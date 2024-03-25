@@ -40,10 +40,8 @@
 #include <kperf/thread_samplers.h>
 #include <kperf/ast.h>
 
-#if MONOTONIC
 #include <kern/monotonic.h>
 #include <machine/monotonic.h>
-#endif /* MONOTONIC */
 
 extern boolean_t stackshot_thread_is_idle_worker_unsafe(thread_t thread);
 
@@ -214,10 +212,11 @@ kperf_thread_scheduling_log(struct kperf_thread_scheduling *thsc)
  * miscellaneous information about threads.
  */
 
-#define KPERF_THREAD_SNAPSHOT_DARWIN_BG  (1U << 0);
-#define KPERF_THREAD_SNAPSHOT_PASSIVE_IO (1U << 1);
-#define KPERF_THREAD_SNAPSHOT_GFI        (1U << 2);
-#define KPERF_THREAD_SNAPSHOT_IDLE_WQ    (1U << 3);
+#define KPERF_THREAD_SNAPSHOT_DARWIN_BG    (1U << 0);
+#define KPERF_THREAD_SNAPSHOT_PASSIVE_IO   (1U << 1);
+#define KPERF_THREAD_SNAPSHOT_GFI          (1U << 2);
+#define KPERF_THREAD_SNAPSHOT_IDLE_WQ      (1U << 3);
+#define KPERF_THREAD_SNAPSHOT_EXCLAVES_RPC (1U << 4);
 /* max is 1U << 7 */
 
 void
@@ -246,6 +245,11 @@ kperf_thread_snapshot_sample(struct kperf_thread_snapshot *thsn,
 	if (stackshot_thread_is_idle_worker_unsafe(thread)) {
 		thsn->kpthsn_flags |= KPERF_THREAD_SNAPSHOT_IDLE_WQ;
 	}
+#if CONFIG_EXCLAVES
+	if (thread->th_exclaves_state & TH_EXCLAVES_RPC) {
+		thsn->kpthsn_flags |= KPERF_THREAD_SNAPSHOT_EXCLAVES_RPC;
+	}
+#endif /* CONFIG_EXCLAVES */
 
 	thsn->kpthsn_suspend_count = thread->suspend_count;
 	/*
@@ -409,8 +413,9 @@ kperf_thread_inscyc_log(struct kperf_context *context)
 	struct recount_usage usage = { 0 };
 	struct recount_usage perf_only = { 0 };
 	recount_current_thread_usage_perf_only(&usage, &perf_only);
-	BUF_DATA(PERF_TI_INSCYCDATA, usage.ru_instructions, usage.ru_cycles,
-	    perf_only.ru_instructions, perf_only.ru_cycles);
+	BUF_DATA(PERF_TI_INSCYCDATA, recount_usage_instructions(&usage),
+	    recount_usage_cycles(&usage), recount_usage_instructions(&perf_only),
+	    recount_usage_cycles(&perf_only));
 #else /* CONFIG_PERVASIVE_CPI */
 #pragma unused(context)
 #endif /* !CONFIG_PERVASIVE_CPI */

@@ -726,8 +726,12 @@ workq_thread_reset_pri(struct workqueue *wq, struct uthread *uth,
 #if CONFIG_PREADOPT_TG
 	if (req && (req->tr_flags & WORKQ_TR_FLAG_WORKLOOP)) {
 		/*
-		 * We cannot safely read and borrow the reference from the kqwl since it
-		 * can disappear from under us at any time due to the max-ing logic in
+		 * For kqwl permanently configured with a thread group, we can safely borrow
+		 * +1 ref from kqwl_preadopt_tg. A thread then takes additional +1 ref
+		 * for itself via thread_set_preadopt_thread_group.
+		 *
+		 * In all other cases, we cannot safely read and borrow the reference from the kqwl
+		 * since it can disappear from under us at any time due to the max-ing logic in
 		 * kqueue_set_preadopted_thread_group.
 		 *
 		 * As such, we do the following dance:
@@ -749,7 +753,8 @@ workq_thread_reset_pri(struct workqueue *wq, struct uthread *uth,
 		int ret = 0;
 again:
 		ret = os_atomic_rmw_loop(tg_loc, old_tg, new_tg, relaxed, {
-			if (!KQWL_HAS_VALID_PREADOPTED_TG(old_tg)) {
+			if ((!KQWL_HAS_VALID_PREADOPTED_TG(old_tg)) ||
+			KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
 			        os_atomic_rmw_loop_give_up(break);
 			}
 
@@ -785,8 +790,12 @@ again:
 				new_tg = thread_group_to_set;
 			});
 		} else {
-			/* Nothing valid on the kqwl, just clear what's on the thread */
-			thread_set_preadopt_thread_group(th, NULL);
+			if (KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
+				thread_set_preadopt_thread_group(th, KQWL_GET_PREADOPTED_TG(old_tg));
+			} else {
+				/* Nothing valid on the kqwl, just clear what's on the thread */
+				thread_set_preadopt_thread_group(th, NULL);
+			}
 		}
 	} else {
 		/* Not even a kqwl, clear what's on the thread */
@@ -2710,6 +2719,20 @@ workq_thread_allow_kill(__unused proc_t p, thread_t thread, bool enable)
 }
 
 static int
+workq_allow_sigmask(proc_t p, sigset_t mask)
+{
+	if (mask & workq_threadmask) {
+		return EINVAL;
+	}
+
+	proc_lock(p);
+	p->p_workq_allow_sigmask |= mask;
+	proc_unlock(p);
+
+	return 0;
+}
+
+static int
 bsdthread_get_max_parallelism(thread_qos_t qos, unsigned long flags,
     int *retval)
 {
@@ -2803,6 +2826,8 @@ bsdthread_ctl(struct proc *p, struct bsdthread_ctl_args *uap, int *retval)
 		return bsdthread_dispatch_apply_attr(p, current_thread(),
 		           (unsigned long)uap->arg1, (uint64_t)uap->arg2,
 		           (uint64_t)uap->arg3);
+	case BSDTHREAD_CTL_WORKQ_ALLOW_SIGMASK:
+		return workq_allow_sigmask(p, (int)uap->arg1);
 	case BSDTHREAD_CTL_SET_QOS:
 	case BSDTHREAD_CTL_QOS_DISPATCH_ASYNCHRONOUS_OVERRIDE_ADD:
 	case BSDTHREAD_CTL_QOS_DISPATCH_ASYNCHRONOUS_OVERRIDE_RESET:
@@ -3333,10 +3358,14 @@ workq_thread_return(struct proc *p, struct workq_kernreturn_args *uap,
 		return EINVAL;
 	}
 
-	/* reset signal mask on the workqueue thread to default state */
-	if (uth->uu_sigmask != (sigset_t)(~workq_threadmask)) {
+	/*
+	 * Reset signal mask on the workqueue thread to default state,
+	 * but do not touch any signals that are marked for preservation.
+	 */
+	sigset_t resettable = uth->uu_sigmask & ~p->p_workq_allow_sigmask;
+	if (resettable != (sigset_t)~workq_threadmask) {
 		proc_lock(p);
-		uth->uu_sigmask = ~workq_threadmask;
+		uth->uu_sigmask |= ~workq_threadmask & ~p->p_workq_allow_sigmask;
 		proc_unlock(p);
 	}
 

@@ -121,7 +121,7 @@ struct __flow {
 			 */
 			struct __flow_policy {
 				uint32_t _fpc_id; /* policy id of pkt sender */
-				uint32_t _fpc_pad;
+				uint32_t _fpc_skip_id; /* skip policy id of pkt sender */
 				union {
 					/* process identifier */
 					uint64_t _fpc_euuid_64[2];
@@ -162,6 +162,7 @@ struct __flow {
 #define flow_src_type           flow_source._fsrc_type
 
 #define flow_policy_id          flow_policy._fpc_id
+#define flow_skip_policy_id     flow_policy._fpc_skip_id
 #define flow_policy_euuid       flow_policy._fpc_euuid
 
 	/*
@@ -909,8 +910,8 @@ struct __user_packet {
 #define SK_PTR_ENCODE(_p, _t, _s)       \
 	(SK_PTR_ADDR_ENC(_p) | SK_PTR_TYPE_ENC(_t) | SK_PTR_SUBTYPE_ENC(_s))
 
-#define SK_PTR_ADDR_UQUM(_ph)   ((struct __user_quantum *)SK_PTR_ADDR(_ph))
-#define SK_PTR_ADDR_UPKT(_ph)   ((struct __user_packet *)SK_PTR_ADDR(_ph))
+#define SK_PTR_ADDR_UQUM(_ph)   (__unsafe_forge_single(struct __user_quantum *, SK_PTR_ADDR(_ph)))
+#define SK_PTR_ADDR_UPKT(_ph)   (__unsafe_forge_single(struct __user_packet *, SK_PTR_ADDR(_ph)))
 
 #ifdef KERNEL
 __BEGIN_DECLS

@@ -40,7 +40,7 @@ include $(MakeInc_def)
 #
 CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE \
 	-D_KERNEL_BUILD -DKERNEL_BUILD -DMACH_KERNEL -DBSD_BUILD \
-	-DBSD_KERNEL_PRIVATE -DLP64_DEBUG=0 \
+	-DBSD_KERNEL_PRIVATE \
         -Warray-bounds-pointer-arithmetic
 SFLAGS+= -include meta_features.h
 
@@ -90,6 +90,7 @@ esp_input.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 esp_output.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 frag6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 icmp6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
+if_ipsec.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 if_stf.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 in6_cksum.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 in6_gif.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member

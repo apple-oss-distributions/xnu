@@ -176,18 +176,18 @@ struct __hack
 
 #define EVENTHANDLER_INVOKE(evthdlr_ref, name, ...)                                     \
 do {                                                                    \
-	struct eventhandler_list *_el;                                  \
+	struct eventhandler_list *__single _el;                                  \
                                                                         \
 	if ((_el = eventhandler_find_list(evthdlr_ref, #name)) != NULL)                 \
 	        _EVENTHANDLER_INVOKE(name, _el , ## __VA_ARGS__);       \
 } while (0)
 
 #define EVENTHANDLER_REGISTER(evthdlr_ref, name, func, arg, priority)           \
-	eventhandler_register(evthdlr_ref, NULL, #name, ptrauth_nop_cast(void *, &func), arg, priority)
+	eventhandler_register(evthdlr_ref, NULL, #name, ptrauth_nop_cast(void * __single, &func), arg, priority)
 
 #define EVENTHANDLER_DEREGISTER(evthdlr_ref, name, tag)                                 \
 do {                                                                    \
-	struct eventhandler_list *_el;                                  \
+	struct eventhandler_list *__single _el;                                  \
                                                                         \
 	if ((_el = eventhandler_find_list(evthdlr_ref, #name)) != NULL)         \
 	        eventhandler_deregister(_el, tag);                      \

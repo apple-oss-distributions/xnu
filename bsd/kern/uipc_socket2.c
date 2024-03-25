@@ -104,6 +104,8 @@
 #include <netinet/mptcp_var.h>
 #endif
 
+#include <net/sockaddr_utils.h>
+
 extern uint32_t net_wake_pkt_debug;
 
 #define DBG_FNC_SBDROP          NETDBG_CODE(DBG_NETSOCK, 4)
@@ -135,19 +137,14 @@ static int soqlencomp = 0;
  * get scaled up or down to suit that memory configuration. high_sb_max is a
  * higher limit on sb_max that is checked when sb_max gets set through sysctl.
  */
-u_int32_t       sb_max = SB_MAX;
-uint64_t        sb_max_adj = SB_MAX_ADJUST(SB_MAX);
-u_int32_t       high_sb_max = SB_MAX;
+uint32_t       sb_max = SB_MAX;
+uint32_t       high_sb_max = SB_MAX;
 
-static  u_int32_t sb_efficiency = 8;    /* parameter for sbreserve() */
-int32_t total_sbmb_cnt __attribute__((aligned(8))) = 0;
-int32_t total_sbmb_cnt_floor __attribute__((aligned(8))) = 0;
-int32_t total_sbmb_cnt_peak __attribute__((aligned(8))) = 0;
-int64_t sbmb_limreached __attribute__((aligned(8))) = 0;
+static uint32_t sb_efficiency = 8;    /* parameter for sbreserve() */
 
-u_int32_t net_io_policy_log = 0;        /* log socket policy changes */
+uint32_t net_io_policy_log = 0;        /* log socket policy changes */
 #if CONFIG_PROC_UUID_POLICY
-u_int32_t net_io_policy_uuid = 1;       /* enable UUID socket policy */
+uint32_t net_io_policy_uuid = 1;       /* enable UUID socket policy */
 #endif /* CONFIG_PROC_UUID_POLICY */
 
 /*
@@ -372,6 +369,8 @@ sonewconn_internal(struct socket *head, int connstatus)
 	}
 
 	so->so_type = head->so_type;
+	so->so_family = head->so_family;
+	so->so_protocol = head->so_protocol;
 	so->so_options = head->so_options & ~SO_ACCEPTCONN;
 	so->so_linger = head->so_linger;
 	so->so_state = head->so_state | SS_NOFDREF;
@@ -757,19 +756,6 @@ sowakeup(struct socket *so, struct sockbuf *sb, struct socket *so2)
 int
 soreserve(struct socket *so, uint32_t sndcc, uint32_t rcvcc)
 {
-	/*
-	 * We do not want to fail the creation of a socket
-	 * when kern.ipc.maxsockbuf is less than the
-	 * default socket buffer socket size of the protocol
-	 * so force the buffer sizes to be at most the
-	 * limit enforced by sbreserve()
-	 */
-	if (sndcc > sb_max_adj) {
-		sndcc = (uint32_t)sb_max_adj;
-	}
-	if (rcvcc > sb_max_adj) {
-		rcvcc = (uint32_t)sb_max_adj;
-	}
 	if (sbreserve(&so->so_snd, sndcc) == 0) {
 		goto bad;
 	} else {
@@ -814,14 +800,20 @@ soreserve_preconnect(struct socket *so, unsigned int pre_cc)
  * if buffering efficiency is near the normal case.
  */
 int
-sbreserve(struct sockbuf *sb, u_int32_t cc)
+sbreserve(struct sockbuf *sb, uint32_t cc)
 {
-	if ((u_quad_t)cc > (u_quad_t)sb_max_adj ||
-	    (cc > sb->sb_hiwat && (sb->sb_flags & SB_LIMITED))) {
+	if (cc > sb_max) {
+		/* We would not end up changing sb_cc, so return 0 */
+		if (sb->sb_hiwat == sb_max) {
+			return 0;
+		}
+		cc = sb_max;
+	}
+	if (cc > sb->sb_hiwat && (sb->sb_flags & SB_LIMITED)) {
 		return 0;
 	}
 	sb->sb_hiwat = cc;
-	sb->sb_mbmax = min(cc * sb_efficiency, sb_max);
+	sb->sb_mbmax = cc * sb_efficiency;
 	if (sb->sb_lowat > sb->sb_hiwat) {
 		sb->sb_lowat = sb->sb_hiwat;
 	}
@@ -1681,8 +1673,7 @@ sbcompress(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 			    (unsigned)m->m_len);
 			n->m_len += m->m_len;
 			sb->sb_cc += m->m_len;
-			if (m->m_type != MT_DATA && m->m_type != MT_HEADER &&
-			    m->m_type != MT_OOBDATA) {
+			if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 				/* XXX: Probably don't need */
 				sb->sb_ctl += m->m_len;
 			}
@@ -1776,6 +1767,10 @@ sbflush(struct sockbuf *sb)
 		sbdrop(sb, (int)sb->sb_cc);
 	}
 
+	if (sb->sb_flags & SB_SENDHEAD) {
+		sb->sb_sendhead = NULL;
+	}
+
 	sb_empty_assert(sb, __func__);
 	sbunlock(sb, TRUE);     /* keep socket locked */
 }
@@ -1817,6 +1812,10 @@ sbdrop(struct sockbuf *sb, int len)
 	free_list = last = m;
 	ml = (struct mbuf *)0;
 
+	if (sb->sb_flags & SB_SENDHEAD) {
+		sb->sb_sendoff -= MIN(len, sb->sb_sendoff);
+	}
+
 	while (len > 0) {
 		if (m == NULL) {
 			if (next == NULL) {
@@ -1850,8 +1849,12 @@ sbdrop(struct sockbuf *sb, int len)
 			if (sb->sb_flags & SB_SNDBYTE_CNT) {
 				inp_decr_sndbytes_total(sb->sb_so, len);
 			}
-			if (m->m_type != MT_DATA && m->m_type != MT_HEADER &&
-			    m->m_type != MT_OOBDATA) {
+			if (sb->sb_flags & SB_SENDHEAD) {
+				if (sb->sb_sendhead == m) {
+					sb->sb_sendhead = NULL;
+				}
+			}
+			if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 				sb->sb_ctl -= len;
 			}
 			break;
@@ -2394,22 +2397,14 @@ sowriteable(struct socket *so)
 void
 sballoc(struct sockbuf *sb, struct mbuf *m)
 {
-	u_int32_t cnt = 1;
 	sb->sb_cc += m->m_len;
-	if (m->m_type != MT_DATA && m->m_type != MT_HEADER &&
-	    m->m_type != MT_OOBDATA) {
+	if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 		sb->sb_ctl += m->m_len;
 	}
 	sb->sb_mbcnt += _MSIZE;
 
 	if (m->m_flags & M_EXT) {
 		sb->sb_mbcnt += m->m_ext.ext_size;
-		cnt += (m->m_ext.ext_size + _MSIZE - 1) / _MSIZE;
-	}
-	OSAddAtomic(cnt, &total_sbmb_cnt);
-	VERIFY(total_sbmb_cnt > 0);
-	if (total_sbmb_cnt > total_sbmb_cnt_peak) {
-		total_sbmb_cnt_peak = total_sbmb_cnt;
 	}
 
 	/*
@@ -2426,22 +2421,13 @@ sballoc(struct sockbuf *sb, struct mbuf *m)
 void
 sbfree(struct sockbuf *sb, struct mbuf *m)
 {
-	int cnt = -1;
-
 	sb->sb_cc -= m->m_len;
-	if (m->m_type != MT_DATA && m->m_type != MT_HEADER &&
-	    m->m_type != MT_OOBDATA) {
+	if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 		sb->sb_ctl -= m->m_len;
 	}
 	sb->sb_mbcnt -= _MSIZE;
 	if (m->m_flags & M_EXT) {
 		sb->sb_mbcnt -= m->m_ext.ext_size;
-		cnt -= (m->m_ext.ext_size + _MSIZE - 1) / _MSIZE;
-	}
-	OSAddAtomic(cnt, &total_sbmb_cnt);
-	VERIFY(total_sbmb_cnt >= 0);
-	if (total_sbmb_cnt < total_sbmb_cnt_floor) {
-		total_sbmb_cnt_floor = total_sbmb_cnt;
 	}
 
 	/*
@@ -2450,6 +2436,12 @@ sbfree(struct sockbuf *sb, struct mbuf *m)
 	 */
 	if (sb->sb_flags & SB_SNDBYTE_CNT) {
 		inp_decr_sndbytes_total(sb->sb_so, m->m_len);
+	}
+
+	if (sb->sb_flags & SB_SENDHEAD) {
+		if (m == sb->sb_sendhead) {
+			sb->sb_sendhead = NULL;
+		}
 	}
 }
 
@@ -2762,26 +2754,27 @@ dup_sockaddr(struct sockaddr *sa, int canwait)
 {
 	struct sockaddr *sa2;
 
-	sa2 = (struct sockaddr *)alloc_sockaddr(sa->sa_len, canwait ? Z_WAITOK : Z_NOWAIT);
+	sa2 = SA(alloc_sockaddr(sa->sa_len, canwait ? Z_WAITOK : Z_NOWAIT));
 	if (sa2 != NULL) {
-		bcopy(sa, sa2, sa->sa_len);
+		SOCKADDR_COPY(sa, sa2, sa->sa_len);
 	}
 	return sa2;
 }
 
-void *
+void * __header_indexable
 alloc_sockaddr(size_t size, zalloc_flags_t flags)
 {
 	VERIFY((size) <= UINT8_MAX);
 
 	__typed_allocators_ignore_push
-	struct sockaddr *sa = kheap_alloc(KHEAP_SONAME, size, flags | Z_ZERO);
+	void * buf = kheap_alloc(KHEAP_SONAME, size, flags | Z_ZERO);
 	__typed_allocators_ignore_pop
-	if (sa != NULL) {
+	if (buf != NULL) {
+		struct sockaddr *sa = SA(buf);
 		sa->sa_len = (uint8_t)size;
 	}
 
-	return sa;
+	return buf;
 }
 
 /*
@@ -2949,10 +2942,8 @@ sysctl_sb_max SYSCTL_HANDLER_ARGS
 	int error = sysctl_io_number(req, sb_max, sizeof(u_int32_t),
 	    &new_value, &changed);
 	if (!error && changed) {
-		if (new_value > LOW_SB_MAX && new_value <= high_sb_max &&
-		    SB_MAX_ADJUST(new_value) < UINT32_MAX) {
+		if (new_value > LOW_SB_MAX && new_value <= high_sb_max) {
 			sb_max = new_value;
-			sb_max_adj = SB_MAX_ADJUST(sb_max);
 		} else {
 			error = ERANGE;
 		}
@@ -3013,16 +3004,6 @@ sysctl_soqlencomp SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern_ipc, OID_AUTO, soqlencomp,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &soqlencomp, 0, &sysctl_soqlencomp, "IU", "");
-
-SYSCTL_INT(_kern_ipc, OID_AUTO, sbmb_cnt, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &total_sbmb_cnt, 0, "");
-SYSCTL_INT(_kern_ipc, OID_AUTO, sbmb_cnt_peak, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &total_sbmb_cnt_peak, 0, "");
-SYSCTL_INT(_kern_ipc, OID_AUTO, sbmb_cnt_floor, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &total_sbmb_cnt_floor, 0, "");
-SYSCTL_QUAD(_kern_ipc, OID_AUTO, sbmb_limreached, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &sbmb_limreached, "");
-
 
 SYSCTL_NODE(_kern_ipc, OID_AUTO, io_policy, CTLFLAG_RW, 0, "network IO policy");
 

@@ -93,13 +93,16 @@ ips_from_waitq(waitq_t wq)
 }
 
 #define ips_active(pset)            io_active(ips_to_object(pset))
-#define ips_mq_lock(pset)           io_lock(ips_to_object(pset))
+#define ips_mq_lock_held(pset)      io_lock_held(ips_to_object(pset))
+#define ips_mq_lock(pset)           ipc_object_lock(ips_to_object(pset), IOT_PORT_SET)
 #define ips_mq_lock_held_kdp(pset)  io_lock_held_kdp(ips_to_object(pset))
 #define ips_mq_unlock(pset)         io_unlock(ips_to_object(pset))
 #define ips_reference(pset)         io_reference(ips_to_object(pset))
 #define ips_release(pset)           io_release(ips_to_object(pset))
 #define ips_validate(pset) \
 	zone_id_require(ZONE_ID_IPC_PORT_SET, sizeof(struct ipc_pset), pset)
+#define ips_validate_aligned(pset) \
+	zone_id_require_aligned(ZONE_ID_IPC_PORT_SET, pset)
 
 /* Allocate a port set */
 extern kern_return_t ipc_pset_alloc(

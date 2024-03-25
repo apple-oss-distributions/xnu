@@ -31,6 +31,8 @@
 #include <unistd.h>
 #include <mach/exception_types.h>
 #include <sys/wait.h>
+#include <sys/sysctl.h>
+#include <sys/code_signing.h>
 
 #include "exc_helpers.h"
 #include "test_utils.h"
@@ -126,6 +128,7 @@ combined_load_auth(void)
 static void
 run_pac_exception_test(void (*ptrauth_failure_fn)(void))
 {
+
 	pid_t pid = fork();
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(pid, "fork");
 
@@ -145,7 +148,7 @@ run_pac_exception_test(void (*ptrauth_failure_fn)(void))
 		T_EXPECT_EQ(SIGKILL, WTERMSIG(status), "child terminated due to SIGKILL");
 	}
 }
-#endif
+#endif //__arm64e__
 
 T_DECL(pac_exception_naked_auth,
     "Test the com.apple.private.pac.exception entitlement (naked auth failure)",

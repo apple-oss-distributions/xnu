@@ -2098,7 +2098,7 @@ ubc_map(vnode_t vp, int flags)
  *		exclusively by the internal use function vclean().
  */
 __private_extern__ void
-ubc_destroy_named(vnode_t vp)
+ubc_destroy_named(vnode_t vp, vm_object_destroy_reason_t reason)
 {
 	memory_object_control_t control;
 	struct ubc_info *uip;
@@ -2110,7 +2110,7 @@ ubc_destroy_named(vnode_t vp)
 		/* Terminate the memory object  */
 		control = ubc_getobject(vp, UBC_HOLDOBJECT);
 		if (control != MEMORY_OBJECT_CONTROL_NULL) {
-			kret = memory_object_destroy(control, 0);
+			kret = memory_object_destroy(control, reason);
 			if (kret != KERN_SUCCESS) {
 				panic("ubc_destroy_named: memory_object_destroy failed");
 			}

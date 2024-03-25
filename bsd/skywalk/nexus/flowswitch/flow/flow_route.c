@@ -1308,7 +1308,7 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 	}
 
 	if (ifa != NULL) {
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 
 	if (src_ifp != NULL) {
@@ -1442,7 +1442,7 @@ _flow_route_laddr_validate(struct flow_ip_addr *src_ip0, uint8_t ip_v,
 	ifnet_lock_done(ifp);
 done:
 	if (ifa != NULL) {
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 
 	return address_found;

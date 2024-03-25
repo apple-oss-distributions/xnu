@@ -98,6 +98,7 @@ LEXT(ml_enable_user_jop_key)
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
 	mov		x1, #1
 	hvc		#0
+	cbnz		x0, .
 	LOAD_CPU_JOP_KEY x0, x1
 	ret
 #endif /* HAS_PARAVIRTUALIZED_PAC */
@@ -113,6 +114,7 @@ LEXT(ml_disable_user_jop_key)
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
 	mov		x1, #0
 	hvc		#0
+	cbnz		x0, .
 	ret
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 
@@ -443,6 +445,29 @@ copyio_error:
 	mov		x0, #EFAULT					// Return an EFAULT error
 	POP_FRAME
 	ARM64_STACK_EPILOG
+
+#if CONFIG_SPTM
+/*
+ * The copyio fault region is a contiguous set of instructions which are exempt
+ * from fatal panic lockdown events due to data abort exceptions. This region
+ * exists because copyio faults are generally expected to be recoverable.
+ */
+	.globl EXT(copyio_fault_region_begin)
+LEXT(copyio_fault_region_begin)
+#endif /* CONFIG_SPTM */
+
+#if CONFIG_XNUPOST
+/*
+ * Test function for panic lockdown which can cause a data abort from within the
+ * copyio fault region.
+ */
+	.text
+	.align 2
+	.globl EXT(arm64_panic_lockdown_test_copyio)
+LEXT(arm64_panic_lockdown_test_copyio)
+	ldr		x0, [x0]
+	ret
+#endif /* CONFIG_XNUPOST */
 
 /*
  * int _bcopyin(const char *src, char *dst, vm_size_t len)
@@ -782,6 +807,10 @@ Lcopyinframe_done:
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
+#if CONFIG_SPTM
+	.globl EXT(copyio_fault_region_end)
+LEXT(copyio_fault_region_end)
+#endif /* CONFIG_SPTM */
 
 /*
  * hw_lck_ticket_t
@@ -916,6 +945,7 @@ LEXT(arm64_prepare_for_sleep)
 	cbnz		x0, is_deep_sleep                           // Skip if deep_sleep == true
 
 
+#if !NO_CPU_OVRD
 	// Mask FIQ and IRQ to avoid spurious wakeups
 	mrs		x9, CPU_OVRD
 	and		x9, x9, #(~(ARM64_REG_CYC_OVRD_irq_mask | ARM64_REG_CYC_OVRD_fiq_mask))
@@ -923,6 +953,7 @@ LEXT(arm64_prepare_for_sleep)
 	orr		x9, x9, x10
 	msr		CPU_OVRD, x9
 	isb
+#endif
 is_deep_sleep:
 #endif
 
@@ -1109,10 +1140,13 @@ LEXT(monitor_call)
 .macro COMPUTE_THREAD_STATE_HASH
 	pacga	x1, x1, x0
 	/*
-	 * Mask off the carry flag so we don't need to re-sign when that flag is
-	 * touched by the system call return path.
+	 * Mask off the carry flag for EL0 states so we don't need to re-sign when
+	 * that flag is touched by the system call return path.
 	 */
+	tst		x2, PSR64_MODE_EL_MASK
+	b.ne	1f
 	bic		x2, x2, PSR_CF
+1:
 	pacga	x1, x2, x1		/* SPSR hash (gkey + pc hash) */
 	pacga	x1, x3, x1		/* LR Hash (gkey + spsr hash) */
 	pacga	x1, x4, x1		/* X16 hash (gkey + lr hash) */
@@ -1124,13 +1158,11 @@ LEXT(monitor_call)
  *
  * Branches to Lintr_enabled_panic if interrupts are in an unexpected state.
  */
-.macro CHECK_THREAD_STATE_INTERRUPTS
-#if DEBUG || DEVELOPMENT
-	mrs		x1, DAIF
-	tbz		x1, #DAIF_IRQF_SHIFT, Lintr_enabled_panic
-	mrs		x1, SPSel
-	tbz		x1, #0, Lintr_enabled_panic
-#endif
+.macro CHECK_THREAD_STATE_INTERRUPTS tmp
+	mrs		\tmp, DAIF
+	tbz		\tmp, #DAIF_IRQF_SHIFT, Lintr_enabled_panic
+	mrs		\tmp, SPSel
+	tbz		\tmp, #0, Lintr_enabled_panic
 .endm
 
 /**
@@ -1147,7 +1179,9 @@ LEXT(monitor_call)
 LEXT(ml_sign_thread_state)
 	COMPUTE_THREAD_STATE_HASH
 	str		x1, [x0, SS64_JOPHASH]
-	CHECK_THREAD_STATE_INTERRUPTS
+#if DEBUG || DEVELOPMENT
+	CHECK_THREAD_STATE_INTERRUPTS tmp=x1
+#endif
 	ret
 
 /**
@@ -1156,17 +1190,17 @@ LEXT(ml_sign_thread_state)
  *							  uint64_t x17)
  *
  * ml_check_signed_state uses a custom calling convention that
- * preserves all registers except x1, x2, and x6.
+ * preserves all registers except x1, x2, and x16.
  */
 	.text
 	.align 2
 	.globl EXT(ml_check_signed_state)
 LEXT(ml_check_signed_state)
-	ldr		x6, [x0, SS64_JOPHASH]
+	CHECK_THREAD_STATE_INTERRUPTS tmp=x16
+	ldr		x16, [x0, SS64_JOPHASH]
 	COMPUTE_THREAD_STATE_HASH
-	cmp		x1, x6
+	cmp		x1, x16
 	b.ne	Lcheck_hash_panic
-	CHECK_THREAD_STATE_INTERRUPTS
 	ret
 Lcheck_hash_panic:
 	/*
@@ -1178,27 +1212,25 @@ Lcheck_hash_panic:
 	 */
 	mov		x1, x0
 	adr		x0, Lcheck_hash_str
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	CALL_EXTERN panic_with_thread_kernel_state
+	brk		#0
 
 Lcheck_hash_str:
 	.asciz "JOP Hash Mismatch Detected (PC, CPSR, or LR corruption)"
 
-#if DEBUG || DEVELOPMENT
 	.align 2
 Lintr_enabled_panic:
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	adr		x0, Lintr_enabled_str
 	CALL_EXTERN panic
+	brk		#0
 Lintr_enabled_str:
 	/*
 	 * Please see the "Signing spilled register state" section of doc/pac.md
 	 * for an explanation of why this is bad and how it should be fixed.
 	 */
 	.asciz "Signed thread state manipulated with interrupts enabled"
-#endif /* DEBUG || DEVELOPMENT */
 
 /**
  * void ml_auth_thread_state_invalid_cpsr(arm_saved_state_t *ss)
@@ -1209,11 +1241,11 @@ Lintr_enabled_str:
 	.align 2
 	.globl EXT(ml_auth_thread_state_invalid_cpsr)
 LEXT(ml_auth_thread_state_invalid_cpsr)
-	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	mov		x1, x0
 	adr		x0, Linvalid_cpsr_str
 	CALL_EXTERN panic_with_thread_kernel_state
+	brk		#0
 
 Linvalid_cpsr_str:
 	.asciz "Thread state corruption detected (PE mode == 0)"

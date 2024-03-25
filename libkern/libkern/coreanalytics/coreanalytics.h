@@ -44,7 +44,7 @@
  */
 #define CA_UUID_LEN          37
 #define CA_PROCNAME_LEN      17
-#define CA_UBSANBUF_LEN      86
+#define CA_UBSANBUF_LEN      256
 #define CA_TEAMID_MAX_LEN    32
 #define CA_SIGNINGID_MAX_LEN 128
 #define CA_STATIC_STRING(len) ca_sstr[len]

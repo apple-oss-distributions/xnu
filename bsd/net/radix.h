@@ -67,7 +67,8 @@
 #include <sys/appleapiopts.h>
 #if KERNEL_PRIVATE
 #include <kern/kalloc.h>
-#endif
+#endif /* KERNEL_PRIVATE */
+
 #ifdef PRIVATE
 
 #ifdef MALLOC_DECLARE
@@ -123,6 +124,35 @@ struct radix_node {
 #define rn_right        rn_u.rn_node.rn_R
 
 /*
+ * Key storage for radix nodes.
+ */
+#if __has_ptrcheck
+typedef char * __indexable rn_addr_storage_t;
+#define __RN_ADDR_STORAGE_MAX 255
+#define __RN_GET_STORAGE(p)                                     \
+	__unsafe_forge_bidi_indexable(char *, (p), __RN_ADDR_STORAGE_MAX)
+#else /* !__has_ptrcheck */
+typedef  char * rn_addr_storage_t;
+#define __RN_GET_STORAGE(p) (rn_addr_storage_t)(p)
+#endif /* __has_ptrcheck */
+
+__attribute__((always_inline))
+static inline __stateful_pure
+rn_addr_storage_t
+rn_get_key(struct radix_node *rn)
+{
+	return __RN_GET_STORAGE(rn->rn_u.rn_leaf.rn_Key);
+}
+
+__attribute__((always_inline))
+static inline __stateful_pure
+rn_addr_storage_t
+rn_get_mask(struct radix_node *rn)
+{
+	return __RN_GET_STORAGE(rn->rn_u.rn_leaf.rn_Mask);
+}
+
+/*
  * Annotations to tree concerning potential routes applying to subtrees.
  */
 
@@ -137,6 +167,14 @@ struct radix_mask {
 	};
 	int     rm_refs;                /* # of references to this struct */
 };
+
+__attribute__((always_inline))
+static inline __stateful_pure
+rn_addr_storage_t
+rm_get_mask(struct radix_mask *rm)
+{
+	return __RN_GET_STORAGE(rm->rm_mask);
+}
 
 #define MKGet(m) {\
 	if (rn_mkfreelist) {\

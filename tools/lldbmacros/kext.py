@@ -1,10 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import object
-from builtins import hex
-from builtins import map
-from builtins import filter
-
 from collections import namedtuple
 import os
 import io
@@ -477,7 +470,8 @@ def AddKextSyms(cmd_args=[], cmd_options={}):
         This command finds symbols for a uuid and load the required executable
         Usage:
             addkext <uuid> : Load one kext based on uuid. eg. (lldb)addkext 4DD2344C0-4A81-3EAB-BDCF-FEAFED9EB73E
-            addkext -F <abs/path/to/executable> <load_address> : Load kext executable at specified load address
+            addkext -F <abs/path/to/executable> : Load kext with executable
+            addkext -F <abs/path/to/executable> <load_address> : Load kext with executable at specified load address
             addkext -N <name> : Load one kext that matches the name provided. eg. (lldb) addkext -N corecrypto
             addkext -N <name> -A: Load all kext that matches the name provided. eg. to load all kext with Apple in name do (lldb) addkext -N Apple -A
             addkext all    : Will load all the kext symbols - SLOW

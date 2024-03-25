@@ -29,6 +29,8 @@
 #ifndef __STDIO_H__
 #define __STDIO_H__
 
+#include <sys/_types/_size_t.h>
+
 #define EOF (-1)
 
 #endif

@@ -300,6 +300,15 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 	} else {
 		/* first packet from this end; set its state */
 		ack = ntohl(pkt->pkt_flow_tcp_ack);
+
+		/* We saw the first SYN, but stack does not reply with a SYN */
+		if (dst->fse_state == TCPS_SYN_SENT && ((tcp_flags & TH_SYN) == 0)) {
+			/* Act as if no sequence number is set */
+			seq = 0;
+			/* Pretend the outgoing SYN was not ACK'ed */
+			ack = dst->fse_seqlo;
+		}
+
 		end = seq + pkt->pkt_flow_ulen;
 		if (tcp_flags & TH_SYN) {
 			if ((tcp_flags & (TH_SYN | TH_ACK)) == TH_SYN) {
@@ -334,7 +343,12 @@ flow_track_tcp(struct flow_entry *fe, struct flow_track *src,
 
 		src->fse_seqlo = seq;
 		if (src->fse_state < TCPS_SYN_SENT) {
-			src->fse_state = TCPS_SYN_SENT;
+			if (tcp_flags & TH_SYN) {
+				src->fse_state = TCPS_SYN_SENT;
+			} else {
+				/* Picking up the connection in the middle */
+				src->fse_state = TCPS_ESTABLISHED;
+			}
 		}
 
 		/*
@@ -769,7 +783,7 @@ flow_track_abort_tcp(struct flow_entry *fe, struct __kern_packet *in_pkt,
 	m->m_pkthdr.len = m->m_len = len;
 
 	/* zero out for checksum */
-	bzero(m->m_data, len);
+	bzero(m_mtod_current(m), len);
 
 	if (fe->fe_key.fk_ipver == IPVERSION) {
 		ip = mtod(m, struct ip *);
@@ -945,7 +959,7 @@ flow_track_abort_quic(struct flow_entry *fe, uint8_t *token)
 	m->m_pkthdr.len = m->m_len = len;
 
 	/* zero out for checksum */
-	bzero(m->m_data, len);
+	bzero(m_mtod_current(m), len);
 
 	if (fe->fe_key.fk_ipver == IPVERSION) {
 		ip = mtod(m, struct ip *);

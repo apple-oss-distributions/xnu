@@ -90,6 +90,8 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 
+#include <net/sockaddr_utils.h>
+
 #define CONST_LLADDR(s) ((const u_char*)((s)->sdl_data + (s)->sdl_nlen))
 
 static const size_t MAX_HW_LEN = 10;
@@ -1161,7 +1163,7 @@ arp_lookup_route(const struct in_addr *addr, int create, int proxy,
 		ifscope = IFSCOPE_NONE;
 	}
 
-	rt = rtalloc1_scoped((struct sockaddr *)&sin, create, 0, ifscope);
+	rt = rtalloc1_scoped(SA(&sin), create, 0, ifscope);
 	if (rt == NULL) {
 		return ENETUNREACH;
 	}
@@ -1292,7 +1294,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
     struct sockaddr_dl *ll_dest, size_t ll_dest_len, route_t hint,
     mbuf_t packet)
 {
-	route_t route = NULL;   /* output route */
+	route_t route __single = NULL;   /* output route */
 	errno_t result = 0;
 	struct sockaddr_dl *gateway;
 	struct llinfo_arp *llinfo = NULL;
@@ -1326,8 +1328,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		 * Callee holds a reference on the route and returns
 		 * with the route entry locked, upon success.
 		 */
-		result = route_to_gwroute((const struct sockaddr *)
-		    net_dest, hint, &route);
+		result = route_to_gwroute(SA(net_dest), hint, &route);
 		if (result != 0) {
 			return result;
 		}
@@ -1339,7 +1340,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 	if ((packet != NULL && (packet->m_flags & M_BCAST)) ||
 	    in_broadcast(net_dest->sin_addr, ifp)) {
 		size_t broadcast_len;
-		bzero(ll_dest, ll_dest_len);
+		SOCKADDR_ZERO(ll_dest, ll_dest_len);
 		result = ifnet_llbroadcast_copy_bytes(ifp, LLADDR(ll_dest),
 		    ll_dest_len - offsetof(struct sockaddr_dl, sdl_data),
 		    &broadcast_len);
@@ -1357,8 +1358,8 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 			RT_UNLOCK(route);
 		}
 		result = dlil_resolve_multi(ifp,
-		    (const struct sockaddr *)net_dest,
-		    (struct sockaddr *)ll_dest, ll_dest_len);
+		    SA(net_dest),
+		    SA(ll_dest), ll_dest_len);
 		if (route != NULL) {
 			RT_LOCK(route);
 		}
@@ -1428,7 +1429,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		boolean_t unreachable = !arp_llreach_reachable(llinfo);
 
 		/* Entry is usable, so fill in info for caller */
-		bcopy(gateway, ll_dest, MIN(gateway->sdl_len, ll_dest_len));
+		SOCKADDR_COPY(gateway, ll_dest, MIN(gateway->sdl_len, ll_dest_len));
 		result = 0;
 		arp_llreach_use(llinfo);        /* Mark use timestamp */
 
@@ -1470,21 +1471,21 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 			 * we'll broadcast ARP next time around.
 			 */
 			lr->lr_probes++;
-			bzero(&sdl, sizeof(sdl));
+			SOCKADDR_ZERO(&sdl, sizeof(sdl));
 			sdl.sdl_alen = ifp->if_addrlen;
 			bcopy(&lr->lr_key.addr, LLADDR(&sdl),
 			    ifp->if_addrlen);
 			IFLR_UNLOCK(lr);
 			IFA_LOCK_SPIN(rt_ifa);
-			IFA_ADDREF_LOCKED(rt_ifa);
+			ifa_addref(rt_ifa);
 			sa = rt_ifa->ifa_addr;
 			IFA_UNLOCK(rt_ifa);
 			rtflags = route->rt_flags;
 			RT_UNLOCK(route);
 			dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa,
-			    (const struct sockaddr_dl *)&sdl,
-			    (const struct sockaddr *)net_dest, rtflags);
-			IFA_REMREF(rt_ifa);
+			    SDL(&sdl),
+			    SA(net_dest), rtflags);
+			ifa_remref(rt_ifa);
 			RT_LOCK(route);
 			goto release;
 		} else {
@@ -1551,16 +1552,16 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 					llinfo->la_flags |= LLINFO_RTRFAIL_EVTSENT;
 				}
 				IFA_LOCK_SPIN(rt_ifa);
-				IFA_ADDREF_LOCKED(rt_ifa);
+				ifa_addref(rt_ifa);
 				sa = rt_ifa->ifa_addr;
 				IFA_UNLOCK(rt_ifa);
 				arp_llreach_use(llinfo); /* Mark use tstamp */
 				rtflags = route->rt_flags;
 				RT_UNLOCK(route);
 				dlil_send_arp(ifp, ARPOP_REQUEST, NULL, sa,
-				    NULL, (const struct sockaddr *)net_dest,
+				    NULL, SA(net_dest),
 				    rtflags);
-				IFA_REMREF(rt_ifa);
+				ifa_remref(rt_ifa);
 				if (sendkev) {
 					post_kev_in_arpfailure(ifp);
 				}
@@ -1687,7 +1688,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 		    ia->ia_addr.sin_addr.s_addr == target_ip->sin_addr.s_addr) {
 			best_ia = ia;
 			best_ia_sin = best_ia->ia_addr;
-			IFA_ADDREF_LOCKED(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
 			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
@@ -1701,7 +1702,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 		    ia->ia_addr.sin_addr.s_addr == sender_ip->sin_addr.s_addr) {
 			best_ia = ia;
 			best_ia_sin = best_ia->ia_addr;
-			IFA_ADDREF_LOCKED(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
 			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
@@ -1728,7 +1729,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 				ifp = ia->ia_ifp;
 				best_ia = ia;
 				best_ia_sin = best_ia->ia_addr;
-				IFA_ADDREF_LOCKED(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
 				lck_rw_done(&in_ifaddr_rwlock);
 				goto match;
@@ -1753,7 +1754,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 		}
 		best_ia = (struct in_ifaddr *)ifa;
 		best_ia_sin = best_ia->ia_addr;
-		IFA_ADDREF_LOCKED(ifa);
+		ifa_addref(ifa);
 		IFA_UNLOCK(ifa);
 		ifnet_lock_done(ifp);
 		goto match;
@@ -1905,14 +1906,14 @@ match:
 				 */
 				ifnet_lock_shared(ifp);
 				ifa = ifp->if_lladdr;
-				IFA_ADDREF(ifa);
+				ifa_addref(ifa);
 				ifnet_lock_done(ifp);
 				dlil_send_arp_internal(ifp, ARPOP_REQUEST,
 				    SDL(ifa->ifa_addr),
-				    (const struct sockaddr *)sender_ip,
+				    SA(sender_ip),
 				    sender_hw,
-				    (const struct sockaddr *)target_ip);
-				IFA_REMREF(ifa);
+				    SA(target_ip));
+				ifa_remref(ifa);
 				ifa = NULL;
 				os_atomic_inc(&arpstat.txconflicts, relaxed);
 			}
@@ -2225,8 +2226,7 @@ respond:
 			 * See if we have a route to the target ip before
 			 * we proxy it.
 			 */
-			route = rtalloc1_scoped((struct sockaddr *)
-			    (size_t)target_ip, 0, 0, ifp->if_index);
+			route = rtalloc1_scoped(__DECONST_SA(target_ip), 0, 0, ifp->if_index);
 			if (!route) {
 				goto done;
 			}
@@ -2250,12 +2250,12 @@ respond:
 	}
 
 	dlil_send_arp(ifp, ARPOP_REPLY,
-	    target_hw, (const struct sockaddr *)target_ip,
-	    sender_hw, (const struct sockaddr *)sender_ip, 0);
+	    target_hw, SA(target_ip),
+	    sender_hw, SA(sender_ip), 0);
 
 done:
 	if (best_ia != NULL) {
-		IFA_REMREF(&best_ia->ia_ifa);
+		ifa_remref(&best_ia->ia_ifa);
 	}
 	return 0;
 }

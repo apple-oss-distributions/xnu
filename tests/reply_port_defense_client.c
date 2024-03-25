@@ -1,12 +1,29 @@
+#include <mach/kern_return.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <mach/mach.h>
 #include <mach/task.h>
+#include <mach/thread_status.h>
 #include <assert.h>
+#include <sys/codesign.h>
+#include <stdbool.h>
+#include "cs_helpers.h"
 
-#define MAX_TEST_NUM 5
+#define MAX_TEST_NUM 7
+
+#if __arm64__
+#define machine_thread_state_t          arm_thread_state64_t
+#define EXCEPTION_THREAD_STATE          ARM_THREAD_STATE64
+#define EXCEPTION_THREAD_STATE_COUNT    ARM_THREAD_STATE64_COUNT
+#elif __x86_64__
+#define machine_thread_state_t          x86_thread_state_t
+#define EXCEPTION_THREAD_STATE          x86_THREAD_STATE
+#define EXCEPTION_THREAD_STATE_COUNT    x86_THREAD_STATE_COUNT
+#else
+#error Unsupported architecture
+#endif
 
 static mach_port_t
 alloc_server_port(void)
@@ -82,7 +99,6 @@ test_immovable_receive_right(void)
 	msg.desc.name = reply_port;
 	msg.desc.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
 	msg.desc.type = MACH_MSG_PORT_DESCRIPTOR;
-
 	kr = mach_msg_send(&msg.header);
 
 	printf("[reply_port_defense_client test_immovable_receive_right]: mach_msg2() returned %d\n", kr);
@@ -178,17 +194,61 @@ test_move_provisional_reply_port(void)
 	printf("[reply_port_defense_client test_immovable_receive_right]: mach_msg2() returned %d\n", kr);
 }
 
+static void
+test_unentitled_thread_set_state(void)
+{
+	machine_thread_state_t ts;
+	mach_msg_type_number_t count = MACHINE_THREAD_STATE_COUNT;
+
+	/* thread_set_state as a hardened binary should fail */
+	kern_return_t kr = thread_get_state(mach_thread_self(), MACHINE_THREAD_STATE, (thread_state_t)&ts, &count);
+
+	kr = thread_set_state(mach_thread_self(), MACHINE_THREAD_STATE, (thread_state_t)&ts, count);
+	assert(kr != KERN_SUCCESS);
+	exit(-1); /* Should have crashed before here! */
+}
+
+static void
+test_unentitled_thread_set_exception_ports(void)
+{
+	mach_port_t exc_port = alloc_server_port();
+
+	/* thread_set_exception_ports as a hardened binary should fail */
+	kern_return_t kr = thread_set_exception_ports(
+		mach_thread_self(),
+		EXC_MASK_ALL,
+		exc_port,
+		(exception_behavior_t)((unsigned int)EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES),
+		EXCEPTION_THREAD_STATE);
+
+	/* thread_set_exception_ports is supposed to crash, unless the policy is turned off.
+	 * Things that disable the policy: AMFI boot-args in use, SIP disabled,
+	 * third party plugins in a process. The caller of this client will check
+	 * whether the test crashed and correctly adhered to these policies.
+	 */
+	printf("thread_set_exception_ports did not crash\n");
+}
+
 int
 main(int argc, char *argv[])
 {
-	printf("[reply_port_defense_client]: My Pid: %d\n", getpid());
+	uint32_t my_csflags = 0;
+	bool thirdparty_hardened = !strcmp(argv[0], "./reply_port_defense_client_3P_hardened");
+
+	if (my_csflags & CS_PLATFORM_BINARY == thirdparty_hardened) {
+		printf("platform binary does not match expected\n");
+		return -1;
+	}
+
 
 	void (*tests[MAX_TEST_NUM])(void) = {
-		test_immovable_receive_right,
+		test_immovable_receive_right, /* 0 */
 		test_make_send_once_right,
 		test_using_send_right,
 		test_move_send_right,
-		test_move_provisional_reply_port
+		test_move_provisional_reply_port,
+		test_unentitled_thread_set_exception_ports,
+		test_unentitled_thread_set_state /* 6 */
 	};
 
 	if (argc < 2) {
@@ -197,11 +257,17 @@ main(int argc, char *argv[])
 	}
 
 	int test_num = atoi(argv[1]);
+	printf("[reply_port_defense_client]: My Pid: %d Test num: %d third_party_hardened: %s\n",
+	    getpid(), test_num, thirdparty_hardened ? "yes" : "no");
+	fflush(stdout);
 	if (test_num >= 0 && test_num < MAX_TEST_NUM) {
 		(*tests[test_num])();
 	} else {
 		printf("[reply_port_defense_client]: Invalid test num. Exiting...\n");
 		exit(-1);
 	}
+	printf("Child exiting cleanly!!\n");
+	fflush(stdout);
+	// return 0;
 	exit(0);
 }

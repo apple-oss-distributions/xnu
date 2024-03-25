@@ -126,6 +126,7 @@ vm_memtag_extract_tag(vm_offset_t tagged_ptr)
  * tag value to achieve optimal codegen and no external calls.
  */
 #define vm_memtag_canonicalize_address(addr)    vm_memtag_add_ptr_tag(addr, 0xF)
+#define vm_memtag_canonicalize_user_address(addr)       vm_memtag_add_ptr_tag(addr, 0x0)
 
 #else /* CONFIG_KERNEL_TAGGING */
 
@@ -139,6 +140,7 @@ vm_memtag_extract_tag(vm_offset_t tagged_ptr)
 #define vm_memtag_canonicalize_address(a)       (a)
 #define vm_memtag_enable_checking()             do { } while (0)
 #define vm_memtag_disable_checking()            do { } while (0)
+
 
 #endif /* CONFIG_KERNEL_TAGGING */
 

@@ -938,7 +938,7 @@ type##_fmt(enum _##type value)                                  \
 #define STATS_ADD(s_ptr, t, v) ((s_ptr)->_arr[(t)] += (v))
 
 static inline void __attribute__((always_inline))
-__stats_fold(uint64_t *dst, uint64_t *src, size_t len)
+__stats_fold(uint64_t *__counted_by(len)dst, uint64_t *__counted_by(len)src, size_t len)
 {
 	// TODO replace with vector instruction once veclib is ready for xnu
 	size_t i;
@@ -955,7 +955,7 @@ type##_fold(struct type *dst, struct type *src)         \
 }
 
 static inline void __attribute__((always_inline))
-__stats_reset(uint64_t *_arr, size_t len)
+__stats_reset(uint64_t *__counted_by(len)_arr, size_t len)
 {
 	// TODO replace with vector instruction once veclib is ready for xnu
 	size_t i;

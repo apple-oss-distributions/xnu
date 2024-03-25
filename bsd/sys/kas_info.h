@@ -44,7 +44,10 @@ __BEGIN_DECLS
 #define KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR     (0) /* returns uint64_t */
 #define KAS_INFO_KERNEL_SEGMENT_VMADDR_SELECTOR (1)
 
-#define KAS_INFO_MAX_SELECTOR                   (2)
+/* Return the SPTM/TXM slide if on a system configured to run those images. */
+#define KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR       (2) /* returns uint64_t */
+#define KAS_INFO_TXM_TEXT_SLIDE_SELECTOR        (3) /* returns uint64_t */
+#define KAS_INFO_MAX_SELECTOR                   (4)
 
 #ifndef KERNEL
 

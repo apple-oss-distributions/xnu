@@ -116,7 +116,7 @@ fsw_attach_vp(struct kern_nexus *nx, struct kern_channel *ch,
 {
 #pragma unused(ch)
 	struct nx_flowswitch *fsw = NX_FSW_PRIVATE(nx);
-	char *cr_name = chr->cr_name;
+	SK_LOG_VAR(char *cr_name = chr->cr_name);
 	int err = 0;
 
 	SK_LOCK_ASSERT_HELD();
@@ -141,17 +141,9 @@ fsw_attach_vp(struct kern_nexus *nx, struct kern_channel *ch,
 	ASSERT(*vpna == NULL);
 
 	/* create a virtual port; callee holds vpna ref */
-	err = fsw_vp_na_create(nx, chr, vpna);
+	err = fsw_vp_na_create(nx, chr, p, vpna);
 	if (err != 0) {
 		SK_ERR("vpna create failed (err %d)", err);
-		goto out;
-	}
-
-	/* attach vp to fsw */
-	err = fsw_vp_na_attach(nx, cr_name, &(*vpna)->vpna_up);
-	if (err != 0) {
-		SK_ERR("vpna \"%s\" fsw attach failed (err %d)",
-		    (*vpna)->vpna_up.na_name, err);
 		goto out;
 	}
 

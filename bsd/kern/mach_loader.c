@@ -367,13 +367,11 @@ const int fourk_binary_compatibility_unsafe = TRUE;
 const int fourk_binary_compatibility_allow_wx = FALSE;
 #endif /* __arm64__ */
 
-#if __has_feature(ptrauth_calls) && XNU_TARGET_OS_OSX
-/**
- * Determines whether this is an arm64e process which may host in-process
- * plugins.
- */
+#if XNU_TARGET_OS_OSX
+
+/* Determines whether this process may host/run third party plugins. */
 static inline bool
-arm64e_plugin_host(struct image_params *imgp, load_result_t *result)
+process_is_plugin_host(struct image_params *imgp, load_result_t *result)
 {
 	if (imgp->ip_flags & IMGPF_NOJOP) {
 		return false;
@@ -440,7 +438,7 @@ arm64e_plugin_host(struct image_params *imgp, load_result_t *result)
 
 	return false;
 }
-#endif /* __has_feature(ptrauth_calls) && XNU_TARGET_OS_OSX */
+#endif /* XNU_TARGET_OS_OSX */
 
 load_return_t
 load_machfile(
@@ -697,12 +695,21 @@ load_machfile(
 	}
 	*mapp = map;
 
-#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+#if XNU_TARGET_OS_OSX
+	if (process_is_plugin_host(imgp, result)) {
+		/*
+		 * We need to disable security policies for processes
+		 * that run third party plugins.
+		 */
+		imgp->ip_flags |= IMGPF_3P_PLUGINS;
+	}
+
+#if __has_feature(ptrauth_calls)
 	/*
 	 * arm64e plugin hosts currently run with JOP keys disabled, since they
 	 * may need to run arm64 plugins.
 	 */
-	if (arm64e_plugin_host(imgp, result)) {
+	if (imgp->ip_flags & IMGPF_3P_PLUGINS) {
 		imgp->ip_flags |= IMGPF_NOJOP;
 		pmap_disable_user_jop(pmap);
 	}
@@ -713,7 +720,8 @@ load_machfile(
 		pmap_disable_user_jop(pmap);
 	}
 #endif /* CONFIG_ROSETTA */
-#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* __has_feature(ptrauth_calls)*/
+#endif /* XNU_TARGET_OS_OSX */
 
 
 	return LOAD_SUCCESS;
@@ -3159,7 +3167,7 @@ load_dylinker(
 			struct fileproc *fp;
 			int dyld_fd;
 			proc_t p = vfs_context_proc(imgp->ip_vfs_context);
-			int error = falloc(p, &fp, &dyld_fd, imgp->ip_vfs_context);
+			int error = falloc_exec(p, imgp->ip_vfs_context, &fp, &dyld_fd);
 			if (error == 0) {
 				error = VNOP_OPEN(vp, FREAD, imgp->ip_vfs_context);
 				if (error == 0) {

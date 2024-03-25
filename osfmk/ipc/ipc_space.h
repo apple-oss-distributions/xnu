@@ -295,7 +295,7 @@ extern void ipc_space_check_limit_exceeded(
 	ipc_space_t             space);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
-extern kern_return_t ipc_space_get_table_size_and_limits(
+extern bool ipc_space_check_table_size_limit(
 	ipc_space_t             space,
 	ipc_entry_num_t        *current_limit,
 	ipc_entry_num_t        *soft_limit,

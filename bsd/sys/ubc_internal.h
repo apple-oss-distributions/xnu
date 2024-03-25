@@ -54,6 +54,9 @@
 
 #include <libkern/ptrauth_utils.h>
 
+#include <vm/vm_protos.h>
+
+
 #define UBC_INFO_NULL   ((struct ubc_info *) 0)
 
 
@@ -210,7 +213,7 @@ __BEGIN_DECLS
 __private_extern__ int  ubc_umount(mount_t mp);
 __private_extern__ void ubc_unmountall(void);
 __private_extern__ memory_object_t ubc_getpager(vnode_t);
-__private_extern__ void ubc_destroy_named(vnode_t);
+__private_extern__ void ubc_destroy_named(vnode_t vp, vm_object_destroy_reason_t reason);
 
 /* internal only */
 __private_extern__ void cluster_release(struct ubc_info *);

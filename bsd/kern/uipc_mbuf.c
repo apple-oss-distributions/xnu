@@ -834,7 +834,6 @@ typedef struct {
 #define m_purge_cnt(c)  mbuf_table[c].mtbl_stats->mbcl_purge_cnt
 #define m_fail_cnt(c)   mbuf_table[c].mtbl_stats->mbcl_fail_cnt
 #define m_ctotal(c)     mbuf_table[c].mtbl_stats->mbcl_ctotal
-#define m_peak(c)       mbuf_table[c].mtbl_stats->mbcl_peak_reported
 #define m_release_cnt(c) mbuf_table[c].mtbl_stats->mbcl_release_cnt
 #define m_region_expand(c)      mbuf_table[c].mtbl_expand
 
@@ -902,14 +901,8 @@ static void *mb_waitchan = &mbuf_table; /* wait channel for all caches */
 static int mb_waiters;                  /* number of waiters */
 #endif /* CONFIG_MBUF_MCACHE */
 
-boolean_t mb_peak_newreport = FALSE;
-boolean_t mb_peak_firstreport = FALSE;
-
-/* generate a report by default after 1 week of uptime */
-#define MBUF_PEAK_FIRST_REPORT_THRESHOLD        604800
-
-#if CONFIG_MBUF_MCACHE
 #define MB_WDT_MAXTIME  10              /* # of secs before watchdog panic */
+#if CONFIG_MBUF_MCACHE
 static struct timeval mb_wdtstart;      /* watchdog start timestamp */
 static char *mbuf_dump_buf;
 
@@ -1018,6 +1011,7 @@ static void slab_nextptr_panic(mcl_slab_t *, void *);
 static void slab_detach(mcl_slab_t *);
 static boolean_t slab_is_detached(mcl_slab_t *);
 #else /* !CONFIG_MBUF_MCACHE */
+static void mbuf_watchdog_drain_composite(thread_call_param_t, thread_call_param_t);
 static struct mbuf *mz_alloc(zalloc_flags_t);
 static void mz_free(struct mbuf *);
 static struct ext_ref *mz_ref_alloc(zalloc_flags_t);
@@ -1078,15 +1072,19 @@ m_class_to_zid(mbuf_class_t class)
 	return ZONE_ID_MBUF + class - MC_MBUF;
 }
 
+__attribute__((always_inline))
+static inline mbuf_class_t
+m_class_from_zid(zone_id_t zid)
+{
+	return MC_MBUF + zid - ZONE_ID_MBUF;
+}
+
 static thread_call_t mbuf_defunct_tcall;
+static thread_call_t mbuf_drain_tcall;
 #endif /* CONFIG_MBUF_MCACHE */
 
 static int m_copyback0(struct mbuf **, int, int, const void *, int, int);
 static struct mbuf *m_split0(struct mbuf *, int, int, int);
-__private_extern__ void mbuf_report_peak_usage(void);
-#if CONFIG_MBUF_MCACHE
-static boolean_t mbuf_report_usage(mbuf_class_t);
-#endif /* CONFIG_MBUF_MCACHE */
 #if CONFIG_MBUF_MCACHE && (DEBUG || DEVELOPMENT)
 #define mbwdog_logger(fmt, ...)  _mbwdog_logger(__func__, __LINE__, fmt, ## __VA_ARGS__)
 static void _mbwdog_logger(const char *func, const int line, const char *fmt, ...);
@@ -1242,28 +1240,16 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_len = 0;                                                 \
 	(m)->m_type = type;                                             \
 	if ((pkthdr) == 0) {                                            \
-	        (m)->m_data = (m)->m_dat;                               \
+	        (m)->m_data = (uintptr_t)(m)->m_dat;                    \
 	        (m)->m_flags = 0;                                       \
 	} else {                                                        \
-	        (m)->m_data = (m)->m_pktdat;                            \
+	        (m)->m_data = (uintptr_t)(m)->m_pktdat;                 \
 	        (m)->m_flags = M_PKTHDR;                                \
 	        MBUF_INIT_PKTHDR(m);                                    \
 	}                                                               \
 }
 
-#define MEXT_INIT(m, buf, size, free, arg, rfa, min, ref, pref, flag,   \
-	    priv, pm) {                                                 \
-	(m)->m_data = (m)->m_ext.ext_buf = (buf);                       \
-	(m)->m_flags |= M_EXT;                                          \
-	m_set_ext((m), (rfa), (free), (arg));                           \
-	(m)->m_ext.ext_size = (u_int)(size);                            \
-	MEXT_MINREF(m) = (min);                                         \
-	MEXT_REF(m) = (ref);                                            \
-	MEXT_PREF(m) = (pref);                                          \
-	MEXT_FLAGS(m) = (flag);                                         \
-	MEXT_PRIV(m) = (priv);                                          \
-	MEXT_PMBUF(m) = (pm);                                           \
-}
+#define MEXT_INIT       mext_init
 
 #define MBUF_CL_INIT(m, buf, rfa, ref, flag)    \
 	MEXT_INIT(m, buf, m_maxsize(MC_CL), NULL, NULL, rfa, 0,         \
@@ -1341,6 +1327,26 @@ static mbuf_mtypes_t PERCPU_DATA(mbuf_mtypes);
 #define mtype_stat_sub(t, n)    mtype_stat_add(t, -(n))
 #define mtype_stat_inc(t)       mtype_stat_add(t, 1)
 #define mtype_stat_dec(t)       mtype_stat_sub(t, 1)
+
+static inline void
+mext_init(struct mbuf *m, void *__sized_by(size)buf, u_int size,
+    m_ext_free_func_t free, caddr_t free_arg, struct ext_ref *rfa,
+    u_int16_t min, u_int16_t ref, u_int16_t pref, u_int16_t flag,
+    u_int32_t priv, struct mbuf *pm)
+{
+	m->m_ext.ext_buf = buf;
+	m->m_ext.ext_size = size;
+	m->m_data = (uintptr_t)m->m_ext.ext_buf;
+	m->m_len = 0;
+	m->m_flags |= M_EXT;
+	m_set_ext(m, rfa, free, free_arg);
+	MEXT_MINREF(m) = min;
+	MEXT_REF(m) = ref;
+	MEXT_PREF(m) = pref;
+	MEXT_FLAGS(m) = flag;
+	MEXT_PRIV(m) = priv;
+	MEXT_PMBUF(m) = pm;
+}
 
 static void
 mbuf_mtypes_sync(boolean_t locked)
@@ -1556,7 +1562,6 @@ mb_stat_sysctl SYSCTL_HANDLER_ARGS
 			oc->mbcl_mc_waiter_cnt = c->mbcl_mc_waiter_cnt;
 			oc->mbcl_mc_wretry_cnt = c->mbcl_mc_wretry_cnt;
 			oc->mbcl_mc_nwretry_cnt = c->mbcl_mc_nwretry_cnt;
-			oc->mbcl_peak_reported = c->mbcl_peak_reported;
 		}
 		statp = omb_stat;
 		statsz = OMB_STAT_SIZE(NELEM(mbuf_table));
@@ -1593,7 +1598,7 @@ static inline void
 m_elide(struct mbuf *m)
 {
 	m->m_next = m->m_nextpkt = NULL;
-	m->m_data = NULL;
+	m->m_data = 0;
 	memset(&m->m_ext, 0, sizeof(m->m_ext));
 	m->m_pkthdr.rcvif = NULL;
 	m->m_pkthdr.pkt_hdr = NULL;
@@ -1792,7 +1797,8 @@ mz_composite_mark_valid(zone_id_t zid, void *p)
 
 	cl = zcache_mark_valid(zone_by_id(cl_zid), cl);
 	rfa = zcache_mark_valid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
-	m->m_data = m->m_ext.ext_buf = cl;
+	m->m_data = (uintptr_t)cl;
+	m->m_ext.ext_buf = cl;
 	m_set_rfa(m, rfa);
 #else
 #pragma unused(zid)
@@ -1816,7 +1822,8 @@ mz_composite_mark_invalid(zone_id_t zid, void *p)
 
 	cl = zcache_mark_invalid(zone_by_id(cl_zid), cl);
 	rfa = zcache_mark_invalid(zone_by_id(ZONE_ID_MBUF_REF), rfa);
-	m->m_data = m->m_ext.ext_buf = cl;
+	m->m_data = (uintptr_t)cl;
+	m->m_ext.ext_buf = cl;
 	m_set_rfa(m, rfa);
 #else
 #pragma unused(zid)
@@ -2053,7 +2060,7 @@ mbuf_table_init(void)
 	mbstat.m_bigmclbytes = m_maxsize(MC_BIGCL);
 }
 
-int
+static int
 mbuf_get_class(struct mbuf *m)
 {
 	if (m->m_flags & M_EXT) {
@@ -2416,11 +2423,7 @@ mbinit(void)
 		/* Make sure we didn't miss any */
 		VERIFY(m_minlimit(m_class(m)) == 0 ||
 		    m_total(m_class(m)) >= m_minlimit(m_class(m)));
-
-		/* populate the initial sizes and report from there on */
-		m_peak(m_class(m)) = m_total(m_class(m));
 	}
-	mb_peak_newreport = FALSE;
 
 #if CONFIG_MBUF_MCACHE
 	lck_mtx_unlock(mbuf_mlock);
@@ -2475,7 +2478,7 @@ mbinit(void)
 		if (!MBUF_CLASS_COMPOSITE(m)) {
 			zone_t zone = zone_by_id(m_class_to_zid(m));
 
-			zone_set_exhaustible(zone, m_maxlimit(m));
+			zone_set_exhaustible(zone, m_maxlimit(m), false);
 			zone_raise_reserve(zone, m_minlimit(m));
 			/*
 			 * Pretend that we have allocated m_total() items
@@ -2506,8 +2509,6 @@ mbinit(void)
 		} else {
 			sb_max = high_sb_max;
 		}
-		sb_max_adj = SB_MAX_ADJUST(sb_max);
-		assert(sb_max_adj < UINT32_MAX);
 	}
 
 #if CONFIG_MBUF_MCACHE
@@ -2521,6 +2522,11 @@ mbinit(void)
 #else
 	mbuf_defunct_tcall =
 	    thread_call_allocate_with_options(mbuf_watchdog_defunct,
+	    NULL,
+	    THREAD_CALL_PRIORITY_KERNEL,
+	    THREAD_CALL_OPTIONS_ONCE);
+	mbuf_drain_tcall =
+	    thread_call_allocate_with_options(mbuf_watchdog_drain_composite,
 	    NULL,
 	    THREAD_CALL_PRIORITY_KERNEL,
 	    THREAD_CALL_OPTIONS_ONCE);
@@ -3932,10 +3938,6 @@ m_clalloc(const u_int32_t num, const int wait, const u_int32_t bufsize)
 	}
 	VERIFY(mca_list == NULL && con_list == NULL);
 
-	if (!mb_peak_newreport && mbuf_report_usage(class)) {
-		mb_peak_newreport = TRUE;
-	}
-
 	/* We're done; let others enter */
 	mb_clalloc_busy = FALSE;
 	if (mb_clalloc_waiters > 0) {
@@ -4090,10 +4092,6 @@ freelist_populate(mbuf_class_t class, unsigned int num, int wait)
 		m_total(class) += numobj;
 		VERIFY(m_total(class) <= m_maxlimit(class));
 		m_infree(class) += numobj;
-
-		if (!mb_peak_newreport && mbuf_report_usage(class)) {
-			mb_peak_newreport = TRUE;
-		}
 
 		i = numobj;
 		if (class == MC_MBUF) {
@@ -4565,7 +4563,6 @@ m_free(struct mbuf *m)
 			m_set_ext(m, NULL, NULL, NULL);
 		} else if (refcnt == minref && composite) {
 			VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
-			VERIFY(m->m_type != MT_FREE);
 
 			mtype_stat_dec(m->m_type);
 			mtype_stat_inc(MT_FREE);
@@ -4606,10 +4603,8 @@ m_free(struct mbuf *m)
 		}
 	}
 
-	if (m->m_type != MT_FREE) {
-		mtype_stat_dec(m->m_type);
-		mtype_stat_inc(MT_FREE);
-	}
+	mtype_stat_dec(m->m_type);
+	mtype_stat_inc(MT_FREE);
 
 	m->m_type = MT_FREE;
 	m->m_flags = m->m_len = 0;
@@ -5009,7 +5004,7 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
 	m_scratch_init(from);                   /* clear src scratch area */
 	to->m_flags = (from->m_flags & M_COPYFLAGS) | (to->m_flags & M_EXT);
 	if ((to->m_flags & M_EXT) == 0) {
-		to->m_data = to->m_pktdat;
+		to->m_data = (uintptr_t)to->m_pktdat;
 	}
 	m_redzone_init(to);                     /* setup red zone on dst */
 }
@@ -5035,7 +5030,7 @@ m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int how)
 	}
 	to->m_flags = (from->m_flags & M_COPYFLAGS) | (to->m_flags & M_EXT);
 	if ((to->m_flags & M_EXT) == 0) {
-		to->m_data = to->m_pktdat;
+		to->m_data = (uintptr_t)to->m_pktdat;
 	}
 	to->m_pkthdr = from->m_pkthdr;
 	/* clear TX completion flag so the callback is not called in the copy */
@@ -5095,6 +5090,7 @@ m_copy_classifier(struct mbuf *to, struct mbuf *from)
 	to->m_pkthdr.pkt_proto = from->m_pkthdr.pkt_proto;
 	to->m_pkthdr.pkt_flowsrc = from->m_pkthdr.pkt_flowsrc;
 	to->m_pkthdr.pkt_flowid = from->m_pkthdr.pkt_flowid;
+	to->m_pkthdr.pkt_mpriv_srcid = from->m_pkthdr.pkt_mpriv_srcid;
 	to->m_pkthdr.pkt_flags = from->m_pkthdr.pkt_flags;
 	to->m_pkthdr.pkt_ext_flags = from->m_pkthdr.pkt_ext_flags;
 	(void) m_set_service_class(to, from->m_pkthdr.pkt_svc);
@@ -5142,13 +5138,13 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 	np = &top;
 	pnum = 0;
 
-#if CONFIG_MBUF_MCACHE
 	/*
 	 * The caller doesn't want all the requested buffers; only some.
 	 * Try hard to get what we can, but don't block.  This effectively
 	 * overrides MCR_SLEEP, since this thread will not go to sleep
 	 * if we can't get all the buffers.
 	 */
+#if CONFIG_MBUF_MCACHE
 	if (!wantall || (mcflags & MCR_NOSLEEP)) {
 		mcflags |= MCR_TRYHARD;
 	}
@@ -5163,6 +5159,11 @@ m_getpackets_internal(unsigned int *num_needed, int num_with_pkthdrs,
 	}
 	needed = mcache_alloc_ext(cp, &mp_list, needed, mcflags);
 #else
+	if (!wantall || (wait & Z_NOWAIT)) {
+		wait &= ~Z_NOWAIT;
+		wait |= Z_NOPAGEWAIT;
+	}
+
 	/* Allocate the composite mbuf + cluster elements from the cache */
 	if (bufsize == m_maxsize(MC_CL)) {
 		class = MC_MBUF_CL;
@@ -5333,17 +5334,22 @@ m_allocpacket_internal(unsigned int *numlist, size_t packetlen,
 		*maxsegments = nsegs;
 	}
 
-#if CONFIG_MBUF_MCACHE
 	/*
 	 * The caller doesn't want all the requested buffers; only some.
 	 * Try hard to get what we can, but don't block.  This effectively
 	 * overrides MCR_SLEEP, since this thread will not go to sleep
 	 * if we can't get all the buffers.
 	 */
+#if CONFIG_MBUF_MCACHE
 	if (!wantall || (mcflags & MCR_NOSLEEP)) {
 		mcflags |= MCR_TRYHARD;
 	}
-#endif /* CONFIG_MBUF_MCACHE */
+#else
+	if (!wantall || (wait & Z_NOWAIT)) {
+		wait &= ~Z_NOWAIT;
+		wait |= Z_NOPAGEWAIT;
+	}
+#endif /* !CONFIG_MBUF_MCACHE */
 
 	/*
 	 * Simple case where all elements in the lists/chains are mbufs.
@@ -5838,7 +5844,6 @@ m_freem_list(struct mbuf *m)
 				m_set_ext(m, NULL, NULL, NULL);
 			} else if (refcnt == minref && composite) {
 				VERIFY(!(MEXT_FLAGS(m) & EXTF_PAIRED));
-				VERIFY(m->m_type != MT_FREE);
 				/*
 				 * Amortize the costs of atomic operations
 				 * by doing them at the end, if possible.
@@ -6027,7 +6032,7 @@ m_align(struct mbuf *m, int len)
 	int adjust = 0;
 
 	/* At this point data must point to start */
-	VERIFY(m->m_data == M_START(m));
+	VERIFY(m->m_data == (uintptr_t)M_START(m));
 	VERIFY(len >= 0);
 	VERIFY(len <= M_SIZE(m));
 	adjust = M_SIZE(m) - len;
@@ -6089,12 +6094,16 @@ m_prepend_2(struct mbuf *m, int len, int how, int align)
  * Make a copy of an mbuf chain starting "off0" bytes from the beginning,
  * continuing for "len" bytes.  If len is M_COPYALL, copy to end of mbuf.
  * The wait parameter is a choice of M_WAIT/M_DONTWAIT from caller.
+ *
+ * The last mbuf and offset accessed are passed in and adjusted on return to
+ * avoid having to iterate over the entire mbuf chain each time.
  */
 struct mbuf *
-m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
+m_copym_mode(struct mbuf *m, int off0, int len0, int wait,
+    struct mbuf **m_lastm, int *m_off, uint32_t mode)
 {
 	struct mbuf *n, *mhdr = NULL, **np;
-	int off = off0;
+	int off = off0, len = len0;
 	struct mbuf *top;
 	int copyhdr = 0;
 
@@ -6111,10 +6120,14 @@ m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
 		copyhdr = 1;
 	}
 
-	while (off >= m->m_len) {
-		if (m->m_next == NULL) {
-			panic("m_copym: invalid mbuf chain");
+	if (m_lastm != NULL && *m_lastm != NULL) {
+		if (off0 >= *m_off) {
+			m = *m_lastm;
+			off = off0 - *m_off;
 		}
+	}
+
+	while (off >= m->m_len) {
 		off -= m->m_len;
 		m = m->m_next;
 	}
@@ -6192,6 +6205,13 @@ m_copym_mode(struct mbuf *m, int off0, int len, int wait, uint32_t mode)
 		if (len != M_COPYALL) {
 			len -= n->m_len;
 		}
+
+		if (len == 0) {
+			if (m_lastm != NULL) {
+				*m_lastm = m;
+				*m_off = off0 + len0 - (off + n->m_len);
+			}
+		}
 		off = 0;
 		m = m->m_next;
 		np = &n->m_next;
@@ -6208,14 +6228,15 @@ nospace:
 struct mbuf *
 m_copym(struct mbuf *m, int off0, int len, int wait)
 {
-	return m_copym_mode(m, off0, len, wait, M_COPYM_MOVE_HDR);
+	return m_copym_mode(m, off0, len, wait, NULL, NULL, M_COPYM_MOVE_HDR);
 }
 
 /*
  * Equivalent to m_copym except that all necessary mbuf hdrs are allocated
- * within this routine also, the last mbuf and offset accessed are passed
- * out and can be passed back in to avoid having to rescan the entire mbuf
- * list (normally hung off of the socket)
+ * within this routine also.
+ *
+ * The last mbuf and offset accessed are passed in and adjusted on return to
+ * avoid having to iterate over the entire mbuf chain each time.
  */
 struct mbuf *
 m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
@@ -6239,19 +6260,20 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 	}
 
 	if (m_lastm != NULL && *m_lastm != NULL) {
-		m = *m_lastm;
-		off = *m_off;
-	} else {
-		while (off >= m->m_len) {
-			off -= m->m_len;
-			m = m->m_next;
+		if (off0 >= *m_off) {
+			m = *m_lastm;
+			off = off0 - *m_off;
 		}
+	}
+
+	while (off >= m->m_len) {
+		off -= m->m_len;
+		m = m->m_next;
 	}
 
 	n = m;
 	while (len > 0) {
 		needed++;
-		ASSERT(n != NULL);
 		len -= MIN(len, (n->m_len - ((needed == 1) ? off : 0)));
 		n = n->m_next;
 	}
@@ -6325,7 +6347,7 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 			n->m_data = m->m_data + off;
 			n->m_flags |= M_EXT;
 		} else {
-			if (MTOD(n, char *) + n->m_len > ((char *)n) + _MSIZE) {
+			if (m_mtod_end(n) > m_mtod_upper_bound(n)) {
 				panic("%s n %p copy overflow",
 				    __func__, n);
 			}
@@ -6336,14 +6358,9 @@ m_copym_with_hdrs(struct mbuf *m0, int off0, int len0, int wait,
 		len -= n->m_len;
 
 		if (len == 0) {
-			if (m_lastm != NULL && m_off != NULL) {
-				if ((off + n->m_len) == m->m_len) {
-					*m_lastm = m->m_next;
-					*m_off  = 0;
-				} else {
-					*m_lastm = m;
-					*m_off  = off + n->m_len;
-				}
+			if (m_lastm != NULL) {
+				*m_lastm = m;
+				*m_off = off0 + len0 - (off + n->m_len);
 			}
 			break;
 		}
@@ -6437,7 +6454,7 @@ m_cat(struct mbuf *m, struct mbuf *n)
 	}
 	while (n) {
 		if ((m->m_flags & M_EXT) ||
-		    m->m_data + m->m_len + n->m_len >= &m->m_dat[MLEN]) {
+		    m->m_data + m->m_len + n->m_len >= (uintptr_t)&m->m_dat[MLEN]) {
 			/* just join the two chains */
 			m->m_next = n;
 			return;
@@ -6560,7 +6577,7 @@ m_pullup(struct mbuf *n, int len)
 		goto bad;
 	}
 	if ((n->m_flags & M_EXT) == 0 &&
-	    n->m_data >= &n->m_dat[MLEN]) {
+	    m_mtod_current(n) >= m_mtod_upper_bound(n)) {
 		os_log_info(OS_LOG_DEFAULT, "%s: m_data out of bounds",
 		    __func__);
 		goto bad;
@@ -6572,7 +6589,7 @@ m_pullup(struct mbuf *n, int len)
 	 * otherwise allocate a new mbuf to prepend to the chain.
 	 */
 	if ((n->m_flags & M_EXT) == 0 &&
-	    len < &n->m_dat[MLEN] - n->m_data && n->m_next != NULL) {
+	    len < m_mtod_upper_bound(n) - m_mtod_current(n) && n->m_next != NULL) {
 		if (n->m_len >= len) {
 			return n;
 		}
@@ -6593,7 +6610,7 @@ m_pullup(struct mbuf *n, int len)
 			n->m_flags &= ~M_PKTHDR;
 		}
 	}
-	space = &m->m_dat[MLEN] - (m->m_data + m->m_len);
+	space = m_mtod_upper_bound(m) - m_mtod_end(m);
 	do {
 		count = MIN(MIN(MAX(len, max_protohdr), space), n->m_len);
 		bcopy(MTOD(n, caddr_t), MTOD(m, caddr_t) + m->m_len,
@@ -6645,7 +6662,7 @@ m_copyup(struct mbuf *n, int len, int dstoff)
 		n->m_flags &= ~M_PKTHDR;
 	}
 	m->m_data += dstoff;
-	space = &m->m_dat[MLEN] - (m->m_data + m->m_len);
+	space = m_mtod_upper_bound(m) - m_mtod_end(m);
 	do {
 		count = min(min(max(len, max_protohdr), space), n->m_len);
 		memcpy(mtod(m, caddr_t) + m->m_len, mtod(n, caddr_t),
@@ -7373,14 +7390,14 @@ m_dup(struct mbuf *m, int how)
 				}
 				n->m_len = m->m_len;
 				m_dup_pkthdr(n, m, how);
-				bcopy(m->m_data, n->m_data, m->m_len);
+				bcopy(MTOD(m, caddr_t), MTOD(n, caddr_t), m->m_len);
 				return n;
 			}
 		} else if (m->m_len <= MLEN) {
 			if ((n = _M_GET(how, m->m_type)) == NULL) {
 				return NULL;
 			}
-			bcopy(m->m_data, n->m_data, m->m_len);
+			bcopy(MTOD(m, caddr_t), MTOD(n, caddr_t), m->m_len);
 			n->m_len = m->m_len;
 			return n;
 		}
@@ -7420,7 +7437,7 @@ m_dup(struct mbuf *m, int how)
 			m_dup_pkthdr(n, m, how);
 			copyhdr = 0;
 			if (!(n->m_flags & M_EXT)) {
-				n->m_data = n->m_pktdat;
+				n->m_data = (uintptr_t)n->m_pktdat;
 			}
 		}
 		n->m_len = m->m_len;
@@ -7481,7 +7498,7 @@ m_expand(struct mbuf *m, struct mbuf **last)
 
 		VERIFY(len > 0);
 		VERIFY(m->m_flags & M_EXT);
-		m->m_data = (void *)data;
+		m->m_data = data;
 		m->m_len = len;
 
 		*nm = *last = m;
@@ -7748,10 +7765,10 @@ m_mchtype(struct mbuf *m, int t)
 	(m)->m_type = t;
 }
 
-void *
+void *__unsafe_indexable
 m_mtod(struct mbuf *m)
 {
-	return MTOD(m, void *);
+	return m_mtod_current(m);
 }
 
 void
@@ -7829,9 +7846,10 @@ mbuf_waiter_dec(mbuf_class_t class, boolean_t comp)
 		}
 	}
 }
-#endif /* CONFIG_MBUF_MCACHE */
 
 static bool mbuf_watchdog_defunct_active = false;
+
+#endif /* CONFIG_MBUF_MCACHE */
 
 static uint32_t
 mbuf_watchdog_socket_space(struct socket *so)
@@ -7978,26 +7996,100 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 		zone_drain(zone_by_id(ZONE_ID_MBUF_REF));
 #endif
 	}
+#if CONFIG_MBUF_MCACHE
 	mbuf_watchdog_defunct_active = false;
+#endif
 }
 
 #if !CONFIG_MBUF_MCACHE
+static LCK_GRP_DECLARE(mbuf_exhausted_grp, "mbuf-exhausted");
+static LCK_TICKET_DECLARE(mbuf_exhausted_lock, &mbuf_exhausted_grp);
+static uint32_t mbuf_exhausted_mask;
+
+#define MBUF_EXHAUSTED_DRAIN_MASK  (\
+	(1u << MC_MBUF) | \
+	(1u << MC_CL) | \
+	(1u << MC_BIGCL) | \
+	(1u << MC_16KCL))
+
+#define MBUF_EXHAUSTED_DEFUNCT_MASK  (\
+	(1u << MC_MBUF) | \
+	(1u << MC_MBUF_CL) | \
+	(1u << MC_MBUF_BIGCL) | \
+	(1u << MC_MBUF_16KCL))
+
 static void
-mbuf_zone_exhausted(zone_id_t zid, zone_t zone __unused)
+mbuf_watchdog_drain_composite(thread_call_param_t arg0, thread_call_param_t arg1)
 {
-	if (mbuf_defunct_tcall == NULL) {
+#pragma unused(arg0, arg1)
+	zcache_drain(ZONE_ID_MBUF_CLUSTER_2K);
+	zcache_drain(ZONE_ID_MBUF_CLUSTER_4K);
+	zcache_drain(ZONE_ID_MBUF_CLUSTER_16K);
+}
+
+static void
+mbuf_zone_exhausted_start(uint32_t bit)
+{
+	uint64_t deadline;
+	uint32_t mask;
+
+	mask = mbuf_exhausted_mask;
+	mbuf_exhausted_mask = mask | bit;
+
+	if ((mask & MBUF_EXHAUSTED_DRAIN_MASK) == 0 &&
+	    (bit & MBUF_EXHAUSTED_DRAIN_MASK)) {
+		clock_interval_to_deadline(MB_WDT_MAXTIME * 1000 / 10,
+		    NSEC_PER_MSEC, &deadline);
+		thread_call_enter_delayed(mbuf_drain_tcall, deadline);
+	}
+
+	if ((mask & MBUF_EXHAUSTED_DEFUNCT_MASK) == 0 &&
+	    (bit & MBUF_EXHAUSTED_DEFUNCT_MASK)) {
+		clock_interval_to_deadline(MB_WDT_MAXTIME * 1000 / 2,
+		    NSEC_PER_MSEC, &deadline);
+		thread_call_enter_delayed(mbuf_defunct_tcall, deadline);
+	}
+}
+
+static void
+mbuf_zone_exhausted_end(uint32_t bit)
+{
+	uint32_t mask;
+
+	mask = (mbuf_exhausted_mask &= ~bit);
+
+	if ((mask & MBUF_EXHAUSTED_DRAIN_MASK) == 0 &&
+	    (bit & MBUF_EXHAUSTED_DRAIN_MASK)) {
+		thread_call_cancel(mbuf_drain_tcall);
+	}
+
+	if ((mask & MBUF_EXHAUSTED_DEFUNCT_MASK) == 0 &&
+	    (bit & MBUF_EXHAUSTED_DEFUNCT_MASK)) {
+		thread_call_cancel(mbuf_defunct_tcall);
+	}
+}
+
+static void
+mbuf_zone_exhausted(zone_id_t zid, zone_t zone __unused, bool exhausted)
+{
+	uint32_t bit;
+
+	if (zid < m_class_to_zid(MBUF_CLASS_MIN) ||
+	    zid > m_class_to_zid(MBUF_CLASS_MAX)) {
 		return;
 	}
 
-	if (zid == ZONE_ID_MBUF ||
-	    zid == ZONE_ID_CLUSTER_2K ||
-	    zid == ZONE_ID_CLUSTER_4K ||
-	    zid == ZONE_ID_CLUSTER_16K) {
-		if (os_atomic_cmpxchg(&mbuf_watchdog_defunct_active,
-		    false, true, relaxed)) {
-			thread_call_enter(mbuf_defunct_tcall);
-		}
+	bit = 1u << m_class_from_zid(zid);
+
+	lck_ticket_lock_nopreempt(&mbuf_exhausted_lock, &mbuf_exhausted_grp);
+
+	if (exhausted) {
+		mbuf_zone_exhausted_start(bit);
+	} else {
+		mbuf_zone_exhausted_end(bit);
 	}
+
+	lck_ticket_unlock_nopreempt(&mbuf_exhausted_lock);
 }
 EVENT_REGISTER_HANDLER(ZONE_EXHAUSTED, mbuf_zone_exhausted);
 #endif /* !CONFIG_MBUF_MCACHE */
@@ -9370,7 +9462,7 @@ m_reinit(struct mbuf *m, int hdr)
 	if (hdr) {
 		VERIFY(!(m->m_flags & M_PKTHDR));
 		if (!(m->m_flags & M_EXT) &&
-		    (m->m_data != m->m_dat || m->m_len > 0)) {
+		    (m->m_data != (uintptr_t)m->m_dat || m->m_len > 0)) {
 			/*
 			 * If there's no external cluster attached and the
 			 * mbuf appears to contain user data, we cannot
@@ -9387,7 +9479,7 @@ m_reinit(struct mbuf *m, int hdr)
 			    (uint64_t)VM_KERNEL_ADDRPERM((uintptr_t)(m->m_dat)), m->m_len);
 			ret = EBUSY;
 		} else {
-			VERIFY((m->m_flags & M_EXT) || m->m_data == m->m_dat);
+			VERIFY((m->m_flags & M_EXT) || m->m_data == (uintptr_t)m->m_dat);
 			m->m_flags |= M_PKTHDR;
 			MBUF_INIT_PKTHDR(m);
 		}
@@ -9647,97 +9739,6 @@ m_get_ext_arg(struct mbuf *m)
 		return (caddr_t)(((uintptr_t)m->m_ext.ext_arg) ^
 		       rfa->ext_token);
 	}
-}
-
-#if CONFIG_MBUF_MCACHE
-/*
- * Send a report of mbuf usage if the usage is at least 6% of max limit
- * or if there has been at least 3% increase since the last report.
- *
- * The values 6% and 3% are chosen so that we can do simple arithmetic
- * with shift operations.
- */
-static boolean_t
-mbuf_report_usage(mbuf_class_t cl)
-{
-	/* if a report is already in progress, nothing to do */
-	if (mb_peak_newreport) {
-		return TRUE;
-	}
-
-	if (m_total(cl) > m_peak(cl) &&
-	    m_total(cl) >= (m_maxlimit(cl) >> 4) &&
-	    (m_total(cl) - m_peak(cl)) >= (m_peak(cl) >> 5)) {
-		return TRUE;
-	}
-	return FALSE;
-}
-#endif /* CONFIG_MBUF_MCACHE */
-
-__private_extern__ void
-mbuf_report_peak_usage(void)
-{
-	int i = 0;
-	u_int64_t uptime;
-	struct nstat_sysinfo_data ns_data;
-	uint32_t memreleased = 0;
-	static uint32_t prevmemreleased;
-
-	uptime = net_uptime();
-	lck_mtx_lock(mbuf_mlock);
-	mbuf_stat_sync();
-	mbuf_mtypes_sync(TRUE);
-
-	/* Generate an initial report after 1 week of uptime */
-	if (!mb_peak_firstreport &&
-	    uptime > MBUF_PEAK_FIRST_REPORT_THRESHOLD) {
-		mb_peak_newreport = TRUE;
-		mb_peak_firstreport = TRUE;
-	}
-
-	if (!mb_peak_newreport) {
-		lck_mtx_unlock(mbuf_mlock);
-		return;
-	}
-
-	/*
-	 * Since a report is being generated before 1 week,
-	 * we do not need to force another one later
-	 */
-	if (uptime < MBUF_PEAK_FIRST_REPORT_THRESHOLD) {
-		mb_peak_firstreport = TRUE;
-	}
-
-	for (i = 0; i < NELEM(mbuf_table); i++) {
-		m_peak(m_class(i)) = m_total(m_class(i));
-		memreleased += m_release_cnt(i);
-	}
-	memreleased = memreleased - prevmemreleased;
-	prevmemreleased = memreleased;
-	mb_peak_newreport = FALSE;
-	lck_mtx_unlock(mbuf_mlock);
-
-	bzero(&ns_data, sizeof(ns_data));
-	ns_data.flags = NSTAT_SYSINFO_MBUF_STATS;
-	ns_data.u.mb_stats.total_256b = m_peak(MC_MBUF);
-	ns_data.u.mb_stats.total_2kb = m_peak(MC_CL);
-	ns_data.u.mb_stats.total_4kb = m_peak(MC_BIGCL);
-	ns_data.u.mb_stats.total_16kb = m_peak(MC_16KCL);
-	ns_data.u.mb_stats.sbmb_total = total_sbmb_cnt_peak;
-	ns_data.u.mb_stats.sb_atmbuflimit = sbmb_limreached;
-	ns_data.u.mb_stats.draincnt = mbstat.m_drain;
-	ns_data.u.mb_stats.memreleased = memreleased;
-	ns_data.u.mb_stats.sbmb_floor = total_sbmb_cnt_floor;
-
-	nstat_sysinfo_send_data(&ns_data);
-
-	/*
-	 * Reset the floor whenever we report a new
-	 * peak to track the trend (increase peek usage
-	 * is not a leak if mbufs get released
-	 * between reports and the floor stays low)
-	 */
-	total_sbmb_cnt_floor = total_sbmb_cnt_peak;
 }
 
 #if CONFIG_MBUF_MCACHE

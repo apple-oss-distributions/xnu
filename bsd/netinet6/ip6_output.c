@@ -156,6 +156,8 @@ extern int ipsec_bypass;
 #include <net/pfvar.h>
 #endif /* PF */
 
+#include <net/sockaddr_utils.h>
+
 static int sysctl_reset_ip6_output_stats SYSCTL_HANDLER_ARGS;
 static int sysctl_ip6_output_measure_bins SYSCTL_HANDLER_ARGS;
 static int sysctl_ip6_output_getperf SYSCTL_HANDLER_ARGS;
@@ -375,7 +377,7 @@ ip6_output_list(struct mbuf *m0, int packetchain, struct ip6_pktopts *opt,
 		dn_tag = (struct dn_pkt_tag *)(tag->m_tag_data);
 		args.fwa_pf_rule = dn_tag->dn_pf_rule;
 
-		bcopy(&dn_tag->dn_dst6, &dst_buf, sizeof(dst_buf));
+		SOCKADDR_COPY(&dn_tag->dn_dst6, &dst_buf, sizeof(dst_buf));
 		dst = &dst_buf;
 		ifp = dn_tag->dn_ifp;
 		if (ifp != NULL) {
@@ -1049,7 +1051,7 @@ skip_ipsec:
 	}
 
 	if (ro->ro_rt == NULL) {
-		bzero(dst, sizeof(*dst));
+		SOCKADDR_ZERO(dst, sizeof(*dst));
 		dst->sin6_family = AF_INET6;
 		dst->sin6_len = sizeof(struct sockaddr_in6);
 		dst->sin6_addr = ip6->ip6_dst;
@@ -1141,13 +1143,13 @@ skip_ipsec:
 	ip6 = mtod(m, struct ip6_hdr *);
 
 	if (ip6obf.select_srcif) {
-		bzero(&src_sa, sizeof(src_sa));
+		SOCKADDR_ZERO(&src_sa, sizeof(src_sa));
 		src_sa.sin6_family = AF_INET6;
 		src_sa.sin6_len = sizeof(src_sa);
 		src_sa.sin6_addr = ip6->ip6_src;
 		src_sa.sin6_scope_id = (!in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_src)) ? ip6_output_getsrcifscope(m) : IFSCOPE_NONE;
 	}
-	bzero(&dst_sa, sizeof(dst_sa));
+	SOCKADDR_ZERO(&dst_sa, sizeof(dst_sa));
 	dst_sa.sin6_family = AF_INET6;
 	dst_sa.sin6_len = sizeof(dst_sa);
 	dst_sa.sin6_addr = ip6->ip6_dst;
@@ -1210,7 +1212,7 @@ skip_ipsec:
 		if (ia == NULL) {
 			ia = (struct in6_ifaddr *)(rt->rt_ifa);
 			if (ia != NULL) {
-				IFA_ADDREF(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 			}
 		}
 		rt->rt_use++;
@@ -1248,7 +1250,7 @@ skip_ipsec:
 		if (in6_setscope(&src0, origifp, &zone)) {
 			goto badscope;
 		}
-		bzero(&src_sa, sizeof(src_sa));
+		SOCKADDR_ZERO(&src_sa, sizeof(src_sa));
 		src_sa.sin6_family = AF_INET6;
 		src_sa.sin6_len = sizeof(src_sa);
 		src_sa.sin6_addr = ip6->ip6_src;
@@ -1263,7 +1265,7 @@ skip_ipsec:
 			goto badscope;
 		}
 		/* re-initialize to be sure */
-		bzero(&dst_sa, sizeof(dst_sa));
+		SOCKADDR_ZERO(&dst_sa, sizeof(dst_sa));
 		dst_sa.sin6_family = AF_INET6;
 		dst_sa.sin6_len = sizeof(dst_sa);
 		dst_sa.sin6_addr = ip6->ip6_dst;
@@ -1618,10 +1620,10 @@ done:
 #endif /* DUMMYNET */
 
 	if (ia != NULL) {
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 	}
 	if (src_ia != NULL) {
-		IFA_REMREF(&src_ia->ia_ifa);
+		ifa_remref(&src_ia->ia_ifa);
 	}
 	if (ifp != NULL) {
 		ifnet_release(ifp);
@@ -2290,7 +2292,7 @@ ip6_getpmtu(struct route_in6 *ro_pmtu, struct route_in6 *ro,
 		}
 
 		if (ro_pmtu->ro_rt == NULL) {
-			bzero(sa6_dst, sizeof(*sa6_dst));
+			SOCKADDR_ZERO(sa6_dst, sizeof(*sa6_dst));
 			sa6_dst->sin6_family = AF_INET6;
 			sa6_dst->sin6_len = sizeof(struct sockaddr_in6);
 			sa6_dst->sin6_addr = *dst;
@@ -3393,7 +3395,7 @@ copypktopts(struct ip6_pktopts *dst, struct ip6_pktopts *src, zalloc_flags_t can
 		if (dst->ip6po_nexthop == NULL && canwait == Z_NOWAIT) {
 			goto bad;
 		}
-		bcopy(src->ip6po_nexthop, dst->ip6po_nexthop,
+		SOCKADDR_COPY(src->ip6po_nexthop, dst->ip6po_nexthop,
 		    src->ip6po_nexthop->sa_len);
 	}
 	PKTOPT_EXTHDRCPY(ip6po_hbh);
@@ -3843,7 +3845,7 @@ ip6_setpktopt(int optname, u_char *buf, int len, struct ip6_pktopts *opt,
 		if (opt->ip6po_nexthop == NULL) {
 			return ENOBUFS;
 		}
-		bcopy(buf, opt->ip6po_nexthop, *buf);
+		SOCKADDR_COPY(buf, opt->ip6po_nexthop, *buf);
 		break;
 
 	case IPV6_2292HOPOPTS:
@@ -4084,7 +4086,7 @@ ip6_mloopback(struct ifnet *srcifp, struct ifnet *origifp, struct mbuf *m,
 	 * is in an mbuf cluster, so that we can safely override the IPv6
 	 * header portion later.
 	 */
-	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, M_COPYM_COPY_HDR);
+	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_COPY_HDR);
 	if (copym != NULL && ((copym->m_flags & M_EXT) ||
 	    copym->m_len < sizeof(struct ip6_hdr))) {
 		copym = m_pullup(copym, sizeof(struct ip6_hdr));

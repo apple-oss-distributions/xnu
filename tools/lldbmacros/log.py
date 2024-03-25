@@ -1,6 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import object
 from collections import namedtuple
 from itertools import chain
 
@@ -282,9 +279,9 @@ class MsgBuffer(object):
         for c in chars:
             line.append(c)
             if chr(c) == '\n':
-                yield six.ensure_str(line.decode('utf-8'))
+                yield line.decode()
                 line = bytearray()
-        yield six.ensure_str(line.decode('utf-8'))
+        yield line.decode()
 
     def _at(self, i):
         """ Returns a character at a given index. """

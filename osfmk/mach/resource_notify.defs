@@ -151,6 +151,31 @@ SimpleRoutine file_descriptors_violation(
 
     /* kill port */
     fatal_port              : mach_port_copy_send_t;
-    
+
     flags                   : resource_notify_flags_t
 );
+
+#if (KERNEL_USER || KQWORKLOOPS_VIOLATION_SUPPORTED)
+SimpleRoutine kqworkloops_violation(
+    receiver                : mach_port_t;
+
+    /* violator */
+    procname                : proc_name_t;
+    pid                     : int;
+
+    /* violation */
+    timestamp               : mach_timespec_t;
+    observed_kqworkloops    : int64_t;
+
+    /* threshold */
+    kqworkloops_allowed     : int64_t;
+
+    /* kill port */
+    fatal_port              : mach_port_copy_send_t;
+
+    flags                   : resource_notify_flags_t
+);
+#else
+skip;
+#endif
+/* vim: set ft=c : */

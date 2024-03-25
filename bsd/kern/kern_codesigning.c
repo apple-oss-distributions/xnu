@@ -41,10 +41,66 @@
 #include <sys/proc_require.h>
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <sys/lockdown_mode.h>
+#include <sys/reason.h>
+#include <sys/kdebug_kernel.h>
+#include <sys/kdebug_triage.h>
 #include <sys/sysctl.h>
 #include <uuid/uuid.h>
 #include <IOKit/IOBSD.h>
 
+#if CONFIG_SPTM
+#include <sys/trusted_execution_monitor.h>
+#endif
+
+#if XNU_KERNEL_PRIVATE
+vm_address_t
+code_signing_allocate(
+	size_t alloc_size)
+{
+	vm_address_t alloc_addr = 0;
+
+	if (alloc_size == 0) {
+		panic("%s: zero allocation size", __FUNCTION__);
+	}
+	size_t aligned_size = round_page(alloc_size);
+
+	kern_return_t ret = kmem_alloc(
+		kernel_map,
+		&alloc_addr, aligned_size,
+		KMA_KOBJECT | KMA_DATA | KMA_ZERO,
+		VM_KERN_MEMORY_SECURITY);
+
+	if (ret != KERN_SUCCESS) {
+		printf("%s: unable to allocate %lu bytes\n", __FUNCTION__, aligned_size);
+	} else if (alloc_addr == 0) {
+		printf("%s: invalid allocation\n", __FUNCTION__);
+	}
+
+	return alloc_addr;
+}
+
+void
+code_signing_deallocate(
+	vm_address_t *alloc_addr,
+	size_t alloc_size)
+{
+	if (alloc_addr == NULL) {
+		panic("%s: invalid pointer provided", __FUNCTION__);
+	} else if ((*alloc_addr == 0) || ((*alloc_addr & PAGE_MASK) != 0)) {
+		panic("%s: address provided: %p", __FUNCTION__, (void*)(*alloc_addr));
+	} else if (alloc_size == 0) {
+		panic("%s: zero allocation size", __FUNCTION__);
+	}
+	size_t aligned_size = round_page(alloc_size);
+
+	/* Free the allocation */
+	kmem_free(kernel_map, *alloc_addr, aligned_size);
+
+	/* Clear the address */
+	*alloc_addr = 0;
+}
+#endif /* XNU_KERNEL_PRIVATE */
 
 SYSCTL_DECL(_security);
 SYSCTL_DECL(_security_codesigning);
@@ -93,9 +149,58 @@ code_signing_configuration(
 		config |= CS_CONFIG_CSM_ENABLED;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+	/*
+	 * Since TrustedExecutionMonitor cannot call into any function within XNU, we
+	 * query it's code signing configuration even before this function is called.
+	 * Using that, we modify the state of the code signing features available.
+	 */
+	if (csm_enabled() == true) {
+#if kTXMKernelAPIVersion >= 3
+		bool platform_code_only = txm_cs_config->systemPolicy->platformCodeOnly;
+#else
+		bool platform_code_only = txm_ro_data->platformCodeOnly;
+#endif
+
+		/* Disable unsupported features when enforcing platform-code-only */
+		if (platform_code_only == true) {
+			config &= ~CS_CONFIG_MAP_JIT;
+			config &= ~CS_CONFIG_COMPILATION_SERVICE;
+			config &= ~CS_CONFIG_LOCAL_SIGNING;
+			config &= ~CS_CONFIG_OOP_JIT;
+		}
+
+#if kTXMKernelAPIVersion >= 3
+		/* MAP_JIT support */
+		if (txm_cs_config->systemPolicy->featureSet.JIT == false) {
+			config &= ~CS_CONFIG_MAP_JIT;
+		}
+#endif
+
+		/* Developer mode support */
+		if (txm_cs_config->systemPolicy->featureSet.developerMode == false) {
+			config &= ~CS_CONFIG_DEVELOPER_MODE_SUPPORTED;
+		}
+
+		/* Compilation service support */
+		if (txm_cs_config->systemPolicy->featureSet.compilationService == false) {
+			config &= ~CS_CONFIG_COMPILATION_SERVICE;
+		}
+
+		/* Local signing support */
+		if (txm_cs_config->systemPolicy->featureSet.localSigning == false) {
+			config &= ~CS_CONFIG_LOCAL_SIGNING;
+		}
+
+		/* OOP-JIT support */
+		if (txm_cs_config->systemPolicy->featureSet.OOPJit == false) {
+			config &= ~CS_CONFIG_OOP_JIT;
+		}
+	}
+	monitor_type = CS_MONITOR_TYPE_TXM;
+#elif PMAP_CS_PPL_MONITOR
 	monitor_type = CS_MONITOR_TYPE_PPL;
-#endif /* */
+#endif /* CONFIG_SPTM */
 #endif /* CODE_SIGNING_MONITOR */
 
 #if DEVELOPMENT || DEBUG
@@ -188,7 +293,31 @@ code_signing_configuration(
 		config |= CS_CONFIG_INTEGRITY_SKIP;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+
+	if (csm_enabled() == true) {
+		/* allow_any_signature */
+		if (txm_cs_config->exemptions.allowAnySignature == false) {
+			config &= ~CS_CONFIG_ALLOW_ANY_SIGNATURE;
+		}
+
+		/* unrestrict_task_for_pid */
+		if (txm_ro_data && !txm_ro_data->exemptions.allowUnrestrictedDebugging) {
+			config &= ~CS_CONFIG_UNRESTRICTED_DEBUGGING;
+		}
+
+		/* cs_enforcement_disable */
+		if (txm_ro_data && !txm_ro_data->exemptions.allowModifiedCode) {
+			config &= ~CS_CONFIG_ENFORCEMENT_DISABLED;
+		}
+
+		/* get_out_of_my_way (skip_trust_evaluation) */
+		if (txm_cs_config->exemptions.skipTrustEvaluation == false) {
+			config &= ~CS_CONFIG_GET_OUT_OF_MY_WAY;
+		}
+	}
+
+#elif PMAP_CS_PPL_MONITOR
 
 	if (csm_enabled() == true) {
 		int pmap_cs_allow_any_signature = 0;
@@ -222,7 +351,7 @@ code_signing_configuration(
 		}
 	}
 
-#endif /* */
+#endif /* CONFIG_SPTM */
 #endif /* DEVELOPMENT || DEBUG */
 
 	os_atomic_store(&cs_monitor, monitor_type, relaxed);
@@ -283,6 +412,10 @@ disable_code_signing_feature(
 
 	case CS_CONFIG_OOP_JIT:
 		cs_config &= ~CS_CONFIG_OOP_JIT;
+		break;
+
+	case CS_CONFIG_MAP_JIT:
+		cs_config &= ~CS_CONFIG_MAP_JIT;
 		break;
 
 	default:
@@ -763,6 +896,102 @@ csm_signature_size_limit(void)
 	return CSM_PREFIX(managed_code_signature_size)();
 }
 
+void
+csm_check_lockdown_mode(void)
+{
+	if (get_lockdown_mode_state() == 0) {
+		return;
+	}
+
+	/* Inform the code signing monitor about lockdown mode */
+	CSM_PREFIX(enter_lockdown_mode)();
+
+#if CONFIG_SPTM
+#if kTXMKernelAPIVersion >= 3
+	/* MAP_JIT lockdown */
+	if (txm_cs_config->systemPolicy->featureSet.JIT == false) {
+		disable_code_signing_feature(CS_CONFIG_MAP_JIT);
+	}
+#endif
+
+	/* Compilation service lockdown */
+	if (txm_cs_config->systemPolicy->featureSet.compilationService == false) {
+		disable_code_signing_feature(CS_CONFIG_COMPILATION_SERVICE);
+	}
+
+	/* Local signing lockdown */
+	if (txm_cs_config->systemPolicy->featureSet.localSigning == false) {
+		disable_code_signing_feature(CS_CONFIG_LOCAL_SIGNING);
+	}
+
+	/* OOP-JIT lockdown */
+	if (txm_cs_config->systemPolicy->featureSet.OOPJit == false) {
+		disable_code_signing_feature(CS_CONFIG_OOP_JIT);
+	}
+#else
+	/*
+	 * Lockdown mode is supposed to disable all forms of JIT on the system. For now,
+	 * we leave JIT enabled by default until some blockers are resolved. The way this
+	 * code is written, we don't need to change anything once we enforce MAP_JIT to
+	 * be disabled for lockdown mode.
+	 */
+	if (ppl_lockdown_mode_enforce_jit == true) {
+		disable_code_signing_feature(CS_CONFIG_MAP_JIT);
+	}
+	disable_code_signing_feature(CS_CONFIG_OOP_JIT);
+	disable_code_signing_feature(CS_CONFIG_LOCAL_SIGNING);
+	disable_code_signing_feature(CS_CONFIG_COMPILATION_SERVICE);
+#endif /* CONFIG_SPTM */
+}
+
+void
+csm_code_signing_violation(
+	proc_t proc,
+	vm_offset_t addr)
+{
+	os_reason_t kill_reason = OS_REASON_NULL;
+
+	/* No enforcement if code-signing-monitor is disabled */
+	if (csm_enabled() == false) {
+		return;
+	} else if (proc == PROC_NULL) {
+		panic("code-signing violation without a valid proc");
+	}
+
+	/*
+	 * If the address space is being debugged, then we expect this task to undergo
+	 * some code signing violations. In this case, we return without killing the
+	 * task.
+	 */
+	if (address_space_debugged(proc) == KERN_SUCCESS) {
+		return;
+	}
+
+	/* Leave a ktriage record */
+	ktriage_record(
+		thread_tid(current_thread()),
+		KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_CODE_SIGNING),
+		0);
+
+	/* Leave a log for triage purposes */
+	printf("[%s: killed] code-signing-violation at %p\n", proc_best_name(proc), (void*)addr);
+
+	/*
+	 * Create a reason for the SIGKILL and set it to allow generating crash reports,
+	 * which is critical for better triaging these issues.
+	 */
+	kill_reason = os_reason_create(OS_REASON_CODESIGNING, CODESIGNING_EXIT_REASON_INVALID_PAGE);
+	if (kill_reason != NULL) {
+		kill_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
+	}
+
+	/*
+	 * Send a SIGKILL to the process. This function will consume the kill_reason, so
+	 * we do not need to manually free it here.
+	 */
+	psignal_with_reason(proc, SIGKILL, kill_reason);
+}
+
 kern_return_t
 csm_register_code_signature(
 	const vm_address_t signature_addr,
@@ -1067,4 +1296,112 @@ kernel_image4_set_bnch_shadow(
 	const img4_nonce_domain_index_t ndi)
 {
 	return CSM_PREFIX(image4_set_bnch_shadow)(ndi);
+}
+
+#pragma mark Image4 - New
+
+
+
+static errno_t
+_kernel_image4_monitor_trap_image_activate(
+	image4_cs_trap_t selector,
+	const void *input_data)
+{
+	/*
+	 * csmx_payload (csmx_payload_len) --> __cs_xfer
+	 * csmx_manifest (csmx_manifest_len) --> __cs_borrow
+	 */
+	image4_cs_trap_argv(image_activate) input = {0};
+	vm_address_t payload_addr = 0;
+	vm_address_t manifest_addr = 0;
+	errno_t err = EPERM;
+
+	/* Copy the input data */
+	memcpy(&input, input_data, sizeof(input));
+
+	payload_addr = code_signing_allocate(input.csmx_payload_len);
+	if (payload_addr == 0) {
+		goto out;
+	}
+	memcpy((void*)payload_addr, (void*)input.csmx_payload, input.csmx_payload_len);
+
+	manifest_addr = code_signing_allocate(input.csmx_manifest_len);
+	if (manifest_addr == 0) {
+		goto out;
+	}
+	memcpy((void*)manifest_addr, (void*)input.csmx_manifest, input.csmx_manifest_len);
+
+	/* Transfer both regions to the monitor */
+	CSM_PREFIX(image4_transfer_region)(selector, payload_addr, input.csmx_payload_len);
+	CSM_PREFIX(image4_transfer_region)(selector, manifest_addr, input.csmx_manifest_len);
+
+	/* Setup the input with new addresses */
+	input.csmx_payload = payload_addr;
+	input.csmx_manifest = manifest_addr;
+
+	/* Trap into the monitor for this selector */
+	err = CSM_PREFIX(image4_monitor_trap)(selector, &input, sizeof(input));
+
+out:
+	if ((err != 0) && (payload_addr != 0)) {
+		/* Retyping only happens after allocating the manifest */
+		if (manifest_addr != 0) {
+			CSM_PREFIX(image4_reclaim_region)(
+				selector, payload_addr, input.csmx_payload_len);
+		}
+		code_signing_deallocate(&payload_addr, input.csmx_payload_len);
+	}
+
+	if (manifest_addr != 0) {
+		/* Reclaim the manifest region -- will be retyped if not NULL */
+		CSM_PREFIX(image4_reclaim_region)(
+			selector, manifest_addr, input.csmx_manifest_len);
+
+		/* Deallocate the manifest region */
+		code_signing_deallocate(&manifest_addr, input.csmx_manifest_len);
+	}
+
+	return err;
+}
+
+static errno_t
+_kernel_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size)
+{
+	/* Validate input size for the selector */
+	if (input_size != image4_cs_trap_vector_size(selector)) {
+		printf("image4 dispatch: invalid input: %llu | %lu\n", selector, input_size);
+		return EINVAL;
+	}
+
+	switch (selector) {
+	case IMAGE4_CS_TRAP_IMAGE_ACTIVATE:
+		return _kernel_image4_monitor_trap_image_activate(selector, input_data);
+
+	default:
+		return CSM_PREFIX(image4_monitor_trap)(selector, input_data, input_size);
+	}
+}
+
+errno_t
+kernel_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size,
+	__unused void *output_data,
+	__unused size_t *output_size)
+{
+	size_t length_check = 0;
+
+	/* Input data is always required */
+	if ((input_data == NULL) || (input_size == 0)) {
+		printf("image4 dispatch: no input data: %llu\n", selector);
+		return EINVAL;
+	} else if (os_add_overflow((vm_address_t)input_data, input_size, &length_check)) {
+		panic("image4_ dispatch: overflow on input: %p | %lu", input_data, input_size);
+	}
+
+	return _kernel_image4_monitor_trap(selector, input_data, input_size);
 }

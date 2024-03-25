@@ -113,6 +113,7 @@
 #define T_PF_EXECUTE            0x10            /* instruction fetch when NX */
 
 #if !defined(ASSEMBLER)
+#if __OPTIMIZE__
 __attribute__((cold, always_inline))
 static inline void
 ml_recoverable_trap(unsigned int code)
@@ -129,6 +130,14 @@ __attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant",
 	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
 	__builtin_unreachable();
 }
+#else
+#define ml_recoverable_trap(code) \
+	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code))
+#define ml_fatal_trap(code)  ({ \
+	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code)); \
+	__builtin_unreachable(); \
+})
+#endif
 
 #if defined(XNU_KERNEL_PRIVATE)
 __attribute__((cold, always_inline))
@@ -155,62 +164,5 @@ ml_bound_chk_soft_trap(unsigned char code)
 }
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* !ASSEMBLER */
-
-#if defined(MACH_KERNEL_PRIVATE)
-
-#if !defined(ASSEMBLER) && defined(MACH_KERNEL)
-
-#include <i386/thread.h>
-
-#define DEFAULT_PANIC_ON_TRAP_MASK ((1U << T_INVALID_OPCODE) |  \
-	(1U << T_GENERAL_PROTECTION) |                          \
-	(1U << T_PAGE_FAULT) |                                  \
-	(1U << T_SEGMENT_NOT_PRESENT) |                         \
-	(1U << T_STACK_FAULT))
-
-
-extern void             i386_exception(
-	int                     exc,
-	mach_exception_code_t   code,
-	mach_exception_subcode_t subcode);
-
-extern void             sync_iss_to_iks(x86_saved_state_t *regs);
-
-extern void             sync_iss_to_iks_unconditionally(
-	x86_saved_state_t       *regs);
-
-extern void             kernel_trap(x86_saved_state_t *regs, uintptr_t *lo_spp);
-
-extern void             user_trap(x86_saved_state_t *regs);
-
-extern void             interrupt(x86_saved_state_t *regs);
-
-extern void             panic_double_fault64(x86_saved_state_t *regs) __abortlike;
-extern void             panic_machine_check64(x86_saved_state_t *regs) __abortlike;
-
-typedef kern_return_t (*perfCallback)(
-	int                     trapno,
-	void                    *regs,
-	uintptr_t               *lo_spp,
-	int);
-
-extern void             panic_i386_backtrace(void *, int, const char *, boolean_t, x86_saved_state_t *);
-extern void     print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker, boolean_t is_64_bit);
-extern void     print_thread_num_that_crashed(task_t task);
-extern void     print_tasks_user_threads(task_t task);
-extern void     print_threads_registers(thread_t thread);
-extern void     print_uuid_info(task_t task);
-extern void     print_launchd_info(void);
-
-#if MACH_KDP
-extern boolean_t        kdp_i386_trap(
-	unsigned int,
-	x86_saved_state64_t *,
-	kern_return_t,
-	vm_offset_t);
-#endif /* MACH_KDP */
-#endif  /* !ASSEMBLER && MACH_KERNEL */
-
-#endif /* MACH_KERNEL_PRIVATE */
 
 #endif  /* _I386_TRAP_H_ */

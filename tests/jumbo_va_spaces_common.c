@@ -15,7 +15,7 @@
  * This value was determined experimentally to fit on applicable devices and to
  * be clearly distinguishable from the default VA limit.
  */
-#define ALLOC_TEST_GB 53
+#define ALLOC_TEST_GB 51
 
 void
 verify_jumbo_va(bool entitled)

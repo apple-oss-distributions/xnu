@@ -86,7 +86,7 @@
 #ifdef PRIVATE
 /* Make sure to count the filter types in event_private.h! */
 #endif
-#define EVFILT_SYSCOUNT         17
+#define EVFILT_SYSCOUNT         18
 #define EVFILT_THREADMARKER     EVFILT_SYSCOUNT /* Internal use only */
 
 #pragma pack(4)

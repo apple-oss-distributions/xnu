@@ -205,6 +205,8 @@ static int __attribute__ ((noinline)) pid_kqueueinfo(struct kqueue * kq, struct 
 static int proc_terminate_all_rsr(__unused int pid, __unused int flavor, int arg, int32_t *retval);
 static int proc_terminate_all_rsr_filter(proc_t p, __unused void *arg);
 static int proc_terminate_all_rsr_callback(proc_t p, void *arg);
+static int proc_signal_with_audittoken(user_addr_t buffer, int signum, int32_t *retval);
+static int proc_terminate_with_audittoken(user_addr_t buffer, int32_t *retval);
 static int fill_vnodeinfo(vnode_t vp, struct vnode_info *vinfo, boolean_t check_fsgetpath);
 static void fill_fileinfo(struct fileproc *fp, proc_t proc, struct proc_fileinfo * finfo);
 static int proc_security_policy(proc_t targetp, int callnum, int flavor, boolean_t check_same_user);
@@ -333,6 +335,10 @@ proc_info_internal(int callnum, int pid, uint32_t flags, uint64_t ext_id, int fl
 		return proc_set_dyld_images(pid, buffer, buffersize, retval);
 	case PROC_INFO_CALL_TERMINATE_RSR:
 		return proc_terminate_all_rsr(pid, flavor, (int)arg, retval);
+	case PROC_INFO_CALL_SIGNAL_AUDITTOKEN:
+		return proc_signal_with_audittoken(buffer, flavor, retval);
+	case PROC_INFO_CALL_TERMINATE_AUDITTOKEN:
+		return proc_terminate_with_audittoken(buffer, retval);
 	default:
 		return EINVAL;
 	}
@@ -659,11 +665,15 @@ int
 proc_pidbsdinfo(proc_t p, struct proc_bsdinfo * pbsd, int zombie)
 {
 	struct pgrp *pg;
+	struct session *sessp;
 	kauth_cred_t my_cred;
 
-	pg = proc_pgrp(p, NULL);
+	pg = proc_pgrp(p, &sessp);
 
-	my_cred = kauth_cred_proc_ref(p);
+	smr_proc_task_enter();
+
+	my_cred = proc_ucred_smr(p);
+
 	bzero(pbsd, sizeof(struct proc_bsdinfo));
 	pbsd->pbi_status = p->p_stat;
 	pbsd->pbi_xstatus = p->p_xstat;
@@ -675,7 +685,9 @@ proc_pidbsdinfo(proc_t p, struct proc_bsdinfo * pbsd, int zombie)
 	pbsd->pbi_rgid = kauth_cred_getrgid(my_cred);
 	pbsd->pbi_svuid =  kauth_cred_getsvuid(my_cred);
 	pbsd->pbi_svgid = kauth_cred_getsvgid(my_cred);
-	kauth_cred_unref(&my_cred);
+
+	my_cred = NOCRED;
+	smr_proc_task_leave();
 
 	pbsd->pbi_nice = p->p_nice;
 	pbsd->pbi_start_tvsec = p->p_start.tv_sec;
@@ -765,19 +777,18 @@ proc_pidbsdinfo(proc_t p, struct proc_bsdinfo * pbsd, int zombie)
 	}
 
 	pbsd->e_tdev = NODEV;
-	if (pg != PGRP_NULL) {
-		pbsd->pbi_pgid = p->p_pgrpid;
+	if (sessp != SESSION_NULL) {
+		pbsd->pbi_pgid  = p->p_pgrpid;
 		pbsd->pbi_pjobc = pg->pg_jobc;
 		if (p->p_flag & P_CONTROLT) {
-			struct session *sessp = pg->pg_session;
-
 			session_lock(sessp);
 			pbsd->e_tdev  = os_atomic_load(&sessp->s_ttydev, relaxed);
 			pbsd->e_tpgid = sessp->s_ttypgrpid;
 			session_unlock(sessp);
 		}
-		pgrp_rele(pg);
 	}
+
+	pgrp_rele(pg);
 
 	return 0;
 }
@@ -3121,21 +3132,23 @@ proc_security_policy(proc_t targetp, __unused int callnum, __unused int flavor, 
 	 * root has this privilege by default
 	 */
 	if (check_same_user) {
-		kauth_cred_t target_cred;
-		uid_t        target_uid;
+		kauth_cred_t my_cred = kauth_cred_get();
+		kauth_cred_t tg_cred;
 
-		target_cred = kauth_cred_proc_ref(targetp);
-		target_uid  = kauth_cred_getuid(target_cred);
-		kauth_cred_unref(&target_cred);
+		smr_proc_task_enter();
+		tg_cred = proc_ucred_smr(targetp);
+		if (kauth_cred_getuid(my_cred) != kauth_cred_getuid(tg_cred)) {
+			error = EPERM;
+		}
+		tg_cred = NOCRED;
+		smr_proc_task_leave();
 
-		if (kauth_getuid() != target_uid) {
-			/*
-			 * If uid doesn't match, check if the caller is specially entitled
-			 * to bypass the requirement.
-			 */
-			if (priv_check_cred(kauth_cred_get(), PRIV_GLOBAL_PROC_INFO, 0)) {
-				return EPERM;
-			}
+		/*
+		 * If uid doesn't match, check if the caller is specially entitled
+		 * to bypass the requirement.
+		 */
+		if (error && priv_check_cred(my_cred, PRIV_GLOBAL_PROC_INFO, 0)) {
+			return EPERM;
 		}
 	}
 
@@ -3262,7 +3275,7 @@ proc_dirtycontrol(int pid, int flavor, uint64_t arg, int32_t *retval)
 	struct proc *target_p;
 	int error = 0;
 	uint32_t pcontrol = (uint32_t)arg;
-	kauth_cred_t my_cred, target_cred;
+	kauth_cred_t my_cred;
 	boolean_t self = FALSE;
 	boolean_t child = FALSE;
 	boolean_t zombref = FALSE;
@@ -3282,7 +3295,6 @@ proc_dirtycontrol(int pid, int flavor, uint64_t arg, int32_t *retval)
 	}
 
 	my_cred = kauth_cred_get();
-	target_cred = kauth_cred_proc_ref(target_p);
 
 	/* Do we have permission to look into this? */
 	if ((error = proc_security_policy(target_p, PROC_INFO_CALL_DIRTYCONTROL, flavor, NO_CHECK_SAME_USER))) {
@@ -3348,8 +3360,6 @@ out:
 		proc_rele(target_p);
 	}
 
-	kauth_cred_unref(&target_cred);
-
 	return error;
 }
 #else
@@ -3363,48 +3373,24 @@ proc_dirtycontrol(__unused int pid, __unused int flavor, __unused uint64_t arg, 
 #endif /* CONFIG_MEMORYSTATUS */
 
 /*
- * proc_terminate() provides support for sudden termination.
+ * proc_terminate_with_proc() provides support for sudden termination by proc_t.
  * SIGKILL is issued to tracked, clean processes; otherwise,
  * SIGTERM is sent.
  */
-
-int
-proc_terminate(int pid, int32_t *retval)
+static int
+proc_terminate_with_proc(proc_t p, int32_t *retval)
 {
-	int error = 0;
-	proc_t p;
 	kauth_cred_t uc = kauth_cred_get();
 	int sig;
 
-#if 0
-	/* XXX: Check if these are necessary */
-	AUDIT_ARG(pid, pid);
-	AUDIT_ARG(signum, sig);
-#endif
-
-	if (pid <= 0 || retval == NULL) {
-		return EINVAL;
-	}
-
-	if ((p = proc_find(pid)) == NULL) {
-		return ESRCH;
-	}
-
-#if 0
-	/* XXX: Check if these are necessary */
-	AUDIT_ARG(process, p);
-#endif
-
 	/* Check privileges; if SIGKILL can be issued, then SIGTERM is also OK */
 	if (!cansignal(current_proc(), uc, p, SIGKILL)) {
-		error = EPERM;
-		goto out;
+		return EPERM;
 	}
 
 	/* Not allowed to sudden terminate yourself */
 	if (p == current_proc()) {
-		error = EPERM;
-		goto out;
+		return EPERM;
 	}
 
 #if CONFIG_MEMORYSTATUS
@@ -3420,9 +3406,40 @@ proc_terminate(int pid, int32_t *retval)
 	psignal(p, sig);
 	*retval = sig;
 
-out:
-	proc_rele(p);
+	return 0;
+}
 
+/*
+ * proc_terminate() provides support for sudden termination by PID.
+ * SIGKILL is issued to tracked, clean processes; otherwise,
+ * SIGTERM is sent.
+ */
+int
+proc_terminate(int pid, int32_t *retval)
+{
+	int error = 0;
+	proc_t p;
+
+#if 0
+	/* XXX: Check if these are necessary */
+	AUDIT_ARG(pid, pid);
+#endif
+
+	if (pid <= 0 || retval == NULL) {
+		return EINVAL;
+	}
+
+	if ((p = proc_find(pid)) == NULL) {
+		return ESRCH;
+	}
+
+#if 0
+	/* XXX: Check if these are necessary */
+	AUDIT_ARG(process, p);
+#endif
+
+	error = proc_terminate_with_proc(p, retval);
+	proc_rele(p);
 	return error;
 }
 
@@ -3455,6 +3472,116 @@ struct proc_terminate_all_rsr_struct {
 	int     ptss_sig;
 	int32_t *ptss_retval;
 };
+
+
+static int
+proc_signal_with_audittoken(user_addr_t uaudittoken, int signum, int32_t *retval)
+{
+	int error = 0;
+	pid_t pid = 0;
+	proc_t target_proc = PROC_NULL;
+	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+	kauth_cred_t uc = kauth_cred_get();
+
+	if (!((signum > 0) && (signum < NSIG))) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if (uaudittoken != USER_ADDR_NULL) {
+		error = copyin(uaudittoken, &token, sizeof(audit_token_t));
+		if (error != 0) {
+			goto out;
+		}
+	} else {
+		error = EINVAL;
+		goto out;
+	}
+
+	pid = token.val[5];
+	if (pid <= 0) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if ((target_proc = proc_find(pid)) == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	/* Check the target proc pidversion */
+	int pidversion = proc_pidversion(target_proc);
+	if (pidversion != token.val[7]) {
+		error = ESRCH;
+		goto out;
+	}
+
+	/* Check the calling process privileges, proceed if it can signal the target process */
+	if (!cansignal(current_proc(), uc, target_proc, signum)) {
+		error = EPERM;
+		goto out;
+	}
+
+	psignal(target_proc, signum);
+out:
+	if (target_proc != PROC_NULL) {
+		proc_rele(target_proc);
+	}
+
+	*retval = 0;
+
+	return error;
+}
+
+/*
+ * proc_terminate_with_audittoken() provides support for sudden termination by audit token.
+ * SIGKILL is issued to tracked, clean processes; otherwise,
+ * SIGTERM is sent.
+ */
+static int
+proc_terminate_with_audittoken(user_addr_t uaudittoken, int32_t *retval)
+{
+	int error = 0;
+	pid_t pid = 0;
+	proc_t target_proc = PROC_NULL;
+	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+
+	if (uaudittoken != USER_ADDR_NULL) {
+		error = copyin(uaudittoken, &token, sizeof(audit_token_t));
+		if (error != 0) {
+			goto out;
+		}
+	} else {
+		error = EINVAL;
+		goto out;
+	}
+
+	pid = token.val[5];
+	if (pid <= 0) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if ((target_proc = proc_find(pid)) == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	/* Check the target proc pidversion */
+	int pidversion = proc_pidversion(target_proc);
+	if (pidversion != token.val[7]) {
+		error = ESRCH;
+		goto out;
+	}
+
+	error = proc_terminate_with_proc(target_proc, retval);
+
+out:
+	if (target_proc != PROC_NULL) {
+		proc_rele(target_proc);
+	}
+	return error;
+}
 
 /*
  * proc_terminate_all_rsr() provides support for sudden termination of all

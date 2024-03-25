@@ -120,7 +120,6 @@ XNU_ONLY_EXPORTS = \
 	iotrace.h \
 	ipc_kobject.h \
 	lock_ptr.h \
-	perfmon.h \
 	recount.h \
 	sched_hygiene.h \
 	smr.h \
@@ -152,19 +151,43 @@ EXPORT_MI_DIR = kern
 # build support for tightbeamc-generated files
 
 ifeq ($(XNU_CONFIG_TIGHTBEAM),1)
-TIGHTBEAM_FILES := exclaves_upcalls.tightbeam conclave_launcher.tightbeam
+TIGHTBEAM_FILES := \
+	exclaves_conclave_launcher.tightbeam \
+	exclaves_eic.tightbeam \
+	exclaves_log.tightbeam \
+	exclaves_upcalls.tightbeam \
+	stackshot.tightbeam \
+	exclaves_frame_mint.tightbeam
+
+TIGHTBEAM_MODULES := \
+	SharedMemoryBase.tbmodule
 endif
 
-GENERATED_HEADERS := $(patsubst %.tightbeam,%.tightbeam.h,$(TIGHTBEAM_FILES))
-GENERATED_IMPL := $(patsubst %.tightbeam,%.tightbeam.c,$(TIGHTBEAM_FILES))
-COMP_FILES := $(GENERATED_HEADERS) $(GENERATED_IMPL)
+# This makes sure to not include any tbmodules which don't exist in the SDK and
+# expand the modules listed above to their full path in the SDK. The modules
+# should only be needed when actually building with CONFIG_EXCLAVES
+# (which can't easily be checked here).
+TIGHTBEAM_MODULES := $(patsubst %.tbmodule,$(TIGHTBEAM_MODULE_DIR)/%.tbmodule,$(TIGHTBEAM_MODULES))
+TIGHTBEAM_MODULES := $(wildcard $(TIGHTBEAM_MODULES))
 
-$(GENERATED_HEADERS) : \
-	%.tightbeam.h : %.tightbeam
+TIGHTBEAM_COMBINED_HDR := exclaves.tightbeam.h
+# Clear TIGHTBEAM_COMBINED_HDR if there are no tightbeam files/modules to be
+# compiled at all.
+ifeq ($(strip $(TIGHTBEAM_FILES)),)
+ifeq ($(strip $(TIGHTBEAM_MODULES)),)
+TIGHTBEAM_COMBINED_HDR :=
+endif
+endif
+
+TIGHTBEAM_COMBINED_IMPL := $(patsubst %.h,%.c,$(TIGHTBEAM_COMBINED_HDR))
+
+COMP_FILES := $(TIGHTBEAM_COMBINED_HDR) $(TIGHTBEAM_COMBINED_IMPL)
+
+$(TIGHTBEAM_COMBINED_IMPL) : $(TIGHTBEAM_FILES) $(TIGHTBEAM_MODULES)
 	@$(LOG_TIGHTBEAMC) "$@"
-	$(_v)$(TIGHTBEAMC) --pass c --output-base $*.tightbeam.c $<
+	$(_v)$(TIGHTBEAMC) build generate-c --output-base $@ --codegen-version 2 $^
 
-$(GENERATED_IMPL) : $(GENERATED_HEADERS)
+$(TIGHTBEAM_COMBINED_HDR) : $(TIGHTBEAM_COMBINED_IMPL)
 
 do_build_all:: $(COMP_FILES)
 

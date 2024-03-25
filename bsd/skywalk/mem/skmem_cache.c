@@ -1044,10 +1044,10 @@ skmem_slab_alloc_locked(struct skmem_cache *skm, struct skmem_obj_info *oi,
 	uint64_t boff = 0;                      /* in msec */
 	boolean_t new_slab;
 	void *buf;
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	vm_offset_t tagged_address;             /* address tagging */
 	struct skmem_region *region;            /* region source for this slab */
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	/* this flag is not for the caller to set */
 	VERIFY(!(skmflag & SKMEM_FAILOK));
@@ -1173,7 +1173,7 @@ again:
 	 * Also store the master object's region info for the caller.
 	 */
 	bzero(oi, sizeof(*oi));
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	region = sl->sl_cache->skm_region;
 	if (region->skr_mode & SKR_MODE_MEMTAG) {
 		/*
@@ -1194,9 +1194,9 @@ again:
 	} else {
 		buf = bc->bc_addr;
 	}
-#else /* !CONFIG_KERNEL_TAGGING */
+#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 	buf = bc->bc_addr;
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 	SKMEM_OBJ_ADDR(oi) = buf;
 	SKMEM_OBJ_BUFCTL(oi) = bc;      /* master only; NULL for slave */
 	ASSERT(skm->skm_objsize <= UINT32_MAX);
@@ -1413,7 +1413,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	struct skmem_bufctl *bc, *tbc;
 	struct skmem_bufctl_bkt *bcb;
 	struct skmem_slab *sl = NULL;
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	struct skmem_region *region;
 	vm_offset_t tagged_addr;
 	/*
@@ -1421,7 +1421,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	 * If buf is untagged, then addr is same as buf.
 	 */
 	void *addr = (void *)vm_memtag_canonicalize_address((vm_offset_t)buf);
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	SKM_SLAB_LOCK_ASSERT_HELD(skm);
 	ASSERT(buf != NULL);
@@ -1438,7 +1438,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	skm->skm_sl_free++;
 	bcb = SKMEM_CACHE_HASH(skm, buf);
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	/*
 	 * If this region is configured to tag memory addresses, then buf is a
 	 * tagged address. When we search for the buffer control from the hash
@@ -1453,7 +1453,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 			break;
 		}
 	}
-#else /* !CONFIG_KERNEL_TAGGING */
+#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
 		if (bc->bc_addr == buf) {
 			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
@@ -1461,7 +1461,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 			break;
 		}
 	}
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	if (bc == NULL) {
 		panic("%s: attempt to free invalid or already-freed obj %p "
@@ -1471,15 +1471,15 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 	}
 	ASSERT(sl != NULL && sl->sl_cache == skm);
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	/*
 	 * We use untagged address here, because SKMEM_SLAB_MEMBER compares the
 	 * address against sl_base, which is untagged.
 	 */
 	VERIFY(SKMEM_SLAB_MEMBER(sl, addr));
-#else /* !CONFIG_KERNEL_TAGGING */
+#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 	VERIFY(SKMEM_SLAB_MEMBER(sl, buf));
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	/* make sure this object is not currently in use by another object */
 	VERIFY(bc->bc_usecnt == 0);
@@ -1494,7 +1494,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 		bzero(buf, skm->skm_objsize);
 	}
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	/*
 	 * If this region is configured to tag memory addresses, we re-tag this
 	 * address as the object is freed. We do the re-tagging in the magazine
@@ -1514,7 +1514,7 @@ skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
 		    skm->skm_objsize);
 		vm_memtag_set_tag(tagged_addr, skm->skm_objsize);
 	}
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	/* insert the buffer control to the slab's freelist */
 	SLIST_INSERT_HEAD(&sl->sl_head, bc, bc_link);
@@ -2281,10 +2281,10 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 	struct skmem_magtype *mtp;
 	struct skmem_mag *mg;
 	struct skmem_obj *listn;
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 	vm_offset_t tagged_address;           /* address tagging */
 	struct skmem_region *region;          /* region source for this cache */
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 	/* if auditing is enabled, record this transaction */
 	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
@@ -2312,7 +2312,7 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 			} else {
 				listn = NULL;
 			}
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 			/*
 			 * If this region is configured to be tagged, we re-tag
 			 * the address that's being freed, to protect against
@@ -2335,9 +2335,9 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 			} else {
 				cp->cp_loaded->mg_round[cp->cp_rounds++] = list;
 			}
-#else /* !CONFIG_KERNEL_TAGGING */
+#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 			cp->cp_loaded->mg_round[cp->cp_rounds++] = list;
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 			cp->cp_free++;
 
 			if ((list = listn) != NULL) {

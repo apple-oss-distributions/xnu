@@ -56,10 +56,31 @@
 #define BSDTHREAD_CTL_QOS_DISPATCH_ASYNCHRONOUS_OVERRIDE_RESET          0x402
 /* bsdthread_ctl(BSDTHREAD_CTL_QOS_MAX_PARALLELISM, priority, flags, 0) */
 #define BSDTHREAD_CTL_QOS_MAX_PARALLELISM       0x800
-/* bsdthread_ctl(BSDTHREAD_CTL_WORKQ_ALLOW_KILL, enable, 0, 0) */
+/*
+ * bsdthread_ctl(BSDTHREAD_CTL_WORKQ_ALLOW_KILL, enable, 0, 0)
+ * It only affects the calling thread. Regular UNIX calls still need to be
+ * used to manipulate signal mask of the calling thread to allow delivery
+ * of a specific signal to it.
+ * It is typically used in abort paths so it does not need to worry about
+ * preserving sigmask across the thread's re-use. See workq_thread_return.
+ */
 #define BSDTHREAD_CTL_WORKQ_ALLOW_KILL 0x1000
 /* bsdthread_ctl(BSDTHREAD_CTL_DISPATCH_APPLY_ATTR, flags, val1, val2) */
 #define BSDTHREAD_CTL_DISPATCH_APPLY_ATTR 0x2000
+/*
+ * bsdthread_ctl(BSDTHREAD_CTL_WORKQ_ALLOW_SIGMASK, sigmask, 0, 0)
+ * This is a process wide configuration (as opposed to ALLOW_KILL) that
+ * provides the calling process an ability to send signals to all its
+ * pthread workqueue threads.
+ * Regular UNIX calls still need to be used to manipulate signal mask of
+ * each individual pthread worker thread to allow delivery of a specific
+ * signal to that thread.
+ * The @sigmask specified here is used internally by workqueue subsystem
+ * to preserve sigmask of pthread workqueue threads across their re-use.
+ * See workq_thread_return.
+ */
+
+#define BSDTHREAD_CTL_WORKQ_ALLOW_SIGMASK 0x4000
 
 /* Flags for BSDTHREAD_CTL_QOS_MAX_PARALLELISM */
 #define _PTHREAD_QOS_PARALLELISM_COUNT_LOGICAL 0x1

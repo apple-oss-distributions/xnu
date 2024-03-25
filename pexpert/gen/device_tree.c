@@ -247,7 +247,9 @@ SecureDTInit(void const *base, size_t size)
 bool
 SecureDTIsLockedDown(void)
 {
-#if   defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#if CONFIG_SPTM
+	return true;
+#elif defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	/*
 	 * We cannot check if the DT is in the CTRR region early on,
 	 * because knowledge of the CTRR region is set up later.  But the

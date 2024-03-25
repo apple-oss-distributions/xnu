@@ -3,13 +3,6 @@
     Eventually the zstack macros should be refactored to reuse the generic btlog
     support added here.
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import chr
-from builtins import hex
-from builtins import object
-from builtins import range
-
 import struct
 import sys
 

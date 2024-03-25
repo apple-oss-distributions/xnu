@@ -1015,12 +1015,14 @@ __options_decl(mach_msg_option64_t, uint64_t, {
 	MACH64_RCV_LINEAR_VECTOR               = 0x1000000000000000ull,
 	/* Receive into highest addr of buffer */
 	MACH64_RCV_STACK                       = 0x2000000000000000ull,
+#if MACH_FLIPC
 	/*
 	 * This internal-only flag is intended for use by a single thread per-port/set!
 	 * If more than one thread attempts to MACH64_PEEK_MSG on a port or set, one of
 	 * the threads may miss messages (in fact, it may never wake up).
 	 */
 	MACH64_PEEK_MSG                        = 0x4000000000000000ull,
+#endif /* MACH_FLIPC */
 	/*
 	 * This is a mach_msg2() send/receive operation.
 	 */
@@ -1281,10 +1283,12 @@ typedef kern_return_t mach_msg_return_t;
 /* invalid receive arguments, receive has not started */
 
 #ifdef XNU_KERNEL_PRIVATE
+#if MACH_FLIPC
 #define MACH_PEEK_IN_PROGRESS           0x10008001
 /* Waiting for a peek. (Internal use only.) */
 #define MACH_PEEK_READY                 0x10008002
 /* Waiting for a peek. (Internal use only.) */
+#endif /* MACH_FLIPC */
 #endif
 
 

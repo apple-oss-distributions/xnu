@@ -385,7 +385,7 @@ fbt_provide_kernel_section(struct modctl *ctl, kernel_section_t *sect, kernel_nl
 		 * Find the function boundary by looking at either the
 		 * end of the section or the beginning of the next symbol
 		 */
-		if (i == nsyms - 1) {
+		if (i == nsyms - 1 || sym[i + 1].n_value > sect_end) {
 			limit = sect_end;
 		} else {
 			limit = sym[i + 1].n_value;

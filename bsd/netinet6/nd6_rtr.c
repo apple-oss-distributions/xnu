@@ -92,6 +92,8 @@
 
 #include <net/net_osdep.h>
 
+#include <net/sockaddr_utils.h>
+
 static void defrouter_addreq(struct nd_defrouter *, struct nd_route_info *, boolean_t);
 static void defrouter_delreq(struct nd_defrouter *, struct nd_route_info *);
 static struct nd_defrouter *defrtrlist_update_common(struct nd_defrouter *,
@@ -275,7 +277,7 @@ nd6_rs_input(
 	} else {
 		struct sockaddr_in6 src_sa6;
 
-		bzero(&src_sa6, sizeof(src_sa6));
+		SOCKADDR_ZERO(&src_sa6, sizeof(src_sa6));
 		src_sa6.sin6_family = AF_INET6;
 		src_sa6.sin6_len = sizeof(src_sa6);
 		src_sa6.sin6_addr = ip6->ip6_src;
@@ -388,7 +390,7 @@ nd6_ra_input(
 	}
 
 	if (ia6 != NULL) {
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		ia6 = NULL;
 	}
 
@@ -753,7 +755,7 @@ nd6_ra_input(
 			    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 			/* this is only for nd6_post_msg(), otherwise unused */
-			bcopy(&pr.ndpr_prefix, &prfl->pr.ndpr_prefix,
+			SOCKADDR_COPY(&pr.ndpr_prefix, &prfl->pr.ndpr_prefix,
 			    sizeof(prfl->pr.ndpr_prefix));
 			prfl->pr.ndpr_raf = pr.ndpr_raf;
 			prfl->pr.ndpr_plen = pr.ndpr_plen;
@@ -904,7 +906,7 @@ static void
 defrouter_addreq(struct nd_defrouter *new, struct nd_route_info *rti, boolean_t scoped)
 {
 	struct sockaddr_in6 key, mask, gate;
-	struct rtentry *newrt = NULL;
+	struct rtentry *newrt __single = NULL;
 	unsigned int ifscope;
 	int err;
 	struct nd_ifinfo *ndi = ND_IFINFO(new->ifp);
@@ -1003,8 +1005,7 @@ defrouter_addreq(struct nd_defrouter *new, struct nd_route_info *rti, boolean_t 
 		}
 	}
 
-	err = rtrequest_scoped(RTM_ADD, (struct sockaddr *)&key,
-	    (struct sockaddr *)&gate, (struct sockaddr *)&mask,
+	err = rtrequest_scoped(RTM_ADD, SA(&key), SA(&gate), SA(&mask),
 	    rtflags, &newrt, ifscope);
 
 	if (newrt) {
@@ -1086,7 +1087,7 @@ static void
 defrouter_delreq(struct nd_defrouter *dr, struct nd_route_info *rti)
 {
 	struct sockaddr_in6 key, mask, gate;
-	struct rtentry *oldrt = NULL;
+	struct rtentry *oldrt __single = NULL;
 	unsigned int ifscope;
 	int err;
 
@@ -1141,9 +1142,8 @@ defrouter_delreq(struct nd_defrouter *dr, struct nd_route_info *rti)
 	}
 	NDDR_UNLOCK(dr);
 
-	err = rtrequest_scoped(RTM_DELETE,
-	    (struct sockaddr *)&key, (struct sockaddr *)&gate,
-	    (struct sockaddr *)&mask, RTF_GATEWAY, &oldrt, ifscope);
+	err = rtrequest_scoped(RTM_DELETE, SA(&key), SA(&gate), SA(&mask),
+	    RTF_GATEWAY, &oldrt, ifscope);
 
 	if (oldrt) {
 		RT_LOCK(oldrt);
@@ -1246,7 +1246,7 @@ defrtrlist_ioctl(u_long cmd, caddr_t data)
 		}
 		ifnet_head_lock_shared();
 		/* Don't need to check is ifindex is < 0 since it's unsigned */
-		if (if_index < ifindex ||
+		if (!IF_INDEX_IN_RANGE(ifindex) ||
 		    (dr_ifp = ifindex2ifnet[ifindex]) == NULL) {
 			ifnet_head_done();
 			error = EINVAL;
@@ -1653,6 +1653,7 @@ defrouter_select(struct ifnet *ifp, struct nd_drhead *nd_router_listp)
 		struct in6_addr rtaddr;
 		struct ifnet *drifp = NULL;
 		struct nd_defrouter *drrele = NULL;
+		boolean_t nd6_mutex_unlocked = FALSE;
 
 		NDDR_LOCK(dr);
 		drifp = dr->ifp;
@@ -1702,6 +1703,7 @@ defrouter_select(struct ifnet *ifp, struct nd_drhead *nd_router_listp)
 
 		/* Callee returns a locked route upon success */
 		if (selected_dr == NULL) {
+			nd6_mutex_unlocked = TRUE;
 			lck_mtx_unlock(nd6_mutex);
 			if ((rt = nd6_lookup(&rtaddr, 0, drifp, 0)) != NULL &&
 			    (ln = rt->rt_llinfo) != NULL &&
@@ -1710,13 +1712,16 @@ defrouter_select(struct ifnet *ifp, struct nd_drhead *nd_router_listp)
 				selected_dr = dr;
 				NDDR_ADDREF(selected_dr);
 			}
-			lck_mtx_lock(nd6_mutex);
 		}
 
 		if (rt) {
 			RT_REMREF_LOCKED(rt);
 			RT_UNLOCK(rt);
 			rt = NULL;
+		}
+
+		if (nd6_mutex_unlocked) {
+			lck_mtx_lock(nd6_mutex);
 		}
 
 		/*
@@ -2656,7 +2661,7 @@ prelist_update(
 
 		if (ia6_match == NULL) { /* remember the first one */
 			ia6_match = ifa6;
-			IFA_ADDREF_LOCKED(ifa); /* for ia6_match */
+			ifa_addref(ifa); /* for ia6_match */
 		}
 
 		/*
@@ -2799,7 +2804,7 @@ prelist_update(
 					    e);
 				}
 			}
-			IFA_REMREF(&ia6->ia_ifa);
+			ifa_remref(&ia6->ia_ifa);
 			ia6 = NULL;
 
 			/*
@@ -2820,7 +2825,7 @@ prelist_update(
 					pr->ndpr_stateflags |= NDPRF_CLAT46;
 					NDPR_UNLOCK(pr);
 					IFA_UNLOCK(&ia6->ia_ifa);
-					IFA_REMREF(&ia6->ia_ifa);
+					ifa_remref(&ia6->ia_ifa);
 					ia6 = NULL;
 				} else if (error != EEXIST) {
 					uuid_t tmp_uuid = {};
@@ -2858,7 +2863,7 @@ end:
 		NDPR_REMREF(pr);
 	}
 	if (ia6_match != NULL) {
-		IFA_REMREF(&ia6_match->ia_ifa);
+		ifa_remref(&ia6_match->ia_ifa);
 	}
 	return error;
 }
@@ -3614,7 +3619,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 	struct nd_prefix *opr;
 	u_int32_t rtflags;
 	int error = 0, prproxy = 0;
-	struct rtentry *rt = NULL;
+	struct rtentry *rt __single = NULL;
 	u_char prefix_len = 0;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
@@ -3694,7 +3699,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 	 * in6_ifinit() sets nd6_rtrequest to ifa_rtrequest for all ifaddrs.
 	 * ifa->ifa_rtrequest = nd6_rtrequest;
 	 */
-	bzero(&mask6, sizeof(mask6));
+	SOCKADDR_ZERO(&mask6, sizeof(mask6));
 	mask6.sin6_len = sizeof(mask6);
 	mask6.sin6_addr = pr->ndpr_mask;
 	prefix = pr->ndpr_prefix;
@@ -3728,7 +3733,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 		struct rtentry *temp_route = NULL;
 		LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
 		lck_mtx_lock(rnh_lock);
-		temp_route = rt_lookup(TRUE, (struct sockaddr *)&prefix, (struct sockaddr *)&mask6, rt_tables[AF_INET6], IFSCOPE_NONE);
+		temp_route = rt_lookup(TRUE, SA(&prefix), SA(&mask6), rt_tables[AF_INET6], IFSCOPE_NONE);
 		lck_mtx_unlock(rnh_lock);
 
 		if (temp_route != NULL && temp_route->rt_flags & RTF_GATEWAY && temp_route->rt_ifp != NULL) {
@@ -3750,9 +3755,8 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 		rt = NULL;
 	}
 
-	error = rtrequest_scoped(RTM_ADD, (struct sockaddr *)&prefix,
-	    ifa->ifa_addr, (struct sockaddr *)&mask6, rtflags, &rt,
-	    ifscope);
+	error = rtrequest_scoped(RTM_ADD, SA(&prefix), ifa->ifa_addr, SA(&mask6),
+	    rtflags, &rt, ifscope);
 
 	/*
 	 * Serialize the setting of NDPRF_PRPROXY.
@@ -3771,8 +3775,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 		    " scoped=%d, errno = %d\n",
 		    ip6_sprintf(&pr->ndpr_prefix.sin6_addr),
 		    pr->ndpr_plen, if_name(ifp),
-		    ip6_sprintf(&((struct sockaddr_in6 *)
-		    (void *)ifa->ifa_addr)->sin6_addr),
+		    ip6_sprintf(&SIN6(ifa->ifa_addr)->sin6_addr),
 		    ip6_sprintf(&mask6.sin6_addr), rtflags,
 		    (ifscope != IFSCOPE_NONE), error);
 	}
@@ -3822,7 +3825,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 	VERIFY(!prproxy || !(pr->ndpr_stateflags & NDPRF_IFSCOPE));
 	NDPR_UNLOCK(pr);
 
-	IFA_REMREF(ifa);
+	ifa_remref(ifa);
 
 	/*
 	 * If this is an upstream prefix, find the downstream ones (if any)
@@ -3858,7 +3861,7 @@ nd6_prefix_offlink(struct nd_prefix *pr)
 	int plen, error = 0, prproxy;
 	struct ifnet *ifp = pr->ndpr_ifp;
 	struct sockaddr_in6 sa6, mask6, prefix;
-	struct rtentry *rt = NULL, *ndpr_rt = NULL;
+	struct rtentry *rt __single = NULL, *ndpr_rt = NULL;
 	unsigned int ifscope;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
@@ -3875,12 +3878,12 @@ nd6_prefix_offlink(struct nd_prefix *pr)
 		return EEXIST;
 	}
 
-	bzero(&sa6, sizeof(sa6));
+	SOCKADDR_ZERO(&sa6, sizeof(sa6));
 	sa6.sin6_family = AF_INET6;
 	sa6.sin6_len = sizeof(sa6);
 	bcopy(&pr->ndpr_prefix.sin6_addr, &sa6.sin6_addr,
 	    sizeof(struct in6_addr));
-	bzero(&mask6, sizeof(mask6));
+	SOCKADDR_ZERO(&mask6, sizeof(mask6));
 	mask6.sin6_family = AF_INET6;
 	mask6.sin6_len = sizeof(sa6);
 	bcopy(&pr->ndpr_mask, &mask6.sin6_addr, sizeof(struct in6_addr));
@@ -3895,8 +3898,8 @@ nd6_prefix_offlink(struct nd_prefix *pr)
 	ifscope = (pr->ndpr_stateflags & NDPRF_IFSCOPE) ?
 	    ifp->if_index : IFSCOPE_NONE;
 
-	error = rtrequest_scoped(RTM_DELETE, (struct sockaddr *)&sa6,
-	    NULL, (struct sockaddr *)&mask6, 0, &rt, ifscope);
+	error = rtrequest_scoped(RTM_DELETE, SA(&sa6), NULL, SA(&mask6),
+	    0, &rt, ifscope);
 
 	if (rt != NULL) {
 		/* report the route deletion to the routing socket. */
@@ -4040,7 +4043,7 @@ in6_pfx_newpersistaddr(struct nd_prefix *pr, int mcast, int *errorp,
 		ifra.ifra_addr.sin6_addr.s6_addr32[3] |=
 		    (ia6->ia_addr.sin6_addr.s6_addr32[3] & ~mask.s6_addr32[3]);
 		IFA_UNLOCK(&ia6->ia_ifa);
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		ia6 = NULL;
 	} else {
 		struct in6_cga_prepare local_cga_prepare;
@@ -4100,7 +4103,7 @@ in6_pfx_newpersistaddr(struct nd_prefix *pr, int mcast, int *errorp,
 	if ((ia6 = in6ifa_ifpwithaddr(ifp, &ifra.ifra_addr.sin6_addr))
 	    != NULL) {
 		error = EEXIST;
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		ia6 = NULL;
 
 		/* this should be rare enough to make an explicit log */
@@ -4190,7 +4193,7 @@ again:
 	 * of the address.  So, we'll do one more sanity check.
 	 */
 	if ((ia = in6ifa_ifpwithaddr(ifp, &ifra.ifra_addr.sin6_addr)) != NULL) {
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 		if (trylimit-- == 0) {
 			nd6log(info, "in6_tmpifadd: failed to find "
 			    "a unique random IFID\n");
@@ -4264,7 +4267,7 @@ again:
 		VERIFY(!(ia0->ia6_flags & IN6_IFF_AUTOCONF));
 		IFA_UNLOCK(&IA6_NONCONST(ia0)->ia_ifa);
 		in6_purgeaddr(&newia->ia_ifa);
-		IFA_REMREF(&newia->ia_ifa);
+		ifa_remref(&newia->ia_ifa);
 		return EADDRNOTAVAIL;
 	}
 	NDPR_ADDREF(ndpr);      /* for us */
@@ -4295,7 +4298,7 @@ again:
 	lck_mtx_lock(nd6_mutex);
 	pfxlist_onlink_check();
 	lck_mtx_unlock(nd6_mutex);
-	IFA_REMREF(&newia->ia_ifa);
+	ifa_remref(&newia->ia_ifa);
 
 	/* remove our reference */
 	NDPR_REMREF(ndpr);
@@ -4447,7 +4450,7 @@ nd6_setdefaultiface(
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	ifnet_head_lock_shared();
-	if (ifindex < 0 || if_index < ifindex) {
+	if (!IF_INDEX_IN_RANGE(ifindex)) {
 		ifnet_head_done();
 		return EINVAL;
 	}

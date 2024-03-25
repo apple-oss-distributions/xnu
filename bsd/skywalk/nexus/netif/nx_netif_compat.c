@@ -1389,7 +1389,7 @@ nx_netif_compat_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 			continue;
 		}
 
-		hlen = (uint8_t)(m->m_data - h);
+		hlen = (uint8_t)(m->m_data - (uintptr_t)h);
 		mlen += hlen;
 
 #if DEBUG || DEVELOPMENT

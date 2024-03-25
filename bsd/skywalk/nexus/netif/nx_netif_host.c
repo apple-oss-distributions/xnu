@@ -538,7 +538,7 @@ get_l2_hlen(struct mbuf *m, uint8_t *l2len)
 
 	pkt_hdr = m->m_pkthdr.pkt_hdr;
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
-		if (pkt_hdr >= m0->m_data && pkt_hdr < m0->m_data + m0->m_len) {
+		if (pkt_hdr >= m_mtod_current(m0) && pkt_hdr < m_mtod_current(m0) + m0->m_len) {
 			break;
 		}
 		len += m0->m_len;
@@ -547,7 +547,7 @@ get_l2_hlen(struct mbuf *m, uint8_t *l2len)
 		DTRACE_SKYWALK2(bad__pkthdr, struct mbuf *, m, char *, pkt_hdr);
 		return EINVAL;
 	}
-	len += (pkt_hdr - m0->m_data);
+	len += (pkt_hdr - m_mtod_current(m0));
 	if (len > UINT8_MAX) {
 		DTRACE_SKYWALK2(bad__l2len, struct mbuf *, m, uint64_t, len);
 		return EINVAL;

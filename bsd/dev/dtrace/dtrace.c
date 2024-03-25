@@ -3632,7 +3632,7 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		return ((uint64_t)(uintptr_t)zname);
 	}
 
-#if CONFIG_PERVASIVE_CPI && MONOTONIC
+#if CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS
 	case DIF_VAR_CPUINSTRS:
 		return mt_cur_cpu_instrs();
 
@@ -3640,23 +3640,24 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		return mt_cur_cpu_cycles();
 
 	case DIF_VAR_VINSTRS: {
-        struct recount_usage usage = { 0 };
-        recount_current_thread_usage(&usage);
-        return usage.ru_instructions;
-    }
+		struct recount_usage usage = { 0 };
+		recount_current_thread_usage(&usage);
+		return recount_usage_instructions(&usage);
+	}
 
 	case DIF_VAR_VCYCLES: {
         struct recount_usage usage = { 0 };
         recount_current_thread_usage(&usage);
-        return usage.ru_cycles;
+		return recount_usage_cycles(&usage);
     }
-#else /* CONFIG_PERVASIVE_CPI && MONOTONIC */
-	case DIF_VAR_CPUINSTRS: /* FALLTHROUGH */
-	case DIF_VAR_CPUCYCLES: /* FALLTHROUGH */
-	case DIF_VAR_VINSTRS: /* FALLTHROUGH */
-	case DIF_VAR_VCYCLES: /* FALLTHROUGH */
+
+#else /* CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS */
+	case DIF_VAR_CPUINSTRS:
+	case DIF_VAR_CPUCYCLES:
+	case DIF_VAR_VINSTRS:
+	case DIF_VAR_VCYCLES:
 		return 0;
-#endif /* !CONFIG_PERVASIVE_CPI || !MONOTONIC */
+#endif /* !CONFIG_PERVASIVE_CPI || !CONFIG_CPU_COUNTERS */
 
 	case DIF_VAR_UID:
 		if (!dtrace_priv_proc_relaxed(state))
@@ -16827,6 +16828,13 @@ dtrace_module_loaded(struct kmod_info *kmod, uint32_t flag)
 	if (dtrace_kernel_symbol_mode == DTRACE_KERNEL_SYMBOLS_NEVER)
 		return 0;
 
+#if CONFIG_SPTM
+	/* Opt-out the SPTM/TXM fake kexts from being loaded by DTrace. */
+	extern kmod_info_t g_sptm_kmod_info, g_txm_kmod_info;
+	if ((kmod == &g_sptm_kmod_info) || (kmod == &g_txm_kmod_info)) {
+		return 0;
+	}
+#endif
 	
 	struct modctl *ctl = NULL;
 	if (!kmod || kmod->address == 0 || kmod->size == 0)

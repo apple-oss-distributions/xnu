@@ -85,3 +85,17 @@ T_DECL(pmap_extended_test,
 	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_extended_test", NULL, NULL, &run, sizeof(run)),
 	    "kern.pmap_extended_test");
 }
+
+T_DECL(pmap_huge_pv_list_test,
+    "Test that extremely large PV lists can be managed without spinlock timeouts or other panics",
+    T_META_REQUIRES_SYSCTL_EQ("kern.page_protection_type", 2))
+{
+	struct {
+		unsigned int num_loops;
+		unsigned int num_mappings;
+	} hugepv_in;
+	hugepv_in.num_loops = 500;
+	hugepv_in.num_mappings = 500000;
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("kern.pmap_huge_pv_list_test", NULL, NULL,
+	    &hugepv_in, sizeof(hugepv_in)), "kern.pmap_huge_pv_list_test");
+}

@@ -28,6 +28,8 @@
 #ifndef MACHINE_MONOTONIC_H
 #define MACHINE_MONOTONIC_H
 
+#if CONFIG_CPU_COUNTERS
+
 #if defined(__x86_64__)
 #include <x86_64/monotonic.h>
 #elif defined(__arm64__)
@@ -68,5 +70,7 @@ extern mt_pmi_fn mt_microstackshot_pmi_handler;
 extern void *mt_microstackshot_ctx;
 extern uint64_t mt_core_reset_values[MT_CORE_NFIXED];
 int mt_microstackshot_start_arch(uint64_t period);
+
+#endif /* CONFIG_CPU_COUNTERS */
 
 #endif /* !defined(MACHINE_MONOTONIC_H) */

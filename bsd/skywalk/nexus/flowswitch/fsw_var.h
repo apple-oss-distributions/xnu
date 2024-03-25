@@ -119,10 +119,8 @@ extern int fsw_vp_na_txsync(struct __kern_channel_ring *kring,
     struct proc *p, uint32_t flags);
 extern int fsw_vp_na_rxsync(struct __kern_channel_ring *kring,
     struct proc *p, uint32_t flags);
-extern int fsw_vp_na_attach(struct kern_nexus *nx, const char *cr_name,
-    struct nexus_adapter *na);
 extern int fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
-    struct nexus_vp_adapter **ret);
+    struct proc *p, struct nexus_vp_adapter **ret);
 extern void fsw_vp_channel_error_stats_fold(struct fsw_stats *fs,
     struct __nx_stats_channel_errors *es);
 extern errno_t fsw_vp_na_channel_event(struct nx_flowswitch *fsw,

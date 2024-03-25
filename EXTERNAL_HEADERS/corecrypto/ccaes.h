@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2013,2015-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2013,2015-2019,2021-2023) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -44,22 +44,6 @@ extern const struct ccmode_cfb ccaes_arm_cfb_encrypt_mode;
 extern const struct ccmode_cfb ccaes_arm_cfb_decrypt_mode;
 
 extern const struct ccmode_ofb ccaes_arm_ofb_crypt_mode;
-
-#endif
-
-#if CCAES_MUX
-/* Runtime check to see if hardware should be used */
-int ccaes_ios_hardware_enabled(int operation);
-
-extern const struct ccmode_cbc ccaes_ios_hardware_cbc_encrypt_mode;
-extern const struct ccmode_cbc ccaes_ios_hardware_cbc_decrypt_mode;
-
-extern const struct ccmode_ctr ccaes_ios_hardware_ctr_crypt_mode;
-
-extern const struct ccmode_cbc *ccaes_ios_mux_cbc_encrypt_mode(void);
-extern const struct ccmode_cbc *ccaes_ios_mux_cbc_decrypt_mode(void);
-
-extern const struct ccmode_ctr *ccaes_ios_mux_ctr_crypt_mode(void);
 
 #endif
 

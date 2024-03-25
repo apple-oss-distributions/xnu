@@ -350,7 +350,7 @@ struct proc {
 	void * vm_shm;                  /* (SYSV SHM Lock) for sysV shared memory */
 	int             p_ractive;
 	/* cached proc-specific data required for corpse inspection */
-	pid_t             p_responsible_pid;    /* pid resonsible for this process */
+	pid_t             p_responsible_pid;    /* pid responsible for this process */
 
 #if CONFIG_DTRACE
 	int                             p_dtrace_probes;                /* (PL) are there probes for this proc? */
@@ -375,6 +375,7 @@ struct proc {
 		sigset_t p_sigmask;             /* DEPRECATED */
 		sigset_t p_sigignore;   /* Signals being ignored. (PL) */
 		sigset_t p_sigcatch;    /* Signals being caught by user.(PL)  */
+		sigset_t p_workq_allow_sigmask; /* Signals allowed for workq threads. Updates protected by proc_lock. */
 
 		u_char  p_priority;     /* (NU) Process priority. */
 		u_char  p_resv0;        /* (NU) User-priority based on p_cpu and p_nice. */
@@ -389,6 +390,8 @@ struct proc {
 
 		uint32_t        p_pcaction;     /* action  for process control on starvation */
 		uint8_t p_uuid[16];                                /* from LC_UUID load command */
+
+		uint8_t p_responsible_uuid[16]; /* UUID of pid responsible for this process */
 
 		/*
 		 * CPU type and subtype of binary slice executed in
@@ -783,10 +786,10 @@ extern int sugid_coredump;
 #endif
 
 __options_decl(cloneproc_flags_t, uint32_t, {
-	CLONEPROC_FLAGS_NONE             = 0,
-	CLONEPROC_FLAGS_INHERIT_MEMORY   = 0x0001,
-	CLONEPROC_FLAGS_MEMSTAT_INTERNAL = 0x0002,
-	CLONEPROC_FLAGS_FOR_EXEC         = 0x0004,
+	CLONEPROC_SPAWN     = 0,
+	CLONEPROC_FORK      = 0x0001,
+	CLONEPROC_INITPROC  = 0x0002,
+	CLONEPROC_EXEC      = 0x0004,
 });
 
 extern thread_t cloneproc(task_t, coalition_t *, proc_t, cloneproc_flags_t);
@@ -847,6 +850,7 @@ extern void proc_reparentlocked(struct proc *child, struct proc * newparent, int
 
 extern bool   proc_list_exited(proc_t p);
 extern proc_t proc_find_locked(int pid);
+extern proc_t proc_find_noref_smr(int pid);
 extern bool proc_is_shadow(proc_t p);
 extern proc_t proc_findthread(thread_t thread);
 extern void proc_refdrain(proc_t);
@@ -942,7 +946,8 @@ extern void proc_set_sigact_trampact(proc_t, int, user_addr_t, user_addr_t);
 extern void proc_reset_sigact(proc_t, sigset_t);
 extern void proc_setexecutableuuid(proc_t, const uuid_t);
 extern const unsigned char *proc_executableuuid_addr(proc_t);
-
+extern void proc_getresponsibleuuid(proc_t, unsigned char *, unsigned long);
+extern void proc_setresponsibleuuid(proc_t target_proc, unsigned char *responsible_uuid, unsigned long size);
 
 #pragma mark - process iteration
 
@@ -1034,6 +1039,7 @@ extern struct proc_ident proc_ident(proc_t p);
 
 #if CONFIG_PROC_RESOURCE_LIMITS
 int proc_set_filedesc_limits(proc_t p, int soft_limit, int hard_limit);
+int proc_set_kqworkloop_limits(proc_t p, int soft_limit, int hard_limit);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 /*

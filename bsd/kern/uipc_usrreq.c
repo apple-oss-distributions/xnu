@@ -188,7 +188,15 @@ struct mdns_ipc_msg_hdr {
  *	need a proper out-of-band
  *	lock pushdown
  */
-static struct   sockaddr sun_noname = { .sa_len = 3, .sa_family = AF_LOCAL, .sa_data = { 0 } };
+static struct   sockaddr sun_noname = {
+	.sa_len = sizeof(struct sockaddr),
+	.sa_family = AF_LOCAL,
+	.sa_data = {
+		0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0
+	}
+};
+
 static ino_t    unp_ino;                /* prototype for fake inode numbers */
 
 static int      unp_attach(struct socket *);
@@ -268,14 +276,13 @@ uipc_accept(struct socket *so, struct sockaddr **nam)
 	 * (our peer may have closed already!).
 	 */
 	if (unp->unp_conn != NULL && unp->unp_conn->unp_addr != NULL) {
-		*nam = dup_sockaddr((struct sockaddr *)
-		    unp->unp_conn->unp_addr, 1);
+		*nam = dup_sockaddr(SA(unp->unp_conn->unp_addr), 1);
 	} else {
 		if (unp_log_enable_flags & ULEF_CONNECTION) {
 			os_log(OS_LOG_DEFAULT, "%s: peer disconnected unp_gencnt %llu",
 			    __func__, unp->unp_gencnt);
 		}
-		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
+		*nam = dup_sockaddr(SA(&sun_noname), 1);
 	}
 	return 0;
 }
@@ -400,10 +407,9 @@ uipc_peeraddr(struct socket *so, struct sockaddr **nam)
 	}
 
 	if (unp->unp_conn != NULL && unp->unp_conn->unp_addr != NULL) {
-		*nam = dup_sockaddr((struct sockaddr *)
-		    unp->unp_conn->unp_addr, 1);
+		*nam = dup_sockaddr(SA(unp->unp_conn->unp_addr), 1);
 	} else {
-		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
+		*nam = dup_sockaddr(SA(&sun_noname), 1);
 	}
 	if (so2 != NULL) {
 		socket_unlock(so2, 1);
@@ -535,7 +541,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		}
 
 		if (unp->unp_addr) {
-			from = (struct sockaddr *)unp->unp_addr;
+			from = SA(unp->unp_addr);
 		} else {
 			from = &sun_noname;
 		}
@@ -772,9 +778,9 @@ uipc_sockaddr(struct socket *so, struct sockaddr **nam)
 		return EINVAL;
 	}
 	if (unp->unp_addr != NULL) {
-		*nam = dup_sockaddr((struct sockaddr *)unp->unp_addr, 1);
+		*nam = dup_sockaddr(SA(unp->unp_addr), 1);
 	} else {
-		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
+		*nam = dup_sockaddr(SA(&sun_noname), 1);
 	}
 	return 0;
 }
@@ -1107,7 +1113,7 @@ unp_bind(
 	struct sockaddr *nam,
 	proc_t p)
 {
-	struct sockaddr_un *soun = (struct sockaddr_un *)nam;
+	struct sockaddr_un *soun = SUN(nam);
 	struct vnode *vp __single, *dvp;
 	struct vnode_attr va;
 	vfs_context_t ctx = vfs_context_current();
@@ -1221,7 +1227,7 @@ unp_bind(
 
 	vp->v_socket = unp->unp_socket;
 	unp->unp_vnode = vp;
-	unp->unp_addr = (struct sockaddr_un *)dup_sockaddr(nam, 1);
+	unp->unp_addr = SUN(dup_sockaddr(nam, 1));
 	vnode_put(vp);          /* drop the iocount */
 
 	return 0;
@@ -1247,7 +1253,7 @@ unp_bind(
 static int
 unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 {
-	struct sockaddr_un *soun = (struct sockaddr_un *)nam;
+	struct sockaddr_un *soun = SUN(nam);
 	struct vnode *vp;
 	struct socket *so2, *so3, *list_so = NULL;
 	struct unpcb *unp, *unp2, *unp3;
@@ -1382,8 +1388,7 @@ unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 		unp2 = sotounpcb(so2);
 		unp3 = sotounpcb(so3);
 		if (unp2->unp_addr) {
-			unp3->unp_addr = (struct sockaddr_un *)
-			    dup_sockaddr((struct sockaddr *)unp2->unp_addr, 1);
+			unp3->unp_addr = SUN(dup_sockaddr((struct sockaddr *)unp2->unp_addr, 1));
 		}
 
 		/*
@@ -1833,10 +1838,12 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 			 * connect/disconnect races for SMP.
 			 */
 			if (unp->unp_addr) {
-				SOCKADDR_COPY(unp->unp_addr, &xu.xu_au);
+				struct sockaddr_un *dst __single = &xu.xu_au.xuu_addr;
+				SOCKADDR_COPY(unp->unp_addr, dst, unp->unp_addr->sun_len);
 			}
 			if (unp->unp_conn && unp->unp_conn->unp_addr) {
-				SOCKADDR_COPY(unp->unp_conn->unp_addr, &xu.xu_cau);
+				struct sockaddr_un *dst __single = &xu.xu_cau.xuu_caddr;
+				SOCKADDR_COPY(unp->unp_conn->unp_addr, dst, unp->unp_conn->unp_addr->sun_len);
 			}
 			unpcb_to_compat(unp, &xu.xu_unp);
 			sotoxsocket(unp->unp_socket, &xu.xu_socket);
@@ -2123,10 +2130,12 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 		xu->xunp_gencnt = unp->unp_gencnt;
 
 		if (unp->unp_addr) {
-			SOCKADDR_COPY(unp->unp_addr, &xu->xu_au);
+			struct sockaddr_un *dst __single = &xu->xu_au.xuu_addr;
+			SOCKADDR_COPY(unp->unp_addr, dst, unp->unp_addr->sun_len);
 		}
 		if (unp->unp_conn && unp->unp_conn->unp_addr) {
-			SOCKADDR_COPY(unp->unp_conn->unp_addr, &xu->xu_cau);
+			struct sockaddr_un *dst __single = &xu->xu_cau.xuu_caddr;
+			SOCKADDR_COPY(unp->unp_conn->unp_addr, dst, unp->unp_conn->unp_addr->sun_len);
 		}
 		sotoxsocket_n(unp->unp_socket, xso);
 		sbtoxsockbuf_n(unp->unp_socket ?

@@ -140,6 +140,15 @@
 #define __unsafe_forge_single(T, P) \
   ((T __single)__builtin_unsafe_forge_single((P)))
 
+/* Create a __terminated_by pointer of a given pointer type (T), starting at
+   address P, terminated by E. T must be a pointer type. */
+#define __unsafe_forge_terminated_by(T, P, E)                                  \
+  ((T __terminated_by(E))__builtin_unsafe_forge_terminated_by((P), (E)))
+
+/* Create a __terminated_by pointer of a given pointer type (T), starting at
+   address P, terminated by 0. T must be a pointer type. */
+#define __unsafe_forge_null_terminated(T, P) __unsafe_forge_terminated_by(T, P, 0)
+
 /* Create a wide pointer with the same lower bound and upper bounds as X, but
    with a pointer component also equal to the lower bound. */
 #define __ptr_lower_bound(X) __builtin_get_pointer_lower_bound(X)
@@ -223,6 +232,32 @@
    initialization. */
 #define __unsafe_late_const __attribute__((__unsafe_late_const__))
 
+/* An attribute to indicate that a function is unavailable when -fbounds-safety
+   is enabled because it is unsafe. Calls to functions annotated with this
+   attribute are errors when -fbounds-safety is enabled, but are allowed when
+   -fbounds-safety is disabled.
+
+   Example:
+
+   void* __ptrcheck_unavailable some_unsafe_api(void*);
+ */
+#define __ptrcheck_unavailable                                                 \
+  __attribute__((__unavailable__("unavailable with -fbounds-safety.")))
+
+/* __ptrcheck_unavailable_r is the same as __ptrcheck_unavailable but it takes
+   as an argument the name of replacement function that is safe for use with
+   -fbounds-safety enabled.
+
+   Example:
+
+   void* __counted_by(size) safe_api(void* __counted_by(size), size_t size);
+
+   void* __ptrcheck_unavailable_r(safe_api) some_unsafe_api(void*);
+ */
+#define __ptrcheck_unavailable_r(REPLACEMENT)                                  \
+  __attribute__((__unavailable__(                                                  \
+      "unavailable with -fbounds-safety. Use " #REPLACEMENT " instead.")))
+
 #else
 
 /* We intentionally define to nothing pointer attributes which do not have an
@@ -249,6 +284,8 @@
 /* __unsafe_forge intrinsics are defined as regular C casts. */
 #define __unsafe_forge_bidi_indexable(T, P, S) ((T)(P))
 #define __unsafe_forge_single(T, P) ((T)(P))
+#define __unsafe_forge_terminated_by(T, P, E) ((T)(P))
+#define __unsafe_forge_null_terminated(T, P) ((T)(P))
 
 /* The conversion between terminated_by pointers just evaluates to the pointer
    argument. */
@@ -261,6 +298,9 @@
 
 /* decay operates normally; attribute is meaningless without pointer checks. */
 #define __array_decay_dicards_count_in_parameters
+
+#define __ptrcheck_unavailable
+#define __ptrcheck_unavailable_r(R)
 
 #endif /* __has_ptrcheck */
 

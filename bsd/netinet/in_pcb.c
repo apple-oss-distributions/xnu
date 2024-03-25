@@ -132,6 +132,8 @@
 
 #include <IOKit/IOBSD.h>
 
+#include <net/sockaddr_utils.h>
+
 extern const char *proc_name_address(struct proc *);
 
 static LCK_GRP_DECLARE(inpcb_lock_grp, "inpcb");
@@ -602,8 +604,8 @@ inp_snprintf_tuple(struct inpcb *inp, char *buf, size_t buflen)
 	uint16_t fport = 0;
 	uint16_t proto = IPPROTO_IP;
 
-	if (inp->inp_socket != NULL && inp->inp_socket->so_proto != NULL) {
-		proto = inp->inp_socket->so_proto->pr_protocol;
+	if (inp->inp_socket != NULL) {
+		proto = SOCK_PROTO(inp->inp_socket);
 
 		if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
 			lport  = inp->inp_lport;
@@ -906,7 +908,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			struct ifaddr *ifa;
 
 			/* Sanitized for interface address searches */
-			bzero(&sin, sizeof(sin));
+			SOCKADDR_ZERO(&sin, sizeof(sin));
 			sin.sin_family = AF_INET;
 			sin.sin_len = sizeof(struct sockaddr_in);
 			sin.sin_addr.s_addr = SIN(nam)->sin_addr.s_addr;
@@ -929,7 +931,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				IFA_LOCK(ifa);
 				outif = ifa->ifa_ifp;
 				IFA_UNLOCK(ifa);
-				IFA_REMREF(ifa);
+				ifa_remref(ifa);
 			}
 		}
 
@@ -1012,7 +1014,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			 * Check wether the process is allowed to bind to a restricted port
 			 */
 			if (!current_task_can_use_restricted_in_port(lport,
-			    (uint8_t)so->so_proto->pr_protocol, PORT_FLAGS_BSD)) {
+			    (uint8_t)SOCK_PROTO(so), PORT_FLAGS_BSD)) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				error = EADDRINUSE;
@@ -1395,7 +1397,7 @@ apn_fallback_required(proc_t proc, struct socket *so, struct sockaddr_in *p_dstv
 	lookup_default_addr.ss_family = AF_INET6;
 	lookup_default_addr.ss_len = sizeof(struct sockaddr_in6);
 
-	rt = rtalloc1((struct sockaddr *)&lookup_default_addr, 0, 0);
+	rt = rtalloc1(SA(&lookup_default_addr), 0, 0);
 	if (NULL == rt) {
 		apn_fallbk_log((LOG_INFO, "APN fallback notification could not find "
 		    "unscoped default IPv6 route.\n"));
@@ -1421,7 +1423,7 @@ apn_fallback_required(proc_t proc, struct socket *so, struct sockaddr_in *p_dstv
 	lookup_default_addr.ss_family = AF_INET;
 	lookup_default_addr.ss_len = sizeof(struct sockaddr_in);
 
-	rt = rtalloc1((struct sockaddr *)&lookup_default_addr, 0, 0);
+	rt = rtalloc1(SA(&lookup_default_addr), 0, 0);
 
 	if (rt) {
 		rtfree(rt);
@@ -1624,7 +1626,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 		}
 		ROUTE_RELEASE(ro);
 		/* No route yet, so try to acquire one */
-		bzero(&ro->ro_dst, sizeof(struct sockaddr_in));
+		SOCKADDR_ZERO(&ro->ro_dst, sizeof(struct sockaddr_in));
 		ro->ro_dst.sa_family = AF_INET;
 		ro->ro_dst.sa_len = sizeof(struct sockaddr_in);
 		SIN(&ro->ro_dst)->sin_addr = SIN(nam)->sin_addr;
@@ -1634,7 +1636,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 		}
 	}
 	/* Sanitized local copy for interface address searches */
-	bzero(&sin, sizeof(sin));
+	SOCKADDR_ZERO(&sin, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_len = sizeof(struct sockaddr_in);
 	sin.sin_addr.s_addr = SIN(nam)->sin_addr.s_addr;
@@ -1682,7 +1684,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 			/* Become a regular mutex */
 			RT_CONVERT_LOCK(ro->ro_rt);
 			ia = ifatoia(ro->ro_rt->rt_ifa);
-			IFA_ADDREF(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 
 			/*
 			 * Mark the control block for notification of
@@ -1724,7 +1726,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 		RT_LOCK(ro->ro_rt);
 		ia = ifatoia(ro->ro_rt->rt_ifa);
 		if (ia != NULL) {
-			IFA_ADDREF(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 		}
 		RT_UNLOCK(ro->ro_rt);
 	}
@@ -1747,7 +1749,7 @@ done:
 		    ia->ia_ifp != imo->imo_multicast_ifp)) {
 			ifp = imo->imo_multicast_ifp;
 			if (ia != NULL) {
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 			}
 			lck_rw_lock_shared(&in_ifaddr_rwlock);
 			TAILQ_FOREACH(ia, &in_ifaddrhead, ia_link) {
@@ -1756,7 +1758,7 @@ done:
 				}
 			}
 			if (ia != NULL) {
-				IFA_ADDREF(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 			}
 			lck_rw_done(&in_ifaddr_rwlock);
 			if (ia == NULL) {
@@ -1806,7 +1808,7 @@ done:
 		} else {
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 		ia = NULL;
 	}
 
@@ -1833,7 +1835,7 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
     unsigned int ifscope, struct ifnet **outif)
 {
 	struct in_addr laddr;
-	struct sockaddr_in *sin = (struct sockaddr_in *)(void *)nam;
+	struct sockaddr_in *sin = SIN(nam);
 	struct inpcb *pcb;
 	int error;
 	struct socket *so = inp->inp_socket;
@@ -2165,8 +2167,8 @@ in_getsockaddr(struct socket *so, struct sockaddr **nam)
 	/*
 	 * Do the malloc first in case it blocks.
 	 */
-	sin = (struct sockaddr_in *)alloc_sockaddr(sizeof(*sin),
-	    Z_WAITOK | Z_NOFAIL);
+	sin = SIN(alloc_sockaddr(sizeof(*sin),
+	    Z_WAITOK | Z_NOFAIL));
 
 	sin->sin_family = AF_INET;
 
@@ -2177,7 +2179,7 @@ in_getsockaddr(struct socket *so, struct sockaddr **nam)
 	sin->sin_port = inp->inp_lport;
 	sin->sin_addr = inp->inp_laddr;
 
-	*nam = (struct sockaddr *)sin;
+	*nam = SA(sin);
 	return 0;
 }
 
@@ -2188,7 +2190,7 @@ in_getsockaddr_s(struct socket *so, struct sockaddr_in *ss)
 	struct inpcb *inp;
 
 	VERIFY(ss != NULL);
-	bzero(ss, sizeof(*ss));
+	SOCKADDR_ZERO(ss, sizeof(*ss));
 
 	sin->sin_family = AF_INET;
 	sin->sin_len = sizeof(*sin);
@@ -2211,8 +2213,8 @@ in_getpeeraddr(struct socket *so, struct sockaddr **nam)
 	/*
 	 * Do the malloc first in case it blocks.
 	 */
-	sin = (struct sockaddr_in *)alloc_sockaddr(sizeof(*sin),
-	    Z_WAITOK | Z_NOFAIL);
+	sin = SIN(alloc_sockaddr(sizeof(*sin),
+	    Z_WAITOK | Z_NOFAIL));
 
 	sin->sin_family = AF_INET;
 
@@ -2223,7 +2225,7 @@ in_getpeeraddr(struct socket *so, struct sockaddr **nam)
 	sin->sin_port = inp->inp_fport;
 	sin->sin_addr = inp->inp_faddr;
 
-	*nam = (struct sockaddr *)sin;
+	*nam = SA(sin);
 	return 0;
 }
 
@@ -2293,7 +2295,7 @@ in_losing(struct inpcb *inp)
 			release = TRUE;
 		}
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 	}
 	if (rt == NULL || release) {
@@ -2325,7 +2327,7 @@ in_rtchange(struct inpcb *inp, int errno)
 			release = TRUE;
 		}
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 	}
 	if (rt == NULL || release) {
@@ -3562,6 +3564,34 @@ inp_fc_feedback(struct inpcb *inp)
 	socket_unlock(so, 1);
 }
 
+static void
+inp_reset_fc_timerstat(struct inpcb *inp)
+{
+	uint64_t now;
+
+	if (inp->inp_fadv_start_time == 0) {
+		return;
+	}
+
+	now = net_uptime_us();
+	ASSERT(now >= inp->inp_fadv_start_time);
+
+	inp->inp_fadv_total_time += (now - inp->inp_fadv_start_time);
+	inp->inp_fadv_cnt++;
+
+	inp->inp_fadv_start_time = 0;
+}
+
+static void
+inp_set_fc_timerstat(struct inpcb *inp)
+{
+	if (inp->inp_fadv_start_time != 0) {
+		return;
+	}
+
+	inp->inp_fadv_start_time = net_uptime_us();
+}
+
 void
 inp_reset_fc_state(struct inpcb *inp)
 {
@@ -3570,6 +3600,8 @@ inp_reset_fc_state(struct inpcb *inp)
 	int needwakeup = (INP_WAIT_FOR_IF_FEEDBACK(inp)) ? 1 : 0;
 
 	inp->inp_flags &= ~(INP_FLOW_CONTROLLED | INP_FLOW_SUSPENDED);
+
+	inp_reset_fc_timerstat(inp);
 
 	if (suspended) {
 		so->so_flags &= ~(SOF_SUSPENDED);
@@ -3602,17 +3634,18 @@ inp_set_fc_state(struct inpcb *inp, int advcode)
 	if ((tmp_inp = inp_fc_getinp(inp->inp_flowhash,
 	    INPFC_SOLOCKED)) != NULL) {
 		if (in_pcb_checkstate(tmp_inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
-			return 0;
+			goto exit_reset;
 		}
 		VERIFY(tmp_inp == inp);
 		switch (advcode) {
 		case FADV_FLOW_CONTROLLED:
 			inp->inp_flags |= INP_FLOW_CONTROLLED;
-			inp->inp_fadv_flow_ctrl_cnt++;
+			inp_set_fc_timerstat(inp);
 			break;
 		case FADV_SUSPENDED:
 			inp->inp_flags |= INP_FLOW_SUSPENDED;
-			inp->inp_fadv_suspended_cnt++;
+			inp_set_fc_timerstat(inp);
+
 			soevent(inp->inp_socket,
 			    (SO_FILT_HINT_LOCKED | SO_FILT_HINT_SUSPEND));
 
@@ -3626,6 +3659,10 @@ inp_set_fc_state(struct inpcb *inp, int advcode)
 		}
 		return 1;
 	}
+
+exit_reset:
+	inp_reset_fc_timerstat(inp);
+
 	return 0;
 }
 
@@ -4226,6 +4263,12 @@ inline void
 inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *ab)
 {
 	bcopy(&inp->inp_nw_activity, ab, sizeof(*ab));
+}
+
+inline void
+inp_clear_activity_bitmap(struct inpcb *inp)
+{
+	in_stat_clear_activity_bitmap(&inp->inp_nw_activity);
 }
 
 void

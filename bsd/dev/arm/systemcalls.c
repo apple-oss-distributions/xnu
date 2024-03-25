@@ -500,7 +500,7 @@ arm_prepare_u64_syscall_return(const struct sysent *callp, arm_saved_state_t *re
 	arm_saved_state64_t *ss64 = saved_state64(regs);
 
 	if (error == ERESTART) {
-		add_saved_state_pc(regs, -4);
+		add_user_saved_state_pc(regs, -4);
 	} else if (error != EJUSTRETURN) {
 		if (error) {
 			ss64->x[0] = error;

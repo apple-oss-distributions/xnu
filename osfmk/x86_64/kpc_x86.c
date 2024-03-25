@@ -322,13 +322,13 @@ kpc_set_fixed_config(kpc_config_t *configv)
 int
 kpc_get_fixed_counters(uint64_t *counterv)
 {
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_fixed_counts(counterv);
 	return 0;
-#else /* MONOTONIC */
+#else /* CONFIG_CPU_COUNTERS */
 #pragma unused(counterv)
 	return ENOTSUP;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_CPU_COUNTERS */
 }
 
 int

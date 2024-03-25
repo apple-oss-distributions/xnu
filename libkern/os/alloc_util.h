@@ -72,4 +72,41 @@ extern "C++" {
 	__elem;                                                   \
 })
 
+/*!
+ * @macro os_get_pointee_type
+ *
+ * @abstract
+ * Get the type pointed to by @c ptr.
+ *
+ * @discussion
+ * C++ forbids dereferencing a void pointer.
+ * This macro provides an abstraction that is safe to use with any pointer,
+ * both from C, and from C++.
+ *
+ * @param ptr           the pointer we want to get the pointee's type for
+ */
+
+#if defined(__cplusplus) && __has_builtin(__remove_pointer) && \
+        __has_builtin(__remove_reference_t)
+/*
+ * The reason we're using the compiler builtins is that those are able to
+ * properly deal with __ptrauth-qualified pointers, unlike template
+ * specializations. Moreover, template specializations would require forwarding
+ * type definitions, and currently __attribute__((xnu_usage_semantics(...)))
+ * annotations are not carried over across typedefs.
+ *
+ * It is safe to assume that if the compiler does not support such builtins,
+ * it also does not implement D150875, and we can therefore safely dereference
+ * void pointers.
+ */
+#define os_get_pointee_type(ptr)                               \
+	__remove_pointer(__remove_reference_t(__typeof__(ptr)))
+#else
+#define os_get_pointee_type(ptr)                                      \
+	_Pragma("clang diagnostic push")                               \
+	_Pragma("clang diagnostic ignored \"-Wvoid-ptr-dereference\"") \
+	__typeof__(*(ptr))                                             \
+	_Pragma("clang diagnostic pop")
+#endif
+
 #endif /* _OS_ALLOC_UTIL_H */

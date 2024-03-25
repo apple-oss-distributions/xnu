@@ -97,6 +97,7 @@ LOG_CTFINSERT = $(call _LOG_HOST_LINK,CTFINSERT)
 LOG_DSYMUTIL = $(call _LOG_HOST_LINK,DSYMUTIL)
 LOG_SUPPORTED_KPI = $(call _LOG_HOST_LINK,SUPPORTED_KPI)
 
+
 ifeq ($(VERBOSE),YES)
 	_v =
 	_vstdout =
@@ -231,9 +232,6 @@ endif
 ifeq ($(origin IIG),undefined)
 	export IIG := $(shell $(XCRUN) -sdk $(SDKROOT) -find iig)
 endif
-ifeq ($(origin TIGHTBEAMC),undefined)
-	export TIGHTBEAMC := $(shell $(XCRUN) -sdk $(SDKROOT) -find tightbeamc)
-endif
 ifeq ($(origin STRIP),undefined)
 	export STRIP := $(shell $(XCRUN) -sdk $(SDKROOT) -find strip)
 endif
@@ -279,6 +277,12 @@ endif
 ifeq ($(origin CTFDUMP),undefined)
 	export CTFDUMP := $(shell $(XCRUN) -sdk $(SDKROOT) -find ctfdump 2> /dev/null)
 endif
+ifeq ($(origin DOCC),undefined)
+	export DOCC := $(shell $(XCRUN) -sdk $(SDKROOT) -find docc 2> /dev/null)
+endif
+ifeq ($(origin PYTHON),undefined)
+	export PYTHON := $(shell $(XCRUN) -sdk $(SDKROOT) -find python3 2> /dev/null)
+endif
 
 #
 # Platform options
@@ -308,7 +312,6 @@ DECOMMENT = $(OBJROOT)/SETUP/decomment/decomment
 NEWVERS = $(SRCROOT)/config/newvers.pl
 INSTALL = $(OBJROOT)/SETUP/installfile/installfile
 REPLACECONTENTS = $(OBJROOT)/SETUP/replacecontents/replacecontents
-JSONCOMPILATIONDB = $(OBJROOT)/SETUP/json_compilation_db/json_compilation_db
 
 # Standard BSD tools
 RM = /bin/rm -f

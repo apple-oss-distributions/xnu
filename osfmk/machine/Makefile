@@ -20,7 +20,6 @@ KERNELFILES = \
 	machine_remote_time.h \
 	machine_routines.h	\
 	machine_kpc.h		\
-	machine_perfmon.h   \
 	memory_types.h		\
 	monotonic.h \
 	pal_routines.h		\

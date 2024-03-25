@@ -305,6 +305,7 @@ log_queue_dispatch_logs(size_t logs_count, log_queue_entry_t *logs)
 				.lp_ftid = read_dependent_w(&lqe_lp->lp_ftid, lqe_state),
 				.lp_timestamp = read_dependent_w(&lqe_lp->lp_timestamp, lqe_state),
 				.lp_stream = read_dependent(&lqe_lp->lp_stream, lqe_state),
+				.lp_pub_data_size = read_dependent(&lqe_lp->lp_pub_data_size, lqe_state),
 				.lp_data_size = read_dependent(&lqe_lp->lp_data_size, lqe_state)
 			};
 			const void *lp_data = (uint8_t *)lqe + sizeof(*lqe);
@@ -354,16 +355,6 @@ log_queue_mem_init(log_queue_t lq, size_t idx, void *buf, size_t buflen)
 
 	logmem_init(&lq->lq_mem[idx], buf, buflen, lq->lq_mem_size_order,
 	    LQ_MIN_LOG_SZ_ORDER, LQ_MAX_LOG_SZ_ORDER);
-}
-
-static void
-log_queue_mem_deinit(log_queue_t lq, size_t idx)
-{
-	assert(idx < LQ_MAX_LM_SLOTS);
-	assert(!LQ_MEM_ENABLED(lq, idx));
-
-	logmem_t *lm = &lq->lq_mem[idx];
-	bzero((void *)lm, sizeof(*lm));
 }
 
 static int
@@ -463,7 +454,8 @@ log_queue_mem_reclaim(log_queue_t lq)
 			assert(lm->lm_mem_size == lq->lq_mem_size);
 			void *reclaimed = lm->lm_mem;
 			log_queue_mem_disable(lq, i);
-			log_queue_mem_deinit(lq, i);
+			/* Do not use bzero here, see rdar://116922009 */
+			*lm = (logmem_t){ };
 			return reclaimed;
 		}
 	}

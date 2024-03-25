@@ -134,7 +134,6 @@ struct route_in6_old {
 };
 
 #ifdef BSD_KERNEL_PRIVATE
-#include <net/if_llatbl.h>
 #include <sys/eventhandler.h>
 
 /*
@@ -151,7 +150,6 @@ struct route_in6 {
 	 * to a 'struct route *'.
 	 */
 	struct rtentry  *ro_rt;
-	struct  llentry *ro_lle;
 
 	struct ifaddr   *ro_srcia;
 	uint32_t        ro_flags;       /* route flags */

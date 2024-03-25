@@ -90,6 +90,7 @@
 
 struct klist;
 struct kqwllist;
+struct ucred;
 
 __options_decl(filedesc_flags_t, uint8_t, {
 	/*
@@ -110,11 +111,8 @@ __options_decl(filedesc_flags_t, uint8_t, {
 	FD_ABOVE_SOFT_LIMIT           = 0x04,
 	/* process has exceeded fd_nfiles hard limit */
 	FD_ABOVE_HARD_LIMIT           = 0x08,
-
-	/* fd_nfiles soft limit notification has already been sent */
-	FD_SOFT_LIMIT_NOTIFIED        = 0x10,
-	/* fd_nfiles hard limit notification has already been sent */
-	FD_HARD_LIMIT_NOTIFIED        = 0x20,
+	KQWL_ABOVE_SOFT_LIMIT         = 0x10,
+	KQWL_ABOVE_HARD_LIMIT         = 0x20,
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 });
 
@@ -129,12 +127,19 @@ struct filedesc {
 	int                 fd_afterlast;   /* (L) high-water mark of fd_ofiles */
 	int                 fd_freefile;    /* (L) approx. next free file */
 #if CONFIG_PROC_RESOURCE_LIMITS
+#define FD_LIMIT_SENTINEL ((int) (-1))
 	int                 fd_nfiles_open;
-	int                 fd_nfiles_soft_limit;   /* (L) fd_nfiles soft limit to trigger guard */
-	int                 fd_nfiles_hard_limit;   /* (L) fd_nfiles hard limit to terminate */
+	int                 fd_nfiles_soft_limit; /* (L) fd_nfiles soft limit to trigger guard. */
+	int                 fd_nfiles_hard_limit; /* (L) fd_nfiles hard limit to terminate. */
+
+#define KQWL_LIMIT_SENTINEL ((int) (-1))
+	int                 num_kqwls;           /* Number of kqwls in the fd_kqhash */
+	int                 kqwl_dyn_soft_limit; /* (L) soft limit for dynamic kqueue */
+	int                 kqwl_dyn_hard_limit; /* (L) hard limit for dynamic kqueue */
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 	int                 fd_knlistsize;  /* (L) size of knlist */
+	int                 unused_padding;/* Due to alignment */
 	struct fileproc   **XNU_PTRAUTH_SIGNED_PTR("filedesc.fd_ofiles") fd_ofiles; /* (L) file structures for open files */
 	char               *fd_ofileflags;  /* (L) per-process open file flags */
 
@@ -159,14 +164,15 @@ struct filedesc {
 #define fdt_flag_clear(fdt, flag)       ((void)((fdt)->fd_flags &= ~(flag)))
 
 #if CONFIG_PROC_RESOURCE_LIMITS
-#define fd_above_soft_limit_notify(fdp)                 fdt_flag_test(fdp, FD_ABOVE_SOFT_LIMIT)
-#define fd_above_hard_limit_notify(fdp)                 fdt_flag_test(fdp, FD_ABOVE_HARD_LIMIT)
+#define fd_above_soft_limit_notified(fdp)                 fdt_flag_test(fdp, FD_ABOVE_SOFT_LIMIT)
+#define fd_above_hard_limit_notified(fdp)                 fdt_flag_test(fdp, FD_ABOVE_HARD_LIMIT)
 #define fd_above_soft_limit_send_notification(fdp)      fdt_flag_set(fdp, FD_ABOVE_SOFT_LIMIT)
 #define fd_above_hard_limit_send_notification(fdp)      fdt_flag_set(fdp, FD_ABOVE_HARD_LIMIT)
-#define fd_soft_limit_already_notified(fdp)             fdt_flag_test(fdp, FD_SOFT_LIMIT_NOTIFIED)
-#define fd_soft_limit_notified(fdp)                     fdt_flag_set(fdp, FD_SOFT_LIMIT_NOTIFIED)
-#define fd_hard_limit_already_notified(fdp)             fdt_flag_test(fdp, FD_HARD_LIMIT_NOTIFIED)
-#define fd_hard_limit_notified(fdp)                     fdt_flag_set(fdp, FD_HARD_LIMIT_NOTIFIED)
+
+#define kqwl_above_soft_limit_notified(fdp)              fdt_flag_test(fdp, KQWL_ABOVE_SOFT_LIMIT)
+#define kqwl_above_hard_limit_notified(fdp)              fdt_flag_test(fdp, KQWL_ABOVE_HARD_LIMIT)
+#define kqwl_above_soft_limit_send_notification(fdp)     fdt_flag_set(fdp, KQWL_ABOVE_SOFT_LIMIT)
+#define kqwl_above_hard_limit_send_notification(fdp)     fdt_flag_set(fdp, KQWL_ABOVE_HARD_LIMIT)
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 /*
@@ -392,7 +398,7 @@ fdt_fork(struct filedesc *child_fdt, proc_t parent_p, struct vnode *uth_cdir, bo
  * If the process is in exec
  */
 extern void
-fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec);
+fdt_exec(proc_t p, struct ucred *p_cred, short posix_spawn_flags, thread_t thread, bool in_exec);
 
 /*!
  * @function fdt_invalidate
@@ -423,16 +429,33 @@ extern void     fdrelse(struct proc * p, int fd);
 #define         fdflags(p, fd)                                  \
 	                (&(p)->p_fd.fd_ofileflags[(fd)])
 
-extern int      falloc(proc_t p, struct fileproc **resultfp,
-    int *resultfd, struct vfs_context *ctx);
-
 typedef void (*fp_initfn_t)(struct fileproc *, void *ctx);
-extern int      falloc_withinit(proc_t p, struct fileproc **resultfp,
-    int *resultfd, struct vfs_context *ctx,
-    fp_initfn_t fp_init, void *initarg);
+extern int      falloc_withinit(
+	proc_t                  p,
+	struct ucred           *p_cred,
+	struct vfs_context     *ctx,
+	struct fileproc       **resultfp,
+	int                    *resultfd,
+	fp_initfn_t             fp_init,
+	void                   *initarg);
+
+#define falloc(p, rfp, rfd)  ({ \
+	struct proc *__p = (p);                                                 \
+	falloc_withinit(__p, current_cached_proc_cred(__p),                     \
+	    vfs_context_current(), rfp, rfd, NULL, NULL);                       \
+})
+
+#define falloc_exec(p, ctx, rfp, rfd)  ({ \
+	struct vfs_context *__c = (ctx);                                        \
+	falloc_withinit(p, vfs_context_ucred(__c), __c, rfp, rfd, NULL, NULL);  \
+})
 
 #if CONFIG_PROC_RESOURCE_LIMITS
+/* The proc_fdlock has to be held by caller for duration of the call */
 void fd_check_limit_exceeded(struct filedesc *fdp);
+
+/* The kqhash_lock has to be held by caller for duration of the call */
+void kqworkloop_check_limit_exceeded(struct filedesc *fdp);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 #endif /* XNU_KERNEL_PRIVATE */

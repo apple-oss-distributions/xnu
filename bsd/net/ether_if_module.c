@@ -111,6 +111,8 @@ extern void if_headless_init(void);
 
 #include <net/dlil.h>
 
+#include <net/sockaddr_utils.h>
+
 SYSCTL_DECL(_net_link);
 SYSCTL_NODE(_net_link, IFT_ETHER, ether, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "Ethernet");
@@ -575,7 +577,7 @@ ether_frameout_extended(struct ifnet *ifp, struct mbuf **m,
 	eh = mtod(*m, struct ether_header *);
 	(void) memcpy(&eh->ether_type, ether_type, sizeof(eh->ether_type));
 	(void) memcpy(eh->ether_dhost, edst, ETHER_ADDR_LEN);
-	ifnet_lladdr_copy_bytes(ifp, eh->ether_shost, ETHER_ADDR_LEN);
+	(void) memcpy(eh->ether_shost, IF_LLADDR(ifp), ETHER_ADDR_LEN);
 
 	return 0;
 }
@@ -602,8 +604,7 @@ ether_check_multi(ifnet_t ifp, const struct sockaddr *proto_addr)
 		break;
 
 	case AF_LINK:
-		e_addr = CONST_LLADDR((const struct sockaddr_dl*)
-		    (uintptr_t)(size_t)proto_addr);
+		e_addr = CONST_LLADDR(SDL(proto_addr));
 		if ((e_addr[0] & 0x01) != 0x01) {
 			result = EADDRNOTAVAIL;
 		} else {

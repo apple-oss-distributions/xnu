@@ -686,7 +686,7 @@ noreplaycheck:
 		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
 		if (ifa) {
 			m->m_pkthdr.rcvif = ifa->ifa_ifp;
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		}
 
 		/* Clear the csum flags, they can't be valid for the inner headers */
@@ -1391,7 +1391,7 @@ noreplaycheck:
 		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
 		if (ifa) {
 			m->m_pkthdr.rcvif = ifa->ifa_ifp;
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		}
 
 		// Input via IPsec interface

@@ -94,6 +94,9 @@
 #include <sys/quota.h>
 #endif
 
+#if CONFIG_EXCLAVES
+#include <vfs/vfs_exclave_fs.h>
+#endif
 
 /*
  * Sigh, such primitive tools are these...
@@ -420,6 +423,9 @@ vfsinit(void)
 
 	nspace_resolver_init();
 
+#if CONFIG_EXCLAVES
+	vfs_exclave_fs_start();
+#endif
 }
 
 void

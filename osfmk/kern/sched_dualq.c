@@ -294,7 +294,7 @@ sched_dualq_processor_enqueue(
 	boolean_t       result;
 
 	result = run_queue_enqueue(rq, thread, options);
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 
 	return result;
 }
@@ -430,7 +430,7 @@ sched_dualq_processor_queue_remove(
 
 	rq = dualq_runq_for_thread(processor, thread);
 
-	if (processor == thread->runq) {
+	if (processor == thread_get_runq_locked(thread)) {
 		/*
 		 * Thread is on a run queue and we have a lock on
 		 * that run queue.
@@ -441,7 +441,7 @@ sched_dualq_processor_queue_remove(
 		 * The thread left the run queue before we could
 		 * lock the run queue.
 		 */
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 		processor = PROCESSOR_NULL;
 	}
 

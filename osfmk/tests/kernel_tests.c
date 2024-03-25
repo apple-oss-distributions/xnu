@@ -84,6 +84,7 @@ extern kern_return_t console_serial_test(void);
 extern kern_return_t console_serial_parallel_log_tests(void);
 extern kern_return_t test_printf(void);
 extern kern_return_t test_os_log(void);
+extern kern_return_t test_os_log_handles(void);
 extern kern_return_t test_os_log_parallel(void);
 extern kern_return_t bitmap_post_test(void);
 extern kern_return_t counter_tests(void);
@@ -93,13 +94,15 @@ extern kern_return_t ml_io_timeout_test(void);
 
 #ifdef __arm64__
 extern kern_return_t arm64_munger_test(void);
-extern kern_return_t ex_cb_test(void);
 #if __ARM_PAN_AVAILABLE__
 extern kern_return_t arm64_pan_test(void);
 #endif
 #if defined(HAS_APPLE_PAC)
 extern kern_return_t arm64_ropjop_test(void);
 #endif /* defined(HAS_APPLE_PAC) */
+#if CONFIG_SPTM
+extern kern_return_t arm64_panic_lockdown_test(void);
+#endif /* CONFIG_SPTM */
 #endif /* __arm64__ */
 
 extern kern_return_t test_thread_call(void);
@@ -113,17 +116,20 @@ struct xnupost_panic_widget xt_panic_widgets = {.xtp_context_p = NULL,
 struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(RandomULong_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(test_printf),
+	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log_handles),
 	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log),
 	                                   XNUPOST_TEST_CONFIG_BASIC(test_os_log_parallel),
 #ifdef __arm64__
 	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_munger_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(ex_cb_test),
 #if __ARM_PAN_AVAILABLE__
 	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_pan_test),
 #endif
 #if defined(HAS_APPLE_PAC)
 	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_ropjop_test),
 #endif /* defined(HAS_APPLE_PAC) */
+#if CONFIG_SPTM
+	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_panic_lockdown_test),
+#endif /* CONFIG_SPTM */
 #endif /* __arm64__ */
 	                                   XNUPOST_TEST_CONFIG_BASIC(kcdata_api_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_test),

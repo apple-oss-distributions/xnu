@@ -333,6 +333,7 @@ bindfs_readdir(struct vnop_readdir_args * ap)
 		bufsize = 3 * MIN((user_size_t)uio_resid(uio), 87371u) / 8;
 		bufptr = kalloc_data(bufsize, Z_WAITOK);
 		if (bufptr == NULL) {
+			vnode_put(lvp);
 			return ENOMEM;
 		}
 		auio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);

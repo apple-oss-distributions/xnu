@@ -285,7 +285,7 @@ kasan_init_fakestack(void)
 		    ZC_NOCALLOUT | ZC_NOGC | ZC_NOCACHING |
 		    ZC_KASAN_NOREDZONE | ZC_KASAN_NOQUARANTINE,
 		    ZONE_ID_ANY, ^(zone_t z) {
-			zone_set_exhaustible(z, maxsz / sz);
+			zone_set_exhaustible(z, maxsz / sz, true);
 		});
 		zone_fill_initially(fakestack_zones[i], maxsz / sz);
 	}

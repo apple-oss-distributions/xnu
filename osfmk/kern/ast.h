@@ -212,7 +212,10 @@ extern void kevent_ast(thread_t thread, uint16_t bits);
 extern void act_set_astkevent(thread_t thread, uint16_t bits);
 extern uint16_t act_clear_astkevent(thread_t thread, uint16_t bits);
 extern bool act_set_ast_reset_pcs(task_t task, thread_t thread);
+#if CONFIG_PROC_RESOURCE_LIMITS
 extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
+extern void task_kqworkloop_ast(task_t task, int current_size, int soft_limit, int hard_limit);
+#endif
 extern void act_set_debug_assert(void);
 
 extern void thread_debug_return_to_user_ast(thread_t thread);

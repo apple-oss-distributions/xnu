@@ -1706,8 +1706,7 @@ sockopt_copyout(sockopt_t sopt, void *data, size_t len)
 static bool
 net_check_compatible_sfltr(void)
 {
-	if (net_api_stats.nas_sfltr_register_count > net_api_stats.nas_sfltr_register_os_count ||
-	    net_api_stats.nas_sfltr_register_os_count > 4) {
+	if (net_api_stats.nas_sfltr_register_count > net_api_stats.nas_sfltr_register_os_count) {
 		return false;
 	}
 	return true;

@@ -226,11 +226,14 @@ rn_lookup_args(void *v_arg, void *m_arg, struct radix_node_head *head,
 		if (x == 0) {
 			return NULL;
 		}
-		netmask = x->rn_key;
+		/*
+		 * Note: the auxillary mask is stored as a "key".
+		 */
+		netmask = rn_get_key(x);
 	}
 	x = rn_match_args(v_arg, head, f, w);
 	if (x && netmask) {
-		while (x && x->rn_mask != netmask) {
+		while (x && rn_get_mask(x) != netmask) {
 			x = x->rn_dupedkey;
 		}
 	}
@@ -248,7 +251,9 @@ static int
 rn_satisfies_leaf(char *trial, struct radix_node *leaf, int skip,
     rn_matchf_t *f, void *w)
 {
-	char *cp = trial, *cp2 = leaf->rn_key, *cp3 = leaf->rn_mask;
+	char *cp = trial;
+	char *cp2 = rn_get_key(leaf);
+	char *cp3 = rn_get_mask(leaf);
 	char *cplim;
 	int length = min(*(u_char *)cp, *(u_char *)cp2);
 
@@ -307,10 +312,13 @@ rn_match_args(void *v_arg, struct radix_node_head *head,
 	 * with a long one.  This wins big for class B&C netmasks which
 	 * are probably the most common case...
 	 */
-	if (t->rn_mask) {
-		vlen = *(u_char *)t->rn_mask;
+	if (rn_get_mask(t)) {
+		vlen = *(u_char *)rn_get_mask(t);
 	}
-	cp += off; cp2 = t->rn_key + off; cplim = v + vlen;
+	cp += off;
+	cp2 = rn_get_key(t) + off;
+	cplim = v + vlen;
+
 	for (; cp < cplim; cp++, cp2++) {
 		if (*cp != *cp2) {
 			goto on1;
@@ -353,7 +361,8 @@ keeplooking:
 	/*
 	 * If there is a host route in a duped-key chain, it will be first.
 	 */
-	if ((saved_t = t)->rn_mask == 0) {
+	saved_t = t;
+	if (rn_get_mask(t) == 0) {
 		t = t->rn_dupedkey;
 	}
 	for (; t; t = t->rn_dupedkey) {
@@ -390,8 +399,8 @@ keeplooking:
 				}
 			} else {
 				off = min(t->rn_offset, matched_off);
-				x = rn_search_m(v, t, m->rm_mask);
-				while (x && x->rn_mask != m->rm_mask) {
+				x = rn_search_m(v, t, rm_get_mask(m));
+				while (x && rn_get_mask(x) != rm_get_mask(m)) {
 					x = x->rn_dupedkey;
 				}
 				if (x && rn_satisfies_leaf(v, x, off, f, w)) {
@@ -448,7 +457,7 @@ rn_insert(void *v_arg, struct radix_node_head *head, int *dupentry,
 	 * Find first bit at which v and t->rn_key differ
 	 */
 	{
-		caddr_t cp2 = t->rn_key + head_off;
+		caddr_t cp2 = rn_get_key(t) + head_off;
 		int cmp_res;
 		caddr_t cplim = v + vlen;
 
@@ -551,7 +560,7 @@ rn_addmask(void *n_arg, int search, int skip)
 	}
 	*addmask_key = last_zeroed = (char)mlen;
 	x = rn_search(addmask_key, rn_masktop);
-	if (Bcmp(addmask_key, x->rn_key, mlen) != 0) {
+	if (Bcmp(addmask_key, rn_get_key(x), mlen) != 0) {
 		x = NULL;
 	}
 	if (x || search) {
@@ -620,7 +629,7 @@ rn_new_radix_mask(struct radix_node *tt, struct radix_mask *next)
 	if (tt->rn_flags & RNF_NORMAL) {
 		m->rm_leaf = tt;
 	} else {
-		m->rm_mask = tt->rn_mask;
+		m->rm_mask = rn_get_mask(tt);
 	}
 	m->rm_mklist = next;
 	tt->rn_mklist = m;
@@ -652,7 +661,10 @@ rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		}
 		b_leaf = x->rn_bit;
 		b = -1 - x->rn_bit;
-		netmask = x->rn_key;
+		/*
+		 * Note: the auxillary mask is stored as a "key".
+		 */
+		netmask = rn_get_key(x);
 	}
 	/*
 	 * Deal with duplicated keys: attach node to previous instance
@@ -660,14 +672,14 @@ rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	saved_tt = tt = rn_insert(v, head, &keyduplicated, treenodes);
 	if (keyduplicated) {
 		for (t = tt; tt; t = tt, tt = tt->rn_dupedkey) {
-			if (tt->rn_mask == netmask) {
+			if (rn_get_mask(tt) == netmask) {
 				return NULL;
 			}
 			if (netmask == 0 ||
-			    (tt->rn_mask &&
+			    (rn_get_mask(tt) != NULL &&
 			    ((b_leaf < tt->rn_bit)  /* index(netmask) > node */
-			    || rn_refines(netmask, tt->rn_mask)
-			    || rn_lexobetter(netmask, tt->rn_mask)))) {
+			    || rn_refines(netmask, rn_get_mask(tt))
+			    || rn_lexobetter(netmask, rn_get_mask(tt))))) {
 				break;
 			}
 		}
@@ -732,7 +744,7 @@ rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	/* Promote general routes from below */
 	if (x->rn_bit < 0) {
 		for (mp = &t->rn_mklist; x; x = x->rn_dupedkey) {
-			if (x->rn_mask && (x->rn_bit >= b_leaf) && x->rn_mklist == 0) {
+			if (rn_get_mask(x) != NULL && (x->rn_bit >= b_leaf) && x->rn_mklist == 0) {
 				*mp = m = rn_new_radix_mask(x, NULL);
 				if (m) {
 					mp = &m->rm_mklist;
@@ -774,14 +786,14 @@ on2:
 			break;
 		}
 		if (m->rm_flags & RNF_NORMAL) {
-			mmask = m->rm_leaf->rn_mask;
+			mmask = rn_get_mask(m->rm_leaf);
 			if (tt->rn_flags & RNF_NORMAL) {
 				log(LOG_ERR,
 				    "Non-unique normal route, mask not entered");
 				return tt;
 			}
 		} else {
-			mmask = m->rm_mask;
+			mmask = rm_get_mask(m);
 		}
 		if (mmask == netmask) {
 			m->rm_refs++;
@@ -815,7 +827,7 @@ rn_delete(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 	saved_tt = tt;
 	top = x;
 	if (tt == 0 ||
-	    Bcmp(v + head_off, tt->rn_key + head_off, vlen - head_off)) {
+	    Bcmp(v + head_off, rn_get_key(tt) + head_off, vlen - head_off)) {
 		return NULL;
 	}
 	/*
@@ -825,14 +837,14 @@ rn_delete(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 		if ((x = rn_addmask(netmask, 1, head_off)) == 0) {
 			return NULL;
 		}
-		netmask = x->rn_key;
-		while (tt->rn_mask != netmask) {
+		netmask = rn_get_key(x);
+		while (rn_get_mask(tt) != netmask) {
 			if ((tt = tt->rn_dupedkey) == 0) {
 				return NULL;
 			}
 		}
 	}
-	if (tt->rn_mask == 0 || (saved_m = m = tt->rn_mklist) == 0) {
+	if (rn_get_mask(tt) == 0 || (saved_m = m = tt->rn_mklist) == 0) {
 		goto on1;
 	}
 	if (tt->rn_flags & RNF_NORMAL) {
@@ -841,7 +853,7 @@ rn_delete(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 			return NULL;  /* dangling ref could cause disaster */
 		}
 	} else {
-		if (m->rm_mask != tt->rn_mask) {
+		if (rm_get_mask(m) != rn_get_mask(tt)) {
 			log(LOG_ERR, "rn_delete: inconsistent annotation\n");
 			goto on1;
 		}

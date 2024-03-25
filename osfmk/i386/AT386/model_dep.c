@@ -94,7 +94,7 @@
 #include <i386/misc_protos.h>
 #include <i386/panic_notify.h>
 #include <i386/thread.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/machine_routines.h>
 #include <i386/mp.h>
 #include <i386/cpuid.h>
@@ -201,7 +201,7 @@ boolean_t coprocessor_paniclog_flush = FALSE;
 
 struct kcdata_descriptor kc_panic_data;
 static boolean_t begun_panic_stackshot = FALSE;
-extern kern_return_t    do_stackshot(void *);
+extern kern_return_t    do_panic_stackshot(void *);
 
 extern void                    kdp_snapshot_preflight(int pid, void * tracebuf,
     uint32_t tracebuf_size, uint64_t flags,
@@ -751,7 +751,7 @@ RecordPanicStackshot()
 #endif
 
 	kdp_snapshot_preflight(-1, (void *) stackshot_begin_loc, (uint32_t) bytes_remaining, stackshot_flags, &kc_panic_data, 0, 0);
-	err = do_stackshot(NULL);
+	err = do_panic_stackshot(NULL);
 	bytes_traced = (size_t) kdp_stack_snapshot_bytes_traced();
 	bytes_uncompressed = (size_t) kdp_stack_snapshot_bytes_uncompressed();
 	bytes_used = (size_t) kcdata_memory_get_used_bytes(&kc_panic_data);
@@ -788,7 +788,7 @@ RecordPanicStackshot()
 #endif
 
 		kdp_snapshot_preflight(-1, (void *) stackshot_begin_loc, (uint32_t) bytes_remaining, stackshot_flags, &kc_panic_data, 0, 0);
-		err = do_stackshot(NULL);
+		err = do_panic_stackshot(NULL);
 		bytes_traced = (size_t) kdp_stack_snapshot_bytes_traced();
 		bytes_uncompressed = (size_t) kdp_stack_snapshot_bytes_uncompressed();
 		bytes_used = (size_t) kcdata_memory_get_used_bytes(&kc_panic_data);

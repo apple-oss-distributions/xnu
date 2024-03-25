@@ -81,6 +81,7 @@
 #define EVFILT_MEMORYSTATUS     (-14)   /* Memorystatus events */
 #define EVFILT_NW_CHANNEL       (-16)   /* Skywalk channel events */
 #define EVFILT_WORKLOOP         (-17)   /* Workloop events */
+#define EVFILT_EXCLAVES_NOTIFICATION (-18) /* Exclave notification */
 /* If additional filter types are added, make sure to update
  * EVFILT_SYSCOUNT in event.h!!!
  */
@@ -194,9 +195,11 @@ typedef uint64_t kqueue_id_t;
 #define EVFILTID_VN                (EVFILT_SYSCOUNT + 16)
 #define EVFILTID_TTY               (EVFILT_SYSCOUNT + 17)
 #define EVFILTID_PTMX              (EVFILT_SYSCOUNT + 18)
+#define EVFILTID_MACH_PORT         (EVFILT_SYSCOUNT + 19)
+#define EVFILTID_MACH_PORT_SET     (EVFILT_SYSCOUNT + 20)
 
-#define EVFILTID_DETACHED          (EVFILT_SYSCOUNT + 19)
-#define EVFILTID_MAX               (EVFILT_SYSCOUNT + 20)
+#define EVFILTID_DETACHED          (EVFILT_SYSCOUNT + 21)
+#define EVFILTID_MAX               (EVFILT_SYSCOUNT + 22)
 
 #endif /* defined(XNU_KERNEL_PRIVATE) */
 
@@ -397,6 +400,11 @@ __options_decl(kn_status_t, uint16_t /* 12 bits really */, {
 	KN_SUPPRESSED     = 0x800,  /* event is suppressed during delivery */
 });
 
+#if CONFIG_EXCLAVES
+/* forward declaration of exclaves_resource */
+struct exclaves_resource;
+#endif /* CONFIG_EXCLAVES */
+
 #if __LP64__
 #define KNOTE_KQ_PACKED_BITS   42
 #define KNOTE_KQ_PACKED_SHIFT   0
@@ -441,9 +449,13 @@ struct knote {
 	union {
 		struct fileproc    *XNU_PTRAUTH_SIGNED_PTR("knote.fp") kn_fp;
 		struct proc        *XNU_PTRAUTH_SIGNED_PTR("knote.proc") kn_proc;
-		struct ipc_object  *XNU_PTRAUTH_SIGNED_PTR("knote.ipc_obj") kn_ipc_obj;
+		struct ipc_port    *XNU_PTRAUTH_SIGNED_PTR("knote.ipc_port") kn_ipc_port;
+		struct ipc_pset    *XNU_PTRAUTH_SIGNED_PTR("knote.ipc_pset") kn_ipc_pset;
 		struct thread_call *XNU_PTRAUTH_SIGNED_PTR("knote.thcall") kn_thcall;
 		struct thread      *XNU_PTRAUTH_SIGNED_PTR("knote.thread") kn_thread;
+#if CONFIG_EXCLAVES
+		struct exclaves_resource *XNU_PTRAUTH_SIGNED_PTR("knote.exclaves_resource") kn_exclaves_resource;
+#endif /* CONFIG_EXCLAVES*/
 	};
 
 	/*

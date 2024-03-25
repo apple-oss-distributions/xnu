@@ -136,6 +136,15 @@ extern int vsnprintf(char *, size_t, const char *, va_list);
 #include <sys/csr.h>
 #endif
 
+#if CONFIG_EXCLAVES
+#include <xnuproxy/panic.h>
+#include "exclaves_panic.h"
+#endif
+
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#include <arm64/sptm/pmap/pmap_data.h>
+#endif /* CONFIG_SPTM */
 
 extern int IODTGetLoaderInfo( const char *key, void **infoAddr, int *infosize );
 extern void IODTFreeLoaderInfo( const char *key, void *infoAddr, int infoSize );
@@ -255,6 +264,7 @@ void panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args,
     unsigned long panic_caller) __dead2 __printflike(1, 0);
 static void kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags);
 void panic_spin_forever(void) __dead2;
+extern kern_return_t do_panic_stackshot(void);
 extern kern_return_t do_stackshot(void);
 extern void PE_panic_hook(const char*);
 extern int sync(proc_t p, void *, void *);
@@ -662,6 +672,13 @@ DebuggerSaveState(debugger_op db_op, const char *db_message, const char *db_pani
 		CPUPANICARGS = db_panic_args;
 		CPUPANICDATAPTR = db_panic_data_ptr;
 		CPUPANICCALLER = db_panic_caller;
+
+#if CONFIG_EXCLAVES
+		char *panic_str;
+		if (exclaves_panic_get_string(&panic_str) == KERN_SUCCESS) {
+			CPUPANICSTR = panic_str;
+		}
+#endif
 	}
 
 	CPUDEBUGGERSYNC = db_proceed_on_sync_failure;
@@ -1121,6 +1138,25 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	read_lbr();
 #endif
 
+#if CONFIG_SPTM
+	/*
+	 * If SPTM has not itself already panicked, trigger a panic lockdown. This
+	 * check is necessary since attempting to re-enter the SPTM after it calls
+	 * panic will lead to a hang, which harms kernel field debugability.
+	 *
+	 * Whether or not this check can be subverted is murky. This doesn't really
+	 * matter, however, because any security critical panics events will have
+	 * already initiated lockdown before calling panic. Thus, lockdown from
+	 * panic itself is merely a "best effort".
+	 */
+	libsptm_error_t sptm_error = LIBSPTM_SUCCESS;
+	bool sptm_has_panicked = false;
+	if (((sptm_error = sptm_triggered_panic(&sptm_has_panicked)) == LIBSPTM_SUCCESS) &&
+	    !sptm_has_panicked) {
+		sptm_xnu_panic_begin();
+	}
+#endif /* CONFIG_SPTM */
+
 	/* optionally call sync, to reduce lost logs on restart, avoid on recursive panic. Unsafe due to unbounded sync() duration */
 	if ((panic_options_mask & DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE) && (CPUDEBUGGERCOUNT == 0)) {
 		sync(NULL, NULL, NULL);
@@ -1383,6 +1419,13 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 	 * and we haven't disabled on-device coredumps.
 	 */
 	if (on_device_corefile_enabled()) {
+#if CONFIG_SPTM
+		/* We want to skip taking a local core dump if this is a panic from SPTM/TXM/cL4. */
+		extern uint8_t sptm_supports_local_coredump;
+		bool sptm_interrupted = false;
+		pmap_sptm_percpu_data_t *sptm_pcpu = PERCPU_GET(pmap_sptm_percpu);
+		sptm_get_cpu_state(sptm_pcpu->sptm_cpu_id, CPUSTATE_SPTM_INTERRUPTED, &sptm_interrupted);
+#endif
 		if (!kdp_has_polled_corefile()) {
 			if (debug_boot_arg & (DB_KERN_DUMP_ON_PANIC | DB_KERN_DUMP_ON_NMI)) {
 				paniclog_append_noflush("skipping local kernel core because core file could not be opened prior to panic (mode : 0x%x, error : 0x%x)\n",
@@ -1407,6 +1450,16 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 #if XNU_MONITOR
 		else if (pmap_get_cpu_data()->ppl_state != PPL_STATE_KERNEL) {
 			paniclog_append_noflush("skipping local kernel core because the PPL is not in KERNEL state\n");
+			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
+			paniclog_flush();
+		}
+#elif CONFIG_SPTM
+		else if (!sptm_supports_local_coredump) {
+			paniclog_append_noflush("skipping local kernel core because the SPTM is in PANIC state and can't support core dump generation\n");
+			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
+			paniclog_flush();
+		} else if (sptm_interrupted) {
+			paniclog_append_noflush("skipping local kernel core because the SPTM is in INTERRUPTED state and can't support core dump generation\n");
 			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
 			paniclog_flush();
 		}
@@ -1602,6 +1655,19 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 #endif
 	} else {
 		/* note: this is the panic path...  */
+#if CONFIG_SPTM
+		/*
+		 * Debug trap panics do not go through the standard panic flows so we
+		 * have to notify the SPTM that we're going down now. This is not so
+		 * much for security (critical cases are handled elsewhere) but rather
+		 * to just keep the SPTM bit in sync with the actual XNU state.
+		 */
+		bool sptm_has_panicked = false;
+		if (sptm_triggered_panic(&sptm_has_panicked) == LIBSPTM_SUCCESS &&
+		    !sptm_has_panicked) {
+			sptm_xnu_panic_begin();
+		}
+#endif /* CONFIG_SPTM */
 #if defined(__arm64__) && (DEBUG || DEVELOPMENT)
 		if (!PE_arm_debug_and_trace_initialized()) {
 			paniclog_append_noflush("kernel panicked before debug and trace infrastructure initialized!\n"
@@ -1857,10 +1923,62 @@ panic_display_kernel_uuid(void)
 	}
 }
 
+#if CONFIG_SPTM
+static void
+panic_display_component_uuid(char const *component_name, void *component_address)
+{
+	uuid_t *component_uuid;
+	unsigned long component_uuid_len = 0;
+	uuid_string_t component_uuid_string;
+
+	component_uuid = getuuidfromheader((kernel_mach_header_t *)component_address, &component_uuid_len);
+
+	if (component_uuid != NULL && component_uuid_len == sizeof(uuid_t)) {
+		uuid_unparse_upper(*component_uuid, component_uuid_string);
+		paniclog_append_noflush("%s UUID: %s\n", component_name, component_uuid_string);
+	}
+}
+#endif /* CONFIG_SPTM */
 
 void
 panic_display_kernel_aslr(void)
 {
+#if CONFIG_SPTM
+	{
+		struct debug_header const *dh = SPTMArgs->debug_header;
+
+		paniclog_append_noflush("Debug Header address: %p\n", dh);
+
+		if (dh != NULL) {
+			void *component_address;
+
+			paniclog_append_noflush("Debug Header entry count: %d\n", dh->count);
+
+			switch (dh->count) {
+			default: // 3 or more
+				component_address = dh->image[DEBUG_HEADER_ENTRY_TXM];
+				paniclog_append_noflush("TXM load address: %p\n", component_address);
+
+				panic_display_component_uuid("TXM", component_address);
+				OS_FALLTHROUGH;
+			case 2:
+				component_address = dh->image[DEBUG_HEADER_ENTRY_XNU];
+				paniclog_append_noflush("Debug Header kernelcache load address: %p\n", component_address);
+
+				panic_display_component_uuid("Debug Header kernelcache", component_address);
+				OS_FALLTHROUGH;
+			case 1:
+				component_address = dh->image[DEBUG_HEADER_ENTRY_SPTM];
+				paniclog_append_noflush("SPTM load address: %p\n", component_address);
+
+				panic_display_component_uuid("SPTM", component_address);
+				OS_FALLTHROUGH;
+			case 0:
+				; // nothing to print
+			}
+		}
+	}
+#endif /* CONFIG_SPTM */
 
 	kc_format_t kc_format;
 

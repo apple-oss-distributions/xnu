@@ -54,12 +54,14 @@ extern int kperf_max_actions;
 #define SAMPLER_SYS_MEM       (1U << 11)
 #define SAMPLER_TH_INSCYC     (1U << 12)
 #define SAMPLER_TK_INFO       (1U << 13)
+#define SAMPLER_EXSTACK       (1U << 14)
 
 #define SAMPLER_TASK_MASK (SAMPLER_MEMINFO | SAMPLER_TK_SNAPSHOT | \
 	        SAMPLER_TK_INFO)
 #define SAMPLER_THREAD_MASK (SAMPLER_TH_INFO | SAMPLER_TH_SNAPSHOT | \
 	        SAMPLER_KSTACK | SAMPLER_USTACK | SAMPLER_PMC_THREAD | \
-	        SAMPLER_TH_SCHEDULING | SAMPLER_TH_DISPATCH | SAMPLER_TH_INSCYC)
+	        SAMPLER_TH_SCHEDULING | SAMPLER_TH_DISPATCH | SAMPLER_TH_INSCYC | \
+	        SAMPLER_EXSTACK)
 
 /* flags for sample calls */
 
@@ -93,6 +95,13 @@ kern_return_t kperf_sample(struct kperf_sample *sbuf,
  */
 void kperf_sample_user(struct kperf_usample *sbuf, struct kperf_context *ctx,
     unsigned int actionid, unsigned int sample_flags);
+
+/* during this sample, the thread was idle. set only if !SAMPLE_FLAG_IDLE_THREADS */
+#define SAMPLE_META_THREAD_WAS_IDLE (1U << 0)
+/* during this sample, a user callstack sample was pended */
+#define SAMPLE_META_UPEND           (1U << 1)
+/* during this sample, an exclave callstack sample was pended */
+#define SAMPLE_META_EXPEND          (1U << 2)
 
 /* Whether the action provided samples non-system values. */
 bool kperf_action_has_non_system(unsigned actionid);

@@ -81,7 +81,7 @@ SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, aborted,
 void *
 mbuf_data(mbuf_t mbuf)
 {
-	return mbuf->m_data;
+	return m_mtod_current(mbuf);
 }
 
 void *
@@ -105,7 +105,7 @@ mbuf_setdata(mbuf_t mbuf, void *data, size_t len)
 	if ((size_t)data < start || ((size_t)data) + len > start + maxlen) {
 		return EINVAL;
 	}
-	mbuf->m_data = data;
+	mbuf->m_data = (uintptr_t)data;
 	mbuf->m_len = (int32_t)len;
 
 	return 0;
@@ -117,7 +117,7 @@ mbuf_align_32(mbuf_t mbuf, size_t len)
 	if ((mbuf->m_flags & M_EXT) != 0 && m_mclhasreference(mbuf)) {
 		return ENOTSUP;
 	}
-	mbuf->m_data = mbuf_datastart(mbuf);
+	mbuf->m_data = (uintptr_t)mbuf_datastart(mbuf);
 	mbuf->m_data +=
 	    ((mbuf_trailingspace(mbuf) - len) & ~(sizeof(u_int32_t) - 1));
 

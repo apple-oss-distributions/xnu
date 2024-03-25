@@ -204,6 +204,16 @@ __kmem_object(kmem_flags_t flags)
 	return kernel_object_default;
 }
 
+static inline pmap_mapping_type_t
+__kmem_mapping_type(kmem_flags_t flags)
+{
+	if (flags & (KMEM_DATA | KMEM_COMPRESSOR)) {
+		return PMAP_MAPPING_TYPE_DEFAULT;
+	} else {
+		return PMAP_MAPPING_TYPE_RESTRICTED;
+	}
+}
+
 static inline vm_size_t
 __kmem_guard_left(kmem_flags_t flags)
 {
@@ -878,10 +888,12 @@ kmem_alloc_guard_internal(
 		vm_object_reference(object);
 	} else {
 		object = vm_object_allocate(map_size);
+		vm_object_lock(object);
 		vm_object_set_size(object, map_size, size);
 		/* stabilize the object to prevent shadowing */
 		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
-		object->true_share = TRUE;
+		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
+		vm_object_unlock(object);
 	}
 
 	if (flags & KMA_LAST_FREE) {
@@ -944,7 +956,8 @@ kmem_alloc_guard_internal(
 		if (wired_page_list) {
 			kernel_memory_populate_object_and_unlock(object,
 			    map_addr + fill_start, offset + fill_start, fill_size,
-			    wired_page_list, flags, guard.kmg_tag, VM_PROT_DEFAULT);
+			    wired_page_list, flags, guard.kmg_tag, VM_PROT_DEFAULT,
+			    __kmem_mapping_type(ANYF(flags)));
 		} else {
 			vm_object_unlock(object);
 		}
@@ -1219,7 +1232,8 @@ kernel_memory_populate_pmap_enter(
 	vm_object_offset_t      offset,
 	vm_page_t               mem,
 	vm_prot_t               prot,
-	int                     pe_flags)
+	int                     pe_flags,
+	pmap_mapping_type_t     mapping_type)
 {
 	kern_return_t   pe_result;
 	int             pe_options;
@@ -1238,7 +1252,7 @@ kernel_memory_populate_pmap_enter(
 
 	pe_result = pmap_enter_options(kernel_pmap, addr + offset,
 	    VM_PAGE_GET_PHYS_PAGE(mem), prot, VM_PROT_NONE,
-	    pe_flags, /* wired */ TRUE, pe_options, NULL);
+	    pe_flags, /* wired */ TRUE, pe_options, NULL, mapping_type);
 
 	if (pe_result == KERN_RESOURCE_SHORTAGE) {
 		vm_object_unlock(object);
@@ -1247,7 +1261,7 @@ kernel_memory_populate_pmap_enter(
 
 		pe_result = pmap_enter_options(kernel_pmap, addr + offset,
 		    VM_PAGE_GET_PHYS_PAGE(mem), prot, VM_PROT_NONE,
-		    pe_flags, /* wired */ TRUE, pe_options, NULL);
+		    pe_flags, /* wired */ TRUE, pe_options, NULL, mapping_type);
 
 		vm_object_lock(object);
 	}
@@ -1257,14 +1271,15 @@ kernel_memory_populate_pmap_enter(
 
 void
 kernel_memory_populate_object_and_unlock(
-	vm_object_t     object, /* must be locked */
-	vm_address_t    addr,
-	vm_offset_t     offset,
-	vm_size_t       size,
-	vm_page_t       page_list,
-	kma_flags_t     flags,
-	vm_tag_t        tag,
-	vm_prot_t       prot)
+	vm_object_t             object, /* must be locked */
+	vm_address_t            addr,
+	vm_offset_t             offset,
+	vm_size_t               size,
+	vm_page_t               page_list,
+	kma_flags_t             flags,
+	vm_tag_t                tag,
+	vm_prot_t               prot,
+	pmap_mapping_type_t     mapping_type)
 {
 	vm_page_t       mem;
 	int             pe_flags;
@@ -1333,9 +1348,8 @@ kernel_memory_populate_object_and_unlock(
 		 * Manual PMAP_ENTER_OPTIONS() with shortcuts
 		 * for the kernel and compressor objects.
 		 */
-
 		kernel_memory_populate_pmap_enter(object, addr, pg_offset,
-		    mem, prot, pe_flags);
+		    mem, prot, pe_flags, mapping_type);
 
 		if (flags & KMA_NOENCRYPT) {
 			pmap_set_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
@@ -1406,7 +1420,8 @@ kernel_memory_populate(
 	if (kr == KERN_SUCCESS) {
 		vm_object_lock(object);
 		kernel_memory_populate_object_and_unlock(object, addr,
-		    addr, size, page_list, flags, tag, VM_PROT_DEFAULT);
+		    addr, size, page_list, flags, tag, VM_PROT_DEFAULT,
+		    __kmem_mapping_type(ANYF(flags)));
 	}
 
 #if DEBUG || DEVELOPMENT
@@ -1493,6 +1508,26 @@ __kmem_realloc_invalid_object_size_panic(
 	panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
 	    "object %p has unexpected size %ld",
 	    map, (void *)address, (size_t)size, entry, object, objsize);
+}
+
+__abortlike
+static void
+__kmem_realloc_invalid_pager_panic(
+	vm_map_t                map,
+	vm_address_t            address,
+	vm_size_t               size,
+	vm_map_entry_t          entry)
+{
+	vm_object_t object     = VME_OBJECT(entry);
+	memory_object_t pager  = object->pager;
+	bool pager_created     = object->pager_created;
+	bool pager_initialized = object->pager_initialized;
+	bool pager_ready       = object->pager_ready;
+
+	panic("kmem_realloc(map=%p, addr=%p, size=%zd, entry=%p): "
+	    "object %p has unexpected pager %p (%d,%d,%d)",
+	    map, (void *)address, (size_t)size, entry, object,
+	    pager, pager_created, pager_initialized, pager_ready);
 }
 
 static kmem_return_t
@@ -1840,6 +1875,14 @@ again:
 		vme_btref_consider_and_set(newentry, __builtin_frame_address(0));
 		newoffs = newaddr + oldsize;
 	} else {
+		if (object->pager_created || object->pager) {
+			/*
+			 * We can't "realloc/grow" the pager, so pageable
+			 * allocations should not go through this path.
+			 */
+			__kmem_realloc_invalid_pager_panic(map,
+			    req_oldaddr, req_oldsize + delta, oldentry);
+		}
 		if (object->vo_size != oldsize) {
 			__kmem_realloc_invalid_object_size_panic(map,
 			    req_oldaddr, req_oldsize + delta, oldentry);
@@ -1863,6 +1906,8 @@ again:
 	vm_size_t guard_right_size = __kmem_guard_right(ANYF(flags));
 
 	if (flags & KMR_KOBJECT) {
+		pmap_mapping_type_t mapping_type = __kmem_mapping_type(ANYF(flags));
+
 		pmap_protect(kernel_pmap,
 		    oldaddr, oldaddr + oldsize - guard_right_size,
 		    VM_PROT_NONE);
@@ -1886,7 +1931,7 @@ again:
 			mem->vmp_busy = false;
 
 			kernel_memory_populate_pmap_enter(object, newaddr,
-			    offset, mem, VM_PROT_DEFAULT, 0);
+			    offset, mem, VM_PROT_DEFAULT, 0, mapping_type);
 		}
 
 		kernel_memory_populate_object_and_unlock(object,
@@ -1894,10 +1939,9 @@ again:
 		    newoffs - guard_right_size,
 		    newsize - oldsize,
 		    page_list, (kma_flags_t)flags,
-		    guard.kmg_tag, VM_PROT_DEFAULT);
+		    guard.kmg_tag, VM_PROT_DEFAULT, mapping_type);
 	} else {
 		vm_page_t guard_right = VM_PAGE_NULL;
-		kern_return_t kr;
 
 		/*
 		 *	Note: we are borrowing the new entry reference
@@ -1912,6 +1956,43 @@ again:
 			vm_page_remove(guard_right, true);
 		}
 
+		if (flags & KMR_FREEOLD) {
+			/*
+			 * Freeing the old mapping will make
+			 * the old pages become pageable until
+			 * the new mapping makes them wired again.
+			 * Let's take an extra "wire_count" to
+			 * prevent any accidental "page out".
+			 * We'll have to undo that after wiring
+			 * the new mapping.
+			 */
+			vm_object_reference_locked(object); /* keep object alive */
+			for (vm_object_offset_t offset = 0;
+			    offset < oldsize - guard_right_size;
+			    offset += PAGE_SIZE_64) {
+				vm_page_t mem;
+
+				mem = vm_page_lookup(object, offset);
+				assert(mem != VM_PAGE_NULL);
+				assertf(!VM_PAGE_PAGEABLE(mem),
+				    "mem %p qstate %d",
+				    mem, mem->vmp_q_state);
+				if (VM_PAGE_GET_PHYS_PAGE(mem) == vm_page_guard_addr) {
+					/* guard pages are not wired */
+				} else {
+					assertf(VM_PAGE_WIRED(mem),
+					    "mem %p qstate %d wirecount %d",
+					    mem,
+					    mem->vmp_q_state,
+					    mem->vmp_wire_count);
+					assertf(mem->vmp_wire_count >= 1,
+					    "mem %p wirecount %d",
+					    mem, mem->vmp_wire_count);
+					mem->vmp_wire_count++;
+				}
+			}
+		}
+
 		for (vm_object_offset_t offset = oldsize - guard_right_size;
 		    offset < newsize - guard_right_size;
 		    offset += PAGE_SIZE_64) {
@@ -1919,6 +2000,8 @@ again:
 
 			page_list = mem->vmp_snext;
 			mem->vmp_snext = VM_PAGE_NULL;
+			assert(mem->vmp_q_state == VM_PAGE_NOT_ON_Q);
+			assert(!VM_PAGE_PAGEABLE(mem));
 
 			vm_page_insert(mem, object, offset);
 			mem->vmp_busy = false;
@@ -1930,10 +2013,6 @@ again:
 		}
 
 		vm_object_unlock(object);
-
-		kr = vm_map_wire_kernel(map, newaddr, newaddr + newsize,
-		    VM_PROT_DEFAULT, guard.kmg_tag, FALSE);
-		assert(kr == KERN_SUCCESS);
 	}
 
 	/*
@@ -1977,6 +2056,56 @@ again:
 		    vmr_flags, guard);
 	} else {
 		vm_map_unlock(map);
+	}
+
+	if ((flags & KMR_KOBJECT) == 0) {
+		kern_return_t kr;
+		/*
+		 * This must happen _after_ we do the KMR_FREEOLD,
+		 * because wiring the pages will call into the pmap,
+		 * and if the pages are typed XNU_KERNEL_RESTRICTED,
+		 * this would cause a second mapping of the page and panic.
+		 */
+		kr = vm_map_wire_kernel(map, newaddr, newaddr + newsize,
+		    VM_PROT_DEFAULT, guard.kmg_tag, FALSE);
+		assert(kr == KERN_SUCCESS);
+
+		if (flags & KMR_FREEOLD) {
+			/*
+			 * Undo the extra "wiring" we made above
+			 * and release the extra reference we took
+			 * on the object.
+			 */
+			vm_object_lock(object);
+			for (vm_object_offset_t offset = 0;
+			    offset < oldsize - guard_right_size;
+			    offset += PAGE_SIZE_64) {
+				vm_page_t mem;
+
+				mem = vm_page_lookup(object, offset);
+				assert(mem != VM_PAGE_NULL);
+				assertf(!VM_PAGE_PAGEABLE(mem),
+				    "mem %p qstate %d",
+				    mem, mem->vmp_q_state);
+				if (VM_PAGE_GET_PHYS_PAGE(mem) == vm_page_guard_addr) {
+					/* guard pages are not wired */
+				} else {
+					assertf(VM_PAGE_WIRED(mem),
+					    "mem %p qstate %d wirecount %d",
+					    mem,
+					    mem->vmp_q_state,
+					    mem->vmp_wire_count);
+					assertf(mem->vmp_wire_count >= 2,
+					    "mem %p wirecount %d",
+					    mem, mem->vmp_wire_count);
+					mem->vmp_wire_count--;
+					assert(VM_PAGE_WIRED(mem));
+					assert(mem->vmp_wire_count >= 1);
+				}
+			}
+			vm_object_unlock(object);
+			vm_object_deallocate(object); /* release extra ref */
+		}
 	}
 
 	if (needs_wakeup) {
@@ -4243,7 +4372,7 @@ kmem_realloc_basic_test(vm_map_t map, kmr_flags_t kind)
 	 *	Initial N page allocation
 	 */
 	addr = kmem_alloc_guard(map, ptoa(N), 0,
-	    (kind & (KMA_KOBJECT | KMA_GUARD_LAST)) | KMA_ZERO,
+	    (kind & (KMA_KOBJECT | KMA_GUARD_LAST | KMA_DATA)) | KMA_ZERO,
 	    guard).kmr_address;
 	assert3u(addr, !=, 0);
 	kmem_test_assert_map(map, N, 1);
@@ -4340,16 +4469,28 @@ kmem_basic_test(__unused int64_t in, int64_t *out)
 	kmem_realloc_basic_test(map, KMR_FREEOLD);
 	printf("%s:     PASS\n", __func__);
 
-	printf("%s: kmem_realloc (KMR_NONE) ...\n", __func__);
-	kmem_realloc_basic_test(map, KMR_NONE);
+	printf("%s: kmem_realloc (KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_FIRST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_FIRST);
 	printf("%s:     PASS\n", __func__);
 
 	printf("%s: kmem_realloc (KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_LAST) ...\n", __func__);
 	kmem_realloc_basic_test(map, KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_LAST);
 	printf("%s:     PASS\n", __func__);
 
+	printf("%s: kmem_realloc (KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_FIRST | KMR_GUARD_LAST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_KOBJECT | KMR_FREEOLD | KMR_GUARD_FIRST | KMR_GUARD_LAST);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_FREEOLD | KMR_GUARD_FIRST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_FREEOLD | KMR_GUARD_FIRST);
+	printf("%s:     PASS\n", __func__);
+
 	printf("%s: kmem_realloc (KMR_FREEOLD | KMR_GUARD_LAST) ...\n", __func__);
 	kmem_realloc_basic_test(map, KMR_FREEOLD | KMR_GUARD_LAST);
+	printf("%s:     PASS\n", __func__);
+
+	printf("%s: kmem_realloc (KMR_FREEOLD | KMR_GUARD_FIRST | KMR_GUARD_LAST) ...\n", __func__);
+	kmem_realloc_basic_test(map, KMR_FREEOLD | KMR_GUARD_FIRST | KMR_GUARD_LAST);
 	printf("%s:     PASS\n", __func__);
 
 	/* using KMR_DATA signals to test the non atomic realloc path */

@@ -338,6 +338,20 @@ devfs_devfd_lookup(struct vnop_lookup_args *ap)
 		goto bad;
 	}
 
+	/*
+	 * For OP_SETATTR lookups, resolve the backing vnode now so we do
+	 * MACF checks on the right thing.
+	 *
+	 * If there is no vnode (i.e. something else is open at that fd) then
+	 * just return an fdescnode.
+	 */
+	if ((cnp->cn_ndp->ni_op == OP_SETATTR) &&
+	    (0 == vnode_getfromfd(ap->a_context, fd, &fvp))) {
+		cnp->cn_flags &= ~MAKEENTRY;
+		*vpp = fvp;
+		return 0;
+	}
+
 	error = fdesc_allocvp(Fdesc, FD_DESC + fd, dvp->v_mount, &fvp, VNON, fd);
 	if (error) {
 		goto bad;
@@ -499,8 +513,6 @@ fdesc_setattr(struct vnop_setattr_args *ap)
 {
 	struct fileproc *fp;
 	unsigned fd;
-	kauth_action_t action;
-	vnode_t vp;
 	int error;
 	struct proc * p = vfs_context_proc(ap->a_context);
 
@@ -520,33 +532,16 @@ fdesc_setattr(struct vnop_setattr_args *ap)
 		return error;
 	}
 
-	/*
-	 * Can setattr the underlying vnode, but not sockets!
-	 */
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
-	{
-		vp = (struct vnode *)fp_get_data(fp);
-
-		if ((error = vnode_getwithref(vp)) != 0) {
-			break;
-		}
-
-		if (((error = vnode_authattr(vp, ap->a_vap, &action, ap->a_context)) != 0) ||
-		    ((error = vnode_authorize(vp, NULL, action, ap->a_context)) != 0)) {
-			if (error == EACCES) {
-				error = EPERM;
-			}
-
-			(void)vnode_put(vp);
-			break;
-		}
-
-		error = vnode_setattr(vp, ap->a_vap, ap->a_context);
-		(void)vnode_put(vp);
-		break;
-	}
-
+	/*
+	 * We shouldn't get here unless we were raced with close/open.
+	 * In that case, shenanigans are happening and it's unsafe to
+	 * take action on the `setattr`; the MACF and UNIX permission
+	 * checks are no longer valid (TOCTOU).
+	 *
+	 * Fall through to report success.
+	 */
 	case DTYPE_SOCKET:
 	case DTYPE_PIPE:
 		error = 0;

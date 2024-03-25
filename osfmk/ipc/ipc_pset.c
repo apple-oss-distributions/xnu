@@ -247,11 +247,13 @@ ipc_pset_finalize(
 }
 
 
+#pragma mark - kevent support
+
 /*
  * Kqueue EVFILT_MACHPORT support
  *
- * - kn_ipc_obj points to the monitored ipc port or pset. If the knote is
- *   using a kqwl, it is eligible to participate in sync IPC overrides.
+ * - kn_ipc_{port,pset} points to the monitored ipc port or pset. If the knote
+ *   is using a kqwl, it is eligible to participate in sync IPC overrides.
  *
  *   For the first such sync IPC message in the port, we set up the port's
  *   turnstile to directly push on the kqwl's turnstile (which is in turn set up
@@ -294,30 +296,34 @@ ipc_pset_finalize(
 #include <sys/errno.h>
 
 static int
-filt_machport_filter_result(struct knote *kn, ipc_object_t object)
+filt_pset_filter_result(ipc_pset_t pset)
 {
-	struct waitq *wq = io_waitq(object);
+	ips_mq_lock_held(pset);
+
+	if (!waitq_is_valid(&pset->ips_wqset)) {
+		return 0;
+	}
+
+	return waitq_set_first_prepost(&pset->ips_wqset, WQS_PREPOST_PEEK) ?
+	       FILTER_ACTIVE : 0;
+}
+
+static int
+filt_port_filter_result(struct knote *kn, ipc_port_t port)
+{
+	struct kqueue *kqwl = knote_get_kq(kn);
 	ipc_kmsg_t first;
 	int result = 0;
 
-	io_lock_held(object);
+	ip_mq_lock_held(port);
 
 	if (kn->kn_sfflags & MACH_RCV_MSG) {
 		result = FILTER_RESET_EVENT_QOS;
 	}
 
-	if (!waitq_is_valid(wq)) {
+	if (!waitq_is_valid(&port->ip_waitq)) {
 		return result;
 	}
-
-	if (waitq_type(wq) == WQT_PORT_SET) {
-		ipc_pset_t pset = ips_object_to_pset(object);
-		return waitq_set_first_prepost(&pset->ips_wqset, WQS_PREPOST_PEEK) ?
-		       FILTER_ACTIVE : 0;
-	}
-
-	ipc_port_t port = ip_object_to_port(object);
-	struct kqueue *kqwl = knote_get_kq(kn);
 
 	if (port->ip_kernel_iotier_override != kqueue_get_iotier_override(kqwl)) {
 		kqueue_set_iotier_override(kqwl, port->ip_kernel_iotier_override);
@@ -378,8 +384,8 @@ filt_machport_stash_port(struct knote *kn, ipc_port_t port, int *link)
 	struct turnstile *ts = TURNSTILE_NULL;
 
 	if (kn->kn_filter == EVFILT_WORKLOOP) {
-		assert(kn->kn_ipc_obj == NULL);
-		kn->kn_ipc_obj = ip_to_object(port);
+		assert(kn->kn_ipc_port == NULL);
+		kn->kn_ipc_port = port;
 		ip_reference(port);
 		if (link) {
 			*link = PORT_SYNC_LINK_WORKLOOP_KNOTE;
@@ -503,9 +509,9 @@ filt_machport_turnstile_complete_port(struct knote *kn, ipc_port_t port)
 void
 filt_wldetach_sync_ipc(struct knote *kn)
 {
-	ipc_object_t io = kn->kn_ipc_obj;
-	filt_machport_turnstile_complete_port(kn, ip_object_to_port(io));
-	kn->kn_ipc_obj = IO_NULL;
+	ipc_port_t port = kn->kn_ipc_port;
+	filt_machport_turnstile_complete_port(kn, port);
+	kn->kn_ipc_port = IP_NULL;
 }
 
 /*
@@ -619,7 +625,7 @@ filt_wlattach_sync_ipc(struct knote *kn)
 	}
 
 	/* make sure the port was stashed */
-	assert(kn->kn_ipc_obj == ip_to_object(port));
+	assert(kn->kn_ipc_port == port);
 
 	/* port has been unlocked by ipc_port_adjust_* */
 
@@ -627,18 +633,108 @@ filt_wlattach_sync_ipc(struct knote *kn)
 }
 
 static int
-filt_machportattach(
-	struct knote *kn,
-	__unused struct kevent_qos_s *kev)
+filt_psetattach(struct knote *kn, ipc_pset_t pset)
+{
+	int result = 0;
+
+	ips_reference(pset);
+	kn->kn_ipc_pset = pset;
+
+	filt_machport_link(&pset->ips_klist, kn);
+	result = filt_pset_filter_result(pset);
+	ips_mq_unlock(pset);
+
+	return result;
+}
+
+static int
+filt_portattach(struct knote *kn, ipc_port_t port)
+{
+	struct turnstile *send_turnstile = TURNSTILE_NULL;
+	int result = 0;
+
+	if (port->ip_specialreply) {
+		/*
+		 * Registering for kevents on special reply ports
+		 * isn't supported for two reasons:
+		 *
+		 * 1. it really makes very little sense for a port that
+		 *    is supposed to be used synchronously
+		 *
+		 * 2. their ports's ip_klist field will be used to
+		 *    store the receive turnstile, so we can't possibly
+		 *    attach them anyway.
+		 */
+		ip_mq_unlock(port);
+		knote_set_error(kn, ENOTSUP);
+		return 0;
+	}
+
+	ip_reference(port);
+	kn->kn_ipc_port = port;
+	if (port->ip_sync_link_state != PORT_SYNC_LINK_ANY) {
+		/*
+		 * We're attaching a port that used to have an IMQ_KNOTE,
+		 * clobber this state, we'll fixup its turnstile inheritor below.
+		 */
+		ipc_port_adjust_sync_link_state_locked(port, PORT_SYNC_LINK_ANY, NULL);
+	}
+
+	filt_machport_link(&port->ip_klist, kn);
+	result = filt_port_filter_result(kn, port);
+
+	/*
+	 * Update the port's turnstile inheritor
+	 *
+	 * Unlike filt_machportdetach(), we don't have to care about races for
+	 * turnstile_workloop_pusher_info(): filt_machport_link() doesn't affect
+	 * already pushing knotes, and if the current one becomes the new
+	 * pusher, it'll only be visible when turnstile_workloop_pusher_info()
+	 * returns.
+	 */
+	send_turnstile = port_send_turnstile(port);
+	if (send_turnstile) {
+		turnstile_reference(send_turnstile);
+		ipc_port_send_update_inheritor(port, send_turnstile,
+		    TURNSTILE_IMMEDIATE_UPDATE);
+
+		/*
+		 * rdar://problem/48861190
+		 *
+		 * When a listener connection resumes a peer,
+		 * updating the inheritor above has moved the push
+		 * from the current thread to the workloop.
+		 *
+		 * However, we haven't told the workloop yet
+		 * that it needs a thread request, and we risk
+		 * to be preeempted as soon as we drop the space
+		 * lock below.
+		 *
+		 * To avoid this disable preemption and let kevent
+		 * reenable it after it takes the kqlock.
+		 */
+		disable_preemption();
+		result |= FILTER_THREADREQ_NODEFEER;
+	}
+
+	ip_mq_unlock(port);
+
+	if (send_turnstile) {
+		turnstile_update_inheritor_complete(send_turnstile,
+		    TURNSTILE_INTERLOCK_NOT_HELD);
+		turnstile_deallocate_safe(send_turnstile);
+	}
+
+	return result;
+}
+
+static int
+filt_machportattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
 	mach_port_name_t name = (mach_port_name_t)kn->kn_id;
 	ipc_space_t space = current_space();
 	ipc_entry_bits_t bits;
 	ipc_object_t object;
-	struct turnstile *send_turnstile = TURNSTILE_NULL;
-
-	int error = 0;
-	int result = 0;
 	kern_return_t kr;
 
 	kn->kn_flags &= ~EV_EOF;
@@ -656,125 +752,62 @@ filt_machportattach(
 	kr = ipc_right_lookup_read(space, name, &bits, &object);
 
 	if (kr != KERN_SUCCESS) {
-		error = ENOENT;
-		goto out;
+		knote_set_error(kn, ENOENT);
+		return 0;
 	}
 	/* object is locked and active */
 
 	if (bits & MACH_PORT_TYPE_PORT_SET) {
-		ipc_pset_t pset = ips_object_to_pset(object);
-
-		io_reference(object);
-		kn->kn_ipc_obj = object;
-		filt_machport_link(&pset->ips_klist, kn);
-		result = filt_machport_filter_result(kn, object);
-		io_unlock(object);
-	} else if (bits & MACH_PORT_TYPE_RECEIVE) {
-		ipc_port_t port = ip_object_to_port(object);
-
-		if (port->ip_specialreply) {
-			/*
-			 * Registering for kevents on special reply ports
-			 * isn't supported for two reasons:
-			 *
-			 * 1. it really makes very little sense for a port that
-			 *    is supposed to be used synchronously
-			 *
-			 * 2. their ports's ip_klist field will be used to
-			 *    store the receive turnstile, so we can't possibly
-			 *    attach them anyway.
-			 */
-			io_unlock(object);
-			error = ENOTSUP;
-			goto out;
-		}
-
-		io_reference(object);
-		kn->kn_ipc_obj = object;
-		if (port->ip_sync_link_state != PORT_SYNC_LINK_ANY) {
-			/*
-			 * We're attaching a port that used to have an IMQ_KNOTE,
-			 * clobber this state, we'll fixup its turnstile inheritor below.
-			 */
-			ipc_port_adjust_sync_link_state_locked(port, PORT_SYNC_LINK_ANY, NULL);
-		}
-
-		filt_machport_link(&port->ip_klist, kn);
-		result = filt_machport_filter_result(kn, object);
-
-		/*
-		 * Update the port's turnstile inheritor
-		 *
-		 * Unlike filt_machportdetach(), we don't have to care about races for
-		 * turnstile_workloop_pusher_info(): filt_machport_link() doesn't affect
-		 * already pushing knotes, and if the current one becomes the new
-		 * pusher, it'll only be visible when turnstile_workloop_pusher_info()
-		 * returns.
-		 */
-		send_turnstile = port_send_turnstile(port);
-		if (send_turnstile) {
-			turnstile_reference(send_turnstile);
-			ipc_port_send_update_inheritor(port, send_turnstile,
-			    TURNSTILE_IMMEDIATE_UPDATE);
-
-			/*
-			 * rdar://problem/48861190
-			 *
-			 * When a listener connection resumes a peer,
-			 * updating the inheritor above has moved the push
-			 * from the current thread to the workloop.
-			 *
-			 * However, we haven't told the workloop yet
-			 * that it needs a thread request, and we risk
-			 * to be preeempted as soon as we drop the space
-			 * lock below.
-			 *
-			 * To avoid this disable preemption and let kevent
-			 * reenable it after it takes the kqlock.
-			 */
-			disable_preemption();
-			result |= FILTER_THREADREQ_NODEFEER;
-		}
-
-		io_unlock(object);
-
-		if (send_turnstile) {
-			turnstile_update_inheritor_complete(send_turnstile,
-			    TURNSTILE_INTERLOCK_NOT_HELD);
-			turnstile_deallocate_safe(send_turnstile);
-		}
-	} else {
-		io_unlock(object);
-		error = ENOTSUP;
+		kn->kn_filtid = EVFILTID_MACH_PORT_SET;
+		return filt_psetattach(kn, ips_object_to_pset(object));
 	}
 
-out:
-	/* bail out on errors */
-	if (error) {
-		knote_set_error(kn, error);
-		return 0;
+	if (bits & MACH_PORT_TYPE_RECEIVE) {
+		kn->kn_filtid = EVFILTID_MACH_PORT;
+		return filt_portattach(kn, ip_object_to_port(object));
 	}
 
-	return result;
+	io_unlock(object);
+	knote_set_error(kn, ENOTSUP);
+	return 0;
 }
 
 static void
-filt_machportdetach(
-	struct knote *kn)
+filt_psetdetach(struct knote *kn)
 {
-	ipc_object_t object = kn->kn_ipc_obj;
-	struct turnstile *send_turnstile = TURNSTILE_NULL;
+	ipc_pset_t pset = kn->kn_ipc_pset;
 
 	filt_machport_turnstile_complete(kn);
 
-	io_lock(object);
+	ips_mq_lock(pset);
+
 	if ((kn->kn_status & KN_VANISHED) || (kn->kn_flags & EV_EOF)) {
 		/*
 		 * ipc_mqueue_changed() already unhooked this knote from the waitq,
 		 */
 	} else {
-		ipc_port_t port = IP_NULL;
+		filt_machport_unlink(&pset->ips_klist, kn);
+	}
 
+	kn->kn_ipc_pset = IPS_NULL;
+	ips_mq_unlock(pset);
+	ips_release(pset);
+}
+
+static void
+filt_portdetach(struct knote *kn)
+{
+	ipc_port_t port = kn->kn_ipc_port;
+	struct turnstile *send_turnstile = TURNSTILE_NULL;
+
+	filt_machport_turnstile_complete(kn);
+
+	ip_mq_lock(port);
+	if ((kn->kn_status & KN_VANISHED) || (kn->kn_flags & EV_EOF)) {
+		/*
+		 * ipc_mqueue_changed() already unhooked this knote from the waitq,
+		 */
+	} else {
 		/*
 		 * When the knote being detached is the first one in the list,
 		 * then unlinking the knote *and* updating the turnstile inheritor
@@ -784,32 +817,24 @@ filt_machportdetach(
 		 * The caller of turnstile_workloop_pusher_info() will use the kq req
 		 * lock (and hence the kqlock), so we just need to hold the kqlock too.
 		 */
-		if (io_otype(object) == IOT_PORT) {
-			port = ip_object_to_port(object);
-			assert(port->ip_sync_link_state == PORT_SYNC_LINK_ANY);
-			if (kn == SLIST_FIRST(&port->ip_klist)) {
-				send_turnstile = port_send_turnstile(port);
-			}
-			filt_machport_unlink(&port->ip_klist, kn);
-			struct kqueue *kq = knote_get_kq(kn);
-			kqueue_set_iotier_override(kq, THROTTLE_LEVEL_END);
-		} else {
-			ipc_pset_t pset = ips_object_to_pset(object);
-
-			filt_machport_unlink(&pset->ips_klist, kn);
+		assert(port->ip_sync_link_state == PORT_SYNC_LINK_ANY);
+		if (kn == SLIST_FIRST(&port->ip_klist)) {
+			send_turnstile = port_send_turnstile(port);
 		}
+		filt_machport_unlink(&port->ip_klist, kn);
+		struct kqueue *kq = knote_get_kq(kn);
+		kqueue_set_iotier_override(kq, THROTTLE_LEVEL_END);
+	}
 
-
-		if (send_turnstile) {
-			turnstile_reference(send_turnstile);
-			ipc_port_send_update_inheritor(port, send_turnstile,
-			    TURNSTILE_IMMEDIATE_UPDATE);
-		}
+	if (send_turnstile) {
+		turnstile_reference(send_turnstile);
+		ipc_port_send_update_inheritor(port, send_turnstile,
+		    TURNSTILE_IMMEDIATE_UPDATE);
 	}
 
 	/* Clear the knote pointer once the knote has been removed from turnstile */
-	kn->kn_ipc_obj = IO_NULL;
-	io_unlock(object);
+	kn->kn_ipc_port = IP_NULL;
+	ip_mq_unlock(port);
 
 	if (send_turnstile) {
 		turnstile_update_inheritor_complete(send_turnstile,
@@ -817,11 +842,11 @@ filt_machportdetach(
 		turnstile_deallocate(send_turnstile);
 	}
 
-	io_release(object);
+	ip_release(port);
 }
 
 /*
- * filt_machportevent - deliver events into the mach port filter
+ * filt_{pset,port}event - deliver events into the mach port filter
  *
  * Mach port message arrival events are currently only posted via the
  * kqueue filter routine for ports.
@@ -836,24 +861,27 @@ filt_machportdetach(
  * and is the waitq which is posting.
  */
 static int
-filt_machportevent(struct knote *kn, long hint __assert_only)
+filt_psetevent(struct knote *kn __unused, long hint __assert_only)
 {
-	if (io_otype(kn->kn_ipc_obj) == IOT_PORT_SET) {
-		/*
-		 * When called for a port-set,
-		 * the posting port waitq is locked.
-		 *
-		 * waitq_set_first_prepost()
-		 * in filt_machport_filter_result()
-		 * would try to lock it and be very sad.
-		 *
-		 * Just trust what we know to be true.
-		 */
-		assert(hint != 0);
-		return FILTER_ACTIVE;
-	}
+	/*
+	 * When called for a port-set,
+	 * the posting port waitq is locked.
+	 *
+	 * waitq_set_first_prepost()
+	 * in filt_machport_filter_result()
+	 * would try to lock it and be very sad.
+	 *
+	 * Just trust what we know to be true.
+	 */
+	assert(hint != 0);
+	return FILTER_ACTIVE;
+}
+
+static int
+filt_portevent(struct knote *kn, long hint __assert_only)
+{
 	assert(hint == 0);
-	return filt_machport_filter_result(kn, kn->kn_ipc_obj);
+	return filt_port_filter_result(kn, kn->kn_ipc_port);
 }
 
 void
@@ -862,14 +890,9 @@ ipc_pset_prepost(struct waitq_set *wqs, struct waitq *waitq)
 	KNOTE(&ips_from_waitq(wqs)->ips_klist, (long)waitq);
 }
 
-static int
-filt_machporttouch(
-	struct knote *kn,
-	struct kevent_qos_s *kev)
+static void
+filt_machporttouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	ipc_object_t object = kn->kn_ipc_obj;
-	int result = 0;
-
 	/*
 	 * Specificying MACH_RCV_MSG or MACH_RCV_SYNC_PEEK during attach results in
 	 * allocation of a turnstile. Modifying the filter flags to include these
@@ -879,7 +902,7 @@ filt_machporttouch(
 	if ((kn->kn_sfflags ^ kev->fflags) & (MACH_RCV_MSG | MACH_RCV_SYNC_PEEK)) {
 		kev->flags |= EV_ERROR;
 		kev->data = EINVAL;
-		return 0;
+		return;
 	}
 
 	/* copy in new settings and save off new input fflags */
@@ -894,18 +917,51 @@ filt_machporttouch(
 		 */
 		filt_machport_turnstile_complete(kn);
 	}
+}
 
-	io_lock(object);
-	result = filt_machport_filter_result(kn, object);
-	io_unlock(object);
+static int
+filt_psettouch(struct knote *kn, struct kevent_qos_s *kev)
+{
+	ipc_pset_t pset = kn->kn_ipc_pset;
+	int result = 0;
+
+	filt_machporttouch(kn, kev);
+	if (kev->flags & EV_ERROR) {
+		return 0;
+	}
+
+	ips_mq_lock(pset);
+	result = filt_pset_filter_result(pset);
+	ips_mq_unlock(pset);
 
 	return result;
 }
 
 static int
-filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
+filt_porttouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	ipc_object_t object = kn->kn_ipc_obj;
+	ipc_port_t port = kn->kn_ipc_port;
+	int result = 0;
+
+	filt_machporttouch(kn, kev);
+	if (kev->flags & EV_ERROR) {
+		return 0;
+	}
+
+	ip_mq_lock(port);
+	result = filt_port_filter_result(kn, port);
+	ip_mq_unlock(port);
+
+	return result;
+}
+
+static int
+filt_machportprocess(
+	struct knote           *kn,
+	struct kevent_qos_s    *kev,
+	ipc_object_t            object,
+	ipc_object_type_t       otype)
+{
 	thread_t self = current_thread();
 	kevent_ctx_t kectx = NULL;
 
@@ -999,7 +1055,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	self->ith_state = MACH_RCV_IN_PROGRESS;
 	self->ith_knote = kn;
 
-	io_lock(object);
+	ipc_object_lock(object, otype);
 
 	wresult = ipc_mqueue_receive_on_thread_and_unlock(
 		io_waitq(object),
@@ -1048,18 +1104,20 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 		kqueue_process_preadopt_thread_group(self, kq, tg);
 	}
 #endif
-	ipc_port_t port = ip_object_to_port(object);
-	struct kqueue *kqwl = knote_get_kq(kn);
-	if (port->ip_kernel_iotier_override != kqueue_get_iotier_override(kqwl)) {
-		/*
-		 * Lock the port to make sure port->ip_kernel_iotier_override does
-		 * not change while updating the kqueue override, else kqueue could
-		 * have old iotier value.
-		 */
-		ip_mq_lock(port);
-		kqueue_set_iotier_override(kqwl, port->ip_kernel_iotier_override);
-		result |= FILTER_ADJUST_EVENT_IOTIER_BIT;
-		ip_mq_unlock(port);
+	if (otype == IOT_PORT) {
+		ipc_port_t port = ip_object_to_port(object);
+		struct kqueue *kqwl = knote_get_kq(kn);
+		if (port->ip_kernel_iotier_override != kqueue_get_iotier_override(kqwl)) {
+			/*
+			 * Lock the port to make sure port->ip_kernel_iotier_override does
+			 * not change while updating the kqueue override, else kqueue could
+			 * have old iotier value.
+			 */
+			ip_mq_lock(port);
+			kqueue_set_iotier_override(kqwl, port->ip_kernel_iotier_override);
+			ip_mq_unlock(port);
+			result |= FILTER_ADJUST_EVENT_IOTIER_BIT;
+		}
 	}
 
 	/*
@@ -1121,6 +1179,22 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	return result;
 }
 
+static int
+filt_psetprocess(struct knote *kn, struct kevent_qos_s *kev)
+{
+	ipc_object_t io = ips_to_object(kn->kn_ipc_pset);
+
+	return filt_machportprocess(kn, kev, io, IOT_PORT_SET);
+}
+
+static int
+filt_portprocess(struct knote *kn, struct kevent_qos_s *kev)
+{
+	ipc_object_t io = ip_to_object(kn->kn_ipc_port);
+
+	return filt_machportprocess(kn, kev, io, IOT_PORT);
+}
+
 static void
 filt_machportsanitizedcopyout(struct knote *kn, struct kevent_qos_s *kev)
 {
@@ -1131,13 +1205,29 @@ filt_machportsanitizedcopyout(struct knote *kn, struct kevent_qos_s *kev)
 	kev->ext[3] = 0;
 }
 
-SECURITY_READ_ONLY_EARLY(struct filterops) machport_filtops = {
+const struct filterops machport_attach_filtops = {
 	.f_adjusts_qos = true,
 	.f_extended_codes = true,
 	.f_attach = filt_machportattach,
-	.f_detach = filt_machportdetach,
-	.f_event = filt_machportevent,
-	.f_touch = filt_machporttouch,
-	.f_process = filt_machportprocess,
+	.f_sanitized_copyout = filt_machportsanitizedcopyout,
+};
+
+const struct filterops mach_port_filtops = {
+	.f_adjusts_qos = true,
+	.f_extended_codes = true,
+	.f_detach = filt_portdetach,
+	.f_event = filt_portevent,
+	.f_touch = filt_porttouch,
+	.f_process = filt_portprocess,
+	.f_sanitized_copyout = filt_machportsanitizedcopyout,
+};
+
+const struct filterops mach_port_set_filtops = {
+	.f_adjusts_qos = true,
+	.f_extended_codes = true,
+	.f_detach = filt_psetdetach,
+	.f_event = filt_psetevent,
+	.f_touch = filt_psettouch,
+	.f_process = filt_psetprocess,
 	.f_sanitized_copyout = filt_machportsanitizedcopyout,
 };

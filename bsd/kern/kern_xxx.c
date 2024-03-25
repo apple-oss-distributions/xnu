@@ -108,9 +108,6 @@ reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
 	char *message = NULL;
 	int error = 0;
 	size_t dummy = 0;
-#if CONFIG_MACF
-	kauth_cred_t my_cred;
-#endif
 
 	AUDIT_ARG(cmd, uap->opt);
 
@@ -148,9 +145,7 @@ reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
 	}
 #endif
 
-	my_cred = kauth_cred_proc_ref(p);
-	error = mac_system_check_reboot(my_cred, uap->opt);
-	kauth_cred_unref(&my_cred);
+	error = mac_system_check_reboot(current_cached_proc_cred(p), uap->opt);
 #if (DEVELOPMENT || DEBUG)
 skip_cred_check:
 #endif

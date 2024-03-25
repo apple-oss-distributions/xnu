@@ -1,5 +1,3 @@
-from __future__ import absolute_import, print_function
-
 from xnu import *
 import logging
 _usertaskdebugging_availabe = False

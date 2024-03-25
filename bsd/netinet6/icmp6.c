@@ -2852,7 +2852,7 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 		IFA_LOCK(&ia->ia_ifa);
 		ifp_ll6 = ia->ia_addr.sin6_addr;
 		IFA_UNLOCK(&ia->ia_ifa);
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 	}
 
 	/* get ip6 linklocal address for the router. */

@@ -151,7 +151,7 @@ alternate_debugger_init(void)
 			uintptr_t just_return_size = (uintptr_t)&alternate_debugger_just_return_end - (uintptr_t)&alternate_debugger_just_return;
 			assert(just_return_size <= alt_size); // alt_size is page-rounded, just_return_size should be much less than a page.
 			// install a simple return vector
-			memcpy((void*)alt_va, &alternate_debugger_just_return, just_return_size);
+			memcpy((void*)alt_va, (const void *)&alternate_debugger_just_return, just_return_size);
 
 			// code is ready, enable the pointers to it
 			lowGlo.lgAltDebugger = alt_code = alt_va;

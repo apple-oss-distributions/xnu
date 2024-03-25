@@ -72,7 +72,6 @@
 #include <net/if_types.h>
 #include <net/route.h>
 #include <net/kpi_protocol.h>
-#include <net/if_llatbl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -91,6 +90,8 @@
 
 #include <net/net_osdep.h>
 #include <dev/random/randomdev.h>
+
+#include <net/sockaddr_utils.h>
 
 u_int32_t in6_maxmtu = 0;
 
@@ -266,12 +267,12 @@ in6_iid_from_hw(struct ifnet *ifp, struct in6_addr *in6)
 	/* Why doesn't this code use ifnet_addrs? */
 	ifnet_lock_shared(ifp);
 	ifa = ifp->if_lladdr;
-	sdl = (struct sockaddr_dl *)(void *)ifa->ifa_addr;
+	sdl = SDL(ifa->ifa_addr);
 	if (sdl->sdl_alen == 0) {
 		ifnet_lock_done(ifp);
 		return -1;
 	}
-	IFA_ADDREF(ifa);        /* for this routine */
+	ifa_addref(ifa);        /* for this routine */
 	ifnet_lock_done(ifp);
 
 	IFA_LOCK(ifa);
@@ -386,12 +387,8 @@ in6_iid_from_hw(struct ifnet *ifp, struct in6_addr *in6)
 	err = 0;        /* found */
 
 done:
-	/* This must not be the last reference to the lladdr */
-	if (IFA_REMREF_LOCKED(ifa) == NULL) {
-		panic("%s: unexpected (missing) refcnt ifa=%p", __func__, ifa);
-		/* NOTREACHED */
-	}
 	IFA_UNLOCK(ifa);
+	ifa_remref(ifa);
 	return err;
 }
 
@@ -535,14 +532,14 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	 */
 	if ((pr = nd6_prefix_lookup(&pr0, ND6_PREFIX_EXPIRY_UNSPEC)) == NULL) {
 		if ((error = nd6_prelist_add(&pr0, NULL, &pr, TRUE)) != 0) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 			lck_mtx_destroy(&pr0.ndpr_lock, &ifa_mtx_grp);
 			return error;
 		}
 	}
 
 	in6_post_msg(ifp, KEV_INET6_NEW_LL_ADDR, ia, NULL);
-	IFA_REMREF(&ia->ia_ifa);
+	ifa_remref(&ia->ia_ifa);
 
 	/* Drop use count held above during lookup/add */
 	if (pr != NULL) {
@@ -603,7 +600,7 @@ in6_ifattach_loopback(
 	}
 
 	VERIFY(ia != NULL);
-	IFA_REMREF(&ia->ia_ifa);
+	ifa_remref(&ia->ia_ifa);
 	return 0;
 }
 
@@ -753,7 +750,6 @@ skipmcast:
 		    sizeof(IN6_IFEXTRA(ifp)->icmp6_ifstat));
 		bzero(&IN6_IFEXTRA(ifp)->in6_ifstat,
 		    sizeof(IN6_IFEXTRA(ifp)->in6_ifstat));
-		/* XXX TBD Purge the layer two table */
 		/*
 		 * XXX When recycling, nd_ifinfo gets initialized, other
 		 * than the lock, inside nd6_ifattach
@@ -778,7 +774,7 @@ skipmcast:
 		nd6_ifattach(ifp);
 	} else {
 		VERIFY(ND_IFINFO(ifp)->initialized);
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		ia6 = NULL;
 	}
 	scope6_ifattach(ifp);
@@ -832,7 +828,7 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 	 */
 	ia6 = in6ifa_ifpforlinklocal(ifp, 0);
 	if (ia6 != NULL) {
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return 0;
 	}
 
@@ -851,7 +847,7 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 		struct in6_addr *in6 = &sin6->sin6_addr;
 		boolean_t ok = TRUE;
 
-		bcopy(&ifra0->ifra_addr, sin6, sizeof(struct sockaddr_in6));
+		SOCKADDR_COPY(&ifra0->ifra_addr, sin6, sizeof(struct sockaddr_in6));
 
 		if (sin6->sin6_family != AF_INET6 || sin6->sin6_port != 0) {
 			ok = FALSE;
@@ -970,7 +966,7 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 	 */
 	ia6 = in6ifa_ifpforlinklocal(ifp, 0);
 	if (ia6 != NULL) {
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return 0;
 	}
 
@@ -980,11 +976,6 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 	ifra.ifra_addr.sin6_family = AF_INET6;
 	ifra.ifra_addr.sin6_len = sizeof(struct sockaddr_in6);
 	ifra.ifra_addr.sin6_addr.s6_addr16[0] = htons(0xfe80);
-	if (in6_embedded_scope) {
-		ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
-	} else {
-		ifra.ifra_addr.sin6_addr.s6_addr16[1] = 0;
-	}
 	ifra.ifra_addr.sin6_addr.s6_addr32[1] = 0;
 	ifra.ifra_flags = IN6_IFF_SECURED;
 
@@ -995,6 +986,11 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 		return EADDRNOTAVAIL;
 	}
 	in6_cga_node_unlock();
+	if (in6_embedded_scope) {
+		ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	} else {
+		ifra.ifra_addr.sin6_addr.s6_addr16[1] = 0;
+	}
 
 	if (in6_setscope(&ifra.ifra_addr.sin6_addr, ifp, IN6_NULL_IF_EMBEDDED_SCOPE(&ifra.ifra_addr.sin6_scope_id))) {
 		return EADDRNOTAVAIL;
@@ -1044,10 +1040,6 @@ in6_ifdetach(struct ifnet *ifp)
 	/* remove neighbor management table */
 	nd6_purge(ifp);
 
-	if (LLTABLE6(ifp)) {
-		lltable_free(LLTABLE6(ifp));
-	}
-
 	/* nuke any of IPv6 addresses we have */
 	lck_rw_lock_exclusive(&in6_ifaddr_rwlock);
 	boolean_t from_begining = TRUE;
@@ -1057,10 +1049,10 @@ in6_ifdetach(struct ifnet *ifp)
 			if (ia->ia_ifa.ifa_ifp != ifp) {
 				continue;
 			}
-			IFA_ADDREF(&ia->ia_ifa);        /* for us */
+			ifa_addref(&ia->ia_ifa);        /* for us */
 			lck_rw_done(&in6_ifaddr_rwlock);
 			in6_purgeaddr(&ia->ia_ifa);
-			IFA_REMREF(&ia->ia_ifa);        /* for us */
+			ifa_remref(&ia->ia_ifa);        /* for us */
 			lck_rw_lock_exclusive(&in6_ifaddr_rwlock);
 			/*
 			 * Purging the address caused in6_ifaddr_rwlock
@@ -1081,8 +1073,7 @@ in6_ifdetach(struct ifnet *ifp)
 	while (ifa != NULL) {
 		IFA_LOCK(ifa);
 		if (ifa->ifa_addr->sa_family != AF_INET6 ||
-		    !IN6_IS_ADDR_LINKLOCAL(&satosin6(&ifa->ifa_addr)->
-		    sin6_addr)) {
+		    !IN6_IS_ADDR_LINKLOCAL(&SIN6(ifa->ifa_addr)->sin6_addr)) {
 			IFA_UNLOCK(ifa);
 			ifa = TAILQ_NEXT(ifa, ifa_list);
 			continue;
@@ -1091,7 +1082,7 @@ in6_ifdetach(struct ifnet *ifp)
 		ia = (struct in6_ifaddr *)ifa;
 
 		/* hold a reference for this routine */
-		IFA_ADDREF_LOCKED(ifa);
+		ifa_addref(ifa);
 		/* remove from the linked list */
 		if_detach_ifa(ifp, ifa);
 		IFA_UNLOCK(ifa);
@@ -1124,12 +1115,12 @@ in6_ifdetach(struct ifnet *ifp)
 		/* remove from the routing table */
 		if (ia->ia_flags & IFA_ROUTE) {
 			IFA_UNLOCK(ifa);
-			rt = rtalloc1((struct sockaddr *)&ia->ia_addr, 0, 0);
+			rt = rtalloc1(SA(&ia->ia_addr), 0, 0);
 			if (rt != NULL) {
 				(void) rtrequest(RTM_DELETE,
-				    (struct sockaddr *)&ia->ia_addr,
-				    (struct sockaddr *)&ia->ia_addr,
-				    (struct sockaddr *)&ia->ia_prefixmask,
+				    SA(&ia->ia_addr),
+				    SA(&ia->ia_addr),
+				    SA(&ia->ia_prefixmask),
 				    rt->rt_flags, (struct rtentry **)0);
 				rtfree(rt);
 			}
@@ -1157,10 +1148,10 @@ in6_ifdetach(struct ifnet *ifp)
 		 * momentarily dropped above.
 		 */
 		if (unlinked) {
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		}
 		/* release reference held for this routine */
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 
 		/*
 		 * This is suboptimal, but since we dropped ifnet lock above
@@ -1186,7 +1177,7 @@ in6_ifdetach(struct ifnet *ifp)
 	nd6_purge(ifp);
 
 	/* remove route to link-local allnodes multicast (ff02::1) */
-	bzero(&sin6, sizeof(sin6));
+	SOCKADDR_ZERO(&sin6, sizeof(sin6));
 	sin6.sin6_len = sizeof(struct sockaddr_in6);
 	sin6.sin6_family = AF_INET6;
 	sin6.sin6_addr = in6addr_linklocal_allnodes;
@@ -1195,7 +1186,7 @@ in6_ifdetach(struct ifnet *ifp)
 	} else {
 		sin6.sin6_scope_id = ifp->if_index;
 	}
-	rt = rtalloc1((struct sockaddr *)&sin6, 0, 0);
+	rt = rtalloc1(SA(&sin6), 0, 0);
 	if (rt != NULL) {
 		RT_LOCK(rt);
 		if (rt->rt_ifp == ifp) {

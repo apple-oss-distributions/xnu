@@ -413,6 +413,8 @@ public:
 	void releaseDriverKitMatchingAssertion();
 #endif
 
+	void        copyWakeReasonString( char * outBuf, size_t bufSize );
+
 private:
 	unsigned long getRUN_STATE(void);
 
@@ -583,7 +585,6 @@ public:
 		IOPMPowerStateIndex ps = 0,
 		bool                async = false);
 
-	void        copyWakeReasonString( char * outBuf, size_t bufSize );
 	void        copyShutdownReasonString( char * outBuf, size_t bufSize );
 	void        lowLatencyAudioNotify(uint64_t time, boolean_t state);
 

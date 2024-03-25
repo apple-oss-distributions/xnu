@@ -115,16 +115,6 @@ struct logsoftc {
 } logsoftc;
 
 char smsg_bufc[CONFIG_MSG_BSIZE]; /* static buffer */
-struct firehose_chunk_s oslog_boot_buf = {
-	.fc_pos = {
-		.fcp_next_entry_offs = offsetof(struct firehose_chunk_s, fc_data),
-		.fcp_private_offs = FIREHOSE_CHUNK_SIZE,
-		.fcp_refcnt = 1, // indicate that there is a writer to this chunk
-		.fcp_stream = firehose_stream_persist,
-		.fcp_flag_io = 1, // for now, lets assume this is coming from the io bank
-	},
-}; /* static buffer */
-firehose_chunk_t firehose_boot_chunk = &oslog_boot_buf;
 struct msgbuf msgbuf = {.msg_magic  = MSG_MAGIC, .msg_size = sizeof(smsg_bufc), .msg_bufx = 0, .msg_bufr = 0, .msg_bufc = smsg_bufc};
 struct msgbuf *msgbufp __attribute__((used)) = &msgbuf;
 

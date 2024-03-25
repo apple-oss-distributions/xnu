@@ -140,6 +140,8 @@
 #include <net/necp.h>
 #endif /* NECP */
 
+#include <net/sockaddr_utils.h>
+
 /*
  * in6_pcblookup_local_and_cleanup does everything
  * in6_pcblookup_local does but it checks for a socket
@@ -222,7 +224,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		goto done;
 	}
 
-	bzero(&sin6, sizeof(sin6));
+	SOCKADDR_ZERO(&sin6, sizeof(sin6));
 	if (nam != NULL) {
 		if (nam->sa_len != sizeof(struct sockaddr_in6)) {
 			lck_rw_done(&pcbinfo->ipi_lock);
@@ -292,7 +294,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				    (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY |
 				    IN6_IFF_DETACHED | IN6_IFF_CLAT46)) {
 					IFA_UNLOCK(ifa);
-					IFA_REMREF(ifa);
+					ifa_remref(ifa);
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					error = EADDRNOTAVAIL;
@@ -308,7 +310,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				 */
 				outif = ifa->ifa_ifp;
 				IFA_UNLOCK(ifa);
-				IFA_REMREF(ifa);
+				ifa_remref(ifa);
 			}
 		}
 
@@ -725,7 +727,7 @@ int
 in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 {
 	struct in6_addr addr6;
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)(void *)nam;
+	struct sockaddr_in6 *sin6 = SIN6(nam);
 	struct inpcb *pcb;
 	int error = 0;
 	struct ifnet *outif = NULL;
@@ -735,7 +737,7 @@ in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	so->so_state_change_cnt++;
 #endif
 
-	if (so->so_proto->pr_protocol == IPPROTO_UDP &&
+	if (SOCK_CHECK_PROTO(so, IPPROTO_UDP) &&
 	    sin6->sin6_port == htons(53) && !(so->so_flags1 & SOF1_DNS_COUNTED)) {
 		so->so_flags1 |= SOF1_DNS_COUNTED;
 		INC_ATOMIC_INT64_LIM(net_api_stats.nas_socket_inet_dgram_dns);
@@ -949,8 +951,8 @@ in6_sockaddr(in_port_t port, struct in6_addr *addr_p, uint32_t ifscope)
 {
 	struct sockaddr_in6 *sin6;
 
-	sin6 = (struct sockaddr_in6 *)alloc_sockaddr(sizeof(*sin6),
-	    Z_WAITOK | Z_NOFAIL);
+	sin6 = SIN6(alloc_sockaddr(sizeof(*sin6),
+	    Z_WAITOK | Z_NOFAIL));
 
 	sin6->sin6_family = AF_INET6;
 	sin6->sin6_port = port;
@@ -970,14 +972,14 @@ in6_sockaddr(in_port_t port, struct in6_addr *addr_p, uint32_t ifscope)
 		sin6->sin6_addr.s6_addr16[1] = 0;
 	}
 
-	return (struct sockaddr *)sin6;
+	return SA(sin6);
 }
 
 void
 in6_sockaddr_s(in_port_t port, struct in6_addr *addr_p,
     struct sockaddr_in6 *sin6, uint32_t ifscope)
 {
-	bzero(sin6, sizeof(*sin6));
+	SOCKADDR_ZERO(sin6, sizeof(*sin6));
 	sin6->sin6_family = AF_INET6;
 	sin6->sin6_len = sizeof(*sin6);
 	sin6->sin6_port = port;
@@ -1033,7 +1035,7 @@ in6_getsockaddr_s(struct socket *so, struct sockaddr_in6 *ss)
 	in_port_t port;
 
 	VERIFY(ss != NULL);
-	bzero(ss, sizeof(*ss));
+	SOCKADDR_ZERO(ss, sizeof(*ss));
 
 	if ((inp = sotoinpcb(so)) == NULL) {
 		return EINVAL;
@@ -1134,7 +1136,7 @@ in6_pcbnotify(struct inpcbinfo *pcbinfo, struct sockaddr *dst, u_int fport_arg,
 		return;
 	}
 
-	sa6_dst = (struct sockaddr_in6 *)(void *)dst;
+	sa6_dst = SIN6(dst);
 	if (IN6_IS_ADDR_UNSPECIFIED(&sa6_dst->sin6_addr)) {
 		return;
 	}
@@ -1143,7 +1145,7 @@ in6_pcbnotify(struct inpcbinfo *pcbinfo, struct sockaddr *dst, u_int fport_arg,
 	 * note that src can be NULL when we get notify by local fragmentation.
 	 */
 	sa6_src = (src == NULL) ?
-	    sa6_any : *(struct sockaddr_in6 *)(uintptr_t)(size_t)src;
+	    sa6_any : *SIN6(src);
 	flowinfo = sa6_src.sin6_flowinfo;
 
 	/*
@@ -1183,7 +1185,7 @@ in6_pcbnotify(struct inpcbinfo *pcbinfo, struct sockaddr *dst, u_int fport_arg,
 		 */
 		if (cmd == PRC_MSGSIZE && cmdarg != NULL) {
 			socket_lock(inp->inp_socket, 1);
-			ip6_notify_pmtu(inp, (struct sockaddr_in6 *)(void *)dst,
+			ip6_notify_pmtu(inp, SIN6(dst),
 			    (u_int32_t *)cmdarg);
 			socket_unlock(inp->inp_socket, 1);
 		}
@@ -1594,7 +1596,7 @@ init_sin6(struct sockaddr_in6 *sin6, struct mbuf *m)
 	struct ip6_hdr *ip;
 
 	ip = mtod(m, struct ip6_hdr *);
-	bzero(sin6, sizeof(*sin6));
+	SOCKADDR_ZERO(sin6, sizeof(*sin6));
 	sin6->sin6_len = sizeof(*sin6);
 	sin6->sin6_family = AF_INET6;
 	sin6->sin6_addr = ip->ip6_src;

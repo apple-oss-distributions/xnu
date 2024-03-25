@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -288,6 +288,7 @@ flow_divert_group_lookup(uint32_t ctl_unit, struct flow_divert_pcb *fd_cb)
 			    group_cursor->in_process_pid != fd_cb->so->last_pid)) {
 				FDLOG(LOG_ERR, fd_cb, "Cannot access group for control unit %u, mismatched PID (%u != %u)",
 				    ctl_unit, group_cursor->in_process_pid, fd_cb->so ? fd_cb->so->last_pid : 0);
+				group = NULL;
 			} else {
 				FDGRP_RETAIN(group);
 			}
@@ -394,7 +395,7 @@ flow_divert_pcb_create(socket_t so)
 static void
 flow_divert_pcb_destroy(struct flow_divert_pcb *fd_cb)
 {
-	FDLOG(LOG_INFO, fd_cb, "Destroying, app tx %u, tunnel tx %u, tunnel rx %u",
+	FDLOG(LOG_INFO, fd_cb, "Destroying, app tx %llu, tunnel tx %llu, tunnel rx %llu",
 	    fd_cb->bytes_written_by_app, fd_cb->bytes_sent, fd_cb->bytes_received);
 
 	if (fd_cb->connect_token != NULL) {
@@ -1838,10 +1839,10 @@ move_on:
 }
 
 static int
-flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct sockaddr *toaddr)
+flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_size, struct sockaddr *toaddr)
 {
-	size_t  to_send         = mbuf_pkthdr_len(data);
-	int     error           = 0;
+	size_t to_send = data_size;
+	int error = 0;
 
 	if (to_send > fd_cb->send_window) {
 		to_send = fd_cb->send_window;
@@ -1852,10 +1853,12 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 	}
 
 	if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
-		size_t  sent            = 0;
-		mbuf_t  remaining_data  = data;
-		mbuf_t  pkt_data        = NULL;
-		while (sent < to_send && remaining_data != NULL) {
+		size_t sent = 0;
+		mbuf_t remaining_data = data;
+		size_t remaining_size = data_size;
+		mbuf_t pkt_data = NULL;
+
+		while (sent < to_send && remaining_data != NULL && remaining_size > 0) {
 			size_t  pkt_data_len;
 
 			pkt_data = remaining_data;
@@ -1866,15 +1869,17 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 				pkt_data_len = to_send - sent;
 			}
 
-			if (pkt_data_len < mbuf_pkthdr_len(pkt_data)) {
+			if (pkt_data_len < remaining_size) {
 				error = mbuf_split(pkt_data, pkt_data_len, MBUF_DONTWAIT, &remaining_data);
 				if (error) {
 					FDLOG(LOG_ERR, fd_cb, "mbuf_split failed: %d", error);
 					pkt_data = NULL;
 					break;
 				}
+				remaining_size -= pkt_data_len;
 			} else {
 				remaining_data = NULL;
+				remaining_size = 0;
 			}
 
 			error = flow_divert_send_data_packet(fd_cb, pkt_data, pkt_data_len);
@@ -1886,7 +1891,11 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 			sent += pkt_data_len;
 		}
 
-		fd_cb->send_window -= sent;
+		if (fd_cb->send_window >= sent) {
+			fd_cb->send_window -= sent;
+		} else {
+			fd_cb->send_window = 0;
+		}
 
 		error = 0;
 
@@ -1915,7 +1924,6 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 		}
 	} else if (SOCK_TYPE(fd_cb->so) == SOCK_DGRAM) {
 		int send_dgram_error = 0;
-		size_t data_size = mbuf_pkthdr_len(data);
 		if (to_send || data_size == 0) {
 			if (data_size <= FLOW_DIVERT_CHUNK_SIZE) {
 				send_dgram_error = flow_divert_send_datagram_packet(fd_cb, data, data_size, toaddr, FALSE, 0);
@@ -2458,7 +2466,7 @@ flow_divert_scope(struct flow_divert_pcb *fd_cb, int out_if_index, bool derive_n
 		}
 	} else {
 		ifnet_head_lock_shared();
-		if (out_if_index <= if_index) {
+		if (IF_INDEX_IN_RANGE(out_if_index)) {
 			new_ifp = ifindex2ifnet[out_if_index];
 		}
 		ifnet_head_done();
@@ -2868,7 +2876,7 @@ flow_divert_handle_data(struct flow_divert_pcb *fd_cb, mbuf_t packet, size_t off
 			if (got_remote_sa == TRUE) {
 				error = flow_divert_dup_addr(remote_address.ss_family, (struct sockaddr *)&remote_address, &append_sa);
 			} else {
-				if (fd_cb->so->so_proto->pr_domain->dom_family == AF_INET6) {
+				if (SOCK_CHECK_DOM(fd_cb->so, AF_INET6)) {
 					error = in6_mapped_peeraddr(fd_cb->so, &append_sa);
 				} else {
 					error = in_getpeeraddr(fd_cb->so, &append_sa);
@@ -3225,6 +3233,69 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 	lck_rw_done(&group->lck);
 }
 
+static void
+flow_divert_handle_flow_states_request(struct flow_divert_group *group)
+{
+	struct flow_divert_pcb *fd_cb;
+	mbuf_t packet = NULL;
+	SLIST_HEAD(, flow_divert_pcb) tmp_list;
+	int error = 0;
+	uint32_t ctl_unit = 0;
+
+	SLIST_INIT(&tmp_list);
+
+	error = flow_divert_packet_init(&nil_pcb, FLOW_DIVERT_PKT_FLOW_STATES, &packet);
+	if (error || packet == NULL) {
+		FDLOG(LOG_ERR, &nil_pcb, "flow_divert_packet_init failed: %d, cannot send flow states", error);
+		return;
+	}
+
+	lck_rw_lock_shared(&group->lck);
+
+	if (!MBUFQ_EMPTY(&group->send_queue)) {
+		FDLOG0(LOG_WARNING, &nil_pcb, "flow_divert_handle_flow_states_request: group send queue is not empty");
+	}
+
+	ctl_unit = group->ctl_unit;
+
+	RB_FOREACH(fd_cb, fd_pcb_tree, &group->pcb_tree) {
+		FDRETAIN(fd_cb);
+		SLIST_INSERT_HEAD(&tmp_list, fd_cb, tmp_list_entry);
+	}
+
+	lck_rw_done(&group->lck);
+
+	SLIST_FOREACH(fd_cb, &tmp_list, tmp_list_entry) {
+		FDLOCK(fd_cb);
+		if (fd_cb->so != NULL) {
+			struct flow_divert_flow_state state = {};
+			socket_lock(fd_cb->so, 0);
+
+			state.conn_id = fd_cb->hash;
+			state.bytes_written_by_app = fd_cb->bytes_written_by_app;
+			state.bytes_sent = fd_cb->bytes_sent;
+			state.bytes_received = fd_cb->bytes_received;
+			state.send_window = fd_cb->send_window;
+			state.send_buffer_bytes = fd_cb->so->so_snd.sb_cc;
+
+			error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_FLOW_STATE, sizeof(state), &state);
+			if (error) {
+				FDLOG(LOG_ERR, fd_cb, "Failed to add a flow state: %d", error);
+			}
+
+			socket_unlock(fd_cb->so, 0);
+		}
+		FDUNLOCK(fd_cb);
+		FDRELEASE(fd_cb);
+	}
+
+	error = ctl_enqueuembuf(g_flow_divert_kctl_ref, ctl_unit, packet, CTL_DATA_EOR);
+	if (error) {
+		FDLOG(LOG_NOTICE, &nil_pcb, "flow_divert_handle_flow_states_request: ctl_enqueuembuf returned an error: %d", error);
+		mbuf_freem(packet);
+	}
+}
+
 static int
 flow_divert_input(mbuf_t packet, struct flow_divert_group *group)
 {
@@ -3254,6 +3325,9 @@ flow_divert_input(mbuf_t packet, struct flow_divert_group *group)
 			break;
 		case FLOW_DIVERT_PKT_APP_MAP_CREATE:
 			flow_divert_handle_app_map_create(group, packet, sizeof(hdr));
+			break;
+		case FLOW_DIVERT_PKT_FLOW_STATES_REQUEST:
+			flow_divert_handle_flow_states_request(group);
 			break;
 		default:
 			FDLOG(LOG_WARNING, &nil_pcb, "got an unknown message type: %d", hdr.packet_type);
@@ -3963,15 +4037,26 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 		}
 	}
 
-	FDLOG(LOG_DEBUG, fd_cb, "app wrote %lu bytes", mbuf_pkthdr_len(data));
+	if (data != NULL) {
+		size_t data_size = 0;
+		if (mbuf_flags(data) & M_PKTHDR) {
+			data_size = mbuf_pkthdr_len(data);
+		} else {
+			for (mbuf_t blob = data; blob != NULL; blob = mbuf_next(blob)) {
+				data_size += mbuf_len(blob);
+			}
+		}
 
-	fd_cb->bytes_written_by_app += mbuf_pkthdr_len(data);
-	error = flow_divert_send_app_data(fd_cb, data, to);
+		FDLOG(LOG_DEBUG, fd_cb, "app wrote %lu bytes", data_size);
+		fd_cb->bytes_written_by_app += data_size;
 
-	data = NULL;
+		error = flow_divert_send_app_data(fd_cb, data, data_size, to);
 
-	if (error) {
-		goto done;
+		data = NULL;
+
+		if (error) {
+			goto done;
+		}
 	}
 
 	if (flags & PRUS_EOF) {

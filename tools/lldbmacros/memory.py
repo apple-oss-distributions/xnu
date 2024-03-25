@@ -2,13 +2,6 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import chr
-from builtins import hex
-from builtins import range
-from builtins import object
-
 from xnu import *
 import sys
 import shlex
@@ -19,7 +12,6 @@ from process import *
 import macho
 import json
 from ctypes import c_int64
-import six
 from operator import itemgetter
 from kext import GetUUIDSummary
 from kext import FindKmodNameForAddr
@@ -27,7 +19,6 @@ from core.collections import (
      iter_RB_HEAD,
 )
 import kmemory
-
 
 def get_vme_offset(vme):
     return unsigned(vme.vme_offset) << 12
@@ -413,7 +404,7 @@ def kalloc_array_decode(addr, elt_type):
             size *= page_size
         ptr = addr | KALLOC_ARRAY_PTR_FIX
 
-    if isinstance(elt_type, six.string_types):
+    if isinstance(elt_type, str):
         elt_type = gettype(elt_type)
 
     target = LazyTarget.GetTarget()
@@ -1548,7 +1539,7 @@ def ShowMap(cmd_args=None):
     """ Routine to print out info about the specified vm_map
         usage: showmap <vm_map>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMap.__doc__)
         return
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
@@ -1560,7 +1551,7 @@ def ShowMapVME(cmd_args=None):
     """Routine to print out info about the specified vm_map and its vm entries
         usage: showmapvme <vm_map>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVME.__doc__)
         return
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
@@ -1632,7 +1623,7 @@ def ShowMapRanges(cmd_args=None):
     """Routine to print out info about the specified vm_map and its vm entries
         usage: showmapranges <vm_map>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVME.__doc__)
         return
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
@@ -1706,7 +1697,7 @@ def GetVMRangeSummary(vmrange, idx=0):
 def ShowMapWired(cmd_args=None):
     """ Routine to print out a summary listing of all the entries with wired pages in a vm_map
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument", ShowMapWired.__doc__)
         return
     map_val = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
@@ -2179,7 +2170,7 @@ def ShowVnode(cmd_args=None):
     """ Display info about one vnode
         usage: showvnode <vnode>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide valid vnode argument. Type help showvnode for help.")
         return
     vnodeval = kern.GetValueFromAddress(cmd_args[0],'vnode *')
@@ -2190,7 +2181,7 @@ def ShowVnode(cmd_args=None):
 def ShowVolVnodes(cmd_args=None):
     """ Display info about all vnodes of a given mount_t
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide a valide mount_t argument. Try 'help showvolvnodes' for help")
         return
     mntval = kern.GetValueFromAddress(cmd_args[0], 'mount_t')
@@ -2203,7 +2194,7 @@ def ShowVolVnodes(cmd_args=None):
 def ShowVolBusyVnodes(cmd_args=None):
     """ Display info about busy (iocount!=0) vnodes of a given mount_t
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide a valide mount_t argument. Try 'help showvolbusyvnodes' for help")
         return
     mntval = kern.GetValueFromAddress(cmd_args[0], 'mount_t')
@@ -2722,9 +2713,8 @@ def getThreadFromCtid(cmd_args = None):
     """
     if not cmd_args:
         raise ArgumentError("Please specify a ctid")
-        return
 
-    ctid   = unsigned(kern.GetValueFromAddress(cmd_args[0]))
+    ctid   = ArgumentStringToInt(cmd_args[0])
     thread = getThreadFromCtidInternal(ctid)
     if thread:
         print("Thread pointer {:#x}".format(thread))
@@ -2734,13 +2724,12 @@ def getThreadFromCtid(cmd_args = None):
 @lldb_command('getturnstilefromctsid')
 def getTurnstileFromCtid(cmd_args = None):
     """ Get the turnstile pointer associated with the ctsid
-        Usage: getthreadfromctid <ctid>
+        Usage: getturnstilefromctsid <ctid>
     """
     if not cmd_args:
         raise ArgumentError("Please specify a ctid")
-        return
 
-    ctid = unsigned(kern.GetValueFromAddress(cmd_args[0]))
+    ctid = ArgumentStringToInt(cmd_args[0])
     ts   = getTurnstileFromCtidInternal(ctid)
     if ts:
         print("Turnstile pointer {:#x}".format(ts))
@@ -3076,7 +3065,7 @@ def ShowMapVME(cmd_args=None, cmd_options={}, entry_filter=None):
         Use -R flag to reverse order
         Use -T to show red-black tree pointers
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVME.__doc__)
         return
     show_pager_info = False
@@ -3115,7 +3104,7 @@ def ShowMapCopyVME(cmd_args=None, cmd_options={}):
         Use -R flag to reverse order
         Use -T to show red-black tree pointers
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVME.__doc__)
         return
     show_pager_info = False
@@ -3154,7 +3143,7 @@ def ShowMapTPRO(cmd_args=None, cmd_options={}):
         Use -R flag to reverse order
         Use -T to show red-black tree pointers
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapTPRO.__doc__)
         return
    
@@ -3175,7 +3164,7 @@ def ShowVMObject(cmd_args=None, cmd_options={}):
         -S: show VM object shadow chain
         -P: show pager info (mapped file, compressed pages, ...)
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVME.__doc__)
         return
     show_pager_info = False
@@ -3196,7 +3185,7 @@ def showvmobject(object, offset=0, size=0, show_pager_info=False, show_all_shado
         size = object.vo_un1.vou_size
     while object != 0:
         depth += 1
-        if show_all_shadows == False and depth != 1 and object.shadow != 0:
+        if not show_all_shadows and depth != 1 and object.shadow != 0:
             offset += unsigned(object.vo_un2.vou_shadow_offset)
             object = object.shadow
             continue
@@ -3657,7 +3646,7 @@ def VMPageLookup(cmd_args=None):
     """ Print the pages in the page bucket corresponding to the provided object and offset.
         Usage: (lldb)vmpagelookup <vm_object_t> <vm_offset_t>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         raise ArgumentError("Please specify an object and offset.")
     format_string = "{0: <#020x} {1: <#020x} {2: <#020x}\n"
 
@@ -3683,7 +3672,7 @@ def VmPageGetPhysPage(cmd_args=None):
     """ return the physical page for a vm_page_t
         usage: vm_page_get_phys_page <vm_page_t>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide valid vm_page_t. Type help vm_page_get_phys_page for help.")
         return
 
@@ -3714,7 +3703,7 @@ def VmPageUnpackPtr(cmd_args=None):
     """ unpack a pointer
         usage: vm_page_unpack_ptr <packed_ptr>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide valid packed pointer argument. Type help vm_page_unpack_ptr for help.")
         return
 
@@ -3753,7 +3742,7 @@ def CalcVMPageHash(cmd_args=None):
     """ Get the page bucket corresponding to the provided object and offset.
         Usage: (lldb)calcvmpagehash <vm_object_t> <vm_offset_t>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         raise ArgumentError("Please specify an object and offset.")
 
     obj = kern.GetValueFromAddress(cmd_args[0],'unsigned long long')
@@ -3848,7 +3837,7 @@ def ScanVMPages(cmd_args=None, cmd_options={}):
     if "-Z" in cmd_options:
         scan_vmpages_zone = True
 
-    if scan_vmpages_array == False and scan_vmpages_zone == False:
+    if not scan_vmpages_array and not scan_vmpages_zone:
         raise ArgumentError("Please specify where to scan (-A: vm_pages array, -Z: vm.pages zone)")
 
     attribute_values = {}
@@ -3982,7 +3971,7 @@ def VMObjectWalkPages(cmd_args=None, cmd_options={}):
 
     """
 
-    if (cmd_args == None or len(cmd_args) < 1):
+    if (cmd_args is None or len(cmd_args) < 1):
         raise ArgumentError("Please specify at minimum a vm_object_t and optionally a vm_page_t")
 
     out_string = ""
@@ -4164,7 +4153,7 @@ def ShowAppleProtectPager(cmd_args=None):
     """Routine to print out info about an apple_protect pager
         usage: show_apple_protect_pager <pager>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowAppleProtectPager.__doc__)
         return
     pager = kern.GetValueFromAddress(cmd_args[0], 'apple_protect_pager_t')
@@ -4204,7 +4193,7 @@ def ShowSharedRegionPager(cmd_args=None):
     """Routine to print out info about a shared_region pager
         usage: show_shared_region_pager <pager>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowSharedRegionPager.__doc__)
         return
     pager = kern.GetValueFromAddress(cmd_args[0], 'shared_region_pager_t')
@@ -4249,7 +4238,7 @@ def ShowDyldPager(cmd_args=None):
     """Routine to print out info about a dyld pager
         usage: show_dyld_pager <pager>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowDyldPager.__doc__)
         return
     print(ShowDyldPager.header)
@@ -4319,7 +4308,7 @@ def ShowJetsamSnapshot(cmd_args=None, cmd_options={}):
     valid_count = kern.globals.memorystatus_jetsam_snapshot_count
     max_count = kern.globals.memorystatus_jetsam_snapshot_max
 
-    if (show_all_entries == True):
+    if show_all_entries:
         count = max_count
     else:
         count = valid_count
@@ -4336,11 +4325,11 @@ def ShowJetsamSnapshot(cmd_args=None, cmd_options={}):
     print(lldb_run_command('p *memorystatus_jetsam_snapshot'))
 
     hdr_format = "{0: >32s} {1: >5s} {2: >4s} {3: >6s} {4: >6s} {5: >20s} {6: >20s} {7: >20s} {8: >5s} {9: >10s} {10: >6s} {11: >6s} {12: >10s} {13: >15s} {14: >15s} {15: >15s}"
-    if (show_footprint_details == True):
+    if show_footprint_details:
         hdr_format += "{16: >15s} {17: >15s} {18: >12s} {19: >12s} {20: >17s} {21: >10s} {22: >13s} {23: >10s}"
 
 
-    if (show_footprint_details == False):
+    if not show_footprint_details:
         print(hdr_format.format('command', 'index', 'pri', 'cid', 'pid', 'starttime', 'killtime', 'idletime', 'kill', '#ents', 'fds', 'gen', 'state', 'footprint', 'purgeable', 'lifetimeMax'))
         print(hdr_format.format('', '', '', '', '', '(abs)', '(abs)', '(abs)', 'cause', '', '', 'Count', '', '(pages)', '(pages)', '(pages)'))
     else:
@@ -4354,7 +4343,7 @@ def ShowJetsamSnapshot(cmd_args=None, cmd_options={}):
                    "{e.fds: >6d} {e.jse_gencount: >6d} {e.state: >10x} {e.pages: >15d} "\
                    "{e.purgeable_pages: >15d} {e.max_pages_lifetime: >15d}"
 
-    if (show_footprint_details == True):
+    if show_footprint_details:
         entry_format += "{e.jse_internal_pages: >15d} "\
                         "{e.jse_internal_compressed_pages: >15d} "\
                         "{e.jse_iokit_mapped_pages: >12d} "\
@@ -4432,7 +4421,7 @@ def _GetBufSummary(buf):
 def _ShowVnodeBlocks(dirty=True, cmd_args=None):
     """ Display info about all [dirty|clean] blocks in a vnode.
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Please provide a valid vnode argument.")
         return
 
@@ -4473,7 +4462,7 @@ def VmPageLookupInMap(cmd_args=None):
     """Lookup up a page at a virtual address in a VM map
         usage: vm_page_lookup_in_map <map> <vaddr>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print("Invalid argument.", VmPageLookupInMap.__doc__)
         return
     map = kern.GetValueFromAddress(cmd_args[0], 'vm_map_t')
@@ -4505,7 +4494,7 @@ def VmPageLookupInObject(cmd_args=None):
     """Lookup up a page at a given offset in a VM object
         usage: vm_page_lookup_in_object <object> <offset>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print("Invalid argument.", VmPageLookupInObject.__doc__)
         return
     object = kern.GetValueFromAddress(cmd_args[0], 'vm_object_t')
@@ -4551,7 +4540,7 @@ def VmPageLookupInCompressorPager(cmd_args=None):
     """Lookup up a page at a given offset in a compressor pager
         usage: vm_page_lookup_in_compressor_pager <pager> <offset>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print("Invalid argument.", VmPageLookupInCompressorPager.__doc__)
         return
     pager = kern.GetValueFromAddress(cmd_args[0], 'compressor_pager_t')
@@ -4595,7 +4584,7 @@ def VmPageLookupInCompressor(cmd_args=None):
     """Lookup up a page in a given compressor slot
         usage: vm_page_lookup_in_compressor <slot>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", VmPageLookupInCompressor.__doc__)
         return
     slot = kern.GetValueFromAddress(cmd_args[0], 'compressor_slot_t *')
@@ -4668,7 +4657,8 @@ def vm_page_lookup_in_compressor(slot_ptr):
         C_SEG_SLOT_ARRAY_MASK = C_SEG_SLOT_ARRAY_SIZE - 1
         cs = GetObjectAtIndexFromArray(c_seg.c_slots[c_indx // C_SEG_SLOT_ARRAY_SIZE], c_indx & C_SEG_SLOT_ARRAY_MASK)
     print(cs)
-    c_slot_unpacked_ptr = vm_unpack_ptr(cs.c_packed_ptr, kern.globals.c_slot_packing_params)
+    kmem = kmemory.KMem.get_shared()
+    c_slot_unpacked_ptr = kmem.c_slot_packing.unpack(unsigned(cs.c_packed_ptr))
     print("c_slot {: <#018x} c_offset {:#x} c_size {:#x} c_packed_ptr {:#x} (unpacked: {: <#018x})".format(cs, cs.c_offset, cs.c_size, cs.c_packed_ptr, unsigned(c_slot_unpacked_ptr)))
     if unsigned(slot_ptr) != unsigned(c_slot_unpacked_ptr):
         print("*** ERROR: compressor slot {: <#018x} points back to {: <#018x} instead of itself".format(slot_ptr, c_slot_unpacked_ptr))
@@ -4812,7 +4802,7 @@ def ShowAllVMNamedEntries(cmd_args=None):
 def ShowVMNamedEntry(cmd_args=None):
     """ Routine to print a VM named entry
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapVMNamedEntry.__doc__)
         return
     named_entry = kern.GetValueFromAddress(cmd_args[0], 'vm_named_entry_t')
@@ -4871,7 +4861,7 @@ def ShowMapRB(cmd_args=None):
     """Routine to print out a VM map's RB tree
         usage: showmaprb <vm_map>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("Invalid argument.", ShowMapRB.__doc__)
         return
 

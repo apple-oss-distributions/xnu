@@ -50,7 +50,7 @@ static void nwk_wq_thread_func(void *v, wait_result_t w);
 void
 nwk_wq_init(void)
 {
-	thread_t nwk_wq_thread = THREAD_NULL;
+	thread_t nwk_wq_thread __single = THREAD_NULL;
 
 	if (kernel_thread_start(nwk_wq_thread_func,
 	    NULL, &nwk_wq_thread) != KERN_SUCCESS) {
@@ -64,8 +64,8 @@ static int
 nwk_wq_thread_cont(int err)
 {
 	TAILQ_HEAD(, nwk_wq_entry) temp_nwk_wq_head;
-	struct nwk_wq_entry *nwk_item;
-	struct nwk_wq_entry *nwk_item_next;
+	struct nwk_wq_entry *nwk_item __single;
+	struct nwk_wq_entry *nwk_item_next __single;
 
 #pragma unused(err)
 	for (;;) {

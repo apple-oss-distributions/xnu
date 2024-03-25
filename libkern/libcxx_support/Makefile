@@ -8,6 +8,7 @@ include $(MakeInc_def)
 
 LIBCXX_DATAFILES = \
 	__xnu_libcxx_sentinel.h \
+	errno.h  \
 	stdio.h  \
 	stdlib.h 
 

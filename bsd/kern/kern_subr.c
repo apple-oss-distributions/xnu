@@ -90,29 +90,52 @@ static uint32_t                         uio_t_count = 0;
 #endif /* DEBUG */
 
 #define IS_VALID_UIO_SEGFLG(segflg)  \
-	( (segflg) == UIO_USERSPACE || \
-	  (segflg) == UIO_SYSSPACE || \
-	  (segflg) == UIO_USERSPACE32 || \
-	  (segflg) == UIO_USERSPACE64 || \
-	  (segflg) == UIO_SYSSPACE32 || \
-	  (segflg) == UIO_USERISPACE || \
-	  (segflg) == UIO_PHYS_USERSPACE || \
-	  (segflg) == UIO_PHYS_SYSSPACE || \
-	  (segflg) == UIO_USERISPACE32 || \
-	  (segflg) == UIO_PHYS_USERSPACE32 || \
-	  (segflg) == UIO_USERISPACE64 || \
-	  (segflg) == UIO_PHYS_USERSPACE64 )
+	( (1 << segflg) & (UIOF_USERSPACE | \
+	                   UIOF_SYSSPACE | \
+	                   UIOF_USERSPACE32 | \
+	                   UIOF_USERSPACE64 | \
+	                   UIOF_SYSSPACE32 | \
+	                   UIOF_USERISPACE | \
+	                   UIOF_PHYS_USERSPACE | \
+	                   UIOF_PHYS_SYSSPACE | \
+	                   UIOF_USERISPACE32 | \
+	                   UIOF_PHYS_USERSPACE32 | \
+	                   UIOF_USERISPACE64 | \
+	                   UIOF_PHYS_USERSPACE64))
+
+#define IS_SYS_OR_PHYS_SPACE_SEGFLG(segflg) \
+	( (1 << segflg) & (UIOF_SYSSPACE | \
+	                   UIOF_PHYS_SYSSPACE | \
+	                   UIOF_SYSSPACE32 | \
+	                   UIOF_PHYS_USERSPACE | \
+	                   UIOF_PHYS_SYSSPACE | \
+	                   UIOF_PHYS_USERSPACE64 | \
+	                   UIOF_PHYS_USERSPACE32))
+
+#define IS_PURE_USER_SPACE_SEGFLG(segflg) \
+	( (1 << segflg) & (UIOF_USERSPACE | \
+	                   UIOF_USERSPACE32 | \
+	                   UIOF_USERSPACE64 | \
+	                   UIOF_USERISPACE | \
+	                   UIOF_USERISPACE32 | \
+	                   UIOF_USERISPACE64))
 
 #define IS_SYS_SPACE_SEGFLG(segflg) \
-	( (segflg) == UIO_SYSSPACE || \
-	  (segflg) == UIO_PHYS_SYSSPACE || \
-	  (segflg) == UIO_SYSSPACE32 )
+	( (1 << segflg) & (UIOF_SYSSPACE | \
+	                   UIOF_SYSSPACE32))
 
-#define IS_PHYS_SEGFLG(segflg) \
-	( (segflg) == UIO_PHYS_USERSPACE || \
-	  (segflg) == UIO_PHYS_SYSSPACE || \
-	  (segflg) == UIO_PHYS_USERSPACE64 || \
-	  (segflg) == UIO_PHYS_USERSPACE32 )
+#define IS_PHYS_USER_SPACE_SEGFLG(segflg) \
+	( (1 << segflg) & (UIOF_PHYS_USERSPACE | \
+	                   UIOF_PHYS_USERSPACE64 | \
+	                   UIOF_PHYS_USERSPACE32))
+
+#define IS_PHYS_SYS_SPACE_SEGFLG(segflg) \
+	( (1 << segflg) & (UIOF_PHYS_SYSSPACE))
+
+static void uio_update_user(uio_t __attribute__((nonnull)) a_uio, user_size_t a_count);
+static void uio_update_sys(uio_t __attribute__((nonnull)) a_uio, user_size_t a_count);
+static user_size_t uio_curriovlen_user(const uio_t __attribute__((nonnull)) a_uio);
+static user_size_t uio_curriovlen_sys(const uio_t __attribute__((nonnull)) a_uio);
 
 #if __has_feature(ptrauth_calls)
 __attribute__((always_inline))
@@ -162,9 +185,11 @@ kiovp_set_base(struct kern_iovec *kiovp, u_int64_t addr)
 static struct kern_iovec *
 uio_kiovp(uio_t uio)
 {
-	if (!UIO_IS_SYS_SPACE(uio)) {
+#if DEBUG
+	if (__improbable(!UIO_IS_SYS_SPACE(uio))) {
 		panic("%s: uio is not sys space", __func__);
 	}
+#endif
 
 	return (struct kern_iovec *)uio->uio_iovs;
 }
@@ -172,21 +197,21 @@ uio_kiovp(uio_t uio)
 static struct user_iovec *
 uio_uiovp(uio_t uio)
 {
-	if (!UIO_IS_USER_SPACE(uio)) {
-		panic("%s: uio is not user space", __func__);
-	}
-
 	return (struct user_iovec *)uio->uio_iovs;
 }
 
 static void *
-uio_advance(uio_t uio)
+uio_advance_user(uio_t uio)
 {
-	if (UIO_IS_USER_SPACE(uio)) {
-		uio->uio_iovs = (void *)((uintptr_t)uio->uio_iovs + sizeof(struct user_iovec));
-	} else {
-		uio->uio_iovs = (void *)((uintptr_t)uio->uio_iovs + sizeof(struct kern_iovec));
-	}
+	uio->uio_iovs = (void *)((uintptr_t)uio->uio_iovs + sizeof(struct user_iovec));
+
+	return uio->uio_iovs;
+}
+
+static void *
+uio_advance_sys(uio_t uio)
+{
+	uio->uio_iovs = (void *)((uintptr_t)uio->uio_iovs + sizeof(struct kern_iovec));
 
 	return uio->uio_iovs;
 }
@@ -215,27 +240,47 @@ uiomove(const char * cp, int n, uio_t uio)
 int
 uiomove64(const addr64_t c_cp, int n, struct uio *uio)
 {
-	addr64_t cp = c_cp;
-	uint64_t acnt;
-	int error = 0;
-	struct kern_iovec *kiovp;
-	struct user_iovec *uiovp;
-
-#if DIAGNOSTIC
-	if (uio->uio_rw != UIO_READ && uio->uio_rw != UIO_WRITE) {
-		panic("uiomove: mode");
+	if (IS_PURE_USER_SPACE_SEGFLG(uio->uio_segflg)) {
+		if (uio->uio_rw == UIO_READ) {
+			return uio_copyout_user((const char *)c_cp, n, uio);
+		} else {
+			return uio_copyin_user((const char *)c_cp, n, uio);
+		}
+	} else if (IS_SYS_SPACE_SEGFLG(uio->uio_segflg)) {
+		if (uio->uio_rw == UIO_READ) {
+			return uio_copyout_sys((const char *)c_cp, n, uio);
+		} else {
+			return uio_copyin_sys((const char *)c_cp, n, uio);
+		}
+	} else if (IS_PHYS_USER_SPACE_SEGFLG(uio->uio_segflg)) {
+		if (uio->uio_rw == UIO_READ) {
+			return uio_copyout_phys_user((const char *)c_cp, n, uio);
+		} else {
+			return uio_copyin_phys_user((const char *)c_cp, n, uio);
+		}
+	} else if (IS_PHYS_SYS_SPACE_SEGFLG(uio->uio_segflg)) {
+		if (uio->uio_rw == UIO_READ) {
+			return uio_copyout_phys_sys((const char *)c_cp, n, uio);
+		} else {
+			return uio_copyin_phys_sys((const char *)c_cp, n, uio);
+		}
+	} else {
+		return EINVAL;
 	}
-#endif
+}
 
-#if LP64_DEBUG
-	if (IS_VALID_UIO_SEGFLG(uio->uio_segflg) == 0) {
-		panic("invalid uio_segflg");
-	}
-#endif /* LP64_DEBUG */
+int
+uio_copyout_user(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
 	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
-		uio_update(uio, 0);
-		acnt = uio_curriovlen(uio);
+		struct user_iovec *uiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_user(uio, 0);
+		acnt = uio_curriovlen_user(uio);
 		if (acnt == 0) {
 			continue;
 		}
@@ -243,125 +288,289 @@ uiomove64(const addr64_t c_cp, int n, struct uio *uio)
 			acnt = n;
 		}
 
-		switch ((int) uio->uio_segflg) {
-		case UIO_USERSPACE64:
-		case UIO_USERISPACE64:
-		case UIO_USERSPACE32:
-		case UIO_USERISPACE32:
-		case UIO_USERSPACE:
-		case UIO_USERISPACE:
-			uiovp = uio_uiovp(uio);
+		uiovp = uio_uiovp(uio);
 
-			// LP64 - 3rd argument in debug code is 64 bit, expected to be 32 bit
-			if (uio->uio_rw == UIO_READ) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
-				    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 0, 0);
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
+		    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 0, 0);
 
-				error = copyout( CAST_DOWN(caddr_t, cp), uiovp->iov_base, (size_t)acnt );
+		error = copyout(CAST_DOWN(caddr_t, cp), uiovp->iov_base, (size_t)acnt);
 
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
-				    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 0, 0);
-			} else {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
-				    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 0, 0);
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
+		    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 0, 0);
 
-				error = copyin(uiovp->iov_base, CAST_DOWN(caddr_t, cp), (size_t)acnt);
-
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
-				    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 0, 0);
-			}
-			if (error) {
-				return error;
-			}
-			break;
-
-		case UIO_SYSSPACE32:
-		case UIO_SYSSPACE:
-			kiovp = uio_kiovp(uio);
-
-			if (uio->uio_rw == UIO_READ) {
-				error = copywithin(CAST_DOWN(caddr_t, cp), CAST_DOWN(caddr_t, kiovp_get_base(kiovp)),
-				    (size_t)acnt);
-			} else {
-				error = copywithin(CAST_DOWN(caddr_t, kiovp_get_base(kiovp)), CAST_DOWN(caddr_t, cp),
-				    (size_t)acnt);
-			}
-			break;
-
-		case UIO_PHYS_USERSPACE64:
-		case UIO_PHYS_USERSPACE32:
-		case UIO_PHYS_USERSPACE:
-			acnt = MIN(acnt, UINT_MAX);
-			uiovp = uio_uiovp(uio);
-
-			if (uio->uio_rw == UIO_READ) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
-				    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 1, 0);
-
-				error = copypv((addr64_t)cp, uiovp->iov_base, (unsigned int)acnt, cppvPsrc | cppvNoRefSrc);
-				if (error) {    /* Copy physical to virtual */
-					error = EFAULT;
-				}
-
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
-				    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 1, 0);
-			} else {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
-				    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 1, 0);
-
-				error = copypv(uiovp->iov_base, (addr64_t)cp, (unsigned int)acnt, cppvPsnk | cppvNoRefSrc | cppvNoModSnk);
-				if (error) {    /* Copy virtual to physical */
-					error = EFAULT;
-				}
-
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
-				    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 1, 0);
-			}
-			if (error) {
-				return error;
-			}
-			break;
-
-		case UIO_PHYS_SYSSPACE:
-			acnt = MIN(acnt, UINT_MAX);
-			kiovp = uio_kiovp(uio);
-
-			if (uio->uio_rw == UIO_READ) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
-				    (int)cp, (uintptr_t)kiovp_get_base(kiovp), acnt, 2, 0);
-
-				error = copypv((addr64_t)cp, (addr64_t)kiovp_get_base(kiovp), (unsigned int)acnt, cppvKmap | cppvPsrc | cppvNoRefSrc);
-				if (error) {    /* Copy physical to virtual */
-					error = EFAULT;
-				}
-
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
-				    (int)cp, (uintptr_t)kiovp_get_base(kiovp), acnt, 2, 0);
-			} else {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
-				    (uintptr_t)kiovp_get_base(kiovp), (int)cp, acnt, 2, 0);
-
-				error = copypv((addr64_t)kiovp_get_base(kiovp), (addr64_t)cp, (unsigned int)acnt, cppvKmap | cppvPsnk | cppvNoRefSrc | cppvNoModSnk);
-				if (error) {    /* Copy virtual to physical */
-					error = EFAULT;
-				}
-
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
-				    (uintptr_t)kiovp_get_base(kiovp), (int)cp, acnt, 2, 0);
-			}
-			if (error) {
-				return error;
-			}
-			break;
-
-		default:
-			break;
+		if (error) {
+			return error;
 		}
-		uio_update(uio, (user_size_t)acnt);
+
+		uio_update_user(uio, (user_size_t)acnt);
 		cp += acnt;
 		n -= acnt;
 	}
-	return error;
+	return 0;
+}
+
+int
+uio_copyin_user(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct user_iovec *uiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_user(uio, 0);
+		acnt = uio_curriovlen_user(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		uiovp = uio_uiovp(uio);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
+		    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 0, 0);
+
+		error = copyin(uiovp->iov_base, CAST_DOWN(caddr_t, cp), (size_t)acnt);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
+		    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 0, 0);
+
+		if (error) {
+			return error;
+		}
+
+		uio_update_user(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyout_sys(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct kern_iovec *kiovp;
+		uint64_t acnt;
+
+		uio_update_sys(uio, 0);
+		acnt = uio_curriovlen_sys(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		kiovp = uio_kiovp(uio);
+
+		copywithin(CAST_DOWN(caddr_t, cp), CAST_DOWN(caddr_t, kiovp_get_base(kiovp)),
+		    (size_t)acnt);
+
+		uio_update_sys(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyin_sys(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct kern_iovec *kiovp;
+		uint64_t acnt;
+
+		uio_update_sys(uio, 0);
+		acnt = uio_curriovlen_sys(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		kiovp = uio_kiovp(uio);
+
+		copywithin(CAST_DOWN(caddr_t, kiovp_get_base(kiovp)), CAST_DOWN(caddr_t, cp),
+		    (size_t)acnt);
+
+		uio_update_sys(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyout_phys_user(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct user_iovec *uiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_user(uio, 0);
+		acnt = uio_curriovlen_user(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		acnt = MIN(acnt, UINT_MAX);
+		uiovp = uio_uiovp(uio);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
+		    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 1, 0);
+
+		error = copypv((addr64_t)cp, uiovp->iov_base, (unsigned int)acnt, cppvPsrc | cppvNoRefSrc);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
+		    (int)cp, (uintptr_t)uiovp->iov_base, acnt, 1, 0);
+
+		if (error) {    /* Copy virtual to physical */
+			return EFAULT;
+		}
+
+		uio_update_user(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyin_phys_user(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct user_iovec *uiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_user(uio, 0);
+		acnt = uio_curriovlen_user(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		acnt = MIN(acnt, UINT_MAX);
+		uiovp = uio_uiovp(uio);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
+		    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 1, 0);
+
+		error = copypv(uiovp->iov_base, (addr64_t)cp, (unsigned int)acnt, cppvPsnk | cppvNoRefSrc | cppvNoModSnk);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
+		    (uintptr_t)uiovp->iov_base, (int)cp, acnt, 1, 0);
+
+		if (error) {    /* Copy virtual to physical */
+			return EFAULT;
+		}
+
+		uio_update_user(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyout_phys_sys(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct kern_iovec *kiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_sys(uio, 0);
+		acnt = uio_curriovlen_sys(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		acnt = MIN(acnt, UINT_MAX);
+		kiovp = uio_kiovp(uio);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_START,
+		    (int)cp, (uintptr_t)kiovp_get_base(kiovp), acnt, 2, 0);
+
+		error = copypv((addr64_t)cp, (addr64_t)kiovp_get_base(kiovp), (unsigned int)acnt, cppvKmap | cppvPsrc | cppvNoRefSrc);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYOUT)) | DBG_FUNC_END,
+		    (int)cp, (uintptr_t)kiovp_get_base(kiovp), acnt, 2, 0);
+
+		if (error) {    /* Copy virtual to physical */
+			return EFAULT;
+		}
+
+		uio_update_sys(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
+}
+
+int
+uio_copyin_phys_sys(const char *c_cp, int n, uio_t uio)
+{
+	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
+
+	while (n > 0 && uio->uio_iovcnt > 0 && uio_resid(uio)) {
+		struct kern_iovec *kiovp;
+		uint64_t acnt;
+		int error;
+
+		uio_update_sys(uio, 0);
+		acnt = uio_curriovlen_sys(uio);
+		if (acnt == 0) {
+			continue;
+		}
+		if (n > 0 && acnt > (uint64_t)n) {
+			acnt = n;
+		}
+
+		acnt = MIN(acnt, UINT_MAX);
+		kiovp = uio_kiovp(uio);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_START,
+		    (uintptr_t)kiovp_get_base(kiovp), (int)cp, acnt, 2, 0);
+
+		error = copypv((addr64_t)kiovp_get_base(kiovp), (addr64_t)cp, (unsigned int)acnt, cppvKmap | cppvPsnk | cppvNoRefSrc | cppvNoModSnk);
+
+		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, DBG_UIO_COPYIN)) | DBG_FUNC_END,
+		    (uintptr_t)kiovp_get_base(kiovp), (int)cp, acnt, 2, 0);
+
+		if (error) {    /* Copy virtual to physical */
+			return EFAULT;
+		}
+
+		uio_update_sys(uio, (user_size_t)acnt);
+		cp += acnt;
+		n -= acnt;
+	}
+	return 0;
 }
 
 /*
@@ -373,41 +582,28 @@ ureadc(int c, struct uio *uio)
 	struct kern_iovec *kiovp;
 	struct user_iovec *uiovp;
 
-	if (uio_resid(uio) <= 0) {
+	if (__improbable(uio_resid(uio) <= 0)) {
 		panic("ureadc: non-positive resid");
 	}
-	uio_update(uio, 0);
-	if (uio->uio_iovcnt == 0) {
-		panic("ureadc: non-positive iovcnt");
-	}
-	if (uio_curriovlen(uio) <= 0) {
-		panic("ureadc: non-positive iovlen");
-	}
 
-	switch ((int) uio->uio_segflg) {
-	case UIO_USERSPACE32:
-	case UIO_USERSPACE:
-	case UIO_USERISPACE32:
-	case UIO_USERISPACE:
-	case UIO_USERSPACE64:
-	case UIO_USERISPACE64:
+	if (IS_PURE_USER_SPACE_SEGFLG(uio->uio_segflg)) {
+		uio_update_user(uio, 0);
+
 		uiovp = uio_uiovp(uio);
 
 		if (subyte((user_addr_t)uiovp->iov_base, c) < 0) {
 			return EFAULT;
 		}
-		break;
 
-	case UIO_SYSSPACE32:
-	case UIO_SYSSPACE:
+		uio_update_user(uio, 1);
+	} else if (IS_SYS_SPACE_SEGFLG(uio->uio_segflg)) {
+		uio_update_sys(uio, 0);
+
 		kiovp = uio_kiovp(uio);
 		*(CAST_DOWN(caddr_t, kiovp_get_base(kiovp))) = (char)c;
-		break;
 
-	default:
-		break;
+		uio_update_sys(uio, 1);
 	}
-	uio_update(uio, 1);
 	return 0;
 }
 
@@ -422,7 +618,7 @@ hashinit(int elements, int type __unused, u_long *hashmask)
 	struct generic_hash_head *hashtbl;
 	vm_size_t hashsize;
 
-	if (elements <= 0) {
+	if (__improbable(elements <= 0)) {
 		panic("hashinit: bad cnt");
 	}
 
@@ -451,9 +647,6 @@ uio_resid( uio_t a_uio )
 	if (a_uio == NULL) {
 		printf("%s :%d - invalid uio_t\n", __FILE__, __LINE__);
 	}
-/*      if (IS_VALID_UIO_SEGFLG(a_uio->uio_segflg) == 0) { */
-/*              panic("invalid uio_segflg");  */
-/*      } */
 #endif /* DEBUG */
 
 	/* return 0 if there are no active iovecs */
@@ -471,12 +664,9 @@ void
 uio_setresid( uio_t a_uio, user_ssize_t a_value )
 {
 #if DEBUG
-	if (a_uio == NULL) {
+	if (__improbable(a_uio == NULL)) {
 		panic("invalid uio_t");
 	}
-/*      if (IS_VALID_UIO_SEGFLG(a_uio->uio_segflg) == 0) { */
-/*              panic("invalid uio_segflg");  */
-/*      } */
 #endif /* DEBUG */
 
 	if (a_uio == NULL) {
@@ -497,12 +687,6 @@ uio_curriovbase( uio_t a_uio )
 	struct kern_iovec *kiovp;
 	struct user_iovec *uiovp;
 
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL || a_uio->uio_iovcnt < 1) {
 		return 0;
 	}
@@ -517,70 +701,41 @@ uio_curriovbase( uio_t a_uio )
 }
 
 /*
+ * uio_curriovlen_user - return the length value of the current iovec associated
+ *	with the given uio_t.
+ */
+static user_size_t
+uio_curriovlen_user(const uio_t __attribute__((nonnull)) a_uio)
+{
+	return uio_uiovp(a_uio)->iov_len;
+}
+
+/*
+ * uio_curriovlen_sys - return the length value of the current iovec associated
+ *	with the given uio_t.
+ */
+static user_size_t
+uio_curriovlen_sys(const uio_t __attribute__((nonnull)) a_uio )
+{
+	return (user_size_t)uio_kiovp(a_uio)->iov_len;
+}
+
+/*
  * uio_curriovlen - return the length value of the current iovec associated
  *	with the given uio_t.
  */
 user_size_t
 uio_curriovlen( uio_t a_uio )
 {
-	struct kern_iovec *kiovp;
-	struct user_iovec *uiovp;
-
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL || a_uio->uio_iovcnt < 1) {
 		return 0;
 	}
 
 	if (UIO_IS_USER_SPACE(a_uio)) {
-		uiovp = uio_uiovp(a_uio);
-		return uiovp->iov_len;
+		return uio_curriovlen_user(a_uio);
 	}
 
-	kiovp = uio_kiovp(a_uio);
-	return (user_size_t)kiovp->iov_len;
-}
-
-/*
- * uio_setcurriovlen - set the length value of the current iovec associated
- *	with the given uio_t.
- */
-__private_extern__ void
-uio_setcurriovlen( uio_t a_uio, user_size_t a_value )
-{
-	struct kern_iovec *kiovp;
-	struct user_iovec *uiovp;
-	u_int64_t base;
-
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
-	if (a_uio == NULL) {
-		return;
-	}
-
-	if (UIO_IS_USER_SPACE(a_uio)) {
-		uiovp = uio_uiovp(a_uio);
-		uiovp->iov_len = a_value;
-	} else {
-#if LP64_DEBUG
-		if (a_value > 0xFFFFFFFFull) {
-			panic("invalid a_value");
-		}
-#endif /* LP64_DEBUG */
-		kiovp = uio_kiovp(a_uio);
-		base = kiovp_get_base(kiovp);
-		kiovp->iov_len = (size_t)a_value;
-		kiovp_set_base(kiovp, base);
-	}
-	return;
+	return uio_curriovlen_sys(a_uio);
 }
 
 /*
@@ -589,12 +744,6 @@ uio_setcurriovlen( uio_t a_uio, user_size_t a_value )
 int
 uio_iovcnt( uio_t a_uio )
 {
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL) {
 		return 0;
 	}
@@ -608,12 +757,6 @@ uio_iovcnt( uio_t a_uio )
 off_t
 uio_offset( uio_t a_uio )
 {
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL) {
 		return 0;
 	}
@@ -626,12 +769,6 @@ uio_offset( uio_t a_uio )
 void
 uio_setoffset( uio_t a_uio, off_t a_offset )
 {
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL) {
 		return;
 	}
@@ -645,12 +782,6 @@ uio_setoffset( uio_t a_uio, off_t a_offset )
 int
 uio_rw( uio_t a_uio )
 {
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL) {
 		return -1;
 	}
@@ -664,17 +795,8 @@ void
 uio_setrw( uio_t a_uio, int a_value )
 {
 	if (a_uio == NULL) {
-#if LP64_DEBUG
-		panic("invalid uio_t");
-#endif /* LP64_DEBUG */
 		return;
 	}
-
-#if LP64_DEBUG
-	if (!(a_value == UIO_READ || a_value == UIO_WRITE)) {
-		panic("invalid a_value");
-	}
-#endif /* LP64_DEBUG */
 
 	if (a_value == UIO_READ || a_value == UIO_WRITE) {
 		a_uio->uio_rw = a_value;
@@ -690,9 +812,6 @@ int
 uio_isuserspace( uio_t a_uio )
 {
 	if (a_uio == NULL) {
-#if LP64_DEBUG
-		panic("invalid uio_t");
-#endif /* LP64_DEBUG */
 		return 0;
 	}
 
@@ -710,7 +829,6 @@ uio_init(uio_t uio,
     int a_iodirection,                /* read or write flag */
     void *iovecs)                     /* pointer to iovec array */
 {
-	assert(uio != NULL);
 	assert(a_iovcount >= 0 && a_iovcount <= UIO_MAXIOV);
 	assert(IS_VALID_UIO_SEGFLG(a_spacetype));
 	assert(a_iodirection == UIO_READ || a_iodirection == UIO_WRITE);
@@ -718,23 +836,20 @@ uio_init(uio_t uio,
 	/*
 	 * we use uio_segflg to indicate if the uio_t is the new format or
 	 * old (pre LP64 support) legacy format
-	 * This switch statement should canonicalize incoming space type
+	 * This if-statement should canonicalize incoming space type
 	 * to one of UIO_USERSPACE32/64, UIO_PHYS_USERSPACE32/64, or
 	 * UIO_SYSSPACE/UIO_PHYS_SYSSPACE
 	 */
-	switch (a_spacetype) {
-	case UIO_USERSPACE:
-		uio->uio_segflg = UIO_USERSPACE32;
-		break;
-	case UIO_SYSSPACE32:
-		uio->uio_segflg = UIO_SYSSPACE;
-		break;
-	case UIO_PHYS_USERSPACE:
-		uio->uio_segflg = UIO_PHYS_USERSPACE32;
-		break;
-	default:
+	if (__improbable((1 << a_spacetype) & (UIOF_USERSPACE | UIOF_SYSSPACE32 | UIOF_PHYS_USERSPACE))) {
+		if (a_spacetype == UIO_USERSPACE) {
+			uio->uio_segflg = UIO_USERSPACE32;
+		} else if (a_spacetype == UIO_SYSSPACE32) {
+			uio->uio_segflg = UIO_SYSSPACE;
+		} else if (a_spacetype == UIO_PHYS_USERSPACE) {
+			uio->uio_segflg = UIO_PHYS_USERSPACE32;
+		}
+	} else {
 		uio->uio_segflg = a_spacetype;
-		break;
 	}
 
 	uio->uio_iovbase = iovecs;
@@ -748,7 +863,7 @@ uio_init(uio_t uio,
 static void *
 uio_alloc_iov_array(int a_spacetype, size_t a_iovcount)
 {
-	if (IS_SYS_SPACE_SEGFLG(a_spacetype) || IS_PHYS_SEGFLG(a_spacetype)) {
+	if (IS_SYS_OR_PHYS_SPACE_SEGFLG(a_spacetype)) {
 		return kalloc_type(struct kern_iovec, a_iovcount, Z_WAITOK | Z_ZERO);
 	}
 
@@ -759,7 +874,7 @@ uio_alloc_iov_array(int a_spacetype, size_t a_iovcount)
 static void
 uio_free_iov_array(int a_spacetype, void *iovs, size_t a_iovcount)
 {
-	if (IS_SYS_SPACE_SEGFLG(a_spacetype) || IS_PHYS_SEGFLG(a_spacetype)) {
+	if (IS_SYS_OR_PHYS_SPACE_SEGFLG(a_spacetype)) {
 		kfree_type(struct kern_iovec, a_iovcount, iovs);
 	} else {
 		size_t bytes = UIO_SIZEOF_IOVS(a_iovcount);
@@ -838,47 +953,51 @@ uio_createwithbuffer( int a_iovcount,                   /* number of iovecs */
 }
 
 /*
- * uio_spacetype - return the address space type for the given uio_t
- */
-__private_extern__ int
-uio_spacetype( uio_t a_uio )
-{
-	if (a_uio == NULL) {
-#if LP64_DEBUG
-		panic("invalid uio_t");
-#endif /* LP64_DEBUG */
-		return -1;
-	}
-
-	return a_uio->uio_segflg;
-}
-
-/*
- * uio_iovsaddr - get the address of the iovec array for the given uio_t.
+ * uio_iovsaddr_user - get the address of the iovec array for the given uio_t.
  * This returns the location of the iovecs within the uio.
  * NOTE - for compatibility mode we just return the current value in uio_iovs
  * which will increase as the IO is completed and is NOT embedded within the
  * uio, it is a seperate array of one or more iovecs.
  */
 __private_extern__ struct user_iovec *
-uio_iovsaddr( uio_t a_uio )
+uio_iovsaddr_user( uio_t a_uio )
 {
-	struct user_iovec *             my_addr;
-
 	if (a_uio == NULL) {
 		return NULL;
 	}
 
-	if (UIO_SEG_IS_USER_SPACE(a_uio->uio_segflg)) {
-		/* we need this for compatibility mode. */
-		my_addr = uio_uiovp(a_uio);
-	} else {
-#if DEBUG
-		panic("uio_iovsaddr called for UIO_SYSSPACE request");
-#endif
-		my_addr = 0;
+	return uio_uiovp(a_uio);
+}
+
+static void
+_uio_reset(uio_t a_uio,
+    off_t a_offset,                                             /* current offset */
+    int a_iodirection)                                         /* read or write flag */
+{
+	void *my_iovs = a_uio->uio_iovbase;
+	int my_max_iovs = a_uio->uio_max_iovs;
+
+	if (my_iovs != NULL) {
+		bzero(my_iovs, UIO_SIZEOF_IOVS(my_max_iovs));
 	}
-	return my_addr;
+
+	a_uio->uio_iovs = my_iovs;
+	a_uio->uio_iovcnt = 0;
+	a_uio->uio_offset = a_offset;
+	a_uio->uio_segflg = 0;
+	a_uio->uio_rw = a_iodirection;
+	a_uio->uio_resid_64 = 0;
+}
+
+void
+uio_reset_fast( uio_t a_uio,
+    off_t a_offset,                                             /* current offset */
+    int a_spacetype,                                            /* type of address space */
+    int a_iodirection )                                         /* read or write flag */
+{
+	_uio_reset(a_uio, a_offset, a_iodirection);
+
+	a_uio->uio_segflg = a_spacetype;
 }
 
 /*
@@ -894,34 +1013,11 @@ uio_reset( uio_t a_uio,
     int a_spacetype,                                            /* type of address space */
     int a_iodirection )                                         /* read or write flag */
 {
-	int my_max_iovs;
-	u_int32_t my_old_flags;
-	void *my_iovs;
-
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("could not allocate uio_t");
-	}
-	if (!IS_VALID_UIO_SEGFLG(a_spacetype)) {
-		panic("invalid address space type");
-	}
-	if (!(a_iodirection == UIO_READ || a_iodirection == UIO_WRITE)) {
-		panic("invalid IO direction flag");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL) {
 		return;
 	}
 
-	my_old_flags = a_uio->uio_flags;
-	my_max_iovs = a_uio->uio_max_iovs;
-	my_iovs = a_uio->uio_iovbase;
-
-	bzero(a_uio, sizeof(*a_uio));
-	if (my_iovs != NULL) {
-		bzero(my_iovs, UIO_SIZEOF_IOVS(my_max_iovs));
-	}
+	_uio_reset(a_uio, a_offset, a_iodirection);
 
 	/*
 	 * we use uio_segflg to indicate if the uio_t is the new format or
@@ -944,15 +1040,6 @@ uio_reset( uio_t a_uio,
 		a_uio->uio_segflg = a_spacetype;
 		break;
 	}
-
-	a_uio->uio_iovs = my_iovs;
-	a_uio->uio_iovbase = my_iovs;
-	a_uio->uio_max_iovs = my_max_iovs;
-	a_uio->uio_offset = a_offset;
-	a_uio->uio_rw = a_iodirection;
-	a_uio->uio_flags = my_old_flags;
-
-	return;
 }
 
 /*
@@ -963,14 +1050,14 @@ void
 uio_free( uio_t a_uio )
 {
 #if DEBUG
-	if (a_uio == NULL) {
+	if (__improbable(a_uio == NULL)) {
 		panic("passing NULL uio_t");
 	}
-#endif /* LP64_DEBUG */
+#endif
 
 	if (a_uio != NULL && (a_uio->uio_flags & UIO_FLAGS_WE_ALLOCED) != 0) {
 #if DEBUG
-		if (os_atomic_dec_orig(&uio_t_count, relaxed) == 0) {
+		if (__improbable(os_atomic_dec_orig(&uio_t_count, relaxed) == 0)) {
 			panic("uio_t_count underflow");
 		}
 #endif
@@ -999,14 +1086,14 @@ uio_addiov( uio_t a_uio, user_addr_t a_baseaddr, user_size_t a_length )
 	struct kern_iovec *kiovp;
 	struct user_iovec *uiovp;
 
-	if (a_uio == NULL) {
+	if (__improbable(a_uio == NULL)) {
 #if DEBUG
 		panic("invalid uio_t");
 #endif
 		return -1;
 	}
 
-	if (os_add_overflow(a_length, a_uio->uio_resid_64, &resid)) {
+	if (__improbable(os_add_overflow(a_length, a_uio->uio_resid_64, &resid))) {
 #if DEBUG
 		panic("invalid length %lu", (unsigned long)a_length);
 #endif
@@ -1092,74 +1179,137 @@ uio_getiov( uio_t a_uio,
 }
 
 /*
- * uio_calculateresid - runs through all iovecs associated with this
+ * uio_calculateresid_user - runs through all iovecs associated with this
  *	uio_t and calculates (and sets) the residual IO count.
  */
 __private_extern__ int
-uio_calculateresid( uio_t a_uio )
+uio_calculateresid_user(uio_t __attribute((nonnull))a_uio)
 {
 	int                     i;
 	u_int64_t               resid = 0;
-	struct kern_iovec *kiovp;
 	struct user_iovec *uiovp;
 
-	if (a_uio == NULL) {
-#if LP64_DEBUG
-		panic("invalid uio_t");
-#endif /* LP64_DEBUG */
-		return EINVAL;
-	}
-
 	a_uio->uio_iovcnt = a_uio->uio_max_iovs;
-	if (UIO_IS_USER_SPACE(a_uio)) {
-		uiovp = uio_uiovp(a_uio);
-		a_uio->uio_resid_64 = 0;
-		for (i = 0; i < a_uio->uio_max_iovs; i++) {
-			if (uiovp[i].iov_len != 0) {
-				if (uiovp[i].iov_len > LONG_MAX) {
-					return EINVAL;
-				}
-				resid += uiovp[i].iov_len;
-				if (resid > LONG_MAX) {
-					return EINVAL;
-				}
+	uiovp = uio_uiovp(a_uio);
+	a_uio->uio_resid_64 = 0;
+	for (i = 0; i < a_uio->uio_max_iovs; i++) {
+		if (uiovp[i].iov_len != 0) {
+			if (uiovp[i].iov_len > LONG_MAX) {
+				return EINVAL;
+			}
+			resid += uiovp[i].iov_len;
+			if (resid > LONG_MAX) {
+				return EINVAL;
 			}
 		}
-		a_uio->uio_resid_64 = (user_size_t)resid;
+	}
+	a_uio->uio_resid_64 = (user_size_t)resid;
 
-		/* position to first non zero length iovec (4235922) */
-		while (a_uio->uio_iovcnt > 0 && uiovp->iov_len == 0) {
-			a_uio->uio_iovcnt--;
-			if (a_uio->uio_iovcnt > 0) {
-				uiovp = uio_advance(a_uio);
-			}
-		}
-	} else {
-		kiovp = uio_kiovp(a_uio);
-		a_uio->uio_resid_64 = 0;
-		for (i = 0; i < a_uio->uio_max_iovs; i++) {
-			if (kiovp[i].iov_len != 0) {
-				if (kiovp[i].iov_len > LONG_MAX) {
-					return EINVAL;
-				}
-				resid += kiovp[i].iov_len;
-				if (resid > LONG_MAX) {
-					return EINVAL;
-				}
-			}
-		}
-		a_uio->uio_resid_64 = (user_size_t)resid;
-
-		/* position to first non zero length iovec (4235922) */
-		while (a_uio->uio_iovcnt > 0 && kiovp->iov_len == 0) {
-			a_uio->uio_iovcnt--;
-			if (a_uio->uio_iovcnt > 0) {
-				kiovp = uio_advance(a_uio);
-			}
+	/* position to first non zero length iovec (4235922) */
+	while (a_uio->uio_iovcnt > 0 && uiovp->iov_len == 0) {
+		a_uio->uio_iovcnt--;
+		if (a_uio->uio_iovcnt > 0) {
+			uiovp = uio_advance_user(a_uio);
 		}
 	}
 
 	return 0;
+}
+
+/*
+ * uio_update_user - update the given uio_t for a_count of completed IO.
+ *	This call decrements the current iovec length and residual IO value
+ *	and increments the current iovec base address and offset value.
+ *	If the current iovec length is 0 then advance to the next
+ *	iovec (if any).
+ *      If the a_count passed in is 0, than only do the advancement
+ *	over any 0 length iovec's.
+ */
+static void
+uio_update_user(uio_t __attribute__((nonnull)) a_uio, user_size_t a_count)
+{
+	struct user_iovec *uiovp;
+
+	uiovp = uio_uiovp(a_uio);
+
+	/*
+	 * if a_count == 0, then we are asking to skip over
+	 * any empty iovs
+	 */
+	if (a_count) {
+		if (a_count > uiovp->iov_len) {
+			uiovp->iov_base += uiovp->iov_len;
+			uiovp->iov_len = 0;
+		} else {
+			uiovp->iov_base += a_count;
+			uiovp->iov_len -= a_count;
+		}
+		if (a_count > (user_size_t)a_uio->uio_resid_64) {
+			a_uio->uio_offset += a_uio->uio_resid_64;
+			a_uio->uio_resid_64 = 0;
+		} else {
+			a_uio->uio_offset += a_count;
+			a_uio->uio_resid_64 -= a_count;
+		}
+	}
+	/*
+	 * advance to next iovec if current one is totally consumed
+	 */
+	while (a_uio->uio_iovcnt > 0 && uiovp->iov_len == 0) {
+		a_uio->uio_iovcnt--;
+		if (a_uio->uio_iovcnt > 0) {
+			uiovp = uio_advance_user(a_uio);
+		}
+	}
+}
+
+/*
+ * uio_update_sys - update the given uio_t for a_count of completed IO.
+ *	This call decrements the current iovec length and residual IO value
+ *	and increments the current iovec base address and offset value.
+ *	If the current iovec length is 0 then advance to the next
+ *	iovec (if any).
+ *      If the a_count passed in is 0, than only do the advancement
+ *	over any 0 length iovec's.
+ */
+static void
+uio_update_sys(uio_t __attribute__((nonnull)) a_uio, user_size_t a_count)
+{
+	struct kern_iovec *kiovp;
+
+	kiovp = uio_kiovp(a_uio);
+
+	/*
+	 * if a_count == 0, then we are asking to skip over
+	 * any empty iovs
+	 */
+	if (a_count) {
+		u_int64_t prev_base = kiovp_get_base(kiovp);
+		if (a_count > kiovp->iov_len) {
+			u_int64_t len = kiovp->iov_len;
+			kiovp->iov_len = 0;
+			kiovp_set_base(kiovp, prev_base + len);
+		} else {
+			kiovp->iov_len -= a_count;
+			kiovp_set_base(kiovp, prev_base + a_count);
+		}
+		if (a_count > (user_size_t)a_uio->uio_resid_64) {
+			a_uio->uio_offset += a_uio->uio_resid_64;
+			a_uio->uio_resid_64 = 0;
+		} else {
+			a_uio->uio_offset += a_count;
+			a_uio->uio_resid_64 -= a_count;
+		}
+	}
+	/*
+	 * advance to next iovec if current one is totally consumed
+	 */
+	while (a_uio->uio_iovcnt > 0 && kiovp->iov_len == 0) {
+		a_uio->uio_iovcnt--;
+		if (a_uio->uio_iovcnt > 0) {
+			kiovp = uio_advance_sys(a_uio);
+		}
+	}
 }
 
 /*
@@ -1172,141 +1322,18 @@ uio_calculateresid( uio_t a_uio )
  *	over any 0 length iovec's.
  */
 void
-uio_update( uio_t a_uio, user_size_t a_count )
+uio_update(uio_t a_uio, user_size_t a_count)
 {
-	struct kern_iovec *kiovp;
-	struct user_iovec *uiovp;
-
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-	if (UIO_IS_32_BIT_SPACE(a_uio) && a_count > 0xFFFFFFFFull) {
-		panic("invalid count value ");
-	}
-#endif /* LP64_DEBUG */
-
 	if (a_uio == NULL || a_uio->uio_iovcnt < 1) {
 		return;
 	}
 
 	if (UIO_IS_USER_SPACE(a_uio)) {
-		uiovp = uio_uiovp(a_uio);
-
-		/*
-		 * if a_count == 0, then we are asking to skip over
-		 * any empty iovs
-		 */
-		if (a_count) {
-			if (a_count > uiovp->iov_len) {
-				uiovp->iov_base += uiovp->iov_len;
-				uiovp->iov_len = 0;
-			} else {
-				uiovp->iov_base += a_count;
-				uiovp->iov_len -= a_count;
-			}
-			if (a_count > (user_size_t)a_uio->uio_resid_64) {
-				a_uio->uio_offset += a_uio->uio_resid_64;
-				a_uio->uio_resid_64 = 0;
-			} else {
-				a_uio->uio_offset += a_count;
-				a_uio->uio_resid_64 -= a_count;
-			}
-		}
-		/*
-		 * advance to next iovec if current one is totally consumed
-		 */
-		while (a_uio->uio_iovcnt > 0 && uiovp->iov_len == 0) {
-			a_uio->uio_iovcnt--;
-			if (a_uio->uio_iovcnt > 0) {
-				uiovp = uio_advance(a_uio);
-			}
-		}
+		uio_update_user(a_uio, a_count);
 	} else {
-		kiovp = uio_kiovp(a_uio);
-
-		/*
-		 * if a_count == 0, then we are asking to skip over
-		 * any empty iovs
-		 */
-		if (a_count) {
-			u_int64_t prev_base = kiovp_get_base(kiovp);
-			if (a_count > kiovp->iov_len) {
-				u_int64_t len = kiovp->iov_len;
-				kiovp->iov_len = 0;
-				kiovp_set_base(kiovp, prev_base + len);
-			} else {
-				kiovp->iov_len -= a_count;
-				kiovp_set_base(kiovp, prev_base + a_count);
-			}
-			if (a_count > (user_size_t)a_uio->uio_resid_64) {
-				a_uio->uio_offset += a_uio->uio_resid_64;
-				a_uio->uio_resid_64 = 0;
-			} else {
-				a_uio->uio_offset += a_count;
-				a_uio->uio_resid_64 -= a_count;
-			}
-		}
-		/*
-		 * advance to next iovec if current one is totally consumed
-		 */
-		while (a_uio->uio_iovcnt > 0 && kiovp->iov_len == 0) {
-			a_uio->uio_iovcnt--;
-			if (a_uio->uio_iovcnt > 0) {
-				kiovp = uio_advance(a_uio);
-			}
-		}
+		uio_update_sys(a_uio, a_count);
 	}
-	return;
 }
-
-/*
- * uio_pushback - undo uncommitted I/O by subtracting from the
- * current base address and offset, and incrementing the residiual
- * IO. If the UIO was previously exhausted, this call will panic.
- * New code should not use this functionality.
- */
-__private_extern__ void
-uio_pushback( uio_t a_uio, user_size_t a_count )
-{
-	u_int64_t prev_base;
-	struct kern_iovec *kiovp;
-	struct user_iovec *uiovp;
-
-#if LP64_DEBUG
-	if (a_uio == NULL) {
-		panic("invalid uio_t");
-	}
-	if (UIO_IS_32_BIT_SPACE(a_uio) && a_count > 0xFFFFFFFFull) {
-		panic("invalid count value ");
-	}
-#endif /* LP64_DEBUG */
-
-	if (a_uio == NULL || a_count == 0) {
-		return;
-	}
-
-	if (a_uio->uio_iovcnt < 1) {
-		panic("Invalid uio for pushback");
-	}
-
-	if (UIO_IS_USER_SPACE(a_uio)) {
-		uiovp = uio_uiovp(a_uio);
-		uiovp->iov_base -= a_count;
-		uiovp->iov_len += a_count;
-	} else {
-		kiovp = uio_kiovp(a_uio);
-		prev_base = kiovp_get_base(kiovp);
-		kiovp->iov_len += a_count;
-		kiovp_set_base(kiovp, prev_base - a_count);
-	}
-
-	a_uio->uio_offset -= a_count;
-	a_uio->uio_resid_64 += a_count;
-
-	return;
-}
-
 
 /*
  * uio_duplicate - allocate a new uio and make a copy of the given uio_t.
@@ -1354,13 +1381,13 @@ uio_duplicate(uio_t uio)
 					break;
 				}
 
-				uiovp = uio_advance(new_uio);
+				uiovp = uio_advance_user(new_uio);
 			} else {
 				if (kiovp->iov_len != 0) {
 					break;
 				}
 
-				kiovp = uio_advance(new_uio);
+				kiovp = uio_advance_sys(new_uio);
 			}
 		}
 	} else {

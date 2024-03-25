@@ -17,8 +17,7 @@ INSTALL_MI_DIR = vfs
 
 INSTALL_KF_MI_LIST = ${DATAFILES}
 
-EXPORT_MI_LIST	= ${DATAFILES} vfs_disk_conditioner.h
-
+EXPORT_MI_LIST	= ${DATAFILES} vfs_disk_conditioner.h vfs_exclave_fs.h
 
 EXPORT_MI_DIR = vfs
 

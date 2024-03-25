@@ -113,7 +113,7 @@ public:
 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
 	virtual bool     setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
-	virtual bool     sync(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn sync(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn flush(const uuid_t guid, IONVRAMOperation op) APPLE_KEXT_OVERRIDE;
 	virtual void     reload(void) APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getGeneration(void) const APPLE_KEXT_OVERRIDE;
@@ -878,7 +878,7 @@ IONVRAMCHRPHandler::setController(IONVRAMController *controller)
 	return true;
 }
 
-bool
+IOReturn
 IONVRAMCHRPHandler::sync(void)
 {
 	IOReturn ret;

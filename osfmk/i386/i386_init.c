@@ -72,6 +72,7 @@
 #include <kern/pms.h>
 #include <kern/cpu_data.h>
 #include <kern/processor.h>
+#include <kern/monotonic.h>
 #include <sys/kdebug.h>
 #include <console/serial_protos.h>
 #include <vm/vm_page.h>
@@ -104,12 +105,8 @@
 #endif
 extern void xcpm_bootstrap(void);
 #if DEVELOPMENT || DEBUG
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #endif
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -778,9 +775,9 @@ vstart(vm_offset_t boot_args_start)
 		kasan_notify_stolen((uintptr_t)ml_static_ptovirt((vm_offset_t)physfree));
 #endif
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		mt_early_init();
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 		first_avail = (vm_offset_t)ID_MAP_VTOP(physfree);
 
@@ -1010,9 +1007,9 @@ i386_init(void)
 	power_management_init();
 	xcpm_bootstrap();
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_up(cpu_datap(0));
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	processor_bootstrap();
 
@@ -1088,9 +1085,9 @@ do_init_slave(boolean_t fast_restart)
 	cpu_init();     /* Sets cpu_running which starter cpu waits for */
 
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_up(current_cpu_datap());
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if KPERF
 	/*

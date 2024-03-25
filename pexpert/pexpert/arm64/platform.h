@@ -67,8 +67,7 @@
 #define ARM64_SOC_NAME CURRENT_MACHINE_CONFIG_LC
 #endif /* ARM64_SOC_NAME */
 
-// rdar://72605444 (EmbeddedHeaders per SoC symlink to newest chip revision: <soc/txxxx/latest>)
-#define SPDS_CHIP_REV_LC a0 // default
+#define SPDS_CHIP_REV_LC latest
 #define PLATFORM_SPDS_CHIP_REV_LC ARM64_SOC_NAME/SPDS_CHIP_REV_LC
 
 #endif /* !_PEXPERT_ARM64_PLATFORM_H_ */

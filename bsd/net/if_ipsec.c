@@ -1538,7 +1538,8 @@ ipsec_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 				if (error == 0) {
 					// Mark packet from policy
 					uint32_t policy_id = kern_packet_get_policy_id(tx_ph);
-					necp_mark_packet_from_ip(data, policy_id);
+					uint32_t skip_policy_id = kern_packet_get_skip_policy_id(tx_ph);
+					necp_mark_packet_from_ip_with_skip(data, policy_id, skip_policy_id);
 
 					// Check policy with NECP
 					if (!ipsec_netif_check_policy(pcb->ipsec_ifp, data)) {
@@ -3402,6 +3403,11 @@ ipsec_ctl_bind(kern_ctl_ref kctlref,
 
 	struct ipsec_pcb *pcb = (struct ipsec_pcb *)*unitinfo;
 	if (pcb == NULL) {
+		return EINVAL;
+	}
+
+	if (pcb->ipsec_ctlref != NULL) {
+		// Return if bind was already called
 		return EINVAL;
 	}
 

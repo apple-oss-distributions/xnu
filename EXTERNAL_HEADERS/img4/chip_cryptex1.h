@@ -9,7 +9,9 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @const IMG4_CHIP_CRYPTEX1_BOOT
@@ -96,6 +98,40 @@ const img4_chip_t _img4_chip_cryptex1_boot_x86;
 #define IMG4_CHIP_CRYPTEX1_BOOT_X86 (&_img4_chip_cryptex1_boot_x86)
 #else
 #define IMG4_CHIP_CRYPTEX1_BOOT_X86 (img4if->i4if_v17.chip_cryptex1_boot_x86)
+#endif
+
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_BOOT_STATIC_X86
+ * A virtual coprocessor environment hosted on an x86 chip which has no unique
+ * identity. This chip assists in booting the x86 processor's userspace. This
+ * chip has no ability to enforce expiration on its manifests.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20220912
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_boot_static_x86;
+#define IMG4_CHIP_CRYPTEX1_BOOT_STATIC_X86 \
+		(&_img4_chip_cryptex1_boot_static_x86)
+#else
+#define IMG4_CHIP_CRYPTEX1_BOOT_STATIC_X86 \
+		(img4if->i4if_v19.chip_cryptex1_boot_static_x86)
+#endif
+
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_BOOT_RELAXED_X86
+ * A virtual coprocessor environment hosted on an x86 chip which has no unique
+ * identity and has secure boot disabled. This chip assists in booting the x86
+ * processor's userspace.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20220711
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_boot_relaxed_x86;
+#define IMG4_CHIP_CRYPTEX1_BOOT_RELAXED_X86 \
+		(&_img4_chip_cryptex1_boot_relaxed_x86)
+#else
+#define IMG4_CHIP_CRYPTEX1_BOOT_RELAXED_X86 \
+		(img4if->i4if_v19.chip_cryptex1_boot_relaxed_x86)
 #endif
 
 /*!
@@ -224,6 +260,42 @@ const img4_chip_t _img4_chip_cryptex1_preboot_x86;
 #endif
 
 /*!
+ * @const IMG4_CHIP_CRYPTEX1_PREBOOT_STATIC_X86
+ * A virtual coprocessor environment hosted on an x86 chip which has no unique
+ * identity. This chip permits executing payloads intended for the next boot
+ * prior to that boot. It does not assist in booting the x86 chip. This chip has
+ * no ability to enforce expiration on its manifests.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20211126
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_preboot_static_x86;
+#define IMG4_CHIP_CRYPTEX1_PREBOOT_STATIC_X86 \
+		(&_img4_chip_cryptex1_preboot_static_x86)
+#else
+#define IMG4_CHIP_CRYPTEX1_PREBOOT_STATIC_X86 \
+		(img4if->i4if_v19.chip_cryptex1_preboot_static_x86)
+#endif
+
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_PREBOOT_RELAXED_X86
+ * A virtual coprocessor environment hosted on an x86 chip which has no unique
+ * identity and has secure boot disabled. This chip permits executing payloads
+ * intended for the next boot prior to that boot. It does not assist in booting
+ * the x86 chip.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20220711
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_preboot_relaxed_x86;
+#define IMG4_CHIP_CRYPTEX1_PREBOOT_RELAXED_X86 \
+		(&_img4_chip_cryptex1_preboot_relaxed_x86)
+#else
+#define IMG4_CHIP_CRYPTEX1_PREBOOT_RELAXED_X86 \
+		(img4if->i4if_v17.chip_cryptex1_preboot_relaxed_x86)
+#endif
+
+/*!
  * @const IMG4_CHIP_CRYPTEX1_PREBOOT_VMA2
  * A virtual coprocessor environment hosted on a virtualized ARM AP which
  * derives its unique identity from the hosting AP. This chip permits executing
@@ -290,6 +362,61 @@ const img4_chip_t _img4_chip_cryptex1_asset_x86;
 #define IMG4_CHIP_CRYPTEX1_ASSET_X86 (img4if->i4if_v18.chip_cryptex1_asset_x86)
 #endif
 
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_GENERIC
+ * A virtual coprocessor environment hosted on the AP which derives its unique
+ * identity from the hosting AP. This chip assists in executing generic cryptex
+ * payloads during runtime, after the host AP has booted its userspace.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_generic;
+#define IMG4_CHIP_CRYPTEX1_GENERIC \
+		(&_img4_chip_cryptex1_generic)
+#else
+#define IMG4_CHIP_CRYPTEX1_GENERIC \
+		(img4if->i4if_v20.chip_cryptex1_generic)
+#endif
+
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_GENERIC_SUPPLEMENTAL
+ * A virtual coprocessor environment hosted on the AP which derives its unique
+ * identity from the hosting AP. This chip assists in executing generic cryptex
+ * payloads during runtime, after the host AP has booted its userspace. Its
+ * trust is rooted in a supplemental root of trust authorized by the Secure Boot
+ * CA.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_generic_supplemental;
+#define IMG4_CHIP_CRYPTEX1_GENERIC_SUPPLEMENTAL \
+		(&_img4_chip_cryptex1_generic_supplemental)
+#else
+#define IMG4_CHIP_CRYPTEX1_GENERIC_SUPPLEMENTAL \
+		(img4if->i4if_v20.chip_cryptex1_generic_supplemental)
+#endif
+
+/*!
+ * @const IMG4_CHIP_CRYPTEX1_GENERIC_X86
+ * A virtual coprocessor environment hosted on an x86 chip. This chip assists in
+ * executing generic cryptex payloads during runtime after the x86 chip has
+ * booted.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT
+const img4_chip_t _img4_chip_cryptex1_generic_x86;
+#define IMG4_CHIP_CRYPTEX1_GENERIC_X86 \
+		(&_img4_chip_cryptex1_generic_x86)
+#else
+#define IMG4_CHIP_CRYPTEX1_GENERIC_X86 \
+		(img4if->i4if_v20.chip_cryptex1_generic_x86)
+#endif
+
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_CHIP_CRYPTEX1_H

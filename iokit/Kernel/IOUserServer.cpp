@@ -47,6 +47,7 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
+#include <IOKit/pwr_mgt/IOPowerConnection.h>
 #include <libkern/c++/OSAllocation.h>
 #include <libkern/c++/OSKext.h>
 #include <libkern/c++/OSSharedPtr.h>
@@ -106,6 +107,9 @@ static const OSSymbol * gIOSystemStatePowerSourceDescriptionACAttachedKey;
 extern bool gInUserspaceReboot;
 
 extern void iokit_clear_registered_ports(task_t task);
+
+static IORPCMessage *
+IORPCMessageFromMachReply(IORPCMessageMach * msg);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -2400,7 +2404,7 @@ OSMetaClassBase::Invoke(IORPC rpc)
 	IORPCMessage    * message;
 
 	assert(rpc.sendSize >= (sizeof(IORPCMessageMach) + sizeof(IORPCMessage)));
-	message = IORPCMessageFromMach(rpc.message, false);
+	message = rpc.kernelContent;
 	if (!message) {
 		return kIOReturnIPCError;
 	}
@@ -3051,7 +3055,7 @@ IOUserServer::objectInstantiate(OSObject * obj, IORPC rpc, IORPCMessage * messag
 	machReply->msgh.msgh_size                  = replySize;
 	machReply->msgh_body.msgh_descriptor_count = queueCount;
 
-	reply = (typeof(reply))IORPCMessageFromMach(machReply, true);
+	reply = (typeof(reply))IORPCMessageFromMachReply(machReply);
 	if (!reply) {
 		return kIOReturnIPCError;
 	}
@@ -3079,7 +3083,7 @@ IOUserServer::kernelDispatch(OSObject * obj, IORPC rpc)
 	IOReturn       ret;
 	IORPCMessage * message;
 
-	message = IORPCMessageFromMach(rpc.message, false);
+	message = rpc.kernelContent;
 	if (!message) {
 		return kIOReturnIPCError;
 	}
@@ -3151,7 +3155,10 @@ uext_server(ipc_port_t receiver, ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 		OSSafeReleaseNULL(object);
 		return KERN_INVALID_NAME;
 	}
-	ret = server->server(requestkmsg, pReply);
+
+	IORPCMessage * message = (typeof(message))ikm_udata_from_header(requestkmsg);
+
+	ret = server->server(requestkmsg, message, pReply);
 	object->release();
 
 	return ret;
@@ -3165,13 +3172,12 @@ uext_server(ipc_port_t receiver, ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 static_assert(MAX_UEXT_REPLY_SIZE + MAX_TRAILER_SIZE <= KALLOC_SAFE_ALLOC_SIZE);
 
 kern_return_t
-IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
+IOUserServer::server(ipc_kmsg_t requestkmsg, IORPCMessage * message, ipc_kmsg_t * pReply)
 {
 	kern_return_t      ret;
 	mach_msg_size_t    replyAlloc;
 	ipc_kmsg_t         replykmsg;
 	IORPCMessageMach * msgin;
-	IORPCMessage     * message;
 	IORPCMessageMach * msgout;
 	IORPCMessage     * reply;
 	uint32_t           replySize;
@@ -3195,7 +3201,6 @@ IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 	if (!(MACH_MSGH_BITS_COMPLEX & msgin->msgh.msgh_bits)) {
 		msgin->msgh_body.msgh_descriptor_count = 0;
 	}
-	message = IORPCMessageFromMach(msgin, false);
 	if (!message) {
 		return kIOReturnIPCError;
 	}
@@ -3227,18 +3232,22 @@ IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 	assert(oneway || (MACH_PORT_NULL != msgin->msgh.msgh_local_port));
 
 	replyAlloc = oneway ? 0 : MAX_UEXT_REPLY_SIZE;
+
+
+
+
 	if (replyAlloc) {
 		/*
 		 * Same as:
-		 *    ipc_kmsg_alloc(replyAlloc, 0,
+		 *    ipc_kmsg_alloc(MAX_UEXT_REPLY_SIZE_MACH, MAX_UEXT_REPLY_SIZE_MESSAGE,
 		 *        IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO | IPC_KMSG_ALLOC_LINEAR |
 		 *        IPC_KMSG_ALLOC_NOFAIL);
 		 */
-		replykmsg = ipc_kmsg_alloc_uext_reply(replyAlloc);
+		replykmsg = ipc_kmsg_alloc_uext_reply(MAX_UEXT_REPLY_SIZE);
 		msgout = (typeof(msgout))ikm_header(replykmsg);
 	}
 
-	IORPC rpc = { .message = msgin, .reply = msgout, .sendSize = msgin->msgh.msgh_size, .replySize = replyAlloc };
+	IORPC rpc = { .message = msgin, .reply = msgout, .sendSize = msgin->msgh.msgh_size, .replySize = replyAlloc, .kernelContent = message };
 
 	if (object) {
 		kern_allocation_name_t prior;
@@ -3267,7 +3276,7 @@ IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 	if (!oneway) {
 		if (kIOReturnSuccess == ret) {
 			replySize = msgout->msgh.msgh_size;
-			reply = IORPCMessageFromMach(msgout, true);
+			reply = IORPCMessageFromMachReply(msgout);
 			if (!reply) {
 				ret = kIOReturnIPCError;
 			} else {
@@ -3279,7 +3288,7 @@ IOUserServer::server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * pReply)
 
 			msgout->msgh_body.msgh_descriptor_count = 0;
 			msgout->msgh.msgh_id                    = kIORPCVersionCurrentReply;
-			errorMsg = (typeof(errorMsg))IORPCMessageFromMach(msgout, true);
+			errorMsg = (typeof(errorMsg))IORPCMessageFromMachReply(msgout);
 			errorMsg->hdr.msgid      = message->msgid;
 			errorMsg->hdr.flags      = kIORPCMessageOneway | kIORPCMessageError;
 			errorMsg->hdr.objectRefs = 0;
@@ -3387,6 +3396,7 @@ IOUserServerUEXTTrap(OSObject * object, void * p1, void * p2, void * p3, void * 
 	rpc.sendSize  = mach->msgh.msgh_size;
 	rpc.reply     = (IORPCMessageMach *) (p + inSize);
 	rpc.replySize = ((uint32_t) (sizeof(buffer.buffer) - inSize));    // inSize was checked
+	rpc.kernelContent = message;
 
 	message->objects[0] = 0;
 	if ((action = OSDynamicCast(OSAction, object))) {
@@ -3428,7 +3438,7 @@ IOUserServerUEXTTrap(OSObject * object, void * p1, void * p2, void * p3, void * 
 			if (rpc.reply->msgh_body.msgh_descriptor_count) {
 				return kIOReturnIPCError;
 			}
-			reply = IORPCMessageFromMach(rpc.reply, rpc.reply->msgh.msgh_size);
+			reply = IORPCMessageFromMachReply(rpc.reply);
 			if (!reply) {
 				return kIOReturnIPCError;
 			}
@@ -3479,7 +3489,7 @@ IOUserServer::rpc(IORPC rpc)
 
 	assert(sendSize >= (sizeof(IORPCMessageMach) + sizeof(IORPCMessage)));
 
-	message = IORPCMessageFromMach(mach, false);
+	message = rpc.kernelContent;
 	if (!message) {
 		return kIOReturnIPCError;
 	}
@@ -3552,7 +3562,7 @@ IOUserServer::rpc(IORPC rpc)
 			if (!(MACH_MSGH_BITS_COMPLEX & mach->msgh.msgh_bits)) {
 				mach->msgh_body.msgh_descriptor_count = 0;
 			}
-			message = IORPCMessageFromMach(mach, true);
+			message = IORPCMessageFromMachReply(mach);
 			if (!message) {
 				ret = kIOReturnIPCError;
 			} else if (message->msgid != msgid) {
@@ -3580,14 +3590,15 @@ IOUserServer::rpc(IORPC rpc)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-IORPCMessage *
-IORPCMessageFromMach(IORPCMessageMach * msg, bool reply)
+static IORPCMessage *
+IORPCMessageFromMachReply(IORPCMessageMach * msg)
 {
 	mach_msg_size_t              idx, count;
 	mach_msg_port_descriptor_t * desc;
 	mach_msg_port_descriptor_t * maxDesc;
 	size_t                       size, msgsize;
 	bool                         upgrade;
+	bool                         reply = true;
 
 	msgsize = msg->msgh.msgh_size;
 	count   = msg->msgh_body.msgh_descriptor_count;
@@ -4156,18 +4167,15 @@ IOUserServer::clientClose(void)
 {
 	OSArray   * services;
 	bool __block unexpectedExit = false;
-	bool powerManagementFailed = false;
 
 	if (kIODKLogSetup & gIODKDebug) {
 		DKLOG("%s::clientClose(%p)\n", getName(), this);
 	}
-
 	services = NULL;
 	IOLockLock(fLock);
 	if (fServices) {
 		services = OSArray::withArray(fServices);
 	}
-	powerManagementFailed = fPowerManagementFailed;
 	IOLockUnlock(fLock);
 
 	// if this was a an expected exit, termination and stop should have detached at this
@@ -4201,8 +4209,7 @@ IOUserServer::clientClose(void)
 
 	if (unexpectedExit &&
 	    !gInUserspaceReboot &&
-	    !powerManagementFailed &&
-	    (fTaskCrashReason == OS_REASON_NULL || (fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD)) &&
+	    (fTaskCrashReason != OS_REASON_NULL && fTaskCrashReason->osr_namespace != OS_REASON_JETSAM && fTaskCrashReason->osr_namespace != OS_REASON_RUNNINGBOARD) &&
 	    fStatistics != NULL) {
 		OSDextCrashPolicy policy = fStatistics->recordCrash();
 		bool allowPanic;
@@ -4858,13 +4865,6 @@ IOUserServer::setPowerState(unsigned long state, IOService * service)
 	return kIOPMAckImplied;
 }
 
-void
-IOUserServer::setPowerManagementFailed(bool failed)
-{
-	IOLockLock(fLock);
-	fPowerManagementFailed = failed;
-	IOLockUnlock(fLock);
-}
 
 IOReturn
 IOUserServer::serviceSetPowerState(IOService * controllingDriver, IOService * service, IOPMPowerFlags flags, unsigned long state)
@@ -4874,7 +4874,7 @@ IOUserServer::serviceSetPowerState(IOService * controllingDriver, IOService * se
 
 	IOLockLock(fLock);
 	if (service->reserved->uvars) {
-		if (!fSystemOff && !fPowerManagementFailed && !(kIODKDisablePM & gIODKDebug)) {
+		if (!fSystemOff && !(kIODKDisablePM & gIODKDebug)) {
 			OSDictionary * wakeDescription;
 			OSObject     * prop;
 			char           wakeReasonString[128];
@@ -4967,6 +4967,31 @@ IOUserServer::powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long state, I
 	}
 
 	return kIOPMAckImplied;
+}
+
+bool
+IOUserServer::checkPMReady()
+{
+	bool __block ready = true;
+
+	IOLockLock(fLock);
+	// Check if any services have not completely joined the PM tree (i.e.
+	// addPowerChild has not compeleted).
+	fServices->iterateObjects(^bool (OSObject * obj) {
+		IOPowerConnection *conn;
+		IOService *service = (IOService *) obj;
+		IORegistryEntry *parent = service->getParentEntry(gIOPowerPlane);
+		if ((conn = OSDynamicCast(IOPowerConnection, parent))) {
+		        if (!conn->getReadyFlag()) {
+		                ready = false;
+		                return true;
+			}
+		}
+		return false;
+	});
+	IOLockUnlock(fLock);
+
+	return ready;
 }
 
 kern_return_t
@@ -5336,12 +5361,6 @@ IOUserServer::systemPower(bool powerOff)
 	}
 
 	IOLockLock(fLock);
-
-	if (fPowerManagementFailed && !powerOff) {
-		IOLockUnlock(fLock);
-		kill("Power Management Failed");
-		return;
-	}
 
 	services = OSArray::withArray(fServices);
 

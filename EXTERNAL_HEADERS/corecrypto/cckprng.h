@@ -1,4 +1,4 @@
-/* Copyright (c) (2018-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2018-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -11,8 +11,6 @@
 
 #ifndef _CORECRYPTO_CCKPRNG_H_
 #define _CORECRYPTO_CCKPRNG_H_
-
-#include <stdbool.h>
 
 #include <corecrypto/cc.h>
 #include "ccrng_fortuna.h"
@@ -104,6 +102,8 @@ struct cckprng_ctx {
 
     struct ccdrbg_info drbg_info;
     uint8_t drbg_state[CCKPRNG_DRBG_STATE_MAX_SIZE];
+
+    ccdrbg_df_bc_ctx_t drbg_df_ctx;
 
     uint8_t cache[CCKPRNG_CACHED_BUF_SIZE];
 

@@ -1,5 +1,3 @@
-from __future__ import absolute_import
-
 from xnu import *
 
 @lldb_command("showcoreanalyticsformatstr")

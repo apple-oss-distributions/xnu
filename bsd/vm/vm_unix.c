@@ -39,6 +39,7 @@
  */
 #include <vm/vm_options.h>
 
+#include <kern/ecc.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/debug.h>
@@ -294,12 +295,14 @@ SYSCTL_UINT(_vm, OID_AUTO, user_tte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_u
 SYSCTL_UINT(_vm, OID_AUTO, kernel_tte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_kernel_ttepages_count, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, user_pte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_user_ptepages_count, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, kernel_pte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_kernel_ptepages_count, 0, "");
+#if !CONFIG_SPTM
 extern unsigned int free_page_size_tt_count;
 extern unsigned int free_two_page_size_tt_count;
 extern unsigned int free_tt_count;
 SYSCTL_UINT(_vm, OID_AUTO, free_1page_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_page_size_tt_count, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, free_2page_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_two_page_size_tt_count, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, free_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_tt_count, 0, "");
+#endif
 #if DEVELOPMENT || DEBUG
 extern unsigned long pmap_asid_flushes;
 SYSCTL_ULONG(_vm, OID_AUTO, pmap_asid_flushes, CTLFLAG_RD | CTLFLAG_LOCKED, &pmap_asid_flushes, "");
@@ -1000,6 +1003,15 @@ task_for_pid(
 
 	proc_rele(p);
 	p = PROC_NULL;
+
+	/* IPC is not active on the task until after `exec_resettextvp` has been called.
+	 * We don't want to call into MAC hooks until we know that this has occured, otherwise
+	 * AMFI and others will read uninitialized fields from the csproc
+	 */
+	if (!task_is_ipc_active(task)) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
 
 #if CONFIG_MACF
 	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_CONTROL);
@@ -3729,6 +3741,27 @@ kas_info(struct proc *p,
 		if (error) {
 			return error;
 		}
+	}
+	break;
+	case KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR:
+	case KAS_INFO_TXM_TEXT_SLIDE_SELECTOR:
+	{
+#if CONFIG_SPTM
+		const uint64_t slide =
+		    (selector == KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR) ? vm_sptm_offsets.slide : vm_txm_offsets.slide;
+#else
+		const uint64_t slide = 0;
+#endif
+
+		if (sizeof(slide) != size) {
+			return EINVAL;
+		}
+
+		error = copyout(&slide, valuep, sizeof(slide));
+		if (error) {
+			return error;
+		}
+		rsize = size;
 	}
 	break;
 	default:

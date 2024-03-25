@@ -58,7 +58,6 @@ typedef struct arm_vfpv2_state arm_vfpv2_state_t;
  * Forward definitions
  */
 void thread_set_child(thread_t child, int pid);
-void thread_set_parent(thread_t parent, int pid);
 static void free_debug_state(thread_t thread);
 user_addr_t thread_get_sigreturn_token(thread_t thread);
 uint32_t thread_get_sigreturn_diversifier(thread_t thread);
@@ -131,7 +130,7 @@ thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
 	const uint32_t CPSR_PRESERVE_MASK = ~(CPSR_COPY_MASK | CPSR_ZERO_MASK);
 #if __has_feature(ptrauth_calls)
 	/* BEGIN IGNORE CODESTYLE */
-	MANIPULATE_SIGNED_THREAD_STATE(saved_state,
+	MANIPULATE_SIGNED_USER_THREAD_STATE(saved_state,
 		"and	w2, w2, %w[preserve_mask]"	"\n"
 		"mov	w6, %w[cpsr]"			"\n"
 		"and	w6, w6, %w[copy_mask]"		"\n"
@@ -151,14 +150,14 @@ thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
 	uint32_t new_cpsr = get_saved_state_cpsr(saved_state);
 	new_cpsr &= CPSR_PRESERVE_MASK;
 	new_cpsr |= (ts64->cpsr & CPSR_COPY_MASK);
-	set_saved_state_cpsr(saved_state, new_cpsr);
+	set_user_saved_state_cpsr(saved_state, new_cpsr);
 #endif /* __has_feature(ptrauth_calls) */
 	set_saved_state_fp(saved_state, ts64->fp);
-	set_saved_state_lr(saved_state, ts64->lr);
+	set_user_saved_state_lr(saved_state, ts64->lr);
 	set_saved_state_sp(saved_state, ts64->sp);
-	set_saved_state_pc(saved_state, ts64->pc);
+	set_user_saved_state_pc(saved_state, ts64->pc);
 	for (i = 0; i < 29; i++) {
-		set_saved_state_reg(saved_state, i, ts64->x[i]);
+		set_user_saved_state_reg(saved_state, i, ts64->x[i]);
 	}
 
 #if __has_feature(ptrauth_calls)
@@ -1590,7 +1589,7 @@ machine_thread_pc(thread_t thread)
 void
 machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
 {
-	set_saved_state_pc(get_user_regs(thread), (register_t)pc);
+	set_user_saved_state_pc(get_user_regs(thread), (register_t)pc);
 }
 
 /*
@@ -1633,13 +1632,15 @@ machine_thread_state_initialize(thread_t thread)
                         "mov	x3, #0"                 "\n"
                         "mov	x4, #0"                 "\n"
                         "mov	x5, #0"                 "\n"
-                        "mov	x6, lr"                 "\n"
                         "msr	SPSel, #1"              "\n"
+                        VERIFY_USER_THREAD_STATE_INSTR  "\n"
+                        "mov	x6, lr"                 "\n"
                         "bl     _ml_sign_thread_state"  "\n"
                         "msr	SPSel, #0"              "\n"
                         "mov	lr, x6"                 "\n"
                         :
-                        : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr)
+                        : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr),
+                          VERIFY_USER_THREAD_STATE_INPUTS
                         : "x0", "x1", "x2", "x3", "x4", "x5", "x6"
                 );
 		ml_pac_safe_interrupts_restore(intr);
@@ -1666,7 +1667,7 @@ machine_thread_dup(thread_t self,
 	bcopy(self_saved_state, target_saved_state, sizeof(struct arm_saved_state));
 #if defined(HAS_APPLE_PAC)
 	if (!is_corpse && is_saved_state64(self_saved_state)) {
-		check_and_sign_copied_thread_state(target_saved_state, self_saved_state);
+		check_and_sign_copied_user_thread_state(target_saved_state, self_saved_state);
 	}
 #endif /* defined(HAS_APPLE_PAC) */
 
@@ -1960,7 +1961,7 @@ thread_setentrypoint(thread_t         thread,
 
 	sv = get_user_regs(thread);
 
-	set_saved_state_pc(sv, entry);
+	set_user_saved_state_pc(sv, entry);
 
 #if HAS_APPLE_PAC
 	ml_pac_safe_interrupts_restore(intr);
@@ -2044,25 +2045,8 @@ thread_set_child(thread_t child,
 
 	child_state = get_user_regs(child);
 
-	set_saved_state_reg(child_state, 0, pid);
-	set_saved_state_reg(child_state, 1, 1ULL);
-}
-
-
-/*
- * Routine: thread_set_parent
- *
- */
-void
-thread_set_parent(thread_t parent,
-    int      pid)
-{
-	struct arm_saved_state *parent_state;
-
-	parent_state = get_user_regs(parent);
-
-	set_saved_state_reg(parent_state, 0, pid);
-	set_saved_state_reg(parent_state, 1, 0);
+	set_user_saved_state_reg(child_state, 0, pid);
+	set_user_saved_state_reg(child_state, 1, 1ULL);
 }
 
 
@@ -2235,7 +2219,7 @@ thread_set_wq_state64(thread_t       thread,
 	 * like sp.
 	 */
 	thread_state64_to_saved_state(state, saved_state);
-	set_saved_state_cpsr(saved_state, PSR64_USER64_DEFAULT);
+	set_user_saved_state_cpsr(saved_state, PSR64_USER64_DEFAULT);
 
 	if (curth != thread) {
 		thread_unlock(thread);

@@ -9,7 +9,9 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @function img4_image_get_bytes
@@ -273,6 +275,8 @@ img4_image_get_entitlement_data(img4_image_t image,
 		(img4if->i4if_v18.image_get_entitlement_data(__VA_ARGS__))
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_IMAGE_H

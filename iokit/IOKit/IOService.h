@@ -231,6 +231,10 @@ typedef void (*IOInterruptAction)( OSObject * target, void * refCon,
 #ifdef __BLOCKS__
 typedef void (^IOInterruptActionBlock)(IOService * nub, int source);
 typedef kern_return_t (^IOStateNotificationHandler)(void);
+#ifdef KERNEL_PRIVATE
+typedef bool (^ANEUpcallSetPowerStateHandler)(uint32_t desiredState);
+typedef bool (^ANEUpcallWorkHandler)(uint64_t arg0, uint64_t arg1, uint64_t arg2);
+#endif
 #endif /* __BLOCKS__ */
 
 typedef void * IOStateNotificationListenerRef;
@@ -1579,6 +1583,26 @@ public:
 	 *   @result kIOReturnSuccess on success. See IOReturn.h for error codes. */
 	kern_return_t exclaveAsyncNotificationRegister(IOExclaveProxyState * pRef, IOInterruptEventSource *notification, uint32_t *notificationID);
 
+#ifdef __BLOCKS__
+	/* ANE specific upcall registration */
+
+	/*! @function exclaveRegisterUpcallSetPowerState
+	 *   @abstract Register a handler for ANE exclave's setPowerState upcall
+	 *   @param pRef Exclave proxy state
+	 *   @param handler Upcall handler
+	 *   @result kIOReturnSuccess on success. See IOReturn.h for error codes. */
+	kern_return_t exclaveRegisterANEUpcallSetPowerState(IOExclaveProxyState * pRef, ANEUpcallSetPowerStateHandler handler);
+
+	/*! @function exclaveRegisterUpcallWorkSubmit
+	 *   @abstract Register a handler for ANE exclave's WorkSubmit upcall
+	 *   @param pRef Exclave proxy state
+	 *   @param handler Upcall handler
+	 *   @result kIOReturnSuccess on success. See IOReturn.h for error codes. */
+	kern_return_t exclaveRegisterANEUpcallWorkSubmit(IOExclaveProxyState * pRef, ANEUpcallWorkHandler handler);
+	kern_return_t exclaveRegisterANEUpcallWorkBegin(IOExclaveProxyState * pRef, ANEUpcallWorkHandler handler);
+	kern_return_t exclaveRegisterANEUpcallWorkEnd(IOExclaveProxyState * pRef, ANEUpcallWorkHandler handler);
+#endif /* __BLOCKS__ */
+
 #ifdef XNU_KERNEL_PRIVATE
 	// Interrupts
 	bool
@@ -2284,6 +2308,7 @@ private:
 	void stop_spindump_timer( void );
 	bool checkForDone( void );
 	bool responseValid( uint32_t x, int pid );
+	void updateClientResponses( void );
 	void computeDesiredState( unsigned long tempDesire, bool computeOnly );
 	void trackSystemSleepPreventers( IOPMPowerStateIndex, IOPMPowerStateIndex, IOPMPowerChangeFlags );
 	void tellSystemCapabilityChange( uint32_t nextMS );

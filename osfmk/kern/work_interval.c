@@ -210,20 +210,6 @@ work_interval_telemetry_data_enabled(struct work_interval *work_interval)
 	return (work_interval->wi_create_flags & WORK_INTERVAL_FLAG_ENABLE_TELEMETRY_DATA) != 0;
 }
 
-/*
- * work_interval_should_collect_telemetry_from_thread()
- *
- * Helper routine to determine whether any work interval telemetry should be collected
- * for a thread.
- */
-static inline bool
-work_interval_should_collect_telemetry_from_thread(thread_t thread)
-{
-	if (thread->th_work_interval == NULL) {
-		return false;
-	}
-	return work_interval_telemetry_data_enabled(thread->th_work_interval);
-}
 
 /*
  * work_interval_get_recount_tracks()
@@ -722,6 +708,46 @@ work_interval_get_priority(thread_t thread)
 	return priority;
 }
 
+#if CONFIG_THREAD_GROUPS
+extern kern_return_t
+kern_work_interval_get_policy_from_port(mach_port_name_t port_name,
+    integer_t *policy,
+    integer_t *priority,
+    struct thread_group **tg)
+{
+	assert((priority != NULL) && (policy != NULL) && (tg != NULL));
+
+	kern_return_t kr;
+	struct work_interval *work_interval;
+
+	kr = port_name_to_work_interval(port_name, &work_interval);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	/* work_interval has a +1 ref */
+	assert(work_interval != NULL);
+	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
+
+	const sched_mode_t mode = work_interval_class_data[work_interval->wi_class].sched_mode;
+
+	if ((mode == TH_MODE_TIMESHARE) || (mode == TH_MODE_FIXED)) {
+		*policy = ((mode == TH_MODE_TIMESHARE)? POLICY_TIMESHARE: POLICY_RR);
+		*priority = work_interval_class_data[work_interval->wi_class].priority;
+		assert(*priority != 0);
+		*priority += work_interval->wi_class_offset;
+		assert3u(*priority, <=, MAXPRI);
+	} /* No sched mode change for REALTIME (threads must explicitly opt-in) */
+
+	if (work_interval->wi_group) {
+		*tg = thread_group_retain(work_interval->wi_group);
+	}
+
+	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
+	return KERN_SUCCESS;
+}
+#endif /* CONFIG_THREAD_GROUPS */
+
 /*
  * Switch to a policy driven by the work interval (if applicable).
  */
@@ -880,7 +906,7 @@ thread_set_work_interval(thread_t thread,
 	 * flag on the thread which indicates that such a "leak" has happened. This flag will
 	 * be cleared when the remote thread eventually blocks and unjoins from the work interval.
 	 */
-	bool thread_on_remote_core = ((thread != current_thread()) && (thread->state & TH_RUN) && (thread->runq == PROCESSOR_NULL));
+	bool thread_on_remote_core = ((thread != current_thread()) && (thread->state & TH_RUN) && (thread_get_runq(thread) == PROCESSOR_NULL));
 
 	if (thread_on_remote_core && ((options & THREAD_WI_THREAD_CTX_SWITCH) == 0)) {
 		assert((options & THREAD_WI_THREAD_LOCK_NEEDED) == 0);

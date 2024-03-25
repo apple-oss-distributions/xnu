@@ -111,6 +111,9 @@
 #include <miscfs/specfs/specdev.h>
 
 #include <vfs/vfs_disk_conditioner.h>
+#if CONFIG_EXCLAVES
+#include <vfs/vfs_exclave_fs.h>
+#endif
 
 #include <security/audit/audit.h>
 #include <bsm/audit_kevents.h>
@@ -4009,18 +4012,17 @@ nameiat(struct nameidata *ndp, int dirfd)
  * Change current working directory to a given file descriptor.
  */
 /* ARGSUSED */
-static int
-common_fchdir(proc_t p, struct fchdir_args *uap, int per_thread)
+int
+fchdir(proc_t p, vfs_context_t ctx, int fd, bool per_thread)
 {
 	vnode_t vp;
 	vnode_t tdp;
 	vnode_t tvp;
 	struct mount *mp;
 	int error, should_put = 1;
-	vfs_context_t ctx = vfs_context_current();
 
-	AUDIT_ARG(fd, uap->fd);
-	if (per_thread && uap->fd == -1) {
+	AUDIT_ARG(fd, fd);
+	if (per_thread && fd == -1) {
 		/*
 		 * Switching back from per-thread to per process CWD; verify we
 		 * in fact have one before proceeding.  The only success case
@@ -4040,11 +4042,11 @@ common_fchdir(proc_t p, struct fchdir_args *uap, int per_thread)
 		return EBADF;
 	}
 
-	if ((error = file_vnode(uap->fd, &vp))) {
+	if ((error = file_vnode(fd, &vp))) {
 		return error;
 	}
 	if ((error = vnode_getwithref(vp))) {
-		file_drop(uap->fd);
+		file_drop(fd);
 		return error;
 	}
 
@@ -4117,21 +4119,21 @@ out:
 	if (should_put) {
 		vnode_put(vp);
 	}
-	file_drop(uap->fd);
+	file_drop(fd);
 
 	return error;
 }
 
 int
-fchdir(proc_t p, struct fchdir_args *uap, __unused int32_t *retval)
+sys_fchdir(proc_t p, struct fchdir_args *uap, __unused int32_t *retval)
 {
-	return common_fchdir(p, uap, 0);
+	return fchdir(p, vfs_context_current(), uap->fd, false);
 }
 
 int
 __pthread_fchdir(proc_t p, struct __pthread_fchdir_args *uap, __unused int32_t *retval)
 {
-	return common_fchdir(p, (void *)uap, 1);
+	return fchdir(p, vfs_context_current(), uap->fd, true);
 }
 
 
@@ -4231,7 +4233,7 @@ common_chdir(proc_t p, struct chdir_args *uap, int per_thread)
  *
  */
 int
-chdir(proc_t p, struct chdir_args *uap, __unused int32_t *retval)
+sys_chdir(proc_t p, struct chdir_args *uap, __unused int32_t *retval)
 {
 	return common_chdir(p, (void *)uap, 0);
 }
@@ -4517,6 +4519,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
 {
 	proc_t p = vfs_context_proc(ctx);
+	kauth_cred_t p_cred = current_cached_proc_cred(PROC_NULL);
 	uthread_t uu = get_bsdthread_info(vfs_context_thread(ctx));
 	struct fileproc *fp;
 	vnode_t vp;
@@ -4544,7 +4547,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	AUDIT_ARG(fflags, oflags);
 	AUDIT_ARG(mode, vap->va_mode);
 
-	if ((error = falloc_withinit(p, &fp, &indx, ctx, fp_init, initarg)) != 0) {
+	if ((error = falloc_withinit(p, p_cred, ctx, &fp, &indx, fp_init, initarg)) != 0) {
 		return error;
 	}
 	if (flags & O_CLOEXEC) {
@@ -12795,6 +12798,53 @@ unlock:
 	case FSIOC_TEST_FSE_ACCESS_GRANTED:
 		error = test_fse_access_granted(vp, (unsigned long)udata, ctx);
 		break;
+
+#if CONFIG_EXCLAVES
+	case FSIOC_EXCLAVE_FS_REGISTER:
+		if (IOTaskHasEntitlement(vfs_context_task(ctx), EXCLAVE_FS_REGISTER_ENTITLEMENT)) {
+			error = vfs_exclave_fs_register(((fsioc_exclave_fs_register_t *)data)->fs_tag, vp);
+		} else {
+			error = EPERM;
+		}
+		break;
+
+	case FSIOC_EXCLAVE_FS_UNREGISTER:
+		if (IOTaskHasEntitlement(vfs_context_task(ctx), EXCLAVE_FS_REGISTER_ENTITLEMENT)) {
+			error = vfs_exclave_fs_unregister(vp);
+		} else {
+			error = EPERM;
+		}
+		break;
+
+	case FSIOC_EXCLAVE_FS_GET_BASE_DIRS: {
+		exclave_fs_get_base_dirs_t *get_base_dirs = ((exclave_fs_get_base_dirs_t *)data);
+		exclave_fs_base_dir_t *dirs = NULL;
+		if (!IOTaskHasEntitlement(vfs_context_task(ctx), EXCLAVE_FS_REGISTER_ENTITLEMENT)) {
+			error = EPERM;
+			break;
+		}
+		if (get_base_dirs->base_dirs) {
+			if ((get_base_dirs->count == 0) || (get_base_dirs->count > EXCLAVE_FS_GET_BASE_DIRS_MAX_COUNT)) {
+				error = EINVAL;
+				break;
+			}
+			dirs = kalloc_type(exclave_fs_base_dir_t, get_base_dirs->count, Z_WAITOK | Z_ZERO);
+			if (!dirs) {
+				error = ENOSPC;
+				break;
+			}
+		}
+		error = vfs_exclave_fs_get_base_dirs(dirs, &get_base_dirs->count);
+		if (!error && dirs) {
+			error = copyout(dirs, (user_addr_t)get_base_dirs->base_dirs,
+			    get_base_dirs->count * sizeof(exclave_fs_base_dir_t));
+		}
+		if (dirs) {
+			kfree_type(exclave_fs_base_dir_t, get_base_dirs->count, dirs);
+		}
+	}
+	break;
+#endif
 
 	default: {
 		/*

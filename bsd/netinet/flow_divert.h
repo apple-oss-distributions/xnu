@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020, 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2017, 2020, 2022, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,10 +49,9 @@ struct flow_divert_pcb {
 	uint32_t aggregate_unit;
 	uint32_t policy_control_unit;
 	int32_t ref_count;
-	uint32_t bytes_written_by_app;
-	uint32_t bytes_read_by_app;
-	uint32_t bytes_sent;
-	uint32_t bytes_received;
+	uint64_t bytes_written_by_app;
+	uint64_t bytes_sent;
+	uint64_t bytes_received;
 	uint8_t log_level;
 	SLIST_ENTRY(flow_divert_pcb) tmp_list_entry;
 	mbuf_t connect_packet;

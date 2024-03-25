@@ -255,7 +255,9 @@ ast_taken_user(void)
 
 	if (reasons & AST_KPERF) {
 		thread_ast_clear(thread, AST_KPERF);
+#if CONFIG_CPU_COUNTERS
 		kperf_kpc_thread_ast(thread);
+#endif /* CONFIG_CPU_COUNTERS */
 	}
 
 	if (reasons & AST_RESET_PCS) {

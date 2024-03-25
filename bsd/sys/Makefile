@@ -96,13 +96,11 @@ PRIVATE_DATAFILES = $(sort \
 	kern_event.h \
 	kern_memorystatus.h \
 	kern_memorystatus_freeze.h \
-	kern_memorystatus_notify.h \
 	kern_overrides.h \
 	kern_sysctl.h \
 	mbuf.h \
 	mman.h \
 	monotonic.h \
-	perfmon_private.h \
 	persona.h \
 	preoslog.h \
 	priv.h \
@@ -141,7 +139,7 @@ PRIVATE_DATAFILES = $(sort \
 # Installs header file for Apple internal use by DriverKit drivers -
 #	  $(DSTROOT)/System/DriverKit/System/usr/local/include/
 DRIVERKIT_PRIVATE_DATAFILES = \
-	appleapiopts.h kdebug.h kdebug_private.h perfmon_private.h queue.h
+	appleapiopts.h kdebug.h kdebug_private.h queue.h
 
 # Installs header file for kernel extensions -
 #	  $(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers
@@ -155,7 +153,7 @@ KERNELFILES = \
 	ioctl_compat.h  kernel.h kernel_types.h kern_event.h lock.h lockf.h \
 	kauth.h kdebug.h kdebug_private.h kdebug_kernel.h md5.h kern_control.h \
 	imgact.h malloc.h namei.h mman.h mbuf.h mount.h netport.h param.h paths.h \
-	perfmon_private.h proc.h  queue.h random.h resource.h \
+	proc.h  queue.h random.h resource.h \
 	sbuf.h posix_sem.h posix_shm.h resource_private.h sem.h shm.h \
 	select.h signal.h socket.h socketvar.h sockio.h stat.h stdio.h \
 	sysctl.h syslimits.h syslog.h systm.h sys_domain.h  time.h \
@@ -188,7 +186,6 @@ PRIVATE_KERNELFILES = \
 	fslog.h \
 	kern_memorystatus.h \
 	kern_memorystatus_freeze.h \
-	kern_memorystatus_notify.h \
 	kpi_private.h \
 	ktrace.h \
 	kdebug_triage.h \
@@ -276,7 +273,7 @@ EXPORT_MI_DIR = sys
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
 	codesign.h content_protection.h csr.h decmpfs.h event_private.h fsevents.h guarded.h \
-	kdebug_private.h kern_memorystatus.h perfmon_private.h preoslog.h proc_info_private.h \
+	kdebug_private.h kern_memorystatus.h preoslog.h proc_info_private.h \
 	reason.h resource_private.h stackshot.h work_interval.h event_log.h code_signing.h \
 	${EXTRA_PRIVATE_DATAFILES})
 

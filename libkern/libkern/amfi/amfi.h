@@ -44,7 +44,10 @@ struct cs_blob;
 typedef struct proc* proc_t;
 
 #if XNU_KERNEL_PRIVATE
+#ifndef CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
 #define CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
+#endif
+
 #include <CoreEntitlements/CoreEntitlementsPriv.h>
 #endif
 

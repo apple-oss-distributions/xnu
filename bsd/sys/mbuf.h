@@ -126,14 +126,14 @@
  * mtod(m,t) -	convert mbuf pointer to data pointer of correct type
  * mtodo(m, o) -- Same as above but with offset 'o' into data.
  */
-#define mtod(m, t)      ((t)m_mtod_indexable(m))
+#define mtod(m, t)      ((t)(void *)m_mtod_current(m))
 #define mtodo(m, o)     ((void *)(mtod(m, uint8_t *) + (o)))
 
 /* header at beginning of each mbuf: */
 struct m_hdr {
 	struct mbuf                *mh_next;       /* next buffer in chain */
 	struct mbuf                *mh_nextpkt;    /* next chain in queue/record */
-	caddr_t __unsafe_indexable mh_data;        /* location of data */
+	uintptr_t                  mh_data;        /* location of data */
 	int32_t                    mh_len;         /* amount of data in this mbuf */
 	u_int16_t                  mh_type;        /* type of data in this mbuf */
 	u_int16_t                  mh_flags;       /* flags; see below */
@@ -589,7 +589,7 @@ struct pkthdr {
  */
 typedef void (*m_ext_free_func_t)(caddr_t, u_int, caddr_t);
 struct m_ext {
-	caddr_t ext_buf;                /* start of buffer */
+	caddr_t __counted_by(ext_size) ext_buf; /* start of buffer */
 	m_ext_free_func_t ext_free;     /* free routine if not the usual */
 	u_int   ext_size;               /* size of buffer, for ext_free */
 	caddr_t ext_arg;                /* additional ext_free argument */
@@ -816,6 +816,25 @@ struct mbuf {
 #define MT_TAG          16      /* volatile metadata associated to pkts */
 #define MT_MAX          32      /* enough? */
 
+enum {
+	MTF_FREE        = (1 << MT_FREE),
+	MTF_DATA        = (1 << MT_DATA),
+	MTF_HEADER      = (1 << MT_HEADER),
+	MTF_SOCKET      = (1 << MT_SOCKET),
+	MTF_PCB         = (1 << MT_PCB),
+	MTF_RTABLE      = (1 << MT_RTABLE),
+	MTF_HTABLE      = (1 << MT_HTABLE),
+	MTF_ATABLE      = (1 << MT_ATABLE),
+	MTF_SONAME      = (1 << MT_SONAME),
+	MTF_SOOPTS      = (1 << MT_SOOPTS),
+	MTF_FTABLE      = (1 << MT_FTABLE),
+	MTF_RIGHTS      = (1 << MT_RIGHTS),
+	MTF_IFADDR      = (1 << MT_IFADDR),
+	MTF_CONTROL     = (1 << MT_CONTROL),
+	MTF_OOBDATA     = (1 << MT_OOBDATA),
+	MTF_TAG         = (1 << MT_TAG),
+};
+
 #ifdef XNU_KERNEL_PRIVATE
 /*
  * mbuf allocation/deallocation macros:
@@ -926,7 +945,7 @@ union m16kcluster {
  * handling external storage, packet-header mbufs, and regular data mbufs.
  */
 #define M_START(m)                                                      \
-	(((m)->m_flags & M_EXT) ? (m)->m_ext.ext_buf :                  \
+	(((m)->m_flags & M_EXT) ? (caddr_t)(m)->m_ext.ext_buf :             \
 	 ((m)->m_flags & M_PKTHDR) ? &(m)->m_pktdat[0] :                \
 	 &(m)->m_dat[0])
 
@@ -951,7 +970,7 @@ union m16kcluster {
  * of checking writability of the mbuf data area rests solely with the caller.
  */
 #define M_LEADINGSPACE(m)                                               \
-	(M_WRITABLE(m) ? ((m)->m_data - M_START(m)) : 0)
+	(M_WRITABLE(m) ? ((m)->m_data - (uintptr_t)M_START(m)) : 0)
 
 /*
  * Compute the amount of space available after the end of data in an mbuf.
@@ -961,7 +980,7 @@ union m16kcluster {
  */
 #define M_TRAILINGSPACE(m)                                              \
 	(M_WRITABLE(m) ?                                                \
-	    ((M_START(m) + M_SIZE(m)) - ((m)->m_data + (m)->m_len)) : 0)
+	    ((M_START(m) + M_SIZE(m)) - (mtod(m, caddr_t) + (m)->m_len)) : 0)
 
 /*
  * Arrange to prepend space of size plen to mbuf m.
@@ -1039,9 +1058,11 @@ do {                                                                    \
 	    m->m_type == MT_FREE ||                                     \
 	    ((m->m_flags & M_EXT) != 0 && m->m_ext.ext_buf == NULL)) {  \
 	        panic_plain("Failed mbuf validity check: mbuf %p len %d "  \
-	            "type %d flags 0x%x data %p rcvif %s ifflags 0x%x",  \
-	            m, m->m_len, m->m_type, m->m_flags,                    \
-	            ((m->m_flags & M_EXT) ? m->m_ext.ext_buf : m->m_data), \
+	            "type %d flags 0x%x data %p rcvif %s ifflags 0x%x", \
+	            m, m->m_len, m->m_type, m->m_flags,                 \
+	            ((m->m_flags & M_EXT)                               \
+	                                ? m->m_ext.ext_buf                              \
+	                                : (caddr_t __unsafe_indexable)m->m_data),       \
 	            if_name(rcvif),                                     \
 	            (rcvif->if_flags & 0xffff));                        \
 	}                                                               \
@@ -1234,9 +1255,7 @@ struct omb_class_stat {
 	u_int32_t       mbcl_mc_waiter_cnt;  /* # waiters on the cache */
 	u_int32_t       mbcl_mc_wretry_cnt;  /* # of wait retries */
 	u_int32_t       mbcl_mc_nwretry_cnt; /* # of no-wait retry attempts */
-	u_int32_t       mbcl_peak_reported; /* last usage peak reported */
 	u_int32_t       mbcl_reserved[7];    /* for future use */
-	u_int32_t       mbcl_pad2;       /* padding */
 } __attribute__((__packed__));
 #endif /* XNU_KERNEL_PRIVATE */
 
@@ -1265,7 +1284,6 @@ typedef struct mb_class_stat {
 	u_int32_t       mbcl_mc_waiter_cnt;  /* # waiters on the cache */
 	u_int32_t       mbcl_mc_wretry_cnt;  /* # of wait retries */
 	u_int32_t       mbcl_mc_nwretry_cnt; /* # of no-wait retry attempts */
-	u_int32_t       mbcl_peak_reported; /* last usage peak reported */
 	u_int32_t       mbcl_reserved[7];    /* for future use */
 } mb_class_stat_t;
 
@@ -1392,7 +1410,7 @@ extern void m_adj(struct mbuf *, int);
 extern void m_cat(struct mbuf *, struct mbuf *);
 extern void m_copydata(struct mbuf *, int, int, void *);
 extern struct mbuf *m_copym(struct mbuf *, int, int, int);
-extern struct mbuf *m_copym_mode(struct mbuf *, int, int, int, uint32_t);
+extern struct mbuf *m_copym_mode(struct mbuf *, int, int, int, struct mbuf **, int *, uint32_t);
 extern struct mbuf *m_get(int, int);
 extern struct mbuf *m_gethdr(int, int);
 extern struct mbuf *m_getpacket(void);
@@ -1403,41 +1421,77 @@ extern struct mbuf *m_prepend_2(struct mbuf *, int, int, int);
 extern struct mbuf *m_pullup(struct mbuf *, int);
 extern struct mbuf *m_split(struct mbuf *, int, int);
 extern void m_mclfree(caddr_t p);
-extern int mbuf_get_class(struct mbuf *m);
 extern bool mbuf_class_under_pressure(struct mbuf *m);
 
-static inline void *__header_indexable
-m_mtod_indexable(struct mbuf *m)
+/*
+ * Accessors for the mbuf data range.
+ * The "lower bound" is the start of the memory range that m->m_data is allowed
+ * to point into. The "start" is where m->m_data points to; equivalent to the
+ * late m_mtod. The end is where m->m_data + m->m_len points to. The upper bound
+ * is the end of the memory range that m->m_data + m->m_len is allowed to point
+ * into.
+ * In a well-formed range, lower bound <= start <= end <= upper bound. An
+ * ill-formed range always means a programming error.
+ */
+__stateful_pure static inline caddr_t __header_bidi_indexable
+m_mtod_lower_bound(struct mbuf *m)
 {
-	return __unsafe_forge_bidi_indexable(void *, m_mtod(m), m->m_len);
+	return M_START(m);
+}
+
+__stateful_pure static inline caddr_t __header_bidi_indexable
+m_mtod_current(struct mbuf *m)
+{
+	caddr_t data = m_mtod_lower_bound(m);
+	return data + (m->m_data - (uintptr_t)data);
+}
+
+__stateful_pure static inline caddr_t __header_bidi_indexable
+m_mtod_end(struct mbuf *m)
+{
+	return m_mtod_current(m) + m->m_len;
+}
+
+__stateful_pure static inline caddr_t __header_bidi_indexable
+m_mtod_upper_bound(struct mbuf *m)
+{
+	return m_mtod_lower_bound(m) + M_SIZE(m);
+}
+
+static inline bool
+m_has_mtype(const struct mbuf *m, int mtype_flags)
+{
+	return (1 << m->m_type) & mtype_flags;
 }
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), this macro checks whether the data pointer of an mbuf
+ * i386 or x86_64 or arm64), this macro checks whether the data pointer of an mbuf
  * is 32-bit aligned (this is the expected minimum alignment for protocol
  * headers), and assert otherwise.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(_m)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(_m) do {                    \
 	if (!IS_P2ALIGNED((_m)->m_data, sizeof (u_int32_t))) {          \
 	        if (((_m)->m_flags & M_PKTHDR) &&                       \
 	            (_m)->m_pkthdr.rcvif != NULL) {                     \
 	                panic_plain("\n%s: mbuf %p data ptr %p is not " \
 	                    "32-bit aligned [%s: alignerrs=%lld]\n",    \
-	                    __func__, (_m), (_m)->m_data,               \
+	                    __func__, (_m),                             \
+	                    (caddr_t __unsafe_indexable)(_m)->m_data,   \
 	                    if_name((_m)->m_pkthdr.rcvif),              \
 	                    (_m)->m_pkthdr.rcvif->if_alignerrs);        \
 	        } else {                                                \
 	                panic_plain("\n%s: mbuf %p data ptr %p is not " \
 	                    "32-bit aligned\n",                         \
-	                    __func__, (_m), (_m)->m_data);              \
+	                    __func__, (_m),                             \
+	                    (caddr_t __unsafe_indexable)(_m)->m_data);  \
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 
 /* Maximum number of MBUF_SC values (excluding MBUF_SC_UNSPEC) */
 #define MBUF_SC_MAX_CLASSES     10

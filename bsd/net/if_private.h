@@ -322,6 +322,7 @@ struct  ifreq {
 			u_int8_t channel;
 		} ifru_radio_details;
 		uint64_t ifru_creation_generation_id;
+		u_int8_t ifru_is_directlink;
 	} ifr_ifru;
 #define ifr_addr        ifr_ifru.ifru_addr      /* address */
 #define ifr_dstaddr     ifr_ifru.ifru_dstaddr   /* other end of p-to-p link */
@@ -376,6 +377,7 @@ struct  ifreq {
 #define ifr_estimated_throughput  ifr_ifru.ifru_estimated_throughput
 #define ifr_radio_details       ifr_ifru.ifru_radio_details
 #define ifr_creation_generation_id       ifr_ifru.ifru_creation_generation_id
+#define ifr_is_directlink       ifr_ifru.ifru_is_directlink
 };
 
 #define _SIZEOF_ADDR_IFREQ(ifr) \

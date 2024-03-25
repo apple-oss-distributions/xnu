@@ -1,19 +1,14 @@
-from __future__ import absolute_import, print_function
-
-from builtins import hex
-from builtins import range
-from builtins import bytes
-
 import sys, os, re, time, getopt, shlex, inspect, xnudefines
 import lldb
 import uuid
 import base64
 import json
+from importlib import reload
 from functools import wraps
 from ctypes import c_ulonglong as uint64_t
 from ctypes import c_void_p as voidptr_t
 import core
-from core import caching, int, PY3
+from core import caching
 from core.standard import *
 from core.configuration import *
 from core.kernelcore import *
@@ -136,37 +131,45 @@ def _format_exc(exc, vt):
     w = textwrap.TextWrapper(width=100, placeholder="...", max_lines=3)
     tb = traceback.TracebackException.from_exception(exc, limit=None, lookup_lines=True, capture_locals=True)
 
-    for fs in tb.stack:
-        out_str += ("File \"" + vt.DarkBlue + fs.filename + "\" " + vt.Magenta + "@{} ".format(fs.lineno) +
-                    vt.Reset + "in " + vt.Bold + vt.DarkCyan + fs.name + vt.Reset + "\n")
+    for frame in tb.stack:
+        out_str += (
+            f"File \"{vt.DarkBlue}{frame.filename}\"{vt.Magenta}@{frame.lineno}{vt.Reset} "
+            f"in {vt.Bold}{vt.DarkCyan}{frame.name}{vt.Reset}\n"
+        )
         out_str += "  Locals:\n"
-        for name, value in fs.locals.items():
-            variable = "    " + vt.Bold + vt.DarkGreen + name + vt.Reset + " = "
+        for name, value in frame.locals.items():
+            variable = f"    {vt.Bold}{vt.DarkGreen}{name}{vt.Reset} = "
             first = True
             for wline in w.wrap(str(value)):
                 if first:
-                    out_str += variable + vt.Oblique + wline + "\n"
+                    out_str += variable + f"{vt.Oblique}{wline}\n"
                     first = False
                 else:
                     out_str += " " * (len(name) + 7) + wline + "\n"
                 out_str += vt.EndOblique
 
         out_str += "  " + "-" * 100 + "\n"
-        with open(fs.filename, "r") as src:
-            lines = src.readlines()
-            startline = fs.lineno - 3 if fs.lineno > 2 else 0
-            for lineno in range(startline, fs.lineno + 2):
+        try:
+            src = open(frame.filename, "r")
+        except IOError:
+            out_str += "    < Sources not available >\n"
+        else:
+            with src:
+                lines = src.readlines()
 
-                if lineno + 1 == fs.lineno:
-                    fmt = vt.Bold + vt.Default
-                    marker = '>'
-                else:
-                    fmt = vt.Default
-                    marker = ' '
+                startline = frame.lineno - 3 if frame.lineno > 2 else 0
+                endline = min(frame.lineno + 2, len(lines))
+                for lineno in range(startline, endline):
 
-                out_str += (fmt + "  {} ".format(marker) +
-                            "{:5}  {}".format(lineno + 1, lines[lineno].rstrip()) +
-                            vt.Reset + "\n")
+                    if lineno + 1 == frame.lineno:
+                        fmt = vt.Bold + vt.Default
+                        marker = '>'
+                    else:
+                        fmt = vt.Default
+                        marker = ' '
+
+                    out_str += f"{fmt}  {marker} {lineno + 1:5}  {lines[lineno].rstrip()}{vt.Reset}\n"
+
         out_str += "  " + "-" * 100 + "\n"
         out_str += "\n"
 
@@ -199,12 +202,8 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
           stream.VT.Default + ": {}".format(str(exc)) + stream.VT.Reset)
     print()
 
-    if not debug_opts or not PY3:
-        # No debugging enabled propagates exception to interpretter/caller.
-        # Python 2 does not offer better exception reporting.
-        if not PY3:
-            print("Please use Python 3 for enhanced debugging.\n")
-        raise
+    if not debug_opts:
+        raise exc
 
     #
     # Display enhanced diagnostics when requested.
@@ -268,7 +267,7 @@ lldb_command_documentation = {}
 _DEBUG_OPTS = { "--debug", "--radar", "--pdb" }
 
 def lldb_command(cmd_name, option_string = '', fancy=False):
-    """ A function decorator to define a command with namd 'cmd_name' in the lldb scope to call python function.
+    """ A function decorator to define a command with name 'cmd_name' in the lldb scope to call python function.
         params: cmd_name - str : name of command to be set in lldb prompt.
             option_string - str: getopt like option string. Only CAPITAL LETTER options allowed.
                                  see README on Customizing command options.
@@ -383,7 +382,7 @@ def lldb_alias(alias_name, cmd_line):
 
 def SetupLLDBTypeSummaries(reset=False):
     global lldb_summary_definitions, MODULE_NAME
-    if reset == True:
+    if reset:
             lldb.debugger.HandleCommand("type category delete  kernel ")
     for single_type in list(lldb_summary_definitions.keys()):
         summary_function = lldb_summary_definitions[single_type]
@@ -423,7 +422,7 @@ def ProcessXNUPluginResult(result_data):
     ret_string = result_data[1]
     ret_commands = result_data[2]
 
-    if ret_status == False:
+    if not ret_status:
         print("Plugin failed: " + ret_string)
         return
     print(ret_string)
@@ -655,7 +654,7 @@ def KernelDebugCommandsHelp(cmd_args=None):
     cmds = list(lldb_command_documentation.keys())
     cmds.sort()
     for cmd in cmds:
-        if isinstance(lldb_command_documentation[cmd][-1], six.string_types):
+        if isinstance(lldb_command_documentation[cmd][-1], str):
             print(" {0: <20s} - {1}".format(cmd , lldb_command_documentation[cmd][1].split("\n")[0].strip()))
         else:
             print(" {0: <20s} - {1}".format(cmd , "No help string found."))
@@ -768,17 +767,13 @@ def XnuDebugCommand(cmd_args=None):
         print("=" * 80)
         print("")
 
-        if PY3:
-            s = io.StringIO()
-        else:
-            s = sys.__stdout__
+        s = io.StringIO()
         ps = pstats.Stats(pr, stream=s)
         ps.strip_dirs()
         ps.sort_stats('cumulative')
         ps.print_stats(30)
-        if PY3:
-            print(s.getvalue().rstrip())
-            print("")
+        print(s.getvalue().rstrip())
+        print("")
 
         print('Profile info saved to "{}"'.format(command_args[1]))
 
@@ -797,7 +792,7 @@ def ShowVersion(cmd_args=None):
     """
     print(kern.version)
 
-def ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len):
+def ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len, cmd_options):
     """ Process the panic stackshot from the panic header, saving it to a file if it is valid
         params: panic_stackshot_addr : start address of the panic stackshot binary data
                 panic_stackshot_len : length of the stackshot binary data
@@ -811,9 +806,24 @@ def ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len):
         print("No panic stackshot available (zero length)")
         return;
 
-    ts = int(time.time())
-    ss_binfile = "/tmp/panic_%d.bin" % ts
-    ss_ipsfile = "/tmp/stacks_%d.ips" % ts
+    if "-D" in cmd_options:
+        dir_ = cmd_options["-D"]
+        if os.path.exists(dir_):
+            if not os.access(dir_, os.W_OK):
+                print("Write access to {} denied".format(dir_))
+                return
+        else:
+            try:
+                os.makedirs(dir_)
+            except OSError as e:
+                print("An error occurred {} while creating a folder : {}".format(e, dir_))
+                return
+    else:
+        dir_ = "/tmp"
+
+    id = str(uuid.uuid4())[:8]
+    ss_binfile = os.path.join(dir_, "panic_%s.bin" % id)
+    ss_ipsfile = os.path.join(dir_, "panic_%s.ips" % id)
 
     if not SaveDataToFile(panic_stackshot_addr, panic_stackshot_len, ss_binfile, None):
         print("Failed to save stackshot binary data to file")
@@ -853,13 +863,15 @@ def ParseEmbeddedPanicLog(panic_header, cmd_options={}):
 
     if "-E" in cmd_options:
         ProcessExtensiblePaniclog(panic_header, cmd_options)
-        return
 
     if "-S" in cmd_options:
         if panic_header_flags & xnudefines.EMBEDDED_PANIC_STACKSHOT_SUCCEEDED_FLAG:
-            ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len)
+            ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len, cmd_options)
         else:
             print("No panic stackshot available")
+    elif "-D" in cmd_options:
+        print("-D option must be specified along with the -S option")
+        return
 
     panic_log_curindex = 0
     while panic_log_curindex < panic_log_len:
@@ -913,9 +925,12 @@ def ParseMacOSPanicLog(panic_header, cmd_options={}):
 
     if "-S" in cmd_options:
         if panic_header_flags & xnudefines.MACOS_PANIC_STACKSHOT_SUCCEEDED_FLAG:
-            ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len)
+            ProcessPanicStackshot(panic_stackshot_addr, panic_stackshot_len, cmd_options)
         else:
             print("No panic stackshot available")
+    elif "-D" in cmd_options:
+        print("-D option must be specified along with the -S option")
+        return
 
     panic_log_curindex = 0
     while panic_log_curindex < panic_log_len:
@@ -1029,13 +1044,14 @@ def ParseUnknownPanicLog(panic_header, cmd_options={}):
     return
 
 
-@lldb_command('paniclog', 'SME:')
+@lldb_command('paniclog', 'SME:D:')
 def ShowPanicLog(cmd_args=None, cmd_options={}):
     """ Display the paniclog information
         usage: (lldb) paniclog
         options:
             -v : increase verbosity
             -S : parse stackshot data (if panic stackshot available)
+            -D : Takes a folder name for stackshot. This must be specified along with the -S option.
             -M : parse macOS panic area (print panic string (if available), and/or capture crashlog info)
             -E : Takes a file name and redirects the ext paniclog output to the file
     """
@@ -1573,3 +1589,5 @@ from refgrp import *
 from workload import *
 from recount import *
 from log import showLogStream, show_log_stream_info
+from nvram import *
+from exclaves import *

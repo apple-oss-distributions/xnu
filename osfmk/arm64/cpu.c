@@ -60,13 +60,10 @@
 
 #include <san/kasan.h>
 
-#if KPC
 #include <kern/kpc.h>
-#endif
-
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 #include <kern/monotonic.h>
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -87,9 +84,11 @@ extern uint64_t         wake_abstime;
 void sleep_token_buffer_init(void);
 #endif
 
+#if !CONFIG_SPTM
 extern uintptr_t resume_idle_cpu;
 extern uintptr_t start_cpu;
 vm_address_t   start_cpu_paddr;
+#endif
 
 #if __ARM_KERNEL_PROTECT__
 extern void exc_vectors_table;
@@ -318,19 +317,21 @@ cpu_sleep(void)
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
 
 	cpu_data_ptr->cpu_active_thread = current_thread();
+#if CONFIG_SPTM
+	cpu_data_ptr->cpu_reset_handler = (uintptr_t) VM_KERNEL_STRIP_PTR(arm_init_cpu);
+#else
 	cpu_data_ptr->cpu_reset_handler = (uintptr_t) start_cpu_paddr;
+#endif
 	cpu_data_ptr->cpu_flags |= SleepState;
 
 	if (cpu_data_ptr->cpu_user_debug != NULL) {
 		arm_debug_set(NULL);
 	}
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_idle();
-#endif /* KPC */
-#if MONOTONIC
 	mt_cpu_down(cpu_data_ptr);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
 #endif /* KPERF */
@@ -576,12 +577,10 @@ cpu_idle(void)
 		}
 	}
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_idle();
-#endif
-#if MONOTONIC
 	mt_cpu_idle(cpu_data_ptr);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	if (wfi) {
 #if !defined(APPLE_ARM64_ARCH_FAMILY)
@@ -659,13 +658,10 @@ cpu_idle_exit(boolean_t from_reset)
 		configure_coresight_registers(cpu_data_ptr);
 	}
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_idle_exit();
-#endif
-
-#if MONOTONIC
 	mt_cpu_run(cpu_data_ptr);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	if (wfi && (cpu_data_ptr->cpu_idle_notify != NULL)) {
 		cpu_data_ptr->cpu_idle_notify(cpu_data_ptr->cpu_id, FALSE, &new_idle_timeout_ticks);
@@ -740,18 +736,16 @@ cpu_init(void)
 	}
 	cdp->cpu_stat.irq_ex_cnt_wake = 0;
 	cdp->cpu_stat.ipi_cnt_wake = 0;
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	cdp->cpu_stat.pmi_cnt_wake = 0;
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	cdp->cpu_running = TRUE;
 	cdp->cpu_sleep_token_last = cdp->cpu_sleep_token;
 	cdp->cpu_sleep_token = 0x0UL;
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_idle_exit();
-#endif /* KPC */
-#if MONOTONIC
 	mt_cpu_up(cdp);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 }
 
 void
@@ -854,8 +848,10 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 	pmap_cpu_data_ptr->pv_free.list = NULL;
 	pmap_cpu_data_ptr->pv_free.count = 0;
 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
+#if !CONFIG_SPTM
 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
+#endif
 #endif /* !XNU_MONITOR */
 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
 #if __ARM_KERNEL_PROTECT__
@@ -918,10 +914,14 @@ cpu_start(int cpu)
 		configure_coresight_registers(cpu_data_ptr);
 	} else {
 		thread_t first_thread;
+#if CONFIG_SPTM
+		cpu_data_ptr->cpu_reset_handler = (vm_offset_t) VM_KERNEL_STRIP_PTR(arm_init_cpu);
+#else
 		cpu_data_ptr->cpu_reset_handler = (vm_offset_t) start_cpu_paddr;
 #if !XNU_MONITOR
 		cpu_data_ptr->cpu_pmap_cpu_data.cpu_nested_pmap = NULL;
 #endif
+#endif /* !CONFIG_SPTM */
 
 		if (processor->startup_thread != THREAD_NULL) {
 			first_thread = processor->startup_thread;
@@ -931,12 +931,18 @@ cpu_start(int cpu)
 		cpu_data_ptr->cpu_active_thread = first_thread;
 		first_thread->machine.CpuDatap = cpu_data_ptr;
 		first_thread->machine.pcpu_data_base =
-		    (vm_address_t)cpu_data_ptr - __PERCPU_ADDR(cpu_data);
+		    (char *)cpu_data_ptr - __PERCPU_ADDR(cpu_data);
 
 		configure_coresight_registers(cpu_data_ptr);
 
 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
+#if CONFIG_SPTM
+		/**
+		 * On SPTM devices, CTRR is configured entirely by the SPTM. Due to this, this logic
+		 * is no longer required in XNU.
+		 */
+#else
 #if defined(KERNEL_INTEGRITY_CTRR)
 
 		/* First CPU being started within a cluster goes ahead to lock CTRR for cluster;
@@ -958,6 +964,7 @@ cpu_start(int cpu)
 			break;
 		}
 #endif
+#endif /* CONFIG_SPTM */
 		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
 	}
 
@@ -1100,9 +1107,9 @@ ml_arm_sleep(void)
 
 		serial_go_to_sleep();
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		mt_sleep();
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 		/* ARM64-specific preparation */
 #if APPLEVIRTUALPLATFORM
 		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
@@ -1149,7 +1156,9 @@ ml_arm_sleep(void)
 void
 cpu_machine_idle_init(boolean_t from_boot)
 {
+#if !CONFIG_SPTM
 	static vm_address_t     resume_idle_cpu_paddr = (vm_address_t)NULL;
+#endif
 	cpu_data_t              *cpu_data_ptr   = getCpuDatap();
 
 	if (from_boot) {
@@ -1202,8 +1211,10 @@ cpu_machine_idle_init(boolean_t from_boot)
 			// do nothing
 			break;
 		}
+#if !CONFIG_SPTM
 		ResetHandlerData.assist_reset_handler = 0;
 		ResetHandlerData.cpu_data_entries = ml_static_vtop((vm_offset_t)CpuDataEntries);
+#endif
 
 #ifdef MONITOR
 		monitor_call(MONITOR_SET_ENTRY, (uintptr_t)ml_static_vtop((vm_offset_t)&LowResetVectorBase), 0, 0);
@@ -1228,8 +1239,10 @@ cpu_machine_idle_init(boolean_t from_boot)
 			coresight_debug_enabled = TRUE;
 #endif
 		}
+#if !CONFIG_SPTM
 		start_cpu_paddr = ml_static_vtop((vm_offset_t)&start_cpu);
 		resume_idle_cpu_paddr = ml_static_vtop((vm_offset_t)&resume_idle_cpu);
+#endif
 	}
 
 #if WITH_CLASSIC_S2R
@@ -1247,7 +1260,11 @@ cpu_machine_idle_init(boolean_t from_boot)
 	}
 	;
 #endif
+#if CONFIG_SPTM
+	cpu_data_ptr->cpu_reset_handler = (uintptr_t) VM_KERNEL_STRIP_PTR(arm_init_idle_cpu);
+#else
 	cpu_data_ptr->cpu_reset_handler = resume_idle_cpu_paddr;
+#endif
 	clean_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
 }
 

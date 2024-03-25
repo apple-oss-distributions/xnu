@@ -29,6 +29,7 @@
 #ifndef __STDLIB_H__
 #define __STDLIB_H__
 
+#include <sys/_types/_size_t.h>
 #include <machine/trap.h>
 
 typedef struct {

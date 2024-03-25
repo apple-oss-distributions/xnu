@@ -115,8 +115,8 @@ TUNABLE(bool, tss_should_crash, "tss_should_crash", true);
 static inline boolean_t
 thread_set_state_allowed(thread_t thread, int flavor)
 {
-	/* platform binaries must have entitlement - all others ok */
-	if ((task_ro_flags_get(current_task()) & TFRO_PLATFORM)
+	/* hardened binaries must have entitlement - all others ok */
+	if (task_is_hardened_binary(get_threadtask(thread))
 	    && !(thread->options & TH_IN_MACH_EXCEPTION)        /* Allowed for now - rdar://103085786 */
 	    && FLAVOR_MODIFIES_CORE_CPU_REGISTERS(flavor)       /* only care about locking down PC/LR */
 #if CONFIG_ROSETTA

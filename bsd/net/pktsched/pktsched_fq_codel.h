@@ -219,6 +219,7 @@ typedef struct fq_codel_sched_data {
 	/* bitmap indicating which grp is in combined mode */
 	pktsched_bitmap_t       fqs_combined_grp_bitmap;
 	classq_pkt_type_t       fqs_ptype;
+	thread_call_t           fqs_pacemaker_tcall;
 	bitmap_ops_t            *fqs_bm_ops;
 #define grp_bitmaps_ffs     fqs_bm_ops->ffs
 #define grp_bitmaps_zeros   fqs_bm_ops->zeros

@@ -409,7 +409,7 @@ __btlib_grow(bt_library_t btl)
 		addr = btl->btl_slabs[slab] + btl->btl_faulted_pos;
 
 		kr = kernel_memory_populate(addr, PAGE_SIZE,
-		    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG);
 	}
 
 done:

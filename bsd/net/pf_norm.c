@@ -1416,7 +1416,7 @@ insert:
 	m = frent->fr_m;
 	m->m_len += sizeof(struct ip6_hdr);
 	m->m_data -= sizeof(struct ip6_hdr);
-	memmove(m->m_data, ip6, sizeof(struct ip6_hdr));
+	memmove(m_mtod_current(m), ip6, sizeof(struct ip6_hdr));
 
 	next = LIST_NEXT(frent, fr_next);
 	pool_put(&pf_frent_pl, frent);

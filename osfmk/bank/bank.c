@@ -866,6 +866,47 @@ bank_command(
 		*out_content_size = (mach_voucher_attr_content_size_t)sizeof(adopt_any_persona);
 		return KERN_SUCCESS;
 
+	case BANK_ORIGINATOR_PROXIMATE_PID:;
+		int32_t *pids_out = (int32_t *)(uintptr_t)&out_content[0];
+		if ((sizeof(pid) * 2) > *out_content_size) {
+			*out_content_size = 0;
+			return KERN_NO_SPACE;
+		}
+
+		for (i = 0; i < value_count; i++) {
+			bank_task_t bank_origin_task = BANK_TASK_NULL;
+			bank_task_t bank_proximate_task = BANK_TASK_NULL;
+			bank_handle = values[i];
+			bank_element = HANDLE_TO_BANK_ELEMENT(bank_handle);
+			if (bank_element == BANK_DEFAULT_VALUE) {
+				continue;
+			}
+
+			if (bank_element == BANK_DEFAULT_TASK_VALUE) {
+				bank_element = CAST_TO_BANK_ELEMENT(get_bank_task_context(current_task(), FALSE));
+			}
+
+			if (bank_element->be_type == BANK_TASK) {
+				bank_origin_task = CAST_TO_BANK_TASK(bank_element);
+			} else if (bank_element->be_type == BANK_ACCOUNT) {
+				bank_account = CAST_TO_BANK_ACCOUNT(bank_element);
+				bank_origin_task = bank_account->ba_holder;
+				bank_proximate_task = bank_account->ba_proximateprocess;
+			} else {
+				panic("Bogus bank type: %d passed in voucher_command", bank_element->be_type);
+			}
+			int32_t origin_pid = bank_origin_task->bt_pid;
+			int32_t proximate_pid = bank_proximate_task != BANK_TASK_NULL ? bank_proximate_task->bt_pid : -1;
+
+			memcpy(&pids_out[0], &origin_pid, sizeof(origin_pid));
+			memcpy(&pids_out[1], &proximate_pid, sizeof(proximate_pid));
+			*out_content_size = (mach_voucher_attr_content_size_t)sizeof(pid) * 2;
+			return KERN_SUCCESS;
+		}
+		/* In the case of no value, return error KERN_INVALID_VALUE */
+		*out_content_size = 0;
+		return KERN_INVALID_VALUE;
+
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}

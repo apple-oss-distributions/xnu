@@ -37,8 +37,22 @@ T_GLOBAL_META(
 // Tests prefixed with `secure_` put the development kernel into a secure CPC mode while tests prefixed with `release_` can run on the RELEASE build variant.
 
 // Metadata for running on a development kernel in CPC secure mode.
-#define _T_META_CPC_SECURE_ON_DEV \
-	XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL, T_META_SYSCTL_INT("kern.cpc.secure=1")
+//
+// This should require kern.development to be 1 with XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL,
+// but libdarwintest has a bug (rdar://111297938) preventing that.
+// In the meantime, manually check in the test whether the kernel is DEVELOPMENT.
+#define _T_META_CPC_SECURE_ON_DEV T_META_SYSCTL_INT("kern.cpc.secure=1")
+
+static void
+_skip_unless_development(void)
+{
+	unsigned int dev = 0;
+	size_t dev_size = sizeof(dev);
+	int ret = sysctlbyname("kern.development", &dev, &dev_size, NULL, 0);
+	if (ret < 0 || dev) {
+		T_SKIP("test must run on DEVELOPMENT kernel");
+	}
+}
 
 static void
 _assert_kpep_ok(int kpep_err, const char *fmt, ...)
@@ -175,6 +189,7 @@ check_secure_cpmu(void)
 T_DECL(secure_cpmu_event_restrictions, "secured CPMU should be restricted to known events",
     _T_META_CPC_SECURE_ON_DEV)
 {
+	_skip_unless_development();
 	check_secure_cpmu();
 }
 
@@ -218,6 +233,7 @@ check_secure_upmu(void)
 T_DECL(secure_upmu_event_restrictions, "secured UPMU should be restricted to no events",
     _T_META_CPC_SECURE_ON_DEV)
 {
+	_skip_unless_development();
 	check_secure_upmu();
 }
 
@@ -286,6 +302,7 @@ check_event_coverage(kpep_db_flags_t flag, const char *kind)
 T_DECL(secure_public_event_coverage, "all public events in kpep should be allowed",
     _T_META_CPC_SECURE_ON_DEV)
 {
+	_skip_unless_development();
 	check_event_coverage(KPEP_DB_FLAG_PUBLIC_ONLY, "public");
 }
 

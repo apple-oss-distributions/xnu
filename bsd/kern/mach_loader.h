@@ -45,6 +45,16 @@
 
 typedef int load_return_t;
 
+/* libmalloc relies on these values not changing. If they change,
+ * you need to update the values in that project as well */
+__options_decl(HR_flags_t, uint32_t, {
+	BrowserHostEntitlementMask       = 0x01,
+	BrowserGPUEntitlementMask        = 0x02,
+	BrowserNetworkEntitlementMask    = 0x04,
+	BrowserWebContentEntitlementMask = 0x08,
+});
+ #define HR_FLAGS_NUM_NIBBLES (sizeof(HR_flags_t) / 2)
+
 /*
  * Structure describing the result from calling load_machfile(), if that
  * function returns LOAD_SUCCESS.
@@ -86,6 +96,9 @@ typedef struct _load_result {
 	mach_vm_address_t       ro_vm_start;
 	mach_vm_address_t       ro_vm_end;
 	unsigned int            platform_binary;
+
+	/* Flags denoting which type of hardened runtime binary this is*/
+	HR_flags_t              hardened_runtime_binary;
 	off_t                   cs_end_offset;
 	void                    *threadstate;
 	size_t                  threadstate_sz;

@@ -140,6 +140,8 @@
 #include <net/content_filter.h>
 #endif /* CONTENT_FILTER */
 
+#include <net/sockaddr_utils.h>
+
 /*
  * UDP protocol inplementation.
  * Per RFC 768, August, 1980.
@@ -225,7 +227,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	if (CFIL_DGRAM_FILTERED(so) && !addr6) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
-			cfil_sin6 = (struct sockaddr_in6 *)(void *)cfil_faddr;
+			cfil_sin6 = SIN6(cfil_faddr);
 			if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
 			    (in6p->in6p_fport != cfil_sin6->sin6_port ||
 			    !in6_are_addr_equal_scoped(&in6p->in6p_faddr, &cfil_sin6->sin6_addr, in6p->inp_fifscope, cfil_sin6->sin6_scope_id))) {
@@ -270,8 +272,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		 * and in6_pcbsetport in order to fill in the local address
 		 * and the local port.
 		 */
-		struct sockaddr_in6 *sin6 =
-		    (struct sockaddr_in6 *)(void *)addr6;
+		struct sockaddr_in6 *sin6 = SIN6(addr6);
 
 		if (sin6->sin6_port == 0) {
 			error = EADDRNOTAVAIL;
@@ -353,9 +354,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		lifscope = in6p->inp_lifscope;
 #if CONTENT_FILTER
 		if (cfil_faddr_use) {
-			faddr = &((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_addr;
-			fport = ((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_port;
-			fifscope = ((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_scope_id;
+			faddr = &SIN6(cfil_faddr)->sin6_addr;
+			fport = SIN6(cfil_faddr)->sin6_port;
+			fifscope = SIN6(cfil_faddr)->sin6_scope_id;
 
 			/* Do not use cached route */
 			ROUTE_RELEASE(&in6p->in6p_route);
@@ -468,29 +469,28 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 				ROUTE_RELEASE(&in6p->inp_route);
 
-				bzero(&from, sizeof(struct sockaddr_in6));
+				SOCKADDR_ZERO(&from, sizeof(struct sockaddr_in6));
 				from.sin6_family = AF_INET6;
 				from.sin6_len = sizeof(struct sockaddr_in6);
 				from.sin6_addr = *laddr;
 
-				bzero(&to, sizeof(struct sockaddr_in6));
+				SOCKADDR_ZERO(&to, sizeof(struct sockaddr_in6));
 				to.sin6_family = AF_INET6;
 				to.sin6_len = sizeof(struct sockaddr_in6);
 				to.sin6_addr = *faddr;
 
 				in6p->inp_route.ro_dst.sa_family = AF_INET6;
 				in6p->inp_route.ro_dst.sa_len = sizeof(struct sockaddr_in6);
-				((struct sockaddr_in6 *)(void *)&in6p->inp_route.ro_dst)->sin6_addr =
-				    *faddr;
+				SIN6(&in6p->inp_route.ro_dst)->sin6_addr = *faddr;
 
 				if (!in6_embedded_scope) {
-					((struct sockaddr_in6 *)(void *)&in6p->inp_route.ro_dst)->sin6_scope_id =
+					SIN6(&in6p->inp_route.ro_dst)->sin6_scope_id =
 					    IN6_IS_SCOPE_EMBED(faddr) ? fifscope : IFSCOPE_NONE;
 				}
 				rtalloc_scoped(&in6p->inp_route, ip6oa.ip6oa_boundif);
 
-				inp_update_necp_policy(in6p, (struct sockaddr *)&from,
-				    (struct sockaddr *)&to, ip6oa.ip6oa_boundif);
+				inp_update_necp_policy(in6p, SA(&from),
+				    SA(&to), ip6oa.ip6oa_boundif);
 				in6p->inp_policyresult.results.qos_marking_gencount = 0;
 			}
 
@@ -636,6 +636,12 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		if (in6p->in6p_route.ro_rt != NULL) {
 			struct rtentry *rt = in6p->in6p_route.ro_rt;
 			struct ifnet *outif;
+
+			if (IS_LOCALNET_ROUTE(rt)) {
+				in6p->in6p_flags2 |= INP2_LAST_ROUTE_LOCAL;
+			} else {
+				in6p->in6p_flags2 &= ~INP2_LAST_ROUTE_LOCAL;
+			}
 
 			if (rt->rt_flags & RTF_MULTICAST) {
 				rt = NULL;      /* unusable */

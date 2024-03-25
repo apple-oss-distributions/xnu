@@ -54,6 +54,8 @@
 
 #include <kern/backtrace.h>
 #include <kern/coalition.h>
+#include <kern/exclaves_stackshot.h>
+#include <kern/exclaves_inspection.h>
 #include <kern/processor.h>
 #include <kern/host_statistics.h>
 #include <kern/counter.h>
@@ -72,6 +74,12 @@
 #include <vm/vm_compressor.h>
 #include <libkern/OSKextLibPrivate.h>
 #include <os/log.h>
+
+#ifdef CONFIG_EXCLAVES
+#include <kern/exclaves.tightbeam.h>
+#endif /* CONFIG_EXCLAVES */
+
+#include <kern/exclaves_test_stackshot.h>
 
 #if defined(__x86_64__)
 #include <i386/mp.h>
@@ -110,6 +118,7 @@ static void *stack_snapshot_buf;
 static uint32_t stack_snapshot_bufsize;
 int stack_snapshot_pid;
 static uint64_t stack_snapshot_flags;
+static uint64_t stackshot_out_flags;
 static uint64_t stack_snapshot_delta_since_timestamp;
 static uint32_t stack_snapshot_pagetable_mask;
 static boolean_t panic_stackshot;
@@ -141,6 +150,14 @@ int kernel_stackshot_buf_size = 0;
 
 void * stackshot_snapbuf = NULL; /* Used by stack_snapshot2 (to be removed) */
 
+#if CONFIG_EXCLAVES
+static ctid_t *stackshot_exclave_inspect_ctids = NULL;
+static size_t stackshot_exclave_inspect_ctid_count = 0;
+static size_t stackshot_exclave_inspect_ctid_capacity = 0;
+
+static kern_return_t stackshot_exclave_kr = KERN_SUCCESS;
+#endif /* CONFIG_EXCLAVES */
+
 __private_extern__ void stackshot_init( void );
 static boolean_t memory_iszero(void *addr, size_t size);
 uint32_t                get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj);
@@ -149,7 +166,7 @@ kern_return_t           kern_stack_snapshot_internal(int stackshot_config_versio
 kern_return_t           do_stackshot(void *);
 void                    kdp_snapshot_preflight(int pid, void * tracebuf, uint32_t tracebuf_size, uint64_t flags, kcdata_descriptor_t data_p, uint64_t since_timestamp, uint32_t pagetable_mask);
 boolean_t               stackshot_thread_is_idle_worker_unsafe(thread_t thread);
-static int              kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t *pBytesTraced, uint32_t *pBytesUncompressed);
+static int              kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags);
 uint32_t                kdp_stack_snapshot_bytes_traced(void);
 uint32_t                kdp_stack_snapshot_bytes_uncompressed(void);
 static void             kdp_mem_and_io_snapshot(struct mem_and_io_snapshot *memio_snap);
@@ -203,6 +220,10 @@ extern kern_return_t kern_stack_snapshot_internal(int stackshot_config_version, 
 
 static size_t stackshot_plh_est_size(void);
 
+#if CONFIG_EXCLAVES
+static kern_return_t collect_exclave_threads(void);
+#endif
+
 /*
  * Validates that the given address for a word is both a valid page and has
  * default caching attributes for the current map.
@@ -244,6 +265,7 @@ static LCK_MTX_DECLARE(stackshot_subsys_mutex, &stackshot_subsys_lck_grp);
 #define STACKSHOT_SUBSYS_LOCK() lck_mtx_lock(&stackshot_subsys_mutex)
 #define STACKSHOT_SUBSYS_TRY_LOCK() lck_mtx_try_lock(&stackshot_subsys_mutex)
 #define STACKSHOT_SUBSYS_UNLOCK() lck_mtx_unlock(&stackshot_subsys_mutex)
+#define STACKSHOT_SUBSYS_ASSERT_LOCKED() lck_mtx_assert(&stackshot_subsys_mutex, LCK_MTX_ASSERT_OWNED);
 
 #define SANE_BOOTPROFILE_TRACEBUF_SIZE (64ULL * 1024ULL * 1024ULL)
 #define SANE_TRACEBUF_SIZE (8ULL * 1024ULL * 1024ULL)
@@ -268,12 +290,28 @@ SECURITY_READ_ONLY_LATE(static uint32_t) max_tracebuf_size = SANE_TRACEBUF_SIZE;
 
 #define STACKSHOT_QUEUE_LABEL_MAXSIZE  64
 
+#define kcd_end_address(kcd) ((void *)((uint64_t)((kcd)->kcd_addr_begin) + kcdata_memory_get_used_bytes((kcd))))
+#define kcd_max_address(kcd) ((void *)((kcd)->kcd_addr_begin + (kcd)->kcd_length))
+/*
+ * Use of the kcd_exit_on_error(action) macro requires a local
+ * 'kern_return_t error' variable and 'error_exit' label.
+ */
+#define kcd_exit_on_error(action)                      \
+	do {                                               \
+	        if (KERN_SUCCESS != (error = (action))) {      \
+	                if (error == KERN_RESOURCE_SHORTAGE) {     \
+	                        error = KERN_INSUFFICIENT_BUFFER_SIZE; \
+	                }                                          \
+	                goto error_exit;                           \
+	        }                                              \
+	} while (0); /* end kcd_exit_on_error */
+
 /*
  * Initialize the mutex governing access to the stack snapshot subsystem
  * and other stackshot related bits.
  */
 __private_extern__ void
-stackshot_init( void )
+stackshot_init(void)
 {
 	mach_timebase_info_data_t timebase;
 
@@ -345,6 +383,21 @@ stackshot_get_timing(uint64_t *last_abs_start, uint64_t *last_abs_end, uint64_t 
 	STACKSHOT_SUBSYS_UNLOCK();
 }
 
+static kern_return_t
+finalize_kcdata(kcdata_descriptor_t kcdata)
+{
+	kern_return_t error = KERN_SUCCESS;
+
+	kcd_finalize_compression(kcdata);
+	kcd_exit_on_error(kcdata_add_uint64_with_description(kcdata, stackshot_out_flags, "stackshot_out_flags"));
+	kcd_exit_on_error(kcdata_write_buffer_end(kcdata));
+	stack_snapshot_bytes_traced = (uint32_t) kcdata_memory_get_used_bytes(kcdata);
+	stack_snapshot_bytes_uncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(kcdata);
+	kcdata_finish(kcdata);
+error_exit:
+	return error;
+}
+
 kern_return_t
 stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, uint64_t delta_since_timestamp, uint32_t pagetable_mask, unsigned *bytes_traced)
 {
@@ -373,6 +426,10 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	} else {
 		STACKSHOT_SUBSYS_LOCK();
 	}
+
+#if CONFIG_EXCLAVES
+	assert(!stackshot_exclave_inspect_ctids);
+#endif
 
 	struct kcdata_descriptor kcdata;
 	uint32_t hdr_tag = (flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ?
@@ -407,12 +464,23 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	 */
 	error = stackshot_trap();
 
-	uint64_t time_end               = mach_absolute_time();
+	uint64_t time_end = mach_absolute_time();
 
 	/* Emit a SOCD tracepoint that we have completed the stackshot */
 	SOCD_TRACE_XNU_END(STACKSHOT);
 
 	ml_set_interrupts_enabled(istate);
+
+#if CONFIG_EXCLAVES
+	/* stackshot trap should only finish successfully or with no pending Exclave threads */
+	assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
+	if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
+		error = collect_exclave_threads();
+	}
+#endif /* CONFIG_EXCLAVES */
+	if (error == KERN_SUCCESS) {
+		error = finalize_kcdata(stackshot_kcdata_p);
+	}
 
 	if (stackshot_duration_outer) {
 		*stackshot_duration_outer = time_end - time_start;
@@ -422,6 +490,12 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_END,
 	    error, (time_end - time_start), size, *bytes_traced);
 out:
+#if CONFIG_EXCLAVES
+	stackshot_exclave_inspect_ctids = NULL;
+	stackshot_exclave_inspect_ctid_capacity = 0;
+	stackshot_exclave_inspect_ctid_count = 0;
+#endif
+
 	stackshot_kcdata_p = NULL;
 	STACKSHOT_SUBSYS_UNLOCK();
 	return error;
@@ -569,6 +643,349 @@ stackshot_remap_buffer(void *stackshotbuf, uint32_t bytes_traced, uint64_t out_b
 	return error;
 }
 
+#if CONFIG_EXCLAVES
+
+static kern_return_t
+stackshot_setup_exclave_waitlist(kcdata_descriptor_t kcdata)
+{
+	kern_return_t error = KERN_SUCCESS;
+	size_t exclave_threads_max = exclaves_ipc_buffer_count();
+	size_t waitlist_size = 0;
+
+	assert(!stackshot_exclave_inspect_ctids);
+
+	if (exclaves_inspection_is_initialized() && exclave_threads_max) {
+		if (os_mul_overflow(exclave_threads_max, sizeof(ctid_t), &waitlist_size)) {
+			error = KERN_INVALID_ARGUMENT;
+			goto error;
+		}
+		stackshot_exclave_inspect_ctids = kcdata_endalloc(kcdata, waitlist_size);
+		if (!stackshot_exclave_inspect_ctids) {
+			error = KERN_RESOURCE_SHORTAGE;
+			goto error;
+		}
+		stackshot_exclave_inspect_ctid_count = 0;
+		stackshot_exclave_inspect_ctid_capacity = exclave_threads_max;
+	}
+
+error:
+	return error;
+}
+
+static kern_return_t
+collect_exclave_threads(void)
+{
+	size_t i;
+	ctid_t ctid;
+	thread_t thread;
+	kern_return_t kr;
+	STACKSHOT_SUBSYS_ASSERT_LOCKED();
+
+	lck_mtx_lock(&exclaves_collect_mtx);
+	/* This error is intentionally ignored: we are now committed to collecting
+	 * these threads, or at least properly waking them. If this fails, the first
+	 * collected thread should also fail to append to the kcdata, and will abort
+	 * further collection, properly clearing the AST and waking these threads.
+	 */
+	kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+
+	for (i = 0; i < stackshot_exclave_inspect_ctid_count; ++i) {
+		ctid = stackshot_exclave_inspect_ctids[i];
+		thread = ctid_get_thread(ctid);
+		assert(thread);
+		exclaves_inspection_queue_add(&exclaves_inspection_queue_stackshot, &thread->th_exclaves_inspection_queue_stackshot);
+	}
+	exclaves_inspection_begin_collecting();
+	exclaves_inspection_wait_complete(&exclaves_inspection_queue_stackshot);
+	kr = stackshot_exclave_kr; /* Read the result of work done on our behalf, by collection thread */
+	if (kr != KERN_SUCCESS) {
+		goto out;
+	}
+
+	kr = kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+	if (kr != KERN_SUCCESS) {
+		goto out;
+	}
+out:
+	lck_mtx_unlock(&exclaves_collect_mtx);
+	return kr;
+}
+
+static kern_return_t
+stackshot_exclaves_process_stacktrace(const address_v__opt_s *_Nonnull st, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+	exclave_ecstackentry_addr_t * addr = NULL;
+	__block size_t count = 0;
+
+	if (!st->has_value) {
+		goto error_exit;
+	}
+
+	address__v_visit(&st->value, ^(size_t __unused i, const stackshot_address_s __unused item) {
+		count++;
+	});
+
+	kcdata_compression_window_open(kcdata_ptr);
+	kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK,
+	    sizeof(exclave_ecstackentry_addr_t), count, (mach_vm_address_t*)&addr));
+
+	address__v_visit(&st->value, ^(size_t i, const stackshot_address_s item) {
+		addr[i] = (exclave_ecstackentry_addr_t)item;
+	});
+
+	kcd_exit_on_error(kcdata_compression_window_close(kcdata_ptr));
+
+error_exit:
+	return error;
+}
+
+static kern_return_t
+stackshot_exclaves_process_ipcstackentry(uint64_t index, const stackshot_ipcstackentry_s *_Nonnull ise, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY, index));
+
+	struct exclave_ipcstackentry_info info = { 0 };
+	info.eise_asid = ise->asid;
+
+	info.eise_tnid = ise->tnid;
+
+	if (ise->invocationid.has_value) {
+		info.eise_flags |= kExclaveIpcStackEntryHaveInvocationID;
+		info.eise_invocationid = ise->invocationid.value;
+	} else {
+		info.eise_invocationid = 0;
+	}
+
+	info.eise_flags |= (ise->stacktrace.has_value ? kExclaveIpcStackEntryHaveStack : 0);
+
+	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO, sizeof(struct exclave_ipcstackentry_info), &info));
+
+	if (ise->stacktrace.has_value) {
+		kcd_exit_on_error(stackshot_exclaves_process_stacktrace(&ise->stacktrace, kcdata_ptr));
+	}
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY, index));
+
+error_exit:
+	return error;
+}
+
+static kern_return_t
+stackshot_exclaves_process_ipcstack(const stackshot_ipcstackentry_v__opt_s *_Nonnull ipcstack, void *kcdata_ptr)
+{
+	__block kern_return_t kr = KERN_SUCCESS;
+
+	if (!ipcstack->has_value) {
+		goto error_exit;
+	}
+
+	stackshot_ipcstackentry__v_visit(&ipcstack->value, ^(size_t i, const stackshot_ipcstackentry_s *_Nonnull item) {
+		if (kr == KERN_SUCCESS) {
+		        kr = stackshot_exclaves_process_ipcstackentry(i, item, kcdata_ptr);
+		}
+	});
+
+error_exit:
+	return kr;
+}
+
+static kern_return_t
+stackshot_exclaves_process_stackshotentry(const stackshot_stackshotentry_s *_Nonnull se, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT, se->scid));
+
+	struct exclave_scresult_info info = { 0 };
+	info.esc_id = se->scid;
+	info.esc_flags = se->ipcstack.has_value ? kExclaveScresultHaveIPCStack : 0;
+
+	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO, sizeof(struct exclave_scresult_info), &info));
+
+	if (se->ipcstack.has_value) {
+		kcd_exit_on_error(stackshot_exclaves_process_ipcstack(&se->ipcstack, kcdata_ptr));
+	}
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT, se->scid));
+
+error_exit:
+	return error;
+}
+
+static kern_return_t
+stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+	__block struct exclave_textlayout_segment * info = NULL;
+
+	__block size_t count = 0;
+	stackshot_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshot_textsegment_s __unused *_Nonnull item) {
+		count++;
+	});
+
+	if (!count) {
+		goto error_exit;
+	}
+
+	kcdata_compression_window_open(kcdata_ptr);
+	kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS,
+	    sizeof(struct exclave_textlayout_segment), count, (mach_vm_address_t*)&info));
+
+	stackshot_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshot_textsegment_s *_Nonnull item) {
+		memcpy(&info->layoutSegment_uuid, item->uuid, sizeof(uuid_t));
+		info->layoutSegment_loadAddress = item->loadaddress;
+		info++;
+	});
+
+	kcd_exit_on_error(kcdata_compression_window_close(kcdata_ptr));
+
+error_exit:
+	return error;
+}
+
+static kern_return_t
+stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+	__block struct exclave_textlayout_info info = { 0 };
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
+
+	info.layout_id = tl->textlayoutid;
+
+	info.etl_flags = kExclaveTextLayoutLoadAddressesUnslid;
+
+	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO, sizeof(struct exclave_textlayout_info), &info));
+	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr));
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
+error_exit:
+	return error;
+}
+
+static kern_return_t
+stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull as, void *kcdata_ptr)
+{
+	kern_return_t error = KERN_SUCCESS;
+	struct exclave_addressspace_info info = { 0 };
+	__block size_t name_len = 0;
+	uint8_t * name = NULL;
+
+	u8__v_visit(&as->name, ^(size_t __unused i, const uint8_t __unused item) {
+		name_len++;
+	});
+
+	info.eas_id = as->asid;
+
+	if (as->rawaddressslide.has_value) {
+		info.eas_flags = kExclaveAddressSpaceHaveSlide;
+		info.eas_slide = as->rawaddressslide.value;
+	} else {
+		info.eas_flags = 0;
+		info.eas_slide = UINT64_MAX;
+	}
+
+	info.eas_layoutid = as->textlayoutid; // text layout for this address space
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE, as->asid));
+	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO, sizeof(struct exclave_addressspace_info), &info));
+
+	if (name_len > 0) {
+		kcdata_compression_window_open(kcdata_ptr);
+		kcd_exit_on_error(kcdata_get_memory_addr(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME, name_len + 1, (mach_vm_address_t*)&name));
+
+		u8__v_visit(&as->name, ^(size_t i, const uint8_t item) {
+			name[i] = item;
+		});
+		name[name_len] = 0;
+
+		kcd_exit_on_error(kcdata_compression_window_close(kcdata_ptr));
+	}
+
+	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE, as->asid));
+error_exit:
+	return error;
+}
+
+kern_return_t
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr);
+
+kern_return_t
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr)
+{
+	__block kern_return_t kr = KERN_SUCCESS;
+
+	stackshot_stackshotentry__v_visit(&result->stackshotentries, ^(size_t __unused i, const stackshot_stackshotentry_s *_Nonnull item) {
+		if (kr == KERN_SUCCESS) {
+		        kr = stackshot_exclaves_process_stackshotentry(item, kcdata_ptr);
+		}
+	});
+
+	stackshot_addressspace__v_visit(&result->addressspaces, ^(size_t __unused i, const stackshot_addressspace_s *_Nonnull item) {
+		if (kr == KERN_SUCCESS) {
+		        kr = stackshot_exclaves_process_addressspace(item, kcdata_ptr);
+		}
+	});
+
+	stackshot_textlayout__v_visit(&result->textlayouts, ^(size_t i, const stackshot_textlayout_s *_Nonnull item) {
+		if (kr == KERN_SUCCESS) {
+		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr);
+		}
+	});
+
+	return kr;
+}
+
+kern_return_t
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result);
+
+kern_return_t
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result)
+{
+	kern_return_t kr = KERN_SUCCESS;
+	if (result == NULL) {
+		return collect_kr;
+	}
+
+	kr = stackshot_exclaves_process_stackshot(result, stackshot_kcdata_p);
+
+	stackshot_exclave_kr = kr;
+
+	return kr;
+}
+
+
+static void
+commit_exclaves_ast(void)
+{
+	size_t i = 0;
+	thread_t thread = NULL;
+
+	assert(debug_mode_active());
+
+	if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
+		for (i = 0; i < stackshot_exclave_inspect_ctid_count; ++i) {
+			thread = ctid_get_thread(stackshot_exclave_inspect_ctids[i]);
+			thread_reference(thread);
+			os_atomic_or(&thread->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_STACKSHOT, relaxed);
+		}
+	}
+}
+
+#endif /* CONFIG_EXCLAVES */
+
 kern_return_t
 kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_config, size_t stackshot_config_size, boolean_t stackshot_from_user)
 {
@@ -672,14 +1089,15 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		return KERN_INVALID_ARGUMENT;
 	}
 
-#if CONFIG_PERVASIVE_CPI && MONOTONIC
+#if CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS
 	if (!mt_core_supported) {
 		flags &= ~STACKSHOT_INSTRS_CYCLES;
 	}
-#else /* CONFIG_PERVASIVE_CPI && MONOTONIC */
+#else /* CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS */
 	flags &= ~STACKSHOT_INSTRS_CYCLES;
-#endif /* !CONFIG_PERVASIVE_CPI || !MONOTONIC */
+#endif /* !CONFIG_PERVASIVE_CPI || !CONFIG_CPU_COUNTERS */
 
+	STACKSHOT_TESTPOINT(TP_WAIT_START_STACKSHOT);
 	STACKSHOT_SUBSYS_LOCK();
 
 	if (flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER) {
@@ -688,12 +1106,12 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		 */
 		if (kernel_stackshot_buf != NULL) {
 			error = KERN_MEMORY_PRESENT;
-			goto error_exit;
+			goto error_early_exit;
 		}
 	} else if (flags & STACKSHOT_RETRIEVE_EXISTING_BUFFER) {
 		if ((kernel_stackshot_buf == NULL) || (kernel_stackshot_buf_size <= 0)) {
 			error = KERN_NOT_IN_SET;
-			goto error_exit;
+			goto error_early_exit;
 		}
 		error = stackshot_remap_buffer(kernel_stackshot_buf, kernel_stackshot_buf_size,
 		    out_buffer_addr, out_size_addr);
@@ -709,7 +1127,7 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 			kernel_stackshot_buf_size = 0;
 		}
 
-		goto error_exit;
+		goto error_early_exit;
 	}
 
 	if (flags & STACKSHOT_GET_BOOT_PROFILE) {
@@ -720,10 +1138,10 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 #endif
 		if (!bootprofile || !len) {
 			error = KERN_NOT_IN_SET;
-			goto error_exit;
+			goto error_early_exit;
 		}
 		error = stackshot_remap_buffer(bootprofile, len, out_buffer_addr, out_size_addr);
-		goto error_exit;
+		goto error_early_exit;
 	}
 
 	stackshot_duration_prior_abs = 0;
@@ -735,6 +1153,10 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_START,
 	    flags, stackshotbuf_size, pid, since_timestamp);
 	is_traced = true;
+
+#if CONFIG_EXCLAVES
+	assert(!stackshot_exclave_inspect_ctids);
+#endif
 
 	for (; stackshotbuf_size <= max_tracebuf_size; stackshotbuf_size <<= 1) {
 		if (kmem_alloc(kernel_map, (vm_offset_t *)&stackshotbuf, stackshotbuf_size,
@@ -788,6 +1210,15 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		SOCD_TRACE_XNU_END(STACKSHOT);
 		ml_set_interrupts_enabled(prev_interrupt_state);
 
+#if CONFIG_EXCLAVES
+		/* trigger Exclave thread collection if any are queued */
+		assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
+		if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
+			STACKSHOT_TESTPOINT(TP_START_COLLECTION);
+			error = collect_exclave_threads();
+		}
+#endif /* CONFIG_EXCLAVES */
+
 		if (stackshot_duration_outer) {
 			*stackshot_duration_outer = time_end - time_start;
 		}
@@ -813,6 +1244,8 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 				goto error_exit;
 			}
 		}
+
+		kcd_exit_on_error(finalize_kcdata(stackshot_kcdata_p));
 
 		bytes_traced = kdp_stack_snapshot_bytes_traced();
 		if (bytes_traced <= 0) {
@@ -858,6 +1291,14 @@ error_exit:
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_END,
 		    error, tot_interrupts_off_abs, stackshotbuf_size, bytes_traced);
 	}
+
+#if CONFIG_EXCLAVES
+	stackshot_exclave_inspect_ctids = NULL;
+	stackshot_exclave_inspect_ctid_capacity = 0;
+	stackshot_exclave_inspect_ctid_count = 0;
+#endif
+
+error_early_exit:
 	if (kcdata_p != NULL) {
 		kcdata_memory_destroy(kcdata_p);
 		kcdata_p = NULL;
@@ -870,7 +1311,10 @@ error_exit:
 	if (buf_to_free != NULL) {
 		kmem_free(kernel_map, (vm_offset_t)buf_to_free, size_to_free);
 	}
+
 	STACKSHOT_SUBSYS_UNLOCK();
+	STACKSHOT_TESTPOINT(TP_STACKSHOT_DONE);
+
 	return error;
 }
 
@@ -986,23 +1430,6 @@ _stackshot_strlen(const char *s, size_t maxlen)
 	}
 	return -1; /* failed before end of string */
 }
-
-#define kcd_end_address(kcd) ((void *)((uint64_t)((kcd)->kcd_addr_begin) + kcdata_memory_get_used_bytes((kcd))))
-#define kcd_max_address(kcd) ((void *)((kcd)->kcd_addr_begin + (kcd)->kcd_length))
-/*
- * Use of the kcd_exit_on_error(action) macro requires a local
- * 'kern_return_t error' variable and 'error_exit' label.
- */
-#define kcd_exit_on_error(action)                      \
-	do {                                               \
-	        if (KERN_SUCCESS != (error = (action))) {      \
-	                if (error == KERN_RESOURCE_SHORTAGE) {     \
-	                        error = KERN_INSUFFICIENT_BUFFER_SIZE; \
-	                }                                          \
-	                goto error_exit;                           \
-	        }                                              \
-	} while (0); /* end kcd_exit_on_error */
-
 
 /*
  * For port labels, we have a small hash table we use to track the
@@ -1748,10 +2175,10 @@ kcdata_record_task_instrs_cycles(kcdata_descriptor_t kcd, task_t task)
 	struct recount_usage usage = { 0 };
 	struct recount_usage perf_only = { 0 };
 	recount_task_terminated_usage_perf_only(task, &usage, &perf_only);
-	instrs_cycles.ics_instructions = usage.ru_instructions;
-	instrs_cycles.ics_cycles = usage.ru_cycles;
-	instrs_cycles.ics_p_instructions = perf_only.ru_instructions;
-	instrs_cycles.ics_p_cycles = perf_only.ru_cycles;
+	instrs_cycles.ics_instructions = recount_usage_instructions(&usage);
+	instrs_cycles.ics_cycles = recount_usage_cycles(&usage);
+	instrs_cycles.ics_p_instructions = recount_usage_instructions(&perf_only);
+	instrs_cycles.ics_p_cycles = recount_usage_cycles(&perf_only);
 
 	return kcdata_push_data(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(instrs_cycles), &instrs_cycles);
 }
@@ -1930,10 +2357,9 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 	struct recount_usage term_usage = { 0 };
 	recount_task_terminated_usage(task, &term_usage);
-	cur_tsnap->ts_user_time_in_terminated_threads =
-	    term_usage.ru_user_time_mach;
-	cur_tsnap->ts_system_time_in_terminated_threads =
-	    term_usage.ru_system_time_mach;
+	struct recount_times_mach term_times = recount_usage_times_mach(&term_usage);
+	cur_tsnap->ts_user_time_in_terminated_threads = term_times.rtm_user;
+	cur_tsnap->ts_system_time_in_terminated_threads = term_times.rtm_system;
 
 	proc_starttime_kdp(bsd_info, &proc_starttime_secs, NULL, NULL);
 	cur_tsnap->ts_p_start_sec = proc_starttime_secs;
@@ -2071,10 +2497,10 @@ kcdata_record_task_delta_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t
 
 	struct recount_usage usage = { 0 };
 	recount_task_terminated_usage(task, &usage);
+	struct recount_times_mach term_times = recount_usage_times_mach(&usage);
 
-	cur_tsnap->tds_user_time_in_terminated_threads = usage.ru_user_time_mach;
-	cur_tsnap->tds_system_time_in_terminated_threads =
-	    usage.ru_system_time_mach;
+	cur_tsnap->tds_user_time_in_terminated_threads = term_times.rtm_user;
+	cur_tsnap->tds_system_time_in_terminated_threads = term_times.rtm_system;
 
 	cur_tsnap->tds_task_size = have_pmap ? get_task_phys_footprint(task) : 0;
 
@@ -2207,6 +2633,26 @@ _stackshot_backtrace_copy(void *vctx, void *dst, user_addr_t src, size_t size)
 	return 0;
 }
 
+#if CONFIG_EXCLAVES
+
+/* Return index of last xnu frame before secure world. Valid frame index is
+ * always in range <0, nframes-1>. When frame is not found, return nframes
+ * value. */
+static uint32_t
+kdp_exclave_stack_offset(uintptr_t * out_addr, size_t nframes)
+{
+	size_t i = 0;
+	while (i < nframes &&
+	    !((exclaves_enter_range_start < out_addr[i]) && (out_addr[i] <= exclaves_enter_range_end))
+	    && !((exclaves_upcall_range_start < out_addr[i]) && (out_addr[i] <= exclaves_upcall_range_end))
+	    ) {
+		i++;
+	}
+
+	return (uint32_t)i;
+}
+#endif /* CONFIG_EXCLAVES */
+
 static kern_return_t
 kcdata_record_thread_snapshot(
 	kcdata_descriptor_t kcd, thread_t thread, task_t task, uint64_t trace_flags, boolean_t have_pmap, boolean_t thread_on_core)
@@ -2326,6 +2772,21 @@ kcdata_record_thread_snapshot(
 	if (thread->options & TH_OPT_GLOBAL_FORCED_IDLE) {
 		cur_thread_snap->ths_ss_flags |= kGlobalForcedIdle;
 	}
+#if CONFIG_EXCLAVES
+	if ((thread->th_exclaves_state & TH_EXCLAVES_RPC) && stackshot_exclave_inspect_ctids && !panic_stackshot) {
+		/* save exclave thread for later collection */
+		if (stackshot_exclave_inspect_ctid_count < stackshot_exclave_inspect_ctid_capacity) {
+			/* certain threads, like the collector, must never be inspected */
+			if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_NOINSPECT) == 0) {
+				stackshot_exclave_inspect_ctids[stackshot_exclave_inspect_ctid_count] = thread_get_ctid(thread);
+				stackshot_exclave_inspect_ctid_count += 1;
+				if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_STACKSHOT) != 0) {
+					panic("stackshot: trying to inspect already-queued thread");
+				}
+			}
+		}
+	}
+#endif /* CONFIG_EXCLAVES */
 	if (thread_on_core) {
 		cur_thread_snap->ths_ss_flags |= kThreadOnCore;
 	}
@@ -2530,6 +2991,23 @@ kcdata_record_thread_snapshot(
 #endif
 			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, stack_kcdata_type,
 			    frame_size, saved_count / frame_size, &out_addr));
+#if CONFIG_EXCLAVES
+			if (thread->th_exclaves_state & TH_EXCLAVES_RPC) {
+				struct thread_exclaves_info info = { 0 };
+
+				info.tei_flags = kExclaveRPCActive;
+				if (thread->th_exclaves_state & TH_EXCLAVES_SCHEDULER_REQUEST) {
+					info.tei_flags |= kExclaveSchedulerRequest;
+				}
+				if (thread->th_exclaves_state & TH_EXCLAVES_UPCALL) {
+					info.tei_flags |= kExclaveUpcallActive;
+				}
+				info.tei_scid = thread->th_exclaves_scheduling_context_id;
+				info.tei_thread_offset = kdp_exclave_stack_offset((uintptr_t *)out_addr, saved_count / frame_size);
+
+				kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO, sizeof(struct thread_exclaves_info), &info));
+			}
+#endif /* CONFIG_EXCLAVES */
 		}
 		if (kern_ths_ss_flags & kThreadTruncatedBT) {
 			kern_ths_ss_flags |= kThreadTruncKernBT;
@@ -2564,8 +3042,8 @@ kcdata_record_thread_snapshot(
 
 		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(struct instrs_cycles_snapshot), &out_addr));
 		struct instrs_cycles_snapshot *instrs_cycles = (struct instrs_cycles_snapshot *)out_addr;
-		    instrs_cycles->ics_instructions = usage.ru_instructions;
-		    instrs_cycles->ics_cycles = usage.ru_cycles;
+		    instrs_cycles->ics_instructions = recount_usage_instructions(&usage);
+		    instrs_cycles->ics_cycles = recount_usage_cycles(&usage);
 	}
 #endif /* CONFIG_PERVASIVE_CPI */
 
@@ -2837,7 +3315,6 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			    num_delta_thread_snapshots, &out_addr));
 			delta_snapshots = (struct thread_delta_snapshot_v3 *)out_addr;
 		}
-
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 		latency_info.task_thread_count_loop_latency = mach_absolute_time();
@@ -3119,7 +3596,7 @@ error_exit:
 }
 
 static kern_return_t
-kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTraced, uint32_t * pBytesUncompressed)
+kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 {
 	kern_return_t error        = KERN_SUCCESS;
 	mach_vm_address_t out_addr = 0;
@@ -3130,6 +3607,12 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	uint32_t length_to_copy = 0, tmp32 = 0;
 	abs_time = mach_absolute_time();
 	uint64_t last_task_start_time = 0;
+	uint64_t trace_flags = 0;
+
+	if (!trace_flags_p) {
+		panic("Invalid kdp_stackshot_kcdata_format trace_flags_p value");
+	}
+	trace_flags = *trace_flags_p;
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	struct stackshot_latency_collection latency_info;
@@ -3146,7 +3629,6 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	collect_latency_info = trace_flags & STACKSHOT_DISABLE_LATENCY_INFO ? false : true;
 #endif
-
 	/* process the flags */
 	bool collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
 	bool use_fault_path          = ((trace_flags & (STACKSHOT_ENABLE_UUID_FAULTING | STACKSHOT_ENABLE_BT_FAULTING)) != 0);
@@ -3173,22 +3655,24 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 		system_state_flags |= kKernel64_p;
 	}
 
-	if (stackshot_kcdata_p == NULL || pBytesTraced == NULL) {
+	if (stackshot_kcdata_p == NULL) {
 		error = KERN_INVALID_ARGUMENT;
 		goto error_exit;
 	}
 
 	_stackshot_validation_reset();
+#if CONFIG_EXCLAVES
+	if (!panic_stackshot) {
+		kcd_exit_on_error(stackshot_setup_exclave_waitlist(stackshot_kcdata_p)); /* Allocate list of exclave threads */
+	}
+#endif
 	stackshot_plh_setup(stackshot_kcdata_p); /* set up port label hash */
+
 
 	/* setup mach_absolute_time and timebase info -- copy out in some cases and needed to convert since_timestamp to seconds for proc start time */
 	clock_timebase_info(&timebase);
 
 	/* begin saving data into the buffer */
-	*pBytesTraced = 0;
-	if (pBytesUncompressed) {
-		*pBytesUncompressed = 0;
-	}
 	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, trace_flags, "stackshot_in_flags"));
 	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, (uint32_t)pid, "stackshot_in_pid"));
 	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, system_state_flags, "system_state_flags"));
@@ -3254,7 +3738,6 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	}
 #endif
 
-
 	/* Iterate over thread group names */
 	if (trace_flags & STACKSHOT_THREAD_GROUP) {
 		/* Variable size array - better not have it on the stack. */
@@ -3293,6 +3776,8 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	latency_info.total_task_iteration_latency = mach_absolute_time();
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
+	bool const process_scoped = (ctx.pid != -1) && !ctx.include_drivers;
+
 	/* Iterate over tasks */
 	queue_iterate(&tasks, task, task_t, tasks)
 	{
@@ -3305,9 +3790,16 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 			}
 		}
 
+		if (process_scoped && (pid_from_task(task) != ctx.pid)) {
+			continue;
+		}
+
 		error = kdp_stackshot_record_task(&ctx, task);
 		if (error) {
 			goto error_exit;
+		} else if (process_scoped) {
+			/* Only targeting one process, we're done now. */
+			break;
 		}
 	}
 
@@ -3427,17 +3919,23 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	}
 #endif
 
-	kcd_finalize_compression(stackshot_kcdata_p);
-	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, trace_flags, "stackshot_out_flags"));
+#if CONFIG_EXCLAVES
+	/* Avoid setting AST until as late as possible, in case the stackshot fails */
+	commit_exclaves_ast();
+#endif
 
-	kcd_exit_on_error(kcdata_write_buffer_end(stackshot_kcdata_p));
-
-	/*  === END of populating stackshot data === */
-
-	*pBytesTraced = (uint32_t) kcdata_memory_get_used_bytes(stackshot_kcdata_p);
-	*pBytesUncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(stackshot_kcdata_p);
+	*trace_flags_p = trace_flags;
 
 error_exit:;
+
+#if CONFIG_EXCLAVES
+	if (error != KERN_SUCCESS && stackshot_exclave_inspect_ctids) {
+		/* Clear inspection CTID list: no need to wait for these threads */
+		stackshot_exclave_inspect_ctid_count = 0;
+		stackshot_exclave_inspect_ctid_capacity = 0;
+		stackshot_exclave_inspect_ctids = NULL;
+	}
+#endif
 
 #if SCHED_HYGIENE_DEBUG
 	bool disable_interrupts_masked_check = kern_feature_override(
@@ -3601,18 +4099,26 @@ do_stackshot(void *context)
 #pragma unused(context)
 	kdp_snapshot++;
 
-	stack_snapshot_ret = kdp_stackshot_kcdata_format(stack_snapshot_pid,
-	    stack_snapshot_flags,
-	    &stack_snapshot_bytes_traced,
-	    &stack_snapshot_bytes_uncompressed);
+	stackshot_out_flags = stack_snapshot_flags;
 
-	if (stack_snapshot_ret == KERN_SUCCESS) {
-		/* releases and zeros and kcdata_end_alloc()s done */
-		kcdata_finish(stackshot_kcdata_p);
-	}
+	stack_snapshot_ret = kdp_stackshot_kcdata_format(stack_snapshot_pid, &stackshot_out_flags);
 
 	kdp_snapshot--;
 	return stack_snapshot_ret;
+}
+
+kern_return_t
+do_panic_stackshot(void *context);
+
+kern_return_t
+do_panic_stackshot(void *context)
+{
+	kern_return_t ret = do_stackshot(context);
+	kern_return_t error = finalize_kcdata(stackshot_kcdata_p);
+
+	// Return ret if it's already an error, error otherwise.  Usually both
+	// are KERN_SUCCESS.
+	return (ret != KERN_SUCCESS) ? ret : error;
 }
 
 boolean_t

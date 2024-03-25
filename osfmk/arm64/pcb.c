@@ -42,10 +42,7 @@
 #include <kern/spl.h>
 #include <kern/machine.h>
 #include <kern/kpc.h>
-
-#if MONOTONIC
 #include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #include <machine/atomic.h>
 #include <arm64/proc_reg.h>
@@ -74,6 +71,7 @@ ZONE_DEFINE_TYPE(ads_zone, "arm debug state", arm_debug_state_t, ZC_NONE);
 ZONE_DEFINE_TYPE(user_ss_zone, "user save state", arm_context_t, ZC_NONE);
 
 
+
 /*
  * Routine: consider_machine_collect
  *
@@ -92,6 +90,7 @@ void
 consider_machine_adjust(void)
 {
 }
+
 
 
 
@@ -130,7 +129,6 @@ static inline void
 machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 {
 	pmap_t new_pmap;
-
 
 
 
@@ -185,7 +183,9 @@ machine_switch_context(thread_t old,
 		panic("machine_switch_context");
 	}
 
+#if CONFIG_CPU_COUNTERS
 	kpc_off_cpu(old);
+#endif /* CONFIG_CPU_COUNTERS */
 
 	machine_switch_pmap_and_extended_context(old, new);
 
@@ -534,7 +534,9 @@ machine_stack_handoff(thread_t old,
 	}
 #endif
 
+#if CONFIG_CPU_COUNTERS
 	kpc_off_cpu(old);
+#endif /* CONFIG_CPU_COUNTERS */
 
 	stack = machine_stack_detach(old);
 #if CONFIG_STKSZ
@@ -786,9 +788,9 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 	 * Software debug single step enable
 	 */
 	if (debug_state->uds.ds32.mdscr_el1 & 0x1) {
-		update_mdscr(0x8000, 1); // ~MDE | SS : no brk/watch while single stepping (which we've set)
+		update_mdscr(0, 1); // MDSCR_EL1[SS]
 
-		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
+		mask_user_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
 	}
@@ -989,9 +991,9 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 	 */
 	if (debug_state->uds.ds64.mdscr_el1 & 0x1) {
 
-		update_mdscr(0x8000, 1); // ~MDE | SS : no brk/watch while single stepping (which we've set)
+		update_mdscr(0, 1); // MDSCR_EL1[SS]
 
-		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
+		mask_user_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
 	}

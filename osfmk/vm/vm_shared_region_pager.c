@@ -490,6 +490,7 @@ shared_region_pager_data_request(
 	int                     interruptible;
 	struct vm_object_fault_info     fault_info;
 	mach_vm_offset_t        slide_start_address;
+	u_int32_t                               slide_info_page_size;
 
 	PAGER_DEBUG(PAGER_ALL, ("shared_region_pager_data_request: %p, %llx, %x, %x\n", mem_obj, offset, length, protection_required));
 
@@ -546,6 +547,7 @@ shared_region_pager_data_request(
 	vm_object_reference(src_top_object); /* keep the source object alive */
 
 	slide_start_address = pager->srp_slide_info->si_slid_address;
+	slide_info_page_size = pager->srp_slide_info->si_slide_info_entry->version == 1 ? PAGE_SIZE_FOR_SR_SLIDE : pager->srp_slide_info->si_slide_info_entry->page_size;
 
 	fault_info.lo_offset += pager->srp_backing_offset;
 	fault_info.hi_offset += pager->srp_backing_offset;
@@ -682,7 +684,7 @@ retry_src_fault:
 		 */
 		for (offset_in_page = 0;
 		    offset_in_page < PAGE_SIZE;
-		    offset_in_page += PAGE_SIZE_FOR_SR_SLIDE) {
+		    offset_in_page += slide_info_page_size) {
 			vm_object_offset_t chunk_offset;
 			vm_object_offset_t offset_in_backing_object;
 			vm_object_offset_t offset_in_sliding_range;
@@ -692,7 +694,7 @@ retry_src_fault:
 			bcopy((const char *)(src_vaddr +
 			    offset_in_page),
 			    (char *)(dst_vaddr + offset_in_page),
-			    PAGE_SIZE_FOR_SR_SLIDE);
+			    slide_info_page_size);
 
 			offset_in_backing_object = (chunk_offset +
 			    pager->srp_backing_offset);
@@ -707,7 +709,7 @@ retry_src_fault:
 			kr = vm_shared_region_slide_page(pager->srp_slide_info,
 			    dst_vaddr + offset_in_page,
 			    (mach_vm_offset_t) (offset_in_sliding_range + slide_start_address),
-			    (uint32_t) (offset_in_sliding_range / PAGE_SIZE_FOR_SR_SLIDE),
+			    (uint32_t) (offset_in_sliding_range / slide_info_page_size),
 #if __has_feature(ptrauth_calls)
 			    pager->srp_slide_info->si_ptrauth ? pager->srp_jop_key : 0
 #else /* __has_feature(ptrauth_calls) */
@@ -886,7 +888,7 @@ shared_region_pager_terminate_internal(
 		pager->srp_backing_object = VM_OBJECT_NULL;
 	}
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->srp_header.mo_control, 0);
+	memory_object_destroy(pager->srp_header.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 }
 
 /*

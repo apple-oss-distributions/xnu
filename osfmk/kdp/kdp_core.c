@@ -80,6 +80,9 @@
 #include <pexpert/pexpert.h>
 #include <os/atomic_private.h>
 
+#if CONFIG_SPTM
+#include <sptm/debug_header.h>
+#endif
 
 #if defined(__x86_64__)
 #include <i386/pmap_internal.h>
@@ -87,6 +90,9 @@
 #include <kern/debug.h>
 #endif /* defined(__x86_64__) */
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif /* CONFIG_SPTM */
 
 kern_return_t kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context);
 kern_return_t kdp_core_polled_io_polled_file_unavailable(void);
@@ -478,7 +484,18 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 				m = VM_PAGE_NULL;
 				// avail_end is not a valid physical address,
 				// so phystokv(avail_end) may not produce the expected result.
+#if CONFIG_SPTM
+				/**
+				 * The physical aperture in SPTM systems includes mappings to IO memory,
+				 * following the last page of managed memory. Rather than calculating the
+				 * end of the physical aperture as a function of the amount of managed memory,
+				 * simply advance [vcur] to the point advertised by the SPTM as the end of
+				 * the physical aperture.
+				 */
+				vcur = SPTMArgs->physmap_end;
+#else
 				vcur = phystokv(avail_start) + (avail_end - avail_start);
+#endif
 			} else {
 				m = (vm_page_t)vm_page_queue_next(&m->vmp_listq);
 				vcur = phystokv(ptoa(ppn));
@@ -1816,6 +1833,19 @@ kern_dump_save_note_summary(void *refcon __unused, core_save_note_summary_cb cal
 	int count = 1;
 	size_t size = sizeof(addrable_bits_note_t);
 
+#ifdef CONFIG_SPTM
+	/* Load binary spec note */
+
+	struct debug_header const *debug_header = SPTMArgs != NULL ? SPTMArgs->debug_header : NULL;
+
+	if (debug_header != NULL &&
+	    debug_header->magic == DEBUG_HEADER_MAGIC_VAL &&
+	    debug_header->version == DEBUG_HEADER_CURRENT_VERSION) {
+		/* Also add SPTM, TXM, and xnu kc load binary specs if present */
+		count += debug_header->count;
+		size += debug_header->count * sizeof(load_binary_spec_note_t);
+	}
+#endif /* CONFIG_SPTM */
 
 	return callback(count, size, context);
 }
@@ -1828,6 +1858,14 @@ kern_dump_save_note_descriptions(void *refcon __unused, core_save_note_descripti
 
 	max_ret = ret = callback(ADDRABLE_BITS_DATA_OWNER, sizeof(addrable_bits_note_t), context);
 
+#if CONFIG_SPTM
+	struct debug_header const *debug_header = SPTMArgs != NULL ? SPTMArgs->debug_header : NULL;
+
+	for (int i = 0; i < (debug_header != NULL ? debug_header->count : 0); i++) {
+		ret = callback(LOAD_BINARY_SPEC_DATA_OWNER, sizeof(load_binary_spec_note_t), context);
+		max_ret = MAX(ret, max_ret);
+	}
+#endif /* CONFIG_SPTM */
 
 	return max_ret;
 }
@@ -1846,6 +1884,46 @@ kern_dump_save_note_data(void *refcon __unused, core_save_note_data_cb callback,
 
 	max_ret = ret = callback(&note, sizeof(addrable_bits_note_t), context);
 
+#if CONFIG_SPTM
+	struct debug_header const *debug_header = SPTMArgs != NULL ? SPTMArgs->debug_header : NULL;
+
+	for (int i = 0; i < (debug_header != NULL ? debug_header->count : 0); i++) {
+		load_binary_spec_note_t load_binary_spec = {
+			.version = LOAD_BINARY_SPEC_VERSION,
+			.uuid = {0},
+			.address = (uint64_t)debug_header->image[i],
+			.slide = UINT64_MAX     // unknown, load address specified
+		};
+
+		char const *name;
+		switch (i) {
+		case DEBUG_HEADER_ENTRY_SPTM:
+			name = "sptm";
+			break;
+		case DEBUG_HEADER_ENTRY_XNU:
+			name = "xnu";
+			break;
+		case DEBUG_HEADER_ENTRY_TXM:
+			name = "txm";
+			break;
+		default:
+			name = "UNKNOWN";
+			kern_coredump_log(context, "%s(): encountered unknown debug header entry %d, "
+			    "including anyway with name '%s'\n", __func__, i, name);
+		}
+
+		strlcpy(load_binary_spec.name_cstring, name, LOAD_BINARY_NAME_BUF_SIZE);
+
+		ret = callback(&load_binary_spec, sizeof(load_binary_spec), context);
+
+		if (ret != KERN_SUCCESS) {
+			kern_coredump_log(context, "%s(): failed to write load binary spec structure "
+			    "for binary #%d ('%s'): callback returned 0x%x\n",
+			    __func__, i, name, ret);
+			max_ret = MAX(ret, max_ret);
+		}
+	}
+#endif /* CONFIG_SPTM */
 
 	return max_ret;
 }

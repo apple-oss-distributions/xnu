@@ -101,7 +101,7 @@ __END_DECLS
 
 #if XNU_KERNEL_PRIVATE
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 
 #include <kern/monotonic.h>
 #include <machine/monotonic.h>
@@ -161,7 +161,7 @@ extern struct mt_device mt_devices[];
 
 __END_DECLS
 
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #endif /* XNU_KERNEL_PRIVATE */
 

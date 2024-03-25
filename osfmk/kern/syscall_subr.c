@@ -569,6 +569,7 @@ thread_poll_yield(thread_t self)
 		thread_lock(self);
 
 		self->computation_epoch   = abstime;
+		self->computation_interrupt_epoch = recount_current_thread_interrupt_time_mach();
 		self->computation_metered = 0;
 
 		uint64_t yield_expiration = abstime +

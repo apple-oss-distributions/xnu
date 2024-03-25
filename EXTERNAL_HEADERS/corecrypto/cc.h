@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2012,2014-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -19,6 +19,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdarg.h>
 
 CC_PTRCHECK_CAPABLE_HEADER()
 
@@ -82,13 +84,13 @@ __attribute__((availability(bridgeos,unavailable)))
 #include <assert.h>
 #endif
 
-/* Provide a static assert that can be used to create compile-type failures,
-   except on GCC which does not support the function when "e" comes from a
-   const value. */
-#ifndef __GNUC__
-#define cc_static_assert(e, m) enum { cc_concat(static_assert_, __COUNTER__) = 1 / (int)(!!(e)) }
+/* Provide a static assert that can be used to create compile-type failures. */
+#if __has_feature(c_static_assert) || __has_extension(c_static_assert)
+ #define cc_static_assert(e, m) _Static_assert(e, m)
+#elif !defined(__GNUC__)
+ #define cc_static_assert(e, m) enum { cc_concat(static_assert_, __COUNTER__) = 1 / (int)(!!(e)) }
 #else
-#define cc_static_assert(e, m)
+ #define cc_static_assert(e, m)
 #endif
 
 /* Declare a struct element with a guarenteed alignment of _alignment_.
@@ -179,17 +181,9 @@ uint8_t b[_alignment_]; \
 CC_NONNULL((2))
 void cc_clear(size_t len, void *cc_sized_by(len) dst);
 
-// cc_zero is deprecated, please use cc_clear instead.
-cc_deprecate_with_replacement("cc_clear", 13.0, 10.15, 13.0, 6.0, 4.0)
-CC_NONNULL_ALL CC_INLINE
-void cc_zero(size_t len, void *cc_sized_by(len) dst)
-{
-    cc_clear(len, dst);
-}
-
 #define cc_copy(_size_, _dst_, _src_) memcpy(_dst_, _src_, _size_)
 
-CC_INLINE CC_NONNULL((2, 3, 4))
+CC_INLINE CC_NONNULL((2))
 void cc_xor(size_t size, void *cc_sized_by(size) r, const void *cc_sized_by(size) s, const void *cc_sized_by(size) t) {
     uint8_t *_r=(uint8_t *)r;
     const uint8_t *_s=(const uint8_t *)s;
@@ -241,5 +235,12 @@ int cc_cmp_safe (size_t num, const void * cc_sized_by(num) ptr1, const void * cc
 #else
 #define CC_SPTR(_sn_, _n_) _n_
 #endif
+
+// Similar to the iovec type used in scatter-gather APIs like readv()
+// and writev().
+typedef struct cc_iovec {
+    const void *base;
+    size_t nbytes;
+} cc_iovec_t;
 
 #endif /* _CORECRYPTO_CC_H_ */

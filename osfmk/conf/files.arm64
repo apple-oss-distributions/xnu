@@ -14,6 +14,15 @@ osfmk/arm/pmap/pmap_iommu.c		optional nos_arm_pmap
 osfmk/arm/pmap/pmap_misc.c		optional nos_arm_pmap
 osfmk/arm/pmap/pmap_ppl_interface.c	optional nos_arm_pmap
 
+osfmk/arm64/sptm/pmap/pmap.c		optional config_sptm
+osfmk/arm64/sptm/pmap/pmap_cs.c		optional config_sptm
+osfmk/arm64/sptm/pmap/pmap_data.c	optional config_sptm
+osfmk/arm64/sptm/pmap/pmap_iommu.c	optional config_sptm
+osfmk/arm64/sptm/pmap/pmap_misc.c	optional config_sptm
+osfmk/arm64/sptm/pmap/pmap_ppl_interface.c	optional config_sptm
+osfmk/arm64/sptm/arm_init_sptm.c	optional config_sptm
+osfmk/arm64/sptm/start_sptm.s		optional config_sptm
+osfmk/arm64/amcc_rorgn_sptm.c		optional config_sptm
 
 osfmk/arm64/bsd_arm64.c		optional mach_bsd
 osfmk/arm/machdep_call.c	optional mach_bsd
@@ -63,6 +72,7 @@ osfmk/arm64/machine_routines_asm.s	optional nos_arm_asm
 osfmk/arm64/machine_task.c		standard
 osfmk/arm/machine_routines_apple.c	optional nos_arm_asm
 osfmk/arm/pal_routines.c		standard
+osfmk/arm/preemption_disable.c	standard
 osfmk/arm64/mcount.s		optional profile
 osfmk/arm64/memcmp_zero.s	standard
 osfmk/arm64/strnlen.s   standard
@@ -79,6 +89,7 @@ osfmk/arm/commpage/commpage_asm.s	optional config_arm_pfz
 
 osfmk/kdp/ml/arm/kdp_machdep.c	optional	mach_kdp
 osfmk/kdp/ml/arm/kdp_vm.c	optional	mach_kdp
+osfmk/kdp/sk_core.c		optional config_exclaves
 
 osfmk/arm64/hibernate_arm64.c        optional hibernation
 osfmk/arm64/hibernate_restore.c      optional hibernation
@@ -92,10 +103,9 @@ osfmk/OPTIONS/ec		optional ec
 osfmk/OPTIONS/hi_res_clock	optional hi_res_clock
 
 # Kernel performance monitoring
-osfmk/arm64/perfmon_arm64.c optional config_perfmon
-osfmk/arm64/kpc.c		optional kpc nos_arm_asm
-osfmk/arm64/monotonic_arm64.c optional monotonic
-osfmk/arm64/cpc_arm64_events.c optional kpc
+osfmk/arm64/monotonic_arm64.c           optional config_cpu_counters
+osfmk/arm64/cpc_arm64_events.c          optional config_cpu_counters
+osfmk/arm64/kpc.c		                optional config_cpu_counters
 
 osfmk/arm64/platform_tests.c			optional config_xnupost
 osfmk/arm64/platform_tests_asm.s		optional config_xnupost

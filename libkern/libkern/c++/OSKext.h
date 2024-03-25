@@ -606,6 +606,7 @@ private:
 /* Sync with user space.
  */
 	static OSReturn pingIOKitDaemon(void);
+	static bool driverkitEnabled(void);
 
 /* Getting info about loaded kexts (kextstat).
  */
@@ -735,6 +736,11 @@ public:
 		unsigned int    cnt,
 		int          (* printf_func)(const char *fmt, ...),
 		uint32_t        flags);
+	static void foreachKextInBacktrace(
+		vm_offset_t   * addr,
+		uint32_t        cnt,
+		uint32_t        flags,
+		void         (^ handler)(OSKextLoadedKextSummary *summary, uint32_t index));
 	bool isDriverKit(void);
 	bool isInFileset(void);
 private:

@@ -99,6 +99,17 @@ typedef struct kfs_event {
 		} docid_event;
 
 		struct {
+			uint32_t         version;
+			dev_t            dev;
+			ino64_t          ino;
+			uint64_t         origin_id;
+			uint64_t         age;
+			uint32_t         use_state;
+			uint32_t         urgency;
+			uint64_t         size;
+		} activity_event;
+
+		struct {
 			audit_token_t    audit_token;
 			const char       *str;
 			uint16_t         len;
@@ -247,7 +258,7 @@ fsevents_internal_init(void)
 	    ZC_NOGC | ZC_NOCALLOUT, ZONE_ID_ANY, ^(zone_t z) {
 		// mark the zone as exhaustible so that it will not
 		// ever grow beyond what we initially filled it with
-		zone_set_exhaustible(z, max_kfs_events);
+		zone_set_exhaustible(z, max_kfs_events, /* exhausts */ true);
 	});
 
 	zone_fill_initially(event_zone, max_kfs_events);
@@ -426,6 +437,7 @@ restart:
 	    type != FSE_DOCID_CHANGED &&
 	    type != FSE_DOCID_CREATED &&
 	    type != FSE_CLONE &&
+	    type != FSE_ACTIVITY &&
 	    // don't coalesce FSE_ACCESS_GRANTED because it could
 	    // have been granted to a different process.
 	    type != FSE_ACCESS_GRANTED) {
@@ -630,6 +642,52 @@ restart:
 		goto done_with_args;
 	}
 
+	if (type == FSE_ACTIVITY) {
+		do_all_links = false;
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT32) {
+			cur->activity_event.version = (uint32_t)(va_arg(ap, uint32_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_DEV) {
+			cur->activity_event.dev = (dev_t)(va_arg(ap, dev_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INO) {
+			cur->activity_event.ino = (ino64_t)(va_arg(ap, ino64_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT64) {
+			cur->activity_event.origin_id = (uint64_t)(va_arg(ap, uint64_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT64) {
+			cur->activity_event.age = (uint64_t)(va_arg(ap, uint64_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT32) {
+			cur->activity_event.use_state = (uint32_t)(va_arg(ap, uint32_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT32) {
+			cur->activity_event.urgency = (uint32_t)(va_arg(ap, uint32_t));
+		}
+
+		arg_type = va_arg(ap, int32_t);
+		if (arg_type == FSE_ARG_INT64) {
+			cur->activity_event.size = (uint64_t)(va_arg(ap, uint64_t));
+		}
+
+		goto done_with_args;
+	}
+#if CONFIG_FSE_ACCESS_GRANTED
 	if (type == FSE_ACCESS_GRANTED) {
 		//
 		// This one is also different.  We get a path string
@@ -735,7 +793,7 @@ restart:
 
 		goto done_with_args;
 	}
-
+#endif
 	if (type == FSE_UNMOUNT_PENDING) {
 		// Just a dev_t
 		// We use the same fields as the regular event, but we
@@ -1168,7 +1226,7 @@ release_event_ref(kfs_event *kfse)
 	//
 	if (kfse->type != FSE_DOCID_CREATED &&
 	    kfse->type != FSE_DOCID_CHANGED &&
-	    kfse->type != FSE_ACCESS_GRANTED) {
+	    kfse->type != FSE_ACTIVITY) {
 		path_str = kfse->regular_event.str;
 
 		dest = kfse->regular_event.dest;
@@ -1216,6 +1274,9 @@ release_event_ref(kfs_event *kfse)
 #define FSEVENTS_WATCHER_ENTITLEMENT            \
 	"com.apple.private.vfs.fsevents-watcher"
 
+#define FSEVENTS_ACTIVITY_WATCHER_ENTITLEMENT \
+	"com.apple.private.vfs.fsevents-activity-watcher"
+
 //
 // We restrict this for two reasons:
 //
@@ -1238,14 +1299,23 @@ watcher_is_entitled(task_t task)
 	//
 	return !!(IOTaskHasEntitlement(task, FSEVENTS_WATCHER_ENTITLEMENT) ||
 	       IOTaskHasEntitlement(task,
-	       FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT));
+	       FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT) ||
+	       IOTaskHasEntitlement(task,
+	       FSEVENTS_ACTIVITY_WATCHER_ENTITLEMENT));
 }
-
+#if CONFIG_FSE_ACCESS_GRANTED
 static bool
 watcher_is_entitled_for_access_granted(task_t task)
 {
 	return !!IOTaskHasEntitlement(task,
 	           FSEVENTS_ACCESS_GRANTED_WATCHER_ENTITLEMENT);
+}
+#endif
+static bool
+watcher_is_entitled_for_activity(task_t task)
+{
+	return !!IOTaskHasEntitlement(task,
+	           FSEVENTS_ACTIVITY_WATCHER_ENTITLEMENT);
 }
 
 static int
@@ -1257,7 +1327,12 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 	if (eventq_size <= 0 || eventq_size > 100 * max_kfs_events) {
 		eventq_size = max_kfs_events;
 	}
-
+	if (num_events > FSE_ACTIVITY &&
+	    event_list[FSE_ACTIVITY] != FSE_IGNORE &&
+	    !watcher_is_entitled_for_activity(current_task())) {
+		event_list[FSE_ACTIVITY] = FSE_IGNORE;
+	}
+#if CONFIG_FSE_ACCESS_GRANTED
 	// If the watcher wants FSE_ACCESS_GRANTED, ensure it has the
 	// correct entitlement.  If not, just silently drop that event.
 	if (num_events > FSE_ACCESS_GRANTED &&
@@ -1265,7 +1340,7 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 	    !watcher_is_entitled_for_access_granted(current_task())) {
 		event_list[FSE_ACCESS_GRANTED] = FSE_IGNORE;
 	}
-
+#endif
 	// Note: the event_queue follows the fs_event_watcher struct
 	//       in memory so we only have to do one allocation
 	watcher = kalloc_type(fs_event_watcher, kfs_event *, eventq_size, Z_WAITOK);
@@ -1685,6 +1760,57 @@ copy_again:
 		goto done;
 	}
 
+	if (kfse->type == FSE_ACTIVITY) {
+		error = fill_buff(FSE_ARG_INT32, sizeof(cur->activity_event.version), &cur->activity_event.version,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+		error = fill_buff(FSE_ARG_DEV, sizeof(cur->activity_event.dev), &cur->activity_event.dev, evbuff,
+		    &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INO, sizeof(cur->activity_event.ino), &cur->activity_event.ino,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INT64, sizeof(cur->activity_event.origin_id), &cur->activity_event.origin_id,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INT64, sizeof(cur->activity_event.age), &cur->activity_event.age,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INT32, sizeof(cur->activity_event.use_state), &cur->activity_event.use_state,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INT32, sizeof(cur->activity_event.urgency), &cur->activity_event.urgency,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		error = fill_buff(FSE_ARG_INT64, sizeof(cur->activity_event.size), &cur->activity_event.size,
+		    evbuff, &evbuff_idx, sizeof(evbuff), uio);
+		if (error != 0) {
+			goto get_out;
+		}
+
+		goto done;
+	}
+#if CONFIG_FSE_ACCESS_GRANTED
 	if (kfse->type == FSE_ACCESS_GRANTED) {
 		//
 		// KFSE_CONTAINS_DROPPED_EVENTS will be set if either
@@ -1711,7 +1837,7 @@ copy_again:
 
 		goto done;
 	}
-
+#endif
 	if (cur->regular_event.str == NULL ||
 	    cur->regular_event.str[0] == '\0') {
 		printf("copy_out_kfse:2: empty/short path (%s)\n",
@@ -1734,7 +1860,6 @@ copy_again:
 		// the stuff below since it isn't initialized
 		goto done;
 	}
-
 
 	if (watcher->flags & WATCHER_WANTS_COMPACT_EVENTS) {
 		// We rely on the layout of the "regular_event"
@@ -1919,7 +2044,7 @@ restart_watch:
 			if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) &&
 			    kfse->type != FSE_DOCID_CREATED &&
 			    kfse->type != FSE_DOCID_CHANGED &&
-			    kfse->type != FSE_ACCESS_GRANTED &&
+			    kfse->type != FSE_ACTIVITY &&
 			    is_ignored_directory(kfse->regular_event.str)) {
 				// If this is not an Apple System Service, skip specified directories
 				// radar://12034844
@@ -2475,7 +2600,7 @@ parse_buffer_and_add_events(const char *buffer, size_t bufsize, vfs_context_t ct
 	ptr = buffer;
 	while ((ptr + sizeof(int) + sizeof(fse_info) + 1) < buffer + bufsize) {
 		type = *(const int *)ptr;
-		if (type < 0 || type == FSE_ACCESS_GRANTED ||
+		if (type < 0 || type == FSE_ACCESS_GRANTED || type == FSE_ACTIVITY ||
 		    type >= FSE_MAX_EVENTS) {
 			err = EINVAL;
 			break;
@@ -2735,7 +2860,7 @@ handle_clone:
 
 		fseh->watcher->fseh = fseh;
 
-		error = falloc(p, &f, &fd, vfs_context_current());
+		error = falloc(p, &f, &fd);
 		if (error) {
 			remove_watcher(fseh->watcher);
 			vsunlock((user_addr_t)fse_clone_args->fd,

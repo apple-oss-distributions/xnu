@@ -637,11 +637,7 @@ struct so_np_extensions {
 struct sockaddr {
 	__uint8_t       sa_len;         /* total length */
 	sa_family_t     sa_family;      /* [XSI] address family */
-#if __has_ptrcheck
-	char            sa_data[__counted_by(sa_len - 2)];
-#else
-	char            sa_data[14];    /* [XSI] addr value (actually smaller or larger) */
-#endif
+	char            sa_data[14];    /* [XSI] addr value */
 };
 __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr, sockaddr);
 
@@ -749,6 +745,7 @@ __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr_storage, sockaddr_storage);
 #define PF_BOND         ((uint32_t)0x626f6e64)  /* 'bond' */
 #ifdef KERNEL_PRIVATE
 #define PF_BRIDGE       ((uint32_t)0x62726467)  /* 'brdg' */
+#define PF_NULL         ((uint32_t)0x6e756c6c)  /* 'null' */
 #endif /* KERNEL_PRIVATE */
 
 /*
@@ -837,7 +834,7 @@ __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct sockaddr_storage, sockaddr_storage);
 /* These are supported values for SO_STATISTICS_EVENT */
 #define SO_STATISTICS_EVENT_ENTER_CELLFALLBACK (1 << 0)
 #define SO_STATISTICS_EVENT_EXIT_CELLFALLBACK  (1 << 1)
-#define SO_STATISTICS_EVENT_RESERVED_1         (1 << 2)
+#define SO_STATISTICS_EVENT_ATTRIBUTION_CHANGE (1 << 2)
 #define SO_STATISTICS_EVENT_RESERVED_2         (1 << 3)
 #endif /* PRIVATE */
 

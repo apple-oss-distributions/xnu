@@ -80,6 +80,8 @@
 #include <net/if_media.h>
 #include <net/multicast_list.h>
 
+#include <net/sockaddr_utils.h>
+
 SYSCTL_DECL(_net_link);
 SYSCTL_NODE(_net_link, OID_AUTO, bond, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "Bond interface");
@@ -525,7 +527,7 @@ packet_buffer_allocate(int length)
 static void *
 packet_buffer_byteptr(packet_buffer_ref buf)
 {
-	return buf->m_data + sizeof(struct ether_header);
+	return m_mtod_current(buf) + sizeof(struct ether_header);
 }
 
 typedef enum {
@@ -1140,14 +1142,14 @@ ifbond_add_slow_proto_multicast(ifbond_ref ifb)
 
 	bond_assert_lock_not_held();
 
-	bzero(&sdl, sizeof(sdl));
+	SOCKADDR_ZERO(&sdl, sizeof(sdl));
 	sdl.sdl_len = sizeof(sdl);
 	sdl.sdl_family = AF_LINK;
 	sdl.sdl_type = IFT_ETHER;
 	sdl.sdl_nlen = 0;
 	sdl.sdl_alen = sizeof(slow_proto_multicast);
 	bcopy(&slow_proto_multicast, sdl.sdl_data, sizeof(slow_proto_multicast));
-	error = if_addmulti_anon(ifb->ifb_ifp, (struct sockaddr *)&sdl, &ifma);
+	error = if_addmulti_anon(ifb->ifb_ifp, SA(&sdl), &ifma);
 	if (error == 0) {
 		ifb->ifb_ifma_slow_proto = ifma;
 	}
@@ -1648,7 +1650,7 @@ bond_receive_lacpdu(struct mbuf * m, struct ifnet * port_ifp)
 			p->po_force_link_event_time = now;
 		}
 	}
-	bondport_receive_lacpdu(p, (lacpdu_ref)m->m_data);
+	bondport_receive_lacpdu(p, (lacpdu_ref)m_mtod_current(m));
 	if (ifbond_selection(ifb)) {
 		event_code = (ifb->ifb_active_lag == NULL)
 		    ? KEV_DL_LINK_OFF
@@ -1691,7 +1693,7 @@ bond_receive_la_marker_pdu(struct mbuf * m, struct ifnet * port_ifp)
 	la_marker_pdu_ref           marker_p;
 	bondport_ref                p;
 
-	marker_p = (la_marker_pdu_ref)(m->m_data + ETHER_HDR_LEN);
+	marker_p = (la_marker_pdu_ref)(m_mtod_current(m) + ETHER_HDR_LEN);
 	if (marker_p->lm_marker_tlv_type != LA_MARKER_TLV_TYPE_MARKER) {
 		goto failed;
 	}

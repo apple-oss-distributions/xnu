@@ -96,6 +96,8 @@
 
 #include <net/ether_if_module.h>
 
+#include <net/sockaddr_utils.h>
+
 static const u_char etherip6allnodes[ETHER_ADDR_LEN] =
 { 0x33, 0x33, 0, 0, 0, 1 };
 
@@ -169,8 +171,7 @@ ether_inet6_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 	 */
 	m->m_flags |= M_LOOP;
 
-	result = nd6_lookup_ipv6(ifp, (const struct sockaddr_in6 *)
-	    (uintptr_t)(size_t)dst_netaddr, &sdl, sizeof(sdl), route, *m0);
+	result = nd6_lookup_ipv6(ifp, SIN6(dst_netaddr), &sdl, sizeof(sdl), route, *m0);
 
 	if (result == 0) {
 		u_int16_t ethertype_ipv6 = htons(ETHERTYPE_IPV6);
@@ -189,7 +190,7 @@ ether_inet6_resolve_multi(ifnet_t ifp, const struct sockaddr *proto_addr,
 	static const size_t minsize =
 	    offsetof(struct sockaddr_dl, sdl_data[0]) + ETHER_ADDR_LEN;
 	const struct sockaddr_in6 *sin6 =
-	    (const struct sockaddr_in6 *)(uintptr_t)(size_t)proto_addr;
+	    SIN6(proto_addr);
 
 	if (proto_addr->sa_family != AF_INET6) {
 		return EAFNOSUPPORT;
@@ -203,7 +204,7 @@ ether_inet6_resolve_multi(ifnet_t ifp, const struct sockaddr *proto_addr,
 		return EMSGSIZE;
 	}
 
-	bzero(out_ll, minsize);
+	SOCKADDR_ZERO(out_ll, minsize);
 	out_ll->sdl_len = minsize;
 	out_ll->sdl_family = AF_LINK;
 	out_ll->sdl_index = ifp->if_index;

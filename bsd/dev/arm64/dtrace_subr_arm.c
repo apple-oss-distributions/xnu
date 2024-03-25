@@ -54,13 +54,10 @@ dtrace_user_probe(arm_saved_state_t *regs)
 	 */
 
 	lck_rw_t *rwp;
-	struct proc *p = current_proc();
 	int is_fasttrap = 0;
-
-	thread_t thread = current_thread();
 	uthread_t uthread = current_uthread();
 
-	kauth_cred_thread_update(thread, p);
+	current_cached_proc_cred_update();
 
 	uint32_t pc;
 	if (copyin((user_addr_t)saved_state64(regs)->pc, &pc, sizeof(uint32_t))) {

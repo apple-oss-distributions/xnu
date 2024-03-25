@@ -1449,6 +1449,9 @@ extern void             vm_page_create(
 extern void             vm_page_create_retired(
 	ppnum_t         pn);
 
+extern boolean_t        vm_page_created(
+	vm_page_t       page);
+
 extern vm_page_t        kdp_vm_page_lookup(
 	vm_object_t             object,
 	vm_object_offset_t      offset);

@@ -189,6 +189,24 @@ typedef enum {
 } sched_mode_t;
 
 /*
+ * Determine whether the target platform should run the Clutch/Edge Scheduler.
+ * All arm64 platforms are eligible to do so.
+ */
+#if defined(__arm64__) && CONFIG_CLUTCH && !CONFIG_SCHED_EDGE_OPT_OUT
+
+/*
+ * Single-cluster, symmetric (SMP) systems can run with just the Clutch policy, but
+ * multi-cluster, asymmetric (AMP) systems must further enable the Edge policy
+ * extension to Clutch in order to manage scheduling across the multiple CPU clusters.
+ */
+#define CONFIG_SCHED_CLUTCH 1
+#if __AMP__
+#define CONFIG_SCHED_EDGE   1
+#endif /* __AMP__ */
+
+#endif /* defined(__arm64__) && CONFIG_CLUTCH && !CONFIG_SCHED_EDGE_OPT_OUT */
+
+/*
  * Since the clutch scheduler organizes threads based on the thread group
  * and the scheduling bucket, its important to not mix threads from multiple
  * priority bands into the same bucket. To achieve that, in the clutch bucket

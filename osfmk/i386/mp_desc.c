@@ -60,12 +60,15 @@
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>
 #include <kern/percpu.h>
+#include <kern/monotonic.h>
+#include <kern/misc_protos.h>
 #include <mach/mach_types.h>
 #include <mach/machine.h>
 #include <mach/vm_map.h>
 #include <mach/machine/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+#include <san/kasan.h>
 
 #include <i386/bit_routines.h>
 #include <i386/mp_desc.h>
@@ -77,13 +80,6 @@
 #if CONFIG_MCA
 #include <i386/machine_check.h>
 #endif
-
-#include <kern/misc_protos.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
-#include <san/kasan.h>
 
 #define K_INTR_GATE (ACC_P|ACC_PL_K|ACC_INTR_GATE)
 #define U_INTR_GATE (ACC_P|ACC_PL_U|ACC_INTR_GATE)

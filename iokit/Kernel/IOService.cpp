@@ -615,6 +615,12 @@ IOService::initialize( void )
 
 	gAKSGetKey                   = OSSymbol::withCStringNoCopy(AKS_PLATFORM_FUNCTION_GETKEY);
 
+#if CONFIG_EXCLAVES
+	gExclaveProxyStates          = OSDictionary::withCapacity( 1 );
+
+	gExclaveProxyStateLock           = IORecursiveLockAlloc();
+	assert( gExclaveProxyStates && gExclaveProxyStateLock);
+#endif /* CONFIG_EXCLAVES */
 
 	assert( gIOServicePlane && gIODeviceMemoryKey
 	    && gIOInterruptControllersKey && gIOInterruptSpecifiersKey
@@ -675,6 +681,9 @@ IOService::initialize( void )
 	gDriverKitLaunches = OSSet::withCapacity(0);
 	gDriverKitLaunchLock = IORecursiveLockAlloc();
 	gIOAssociatedServicesKey = OSSymbol::withCStringNoCopy( "IOAssociatedServices" );
+#if CONFIG_EXCLAVES
+	gDARTMapperFunctionSetActive = OSSymbol::withCStringNoCopy("setActive");
+#endif /* CONFIG_EXCLAVES */
 
 	// worker thread that is responsible for terminating / cleaning up threads
 	kernel_thread_start(&terminateThread, NULL, &gIOTerminateWorkerThread);
@@ -1642,6 +1651,7 @@ IOService::lockForArbitration( bool isSuccessRequired )
 	bool                          found;
 	bool                          success;
 	ArbitrationLockQueueElement * element;
+	ArbitrationLockQueueElement * owner;
 	ArbitrationLockQueueElement * active;
 	ArbitrationLockQueueElement * waiting;
 
@@ -1671,17 +1681,18 @@ IOService::lockForArbitration( bool isSuccessRequired )
 	// determine whether this object is already locked (ie. on active queue)
 	found = false;
 	queue_iterate( &gArbitrationLockQueueActive,
-	    active,
+	    owner,
 	    ArbitrationLockQueueElement *,
 	    link )
 	{
-		if (active->service == element->service) {
+		if (owner->service == element->service) {
 			found = true;
 			break;
 		}
 	}
 
 	if (found) { // this object is already locked
+		active = owner;
 		// determine whether it is the same or a different thread trying to lock
 		if (active->thread != element->thread) { // it is a different thread
 			ArbitrationLockQueueElement * victim = NULL;
@@ -1751,9 +1762,8 @@ IOService::lockForArbitration( bool isSuccessRequired )
 								    link );
 
 								// wake the victim
-								IOLockWakeup( gArbitrationLockQueueLock,
-								    victim,
-								    /* one thread */ true );
+								wakeup_thread_with_inheritor(&victim->service->__machPortHoldDestroy, // event
+								    THREAD_AWAKENED, LCK_WAKE_DEFAULT, victim->thread);
 
 								// allow this thread to proceed (ie. wait)
 								success = true; // (put request on wait queue)
@@ -1789,18 +1799,14 @@ IOService::lockForArbitration( bool isSuccessRequired )
 				    link );
 
 				// declare that this thread will wait for a given event
-restart_sleep:                  wait_result = assert_wait( element,
-				    element->required ? THREAD_UNINT
-				    : THREAD_INTERRUPTIBLE );
-
+restart_sleep:
 				// unlock global access
-				IOUnlock( gArbitrationLockQueueLock );
-
-				// put thread to sleep, waiting for our event to fire...
-				if (wait_result == THREAD_WAITING) {
-					wait_result = thread_block(THREAD_CONTINUE_NULL);
-				}
-
+				// & put thread to sleep, waiting for our event to fire...
+				wait_result = lck_mtx_sleep_with_inheritor(gArbitrationLockQueueLock,
+				    LCK_SLEEP_UNLOCK,
+				    &element->service->__machPortHoldDestroy,     // event
+				    owner->thread,
+				    element->required ? THREAD_UNINT : THREAD_INTERRUPTIBLE, TIMEOUT_WAIT_FOREVER);
 
 				// ...and we've been woken up; we might be in one of two states:
 				// (a) we've been aborted and our queue element is not on
@@ -1858,7 +1864,6 @@ restart_sleep:                  wait_result = assert_wait( element,
 				// determine whether we've been aborted while we were asleep
 				if (element->aborted) {
 					assert( false == element->required );
-
 					// re-lock global access
 					IOTakeLock( gArbitrationLockQueueLock );
 
@@ -1947,20 +1952,25 @@ IOService::unlockForArbitration( void )
 		    ArbitrationLockQueueElement *,
 		    link );
 
-		// determine whether a thread is waiting for object (head to tail scan)
-		found = false;
-		queue_iterate( &gArbitrationLockQueueWaiting,
-		    element,
-		    ArbitrationLockQueueElement *,
-		    link )
-		{
-			if (element->service == this) {
-				found = true;
-				break;
-			}
-		}
+		// determine whether a thread is waiting for object
+		thread_t woken;
+		kern_return_t kr =
+		    wakeup_one_with_inheritor(&__machPortHoldDestroy, // event
+		    THREAD_AWAKENED, LCK_WAKE_DEFAULT, &woken);
 
-		if (found) { // we found an interested thread on waiting queue
+		if (KERN_SUCCESS == kr) {
+			found = false;
+			queue_iterate( &gArbitrationLockQueueWaiting,
+			    element,
+			    ArbitrationLockQueueElement *,
+			    link )
+			{
+				if (element->thread == woken) {
+					found = true;
+					break;
+				}
+			}
+			assert(found); // we found an interested thread on waiting queue
 			// remove it from the waiting queue
 			queue_remove( &gArbitrationLockQueueWaiting,
 			    element,
@@ -1973,10 +1983,7 @@ IOService::unlockForArbitration( void )
 			    ArbitrationLockQueueElement *,
 			    link );
 
-			// wake the waiting thread
-			IOLockWakeup( gArbitrationLockQueueLock,
-			    element,
-			    /* one thread */ true );
+			thread_deallocate(woken);
 		}
 	}
 
@@ -4478,7 +4485,7 @@ IOServicePH::matchingStart(IOService * service)
 			fMatchingWork->setObject(service);
 		}
 	} else {
-		// Delay matching if system is transitioning to sleep / darkwake
+		// Delay matching if system is transitioning to sleep
 		if (!fMatchingDelayed) {
 			fMatchingDelayed = OSArray::withObjects((const OSObject **) &service, 1, 1);
 		} else {
@@ -4587,7 +4594,7 @@ IOServicePH::userServerAckTimerExpired(void *, void *)
 			IOUserServer * us = OSDynamicCast(IOUserServer, obj);
 			if (us) {
 			        DKLOG(DKS " power state transition failed\n", DKN(us));
-			        us->setPowerManagementFailed(true);
+			        us->kill("Power Management Failed");
 			}
 			return false;
 		});
@@ -4719,6 +4726,27 @@ IOServicePH::systemPowerChange(
 	}
 
 	return ret;
+}
+
+bool
+IOServicePH::checkPMReady(void)
+{
+	bool __block ready = true;
+
+	lock();
+	fUserServers->iterateObjects(^bool (OSObject *obj) {
+		IOUserServer * us = OSDynamicCast(IOUserServer, obj);
+		if (us) {
+		        if (!us->checkPMReady()) {
+		                ready = false;
+		                return true;
+			}
+		}
+		return false;
+	});
+	unlock();
+
+	return ready;
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -5266,8 +5294,8 @@ IOService::canTerminateForReplacement(IOService * client)
 	if (!gIOServiceRootMediaParent) {
 		return false;
 	}
-	parent = client;
-	while (parent && (parent != gIOServiceRootMediaParent)) {
+	parent = gIOServiceRootMediaParent;
+	while (parent && (parent != client)) {
 		parent = parent->getProvider();
 	}
 	if (parent) {
@@ -7556,8 +7584,10 @@ IOService::matchInternal(OSDictionary * table, uint32_t options, uint32_t * did)
 		count = table->getCount();
 		done = 0;
 		matchProps = NULL;
+		bool isUser;
 
-		if (table->getObject(gIOServiceNotificationUserKey)) {
+		isUser = (NULL != table->getObject(gIOServiceNotificationUserKey));
+		if (isUser) {
 			done++;
 			match = (0 == (kIOServiceUserInvisibleMatchState & __state[0]));
 			if ((!match) || (done == count)) {
@@ -7566,7 +7596,7 @@ IOService::matchInternal(OSDictionary * table, uint32_t options, uint32_t * did)
 		}
 
 		if (propertyExists(gIOExclaveAssignedKey)) {
-			if (!table->getObject(gIOExclaveProxyKey)) {
+			if (!table->getObject(gIOExclaveProxyKey) && !isUser) {
 				match = false;
 				break;
 			}

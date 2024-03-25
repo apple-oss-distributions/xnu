@@ -92,10 +92,12 @@ struct secasvar {
 
 	struct sadb_key *key_auth;      /* Key for Authentication */
 	struct sadb_key *key_enc;       /* Key for Encryption */
-	caddr_t iv;                     /* Initilization Vector */
+	caddr_t iv;                     /* Initialization Vector */
 	u_int ivlen;                    /* length of IV */
-	void *sched;                    /* intermediate encryption key */
-	size_t schedlen;
+	void *sched_auth;               /* intermediate authentication key */
+	void *sched_enc;                /* intermediate encryption key */
+	size_t schedlen_auth;
+	size_t schedlen_enc;
 
 	struct secreplay *replay[MAX_REPLAY_WINDOWS]; /* replay prevention */
 

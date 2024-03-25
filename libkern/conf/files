@@ -107,6 +107,7 @@ libkern/coretrust/coretrust.c   standard
 libkern/apple_encrypted_archive/apple_encrypted_archive.c	standard
 
 libkern/img4/interface.c 		standard
+libkern/image4/dlxk.c 		standard
 
 libkern/amfi/amfi.c 		standard
 

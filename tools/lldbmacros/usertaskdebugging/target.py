@@ -1,11 +1,6 @@
-from __future__ import absolute_import
-
-from builtins import object
-
 import binascii
 import logging
 import struct
-import six
 
 
 class Process(object):
@@ -133,7 +128,7 @@ class Process(object):
         if bytesize > 4:
             format = '<Q'
         packed_data = struct.pack(format, intdata)
-        return six.ensure_str(binascii.hexlify(packed_data))
+        return binascii.hexlify(packed_data).decode()
 
     def encodePointerRegisterData(self, ptrdata):
         """ encodes pointer data based on ptrsize defined for the target """
@@ -141,7 +136,7 @@ class Process(object):
 
     def encodeThreadID(self, intdata):
         format = '>Q'
-        return six.ensure_str(binascii.hexlify(struct.pack(format, intdata)))
+        return binascii.hexlify(struct.pack(format, intdata)).decode()
 
     def encodeByteString(self, bytestr):
-        return six.ensure_str(binascii.hexlify(bytestr))
+        return binascii.hexlify(bytestr).decode()

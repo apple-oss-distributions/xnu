@@ -81,7 +81,6 @@
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
 #include <skywalk/lib/net_filter_event.h>
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
-#include <net/if_llatbl.h>
 #include <net/net_api_stats.h>
 #include <net/if_ports_used.h>
 #include <net/if_vlan_var.h>
@@ -141,6 +140,8 @@
 #include <skywalk/nexus/netif/nx_netif.h>
 #include <skywalk/nexus/flowswitch/nx_flowswitch.h>
 #endif /* SKYWALK */
+
+#include <net/sockaddr_utils.h>
 
 #include <os/log.h>
 
@@ -212,6 +213,28 @@ SLIST_HEAD(proto_hash_entry, if_proto);
 #define DLIL_SDLDATALEN \
 	(DLIL_SDLMAXLEN - offsetof(struct sockaddr_dl, sdl_data[0]))
 
+/*
+ * In the common case, the LL address is stored in the
+ * `dl_if_lladdr' member of the `dlil_ifnet'. This is sufficient
+ * for LL addresses that do not exceed the `DLIL_SDLMAXLEN' constant.
+ */
+struct dl_if_lladdr_std {
+	struct ifaddr   ifa;
+	u_int8_t        addr_sdl_bytes[DLIL_SDLMAXLEN];
+	u_int8_t        mask_sdl_bytes[DLIL_SDLMAXLEN];
+};
+
+/*
+ * However, in some rare cases we encounter LL addresses which
+ * would not fit in the `DLIL_SDLMAXLEN' limitation. In such cases
+ * we allocate the storage in the permanent arena, using this memory layout.
+ */
+struct dl_if_lladdr_xtra_space {
+	struct ifaddr   ifa;
+	u_int8_t        addr_sdl_bytes[SOCK_MAXADDRLEN];
+	u_int8_t        mask_sdl_bytes[SOCK_MAXADDRLEN];
+};
+
 struct dlil_ifnet {
 	struct ifnet    dl_if;                  /* public ifnet */
 	/*
@@ -226,11 +249,7 @@ struct dlil_ifnet {
 	size_t  dl_if_uniqueid_len;             /* length of the unique id */
 	char    dl_if_namestorage[IFNAMSIZ];    /* interface name storage */
 	char    dl_if_xnamestorage[IFXNAMSIZ];  /* external name storage */
-	struct {
-		struct ifaddr   ifa;            /* lladdr ifa */
-		u_int8_t        asdl[DLIL_SDLMAXLEN]; /* addr storage */
-		u_int8_t        msdl[DLIL_SDLMAXLEN]; /* mask storage */
-	} dl_if_lladdr;
+	struct dl_if_lladdr_std dl_if_lladdr;   /* link-level address storage*/
 	u_int8_t dl_if_descstorage[IF_DESCSIZE]; /* desc storage */
 	u_int8_t dl_if_permanent_ether[ETHER_ADDR_LEN]; /* permanent address */
 	u_int8_t dl_if_permanent_ether_is_set;
@@ -4154,9 +4173,9 @@ dlil_trim_overcomitted_queue_locked(class_queue_t *input_queue,
 {
 	uint32_t overcommitted_qlen;    /* Length in packets. */
 	uint64_t overcommitted_qsize;   /* Size in bytes. */
-	uint32_t target_qlen;                   /* The desired queue length after trimming. */
-	uint32_t pkts_to_drop;                  /* Number of packets to drop. */
-	uint32_t dropped_pkts = 0;              /* Number of packets that were dropped. */
+	uint32_t target_qlen;           /* The desired queue length after trimming. */
+	uint32_t pkts_to_drop = 0;      /* Number of packets to drop. */
+	uint32_t dropped_pkts = 0;      /* Number of packets that were dropped. */
 	uint32_t dropped_bytes = 0;     /* Number of dropped bytes. */
 	struct mbuf *m = NULL, *m_tmp = NULL;
 
@@ -4571,12 +4590,6 @@ ifnet_start_common(struct ifnet *ifp, boolean_t resetfc, boolean_t ignore_delay)
 }
 
 void
-ifnet_start_set_pacemaker_time(struct ifnet *ifp, uint64_t tx_time)
-{
-	ifp->if_start_pacemaker_time = tx_time;
-}
-
-void
 ifnet_start(struct ifnet *ifp)
 {
 	ifnet_start_common(ifp, FALSE, FALSE);
@@ -4744,38 +4757,7 @@ skip:
 	if (__probable((ifp->if_start_flags & IFSF_TERMINATING) == 0)) {
 		uint64_t deadline = TIMEOUT_WAIT_FOREVER;
 		struct timespec delay_start_ts;
-		struct timespec pacemaker_ts;
 		struct timespec *ts = NULL;
-
-		/*
-		 * Wakeup N ns from now if rate-controlled by TBR, and if
-		 * there are still packets in the send queue which haven't
-		 * been dequeued so far; else sleep indefinitely (ts = NULL)
-		 * until ifnet_start() is called again.
-		 */
-		if (ifp->if_start_pacemaker_time != 0) {
-			struct timespec now_ts;
-			uint64_t now;
-
-			nanouptime(&now_ts);
-			now = ((uint64_t)now_ts.tv_sec * NSEC_PER_SEC) + now_ts.tv_nsec;
-
-			if (ifp->if_start_pacemaker_time != 0 &&
-			    ifp->if_start_pacemaker_time > now) {
-				pacemaker_ts.tv_sec = 0;
-				pacemaker_ts.tv_nsec = ifp->if_start_pacemaker_time - now;
-
-				ts = &pacemaker_ts;
-				ifp->if_start_flags |= IFSF_NO_DELAY;
-				DTRACE_SKYWALK2(pacemaker__schedule, struct ifnet*, ifp,
-				    uint64_t, pacemaker_ts.tv_nsec);
-			} else {
-				DTRACE_SKYWALK2(pacemaker__timer__miss, struct ifnet*, ifp,
-				    uint64_t, now - ifp->if_start_pacemaker_time);
-				ifp->if_start_pacemaker_time = 0;
-				ifp->if_start_flags &= ~IFSF_NO_DELAY;
-			}
-		}
 
 		if (ts == NULL) {
 			ts = ((IFCQ_TBR_IS_ENABLED(ifq) && !IFCQ_IS_EMPTY(ifq)) ?
@@ -4807,7 +4789,6 @@ terminate:
 		/* interface is detached? */
 		ifnet_set_start_cycle(ifp, NULL);
 
-		ifp->if_start_pacemaker_time = 0;
 		/* clear if_start_thread to allow termination to continue */
 		ASSERT(ifp->if_start_thread != THREAD_NULL);
 		ifp->if_start_thread = THREAD_NULL;
@@ -5705,8 +5686,19 @@ ifnet_enqueue_common(struct ifnet *ifp, struct ifclassq *ifcq,
 errno_t
 ifnet_enqueue(struct ifnet *ifp, struct mbuf *m)
 {
+	uint32_t bytes = m_pktlen(m);
+	struct mbuf *tail = m;
+	uint32_t cnt = 1;
 	boolean_t pdrop;
-	return ifnet_enqueue_mbuf(ifp, m, TRUE, &pdrop);
+
+	while (tail->m_nextpkt) {
+		VERIFY(tail->m_flags & M_PKTHDR);
+		tail = tail->m_nextpkt;
+		cnt++;
+		bytes += m_pktlen(tail);
+	}
+
+	return ifnet_enqueue_mbuf_chain(ifp, m, tail, cnt, bytes, TRUE, &pdrop);
 }
 
 errno_t
@@ -6528,7 +6520,7 @@ skip_clat:
 			if (frame_header == NULL ||
 			    frame_header < (char *)mbuf_datastart(m) ||
 			    frame_header > (char *)m->m_data ||
-			    (adj = (int)(m->m_data - frame_header)) >
+			    (adj = (int)(m->m_data - (uintptr_t)frame_header)) >
 			    m->m_pkthdr.csum_rx_start) {
 				m->m_pkthdr.csum_data = 0;
 				m->m_pkthdr.csum_flags &= ~CSUM_DATA_VALID;
@@ -6929,7 +6921,7 @@ dlil_output(ifnet_t ifp, protocol_family_t proto_family, mbuf_t packetlist,
 	protocol_family_t old_proto_family = proto_family;
 	struct sockaddr_in6 dest6;
 	struct rtentry *rt = NULL;
-	u_int32_t m_loop_set = 0;
+	u_int16_t m_loop_set = 0;
 
 	KERNEL_DEBUG(DBG_FNC_DLIL_OUTPUT | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
@@ -7025,13 +7017,13 @@ preout_again:
 				dest6.sin6_len = sizeof(struct sockaddr_in6);
 				dest6.sin6_family = AF_INET6;
 				dest6.sin6_addr = (mtod(m, struct ip6_hdr *))->ip6_dst;
-				dest = (const struct sockaddr *)&dest6;
+				dest = SA(&dest6);
 
 				/*
 				 * Lookup route to the translated destination
 				 * Free this route ref during cleanup
 				 */
-				rt = rtalloc1_scoped((struct sockaddr *)&dest6,
+				rt = rtalloc1_scoped(SA(&dest6),
 				    0, 0, ifp->if_index);
 
 				route = rt;
@@ -7074,6 +7066,9 @@ preout_again:
 			}
 		}
 	}
+
+	nanouptime(&now);
+	net_timernsec(&now, &now_nsec);
 
 	do {
 		/*
@@ -7248,17 +7243,6 @@ preout_again:
 		}
 
 		/*
-		 * Record timestamp; ifnet_enqueue() will use this info
-		 * rather than redoing the work.  An optimization could
-		 * involve doing this just once at the top, if there are
-		 * no interface filters attached, but that's probably
-		 * not a big deal.
-		 */
-		nanouptime(&now);
-		net_timernsec(&now, &now_nsec);
-		(void) mbuf_set_timestamp(m, now_nsec, TRUE);
-
-		/*
 		 * Discard partial sum information if this packet originated
 		 * from another interface; the packet would already have the
 		 * final checksum and we shouldn't recompute it.
@@ -7278,9 +7262,19 @@ preout_again:
 				flen += (m_pktlen(m) - (pre + post));
 				m->m_pkthdr.pkt_flags &= ~PKTF_FORWARDED;
 			}
+			(void) mbuf_set_timestamp(m, now_nsec, TRUE);
+
 			*send_tail = m;
 			send_tail = &m->m_nextpkt;
 		} else {
+			/*
+			 * Record timestamp; ifnet_enqueue() will use this info
+			 * rather than redoing the work.
+			 */
+			nanouptime(&now);
+			net_timernsec(&now, &now_nsec);
+			(void) mbuf_set_timestamp(m, now_nsec, TRUE);
+
 			if (m->m_pkthdr.pkt_flags & PKTF_FORWARDED) {
 				flen = (m_pktlen(m) - (pre + post));
 				m->m_pkthdr.pkt_flags &= ~PKTF_FORWARDED;
@@ -7566,7 +7560,7 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 
 cleanup:
 	if (ia6_clat_src != NULL) {
-		IFA_REMREF(&ia6_clat_src->ia_ifa);
+		ifa_remref(&ia6_clat_src->ia_ifa);
 	}
 
 	if (pbuf_is_valid(pbuf)) {
@@ -7656,12 +7650,12 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 		 */
 		ia4_clat_dst = inifa_ifpclatv4(ifp);
 		if (ia4_clat_dst == NULL) {
-			IFA_REMREF(&ia6_clat_dst->ia_ifa);
+			ifa_remref(&ia6_clat_dst->ia_ifa);
 			ip6stat.ip6s_clat464_in_nov4addr_drop++;
 			error = -1;
 			goto cleanup;
 		}
-		IFA_REMREF(&ia6_clat_dst->ia_ifa);
+		ifa_remref(&ia6_clat_dst->ia_ifa);
 
 		/* Translate IPv6 src to IPv4 src by removing the NAT64 prefix */
 		dst = &ia4_clat_dst->ia_addr.sin_addr;
@@ -7707,7 +7701,7 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 
 cleanup:
 		if (ia4_clat_dst != NULL) {
-			IFA_REMREF(&ia4_clat_dst->ia_ifa);
+			ifa_remref(&ia4_clat_dst->ia_ifa);
 		}
 
 		if (pbuf_is_valid(pbuf)) {
@@ -7977,8 +7971,7 @@ dlil_resolve_multi(struct ifnet *ifp, const struct sockaddr *proto_addr,
 		resolvep = (proto->proto_kpi == kProtoKPI_v1 ?
 		    proto->kpi.v1.resolve_multi : proto->kpi.v2.resolve_multi);
 		if (resolvep != NULL) {
-			result = resolvep(ifp, proto_addr,
-			    (struct sockaddr_dl *)(void *)ll_addr, ll_len);
+			result = resolvep(ifp, proto_addr, SDL(ll_addr), ll_len);
 		}
 		if_proto_free(proto);
 	}
@@ -8113,7 +8106,7 @@ net_thread_unmarks_pop(net_thread_marks_t unpopx)
 
 		VERIFY((unpop & ones) == unpop);
 		VERIFY((ptrdiff_t)(uth->uu_network_marks & unpop) == 0);
-		uth->uu_network_marks |= unpop;
+		uth->uu_network_marks |= (u_int32_t)unpop;
 	}
 }
 
@@ -8159,7 +8152,7 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	const struct sockaddr_in * sender_sin;
 	const struct sockaddr_in * target_sin;
 	struct sockaddr_inarp target_proto_sinarp;
-	struct sockaddr *target_proto = (void *)(uintptr_t)target_proto0;
+	struct sockaddr *target_proto = __DECONST_SA(target_proto0);
 
 	if (target_proto == NULL || sender_proto == NULL) {
 		return EINVAL;
@@ -8174,10 +8167,9 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	 * information to the send_arp callback routine.
 	 */
 	if (rtflags & RTF_ROUTER) {
-		bcopy(target_proto, &target_proto_sinarp,
-		    sizeof(struct sockaddr_in));
+		SOCKADDR_COPY(target_proto, &target_proto_sinarp, sizeof(struct sockaddr_in));
 		target_proto_sinarp.sin_other |= SIN_ROUTER;
-		target_proto = (struct sockaddr *)&target_proto_sinarp;
+		target_proto = SA(&target_proto_sinarp);
 	}
 
 	/*
@@ -8186,8 +8178,8 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	 * an announcement, which must only appear on the specific
 	 * interface.
 	 */
-	sender_sin = (struct sockaddr_in *)(void *)(uintptr_t)sender_proto;
-	target_sin = (struct sockaddr_in *)(void *)(uintptr_t)target_proto;
+	sender_sin = SIN(sender_proto);
+	target_sin = SIN(target_proto);
 	if (target_proto->sa_family == AF_INET &&
 	    IN_LINKLOCAL(ntohl(target_sin->sin_addr.s_addr)) &&
 	    ipv4_ll_arp_aware != 0 && arpop == ARPOP_REQUEST &&
@@ -8225,9 +8217,7 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 					    source_ip->ifa_addr->sa_family ==
 					    AF_INET) {
 						/* Copy the source IP address */
-						source_ip_copy =
-						    *(struct sockaddr_in *)
-						    (void *)source_ip->ifa_addr;
+						SOCKADDR_COPY(SIN(source_ip->ifa_addr), &source_ip_copy, sizeof(source_ip_copy));
 						IFA_UNLOCK(source_ip);
 						break;
 					}
@@ -8240,17 +8230,16 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 					continue;
 				}
 
-				IFA_ADDREF(source_hw);
+				ifa_addref(source_hw);
 				ifnet_lock_done(cur_ifp);
 
 				/* Send the ARP */
 				new_result = dlil_send_arp_internal(cur_ifp,
-				    arpop, (struct sockaddr_dl *)(void *)
-				    source_hw->ifa_addr,
-				    (struct sockaddr *)&source_ip_copy, NULL,
+				    arpop, SDL(source_hw->ifa_addr),
+				    SA(&source_ip_copy), NULL,
 				    target_proto);
 
-				IFA_REMREF(source_hw);
+				ifa_remref(source_hw);
 				if (result == ENOTSUP) {
 					result = new_result;
 				}
@@ -8379,6 +8368,7 @@ ifnet_datamov_begin(struct ifnet *ifp)
 	}
 	lck_mtx_unlock(&ifp->if_ref_lock);
 
+	DTRACE_IP2(datamov__begin, struct ifnet *, ifp, boolean_t, ret);
 	return ret;
 }
 
@@ -8398,6 +8388,8 @@ ifnet_datamov_end(struct ifnet *ifp)
 	}
 	ifnet_decr_iorefcnt_locked(ifp);
 	lck_mtx_unlock(&ifp->if_ref_lock);
+
+	DTRACE_IP1(datamov__end, struct ifnet *, ifp);
 }
 
 static void
@@ -9102,7 +9094,7 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	/* make this address the first on the list */
 	IFA_LOCK(ifa);
 	/* hold a reference for ifnet_addrs[] */
-	IFA_ADDREF_LOCKED(ifa);
+	ifa_addref(ifa);
 	/* if_attach_link_ifa() holds a reference for ifa_link */
 	if_attach_link_ifa(ifp, ifa);
 	IFA_UNLOCK(ifa);
@@ -9186,7 +9178,6 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 		VERIFY(ifp->if_start_thread == THREAD_NULL);
 
 		ifnet_set_start_cycle(ifp, NULL);
-		ifp->if_start_pacemaker_time = 0;
 		ifp->if_start_active = 0;
 		ifp->if_start_req = 0;
 		ifp->if_start_flags = 0;
@@ -9467,8 +9458,8 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 static struct ifaddr *
 dlil_alloc_lladdr(struct ifnet *ifp, const struct sockaddr_dl *ll_addr)
 {
-	struct ifaddr *ifa, *oifa;
-	struct sockaddr_dl *asdl, *msdl;
+	struct ifaddr *ifa, *oifa = NULL;
+	struct sockaddr_dl *addr_sdl, *mask_sdl;
 	char workbuf[IFNAMSIZ * 2];
 	int namelen, masklen, socksize;
 	struct dlil_ifnet *dl_if = (struct dlil_ifnet *)ifp;
@@ -9498,21 +9489,31 @@ dlil_alloc_lladdr(struct ifnet *ifp, const struct sockaddr_dl *ll_addr)
 		 * that we can reuse the same space when if_addrlen grows.
 		 * This same space will be used when if_addrlen shrinks.
 		 */
-		if (ifa == NULL || ifa == &dl_if->dl_if_lladdr.ifa) {
-			int ifasize = sizeof(*ifa) + 2 * SOCK_MAXADDRLEN;
+		struct dl_if_lladdr_xtra_space *__single dl_if_lladdr_ext;
 
-			ifa = zalloc_permanent(ifasize, ZALIGN(struct ifaddr));
+		if (ifa == NULL || ifa == &dl_if->dl_if_lladdr.ifa) {
+			dl_if_lladdr_ext = zalloc_permanent(
+				sizeof(*dl_if_lladdr_ext), ZALIGN(struct ifaddr));
+
+			ifa = &dl_if_lladdr_ext->ifa;
 			ifa_lock_init(ifa);
+			ifa_initref(ifa);
 			/* Don't set IFD_ALLOC, as this is permanent */
 			ifa->ifa_debug = IFD_LINK;
+		} else {
+			dl_if_lladdr_ext = __unsafe_forge_single(
+				struct dl_if_lladdr_xtra_space*, ifa);
+			ifa = &dl_if_lladdr_ext->ifa;
 		}
+
 		IFA_LOCK(ifa);
 		/* address and mask sockaddr_dl locations */
-		asdl = (struct sockaddr_dl *)(ifa + 1);
-		bzero(asdl, SOCK_MAXADDRLEN);
-		msdl = (struct sockaddr_dl *)(void *)
-		    ((char *)asdl + SOCK_MAXADDRLEN);
-		bzero(msdl, SOCK_MAXADDRLEN);
+		bzero(dl_if_lladdr_ext->addr_sdl_bytes,
+		    sizeof(dl_if_lladdr_ext->addr_sdl_bytes));
+		bzero(dl_if_lladdr_ext->mask_sdl_bytes,
+		    sizeof(dl_if_lladdr_ext->mask_sdl_bytes));
+		addr_sdl = SDL(dl_if_lladdr_ext->addr_sdl_bytes);
+		mask_sdl = SDL(dl_if_lladdr_ext->mask_sdl_bytes);
 	} else {
 		VERIFY(ifa == NULL || ifa == &dl_if->dl_if_lladdr.ifa);
 		/*
@@ -9522,52 +9523,55 @@ dlil_alloc_lladdr(struct ifnet *ifp, const struct sockaddr_dl *ll_addr)
 		if (ifa == NULL) {
 			ifa = &dl_if->dl_if_lladdr.ifa;
 			ifa_lock_init(ifa);
+			ifa_initref(ifa);
 			/* Don't set IFD_ALLOC, as this is permanent */
 			ifa->ifa_debug = IFD_LINK;
 		}
 		IFA_LOCK(ifa);
 		/* address and mask sockaddr_dl locations */
-		asdl = (struct sockaddr_dl *)(void *)&dl_if->dl_if_lladdr.asdl;
-		bzero(asdl, sizeof(dl_if->dl_if_lladdr.asdl));
-		msdl = (struct sockaddr_dl *)(void *)&dl_if->dl_if_lladdr.msdl;
-		bzero(msdl, sizeof(dl_if->dl_if_lladdr.msdl));
+		bzero(dl_if->dl_if_lladdr.addr_sdl_bytes,
+		    sizeof(dl_if->dl_if_lladdr.addr_sdl_bytes));
+		bzero(dl_if->dl_if_lladdr.mask_sdl_bytes,
+		    sizeof(dl_if->dl_if_lladdr.mask_sdl_bytes));
+		addr_sdl = SDL(dl_if->dl_if_lladdr.addr_sdl_bytes);
+		mask_sdl = SDL(dl_if->dl_if_lladdr.mask_sdl_bytes);
 	}
 
-	/* hold a permanent reference for the ifnet itself */
-	IFA_ADDREF_LOCKED(ifa);
-	oifa = ifp->if_lladdr;
-	ifp->if_lladdr = ifa;
+	if (ifp->if_lladdr != ifa) {
+		oifa = ifp->if_lladdr;
+		ifp->if_lladdr = ifa;
+	}
 
 	VERIFY(ifa->ifa_debug == IFD_LINK);
 	ifa->ifa_ifp = ifp;
 	ifa->ifa_rtrequest = link_rtrequest;
-	ifa->ifa_addr = (struct sockaddr *)asdl;
-	asdl->sdl_len = (u_char)socksize;
-	asdl->sdl_family = AF_LINK;
+	ifa->ifa_addr = SA(addr_sdl);
+	addr_sdl->sdl_len = (u_char)socksize;
+	addr_sdl->sdl_family = AF_LINK;
 	if (namelen > 0) {
-		bcopy(workbuf, asdl->sdl_data, min(namelen,
-		    sizeof(asdl->sdl_data)));
-		asdl->sdl_nlen = (u_char)namelen;
+		bcopy(workbuf, addr_sdl->sdl_data, min(namelen,
+		    sizeof(addr_sdl->sdl_data)));
+		addr_sdl->sdl_nlen = (u_char)namelen;
 	} else {
-		asdl->sdl_nlen = 0;
+		addr_sdl->sdl_nlen = 0;
 	}
-	asdl->sdl_index = ifp->if_index;
-	asdl->sdl_type = ifp->if_type;
+	addr_sdl->sdl_index = ifp->if_index;
+	addr_sdl->sdl_type = ifp->if_type;
 	if (ll_addr != NULL) {
-		asdl->sdl_alen = ll_addr->sdl_alen;
-		bcopy(CONST_LLADDR(ll_addr), LLADDR(asdl), asdl->sdl_alen);
+		addr_sdl->sdl_alen = ll_addr->sdl_alen;
+		bcopy(CONST_LLADDR(ll_addr), LLADDR(addr_sdl), addr_sdl->sdl_alen);
 	} else {
-		asdl->sdl_alen = 0;
+		addr_sdl->sdl_alen = 0;
 	}
-	ifa->ifa_netmask = (struct sockaddr *)msdl;
-	msdl->sdl_len = (u_char)masklen;
+	ifa->ifa_netmask = SA(mask_sdl);
+	mask_sdl->sdl_len = (u_char)masklen;
 	while (namelen > 0) {
-		msdl->sdl_data[--namelen] = 0xff;
+		mask_sdl->sdl_data[--namelen] = 0xff;
 	}
 	IFA_UNLOCK(ifa);
 
 	if (oifa != NULL) {
-		IFA_REMREF(oifa);
+		ifa_remref(oifa);
 	}
 
 	return ifa;
@@ -9978,7 +9982,7 @@ ifnet_detach_final(struct ifnet *ifp)
 	IFA_UNLOCK(ifa);
 
 	/* Remove (permanent) link address from ifnet_addrs[] */
-	IFA_REMREF(ifa);
+	ifa_remref(ifa);
 	ifnet_addrs[ifp->if_index - 1] = NULL;
 
 	/* This interface should not be on {ifnet_head,detaching} */
@@ -10213,7 +10217,9 @@ ifnet_detach_final(struct ifnet *ifp)
 	bzero(&ifp->if_src_route6, sizeof(ifp->if_src_route6));
 	lck_mtx_unlock(&ifp->if_cached_route_lock);
 
-	VERIFY(ifp->if_data_threshold == 0);
+	/* Ignore any pending data threshold as the interface is anyways gone */
+	ifp->if_data_threshold = 0;
+
 	VERIFY(ifp->if_dt_tcall != NULL);
 	VERIFY(!thread_call_isactive(ifp->if_dt_tcall));
 
@@ -10705,21 +10711,21 @@ ifnet_cached_rtlookup_inet(struct ifnet *ifp, struct in_addr src_ip)
 	struct route            src_rt;
 	struct sockaddr_in      *dst;
 
-	dst = (struct sockaddr_in *)(void *)(&src_rt.ro_dst);
+	dst = SIN(&src_rt.ro_dst);
 
 	ifp_src_route_copyout(ifp, &src_rt);
 
 	if (ROUTE_UNUSABLE(&src_rt) || src_ip.s_addr != dst->sin_addr.s_addr) {
 		ROUTE_RELEASE(&src_rt);
 		if (dst->sin_family != AF_INET) {
-			bzero(&src_rt.ro_dst, sizeof(src_rt.ro_dst));
+			SOCKADDR_ZERO(&src_rt.ro_dst, sizeof(src_rt.ro_dst));
 			dst->sin_len = sizeof(src_rt.ro_dst);
 			dst->sin_family = AF_INET;
 		}
 		dst->sin_addr = src_ip;
 
 		VERIFY(src_rt.ro_rt == NULL);
-		src_rt.ro_rt = rtalloc1_scoped((struct sockaddr *)dst,
+		src_rt.ro_rt = rtalloc1_scoped(SA(dst),
 		    0, 0, ifp->if_index);
 
 		if (src_rt.ro_rt != NULL) {
@@ -10745,7 +10751,7 @@ ifnet_cached_rtlookup_inet6(struct ifnet *ifp, struct in6_addr *src_ip6)
 	    !IN6_ARE_ADDR_EQUAL(src_ip6, &src_rt.ro_dst.sin6_addr)) {
 		ROUTE_RELEASE(&src_rt);
 		if (src_rt.ro_dst.sin6_family != AF_INET6) {
-			bzero(&src_rt.ro_dst, sizeof(src_rt.ro_dst));
+			SOCKADDR_ZERO(&src_rt.ro_dst, sizeof(src_rt.ro_dst));
 			src_rt.ro_dst.sin6_len = sizeof(src_rt.ro_dst);
 			src_rt.ro_dst.sin6_family = AF_INET6;
 		}
@@ -10755,7 +10761,7 @@ ifnet_cached_rtlookup_inet6(struct ifnet *ifp, struct in6_addr *src_ip6)
 
 		if (src_rt.ro_rt == NULL) {
 			src_rt.ro_rt = rtalloc1_scoped(
-				(struct sockaddr *)&src_rt.ro_dst, 0, 0,
+				SA(&src_rt.ro_dst), 0, 0,
 				ifp->if_index);
 
 			if (src_rt.ro_rt != NULL) {
@@ -11429,7 +11435,7 @@ dlil_node_present_v2(struct ifnet *ifp, struct sockaddr *sa, struct sockaddr_dl 
 	return ret;
 }
 
-const void *
+const void * __indexable
 dlil_ifaddr_bytes(const struct sockaddr_dl *sdl, size_t *sizep,
     kauth_cred_t *credp)
 {
@@ -11718,10 +11724,9 @@ ifnet_set_log(struct ifnet *ifp, int32_t level, uint32_t flags,
 			ifp->if_log.flags |= flags;
 		}
 
-		log(LOG_INFO, "%s: logging level set to %d flags=%b "
-		    "arg=%b, category=%d subcategory=%d\n", if_name(ifp),
-		    ifp->if_log.level, ifp->if_log.flags,
-		    IFNET_LOGF_BITS, flags, IFNET_LOGF_BITS,
+		log(LOG_INFO, "%s: logging level set to %d flags=0x%x "
+		    "arg=0x%x, category=%d subcategory=%d\n", if_name(ifp),
+		    ifp->if_log.level, ifp->if_log.flags, flags,
 		    category, subcategory);
 	}
 
@@ -12258,7 +12263,7 @@ dlil_input_cksum_dbg(struct ifnet *ifp, struct mbuf *m, char *frame_header,
 		    (uint64_t)VM_KERNEL_ADDRPERM(m));
 		return;
 	}
-	hlen = (uint32_t)(m->m_data - frame_header);
+	hlen = (uint32_t)(m->m_data - (uintptr_t)frame_header);
 
 	switch (pf) {
 	case PF_INET:
@@ -12550,7 +12555,7 @@ dlil_verify_sum16(void)
 			bcopy(sumdata, c, len);
 
 			/* Zero-offset test (align by data pointer) */
-			m->m_data = (caddr_t)c;
+			m->m_data = (uintptr_t)c;
 			m->m_len = len;
 			sum = m_sum16(m, 0, len);
 
@@ -12577,7 +12582,7 @@ dlil_verify_sum16(void)
 			}
 
 			/* Alignment test by offset (fixed data pointer) */
-			m->m_data = (caddr_t)buf;
+			m->m_data = (uintptr_t)buf;
 			m->m_len = i + len;
 			sum = m_sum16(m, i, len);
 

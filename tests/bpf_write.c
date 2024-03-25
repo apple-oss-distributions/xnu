@@ -169,7 +169,7 @@ done:
 }
 
 static int
-create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen)
+create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen, u_int write_size_max)
 {
 	int bpf_fd = -1;
 	int error = 0;
@@ -194,7 +194,18 @@ create_bpf_on_interface(const char *ifname, int *out_fd, int *out_bdlen)
 
 	T_ASSERT_POSIX_SUCCESS(bpf_set_header_complete(bpf_fd, 0), NULL);
 
+#ifdef BIOCSWRITEMAX
+	T_ASSERT_POSIX_SUCCESS(bpf_set_write_size_max(bpf_fd, write_size_max), NULL);
 
+	u_int value;
+	T_ASSERT_POSIX_SUCCESS(bpf_get_write_size_max(bpf_fd, &value), NULL);
+
+	T_LOG("write_size_max %u %s value %u", write_size_max, write_size_max != value ? "!=" : "==", value);
+#else
+	if (write_size_max > 0) {
+		T_SKIP("BIOCSWRITEMAX not supported");
+	}
+#endif
 	struct timeval five_seconds = { .tv_sec = 5, .tv_usec = 0 };
 	T_ASSERT_POSIX_SUCCESS(bpf_set_timeout(bpf_fd, &five_seconds), NULL);
 
@@ -205,7 +216,7 @@ done:
 }
 
 static void
-do_bpf_write(const char *ifname, u_int ip_len, bool expect_success)
+do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_size_max)
 {
 	int bpf_fd = -1;
 	int bdlen = 0;
@@ -219,7 +230,7 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success)
 		payload_len = ip_len - (sizeof(struct ip) + sizeof(struct udphdr));
 	}
 
-	T_ASSERT_POSIX_ZERO(create_bpf_on_interface(ifname, &bpf_fd, &bdlen), NULL);
+	T_ASSERT_POSIX_ZERO(create_bpf_on_interface(ifname, &bpf_fd, &bdlen, write_size_max), NULL);
 	T_LOG("bpf bdlen %d", bdlen);
 
 	struct ether_addr src_eaddr = {};
@@ -271,7 +282,7 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success)
 	}
 
 	T_LOG("bpf written %ld bytes over %u", nwritten, frame_length);
-	HexDump(pkt, MIN((size_t)nwritten, 256));
+	HexDump(pkt, MIN((size_t)nwritten, 512));
 
 	unsigned char *buffer = calloc(1, (size_t)bdlen);
 	T_ASSERT_NOTNULL(buffer, "malloc()");
@@ -295,7 +306,7 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success)
 	    hp->bh_tstamp.tv_sec, hp->bh_tstamp.tv_usec,
 	    hp->bh_caplen, hp->bh_datalen, hp->bh_hdrlen);
 
-	HexDump(buffer + hp->bh_hdrlen, MIN((size_t)hp->bh_caplen, 256));
+	HexDump(buffer, MIN((size_t)(hp->bh_hdrlen + hp->bh_caplen), 512));
 
 	T_ASSERT_EQ_LONG(nwritten, (long)hp->bh_caplen, "bpf read same size as written");
 
@@ -311,71 +322,76 @@ done:
 }
 
 static void
-test_bpf_write(u_int data_len, int mtu, bool expect_success)
+test_bpf_write(u_int data_len, int mtu, bool expect_success, u_int write_size_max)
 {
 	init(mtu);
 
 	T_ASSERT_POSIX_ZERO(setup_feth_pair(mtu), NULL);
 
-	do_bpf_write(ifname1, data_len, expect_success);
+	do_bpf_write(ifname1, data_len, expect_success, write_size_max);
 }
 
 T_DECL(bpf_write_dhcp, "BPF write DHCP feth MTU 1500")
 {
-	test_bpf_write(0, 1500, true);
+	test_bpf_write(0, 1500, true, 0);
 }
 
 T_DECL(bpf_write_1024, "BPF write 1024 feth MTU 1500")
 {
-	test_bpf_write(1024, 1500, true);
+	test_bpf_write(1024, 1500, true, 0);
 }
 
 T_DECL(bpf_write_1514, "BPF write 1500 feth MTU 1500")
 {
-	test_bpf_write(1514, 1500, true);
+	test_bpf_write(1514, 1500, true, 0);
 }
 
 T_DECL(bpf_write_65482, "BPF write 65482 feth MTU 1500")
 {
-	test_bpf_write(65482, 1500, false);
+	test_bpf_write(65482, 1500, false, 0);
 }
 
 T_DECL(bpf_write_2048, "BPF write 2048 feth MTU 1500")
 {
-	test_bpf_write(2048, 1500, false);
+	test_bpf_write(2048, 1500, false, 0);
 }
 
 T_DECL(bpf_write_2048_mtu_4096, "BPF write 2048 feth MTU 4096 ")
 {
-	test_bpf_write(2048, 4096, true);
+	test_bpf_write(2048, 4096, true, 0);
 }
 
 T_DECL(bpf_write_4110_mtu_4096, "BPF write 4110 feth MTU 4096 ")
 {
-	test_bpf_write(4110, 4096, true);
+	test_bpf_write(4110, 4096, true, 0);
 }
 
 T_DECL(bpf_write_4096_mtu_9000, "BPF write 4096 feth MTU 9000")
 {
-	test_bpf_write(4096, 9000, true);
+	test_bpf_write(4096, 9000, true, 0);
 }
 
 T_DECL(bpf_write_8192_mtu_9000, "BPF write 8192 feth MTU 9000")
 {
-	test_bpf_write(8192, 9000, true);
+	test_bpf_write(8192, 9000, true, 0);
 }
 
 T_DECL(bpf_write_9000_mtu_9000, "BPF write 9000 feth MTU 9000")
 {
-	test_bpf_write(9000, 9000, true);
+	test_bpf_write(9000, 9000, true, 0);
 }
 
 T_DECL(bpf_write_9018_mtu_9000, "BPF write 9018 feth MTU 9000")
 {
-	test_bpf_write(9018, 9000, true);
+	test_bpf_write(9018, 9000, true, 0);
 }
 
 T_DECL(bpf_write_16370_mtu_9000, "BPF write 16370 feth MTU 9000")
 {
-	test_bpf_write(16370, 9000, false);
+	test_bpf_write(16370, 9000, false, 0);
+}
+
+T_DECL(bpf_write_16370_mtu_9000_max_16370, "BPF write 16370 feth MTU 9000 max 16370")
+{
+	test_bpf_write(16370, 9000, true, 16370);
 }

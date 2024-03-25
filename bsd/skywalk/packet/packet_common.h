@@ -102,7 +102,8 @@
 	if (__probable((_pkt)->pkt_qum_buf.buf_addr != 0)) {            \
 	        (_buf) = &(_pkt)->pkt_qum_buf;                          \
 	} else {                                                        \
-	        (_buf) = __DECONST(void *, (_pkt)->pkt_qum_buf.buf_nbft_addr);\
+	        (_buf) = __unsafe_forge_single(struct __kern_buflet *,  \
+	            __DECONST(void *, (_pkt)->pkt_qum_buf.buf_nbft_addr));\
 	}                                                               \
 } while (0)
 
@@ -110,7 +111,8 @@
 	if ((_pbuf) == NULL) {                                          \
 	        PKT_GET_FIRST_BUFLET(_pkt, _bcnt, _buf);                \
 	} else {                                                        \
-	        (_buf) = __DECONST(void *, (_pbuf)->buf_nbft_addr);     \
+	        (_buf) = __unsafe_forge_single(struct __kern_buflet *,  \
+	            __DECONST(void *, (_pbuf)->buf_nbft_addr));         \
 	}                                                               \
 } while (0)
 
@@ -402,7 +404,8 @@ __packet_set_expiry_action(const uint64_t ph, packet_expiry_action_t pea)
 
 __attribute__((always_inline))
 static inline errno_t
-__packet_opt_get_token(const struct __packet_opt *po, void *token,
+__packet_opt_get_token(const struct __packet_opt *po,
+    void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token,
     uint16_t *len, uint8_t *type)
 {
 	uint16_t tlen = po->__po_token_len;
@@ -423,7 +426,8 @@ __packet_opt_get_token(const struct __packet_opt *po, void *token,
 
 __attribute__((always_inline))
 static inline errno_t
-__packet_get_token(const uint64_t ph, void *token, uint16_t *len)
+__packet_get_token(const uint64_t ph,
+    void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token, uint16_t *len)
 {
 #ifdef KERNEL
 	struct __packet_opt *po = PKT_ADDR(ph)->pkt_com_opt;
@@ -446,7 +450,8 @@ __packet_get_token(const uint64_t ph, void *token, uint16_t *len)
 
 __attribute__((always_inline))
 static inline errno_t
-__packet_opt_set_token(struct __packet_opt *po, const void *token,
+__packet_opt_set_token(struct __packet_opt *po,
+    const void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token,
     const uint16_t len, const uint8_t type, volatile uint64_t *pflags)
 {
 	_CASSERT((__builtin_offsetof(struct __packet_opt, __po_token) % 8) == 0);
@@ -493,7 +498,8 @@ __packet_set_tx_timestamp(const uint64_t ph, const uint64_t ts)
 
 __attribute__((always_inline))
 static inline errno_t
-__packet_set_token(const uint64_t ph, const void *token, const uint16_t len)
+__packet_set_token(const uint64_t ph,
+    const void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token, const uint16_t len)
 {
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
 #ifdef KERNEL
@@ -946,11 +952,11 @@ __packet_set_flow_uuid(const uint64_t ph, const uuid_t flow_uuid)
 	 * the one in qum_flow_id is always 8-byte aligned.
 	 */
 	if (__probable(IS_P2ALIGNED(flow_uuid, sizeof(uint64_t)))) {
-		uint64_t *id_64 = (uint64_t *)(uintptr_t)flow_uuid;
+		const uint64_t *id_64 = (const uint64_t *)(const void *)flow_uuid;
 		q->__q_flow_id_val64[0] = id_64[0];
 		q->__q_flow_id_val64[1] = id_64[1];
 	} else if (__probable(IS_P2ALIGNED(flow_uuid, sizeof(uint32_t)))) {
-		uint32_t *id_32 = (uint32_t *)(uintptr_t)flow_uuid;
+		const uint32_t *id_32 = (const uint32_t *)(const void *)flow_uuid;
 		q->__q_flow_id_val32[0] = id_32[0];
 		q->__q_flow_id_val32[1] = id_32[1];
 		q->__q_flow_id_val32[2] = id_32[2];
@@ -971,11 +977,11 @@ __packet_get_flow_uuid(const uint64_t ph, uuid_t flow_uuid)
 	 * the one in qum_flow_id is always 8-byte aligned.
 	 */
 	if (__probable(IS_P2ALIGNED(flow_uuid, sizeof(uint64_t)))) {
-		uint64_t *id_64 = (uint64_t *)(uintptr_t)flow_uuid;
+		uint64_t *id_64 = (uint64_t *)(void *)flow_uuid;
 		id_64[0] = q->__q_flow_id_val64[0];
 		id_64[1] = q->__q_flow_id_val64[1];
 	} else if (__probable(IS_P2ALIGNED(flow_uuid, sizeof(uint32_t)))) {
-		uint32_t *id_32 = (uint32_t *)(uintptr_t)flow_uuid;
+		uint32_t *id_32 = (uint32_t *)(void *)flow_uuid;
 		id_32[0] = q->__q_flow_id_val32[0];
 		id_32[1] = q->__q_flow_id_val32[1];
 		id_32[2] = q->__q_flow_id_val32[2];
@@ -1086,7 +1092,7 @@ __packet_add_buflet(const uint64_t ph, const void *bprev0, const void *bnew0)
 #ifdef KERNEL
 #if DEVELOPMENT || DEBUG
 	/* check if bprev is the last buflet in the chain */
-	struct __kern_buflet *pbft, *kbft;
+	struct __kern_buflet *__single pbft, *__single kbft;
 	int n = bcnt;
 
 	PKT_GET_FIRST_BUFLET(PKT_ADDR(ph), bcnt, pbft);
@@ -1094,7 +1100,8 @@ __packet_add_buflet(const uint64_t ph, const void *bprev0, const void *bnew0)
 
 	while ((kbft != NULL) && n--) {
 		pbft = kbft;
-		kbft = __DECONST(struct __kern_buflet *, kbft->buf_nbft_addr);
+		kbft = __unsafe_forge_single(struct __kern_buflet *,
+		    __DECONST(struct __kern_buflet *, kbft->buf_nbft_addr));
 	}
 	ASSERT(n == 0);
 	ASSERT(bprev == pbft);
@@ -1120,10 +1127,11 @@ __packet_get_next_buflet(const uint64_t ph, const void *bprev0)
 {
 #ifdef KERNEL
 	kern_buflet_t bprev = __DECONST(kern_buflet_t, bprev0);
+	struct __kern_buflet *__single bcur = NULL;
 #else /* !KERNEL */
 	buflet_t bprev = __DECONST(buflet_t, bprev0);
-#endif /* !KERNEL */
 	void *bcur = NULL;
+#endif /* !KERNEL */
 
 	switch (SK_PTR_TYPE(ph)) {
 	case NEXUS_META_TYPE_PACKET: {
@@ -1279,7 +1287,7 @@ __attribute__((always_inline))
 static inline int
 __packet_finalize(const uint64_t ph)
 {
-	void *bcur = NULL, *bprev = NULL;
+	void *__single bcur = NULL, *__single bprev = NULL;
 	uint32_t len, bcnt, bdoff0, bdlim0;
 	int err = 0;
 
@@ -1780,7 +1788,7 @@ __packet_fix_sum(uint16_t csum, uint16_t old, uint16_t new)
 /* MUST be used for uint32_t fields */
 __attribute__((always_inline))
 static inline void
-__packet_fix_hdr_sum(uint8_t *field, uint16_t *csum, uint32_t new)
+__packet_fix_hdr_sum(uint8_t *__sized_by(4)field, uint16_t *csum, uint32_t new)
 {
 	uint32_t old;
 	memcpy(&old, field, sizeof(old));
@@ -1794,7 +1802,7 @@ __attribute__((always_inline))
 static inline void *
 __buflet_get_data_address(const void *buf)
 {
-	return (void *)(BLT_ADDR(buf)->buf_addr);
+	return __unsafe_forge_single(void *, (void *)(BLT_ADDR(buf)->buf_addr));
 }
 
 #ifdef KERNEL

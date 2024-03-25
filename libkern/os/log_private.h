@@ -28,6 +28,7 @@
 #include <firehose/tracepoint_private.h>
 #include <sys/queue.h>
 
+#define OS_LOG_XNU_SUBSYSTEM  "com.apple.xnu"
 #define OS_LOG_MAX_SIZE_ORDER 10 // Maximum log size order (1024 bytes)
 
 __BEGIN_DECLS
@@ -66,10 +67,16 @@ __BEGIN_DECLS
  * va_list from variadic arguments.  The caller must be the same binary
  * that generated the message and provided the format string.
  */
-__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
-OS_EXPORT OS_NOTHROW OS_LOG_NOTAILCALL
 void
-os_log_with_args(os_log_t oslog, os_log_type_t type, const char *format, va_list args, void *ret_addr) __osloglike(3, 0);
+os_log_with_args(os_log_t oslog, os_log_type_t type, const char *format, va_list args, void *ret_addr)
+__osloglike(3, 0);
+
+/*
+ * A private interface allowing to emit already encoded log messages.
+ */
+bool os_log_encoded_metadata(firehose_tracepoint_id_u, uint64_t, const void *, size_t);
+bool os_log_encoded_signpost(firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
+bool os_log_encoded_log(firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
 
 __END_DECLS
 

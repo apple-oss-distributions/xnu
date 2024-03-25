@@ -31,6 +31,8 @@
 #include <mach/machine/thread_state.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#include <sys/code_signing.h>
+#include <stdlib.h>
 #include "exc_helpers.h"
 
 T_GLOBAL_META(

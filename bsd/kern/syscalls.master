@@ -54,8 +54,8 @@
 9	AUE_LINK	ALL	{ int link(user_addr_t path, user_addr_t link); }
 10	AUE_UNLINK	ALL	{ int unlink(user_addr_t path) NO_SYSCALL_STUB; }
 11	AUE_NULL	ALL	{ int enosys(void); }   { old execv }
-12	AUE_CHDIR	ALL	{ int chdir(user_addr_t path); }
-13	AUE_FCHDIR	ALL	{ int fchdir(int fd); }
+12	AUE_CHDIR	ALL	{ int sys_chdir(user_addr_t path); }
+13	AUE_FCHDIR	ALL	{ int sys_fchdir(int fd); }
 14	AUE_MKNOD	ALL	{ int mknod(user_addr_t path, int mode, int dev); }
 15	AUE_CHMOD	ALL	{ int chmod(user_addr_t path, int mode) NO_SYSCALL_STUB; }
 16	AUE_CHOWN	ALL	{ int chown(user_addr_t path, int uid, int gid); }

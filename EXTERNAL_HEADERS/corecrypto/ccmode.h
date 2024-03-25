@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2012,2014-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2023) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -13,12 +13,10 @@
 #define _CORECRYPTO_CCMODE_H_
 
 #include <corecrypto/cc_config.h>
-#include <corecrypto/cc.h>
+#include <corecrypto/cc_priv.h>
 #include <corecrypto/ccmode_impl.h>
 #include <corecrypto/ccmode_siv.h>
 #include <corecrypto/ccmode_siv_hmac.h>
-
-
 
 CC_PTRCHECK_CAPABLE_HEADER()
 
@@ -29,38 +27,29 @@ CC_PTRCHECK_CAPABLE_HEADER()
 #define ccecb_ctx_decl(_size_, _name_) cc_ctx_decl_vla(ccecb_ctx, _size_, _name_)
 #define ccecb_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t ccecb_context_size(const struct ccmode_ecb *mode)
-{
-    return mode->size;
-}
+size_t ccecb_context_size(const struct ccmode_ecb *mode);
 
-CC_INLINE size_t ccecb_block_size(const struct ccmode_ecb *mode)
-{
-    return mode->block_size;
-}
+size_t ccecb_block_size(const struct ccmode_ecb *mode);
 
-CC_INLINE int ccecb_init(const struct ccmode_ecb *mode, ccecb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key)
-{
-    return mode->init(mode, ctx, key_len, key);
-}
+int ccecb_init(const struct ccmode_ecb *mode, ccecb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key);
 
-CC_INLINE int ccecb_update(const struct ccmode_ecb *mode, const ccecb_ctx *ctx, size_t nblocks, const void *cc_indexable in, void *cc_indexable out)
-{
-    return mode->ecb(ctx, nblocks, in, out);
-}
+int ccecb_update(const struct ccmode_ecb *mode, const ccecb_ctx *ctx, size_t nblocks, const void *cc_indexable in, void *cc_indexable out);
 
-CC_INLINE int
-ccecb_one_shot(const struct ccmode_ecb *mode, size_t key_len, const void *key, size_t nblocks, const void *cc_indexable in, void *cc_indexable out)
-{
-    int rc;
-    ccecb_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, key_len, key);
-    if (rc == 0) {
-        rc = mode->ecb(ctx, nblocks, in, out);
-    }
-    ccecb_ctx_clear(mode->size, ctx);
-    return rc;
-}
+cc_ptrcheck_unavailable_r(ccecb_one_shot_explicit)
+int ccecb_one_shot(const struct ccmode_ecb *mode,
+                   size_t key_len,
+                   const void *cc_sized_by(key_len) key,
+                   size_t nblocks,
+                   const void *cc_unsafe_indexable in,
+                   void *cc_unsafe_indexable out);
+
+int ccecb_one_shot_explicit(const struct ccmode_ecb *mode,
+                            size_t key_len,
+                            size_t block_size,
+                            size_t nblocks,
+                            const void *cc_sized_by(key_len) key,
+                            const void *cc_sized_by(block_size * nblocks) in,
+                            void *cc_sized_by(block_size * nblocks) out);
 
 /* CBC mode. */
 
@@ -82,52 +71,38 @@ ccecb_one_shot(const struct ccmode_ecb *mode, size_t key_len, const void *key, s
    Alternatively you can dynamically initialize a struct ccmode_cbc
    ccmode_factory_cbc_decrypt() or ccmode_factory_cbc_encrypt(). */
 
-CC_INLINE size_t cccbc_context_size(const struct ccmode_cbc *mode)
-{
-    return mode->size;
-}
+size_t cccbc_context_size(const struct ccmode_cbc *mode);
 
-CC_INLINE size_t cccbc_block_size(const struct ccmode_cbc *mode)
-{
-    return mode->block_size;
-}
+size_t cccbc_block_size(const struct ccmode_cbc *mode);
 
-CC_INLINE int cccbc_init(const struct ccmode_cbc *mode, cccbc_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key)
-{
-    return mode->init(mode, ctx, key_len, key);
-}
+int cccbc_init(const struct ccmode_cbc *mode, cccbc_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key);
 
-CC_INLINE int cccbc_copy_iv(cccbc_iv *cc_sized_by(len) iv_ctx, const void *cc_sized_by(len) iv, size_t len) {
-    cc_copy(len, iv_ctx, iv);
-    return 0;
-}
-CC_INLINE int cccbc_clear_iv(cccbc_iv *cc_sized_by(len) iv_ctx, size_t len) {
-    cc_clear(len, iv_ctx);
-    return 0;
-}
+int cccbc_copy_iv(cccbc_iv *cc_sized_by(len) iv_ctx, const void *cc_sized_by(len) iv, size_t len);
+int cccbc_clear_iv(cccbc_iv *cc_sized_by(len) iv_ctx, size_t len);
 
-#if CC_PTRCHECK
-cc_unavailable() // Use cccbc_copy_iv() or cccbc_clear_iv() directly.
+cc_ptrcheck_unavailable() // Use cccbc_copy_iv() or cccbc_clear_iv() directly.
 int cccbc_set_iv(const struct ccmode_cbc *mode, cccbc_iv *iv_ctx, const void *iv);
-#else
-CC_INLINE int cccbc_set_iv(const struct ccmode_cbc *mode, cccbc_iv *iv_ctx, const void *iv)
-{
-    return iv ? cccbc_copy_iv(iv_ctx, iv, mode->block_size) : cccbc_clear_iv(iv_ctx, mode->block_size);
-}
-#endif
 
-CC_INLINE int cccbc_update(const struct ccmode_cbc *mode, cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks, const void *cc_indexable in, void *cc_indexable out)
-{
-    return mode->cbc(ctx, iv, nblocks, in, out);
-}
+int cccbc_update(const struct ccmode_cbc *mode, const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks, const void *cc_indexable in, void *cc_indexable out);
 
+cc_ptrcheck_unavailable_r(cccbc_one_shot_explicit)
 int cccbc_one_shot(const struct ccmode_cbc *mode,
                    size_t key_len,
                    const void *cc_sized_by(key_len) key,
-                   const void *cc_sized_by(key_len) iv,
+                   const void *iv,
                    size_t nblocks,
-                   const void *cc_indexable in,
-                   void *cc_indexable out);
+                   const void *cc_unsafe_indexable in,
+                   void *cc_unsafe_indexable out);
+
+int cccbc_one_shot_explicit(const struct ccmode_cbc *mode,
+                            size_t key_len,
+                            size_t iv_len,
+                            size_t block_size,
+                            size_t nblocks,
+                            const void *cc_sized_by(key_len) key,
+                            const void *cc_sized_by(iv_len) iv,
+                            const void *cc_sized_by(block_size * nblocks) in,
+                            void *cc_sized_by(block_size * nblocks) out);
 
 /* CFB mode. */
 
@@ -136,43 +111,21 @@ int cccbc_one_shot(const struct ccmode_cbc *mode,
 #define cccfb_ctx_decl(_size_, _name_) cc_ctx_decl_vla(cccfb_ctx, _size_, _name_)
 #define cccfb_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t cccfb_context_size(const struct ccmode_cfb *mode)
-{
-    return mode->size;
-}
+size_t cccfb_context_size(const struct ccmode_cfb *mode);
 
-CC_INLINE size_t cccfb_block_size(const struct ccmode_cfb *mode)
-{
-    return mode->block_size;
-}
+size_t cccfb_block_size(const struct ccmode_cfb *mode);
 
-CC_INLINE int cccfb_init(const struct ccmode_cfb *mode, cccfb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv)
-{
-    return mode->init(mode, ctx, key_len, key, iv);
-}
+int cccfb_init(const struct ccmode_cfb *mode, cccfb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv);
 
-CC_INLINE int cccfb_update(const struct ccmode_cfb *mode, cccfb_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->cfb(ctx, nbytes, in, out);
-}
+int cccfb_update(const struct ccmode_cfb *mode, cccfb_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
-CC_INLINE int cccfb_one_shot(const struct ccmode_cfb *mode,
-                             size_t key_len,
-                             const void *cc_sized_by(key_len) key,
-                             const void *cc_indexable iv,
-                             size_t nbytes,
-                             const void *cc_sized_by(nbytes) in,
-                             void *cc_sized_by(nbytes) out)
-{
-    int rc;
-    cccfb_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, key_len, key, iv);
-    if (rc == 0) {
-        rc = mode->cfb(ctx, nbytes, in, out);
-    }
-    cccfb_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int cccfb_one_shot(const struct ccmode_cfb *mode,
+                   size_t key_len,
+                   const void *cc_sized_by(key_len) key,
+                   const void *cc_indexable iv,
+                   size_t nbytes,
+                   const void *cc_sized_by(nbytes) in,
+                   void *cc_sized_by(nbytes) out);
 
 /* CFB8 mode. */
 
@@ -181,43 +134,21 @@ CC_INLINE int cccfb_one_shot(const struct ccmode_cfb *mode,
 #define cccfb8_ctx_decl(_size_, _name_) cc_ctx_decl_vla(cccfb8_ctx, _size_, _name_)
 #define cccfb8_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t cccfb8_context_size(const struct ccmode_cfb8 *mode)
-{
-    return mode->size;
-}
+size_t cccfb8_context_size(const struct ccmode_cfb8 *mode);
 
-CC_INLINE size_t cccfb8_block_size(const struct ccmode_cfb8 *mode)
-{
-    return mode->block_size;
-}
+size_t cccfb8_block_size(const struct ccmode_cfb8 *mode);
 
-CC_INLINE int cccfb8_init(const struct ccmode_cfb8 *mode, cccfb8_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv)
-{
-    return mode->init(mode, ctx, key_len, key, iv);
-}
+int cccfb8_init(const struct ccmode_cfb8 *mode, cccfb8_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv);
 
-CC_INLINE int cccfb8_update(const struct ccmode_cfb8 *mode, cccfb8_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->cfb8(ctx, nbytes, in, out);
-}
+int cccfb8_update(const struct ccmode_cfb8 *mode, cccfb8_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
-CC_INLINE int cccfb8_one_shot(const struct ccmode_cfb8 *mode,
-                              size_t key_len,
-                              const void *cc_sized_by(key_len) key,
-                              const void *cc_indexable iv,
-                              size_t nbytes,
-                              const void *cc_sized_by(nbytes) in,
-                              void *cc_sized_by(nbytes) out)
-{
-    int rc;
-    cccfb8_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, key_len, key, iv);
-    if (rc == 0) {
-        rc = mode->cfb8(ctx, nbytes, in, out);
-    }
-    cccfb8_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int cccfb8_one_shot(const struct ccmode_cfb8 *mode,
+                    size_t key_len,
+                    const void *cc_sized_by(key_len) key,
+                    const void *cc_indexable iv,
+                    size_t nbytes,
+                    const void *cc_sized_by(nbytes) in,
+                    void *cc_sized_by(nbytes) out);
 
 /* CTR mode. */
 
@@ -230,43 +161,21 @@ CC_INLINE int cccfb8_one_shot(const struct ccmode_cfb8 *mode,
  that is incremented by 1 for each new block. Use the mode flags to select
  if the IV/Counter is stored in big or little endian. */
 
-CC_INLINE size_t ccctr_context_size(const struct ccmode_ctr *mode)
-{
-    return mode->size;
-}
+size_t ccctr_context_size(const struct ccmode_ctr *mode);
 
-CC_INLINE size_t ccctr_block_size(const struct ccmode_ctr *mode)
-{
-    return mode->block_size;
-}
+size_t ccctr_block_size(const struct ccmode_ctr *mode);
 
-CC_INLINE int ccctr_init(const struct ccmode_ctr *mode, ccctr_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv)
-{
-    return mode->init(mode, ctx, key_len, key, iv);
-}
+int ccctr_init(const struct ccmode_ctr *mode, ccctr_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv);
 
-CC_INLINE int ccctr_update(const struct ccmode_ctr *mode, ccctr_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->ctr(ctx, nbytes, in, out);
-}
+int ccctr_update(const struct ccmode_ctr *mode, ccctr_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
-CC_INLINE int ccctr_one_shot(const struct ccmode_ctr *mode,
-                             size_t key_len,
-                             const void *cc_sized_by(key_len) key,
-                             const void *cc_indexable iv,
-                             size_t nbytes,
-                             const void *cc_sized_by(nbytes) in,
-                             void *cc_sized_by(nbytes) out)
-{
-    int rc;
-    ccctr_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, key_len, key, iv);
-    if (rc == 0) {
-        rc = mode->ctr(ctx, nbytes, in, out);
-    }
-    ccctr_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int ccctr_one_shot(const struct ccmode_ctr *mode,
+                   size_t key_len,
+                   const void *cc_sized_by(key_len) key,
+                   const void *cc_indexable iv,
+                   size_t nbytes,
+                   const void *cc_sized_by(nbytes) in,
+                   void *cc_sized_by(nbytes) out);
 
 /* OFB mode. */
 
@@ -275,43 +184,21 @@ CC_INLINE int ccctr_one_shot(const struct ccmode_ctr *mode,
 #define ccofb_ctx_decl(_size_, _name_) cc_ctx_decl_vla(ccofb_ctx, _size_, _name_)
 #define ccofb_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t ccofb_context_size(const struct ccmode_ofb *mode)
-{
-    return mode->size;
-}
+size_t ccofb_context_size(const struct ccmode_ofb *mode);
 
-CC_INLINE size_t ccofb_block_size(const struct ccmode_ofb *mode)
-{
-    return mode->block_size;
-}
+size_t ccofb_block_size(const struct ccmode_ofb *mode);
 
-CC_INLINE int ccofb_init(const struct ccmode_ofb *mode, ccofb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv)
-{
-    return mode->init(mode, ctx, key_len, key, iv);
-}
+int ccofb_init(const struct ccmode_ofb *mode, ccofb_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key, const void *cc_indexable iv);
 
-CC_INLINE int ccofb_update(const struct ccmode_ofb *mode, ccofb_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->ofb(ctx, nbytes, in, out);
-}
+int ccofb_update(const struct ccmode_ofb *mode, ccofb_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
-CC_INLINE int ccofb_one_shot(const struct ccmode_ofb *mode,
-                             size_t key_len,
-                             const void *cc_sized_by(key_len) key,
-                             const void *cc_indexable iv,
-                             size_t nbytes,
-                             const void *cc_sized_by(nbytes) in,
-                             void *cc_sized_by(nbytes) out)
-{
-    int rc;
-    ccofb_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, key_len, key, iv);
-    if (rc == 0) {
-        rc = mode->ofb(ctx, nbytes, in, out);
-    }
-    ccofb_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int ccofb_one_shot(const struct ccmode_ofb *mode,
+                   size_t key_len,
+                   const void *cc_sized_by(key_len) key,
+                   const void *cc_indexable iv,
+                   size_t nbytes,
+                   const void *cc_sized_by(nbytes) in,
+                   void *cc_sized_by(nbytes) out);
 
 /* XTS mode. */
 
@@ -338,15 +225,9 @@ CC_INLINE int ccofb_one_shot(const struct ccmode_ofb *mode,
    functions.   Also note that xts only works for ecb modes with a block_size
    of 16.  */
 
-CC_INLINE size_t ccxts_context_size(const struct ccmode_xts *mode)
-{
-    return mode->size;
-}
+size_t ccxts_context_size(const struct ccmode_xts *mode);
 
-CC_INLINE size_t ccxts_block_size(const struct ccmode_xts *mode)
-{
-    return mode->block_size;
-}
+size_t ccxts_block_size(const struct ccmode_xts *mode);
 
 /*!
  @function   ccxts_init
@@ -362,11 +243,7 @@ CC_INLINE size_t ccxts_block_size(const struct ccmode_xts *mode)
 
  @discussion For security reasons, the two keys must be different.
  */
-CC_INLINE int
-ccxts_init(const struct ccmode_xts *mode, ccxts_ctx *ctx, size_t key_nbytes, const void *cc_sized_by(key_nbytes) data_key, const void *cc_sized_by(key_nbytes) tweak_key)
-{
-    return mode->init(mode, ctx, key_nbytes, data_key, tweak_key);
-}
+int ccxts_init(const struct ccmode_xts *mode, ccxts_ctx *ctx, size_t key_nbytes, const void *cc_sized_by(key_nbytes) data_key, const void *cc_sized_by(key_nbytes) tweak_key);
 
 /*!
  @function   ccxts_set_tweak
@@ -379,10 +256,7 @@ ccxts_init(const struct ccmode_xts *mode, ccxts_ctx *ctx, size_t key_nbytes, con
 
  @discussion The IV must be exactly one block in length.
  */
-CC_INLINE int ccxts_set_tweak(const struct ccmode_xts *mode, ccxts_ctx *ctx, ccxts_tweak *tweak, const void *cc_indexable iv)
-{
-    return mode->set_tweak(ctx, tweak, iv);
-}
+int ccxts_set_tweak(const struct ccmode_xts *mode, ccxts_ctx *ctx, ccxts_tweak *tweak, const void *cc_indexable iv);
 
 /*!
  @function   ccxts_update
@@ -397,11 +271,8 @@ CC_INLINE int ccxts_set_tweak(const struct ccmode_xts *mode, ccxts_ctx *ctx, ccx
 
  @result     The updated internal buffer of the tweak context. May be ignored.
   */
-CC_INLINE void *cc_unsafe_indexable
-ccxts_update(const struct ccmode_xts *mode, ccxts_ctx *ctx, ccxts_tweak *tweak, size_t nblocks, const void *cc_indexable in, void *cc_indexable out)
-{
-    return mode->xts(ctx, tweak, nblocks, in, out);
-}
+void *cc_unsafe_indexable
+ccxts_update(const struct ccmode_xts *mode, ccxts_ctx *ctx, ccxts_tweak *tweak, size_t nblocks, const void *cc_indexable in, void *cc_indexable out);
 
 /*!
  @function   ccxts_one_shot
@@ -447,15 +318,9 @@ int ccxts_one_shot(const struct ccmode_xts *mode,
 /* Exceeding this figure breaks confidentiality and authenticity. */
 #define CCGCM_TEXT_MAX_NBYTES ((1ULL << 36) - 32ULL)
 
-CC_INLINE size_t ccgcm_context_size(const struct ccmode_gcm *mode)
-{
-    return mode->size;
-}
+size_t ccgcm_context_size(const struct ccmode_gcm *mode);
 
-CC_INLINE size_t ccgcm_block_size(const struct ccmode_gcm *mode)
-{
-    return mode->block_size;
-}
+size_t ccgcm_block_size(const struct ccmode_gcm *mode);
 
 /*!
  @function   ccgcm_init
@@ -491,10 +356,7 @@ CC_INLINE size_t ccgcm_block_size(const struct ccmode_gcm *mode)
 
  @warning This function is not FIPS-compliant. Use @p ccgcm_init_with_iv instead.
  */
-CC_INLINE int ccgcm_init(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t key_nbytes, const void *cc_sized_by(key_nbytes) key)
-{
-    return mode->init(mode, ctx, key_nbytes, key);
-}
+int ccgcm_init(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t key_nbytes, const void *cc_sized_by(key_nbytes) key);
 
 /*!
  @function   ccgcm_init_with_iv
@@ -563,10 +425,7 @@ int ccgcm_init_with_iv(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t key
 
  @warning This function is not FIPS-compliant. Use @p ccgcm_init_with_iv instead.
  */
-CC_INLINE int ccgcm_set_iv(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t iv_nbytes, const void *cc_sized_by(iv_nbytes) iv)
-{
-    return mode->set_iv(ctx, iv_nbytes, iv);
-}
+int ccgcm_set_iv(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t iv_nbytes, const void *cc_sized_by(iv_nbytes) iv);
 
 /*!
  @function   ccgcm_set_iv_legacy
@@ -624,21 +483,15 @@ int ccgcm_inc_iv(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, void *cc_unsafe_
 
  This function may be called zero or more times.
  */
-CC_INLINE int ccgcm_aad(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) additional_data)
-{
-    return mode->gmac(ctx, nbytes, additional_data);
-}
+int ccgcm_aad(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) additional_data);
 
 /*!
  @function   ccgcm_gmac
 
  @discussion ccgcm_gmac is deprecated. Use the drop-in replacement 'ccgcm_aad' instead.
  */
-CC_INLINE int ccgcm_gmac (const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in)
-cc_deprecate_with_replacement("ccgcm_aad", 13.0, 10.15, 13.0, 6.0, 4.0)
-{
-    return mode->gmac(ctx, nbytes, in);
-}
+int ccgcm_gmac(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in)
+cc_deprecate_with_replacement("ccgcm_aad", 13.0, 10.15, 13.0, 6.0, 4.0);
 
 /*!
  @function   ccgcm_update
@@ -656,10 +509,7 @@ cc_deprecate_with_replacement("ccgcm_aad", 13.0, 10.15, 13.0, 6.0, 4.0)
 
  This function may be called zero or more times.
  */
-CC_INLINE int ccgcm_update(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->gcm(ctx, nbytes, in, out);
-}
+int ccgcm_update(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
 /*!
  @function   ccgcm_finalize
@@ -683,10 +533,7 @@ CC_INLINE int ccgcm_update(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t
  @warning The generated tag is written to @p tag to support legacy applications that perform authentication manually. Do not
  follow this usage pattern in new applications. Rely on the function's error code to verify authenticity.
  */
-CC_INLINE int ccgcm_finalize(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t tag_nbytes, void *cc_sized_by(tag_nbytes) tag)
-{
-    return mode->finalize(ctx, tag_nbytes, tag);
-}
+int ccgcm_finalize(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size_t tag_nbytes, void *cc_sized_by(tag_nbytes) tag);
 
 /*!
  @function   ccgcm_reset
@@ -699,10 +546,7 @@ CC_INLINE int ccgcm_finalize(const struct ccmode_gcm *mode, ccgcm_ctx *ctx, size
 
  @discussion Refer to @p ccgcm_init for correct usage.
  */
-CC_INLINE int ccgcm_reset(const struct ccmode_gcm *mode, ccgcm_ctx *ctx)
-{
-    return mode->reset(ctx);
-}
+int ccgcm_reset(const struct ccmode_gcm *mode, ccgcm_ctx *ctx);
 
 /*!
  @function   ccgcm_one_shot
@@ -804,25 +648,16 @@ int ccgcm_one_shot_legacy(const struct ccmode_gcm *mode,
 #define ccccm_nonce_decl(_size_, _name_) cc_ctx_decl_vla(ccccm_nonce, _size_, _name_)
 #define ccccm_nonce_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t ccccm_context_size(const struct ccmode_ccm *mode)
-{
-    return mode->size;
-}
+size_t ccccm_context_size(const struct ccmode_ccm *mode);
 
-CC_INLINE size_t ccccm_block_size(const struct ccmode_ccm *mode)
-{
-    return mode->block_size;
-}
+size_t ccccm_block_size(const struct ccmode_ccm *mode);
 
 /// Initialize a ccm authenticated encryption/decryption mode
 /// @param mode mode descriptor
 /// @param ctx  context for this instance
 /// @param key_len length in bytes of key provided
 /// @param key bytes defining key
-CC_INLINE int ccccm_init(const struct ccmode_ccm *mode, ccccm_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key)
-{
-    return mode->init(mode, ctx, key_len, key);
-}
+int ccccm_init(const struct ccmode_ccm *mode, ccccm_ctx *ctx, size_t key_len, const void *cc_sized_by(key_len) key);
 
 /// Set the initialization value/nonce for the ccm authenticated encryption/decryption
 /// @param mode mode descriptor
@@ -833,17 +668,14 @@ CC_INLINE int ccccm_init(const struct ccmode_ccm *mode, ccccm_ctx *ctx, size_t k
 /// @param mac_size length in bytes of mac tag
 /// @param auth_len length in bytes of authenticating data
 /// @param data_len length in bytes of plaintext
-CC_INLINE int ccccm_set_iv(const struct ccmode_ccm *mode,
-                           ccccm_ctx *ctx,
-                           ccccm_nonce *nonce_ctx,
-                           size_t nonce_len,
-                           const void *cc_sized_by(nonce_len) nonce,
-                           size_t mac_size,
-                           size_t auth_len,
-                           size_t data_len)
-{
-    return mode->set_iv(ctx, nonce_ctx, nonce_len, nonce, mac_size, auth_len, data_len);
-}
+int ccccm_set_iv(const struct ccmode_ccm *mode,
+                 ccccm_ctx *ctx,
+                 ccccm_nonce *nonce_ctx,
+                 size_t nonce_len,
+                 const void *cc_sized_by(nonce_len) nonce,
+                 size_t mac_size,
+                 size_t auth_len,
+                 size_t data_len);
 
 /// (Deprecated) Add associated data to the ccm authenticated encryption/decryption
 /// @param mode mode descriptor
@@ -851,10 +683,7 @@ CC_INLINE int ccccm_set_iv(const struct ccmode_ccm *mode,
 /// @param nonce_ctx  context for this nonce
 /// @param nbytes nbytes length in bytes of associated data being provided in this invocation
 /// @param in authenticated data being provided in this invocation
-CC_INLINE int ccccm_cbcmac(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t nbytes, const void *cc_sized_by(nbytes) in)
-{
-    return mode->cbcmac(ctx, nonce_ctx, nbytes, in);
-}
+int ccccm_cbcmac(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t nbytes, const void *cc_sized_by(nbytes) in);
 
 ///Add associated data to the ccm authenticated encryption/decryption
 /// @param mode mode descriptor
@@ -862,10 +691,7 @@ CC_INLINE int ccccm_cbcmac(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_
 /// @param nonce_ctx  context for this nonce
 /// @param ad_nbytes nbytes length in bytes of associated data being provided in this invocation
 /// @param ad authenticated data being provided in this invocation
-CC_INLINE int ccccm_aad(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t ad_nbytes, const uint8_t *cc_sized_by(ad_nbytes) ad)
-{
-    return mode->cbcmac(ctx, nonce_ctx, ad_nbytes, ad);
-}
+int ccccm_aad(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t ad_nbytes, const uint8_t *cc_sized_by(ad_nbytes) ad);
 
 /// Add plaintext data to the ccm authenticated encryption/decryption
 /// @param mode mode descriptor
@@ -874,10 +700,7 @@ CC_INLINE int ccccm_aad(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_non
 /// @param nbytes length in bytes of both plaintext and encrypted plaintext
 /// @param in In encryption mode plaintext data, in decryption mode encrypted plaintext data.
 /// @param out in encryption mode resulting encrypted plaintext data. In decryption mode resulting plaintext data
-CC_INLINE int ccccm_update(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out)
-{
-    return mode->ccm(ctx, nonce_ctx, nbytes, in, out);
-}
+int ccccm_update(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, size_t nbytes, const void *cc_sized_by(nbytes) in, void *cc_sized_by(nbytes) out);
 
 /// Add plaintext data to the ccm authenticated encryption
 /// @param mode mode descriptor
@@ -904,10 +727,7 @@ int ccccm_decrypt(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *no
 /// @param nonce_ctx  context for this nonce
 /// @param mac tag portion of ciphertext that is computed from ccm MAC.
 /// @discussion This is being deprecated, as it requires the caller to manually verify that the returned mac tag is correct when decrypting. Please use ccccm_finalize_and_verify instead.
-CC_INLINE int ccccm_finalize(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, void *cc_indexable mac)
-{
-    return mode->finalize(ctx, nonce_ctx, mac);
-}
+int ccccm_finalize(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx, void *cc_indexable mac);
 
 /// Ends encryption and computes tag when in encryption mode
 /// @param mode mode descriptor
@@ -929,10 +749,7 @@ int ccccm_finalize_and_verify_tag(const struct ccmode_ccm *mode, ccccm_ctx *ctx,
 /// @param mode mode descriptor
 /// @param ctx context for this ccm instance
 /// @param nonce_ctx  context for this nonce
-CC_INLINE int ccccm_reset(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx)
-{
-    return mode->reset(ctx, nonce_ctx);
-}
+int ccccm_reset(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_nonce *nonce_ctx);
 
 /// (Deprecated) Encrypts/Decrypts a plaintext/ciphertext using the AEAD CCM mode.
 /// @param mode mode descriptor
@@ -948,40 +765,18 @@ CC_INLINE int ccccm_reset(const struct ccmode_ccm *mode, ccccm_ctx *ctx, ccccm_n
 /// @param mac_size length in bytes of CCM mac tag
 /// @param mac portion of ciphertext that is computed from ccm MAC.
 /// @return This is being deprecated, as it requires the caller to manually  verify that the returned mac tag is correct when decrypting. Please use ccccm_one_shot_with_verify instead
-CC_INLINE int ccccm_one_shot(const struct ccmode_ccm *mode,
-                             size_t key_len,
-                             const void *cc_sized_by(key_len) key,
-                             size_t nonce_len,
-                             const void *cc_sized_by(nonce_len) nonce,
-                             size_t nbytes,
-                             const void *cc_sized_by(nbytes) in,
-                             void *cc_sized_by(nbytes) out,
-                             size_t adata_len,
-                             const void *cc_sized_by(adata_len) adata,
-                             size_t mac_size,
-                             void *cc_sized_by(mac_size) mac)
-{
-    int rc;
-    ccccm_ctx_decl(mode->size, ctx);
-    ccccm_nonce_decl(mode->nonce_size, nonce_ctx);
-    rc = mode->init(mode, ctx, key_len, key);
-    if (rc == 0) {
-        rc = mode->set_iv(ctx, nonce_ctx, nonce_len, nonce, mac_size, adata_len, nbytes);
-    }
-    if (rc == 0) {
-        rc = mode->cbcmac(ctx, nonce_ctx, adata_len, adata);
-    }
-    if (rc == 0) {
-        rc = mode->ccm(ctx, nonce_ctx, nbytes, in, out);
-    }
-    if (rc == 0) {
-        rc = mode->finalize(ctx, nonce_ctx, mac);
-    }
-    ccccm_ctx_clear(mode->size, ctx);
-    ccccm_nonce_clear(mode->nonce_size, nonce_ctx);
-
-    return rc;
-}
+int ccccm_one_shot(const struct ccmode_ccm *mode,
+                   size_t key_len,
+                   const void *cc_sized_by(key_len) key,
+                   size_t nonce_len,
+                   const void *cc_sized_by(nonce_len) nonce,
+                   size_t nbytes,
+                   const void *cc_sized_by(nbytes) in,
+                   void *cc_sized_by(nbytes) out,
+                   size_t adata_len,
+                   const void *cc_sized_by(adata_len) adata,
+                   size_t mac_size,
+                   void *cc_sized_by(mac_size) mac);
 
 /// Encrypts a plaintext using the AEAD CCM mode, and provides corresponding  mac tag. The encrypted plaintext and tag together are the AEAD ciphertext
 /// @param mode mode descriptor
@@ -1044,44 +839,21 @@ int ccccm_one_shot_decrypt(const struct ccmode_ccm *mode,
 #define ccomac_ctx_decl(_size_, _name_) cc_ctx_decl_vla(ccomac_ctx, _size_, _name_)
 #define ccomac_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
-CC_INLINE size_t ccomac_context_size(const struct ccmode_omac *mode)
-{
-    return mode->size;
-}
+size_t ccomac_context_size(const struct ccmode_omac *mode);
 
-CC_INLINE size_t ccomac_block_size(const struct ccmode_omac *mode)
-{
-    return mode->block_size;
-}
+size_t ccomac_block_size(const struct ccmode_omac *mode);
 
-CC_INLINE int ccomac_init(const struct ccmode_omac *mode, ccomac_ctx *ctx, size_t tweak_len, size_t key_len, const void *cc_sized_by(key_len) key)
-{
-    return mode->init(mode, ctx, tweak_len, key_len, key);
-}
+int ccomac_init(const struct ccmode_omac *mode, ccomac_ctx *ctx, size_t tweak_len, size_t key_len, const void *cc_sized_by(key_len) key);
 
-CC_INLINE int
-ccomac_update(const struct ccmode_omac *mode, ccomac_ctx *ctx, size_t nblocks, const void *tweak, const void *cc_indexable in, void *cc_indexable out)
-{
-    return mode->omac(ctx, nblocks, tweak, in, out);
-}
+int ccomac_update(const struct ccmode_omac *mode, ccomac_ctx *ctx, size_t nblocks, const void *tweak, const void *cc_indexable in, void *cc_indexable out);
 
-CC_INLINE int ccomac_one_shot(const struct ccmode_omac *mode,
-                              size_t tweak_len,
-                              size_t key_len,
-                              const void *cc_sized_by(key_len) key,
-                              const void *cc_sized_by(tweak_len) tweak,
-                              size_t nblocks,
-                              const void *cc_indexable in,
-                              void *cc_indexable out)
-{
-    int rc;
-    ccomac_ctx_decl(mode->size, ctx);
-    rc = mode->init(mode, ctx, tweak_len, key_len, key);
-    if (rc == 0) {
-        rc = mode->omac(ctx, nblocks, tweak, in, out);
-    }
-    ccomac_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int ccomac_one_shot(const struct ccmode_omac *mode,
+                    size_t tweak_len,
+                    size_t key_len,
+                    const void *cc_sized_by(key_len) key,
+                    const void *cc_sized_by(tweak_len) tweak,
+                    size_t nblocks,
+                    const void *cc_indexable in,
+                    void *cc_indexable out);
 
 #endif /* _CORECRYPTO_CCMODE_H_ */

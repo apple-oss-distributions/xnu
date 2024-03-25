@@ -4155,11 +4155,17 @@ key_reset_sav(struct secasvar *sav)
 		kfree_data(sav->key_enc, PFKEY_UNUNIT64(sav->key_enc->sadb_key_len));
 		sav->key_enc = NULL;
 	}
-	if (sav->sched) {
-		bzero(sav->sched, sav->schedlen);
-		kfree_data(sav->sched, sav->schedlen);
-		sav->sched = NULL;
-		sav->schedlen = 0;
+	if (sav->sched_auth) {
+		bzero(sav->sched_auth, sav->schedlen_auth);
+		kfree_data(sav->sched_auth, sav->schedlen_auth);
+		sav->sched_auth = NULL;
+		sav->schedlen_auth = 0;
+	}
+	if (sav->sched_enc) {
+		bzero(sav->sched_enc, sav->schedlen_enc);
+		kfree_data(sav->sched_enc, sav->schedlen_enc);
+		sav->sched_enc = NULL;
+		sav->schedlen_enc = 0;
 	}
 
 	for (int i = 0; i < MAX_REPLAY_WINDOWS; i++) {
@@ -9251,10 +9257,10 @@ bzero_mbuf(struct mbuf *m)
 		}
 		offset = sizeof(struct sadb_msg);
 	}
-	bzero(mptr->m_data + offset, mptr->m_len - offset);
+	bzero(m_mtod_current(mptr) + offset, mptr->m_len - offset);
 	mptr = mptr->m_next;
 	while (mptr != NULL) {
-		bzero(mptr->m_data, mptr->m_len);
+		bzero(m_mtod_current(mptr), mptr->m_len);
 		mptr = mptr->m_next;
 	}
 }

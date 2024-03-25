@@ -69,8 +69,15 @@ struct xnupost_test bsd_post_tests[] = {
 	XNUPOST_TEST_CONFIG_BASIC(arm_cpu_capabilities_legacy_test),
 	XNUPOST_TEST_CONFIG_BASIC(pmap_test),
 #endif /* defined(__arm64__) */
+#if CONFIG_SPTM
+/**
+ * SPTM TODO: The CTRR test is currently not functional in SPTM systems.
+ *            This will be addressed in a future change.
+ */
+#else
 #if defined(KERNEL_INTEGRITY_CTRR)
 	XNUPOST_TEST_CONFIG_BASIC(ctrr_test),
+#endif
 #endif
 #if __ARM_PAN_AVAILABLE__
 	XNUPOST_TEST_CONFIG_BASIC(arm64_late_pan_test),

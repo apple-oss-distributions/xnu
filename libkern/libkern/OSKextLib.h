@@ -474,6 +474,21 @@ __BEGIN_DECLS
  */
 #define kOSKextKernelIdentifier                 "__kernel__"
 
+#if CONFIG_SPTM && PRIVATE
+/*!
+ * @define   kOSKextSPTMIdentifier
+ * @abstract
+ * This is the CFBundleIdentifier used by the Secure Page Table Monitor (SPTM).
+ */
+#define kOSKextSPTMIdentifier                 "com.apple.sptm"
+
+/*!
+ * @define   kOSKextTXMIdentifier
+ * @abstract
+ * This is the CFBundleIdentifier used by the Trusted Execution Monitor (TXM).
+ */
+#define kOSKextTXMIdentifier                 "com.apple.txm"
+#endif /* CONFIG_SPTM */
 
 /*!
  * @define  kOSKextBundlePackageTypeKext

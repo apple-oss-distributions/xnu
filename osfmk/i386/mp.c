@@ -50,6 +50,7 @@
 #include <kern/timer_call.h>
 #include <kern/zalloc.h>
 #include <kern/queue.h>
+#include <kern/monotonic.h>
 #include <prng/random.h>
 
 #include <vm/vm_map.h>
@@ -60,7 +61,7 @@
 #include <i386/cpu_threads.h>
 #include <i386/mp_desc.h>
 #include <i386/misc_protos.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/postcode.h>
 #include <i386/machine_routines.h>
 #include <i386/mp.h>
@@ -78,10 +79,6 @@
 #include <sys/kdebug.h>
 
 #include <console/serial_protos.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -1585,9 +1582,9 @@ i386_deactivate_cpu(void)
 	timer_queue_shutdown(&cdp->rtclock_timer.queue);
 	mp_cpus_call(cpu_to_cpumask(master_cpu), ASYNC, timer_queue_expire_local, NULL);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_down(cdp);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
 #endif /* KPERF */

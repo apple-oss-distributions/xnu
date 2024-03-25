@@ -1,5 +1,7 @@
 # XNU Allocators best practices
 
+The right way to allocate memory in the kernel.
+
 ## Introduction
 
 XNU proposes two ways to allocate memory:
@@ -127,6 +129,8 @@ or C++ `class`. Fixed-size types must follow certain rules:
   smaller than `KALLOC_SAFE_ALLOC_SIZE`. When this is not the case,
   we have typically found that there is a large array of data,
   or some buffer in that type, the solution is to outline this allocation.
+  kernel extensions must define `KALLOC_TYPE_STRICT_SIZE_CHECK` to turn
+  misuse of `kalloc_type()` relative to size at compile time, it's default in XNU.
 - for union types, data/pointer overlaps should be avoided if possible.
   when this isn't possible, a zone should be considered.
 
@@ -171,6 +175,8 @@ the kernel pointers and the second that is untyped and data-only.
       <tt>kalloc_data(size, flags)</tt><br/>
       <tt>krealloc_data(ptr, old_size, new_size, flags)</tt><br/>
       <tt>kfree_data(ptr, size)</tt><br/>
+      <tt>kfree_data_counted_by(ptr_var, count_var)</tt><br/>
+      <tt>kfree_data_sized_by(ptr_var, byte_count_var)</tt><br/>
       <tt>kfree_data_addr(ptr)</tt>
       </p>
       <p>
@@ -261,6 +267,15 @@ the kernel pointers and the second that is untyped and data-only.
     </td>
   </tr>
 </table>
+
+`kfree_data_counted_by` and `kfree_data_sized_by` are used when working with
+-fbounds-safety and pointers with __counted_by and __sized_by modifiers,
+respectively. They expect both their pointer and size arguments to be
+modifiable, and the pointer and size will be set to 0 together, in accordance
+with -fbounds-safety semantics. Please note that arguments are evaluated
+multiple times. When -fbounds-safety is enabled, the compiler can help ensuring
+correct usage of these macros; with -fbounds-safety disabled, engineers are on
+their own to ensure proper usage.
 
 ## C++ classes and operator new.
 

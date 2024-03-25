@@ -1,9 +1,7 @@
 # ARM64 specific blacklist
 
 # Exclude KASan runtime
-src:./san/memory/kasan-arm64.c
 src:./osfmk/arm/machine_routines_common.c
-src:./osfmk/kern/debug.c
 
 # These use a local variable to work out which stack we're on, but can end up with
 # a fakestack allocation.

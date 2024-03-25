@@ -78,6 +78,14 @@ firehose_chunk_pos_fits(firehose_chunk_pos_u *pos, uint16_t size)
 	return pos->fcp_next_entry_offs + size <= pos->fcp_private_offs;
 }
 
+OS_ALWAYS_INLINE
+static inline firehose_chunk_t
+firehose_chunk_for_address(void *addr)
+{
+	uintptr_t chunk_addr = (uintptr_t)addr & ~(FIREHOSE_CHUNK_SIZE - 1);
+	return (firehose_chunk_t)chunk_addr;
+}
+
 #define FIREHOSE_CHUNK_TRY_RESERVE_FAIL_ENQUEUE  (-1)
 #define FIREHOSE_CHUNK_TRY_RESERVE_FAIL          ( 0)
 

@@ -78,6 +78,17 @@
 #define SECURITY_READ_ONLY_LATE(_t)  _t __security_const_late  __attribute__((used))
 #define SECURITY_READ_WRITE(_t)      _t __security_read_write  __attribute__((used))
 
+#if CONFIG_SPTM
+/*
+ * Place a function in a special segment, __TEXT_BOOT_EXEC. Code placed
+ * in this segment will be allowed by the SPTM to execute during the fixups
+ * phase; the rest of the code will be mapped as RW, so that it can be overwritten.
+ * Code that is required to execute in order to apply fixups MUST be contained
+ * in this special segment.
+ */
+#define MARK_AS_FIXUP_TEXT __attribute__((used, section("__TEXT_BOOT_EXEC,__bootcode,regular,pure_instructions")))
+#else
 #define MARK_AS_FIXUP_TEXT
+#endif
 
 #endif /* _SECTION_KEYWORDS_H_ */

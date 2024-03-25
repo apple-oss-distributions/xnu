@@ -231,11 +231,6 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
 	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
 
 	saveflag = uio->uio_segflg;                                                     /* Remember what the request is */
-#if LP64_DEBUG
-	if (UIO_IS_USER_SPACE(uio) == 0 && UIO_IS_SYS_SPACE(uio) == 0) {
-		panic("mdevrw - invalid uio_segflg");
-	}
-#endif /* LP64_DEBUG */
 	/* Make sure we are moving from physical ram if physical device */
 	if (mdev[devid].mdFlags & mdPhys) {
 		if (uio->uio_segflg == UIO_USERSPACE64) {

@@ -333,7 +333,8 @@ __options_decl(eph_panic_flags_t, uint64_t, {
 	EMBEDDED_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED     = 0x1000,                             /* ERROR: coredump policy requires encryption, but encryptions is not initialized or available */
 	EMBEDDED_PANIC_HEADER_FLAG_KERNEL_COREDUMP_SKIPPED_EXCLUDE_REGIONS_UNAVAILABLE   = 0x2000,      /* ERROR: coredump region exclusion list is not available */
 	EMBEDDED_PANIC_HEADER_FLAG_COREFILE_UNLINKED              = 0x4000,                             /* ERROR: coredump output file is not linked */
-	EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000                              /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+	EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000,                             /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+	EMBEDDED_PANIC_HEADER_FLAG_EXCLAVE_PANIC                  = 0x10000,                            /* INFO: panic originated from exclaves */
 });
 
 #define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 5
@@ -913,6 +914,9 @@ typedef enum {
 } lbr_modes_t;
 
 extern lbr_modes_t last_branch_enabled_modes;
+
+/* Exclaves stackshot tests support */
+#define STACKSHOT_EXCLAVES_TESTING ((DEVELOPMENT || DEBUG) && CONFIG_EXCLAVES)
 
 #endif  /* XNU_KERNEL_PRIVATE */
 

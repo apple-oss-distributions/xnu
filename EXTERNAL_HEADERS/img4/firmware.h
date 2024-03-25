@@ -43,8 +43,11 @@
 #include <img4/4MSU.h>
 #endif
 
+#include <sys/cdefs.h>
+
 __BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @typedef img4_4cc_t
@@ -197,6 +200,7 @@ typedef struct _img4_image *img4_image_t;
 IMG4_API_AVAILABLE_20200508
 typedef struct _img4_runtime img4_runtime_t;
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
 
 #include <img4/nonce.h>
@@ -211,7 +215,12 @@ OS_ASSUME_NONNULL_END
 #include <img4/image.h>
 #include <img4/runtime.h>
 
+#if TXM
+#include <img4/4txm.h>
+#endif
+
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @typedef img4_firmware_authenticated_execute_t
@@ -322,18 +331,20 @@ typedef struct _img4_firmware_execution_context {
  * The manifest authenticating the firmware is attached (i.e. the buffer given
  * represents a .img4 file).
  *
+ * This flag no longer does anything and probably never did. The implementation
+ * assumes that, if {@link img4_firmware_attach_manifest} was not called, then
+ * the manifest is attached to the payload.
+ *
  * @const IMG4_FIRMWARE_FLAG_BARE
  * The firmware image is not wrapped with an Image4 payload structure. This flag
  * is mutually exclusive with {@link IMG4_FIRMWARE_FLAG_ATTACHED_MANIFEST}, and
  * if both are present, the implementation's behavior is undefined.
  *
  * @const IMG4_FIRMWARE_FLAG_SUBSEQUENT_STAGE
- * The firmware image extends an existing chain of trust. If set, the
- * runtime must provide a {@link i4rt_get_digest} function which returns a
- * digest for {@link IMG4_IDENTIFIER_CHMH}.
+ * The firmware image extends an existing chain of trust.
  *
- * If set, the firmware may optionally provide a {@link i4rt_get_bool} function
- * which returns a value for {@link IMG4_IDENTIFIER_AMNM}.
+ * This flag no longer does anything; the implementation is now designed to
+ * understand which environments are first-stage or subsequent-stage boots.
  *
  * @const IMG4_FIRMWARE_FLAG_RESPECT_AMNM
  * Forces the implementation to respect the manifest's AMNM entitlement if it is
@@ -347,6 +358,8 @@ typedef struct _img4_firmware_execution_context {
  * @const IMG4_FIRMWARE_FLAG_PASSTHROUGH
  * Causes the wrapped payload bytes to be delivered to the image execution
  * callback. These bytes do not have the Image4 wrapping stripped.
+ *
+ * This flag no longer does anything.
  *
  * @const IMG4_FIRMWARE_FLAG_FORCE_ANTI_REPLAY
  * Force anti-replay enforcement even when performing just manifest evaluation
@@ -525,7 +538,7 @@ img4_firmware_new_from_fd_4MSM(const img4_runtime_t *rt,
 IMG4_API_AVAILABLE_20200508
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1
 img4_firmware_t
-img4_firmware_init_from_buff(void *buff, size_t len);
+img4_firmware_init_from_buff(void *__sized_by(len) buff, size_t len);
 #else
 #define img4_firmware_init_from_buff(...) \
 		(img4if->i4if_v7.firmware_init_from_buff(__VA_ARGS__))
@@ -657,15 +670,15 @@ img4_firmware_attach_manifest(img4_firmware_t fw,
  * @param fw
  * The firmware to query.
  *
- * @param acceptable_chips
+ * @param chips
  * An array of chips the caller finds acceptable to verify the firmware.
  *
- * @param acceptable_chips_cnt
- * The number of elements in {@link acceptable_chips}.
+ * @param chips_cnt
+ * The number of elements in {@link chips}.
  *
  * @result
  * If the manifest may be authenticated by the certificate chain associated with
- * one of the manifests provided in {@link acceptable_chips}, that chip is
+ * one of the manifests provided in {@link chips}, that chip is
  * returned. If the manifest cannot be authenticated with any of the provided
  * chips, NULL is returned.
  *
@@ -686,8 +699,8 @@ IMG4_API_AVAILABLE_20200724
 OS_EXPORT OS_WARN_RESULT
 const img4_chip_t *_Nullable
 img4_firmware_select_chip(const img4_firmware_t fw,
-		const img4_chip_select_array_t _Nonnull acceptable_chips,
-		size_t acceptable_chips_cnt);
+		const img4_chip_select_array_t __counted_by(chips_cnt) _Nonnull chips,
+		size_t chips_cnt);
 #else
 #define img4_firmware_select_chip(...) \
 		(img4if->i4if_v10.firmware_select_chip(__VA_ARGS__))
@@ -814,12 +827,13 @@ img4_firmware_evaluate(img4_firmware_t fw,
 IMG4_API_AVAILABLE_20200508
 OS_EXPORT
 void
-img4_firmware_destroy(img4_firmware_t _Nonnull *_Nullable fw);
+img4_firmware_destroy(img4_firmware_t _Nullable *_Nonnull fw);
 #else
 #define img4_firmware_destroy(...) \
 		(img4if->i4if_v7.firmware_destroy(__VA_ARGS__))
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
 __END_DECLS
 

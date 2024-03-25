@@ -75,6 +75,19 @@ kern_work_interval_create(thread_t thread, struct kern_work_interval_create_args
 extern kern_return_t
 kern_work_interval_get_flags_from_port(mach_port_name_t port_name, uint32_t*flags);
 
+#if CONFIG_THREAD_GROUPS
+/*
+ * A private interface for kevent subsystem.
+ * Returns following scheduling policies associated with a work interval, if available.
+ * : Priority
+ * : Scheduling policy/mode
+ * : +1 ref on the backing thread group
+ */
+extern kern_return_t
+kern_work_interval_get_policy_from_port(mach_port_name_t port_name,
+    integer_t *policy, integer_t *priority, struct thread_group **tg);
+#endif /* CONFIG_THREAD_GROUPS */
+
 
 extern kern_return_t
 kern_work_interval_destroy(thread_t thread, uint64_t work_interval_id);

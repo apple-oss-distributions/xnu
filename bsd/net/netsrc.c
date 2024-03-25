@@ -253,7 +253,7 @@ netsrc_ipv4(kern_ctl_ref kctl, uint32_t unit, struct netsrc_req *request)
 		TAILQ_FOREACH(ia, &in_ifaddrhead, ia_link) {
 			IFA_LOCK_SPIN(&ia->ia_ifa);
 			if (ia->ia_ifp == rt->rt_ifp) {
-				IFA_ADDREF_LOCKED(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 				break;
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
@@ -262,8 +262,8 @@ netsrc_ipv4(kern_ctl_ref kctl, uint32_t unit, struct netsrc_req *request)
 
 		if (ia) {
 			reply.nrp_sin = *IA_SIN(ia);
-			IFA_REMREF_LOCKED(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 			reply.nrp_flags |= NETSRC_FLAG_ROUTEABLE;
 		}
 		netsrc_common(rt, &reply);

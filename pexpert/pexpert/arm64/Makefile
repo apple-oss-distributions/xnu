@@ -16,6 +16,7 @@ PRIVATE_KERNELFILES = \
 	board_config.h \
 	boot.h \
 	H13.h \
+	H14.h \
 	VMAPPLE.h \
 	BCM2837.h
 

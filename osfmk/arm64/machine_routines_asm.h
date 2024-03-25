@@ -81,7 +81,7 @@
 	* Arg3: the LR to check
 	*
 	* Stash saved state PC and CPSR in other registers to avoid reloading potentially unauthed
-	* values from memory.  (ml_check_signed_state will clobber x1 and x2.)
+	* values from memory.  (ml_check_signed_state will clobber x1, x2, and x16.)
 	*/
 	mov		\tmp1, x1
 	mov		\tmp2, x2
@@ -91,6 +91,7 @@
 	bl		EXT(ml_check_signed_state)
 	mov		x1, \tmp1
 	mov		x2, \tmp2
+	mov		x16, x4
 	msr		SPSel, #0
 
 .if \el0_state_allowed==0

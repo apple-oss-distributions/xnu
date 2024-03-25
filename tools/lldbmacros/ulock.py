@@ -1,7 +1,3 @@
-from __future__ import absolute_import, print_function
-
-from builtins import range
-
 from xnu import *
 from scheduler import GetRecentTimestamp
 import xnudefines

@@ -98,6 +98,8 @@
 #include <netinet6/ipsec6.h>
 #endif
 
+#include <net/sockaddr_utils.h>
+
 struct dadq;
 static struct dadq *nd6_dad_find(struct ifaddr *, struct nd_opt_nonce *);
 void nd6_dad_stoptimer(struct ifaddr *);
@@ -324,7 +326,7 @@ nd6_ns_input(
 		 * to be a neighbor otherwise.  This point is expected to be
 		 * clarified in future revisions of the specification.
 		 */
-		bzero(&src_sa6, sizeof(src_sa6));
+		SOCKADDR_ZERO(&src_sa6, sizeof(src_sa6));
 		src_sa6.sin6_family = AF_INET6;
 		src_sa6.sin6_len = sizeof(src_sa6);
 		src_sa6.sin6_addr = saddr6;
@@ -393,13 +395,12 @@ nd6_ns_input(
 		struct rtentry *rt;
 		struct sockaddr_in6 tsin6;
 
-		bzero(&tsin6, sizeof tsin6);
+		SOCKADDR_ZERO(&tsin6, sizeof tsin6);
 		tsin6.sin6_len = sizeof(struct sockaddr_in6);
 		tsin6.sin6_family = AF_INET6;
 		tsin6.sin6_addr = taddr6;
 
-		rt = rtalloc1_scoped((struct sockaddr *)&tsin6, 0, 0,
-		    ifp->if_index);
+		rt = rtalloc1_scoped(SA(&tsin6), 0, 0, ifp->if_index);
 
 		if (rt != NULL) {
 			RT_LOCK(rt);
@@ -528,7 +529,7 @@ nd6_ns_input(
 			    ((anycast || proxy || !tlladdr) ? 0 :
 			    ND_NA_FLAG_OVERRIDE) | (advrouter ?
 			    ND_NA_FLAG_ROUTER : 0), tlladdr, proxy ?
-			    (struct sockaddr *)&proxydl : NULL);
+			    SA(&proxydl) : NULL);
 		}
 		goto freeit;
 	}
@@ -539,11 +540,11 @@ nd6_ns_input(
 	nd6_na_output(ifp, &saddr6, &taddr6,
 	    ((anycast || proxy || !tlladdr || oflgclr) ? 0 : ND_NA_FLAG_OVERRIDE) |
 	    (advrouter ? ND_NA_FLAG_ROUTER : 0) | ND_NA_FLAG_SOLICITED,
-	    tlladdr, proxy ? (struct sockaddr *)&proxydl : NULL);
+	    tlladdr, proxy ? SA(&proxydl) : NULL);
 freeit:
 	m_freem(m);
 	if (ifa != NULL) {
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 	return;
 
@@ -554,7 +555,7 @@ bad:
 	icmp6stat.icp6s_badns++;
 	m_freem(m);
 	if (ifa != NULL) {
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 }
 
@@ -726,7 +727,7 @@ nd6_ns_output(
 			int error;
 			struct sockaddr_in6 dst_sa;
 
-			bzero(&dst_sa, sizeof(dst_sa));
+			SOCKADDR_ZERO(&dst_sa, sizeof(dst_sa));
 			dst_sa.sin6_family = AF_INET6;
 			dst_sa.sin6_len = sizeof(dst_sa);
 			dst_sa.sin6_addr = ip6->ip6_dst;
@@ -744,7 +745,7 @@ nd6_ns_output(
 			}
 
 			if (ia != NULL) {
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 				ia = NULL;
 			}
 			/*
@@ -894,7 +895,7 @@ exit:
 	ROUTE_RELEASE(&ro);     /* we don't cache this route. */
 
 	if (ia != NULL) {
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 	}
 	return;
 
@@ -1285,8 +1286,7 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			struct in6_addr *in6;
 			struct ifnet *rt_ifp = rt->rt_ifp;
 
-			in6 = &((struct sockaddr_in6 *)
-			    (void *)rt_key(rt))->sin6_addr;
+			in6 = &SIN6(rt_key(rt))->sin6_addr;
 
 			RT_UNLOCK(rt);
 			lck_mtx_lock(nd6_mutex);
@@ -1497,7 +1497,7 @@ nd6_na_output(
 		ip6_output_setdstifscope(m, ifp->if_index, NULL);
 	}
 
-	bzero(&dst_sa, sizeof(struct sockaddr_in6));
+	SOCKADDR_ZERO(&dst_sa, sizeof(struct sockaddr_in6));
 	dst_sa.sin6_family = AF_INET6;
 	dst_sa.sin6_len = sizeof(struct sockaddr_in6);
 	dst_sa.sin6_addr = daddr6;
@@ -1505,7 +1505,7 @@ nd6_na_output(
 	/*
 	 * Select a source whose scope is the same as that of the dest.
 	 */
-	bcopy(&dst_sa, &ro.ro_dst, sizeof(dst_sa));
+	SOCKADDR_COPY(&dst_sa, &ro.ro_dst, sizeof(dst_sa));
 	src = in6_selectsrc(&dst_sa, NULL, NULL, &ro, NULL, &src_storage,
 	    ip6oa.ip6oa_boundif, &error);
 	if (src == NULL) {
@@ -1526,7 +1526,7 @@ nd6_na_output(
 		if (ia->ia6_flags & IN6_IFF_OPTIMISTIC) {
 			flags &= ~ND_NA_FLAG_OVERRIDE;
 		}
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 	}
 
 	nd_na = (struct nd_neighbor_advert *)(ip6 + 1);
@@ -1551,7 +1551,7 @@ nd6_na_output(
 			mac = nd6_ifptomac(ifp);
 		} else if (sdl0->sa_family == AF_LINK) {
 			struct sockaddr_dl *sdl;
-			sdl = (struct sockaddr_dl *)(void *)sdl0;
+			sdl = SDL(sdl0);
 			if (sdl->sdl_alen == ifp->if_addrlen) {
 				mac = LLADDR(sdl);
 			}
@@ -1672,7 +1672,7 @@ nd6_nbr_init(void)
 
 	TAILQ_INIT(&dadq);
 
-	bzero(&hostrtmask, sizeof hostrtmask);
+	SOCKADDR_ZERO(&hostrtmask, sizeof hostrtmask);
 	hostrtmask.sin6_family = AF_INET6;
 	hostrtmask.sin6_len = sizeof hostrtmask;
 	for (i = 0; i < sizeof hostrtmask.sin6_addr; ++i) {
@@ -1841,7 +1841,7 @@ nd6_dad_attach(struct dadq *dp, struct ifaddr *ifa)
 	lck_mtx_lock(&dad6_mutex);
 	DAD_LOCK(dp);
 	dp->dad_ifa = ifa;
-	IFA_ADDREF(ifa);        /* for dad_ifa */
+	ifa_addref(ifa);        /* for dad_ifa */
 	dp->dad_count = ip6_dad_count;
 	dp->dad_ns_icount = dp->dad_na_icount = 0;
 	dp->dad_ns_ocount = dp->dad_ns_tcount = 0;
@@ -2146,8 +2146,7 @@ nd6_dad_duplicated(struct ifaddr *ifa)
 			 */
 			llifa = ifp->if_lladdr;
 			IFA_LOCK(llifa);
-			sdl = (struct sockaddr_dl *)(void *)
-			    llifa->ifa_addr;
+			sdl = SDL(llifa->ifa_addr);
 			if (lladdrlen == sdl->sdl_alen &&
 			    bcmp(lladdr, LLADDR(sdl), lladdrlen) == 0) {
 				candisable = TRUE;
@@ -2401,7 +2400,7 @@ nd6_dad_na_input(struct mbuf *m, struct ifnet *ifp, struct in6_addr *taddr,
 	    ip6_sprintf(taddr), if_name(ifp));
 done:
 	IFA_LOCK_ASSERT_NOTHELD(ifa);
-	IFA_REMREF(ifa);
+	ifa_remref(ifa);
 	m_freem(m);
 	return NULL;
 }
@@ -2447,7 +2446,7 @@ dad_remref(struct dadq *dp)
 	}
 
 	if ((ifa = dp->dad_ifa) != NULL) {
-		IFA_REMREF(ifa);        /* drop dad_ifa reference */
+		ifa_remref(ifa);        /* drop dad_ifa reference */
 		dp->dad_ifa = NULL;
 	}
 
@@ -2477,11 +2476,11 @@ nd6_alt_node_addr_decompose(struct ifnet *ifp, struct sockaddr *sa,
 	VERIFY(sdl && (void *)sa != (void *)sdl);
 	VERIFY(sin6 && (void *)sa != (void *)sin6);
 
-	bzero(sin6, sizeof(*sin6));
+	SOCKADDR_ZERO(sin6, sizeof(*sin6));
 	sin6->sin6_len = sizeof *sin6;
 	sin6->sin6_family = AF_INET6;
 
-	bzero(sdl, sizeof(*sdl));
+	SOCKADDR_ZERO(sdl, sizeof(*sdl));
 	sdl->sdl_len = sizeof *sdl;
 	sdl->sdl_family = AF_LINK;
 	sdl->sdl_type = ifp->if_type;
@@ -2490,7 +2489,7 @@ nd6_alt_node_addr_decompose(struct ifnet *ifp, struct sockaddr *sa,
 
 	switch (sa->sa_family) {
 	case AF_INET6: {
-		struct sockaddr_in6 *sin6a = (struct sockaddr_in6 *)(void *)sa;
+		struct sockaddr_in6 *sin6a = SIN6(sa);
 		struct in6_addr *in6 = &sin6a->sin6_addr;
 
 		VERIFY(sa->sa_len == sizeof *sin6);
@@ -2511,12 +2510,12 @@ nd6_alt_node_addr_decompose(struct ifnet *ifp, struct sockaddr *sa,
 		break;
 	}
 	case AF_LINK: {
-		struct sockaddr_dl *sdla = (struct sockaddr_dl *)(void *)sa;
+		struct sockaddr_dl *sdla = SDL(sa);
 		struct in6_addr *in6 = &sin6->sin6_addr;
 		caddr_t lla = LLADDR(sdla);
 
 		VERIFY(sa->sa_len <= sizeof(*sdl));
-		bcopy(sa, sdl, sa->sa_len);
+		SOCKADDR_COPY(sa, sdl, sa->sa_len);
 
 		sin6->sin6_scope_id = sdla->sdl_index;
 		if (sin6->sin6_scope_id == 0) {
@@ -2574,8 +2573,7 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
 	lck_mtx_lock(rnh_lock);
 
-	rt = rtalloc1_scoped_locked((struct sockaddr *)sin6, 1, 0,
-	    ifp->if_index);
+	rt = rtalloc1_scoped_locked(SA(sin6), 1, 0, ifp->if_index);
 
 	/* Restore the address that was passed to us */
 	if (in6_embedded_scope) {
@@ -2659,8 +2657,7 @@ nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockadd
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
 	lck_mtx_lock(rnh_lock);
 
-	rt = rtalloc1_scoped_locked((struct sockaddr *)sin6, 0, 0,
-	    ifp->if_index);
+	rt = rtalloc1_scoped_locked(SA(sin6), 0, 0, ifp->if_index);
 
 	/* Restore the address that was passed to us */
 	if (in6_embedded_scope) {
@@ -2682,15 +2679,14 @@ nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockadd
 			if (sdl != NULL && rt->rt_gateway != NULL &&
 			    rt->rt_gateway->sa_family == AF_LINK &&
 			    SDL(rt->rt_gateway)->sdl_len <= sizeof(*sdl)) {
-				bcopy(rt->rt_gateway, sdl, SDL(rt->rt_gateway)->sdl_len);
+				SOCKADDR_COPY(rt->rt_gateway, sdl, SDL(rt->rt_gateway)->sdl_len);
 			}
 
 			rt->rt_flags |= RTF_CONDEMNED;
 			RT_UNLOCK(rt);
 
-			error = rtrequest_locked(RTM_DELETE, rt_key(rt),
-			    (struct sockaddr *)NULL, rt_mask(rt), 0,
-			    (struct rtentry **)NULL);
+			error = rtrequest_locked(RTM_DELETE, rt_key(rt), NULL, rt_mask(rt),
+			    0, (struct rtentry **)NULL);
 
 			rtfree_locked(rt);
 		} else {

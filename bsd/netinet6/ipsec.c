@@ -4934,8 +4934,7 @@ ipsec_copypkt(struct mbuf *m)
 						    remain : MCLBYTES;
 					}
 
-					bcopy(n->m_data + copied, mm->m_data,
-					    len);
+					bcopy(m_mtod_current(n) + copied, m_mtod_current(mm), len);
 
 					copied += len;
 					remain -= len;

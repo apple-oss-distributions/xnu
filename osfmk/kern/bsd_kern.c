@@ -36,6 +36,8 @@
 #include <kern/task.h>
 #include <kern/spl.h>
 #include <kern/ast.h>
+#include <kern/monotonic.h>
+#include <machine/monotonic.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_object.h>
 #include <vm/vm_map.h>
@@ -46,11 +48,6 @@
 #include <sys/signal.h>
 #include <sys/errno.h>
 #include <sys/proc_require.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#include <machine/monotonic.h>
-#endif /* MONOTONIC */
 
 #include <machine/limits.h>
 #include <sys/codesign.h> /* CS_CDHASH_LEN */
@@ -1220,6 +1217,8 @@ fill_task_rusage(task_t task, rusage_info_current *ri)
 	ri->ri_system_ptime = extra.system_ptime;
 	ri->ri_energy_nj = extra.energy;
 	ri->ri_penergy_nj = extra.penergy;
+	ri->ri_secure_time_in_system = extra.secure_time;
+	ri->ri_secure_ptime_in_system = extra.secure_ptime;
 
 	ri->ri_phys_footprint = get_task_phys_footprint(task);
 	ledger_get_balance(task->ledger, task_ledgers.phys_mem,

@@ -40,4 +40,8 @@
 
 #pragma once
 
+#if CONFIG_SPTM
+#include <arm64/sptm/pmap/pmap.h>
+#else
 #include <arm/pmap/pmap.h>
+#endif

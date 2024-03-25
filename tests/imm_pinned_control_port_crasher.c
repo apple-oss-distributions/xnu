@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include <assert.h>
 #include <mach/task.h>
+#include <stdbool.h>
 #include <mach/mk_timer.h>
+#include "cs_helpers.h"
 
 /*
  * DO NOT run this test file by itself.
@@ -442,12 +444,23 @@ main(int argc, char *argv[])
 		exit(-1);
 	}
 
+	bool third_party_hardened = !strcmp(argv[0], "imm_pinned_control_port_crasher_3P_hardened");
+	if (third_party_hardened) {
+		// Ensure that we can set this crasher as a non-platform binary
+		if (remove_platform_binary() != 0) {
+			printf("Failed to remove platform binary, exiting\n");
+			exit(1);
+		}
+	}
+
 	int test_num = atoi(argv[1]);
 
+
 	if (test_num >= 0 && test_num < MAX_TEST_NUM) {
+		printf("[Crasher]: Running test num %d\n", test_num);
 		(*tests[test_num])();
 	} else {
-		printf("[Crasher]: Invalid test num. Exiting...\n");
+		printf("[Crasher]: Invalid test num: %d. Exiting...\n", test_num);
 		exit(-1);
 	}
 

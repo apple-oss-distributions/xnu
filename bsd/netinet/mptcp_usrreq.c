@@ -53,6 +53,7 @@
 #include <netinet/mptcp_timer.h>
 
 #include <mach/sdt.h>
+#include <net/sockaddr_utils.h>
 
 static int mptcp_usr_attach(struct socket *, int, struct proc *);
 static int mptcp_usr_detach(struct socket *);
@@ -343,12 +344,12 @@ mptcp_usr_connectx(struct socket *mp_so, struct sockaddr *src,
 	}
 
 	if ((mp_so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING)) == 0) {
-		memcpy(&mpte->mpte_u_dst, dst, dst->sa_len);
+		SOCKADDR_COPY(dst, &mpte->mpte_dst, dst->sa_len);
 
 		if (dst->sa_family == AF_INET) {
-			memcpy(&mpte->mpte_sub_dst_v4, dst, dst->sa_len);
+			SOCKADDR_COPY(dst, &mpte->mpte_sub_dst_v4, dst->sa_len);
 		} else {
-			memcpy(&mpte->mpte_sub_dst_v6, dst, dst->sa_len);
+			SOCKADDR_COPY(dst, &mpte->mpte_sub_dst_v6, dst->sa_len);
 		}
 	}
 
@@ -375,7 +376,7 @@ mptcp_usr_connectx(struct socket *mp_so, struct sockaddr *src,
 		}
 
 		if ((mp_so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING)) == 0) {
-			memcpy(&mpte->mpte_u_src, src, src->sa_len);
+			SOCKADDR_COPY(src, &mpte->mpte_src, src->sa_len);
 		}
 	}
 

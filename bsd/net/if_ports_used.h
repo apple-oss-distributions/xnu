@@ -162,10 +162,21 @@ struct npi_if_info {
     ((_npi)->npi_if_family == IFRTYPE_FAMILY_UTUN)
 
 /*
- * struct net_port_info_una_wake_event is the event data for KEV_POWER_WAKE_PACKET
- *
- * una_wake_pkt_control_flags is valid when NPIF_TCP is set and contains the TCP packet
- * header flags -- see TH_FLAGS in netinet/tcp.h
+ * Symbolic names for bits of wake_pkt_control_flags and una_wake_pkt_control_flags
+ * When the protocol is TCP (flag NPIF_TCP set) the lower 8 bits correspond to the TCP header flag
+ */
+#define NPICF_TH_FIN  0x01
+#define NPICF_TH_SYN  0x02
+#define NPICF_TH_RST  0x04
+#define NPICF_TH_PUSH 0x08
+#define NPICF_TH_ACK  0x10
+#define NPICF_TH_URG  0x20
+#define NPICF_TH_ECE  0x40
+#define NPICF_TH_CWR  0x80
+#define NPICF_NOWAKE  0x1000
+
+/*
+ * struct net_port_info_una_wake_event is the event data for KEV_POWER_WAKE_PACKE
  *
  * See <net/if_private.h> for definiton of values of these kinds of fields:
  *  - xxx_if_family             IFRTYPE_FAMILY_YYY
@@ -192,7 +203,7 @@ struct net_port_info_wake_event {
 	/* Following fields added with NPI_HAS_PACKET_INFO */
 	uint32_t            wake_pkt_total_len; /* actual length of packet */
 	uint32_t            wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
-	uint16_t            wake_pkt_control_flags;
+	uint16_t            wake_pkt_control_flags; /* see NPICF_xxx above */
 
 	/* Followings fields added with NPI_HAS_PHYSICAL_LINK */
 	struct npi_if_info  wake_pkt_if_info;  /* inner-most interface of TCP/UDP packet */
@@ -227,7 +238,7 @@ struct net_port_info_una_wake_event {
 	/* Following fields added with NPI_HAS_PACKET_INFO */
 	uint32_t            una_wake_pkt_total_len; /* actual length of packet */
 	uint32_t            una_wake_pkt_data_len; /* exclude transport (TCP/UDP) header length */
-	uint16_t            una_wake_pkt_control_flags; /* for NPIF_TCP, see TH_FLAGS in netinet/tcp.h */
+	uint16_t            una_wake_pkt_control_flags; /* see NPICF_xxx above */
 	uint16_t            una_wake_pkt_proto; /* IPv4 or IPv6 protocol */
 
 	/* Followings fields added with NPI_HAS_PHYSICAL_LINK */
@@ -270,7 +281,8 @@ struct net_port_info_una_wake_event {
 	X(uint64_t, ifpu_incomplete_tcp_hdr_pkt, "packet%s with incomplete TCP header", "", "s") \
 	X(uint64_t, ifpu_incomplete_udp_hdr_pkt, "packet%s with incomplete UDP header", "", "s") \
 	X(uint64_t, ifpu_npi_not_added_no_wakeuuid, "port entr%s not added with wakeuuid not set", "y", "ies") \
-	X(uint64_t, ifpu_deferred_isakmp_natt_wake_pkt, "deferred matching of ISAKMP NAT traversal wake packet%s", "", "s")
+	X(uint64_t, ifpu_deferred_isakmp_natt_wake_pkt, "deferred matching of ISAKMP NAT traversal wake packet%s", "", "s") \
+	X(uint64_t, ifpu_spurious_wake_event, "spurious wake packet event%s", "", "s")
 
 struct if_ports_used_stats {
 #define X(_type, _field, ...) _type _field;
@@ -279,6 +291,8 @@ struct if_ports_used_stats {
 };
 
 #ifdef XNU_KERNEL_PRIVATE
+
+extern int if_ports_used_verbose;
 
 void if_ports_used_init(void);
 

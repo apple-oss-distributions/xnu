@@ -139,9 +139,9 @@ class IONVRAMV3Handler;
 // RST = Reset, Obliterate
 // RD  = Read
 // DEL = Delete
-#define ENT_MOD_RST     ((1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete) | (1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
-#define ENT_MOD_RD      ((1 << kIONVRAMOperationRead) | (1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete))
-#define ENT_MOD         ((1 << kIONVRAMOperationWrite) | (1 << kIONVRAMOperationDelete))
+#define ENT_MOD_RST     ((1 << kIONVRAMOperationWrite)      | (1 << kIONVRAMOperationDelete)  | (1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
+#define ENT_MOD_RD      ((1 << kIONVRAMOperationRead)       | (1 << kIONVRAMOperationWrite)   | (1 << kIONVRAMOperationDelete))
+#define ENT_MOD         ((1 << kIONVRAMOperationWrite)      | (1 << kIONVRAMOperationDelete))
 #define ENT_RST         ((1 << kIONVRAMOperationObliterate) | (1 << kIONVRAMOperationReset))
 #define ENT_RD          ((1 << kIONVRAMOperationRead))
 #define ENT_DEL         ((1 << kIONVRAMOperationDelete))
@@ -162,14 +162,25 @@ UUID_DEFINE(gAppleSystemVariableGuid, 0x40, 0xA0, 0xDD, 0xD2, 0x77, 0xF8, 0x43, 
 // 7C436110-AB2A-4BBB-A880-FE41995C9F82
 UUID_DEFINE(gAppleNVRAMGuid, 0x7C, 0x43, 0x61, 0x10, 0xAB, 0x2A, 0x4B, 0xBB, 0xA8, 0x80, 0xFE, 0x41, 0x99, 0x5C, 0x9F, 0x82);
 
+// Wifi NVRAM namespace
+// 36C28AB5-6566-4C50-9EBD-CBB920F83843
+UUID_DEFINE(gAppleWifiGuid, 0x36, 0xC2, 0x8A, 0xB5, 0x65, 0x66, 0x4C, 0x50, 0x9E, 0xBD, 0xCB, 0xB9, 0x20, 0xF8, 0x38, 0x43);
+
 // Prefix for kernel-only variables
 #define KERNEL_ONLY_VAR_NAME_PREFIX "krn."
 
 static TUNABLE(bool, gNVRAMLogging, "nvram-log", false);
 static bool gInternalBuild = false;
 
+// IONVRAMSystemVariableListInternal:
+// Used for internal builds only
+// "force-lock-bits" used by fwam over ssh nvram to device so they are unable to use entitlements
+#define IONVRAMSystemVariableListInternal IONVRAMSystemVariableList, \
+	                                      "force-lock-bits"
+
 // allowlist variables from macboot that need to be set/get from system region if present
 static const char * const gNVRAMSystemList[] = { IONVRAMSystemVariableList, nullptr };
+static const char * const gNVRAMSystemListInternal[] = { IONVRAMSystemVariableListInternal, nullptr };
 
 typedef struct {
 	const char *name;
@@ -247,6 +258,7 @@ union VariablePermission {
 		uint64_t NeverAllowedToDelete :1;
 		uint64_t SystemReadHidden     :1;
 		uint64_t FullAccess           :1;
+		uint64_t InternalOnly         :1;
 		uint64_t Reserved:57;
 	} Bits;
 	uint64_t Uint64;
@@ -296,6 +308,7 @@ VariablePermissionEntry gVariablePermissions[] = {
 	{"testNeverDel", .p.Bits.NeverAllowedToDelete = 1},
 	{"testUserWrite", .p.Bits.UserWrite = 1},
 	{"testRootReq", .p.Bits.RootRequired = 1},
+	{"reclaim-int", .p.Bits.InternalOnly = 1},
 	{nullptr, {.Bits.FullAccess = 1}} // Default access
 };
 
@@ -314,6 +327,12 @@ VariableEntitlementEntry gVariableEntitlements[] = {
 	{ENT_MOD, &gAppleSystemVariableGuid, "BluetoothUHEDevices", "com.apple.private.iokit.nvram-bluetooth"},
 	{ENT_MOD, &gAppleNVRAMGuid, "bluetoothExternalDongleFailed", "com.apple.private.iokit.nvram-bluetooth"},
 	{ENT_MOD, &gAppleNVRAMGuid, "bluetoothInternalControllerInfo", "com.apple.private.iokit.nvram-bluetooth"},
+	{ENT_RD, &gAppleSystemVariableGuid, "current-network", "com.apple.private.security.nvram.wifi-psks"},
+	{ENT_RD, &gAppleWifiGuid, "current-network", "com.apple.private.security.nvram.wifi-psks"},
+	{ENT_RD, &gAppleSystemVariableGuid, "preferred-networks", "com.apple.private.security.nvram.wifi-psks"},
+	{ENT_RD, &gAppleWifiGuid, "preferred-networks", "com.apple.private.security.nvram.wifi-psks"},
+	{ENT_RD, &gAppleSystemVariableGuid, "preferred-count", "com.apple.private.security.nvram.wifi-psks"},
+	{ENT_RD, &gAppleWifiGuid, "preferred-count", "com.apple.private.security.nvram.wifi-psks"},
 	// Variables used for testing entitlement
 	{ENT_MOD_RST, &gAppleNVRAMGuid, "testEntModRst", "com.apple.private.iokit.testEntModRst"},
 	{ENT_MOD_RST, &gAppleSystemVariableGuid, "testEntModRstSys", "com.apple.private.iokit.testEntModRst"},
@@ -378,9 +397,10 @@ static bool
 variableInAllowList(const char *varName)
 {
 	unsigned int i = 0;
+	const char * const *list = gInternalBuild ? gNVRAMSystemListInternal : gNVRAMSystemList;
 
-	while (gNVRAMSystemList[i] != nullptr) {
-		if (strcmp(varName, gNVRAMSystemList[i]) == 0) {
+	while (list[i] != nullptr) {
+		if (strcmp(varName, list[i]) == 0) {
 			return true;
 		}
 		i++;
@@ -584,6 +604,11 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 		goto exit;
 	}
 
+	if (perm.Bits.InternalOnly && !gInternalBuild) {
+		DEBUG_INFO("InternalOnly access for %s, gInternalBuild=%d\n", varName, gInternalBuild);
+		goto exit;
+	}
+
 	allowList              = variableInAllowList(varName);
 	systemGuid             = uuid_compare(varGuid, gAppleSystemVariableGuid) == 0;
 	admin                  = IOUserClient::clientHasPrivilege(current_task(), kIONVRAMPrivilege) == kIOReturnSuccess;
@@ -658,8 +683,8 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 	}
 
 exit:
-	DEBUG_INFO("Permission for %s of %s %s: kern=%d, adm=%d, wE=%d, rE=%d, sG=%d, sEd=%d, sIEd=%d, sRHA=%d, UW=%d, vE=%d\n", getNVRAMOpString(op), varName, ok ? "granted" : "denied",
-	    kernel, admin, writeEntitled, readEntitled, systemGuid, systemEntitled, systemInternalEntitled, systemReadHiddenAllow, perm.Bits.UserWrite, varEntitled);
+	DEBUG_INFO("Permission for %s of %s %s: I=%d kern=%d, adm=%d, wE=%d, rE=%d, sG=%d, sEd=%d, sIEd=%d, sRHA=%d, UW=%d, vE=%d\n", getNVRAMOpString(op), varName, ok ? "granted" : "denied",
+	    gInternalBuild, kernel, admin, writeEntitled, readEntitled, systemGuid, systemEntitled, systemInternalEntitled, systemReadHiddenAllow, perm.Bits.UserWrite, varEntitled);
 
 	return ok;
 }
@@ -1165,7 +1190,7 @@ public:
 	virtual IOReturn unserializeVariables(void) = 0;
 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) = 0;
 	virtual bool     setController(IONVRAMController *_nvramController) = 0;
-	virtual bool     sync(void) = 0;
+	virtual IOReturn sync(void) = 0;
 	virtual IOReturn flush(const uuid_t guid, IONVRAMOperation op) = 0;
 	virtual void     reload(void) = 0;
 	virtual uint32_t getGeneration(void) const = 0;
@@ -1477,14 +1502,16 @@ IODTNVRAM::safeToSync(void)
 	return false;
 }
 
-void
+IOReturn
 IODTNVRAM::syncInternal(bool rateLimit)
 {
+	IOReturn ret = kIOReturnSuccess;
+
 	DEBUG_INFO("rateLimit=%d\n", rateLimit);
 
 	if (!SAFE_TO_LOCK()) {
 		DEBUG_INFO("cannot lock\n");
-		return;
+		goto exit;
 	}
 
 	// Rate limit requests to sync. Drivers that need this rate limiting will
@@ -1492,7 +1519,7 @@ IODTNVRAM::syncInternal(bool rateLimit)
 	if (rateLimit) {
 		if (safeToSync() == false) {
 			DEBUG_INFO("safeToSync()=false\n");
-			return;
+			goto exit;
 		}
 	}
 
@@ -1502,21 +1529,26 @@ IODTNVRAM::syncInternal(bool rateLimit)
 	NVRAMREADLOCK();
 	CONTROLLERLOCK();
 
-	_format->sync();
+	ret = _format->sync();
 
 	CONTROLLERUNLOCK();
 	NVRAMUNLOCK();
+
+	record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_NVRAM, "sync", "completed with ret=%08x", ret);
 
 	if (_diags) {
 		OSSharedPtr<OSNumber> generation = OSNumber::withNumber(_format->getGeneration(), 32);
 		_diags->setProperty(kCurrentGenerationCountKey, generation.get());
 	}
+
+exit:
+	return ret;
 }
 
-void
+IOReturn
 IODTNVRAM::sync(void)
 {
-	syncInternal(false);
+	return syncInternal(false);
 }
 
 void
@@ -1749,16 +1781,17 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 	OSString              *tmpString = nullptr;
 	OSSharedPtr<OSObject> propObject;
 	OSSharedPtr<OSObject> sharedObject(anObject, OSRetain);
-	bool                  deletePropertyKey, syncNowPropertyKey, forceSyncNowPropertyKey;
+	bool                  deletePropertyKey, syncNowPropertyKey, forceSyncNowPropertyKey, deletePropertyKeyWRet;
 	bool                  ok;
 	size_t                propDataSize = 0;
 	uuid_t                newGuid;
 
 	deletePropertyKey = strncmp(name, kIONVRAMDeletePropertyKey, sizeof(kIONVRAMDeletePropertyKey)) == 0;
+	deletePropertyKeyWRet = strncmp(name, kIONVRAMDeletePropertyKeyWRet, sizeof(kIONVRAMDeletePropertyKeyWRet)) == 0;
 	syncNowPropertyKey = strncmp(name, kIONVRAMSyncNowPropertyKey, sizeof(kIONVRAMSyncNowPropertyKey)) == 0;
 	forceSyncNowPropertyKey = strncmp(name, kIONVRAMForceSyncNowPropertyKey, sizeof(kIONVRAMForceSyncNowPropertyKey)) == 0;
 
-	if (deletePropertyKey) {
+	if (deletePropertyKey || deletePropertyKeyWRet) {
 		tmpString = OSDynamicCast(OSString, anObject);
 		if (tmpString != nullptr) {
 			const char *variableName;
@@ -1782,10 +1815,12 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 				DEBUG_INFO("Removing with value provided GUID\n");
 				removeRet = removePropertyWithGUIDAndName(valueVarGuid, variableName);
 			}
-
-			DEBUG_INFO("kIONVRAMDeletePropertyKey found, removeRet=%#08x\n", removeRet);
+			if (deletePropertyKeyWRet) {
+				ret = removeRet;
+			}
+			DEBUG_INFO("%s found, removeRet=%#08x\n", deletePropertyKeyWRet ? "deletePropertyKeyWRet" : "deletePropertyKey", removeRet);
 		} else {
-			DEBUG_INFO("kIONVRAMDeletePropertyKey value needs to be an OSString\n");
+			DEBUG_INFO("%s value needs to be an OSString\n", deletePropertyKeyWRet ? "deletePropertyKeyWRet" : "deletePropertyKey");
 			ret = kIOReturnError;
 		}
 		goto exit;
@@ -1794,7 +1829,7 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObj
 		DEBUG_INFO("NVRAM sync key %s found\n", name);
 		if (tmpString != nullptr) {
 			// We still want to throttle NVRAM commit rate for SyncNow. ForceSyncNow is provided as a really big hammer.
-			syncInternal(syncNowPropertyKey);
+			ret = syncInternal(syncNowPropertyKey);
 		} else {
 			DEBUG_INFO("%s value needs to be an OSString\n", name);
 			ret = kIOReturnError;

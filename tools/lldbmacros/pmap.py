@@ -1,8 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import hex
-from builtins import range
-
 from xnu import *
 import xnudefines
 from kdp import *
@@ -43,7 +38,7 @@ def ReadPhys(cmd_args = None):
         nbits: 8,16,32,64
         address: 1234 or 0x1234
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print("Insufficient arguments.", ReadPhys.__doc__)
         return False
     else:
@@ -249,7 +244,7 @@ def WritePhys(cmd_args=None):
         value: int value to be written
         ex. (lldb)writephys 16 0x12345abcd 0x25
     """
-    if cmd_args == None or len(cmd_args) < 3:
+    if cmd_args is None or len(cmd_args) < 3:
         print("Invalid arguments.", WritePhys.__doc__)
     else:
         nbits = ArgumentStringToInt(cmd_args[0])
@@ -711,7 +706,7 @@ def PmapWalkHelper(cmd_args=None):
         Syntax: (lldb) pmap_walk <pmap> <virtual_address> [-v] [-e]
             Multiple -v's can be specified for increased verbosity
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         raise ArgumentError("Too few arguments to pmap_walk.")
 
     pmap = kern.GetValueAsType(cmd_args[0], 'pmap_t')
@@ -738,7 +733,7 @@ def TTEPWalkPHelper(cmd_args=None):
         Syntax: (lldb) ttep_walk <root_ttep> <virtual_address> [4k|16k|16k_s2] [-v] [-e]
         Multiple -v's can be specified for increased verbosity
         """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         raise ArgumentError("Too few arguments to ttep_walk.")
 
     if not kern.arch.startswith('arm64'):
@@ -758,7 +753,7 @@ def DecodeTTE(cmd_args=None):
     """ Decode the bits in the TTE/PTE value specified <tte_val> for translation level <level> and stage [s1|s2]
         Syntax: (lldb) decode_tte <tte_val> <level> [s1|s2]
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         raise ArgumentError("Too few arguments to decode_tte.")
     if len(cmd_args) > 2 and cmd_args[2] not in ["s1", "s2"]:
         raise ArgumentError("{} is not a valid stage of translation.".format(cmd_args[2]))
@@ -927,6 +922,13 @@ def PVWalkARM(pai, verbose_level = vHUMAN):
                 pvh_flags.append("LOCKDOWN_CS")
             if pvh_raw & (1 << 56):
                 pvh_flags.append("LOCKDOWN_RO")
+            if pvh_raw & (1 << 55):
+                pvh_flags.append("RETIRED")
+            if pvh_raw & (1 << 54):
+                if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
+                    pvh_flags.append("SECURE_FLUSH_NEEDED")
+                else:
+                    pvh_flags.append("SLEEPABLE_LOCK")
             if kern.arch.startswith('arm64') and pvh_raw & (1 << 61):
                 pvh_flags.append("LOCK")
 
@@ -987,7 +989,7 @@ def PVWalk(cmd_args=None):
         as well as dump the page table descriptor (PTD) struct if the entry is a
         PTD.
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to pv_walk.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("pv_walk does not support {0}".format(kern.arch))
@@ -1006,7 +1008,7 @@ def KVToPhys(cmd_args=None):
         Assumes the virtual address falls within the kernel static region.
         Syntax: (lldb) kvtophys <kernel virtual address>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to kvtophys.")
     if kern.arch.startswith('arm'):
         print("{:#x}".format(KVToPhysARM(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
@@ -1019,7 +1021,7 @@ def PhysToKV(cmd_args=None):
         Assumes the physical address corresponds to managed DRAM.
         Syntax: (lldb) phystokv <physical address>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to phystokv.")
     print("{:#x}".format(kern.PhysToKernelVirt(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))))
 
@@ -1030,6 +1032,11 @@ def KVToPhysARM(addr):
             if (addr >= int(unsigned(ptov_table[i].va))) and (addr < (int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].len)))):
                 return (addr - int(unsigned(ptov_table[i].va)) + int(unsigned(ptov_table[i].pa)))
     else:
+        papt_table = kern.globals.libsptm_papt_ranges
+        page_size = kern.globals.page_size
+        for i in range(0, kern.globals.libsptm_n_papt_ranges):
+            if (addr >= int(unsigned(papt_table[i].papt_start))) and (addr < (int(unsigned(papt_table[i].papt_start)) + int(unsigned(papt_table[i].num_mappings) * page_size))):
+                return (addr - int(unsigned(papt_table[i].papt_start)) + int(unsigned(papt_table[i].paddr_start)))
         raise ValueError("VA {:#x} not found in physical region lookup table".format(addr))
     return (addr - unsigned(kern.globals.gVirtBase) + unsigned(kern.globals.gPhysBase))
 
@@ -1047,6 +1054,34 @@ def GetPtDesc(paddr):
     ptd = kern.GetValueFromAddress(pvh & ~0x3, 'pt_desc_t *')
     return ptd
 
+def PhysToFrameTableEntry(paddr):
+    if paddr >= int(unsigned(kern.globals.sptm_first_phys)) or paddr < int(unsigned(kern.globals.sptm_last_phys)):
+        return kern.globals.frame_table[(paddr - int(unsigned(kern.globals.sptm_first_phys))) // kern.globals.page_size]
+    page_idx = paddr / kern.globals.page_size
+    for i in range(0, kern.globals.sptm_n_io_ranges):
+        base = kern.globals.io_frame_table[i].io_range.phys_page_idx
+        end = base + kern.globals.io_frame_table[i].io_range.num_pages
+        if page_idx >= base and page_idx < end:
+            return kern.globals.io_frame_table[i]
+    return kern.globals.xnu_io_fte
+
+@lldb_command('phystofte')
+def PhysToFTE(cmd_args=None):
+    """ Translate a physical address to the corresponding SPTM frame table entry pointer
+        Syntax: (lldb) phystofte <physical address>
+    """
+    if cmd_args is None or len(cmd_args) < 1:
+        raise ArgumentError("Too few arguments to phystofte.")
+
+    fte = PhysToFrameTableEntry(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))
+    print(repr(fte))
+
+XNU_IOMMU = 22
+XNU_PAGE_TABLE = 18
+XNU_PAGE_TABLE_SHARED = 19
+XNU_PAGE_TABLE_ROZONE = 20
+XNU_PAGE_TABLE_COMMPAGE = 21
+SPTM_PAGE_TABLE = 9
 
 def ShowPTEARM(pte, page_size, level):
     """ Display vital information about an ARM page table entry
@@ -1089,6 +1124,21 @@ def ShowPTEARM(pte, page_size, level):
                 info_str = None
             return (int(unsigned(refcnt)), level, info_str)
         else:
+            fte = PhysToFrameTableEntry(paddr)
+            if fte.type == XNU_IOMMU:
+                if page_size is None:
+                    page_size = kern.globals.native_pt_attr.pta_page_size
+                info_str = "PTD iommu token: {:#x} (ID {:#x} TSD {:#x})".format(ptd.iommu, fte.iommu_page.iommu_id, fte.iommu_page.iommu_tsd)
+                return (int(unsigned(fte.iommu_page.iommu_refcnt._value)), 0, info_str)
+            elif fte.type in [XNU_PAGE_TABLE, XNU_PAGE_TABLE_SHARED, XNU_PAGE_TABLE_ROZONE, XNU_PAGE_TABLE_COMMPAGE, SPTM_PAGE_TABLE]:
+                if page_size is None:
+                    if hasattr(ptd.pmap, 'pmap_pt_attr'):
+                        page_size = ptd.pmap.pmap_pt_attr.pta_page_size
+                    else:
+                        page_size = kern.globals.native_pt_attr.pta_page_size;
+                return (int(unsigned(fte.cpu_page_table.mapping_refcnt._value)), int(unsigned(fte.cpu_page_table.level)), None)
+            else:
+                raise ValueError("Unrecognized FTE type {:#x}".format(fte.type))
             raise ValueError("Unable to retrieve PTD refcnt")
     pte_paddr = KVToPhysARM(pte)
     ptd = GetPtDesc(pte_paddr)
@@ -1122,7 +1172,7 @@ def ShowPTE(cmd_args=None):
     """ Display vital information about the page table entry at VA <pte>
         Syntax: (lldb) showpte <pte_va> [level] [4k|16k|16k_s2]
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to showpte.")
 
     if kern.arch.startswith('arm64'):
@@ -1214,7 +1264,7 @@ def ShowAllMappings(cmd_args=None):
         Syntax: (lldb) showallmappings <physical_address> [<pmap>]
         WARNING: this macro can take a long time (up to 30min.) to complete!
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to showallmappings.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("showallmappings does not support {0}".format(kern.arch))
@@ -1343,7 +1393,7 @@ def PVCheck(cmd_args=None, cmd_options={}):
         Syntax: (lldb) pv_check <addr> [-p]
             -P        : Interpret <addr> as a physical address rather than a PTE
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to pv_check.")
     if kern.arch.startswith('arm64'):
         level = 3
@@ -1379,7 +1429,7 @@ def PmapsForLedger(cmd_args=None):
     """ Find and display all pmaps currently using <ledger>.
         Syntax: (lldb) pmapsforledger <ledger>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to pmapsforledger.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("pmapsforledger does not support {0}".format(kern.arch))
@@ -1450,7 +1500,7 @@ def PmapPaIndex(cmd_args=None):
         NOTE: This macro will throw an exception if the input isn't a valid PAI
               and is also not a kernel-managed physical address.
     """
-    if (cmd_args == None) or (len(cmd_args) < 1):
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to pmappaindex.")
 
     if not kern.arch.startswith('arm'):

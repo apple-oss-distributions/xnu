@@ -405,7 +405,7 @@ kern_return_t send_resource_violation(typeof(send_cpu_usage_violation),
  *
  *   @discussion
  *       send_resource_violation_with_fatal_port() calls the corresponding MIG routine
- *       over the host special RESOURCE_NOTIFY port. If port is set, then deallocating
+ *       over the host special RESOURCE_NOTIFY port. If fatal_port is set, then deallocating
  *       that port right, will kill the process.
  *
  */

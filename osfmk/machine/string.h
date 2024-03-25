@@ -30,15 +30,6 @@
 #define _MACHINE_STRING_H_
 
 #include <sys/cdefs.h>
-#include <types.h>
-
-#if defined (__i386__) || defined (__x86_64__)
-#include "i386/string.h"
-#elif defined (__arm__) || defined (__arm64__)
-#include "arm/string.h"
-#else
-#error architecture not supported
-#endif
 
 /*
  * Below are prototypes that call into a precise symbol,
@@ -50,6 +41,8 @@
  */
 extern int bcmp_impl(const void *, const void *, size_t) asm("_bcmp");
 extern int memcmp_impl(const void *, const void *, size_t) asm("_memcmp");
+
+extern unsigned long memcmp_zero_ptr_aligned_impl(const void *addr, size_t size) asm("_memcmp_zero_ptr_aligned");
 
 extern void *bzero_impl(void *, const void *, size_t) asm("_bzero");
 extern void *memset_impl(void *, int c, size_t) asm("_memset");
@@ -64,17 +57,25 @@ extern void bcopy_impl(const void *, void *, size_t) asm("_bcopy");
 extern size_t strlen_impl(const char *) asm("_strlen");
 extern size_t strnlen_impl(const char *s, size_t) asm("_strnlen");
 
+extern int strprefix_impl(const char *, const char *) asm("_strprefix");
+
 extern int strcmp_impl(const char *, const char *) asm("_strcmp");
 extern int strncmp_impl(const char *, const char *, size_t) asm("_strncmp");
+extern int strlcmp_impl(const char *, const char *, size_t) asm("_strlcmp");
+extern int strbufcmp_impl(const char *, size_t, const char *, size_t) asm("_strbufcmp");
 extern int strcasecmp_impl(const char *, const char *) asm("_strcasecmp");
 extern int strncasecmp_impl(const char *, const char *, size_t) asm("_strncasecmp");
+extern int strlcasecmp_impl(const char *, const char *, size_t) asm("_strlcasecmp");
+extern int strbufcasecmp_impl(const char *, size_t, const char *, size_t) asm("_strbufcasecmp");
 
 extern char *strchr_impl(const char *, int) asm("_strchr");
 extern char *strrchr_impl(const char *, int) asm("_strrchr");
 extern char *strnstr_impl(const char *s, const char *, size_t) asm("_strnstr");
 
 extern size_t strlcat_impl(char *, const char *, size_t) asm("_strlcat");
+extern const char *strbufcat_impl(char *, size_t, const char *, size_t) asm("_strbufcat");
 extern size_t strlcpy_impl(char *, const char *, size_t) asm("_strlcpy");
+extern const char *strbufcpy_impl(char *, size_t, const char *, size_t) asm("_strbufcpy");
 
 /*
  * Deprecated functions

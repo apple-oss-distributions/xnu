@@ -125,7 +125,7 @@ struct fileproc {
 	struct fileglob *XNU_PTRAUTH_SIGNED_PTR("fileproc.fp_glob") fp_glob;
 	union {
 		struct select_set     *fp_wset;   /* fp_guard_attrs == 0 */
-		struct fileproc_guard *fp_guard;  /* fp_guard_attrs != 0 */
+		struct fileproc_guard *XNU_PTRAUTH_SIGNED_PTR("fileproc.fp_guard") fp_guard;  /* fp_guard_attrs != 0 */
 	};
 };
 __CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct fileproc, fileproc);
@@ -481,14 +481,11 @@ fp_get_noref_locked_with_iocount(proc_t p, int fd);
  *
  * The @c proc_fdlock is unlocked upon return.
  *
- * @param p
- * The process in which fd lives.
- *
- * @param fd
- * The file descriptor index being closed.
- *
- * @param fp
- * The fileproc entry associated with @c fd.
+ * @param p             The process in which fd lives.
+ * @param p_cred        The proc's cred for this operation.
+ * @param fd            The file descriptor index being closed.
+ * @param fp            The fileproc entry associated with @c fd.
+ * @param flags         FD_DUP2RESV or 0.
  *
  * @returns
  * 0            Success
@@ -496,7 +493,7 @@ fp_get_noref_locked_with_iocount(proc_t p, int fd);
  * ???          Any error that @c fileops::fo_close can return.
  */
 extern int
-fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags);
+fp_close_and_unlock(proc_t p, kauth_cred_t p_cred, int fd, struct fileproc *fp, int flags);
 
 /* wrappers for fp->f_ops->fo_... */
 int fo_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx);
@@ -548,8 +545,9 @@ fileproc_vflags_t fileproc_get_vflags(struct fileproc *fp);
 #pragma mark internal version of syscalls
 
 int fileport_makefd(proc_t p, ipc_port_t port, fileproc_flags_t fp_flags, int *fd);
-int dup2(proc_t p, int from, int to, int *fd);
-int close_nocancel(proc_t p, int fd);
+int dup2(proc_t p, kauth_cred_t p_cred, int from, int to, int *fd);
+int close_nocancel(proc_t p, kauth_cred_t p_cred, int fd);
+int fchdir(proc_t p, vfs_context_t ctx, int fd, bool per_thread);
 
 #pragma GCC visibility pop
 

@@ -119,6 +119,7 @@ fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 	uuid_copy(req.nfr_euuid, cparams->euuid);
 	req.nfr_epid = cparams->epid;
 	req.nfr_policy_id = (uint32_t)cparams->policy_id;
+	req.nfr_skip_policy_id = (uint32_t)cparams->skip_policy_id;
 
 	if (fsw_netagent_tc2sc(cparams->traffic_class,
 	    &req.nfr_svc_class) != 0) {

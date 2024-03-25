@@ -2752,6 +2752,7 @@ ipc_right_copyin_two(
 	ipc_port_t                *sorightp,
 	ipc_port_t                *releasep)
 {
+	ipc_port_t port;
 	kern_return_t kr;
 	int assertcnt = 0;
 
@@ -2869,9 +2870,10 @@ ipc_right_copyin_two(
 		 *	It means we can't use ipc_port_copy_send() which
 		 *	may fail if the port died.
 		 */
-		io_lock(*objectp);
-		ipc_port_copy_send_any_locked(ip_object_to_port(*objectp));
-		io_unlock(*objectp);
+		port = ip_object_to_port(*objectp);
+		ip_mq_lock(port);
+		ipc_port_copy_send_any_locked(port);
+		ip_mq_unlock(port);
 	}
 
 	return KERN_SUCCESS;

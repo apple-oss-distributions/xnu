@@ -15,8 +15,6 @@
         4.  Create a function that can be called either through the zonetriage macro ZoneTriage() or using its own macro. 
             This function should handle all lldb commands you want to run for this type of zone panic.
 """
-from __future__ import absolute_import, print_function
-
 from xnu import *
 import sys, shlex
 from utils import *

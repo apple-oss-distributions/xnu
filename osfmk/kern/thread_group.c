@@ -770,7 +770,7 @@ thread_set_resolved_thread_group(thread_t t, struct thread_group *old_tg,
 
 	/* Thread is either running already or is runnable but not on a runqueue */
 	assert((t->state & (TH_RUN | TH_IDLE)) == TH_RUN);
-	assert(t->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(t);
 
 	struct thread_group *home_tg = thread_group_get_home_group(t);
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_SET),
@@ -851,7 +851,7 @@ void
 thread_resolve_and_enforce_thread_group_hierarchy_if_needed(thread_t t)
 {
 	assert(t != current_thread());
-	assert(t->runq == NULL);
+	thread_assert_runq_null(t);
 
 	if (thread_get_reevaluate_tg_hierarchy_locked(t)) {
 		struct thread_group *resolved_tg = NULL;
@@ -942,36 +942,21 @@ thread_set_preadopt_thread_group(thread_t t, struct thread_group *tg)
 		 * We're modifying the thread group of another thread, we need to take
 		 * action according to the state of the other thread.
 		 *
-		 * If the thread is runnable and not yet running, try removing it from
-		 * the runq, modify it's TG and then reinsert it for reevaluation. If it
-		 * isn't runnable (already running or started running concurrently, or
-		 * if it is waiting), then mark a bit having the thread reevaluate its
-		 * own hierarchy the next time it is being inserted into a runq
+		 * Try removing the thread from its runq, modify its TG and then
+		 * reinsert it for reevaluation. If the thread isn't runnable (already
+		 * running, started running concurrently, or in a waiting state), then
+		 * mark a bit that will cause the thread to reevaluate its own
+		 * hierarchy the next time it is being inserted into a runq
 		 */
-		if ((t->state & TH_RUN) && (t->runq != PROCESSOR_NULL)) {
-			/* Thread is runnable but not running */
+		if (thread_run_queue_remove(t)) {
+			/* Thread is runnable and we successfully removed it from the runq */
+			thread_set_resolved_thread_group(t, old_tg, resolved_tg, false);
 
-			bool removed_from_runq = thread_run_queue_remove(t);
-			if (removed_from_runq) {
-				thread_set_resolved_thread_group(t, old_tg, resolved_tg, false);
+			KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_PREADOPT),
+			    thread_group_id(old_tg), thread_group_id(tg),
+			    (uintptr_t)thread_tid(t), thread_group_id(home_tg));
 
-				KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_PREADOPT),
-				    thread_group_id(old_tg), thread_group_id(tg),
-				    (uintptr_t)thread_tid(t), thread_group_id(home_tg));
-
-				thread_run_queue_reinsert(t, SCHED_TAILQ);
-			} else {
-				/*
-				 * We failed to remove it from the runq - it probably started
-				 * running, let the thread reevaluate the next time it gets
-				 * enqueued on a runq
-				 */
-				thread_set_reevaluate_tg_hierarchy_locked(t);
-
-				KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_THREAD_GROUP, MACH_THREAD_GROUP_PREADOPT_NEXTTIME),
-				    thread_group_id(old_tg), thread_group_id(tg),
-				    (uintptr_t)thread_tid(t), thread_group_id(home_tg));
-			}
+			thread_run_queue_reinsert(t, SCHED_TAILQ);
 		} else {
 			/*
 			 * The thread is not runnable or it is running already - let the
@@ -1113,7 +1098,7 @@ thread_group_set_bank(thread_t t, struct thread_group *tg)
 void
 thread_set_autojoin_thread_group_locked(thread_t t, struct thread_group *tg)
 {
-	assert(t->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(t);
 
 	assert((t->options & TH_OPT_IPC_TG_BLOCKED) == 0);
 	t->auto_join_thread_group = tg;

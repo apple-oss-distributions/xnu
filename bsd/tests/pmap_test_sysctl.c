@@ -36,6 +36,9 @@ extern kern_return_t test_pmap_iommu_disconnect(void);
 extern kern_return_t test_pmap_extended(void);
 extern void test_pmap_call_overhead(unsigned int);
 extern uint64_t test_pmap_page_protect_overhead(unsigned int, unsigned int);
+#if CONFIG_SPTM
+extern kern_return_t test_pmap_huge_pv_list(unsigned int, unsigned int);
+#endif
 
 static int
 sysctl_test_pmap_enter_disconnect(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -172,3 +175,25 @@ sysctl_test_pmap_page_protect_overhead(__unused struct sysctl_oid *oidp, __unuse
 
 SYSCTL_PROC(_kern, OID_AUTO, pmap_page_protect_overhead_test,
     CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_test_pmap_page_protect_overhead, "-", "");
+
+#if CONFIG_SPTM
+
+static int
+sysctl_test_pmap_huge_pv_list(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	struct {
+		unsigned int num_loops;
+		unsigned int num_mappings;
+	} hugepv_in;
+
+	int error = SYSCTL_IN(req, &hugepv_in, sizeof(hugepv_in));
+	if (error) {
+		return error;
+	}
+	return test_pmap_huge_pv_list(hugepv_in.num_loops, hugepv_in.num_mappings);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_huge_pv_list_test,
+    CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_test_pmap_huge_pv_list, "-", "");
+
+#endif

@@ -11,6 +11,7 @@
 #include <mach/shared_region.h>
 #include <mach/mach.h>
 #include <os/reason_private.h>
+#include <TargetConditionals.h>
 
 #ifdef T_NAMESPACE
 #undef T_NAMESPACE
@@ -25,7 +26,8 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"),
-	T_META_CHECK_LEAKS(false)
+	T_META_CHECK_LEAKS(false),
+	T_META_OWNER("jarrad")
 	);
 
 #define MEM_SIZE_MB                     10
@@ -61,7 +63,7 @@ static const char *exit_codes_str[] = {
 };
 
 static int
-get_vmpage_size()
+get_vmpage_size(void)
 {
 	int vmpage_size;
 	size_t size = sizeof(vmpage_size);
@@ -322,20 +324,6 @@ freeze_helper_process(void)
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(kill(child_pid, SIGUSR1), "failed to send SIGUSR1 to child process");
 }
 
-static void
-skip_if_freezer_is_disabled()
-{
-	int freeze_enabled;
-	size_t length = sizeof(freeze_enabled);
-
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("vm.freeze_enabled", &freeze_enabled, &length, NULL, 0),
-	    "failed to query vm.freeze_enabled");
-	if (!freeze_enabled) {
-		/* If freezer is disabled, skip the test. This can happen due to disk space shortage. */
-		T_SKIP("Freeze has been disabled. Skipping test.");
-	}
-}
-
 void
 run_freezer_test(int num_pages)
 {
@@ -345,8 +333,6 @@ run_freezer_test(int num_pages)
 	char testpath[PATH_MAX];
 	uint32_t testpath_buf_size;
 	dispatch_source_t ds_freeze, ds_proc;
-
-	skip_if_freezer_is_disabled();
 
 	signal(SIGUSR1, SIG_IGN);
 	ds_freeze = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
@@ -500,14 +486,41 @@ T_HELPER_DECL(allocate_pages,
 	allocate_pages(num_pages);
 }
 
-T_DECL(freeze, "VM freezer test", T_META_ASROOT(true)) {
+T_DECL(memorystatus_freeze_default_state, "Test that the freezer is enabled or disabled as expected by default.", T_META_ASROOT(true)) {
+
+#if TARGET_OS_IOS || TARGET_OS_WATCH
+	bool expected_freeze_enabled = true;
+#else
+	bool expected_freeze_enabled = false;
+#endif
+
+
+	int freeze_enabled;
+	size_t length = sizeof(freeze_enabled);
+	int ret = sysctlbyname("vm.freeze_enabled", &freeze_enabled, &length, NULL, 0);
+
+	if (ret != 0) {
+		if (expected_freeze_enabled) {
+			T_ASSERT_FAIL("Expected freezer enabled but did not find sysctl vm.freeze_enabled");
+		} else {
+			T_PASS("Did not expect freezer to be enabled and did not find sysctl vm.freeze_enabled");
+		}
+	} else {
+		T_ASSERT_EQ(freeze_enabled, expected_freeze_enabled, "Expected freezer sysctl status %d, got %d", expected_freeze_enabled, freeze_enabled);
+	}
+}
+
+T_DECL(freeze, "VM freezer test",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ASROOT(true)) {
 	run_freezer_test(
 		(MEM_SIZE_MB << 20) / get_vmpage_size());
 }
 
 static int old_freeze_pages_max = 0;
 static void
-reset_freeze_pages_max()
+reset_freeze_pages_max(void)
 {
 	if (old_freeze_pages_max != 0) {
 		sysctl_freeze_pages_max(&old_freeze_pages_max);
@@ -531,13 +544,19 @@ sysctl_freeze_pages_max(int* new_value)
 	return old_freeze_pages_max;
 }
 
-T_DECL(freeze_over_max_threshold, "Max Freeze Threshold is Enforced", T_META_ASROOT(true)) {
+T_DECL(freeze_over_max_threshold, "Max Freeze Threshold is Enforced",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ASROOT(true)) {
 	int freeze_pages_max = FREEZE_PAGES_MAX;
 	sysctl_freeze_pages_max(&freeze_pages_max);
 	run_freezer_test(FREEZE_PAGES_MAX * 2);
 }
 
-T_HELPER_DECL(frozen_background, "Frozen background process", T_META_ASROOT(true)) {
+T_HELPER_DECL(frozen_background, "Frozen background process",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ASROOT(true)) {
 	kern_return_t kern_ret;
 	/* Set the process to freezable */
 	kern_ret = memorystatus_control(MEMORYSTATUS_CMD_SET_PROCESS_IS_FREEZABLE, getpid(), 1, NULL, 0);
@@ -577,14 +596,14 @@ freeze_process(pid_t pid)
 static uint32_t max_frozen_demotions_daily_default;
 
 static void
-reset_max_frozen_demotions_daily()
+reset_max_frozen_demotions_daily(void)
 {
 	int sysctl_ret = sysctlbyname("kern.memorystatus_max_freeze_demotions_daily", NULL, NULL, &max_frozen_demotions_daily_default, sizeof(max_frozen_demotions_daily_default));
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctl_ret, "set kern.memorystatus_max_freeze_demotions_daily to default");
 }
 
 static void
-allow_unlimited_demotions()
+allow_unlimited_demotions(void)
 {
 	size_t size = sizeof(max_frozen_demotions_daily_default);
 	uint32_t new_value = UINT32_MAX;
@@ -594,7 +613,7 @@ allow_unlimited_demotions()
 }
 
 static void
-memorystatus_assertion_test_demote_frozen()
+memorystatus_assertion_test_demote_frozen(void)
 {
 	/*
 	 * Test that if we assert a priority on a process, freeze it, and then demote all frozen processes, it does not get demoted below the asserted priority.
@@ -653,7 +672,10 @@ memorystatus_assertion_test_demote_frozen()
 	dispatch_main();
 }
 
-T_DECL(assertion_test_demote_frozen, "demoted frozen process goes to asserted priority.", T_META_ASROOT(true)) {
+T_DECL(assertion_test_demote_frozen, "demoted frozen process goes to asserted priority.",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_ASROOT(true)) {
 	memorystatus_assertion_test_demote_frozen();
 }
 
@@ -691,6 +713,8 @@ reset_budget_multiplier(void)
 }
 
 T_DECL(budget_replenishment, "budget replenishes properly",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_REQUIRES_SYSCTL_NE("kern.memorystatus_freeze_daily_mb_max", UINT32_MAX)) {
 	size_t length;
 	int ret;
@@ -845,7 +869,7 @@ resume_and_kill_proc(pid_t pid)
 }
 
 static void
-resume_and_kill_child()
+resume_and_kill_child(void)
 {
 	/* Used for test cleanup. proc might not be suspended so pid_resume might fail. */
 	pid_resume(child_pid);
@@ -896,8 +920,9 @@ test_after_background_helper_launches(bool exit_with_child, const char* variant,
 	dispatch_activate(ds_signal);
 }
 
-T_DECL(get_frozen_procs, "List processes in the freezer") {
-	skip_if_freezer_is_disabled();
+T_DECL(get_frozen_procs, "List processes in the freezer",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 
 	test_after_background_helper_launches(true, "frozen_background", ^{
 		proc_name_t name;
@@ -915,11 +940,12 @@ T_DECL(get_frozen_procs, "List processes in the freezer") {
 	dispatch_main();
 }
 
-T_DECL(frozen_to_swap_accounting, "jetsam snapshot has frozen_to_swap accounting") {
+T_DECL(frozen_to_swap_accounting, "jetsam snapshot has frozen_to_swap accounting",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 	static const size_t kSnapshotSleepDelay = 5;
 	static const size_t kFreezeToDiskMaxDelay = 60;
 
-	skip_if_freezer_is_disabled();
 
 	test_after_background_helper_launches(true, "frozen_background", ^{
 		memorystatus_jetsam_snapshot_t *snapshot = NULL;
@@ -951,7 +977,9 @@ T_DECL(frozen_to_swap_accounting, "jetsam snapshot has frozen_to_swap accounting
 	dispatch_main();
 }
 
-T_DECL(freezer_snapshot, "App kills are recorded in the freezer snapshot") {
+T_DECL(freezer_snapshot, "App kills are recorded in the freezer snapshot",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -975,7 +1003,9 @@ T_DECL(freezer_snapshot, "App kills are recorded in the freezer snapshot") {
 	dispatch_main();
 }
 
-T_DECL(freezer_snapshot_consume, "Freezer snapshot is consumed on read") {
+T_DECL(freezer_snapshot_consume, "Freezer snapshot is consumed on read",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1004,8 +1034,9 @@ T_DECL(freezer_snapshot_consume, "Freezer snapshot is consumed on read") {
 	dispatch_main();
 }
 
-T_DECL(freezer_snapshot_frozen_state, "Frozen state is recorded in freezer snapshot") {
-	skip_if_freezer_is_disabled();
+T_DECL(freezer_snapshot_frozen_state, "Frozen state is recorded in freezer snapshot",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1032,8 +1063,9 @@ T_DECL(freezer_snapshot_frozen_state, "Frozen state is recorded in freezer snaps
 	dispatch_main();
 }
 
-T_DECL(freezer_snapshot_thaw_state, "Thaw count is recorded in freezer snapshot") {
-	skip_if_freezer_is_disabled();
+T_DECL(freezer_snapshot_thaw_state, "Thaw count is recorded in freezer snapshot",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 	/* Take ownership of the snapshot to ensure we don't race with another process trying to consume them. */
 	set_testing_pid();
 
@@ -1115,8 +1147,9 @@ T_HELPER_DECL(check_frozen, "Check frozen state", T_META_ASROOT(true)) {
 	dispatch_main();
 }
 
-T_DECL(memorystatus_get_process_is_frozen, "MEMORYSTATUS_CMD_GET_PROCESS_IS_FROZEN returns correct state") {
-	skip_if_freezer_is_disabled();
+T_DECL(memorystatus_get_process_is_frozen, "MEMORYSTATUS_CMD_GET_PROCESS_IS_FROZEN returns correct state",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
 
 	test_after_background_helper_launches(true, "check_frozen", ^{
 		int ret;
@@ -1137,7 +1170,7 @@ T_DECL(memorystatus_get_process_is_frozen, "MEMORYSTATUS_CMD_GET_PROCESS_IS_FROZ
 static unsigned int freeze_pages_min_old;
 static int throttle_enabled_old;
 static void
-cleanup_memorystatus_freeze_top_process()
+cleanup_memorystatus_freeze_top_process(void)
 {
 	sysctlbyname("kern.memorystatus_freeze_pages_min", NULL, NULL, &freeze_pages_min_old, sizeof(freeze_pages_min_old));
 	sysctlbyname("kern.memorystatus_freeze_throttle_enabled", NULL, NULL, &throttle_enabled_old, sizeof(throttle_enabled_old));
@@ -1147,7 +1180,7 @@ cleanup_memorystatus_freeze_top_process()
  * Disables heuristics that could prevent us from freezing the child via memorystatus_freeze_top_process.
  */
 static void
-memorystatus_freeze_top_process_setup()
+memorystatus_freeze_top_process_setup(void)
 {
 	size_t freeze_pages_min_size = sizeof(freeze_pages_min_old);
 	unsigned int freeze_pages_min_new = 0;
@@ -1202,9 +1235,10 @@ verify_proc_not_frozen(pid_t pid)
 }
 
 T_DECL(memorystatus_freeze_top_process, "memorystatus_freeze_top_process chooses the correct process",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	T_SKIP("Skipping flaky test"); // rdar://76986376
 	int32_t memorystatus_freeze_band = 0;
 	size_t memorystatus_freeze_band_size = sizeof(memorystatus_freeze_band);
@@ -1271,19 +1305,19 @@ T_DECL(memorystatus_freeze_top_process, "memorystatus_freeze_top_process chooses
 static unsigned int use_ordered_list_original;
 static unsigned int use_demotion_list_original;
 static void
-reset_ordered_freeze_mode()
+reset_ordered_freeze_mode(void)
 {
 	sysctlbyname("kern.memorystatus_freezer_use_ordered_list", NULL, NULL, &use_ordered_list_original, sizeof(use_ordered_list_original));
 }
 
 static void
-reset_ordered_demote_mode()
+reset_ordered_demote_mode(void)
 {
 	sysctlbyname("kern.memorystatus_freezer_use_demotion_list", NULL, NULL, &use_demotion_list_original, sizeof(use_demotion_list_original));
 }
 
 static void
-enable_ordered_freeze_mode()
+enable_ordered_freeze_mode(void)
 {
 	int ret;
 	int val = 1;
@@ -1294,7 +1328,7 @@ enable_ordered_freeze_mode()
 }
 
 static void
-enable_ordered_demote_mode()
+enable_ordered_demote_mode(void)
 {
 	int ret;
 	int val = 1;
@@ -1320,9 +1354,10 @@ construct_child_freeze_entry(memorystatus_properties_freeze_entry_v1 *entry)
 }
 
 T_DECL(memorystatus_freeze_top_process_ordered, "memorystatus_freeze_top_process chooses the correct process when using an ordered list",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	test_after_background_helper_launches(true, "frozen_background", ^{
@@ -1381,27 +1416,30 @@ memorystatus_freeze_top_process_ordered_wrong_pid(pid_t (^pid_for_entry)(pid_t))
  * In both cases the child should still get frozen.
  */
 T_DECL(memorystatus_freeze_top_process_ordered_reused_pid, "memorystatus_freeze_top_process is resilient to pid changes",
-    T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
+	T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_ASROOT(true)) {
 	memorystatus_freeze_top_process_ordered_wrong_pid(^(__unused pid_t child) {
 		return 1;
 	});
 }
 
 T_DECL(memorystatus_freeze_top_process_ordered_wrong_pid, "memorystatus_freeze_top_process is resilient to pid changes",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	memorystatus_freeze_top_process_ordered_wrong_pid(^(__unused pid_t child) {
 		return child + 1000;
 	});
 }
 
 T_DECL(memorystatus_freeze_demote_ordered, "memorystatus_demote_frozen_processes_using_demote_list chooses the correct process",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	enable_ordered_demote_mode();
@@ -1490,9 +1528,10 @@ cleanup_memorystatus_freezer_thaw_percentage(void)
 }
 
 T_DECL(memorystatus_freezer_thaw_percentage, "memorystatus_freezer_thaw_percentage updates correctly",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	__block dispatch_source_t first_signal_block;
 	/* Take ownership of the freezer probabilities for the duration of the test so that nothing new gets frozen by dasd. */
 	set_testing_pid();
@@ -1572,10 +1611,11 @@ enable_freeze(void)
 }
 
 T_DECL(memorystatus_freeze_budget_multiplier, "memorystatus_budget_multiplier multiplies budget",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_NE("kern.memorystatus_freeze_daily_mb_max", UINT32_MAX),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ENABLED(false) /* rdar://87165483 */) {
 	/* Disable freezer so that the budget doesn't change out from underneath us. */
 	int freeze_enabled = 0;
@@ -1596,6 +1636,8 @@ T_DECL(memorystatus_freeze_budget_multiplier, "memorystatus_budget_multiplier mu
 }
 
 T_DECL(memorystatus_freeze_set_dasd_trial_identifiers, "set dasd trial identifiers",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true)) {
 #define TEST_STR "freezer-das-trial"
 	memorystatus_freezer_trial_identifiers_v1 identifiers = {0};
@@ -1608,9 +1650,10 @@ T_DECL(memorystatus_freeze_set_dasd_trial_identifiers, "set dasd trial identifie
 }
 
 T_DECL(memorystatus_reset_freezer_state, "FREEZER_CONTROL_RESET_STATE kills frozen proccesses",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	/* Take ownership of the freezer probabilities for the duration of the test so that nothing new gets frozen by dasd. */
 	set_testing_pid();
 	reset_interval();
@@ -1618,6 +1661,7 @@ T_DECL(memorystatus_reset_freezer_state, "FREEZER_CONTROL_RESET_STATE kills froz
 	test_after_background_helper_launches(false, "frozen_background", ^{
 		proc_name_t name;
 		int ret;
+
 		/* Freeze the child and verify they're frozen. */
 		move_to_idle_band(child_pid);
 		ret = pid_suspend(child_pid);
@@ -1632,7 +1676,8 @@ T_DECL(memorystatus_reset_freezer_state, "FREEZER_CONTROL_RESET_STATE kills froz
 		ret = memorystatus_control(MEMORYSTATUS_CMD_FREEZER_CONTROL, 0, FREEZER_CONTROL_RESET_STATE, NULL, 0);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "FREEZER_CONRTOL_RESET_STATE");
 
-		/* Verify budget > 0 */
+		/* Verify budget resets to a non-zero value. Some devices may have a configured
+		 * budget of 0. Skip this assertion if so. */
 		uint64_t budget_after_reset = get_budget_pages_remaining();
 		T_QUIET; T_ASSERT_GT(budget_after_reset, 0ULL, "freeze budget after reset > 0");
 		/*
@@ -1664,9 +1709,11 @@ dock_proc(pid_t pid)
 }
 
 T_DECL(memorystatus_freeze_skip_docked, "memorystatus_freeze_top_process does not freeze docked processes",
+	T_META_ENABLED(!TARGET_OS_WATCH),
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	memorystatus_freeze_top_process_setup();
 	enable_ordered_freeze_mode();
 	test_after_background_helper_launches(true, "frozen_background", ^{
@@ -1740,9 +1787,10 @@ T_HELPER_DECL(corpse_generation, "Generate a large corpse", T_META_ASROOT(false)
 }
 
 T_DECL(memorystatus_disable_freeze_corpse, "memorystatus_disable_freeze with parallel corpse creation",
+	T_META_BOOTARGS_SET("freeze_enabled=1"),
+	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
 	/*
 	 * In the past, we've had race conditions w.r.t. killing on disk space shortage
 	 * and corpse generation of frozen processes.

@@ -402,6 +402,10 @@ _enable_lockdown_mode
 _disable_lockdown_mode
 _exclaves_get_status
 _exclaves_register_xrt_hosted_callbacks
+_exclaves_sensor_start
+_exclaves_sensor_stop
+_exclaves_sensor_status
+_exclaves_display_healthcheck_rate
 _ext_paniclog_handle_set_active
 _ext_paniclog_handle_set_inactive
 _ext_paniclog_handle_alloc_with_uuid
@@ -501,14 +505,16 @@ _ipf_addv6_internal
 _kalloc_data:_kalloc_data_external
 _kalloc_type_impl:_kalloc_type_impl_external
 _kalloc_type_var_impl:_kalloc_type_var_impl_external
+_kauth_acl_evaluate
+_kauth_cred_dsnode2nfs4domain
 _kauth_cred_getgroups
 _kauth_cred_grnam2guid
 _kauth_cred_guid2grnam
 _kauth_cred_guid2pwnam
-_kauth_cred_pwnam2guid
 _kauth_cred_nfs4domain2dsnode
-_kauth_cred_dsnode2nfs4domain
-_kauth_acl_evaluate
+_kauth_cred_proc_ref_for_pid
+_kauth_cred_proc_ref_for_pidversion
+_kauth_cred_pwnam2guid
 _kcdata_estimate_required_buffer_size
 _kcdata_memory_get_used_bytes
 _kcdata_memcpy
@@ -665,6 +671,9 @@ _kern_packet_get_chain_counts
 _kern_packet_set_trace_id
 _kern_packet_get_trace_id
 _kern_packet_trace_event
+_kern_packet_set_fpd_sequence_number
+_kern_packet_set_fpd_context_id
+_kern_packet_set_fpd_command
 _kern_packet_get_flowid
 _kern_packet_set_trace_tag
 _kern_packet_get_trace_tag
@@ -826,6 +835,7 @@ _match_compilation_service_cdhash
 _set_local_signing_public_key
 _get_local_signing_public_key
 _unrestrict_local_signing_cdhash
+_kernel_image4_monitor_trap
 _kernel_image4_storage_data
 _kernel_image4_set_nonce
 _kernel_image4_roll_nonce
@@ -881,6 +891,7 @@ _proc_puniqueid
 _proc_gettty
 _proc_gettty_dev
 _proc_exitstatus
+_proc_is_zombie
 _proc_is_translated
 _proc_is_rsr
 _proc_isinitproc
@@ -991,6 +1002,7 @@ _ttspeedtab
 _ttwakeup
 _ttwwakeup
 _tty_lock
+_tty_trylock
 _tty_unlock
 _ttyclose
 _ttyflush

@@ -287,7 +287,7 @@ rip_input_inner(struct mbuf *m, int iphlen, bool is_ipv4_pass, uint32_t *total_d
 			continue;
 		}
 		if (last != NULL) {
-			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 
 			if (n == NULL) {
 				continue;
@@ -310,7 +310,7 @@ rip_input_inner(struct mbuf *m, int iphlen, bool is_ipv4_pass, uint32_t *total_d
 		}
 	} else {
 		if (last != NULL) {
-			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+			struct mbuf *n = m_copym_mode(m, 0, (int)M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 
 			if (n != NULL) {
 				num_delivered += rip_inp_input(last, n, iphlen);
@@ -876,7 +876,7 @@ rip_ctlinput(
 			if (ia->ia_ifa.ifa_addr == sa &&
 			    (ia->ia_flags & IFA_ROUTE)) {
 				done = 1;
-				IFA_ADDREF_LOCKED(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
 				lck_rw_done(&in_ifaddr_rwlock);
 				lck_mtx_lock(rnh_lock);
@@ -892,7 +892,7 @@ rip_ctlinput(
 				 */
 				in_ifadown(&ia->ia_ifa, 1);
 				lck_mtx_unlock(rnh_lock);
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 				break;
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
@@ -921,7 +921,7 @@ rip_ctlinput(
 			lck_rw_done(&in_ifaddr_rwlock);
 			return;
 		}
-		IFA_ADDREF_LOCKED(&ia->ia_ifa);
+		ifa_addref(&ia->ia_ifa);
 		IFA_UNLOCK(&ia->ia_ifa);
 		lck_rw_done(&in_ifaddr_rwlock);
 
@@ -939,7 +939,7 @@ rip_ctlinput(
 			ia->ia_flags |= IFA_ROUTE;
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 		break;
 	}
 }
@@ -1059,7 +1059,7 @@ rip_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		IFA_LOCK(ifa);
 		outif = ifa->ifa_ifp;
 		IFA_UNLOCK(ifa);
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 	inp->inp_laddr = sin.sin_addr;
 	inp->inp_last_outifp = outif;

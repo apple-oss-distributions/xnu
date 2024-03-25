@@ -63,6 +63,19 @@ code_signing_init()
 	/* Does nothing */
 }
 
+void
+ppl_enter_lockdown_mode(void)
+{
+	/*
+	 * This function is expected to be called before read-only lockdown on the
+	 * system. As a result, the PPL variable should be mutable. If not, then we
+	 * will panic (as we should).
+	 */
+	ppl_lockdown_mode_enabled = true;
+
+	printf("entered lockdown mode policy for the PPL");
+}
+
 #pragma mark Developer Mode
 
 SECURITY_READ_ONLY_LATE(bool*) developer_mode_enabled = &ppl_developer_mode_storage;
@@ -675,6 +688,37 @@ ppl_image4_set_bnch_shadow(
 
 	printf("explicit BNCH-shadow-set not required for the PPL\n");
 	return ENOTSUP;
+}
+
+#pragma mark Image4 - New
+
+kern_return_t
+ppl_image4_transfer_region(
+	__unused image4_cs_trap_t selector,
+	__unused vm_address_t region_addr,
+	__unused vm_size_t region_size)
+{
+	/* All regions transfers happen internally with the PPL */
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ppl_image4_reclaim_region(
+	__unused image4_cs_trap_t selector,
+	__unused vm_address_t region_addr,
+	__unused vm_size_t region_size)
+{
+	/* All regions transfers happen internally with the PPL */
+	return KERN_SUCCESS;
+}
+
+errno_t
+ppl_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size)
+{
+	return pmap_image4_monitor_trap(selector, input_data, input_size);
 }
 
 #endif /* PMAP_CS_PPL_MONITOR */

@@ -1,8 +1,3 @@
-from __future__ import absolute_import
-
-from builtins import bytes
-from builtins import object
-
 import logging
 import socket
 import select

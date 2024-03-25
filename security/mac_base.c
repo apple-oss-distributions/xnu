@@ -1243,19 +1243,15 @@ __mac_get_pid(struct proc *p, struct __mac_get_pid_args *uap, int *ret __unused)
 {
 	return mac_do_get(p, uap->mac_p,
 	           ^(char *input, char *output, size_t len) {
-		struct proc *tproc;
 		struct ucred *tcred;
 		int error;
 
 		AUDIT_ARG(pid, uap->pid);
 
-		tproc = proc_find(uap->pid);
-		if (tproc == NULL) {
+		tcred = kauth_cred_proc_ref_for_pid(uap->pid);
+		if (tcred == NOCRED) {
 		        return ESRCH;
 		}
-
-		tcred = kauth_cred_proc_ref(tproc);
-		proc_rele(tproc);
 
 		error = mac_cred_label_externalize(mac_cred_label(tcred),
 		input, output, len, M_WAITOK);

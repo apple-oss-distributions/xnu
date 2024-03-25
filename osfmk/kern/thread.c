@@ -129,9 +129,7 @@
 #include <kern/compact_id.h>
 
 #include <corpses/task_corpse.h>
-#if KPC
 #include <kern/kpc.h>
-#endif
 
 #if CONFIG_PERVASIVE_CPI
 #include <kern/monotonic.h>
@@ -174,6 +172,9 @@
 
 #include <pthread/workqueue_trace.h>
 
+#if CONFIG_EXCLAVES
+#include <mach/exclaves.h>
+#endif
 
 LCK_GRP_DECLARE(thread_lck_grp, "thread");
 
@@ -361,36 +362,14 @@ thread_ro_destroy(thread_t th)
 	thread_ro_t tro = get_thread_ro(th);
 #if MACH_BSD
 	struct ucred *cred = tro->tro_cred;
+	struct ucred *rcred = tro->tro_realcred;
 #endif
-
 	zfree_ro(ZONE_ID_THREAD_RO, tro);
 #if MACH_BSD
-	if (cred) {
-		uthread_cred_free(cred);
-	}
+	uthread_cred_free(cred);
+	uthread_cred_free(rcred);
 #endif
 }
-
-#if MACH_BSD
-extern void kauth_cred_set(struct ucred **, struct ucred *);
-
-void
-thread_ro_update_cred(thread_ro_t tro, struct ucred *ucred)
-{
-	struct ucred *my_cred = tro->tro_cred;
-	if (my_cred != ucred) {
-		kauth_cred_set(&my_cred, ucred);
-		zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_cred, &my_cred);
-	}
-}
-
-void
-thread_ro_update_flags(thread_ro_t tro, thread_ro_flags_t add, thread_ro_flags_t clr)
-{
-	thread_ro_flags_t flags = (tro->tro_flags & ~clr) | add;
-	zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_flags, &flags);
-}
-#endif
 
 __startup_func
 thread_t
@@ -552,17 +531,16 @@ thread_terminate_self(void)
 			recount_current_thread_usage_perf_only(&usage, &perf_only);
 			ml_set_interrupts_enabled(intrs_end);
 			KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_THR_EXIT,
-			    usage.ru_instructions,
-			    usage.ru_cycles,
-			    usage.ru_system_time_mach,
-			    usage.ru_user_time_mach);
+			    recount_usage_instructions(&usage),
+			    recount_usage_cycles(&usage),
+			    recount_usage_system_time_mach(&usage),
+			    usage.ru_metrics[RCT_LVL_USER].rm_time_mach);
 #if __AMP__
 			KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_THR_EXIT,
-			    perf_only.ru_instructions,
-			    perf_only.ru_cycles,
-			    perf_only.ru_system_time_mach,
-			    perf_only.ru_user_time_mach);
-
+			    recount_usage_instructions(&perf_only),
+			    recount_usage_cycles(&perf_only),
+			    recount_usage_system_time_mach(&perf_only),
+			    perf_only.ru_metrics[RCT_LVL_USER].rm_time_mach);
 #endif // __AMP__
 		}
 #endif/* CONFIG_PERVASIVE_CPI */
@@ -604,16 +582,16 @@ thread_terminate_self(void)
 				struct recount_usage perf_only = { 0 };
 				recount_current_task_usage_perf_only(&usage, &perf_only);
 				KDBG_RELEASE(DBG_MT_INSTRS_CYCLES_PROC_EXIT,
-				    usage.ru_instructions,
-				    usage.ru_cycles,
-				    usage.ru_system_time_mach,
-				    usage.ru_user_time_mach);
+				    recount_usage_instructions(&usage),
+				    recount_usage_cycles(&usage),
+				    recount_usage_system_time_mach(&usage),
+				    usage.ru_metrics[RCT_LVL_USER].rm_time_mach);
 #if __AMP__
 				KDBG_RELEASE(DBG_MT_P_INSTRS_CYCLES_PROC_EXIT,
-				    perf_only.ru_instructions,
-				    perf_only.ru_cycles,
-				    perf_only.ru_system_time_mach,
-				    perf_only.ru_user_time_mach);
+				    recount_usage_instructions(&perf_only),
+				    recount_usage_cycles(&perf_only),
+				    recount_usage_system_time_mach(&perf_only),
+				    perf_only.ru_metrics[RCT_LVL_USER].rm_time_mach);
 #endif // __AMP__
 			}
 #endif/* CONFIG_PERVASIVE_CPI */
@@ -624,6 +602,9 @@ thread_terminate_self(void)
 		subcode = proc_encode_exit_exception_code(bsd_info);
 		proc_exit(bsd_info);
 		bsd_info = NULL;
+#if CONFIG_EXCLAVES
+		task_clear_conclave(task);
+#endif
 		/*
 		 * if there is crash info in task
 		 * then do the deliver action since this is
@@ -647,6 +628,9 @@ thread_terminate_self(void)
 		task_unlock(task);
 	}
 
+#if CONFIG_EXCLAVES
+	exclaves_thread_terminate(thread);
+#endif
 
 	s = splsched();
 	thread_lock(thread);
@@ -724,6 +708,12 @@ thread_terminate_self(void)
 	thread->state |= TH_TERMINATE;
 	thread_mark_wait_locked(thread, THREAD_UNINT);
 
+#if CONFIG_EXCLAVES
+	assert(thread->th_exclaves_ipc_buffer == NULL);
+	assert(thread->th_exclaves_scheduling_context_id == 0);
+	assert(thread->th_exclaves_intstate == 0);
+	assert(thread->th_exclaves_state == 0);
+#endif
 	assert(thread->th_work_interval_flags == TH_WORK_INTERVAL_FLAGS_NONE);
 	assert(thread->kern_promotion_schedpri == 0);
 	if (thread->rwlock_count > 0) {
@@ -793,12 +783,12 @@ thread_deallocate_complete(
 		panic("thread_deallocate: thread not properly terminated");
 	}
 
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 	assert(!(thread->state & TH_WAKING));
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_thread_destroy(thread);
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	ipc_thread_terminate(thread);
 
@@ -1391,6 +1381,7 @@ thread_create_internal(
 	new_thread->parameter = parameter;
 	new_thread->inheritor_flags = TURNSTILE_UPDATE_FLAGS_NONE;
 	new_thread->requested_policy = default_thread_requested_policy;
+	new_thread->__runq.runq = PROCESSOR_NULL;
 	priority_queue_init(&new_thread->sched_inheritor_queue);
 	priority_queue_init(&new_thread->base_inheritor_queue);
 #if CONFIG_SCHED_CLUTCH
@@ -1512,9 +1503,9 @@ thread_create_internal(
 	new_thread->depress_timer = timer_call_alloc(thread_depress_expire, new_thread);
 	new_thread->wait_timer = timer_call_alloc(thread_timer_expire, new_thread);
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_thread_create(new_thread);
-#endif
+#endif /* CONFIG_CPU_COUNTERS */
 
 	/* Set the thread's scheduling parameters */
 	new_thread->sched_mode = SCHED(initial_thread_sched_mode)(parent_task);
@@ -3548,6 +3539,28 @@ thread_get_voucher_origin_pid(thread_t thread, int32_t *pid)
 	           &buf_size);
 }
 
+/*
+ *  thread_get_current_voucher_proximate_pid - get the pid of the proximate process of the current voucher.
+ */
+kern_return_t
+thread_get_voucher_origin_proximate_pid(thread_t thread, int32_t *origin_pid, int32_t *proximate_pid)
+{
+	int32_t origin_proximate_pids[2] = { };
+	uint32_t buf_size = sizeof(origin_proximate_pids);
+	kern_return_t kr = mach_voucher_attr_command(thread->ith_voucher,
+	    MACH_VOUCHER_ATTR_KEY_BANK,
+	    BANK_ORIGINATOR_PROXIMATE_PID,
+	    NULL,
+	    0,
+	    (mach_voucher_attr_content_t)origin_proximate_pids,
+	    &buf_size);
+	if (kr == KERN_SUCCESS) {
+		*origin_pid = origin_proximate_pids[0];
+		*proximate_pid = origin_proximate_pids[1];
+	}
+	return kr;
+}
+
 #if CONFIG_THREAD_GROUPS
 /*
  * Returns the current thread's voucher-carried thread group
@@ -3775,6 +3788,64 @@ thread_get_thread_name(thread_t th, char* name)
 	} else {
 		name[0] = '\0';
 	}
+}
+
+processor_t
+thread_get_runq(thread_t thread)
+{
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+	processor_t runq = thread->__runq.runq;
+	os_atomic_thread_fence(acquire);
+	return runq;
+}
+
+processor_t
+thread_get_runq_locked(thread_t thread)
+{
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+	processor_t runq = thread->__runq.runq;
+	if (runq != PROCESSOR_NULL) {
+		pset_assert_locked(runq->processor_set);
+	}
+	return runq;
+}
+
+void
+thread_set_runq_locked(thread_t thread, processor_t new_runq)
+{
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+	pset_assert_locked(new_runq->processor_set);
+	thread_assert_runq_null(thread);
+	thread->__runq.runq = new_runq;
+}
+
+void
+thread_clear_runq(thread_t thread)
+{
+	thread_assert_runq_nonnull(thread);
+	os_atomic_thread_fence(release);
+	thread->__runq.runq = PROCESSOR_NULL;
+}
+
+void
+thread_clear_runq_locked(thread_t thread)
+{
+	thread_lock_assert(thread, LCK_ASSERT_OWNED);
+	thread_assert_runq_nonnull(thread);
+	thread->__runq.runq = PROCESSOR_NULL;
+}
+
+void
+thread_assert_runq_null(__assert_only thread_t thread)
+{
+	assert(thread->__runq.runq == PROCESSOR_NULL);
+}
+
+void
+thread_assert_runq_nonnull(thread_t thread)
+{
+	pset_assert_locked(thread->__runq.runq->processor_set);
+	assert(thread->__runq.runq != PROCESSOR_NULL);
 }
 
 void
@@ -4080,6 +4151,43 @@ thread_process_signature(thread_t thread, task_t task)
 	return machine_thread_process_signature(thread, task);
 }
 
+#if CONFIG_SPTM
+
+void
+thread_associate_txm_thread_stack(uintptr_t thread_stack)
+{
+	thread_t self = current_thread();
+
+	if (self->txm_thread_stack != 0) {
+		panic("attempted multiple TXM thread associations: %lu | %lu",
+		    self->txm_thread_stack, thread_stack);
+	}
+
+	self->txm_thread_stack = thread_stack;
+}
+
+void
+thread_disassociate_txm_thread_stack(uintptr_t thread_stack)
+{
+	thread_t self = current_thread();
+
+	if (self->txm_thread_stack == 0) {
+		panic("attempted to disassociate non-existent TXM thread");
+	} else if (self->txm_thread_stack != thread_stack) {
+		panic("invalid disassociation for TXM thread: %lu | %lu",
+		    self->txm_thread_stack, thread_stack);
+	}
+
+	self->txm_thread_stack = 0;
+}
+
+uintptr_t
+thread_get_txm_thread_stack(void)
+{
+	return current_thread()->txm_thread_stack;
+}
+
+#endif
 
 #if CONFIG_DTRACE
 uint32_t
@@ -4209,7 +4317,7 @@ dtrace_calc_thread_recent_vtime(thread_t thread)
 
 	struct recount_usage usage = { 0 };
 	recount_current_thread_usage(&usage);
-	return (int64_t)(usage.ru_system_time_mach + usage.ru_user_time_mach);
+	return (int64_t)(recount_usage_time_mach(&usage));
 }
 
 void

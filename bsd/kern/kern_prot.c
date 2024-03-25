@@ -329,7 +329,7 @@ gettid(__unused proc_t p, struct gettid_args *uap, int32_t *retval)
 	 * If this thread is not running with an override identity, we can't
 	 * return one to the caller, so return an error instead.
 	 */
-	if (!(tro->tro_flags & TRO_SETUID)) {
+	if (tro->tro_realcred == tro->tro_cred) {
 		return ESRCH;
 	}
 
@@ -1155,6 +1155,15 @@ setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 }
 
 
+static void
+kern_settid_assume_cred(thread_ro_t tro, kauth_cred_t tmp)
+{
+	kauth_cred_t cred = NOCRED;
+
+	kauth_cred_set(&cred, tmp);
+	zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_cred, &cred);
+}
+
 /*
  * Set the per-thread override identity.  The first parameter can be the
  * current real UID, KAUTH_UID_NONE, or, if the caller is privileged, it
@@ -1182,18 +1191,15 @@ kern_settid(proc_t p, uid_t uid, gid_t gid)
 
 	if (uid == KAUTH_UID_NONE) {
 		/* must already be assuming another identity in order to revert back */
-		if ((tro->tro_flags & TRO_SETUID) == 0) {
+		if (tro->tro_realcred == tro->tro_cred) {
 			return EPERM;
 		}
 
 		/* revert to delayed binding of process credential */
-		cred = kauth_cred_proc_ref(p);
-		thread_ro_update_cred(tro, cred);
-		thread_ro_update_flags(tro, TRO_NONE, TRO_SETUID);
-		kauth_cred_unref(&cred);
+		kern_settid_assume_cred(tro, tro->tro_realcred);
 	} else {
 		/* cannot already be assuming another identity */
-		if ((tro->tro_flags & TRO_SETUID) != 0) {
+		if (tro->tro_realcred != tro->tro_cred) {
 			return EPERM;
 		}
 
@@ -1208,8 +1214,7 @@ kern_settid(proc_t p, uid_t uid, gid_t gid)
 		    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
 			return kauth_cred_model_setuidgid(model, uid, gid);
 		});
-		thread_ro_update_cred(tro, cred);
-		thread_ro_update_flags(tro, TRO_SETUID, TRO_NONE);
+		kern_settid_assume_cred(tro, cred);
 		kauth_cred_unref(&cred);
 	}
 
@@ -1263,25 +1268,20 @@ sys_settid_with_pid(proc_t p, struct settid_with_pid_args *uap, __unused int32_t
 	 * id passed in the pid argument.
 	 */
 	if (uap->assume != 0) {
-		proc_t target_proc;
-		kauth_cred_t target_cred;
+		kauth_cred_t cred;
 
 		if (uap->pid == 0) {
 			return ESRCH;
 		}
 
-		target_proc = proc_find(uap->pid);
-		if (target_proc == NULL) {
+		cred = kauth_cred_proc_ref_for_pid(uap->pid);
+		if (cred == NOCRED) {
 			return ESRCH;
 		}
 
-		proc_ucred_lock(target_proc);
-		target_cred = proc_ucred_locked(target_proc);
-		uid = posix_cred_get(target_cred)->cr_uid;
-		gid = posix_cred_get(target_cred)->cr_gid;
-		proc_ucred_unlock(target_proc);
-
-		proc_rele(target_proc);
+		uid = kauth_cred_getuid(cred);
+		gid = kauth_cred_getgid(cred);
+		kauth_cred_unref(&cred);
 	} else {
 		/*
 		 * Otherwise, we are reverting back to normal mode of operation
@@ -1358,10 +1358,7 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 	kauth_cred_t cred;
 	int     error;
 
-	cred = kauth_cred_proc_ref(p);
-	error = suser(cred, &p->p_acflag);
-	kauth_cred_unref(&cred);
-
+	error = proc_suser(p);
 	if (error) {
 		return error;
 	}
@@ -1375,7 +1372,7 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 		return kauth_cred_model_setgroups(model, newgroups, ngrp, gmuid);
 	};
 
-	if ((tro->tro_flags & TRO_SETUID) != 0) {
+	if (tro->tro_realcred != tro->tro_cred) {
 		/*
 		 * If this thread is under an assumed identity, set the
 		 * supplementary grouplist on the thread credential instead
@@ -1386,7 +1383,7 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 		 * need the referencing/locking/retry required for per-process.
 		 */
 		cred = kauth_cred_derive(tro->tro_cred, fn);
-		thread_ro_update_cred(tro, cred);
+		kern_settid_assume_cred(tro, cred);
 		kauth_cred_unref(&cred);
 	} else {
 		kauth_cred_proc_update(p, PROC_SETTOKEN_SETUGID, fn);

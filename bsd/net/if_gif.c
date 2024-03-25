@@ -106,6 +106,8 @@
 
 #include <net/net_osdep.h>
 
+#include <net/sockaddr_utils.h>
+
 #define GIFNAME         "gif"
 #define GIFDEV          "if_gif"
 
@@ -702,19 +704,21 @@ gif_ioctl(
 	case SIOCSIFPHYADDR_IN6_64:
 		switch (cmd) {
 #if INET
-		case SIOCSIFPHYADDR:
-			src = (struct sockaddr *)
-			    &(((struct in_aliasreq *)data)->ifra_addr);
-			dst = (struct sockaddr *)
-			    &(((struct in_aliasreq *)data)->ifra_dstaddr);
+		case SIOCSIFPHYADDR: {
+			struct in_aliasreq *ifra =
+			    (struct in_aliasreq*)data;
+
+			src = SA(&ifra->ifra_addr);
+			dst = SA(&ifra->ifra_dstaddr);
 			break;
+		}
 #endif
 		case SIOCSIFPHYADDR_IN6_32: {
 			struct in6_aliasreq_32 *ifra_32 =
 			    (struct in6_aliasreq_32 *)data;
 
-			src = (struct sockaddr *)&ifra_32->ifra_addr;
-			dst = (struct sockaddr *)&ifra_32->ifra_dstaddr;
+			src = SA(&ifra_32->ifra_addr);
+			dst = SA(&ifra_32->ifra_dstaddr);
 			break;
 		}
 
@@ -722,8 +726,8 @@ gif_ioctl(
 			struct in6_aliasreq_64 *ifra_64 =
 			    (struct in6_aliasreq_64 *)data;
 
-			src = (struct sockaddr *)&ifra_64->ifra_addr;
-			dst = (struct sockaddr *)&ifra_64->ifra_dstaddr;
+			src = SA(&ifra_64->ifra_addr);
+			dst = SA(&ifra_64->ifra_dstaddr);
 			break;
 		}
 		}
@@ -824,8 +828,8 @@ gif_ioctl(
 			}
 #ifndef XBONEHACK
 			/* can't configure same pair of address onto two gifs */
-			if (bcmp(sc2->gif_pdst, dst, dst->sa_len) == 0 &&
-			    bcmp(sc2->gif_psrc, src, src->sa_len) == 0) {
+			if (SOCKADDR_CMP(sc2->gif_pdst, dst, dst->sa_len) == 0 &&
+			    SOCKADDR_CMP(sc2->gif_psrc, src, src->sa_len) == 0) {
 				GIF_ORDERED_UNLOCK(sc, sc2);
 				error = EADDRNOTAVAIL;
 				ifnet_head_done();
@@ -861,7 +865,7 @@ gif_ioctl(
 		if (sc->gif_psrc) {
 			kfree_data(sc->gif_psrc, sc->gif_psrc->sa_len);
 		}
-		sa = (struct sockaddr *)kalloc_data(src->sa_len, Z_WAITOK);
+		sa = SA(kalloc_data(src->sa_len, Z_WAITOK));
 		if (sa == NULL) {
 			GIF_UNLOCK(sc);
 			return ENOBUFS;
@@ -872,7 +876,7 @@ gif_ioctl(
 		if (sc->gif_pdst) {
 			kfree_data(sc->gif_pdst, sc->gif_pdst->sa_len);
 		}
-		sa = (struct sockaddr *)kalloc_data(dst->sa_len, Z_WAITOK);
+		sa = SA(kalloc_data(dst->sa_len, Z_WAITOK));
 		if (sa == NULL) {
 			GIF_UNLOCK(sc);
 			return ENOBUFS;
@@ -919,11 +923,14 @@ gif_ioctl(
 			size = sizeof(ifr->ifr_addr);
 			break;
 #endif /* INET */
-		case SIOCGIFPSRCADDR_IN6:
-			dst = (struct sockaddr *)
-			    &(((struct in6_ifreq *)data)->ifr_addr);
-			size = sizeof(((struct in6_ifreq *)data)->ifr_addr);
+		case SIOCGIFPSRCADDR_IN6: {
+			struct in6_ifreq *ifreq =
+			    (struct in6_ifreq*)data;
+
+			dst = SA(&ifreq->ifr_addr);
+			size = sizeof(ifreq->ifr_addr);
 			break;
+		}
 		default:
 			GIF_UNLOCK(sc);
 			error = EADDRNOTAVAIL;
@@ -953,11 +960,14 @@ gif_ioctl(
 			size = sizeof(ifr->ifr_addr);
 			break;
 #endif /* INET */
-		case SIOCGIFPDSTADDR_IN6:
-			dst = (struct sockaddr *)
-			    &(((struct in6_ifreq *)data)->ifr_addr);
-			size = sizeof(((struct in6_ifreq *)data)->ifr_addr);
+		case SIOCGIFPDSTADDR_IN6: {
+			struct in6_ifreq *ifreq =
+			    (struct in6_ifreq*)data;
+
+			dst = SA(&ifreq->ifr_addr);
+			size = sizeof(ifreq->ifr_addr);
 			break;
+		}
 		default:
 			error = EADDRNOTAVAIL;
 			GIF_UNLOCK(sc);

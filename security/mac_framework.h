@@ -320,7 +320,7 @@ int     mac_proc_check_getaudit(proc_t proc) __result_use_check;
 int     mac_proc_check_getauid(proc_t proc) __result_use_check;
 int     mac_proc_check_dyld_process_info_notify_register(void) __result_use_check;
 int     mac_proc_check_ledger(proc_t curp, proc_t target, int op) __result_use_check;
-int     mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
+int     mac_proc_check_map_anon(proc_t proc, kauth_cred_t cred, user_addr_t u_addr,
     user_size_t u_size, int prot, int flags, int *maxprot) __result_use_check;
 int     mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid) __result_use_check;
 int     mac_proc_check_mprotect(proc_t proc,

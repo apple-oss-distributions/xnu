@@ -133,6 +133,7 @@
 #include <mach/host_info.h>
 #include <mach/exclaves.h>
 #include <kern/hvg_hypercall.h>
+#include <kdp/sk_core.h>
 
 #if DEVELOPMENT || DEBUG
 #include <kern/ext_paniclog.h>
@@ -1334,7 +1335,6 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 	vm_offset_t     smallbuffer_start;
 	kern_return_t ret;
 	int pid;
-	kauth_cred_t my_cred;
 	uid_t uid;
 	int argc = -1;
 	size_t argvsize;
@@ -1432,9 +1432,9 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 		goto calculate_size;
 	}
 
-	my_cred = kauth_cred_proc_ref(p);
-	uid = kauth_cred_getuid(my_cred);
-	kauth_cred_unref(&my_cred);
+	smr_proc_task_enter();
+	uid = kauth_cred_getuid(proc_ucred_smr(p));
+	smr_proc_task_leave();
 
 	if ((uid != kauth_cred_getuid(kauth_cred_get()))
 	    && suser(kauth_cred_get(), &cur_proc->p_acflag)) {
@@ -2722,6 +2722,11 @@ sysctl_hostname
 	    IOCurrentTaskHasEntitlement(ENTITLEMENT_USER_ASSIGNED_DEVICE_NAME)) {
 		name = hostname;
 	} else {
+		/* Deny writes if we don't pass entitlement check */
+		if (req->newptr) {
+			return EPERM;
+		}
+
 		name = "localhost";
 	}
 #endif /* ! XNU_TARGET_OS_OSX */
@@ -3267,6 +3272,16 @@ sysctl_usrstack64
 SYSCTL_PROC(_kern, KERN_USRSTACK64, usrstack64,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_usrstack64, "Q", "");
+
+
+#if EXCLAVES_COREDUMP
+
+/* secure kernel coredump support. */
+extern unsigned int sc_dump_mode;
+SYSCTL_UINT(_kern, OID_AUTO, secure_coredump, CTLFLAG_RD, &sc_dump_mode, 0, "secure_coredump");
+
+#endif /* EXCLAVES_COREDUMP */
+
 
 #if CONFIG_COREDUMP
 
@@ -4746,6 +4761,9 @@ SYSCTL_INT(_vm, OID_AUTO, vm_page_needed_delayed_work_ctx, CTLFLAG_RD | CTLFLAG_
 SCALABLE_COUNTER_DECLARE(oslog_p_total_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_metadata_saved_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_metadata_dropped_msgcount);
+SCALABLE_COUNTER_DECLARE(oslog_p_signpost_saved_msgcount);
+SCALABLE_COUNTER_DECLARE(oslog_p_signpost_dropped_msgcount);
+SCALABLE_COUNTER_DECLARE(oslog_p_error_count);
 SCALABLE_COUNTER_DECLARE(oslog_p_error_count);
 SCALABLE_COUNTER_DECLARE(oslog_p_saved_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_dropped_msgcount);
@@ -4756,6 +4774,10 @@ SCALABLE_COUNTER_DECLARE(oslog_p_unresolved_kc_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_fmt_invalid_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_fmt_max_args_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_p_truncated_msgcount);
+
+SCALABLE_COUNTER_DECLARE(oslog_subsystem_count);
+SCALABLE_COUNTER_DECLARE(oslog_subsystem_found);
+SCALABLE_COUNTER_DECLARE(oslog_subsystem_dropped);
 
 SCALABLE_COUNTER_DECLARE(log_queue_cnt_received);
 SCALABLE_COUNTER_DECLARE(log_queue_cnt_rejected_fh);
@@ -4780,9 +4802,23 @@ SCALABLE_COUNTER_DECLARE(oslog_msgbuf_msgcount);
 SCALABLE_COUNTER_DECLARE(oslog_msgbuf_dropped_msgcount);
 extern uint32_t oslog_msgbuf_dropped_charcount;
 
+#if CONFIG_EXCLAVES
+/* log message counters for exclaves logging */
+SCALABLE_COUNTER_DECLARE(oslog_e_log_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_log_dropped_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_metadata_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_metadata_dropped_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_signpost_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_signpost_dropped_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_query_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_error_query_count);
+#endif // CONFIG_EXCLAVES
+
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_total_msgcount, oslog_p_total_msgcount, "");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_metadata_saved_msgcount, oslog_p_metadata_saved_msgcount, "");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_metadata_dropped_msgcount, oslog_p_metadata_dropped_msgcount, "");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_signpost_saved_msgcount, oslog_p_signpost_saved_msgcount, "");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_signpost_dropped_msgcount, oslog_p_signpost_dropped_msgcount, "");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_error_count, oslog_p_error_count, "");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_saved_msgcount, oslog_p_saved_msgcount, "");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_dropped_msgcount, oslog_p_dropped_msgcount, "");
@@ -4814,6 +4850,29 @@ SYSCTL_SCALABLE_COUNTER(_debug, log_queue_cnt_dropped_off, log_queue_cnt_dropped
 SYSCTL_SCALABLE_COUNTER(_debug, log_queue_cnt_mem_allocated, log_queue_cnt_mem_allocated, "Number of memory allocations");
 SYSCTL_SCALABLE_COUNTER(_debug, log_queue_cnt_mem_released, log_queue_cnt_mem_released, "Number of memory releases");
 SYSCTL_SCALABLE_COUNTER(_debug, log_queue_cnt_mem_failed, log_queue_cnt_mem_failed, "Number of failed memory allocations");
+
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_subsystem_count, oslog_subsystem_count, "Number of registered log subsystems");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_subsystem_found, oslog_subsystem_found, "Number of sucessful log subsystem lookups");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_subsystem_dropped, oslog_subsystem_dropped, "Number of dropped log subsystem registrations");
+
+#if CONFIG_EXCLAVES
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_metadata_count, oslog_e_metadata_count,
+    "Number of metadata messages retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_metadata_dropped_count, oslog_e_metadata_dropped_count,
+    "Number of dropped metadata messages retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_log_count, oslog_e_log_count,
+    "Number of logs retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_log_dropped_count, oslog_e_log_dropped_count,
+    "Number of dropeed logs retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_signpost_count, oslog_e_signpost_count,
+    "Number of signposts retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_signpost_dropped_count, oslog_e_signpost_dropped_count,
+    "Number of dropped signposts retrieved from the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_query_count, oslog_e_query_count,
+    "Number of sucessful queries to the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_error_query_count, oslog_e_error_query_count,
+    "Number of failed queries to the exclaves log server");
+#endif // CONFIG_EXCLAVES
 
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -5992,6 +6051,60 @@ SYSCTL_PROC(_kern, OID_AUTO, page_protection_type,
 
 TUNABLE_DT(int, gpu_pmem_selector, "defaults", "kern.gpu_pmem_selector", "gpu-pmem-selector", 0, TUNABLE_DT_NONE);
 
+#if CONFIG_EXCLAVES
+
+static int
+sysctl_task_conclave SYSCTL_HANDLER_ARGS
+{
+	extern const char *exclaves_resource_name(void *);
+
+#pragma unused(arg2)
+	void *conclave = task_get_conclave(current_task());
+	if (conclave != NULL) {
+		const char *name = exclaves_resource_name(conclave);
+		assert3u(strlen(name), >, 0);
+
+		/*
+		 * This is a RO operation already and the string is never
+		 * written to.
+		 */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
+		return sysctl_handle_string(oidp, (char *)name, 0, req);
+#pragma clang diagnostic pop
+	}
+	return sysctl_handle_string(oidp, arg1, MAXCONCLAVENAME, req);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, task_conclave,
+    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    "", 0, sysctl_task_conclave, "A", "Conclave string for the task");
+
+
+void task_set_conclave_untaintable(task_t task);
+
+static int
+sysctl_task_conclave_untaintable SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+
+	task_set_conclave_untaintable(current_task());
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, task_conclave_untaintable,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    "", 0, sysctl_task_conclave_untaintable, "A", "Task could not be tainted by talking to conclaves");
+
+extern uint32_t fake_crash_buffer_length;
+SYSCTL_INT(_kern, OID_AUTO, fake_crash_buffer_length, CTLFLAG_RD, &fake_crash_buffer_length, 0, NULL);
+
+#endif /* CONFIG_EXCLAVES */
 
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_INT(_kern, OID_AUTO, gpu_pmem_selector,
@@ -6014,3 +6127,20 @@ SYSCTL_PROC(_kern, OID_AUTO, exclaves_status,
     CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_exclaves_status, "I", "Running status of Exclaves");
 
+
+static int
+sysctl_exclaves_boot_stage SYSCTL_HANDLER_ARGS
+{
+	int value = exclaves_get_boot_stage();
+	return sysctl_io_number(req, value, sizeof(value), NULL, NULL);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, exclaves_boot_stage,
+    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_exclaves_boot_stage, "I", "Boot stage of Exclaves");
+
+#if CONFIG_EXCLAVES && (DEVELOPMENT || DEBUG)
+extern unsigned int exclaves_debug;
+SYSCTL_UINT(_kern, OID_AUTO, exclaves_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &exclaves_debug, 0, "Exclaves debug flags");
+#endif /* CONFIG_EXCLAVES && (DEVELOPMENT || DEBUG) */

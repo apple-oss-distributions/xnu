@@ -1,12 +1,6 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import range
-from builtins import object
-
 import macholib
 from macholib import MachO as macho
 from collections import namedtuple
-import six
 import uuid
 import sys
 
@@ -199,7 +193,7 @@ class MemMachO(macho.MachO):
         # Wrap all sections in MachOSection tuple.
         segsec = [
             MachOSection(
-                sectname = six.ensure_str(s.segname[:s.segname.find(b'\x00')]),
+                sectname = s.segname[:s.segname.find(b'\x00')].decode(),
                 addr = s.addr,
                 fileoff = s.offset,
                 size = s.size
@@ -209,7 +203,7 @@ class MemMachO(macho.MachO):
 
         # Return MachOSegment
         return MachOSegment(
-            name=six.ensure_str(seg.segname[:seg.segname.find(b'\x00')]),
+            name=seg.segname[:seg.segname.find(b'\x00')].decode(),
             vmaddr = seg.vmaddr,
             vmsize = seg.vmsize,
             fileoff = seg.fileoff,
@@ -259,20 +253,8 @@ macholib.mach_o.MH_FILETYPE_SHORTNAMES[macholib.mach_o.MH_KEXT_BUNDLE] = "kext"
 
 SEGMENT_TYPES = (macholib.mach_o.segment_command_64, macholib.mach_o.segment_command)
 
-if six.PY3:
-    # Use newer macholib interface on Python 3.
-    def get_load_command_human_name(lc):
-        return lc.get_cmd_name()
-else:
-    def get_load_command_human_name(lc):
-        """ return string name of LC_LOAD_DYLIB => "load_dylib"
-            "<unknown>" if not found
-        """
-        retval = "<unknown>"
-        if lc.cmd in macho.LC_REGISTRY:
-            retval = macho.LC_REGISTRY[lc.cmd].__name__
-            retval = retval.replace("_command", "")
-        return retval
+def get_load_command_human_name(lc):
+    return lc.get_cmd_name()
 
 
 class VisualMachoMap(object):
@@ -326,14 +308,14 @@ class VisualMachoMap(object):
                 lc_str_rep = "\n\t LC: {:s} size:{:d} nsects:{:d}".format(lc_cmd_str, lc.cmdsize, len(sections))
                 # print lc_str_rep
                 if isinstance(segment, SEGMENT_TYPES):
-                    segname = six.ensure_str(segment.segname[:segment.segname.find(b'\x00')])
+                    segname = segment.segname[:segment.segname.find(b'\x00')].decode()
                     # print "\tsegment: {:s} vmaddr: {:x} vmsize:{:d} fileoff: {:x} filesize: {:d}".format(
                     #             segname, segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize)
                     blocks.append(MapBlock(segname, segment.vmaddr, segment.vmsize, segment.fileoff, segment.filesize,
                                             ' LC:{} : {} init:{:#0X} max:{:#0X}'.format(lc_cmd_str, segname, segment.initprot, segment.maxprot),
                                             True))
                     for section in sections:
-                        section_name = six.ensure_str(section.sectname[:section.sectname.find(b'\x00')])
+                        section_name = section.sectname[:section.sectname.find(b'\x00')].decode()
                         blocks.append(MapBlock(section_name, section.addr, section.size, section.offset,
                                                 section.size, 'al:{} flags:{:#0X}'.format(section.align, section.flags), False))
                         #print "\t\tsection:{:s} addr:{:x} off:{:x} size:{:d}".format(section_name, section.addr, section.offset, section.size)

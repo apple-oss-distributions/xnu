@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2012,2015-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2015-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -11,7 +11,6 @@
 
 #ifndef _CORECRYPTO_CCMODE_IMPL_H_
 #define _CORECRYPTO_CCMODE_IMPL_H_
-#include <stdbool.h>
 #include <corecrypto/cc.h>
 
 #define CCMODE_MAX_BLOCK_SIZE 16
@@ -62,6 +61,10 @@ struct ccmode_ecb {
 // 1- CBC mode, stateless
 cc_aligned_struct(16) cccbc_ctx;
 cc_aligned_struct(16) cccbc_iv;
+
+// This value was derived empirically. It may need to be updated to
+// match changes in implementation.
+#define CCCBC_MAX_CTX_SIZE 512
 
 struct ccmode_cbc {
     size_t size; /* first argument to cccbc_ctx_decl(). */
@@ -231,6 +234,53 @@ struct ccmode_omac {
                   init))(const struct ccmode_omac *omac, ccomac_ctx *ctx, size_t tweak_len, size_t key_len, const void *key);
     int (*CC_SPTR(ccmode_omac, omac))(ccomac_ctx *ctx, size_t nblocks, const void *tweak, const void *in, void *out);
     const void *custom;
+};
+
+/* This provide an implementation of SIV
+ as specified in https://tools.ietf.org/html/rfc5297
+ also in http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/siv/siv.pdf
+ Counter Mode where IV is based on CMAC
+ */
+
+cc_aligned_struct(16) ccsiv_ctx;
+
+struct ccmode_siv {
+    size_t size;        /* first argument to ccsiv_ctx_decl(). */
+    size_t block_size;
+    int (*CC_SPTR(ccmode_siv, init))(const struct ccmode_siv *siv, ccsiv_ctx *ctx,
+                 size_t key_len, const uint8_t *key);
+    int (*CC_SPTR(ccmode_siv, set_nonce))(ccsiv_ctx *ctx,  size_t nbytes, const uint8_t *in);  // could just be ccm with NULL out
+    int (*CC_SPTR(ccmode_siv, auth))(ccsiv_ctx *ctx,  size_t nbytes, const uint8_t *in);  // could just be ccm with NULL out
+    int (*CC_SPTR(ccmode_siv, crypt))(ccsiv_ctx *ctx, size_t nbytes, const uint8_t *in, uint8_t *out);
+    int (*CC_SPTR(ccmode_siv, reset))(ccsiv_ctx *ctx);
+    const struct ccmode_cbc *cbc;
+    const struct ccmode_ctr *ctr;
+};
+
+/* This provides an implementation of SIV using AES CTR mode with HMAC as the MAC,
+ allowing for a tagging mechanism with collision resistant tags. This is a modification of the
+ standard specified in https://tools.ietf.org/html/rfc5297
+ also in http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/siv/siv.pdf
+ Counter Mode where IV is based on HMAC.
+ */
+
+cc_aligned_struct(16) ccsiv_hmac_ctx;
+
+struct ccmode_siv_hmac {
+    size_t size; /* first argument to ccsiv_hmac_ctx_decl(). */
+    size_t block_size;
+    
+    int (*CC_SPTR(ccmode_siv_hmac, init))(const struct ccmode_siv_hmac *sivhmac,
+                ccsiv_hmac_ctx *ctx,
+                size_t key_len,
+                const uint8_t *key,
+                const size_t tag_size);
+    int (*CC_SPTR(ccmode_siv_hmac, set_nonce))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in);
+    int (*CC_SPTR(ccmode_siv_hmac, auth))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in);
+    int (*CC_SPTR(ccmode_siv_hmac, crypt))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in, uint8_t *out);
+    int (*CC_SPTR(ccmode_siv_hmac, reset))(ccsiv_hmac_ctx *ctx);
+    const struct ccdigest_info *hmac_digest; // Digest to be used in HMAC;
+    const struct ccmode_ctr *ctr;
 };
 
 #endif /* _CORECRYPTO_CCMODE_IMPL_H_ */

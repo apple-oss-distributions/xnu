@@ -350,6 +350,7 @@ struct  ifreq {
 #define IFRTYPE_FUNCTIONAL_COMPANIONLINK        7
 #define IFRTYPE_FUNCTIONAL_MANAGEMENT           8
 #define IFRTYPE_FUNCTIONAL_LAST                 8
+		u_int8_t ifru_is_directlink;
 	} ifr_ifru;
 #define ifr_addr        ifr_ifru.ifru_addr      /* address */
 #define ifr_dstaddr     ifr_ifru.ifru_dstaddr   /* other end of p-to-p link */

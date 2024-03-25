@@ -569,6 +569,14 @@ struct IOPMInterestContext {
 	IOPMMessageFilter       messageFilter;
 };
 
+// track client ack requirements
+class IOPMClientAck : public OSObject {
+	OSDeclareDefaultStructors( IOPMClientAck );
+public:
+	uint64_t completionTimestamp;   // absolute time
+	uint32_t maxTimeRequested;              // microseconds
+};
+
 // assertPMDriverCall() options
 enum {
 	kIOPMDriverCallNoInactiveCheck = 1

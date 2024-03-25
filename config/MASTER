@@ -321,6 +321,14 @@ options   CONFIG_VSPRINTF               # <vsprintf>
 options   CONFIG_EMBEDDED			# <config_embedded>
 
 
+# Compile XNU with SPTM support. This option should be used mutually exclusively
+# with the config_pmap_ppl option
+options   CONFIG_SPTM				# <config_sptm>
+
+
+# Enable support for commmunication with exclaves. Requires SPTM support.
+options		CONFIG_EXCLAVES			# <config_exclaves>
+
 # Compile XNU with PPL support.
 options   CONFIG_PMAP_PPL			# <config_pmap_ppl>
 
@@ -507,8 +515,8 @@ pseudo-device	systrace	1	init	systrace_init	# <config_dtrace>
 pseudo-device	fbt		1	init	fbt_init	# <config_dtrace>
 pseudo-device	profile_prvd	1	init	profile_init	# <config_dtrace>
 
-
-pseudo-device perfmon 1 init perfmon_dev_init # <config_perfmon>
+# monotonic devices
+pseudo-device monotonic 1 init mt_dev_init # <config_cpu_counters>
 
 #
 # IOKit configuration options
@@ -621,19 +629,13 @@ options		LOCK_STATS		#		    # <lock_stats>
 
 # kernel performance tracing
 options     KPERF                  # <kperf>
-options     KPC                    # <kpc>
 
+options     CONFIG_CPU_COUNTERS     # <config_cpu_counters>
 
 options     CONFIG_PERVASIVE_CPI    # <config_pervasive_cpi>
 options     CONFIG_PERVASIVE_ENERGY # <config_pervasive_energy>
 
 options     CONFIG_IOTRACE          # Physical IO tracing    # <config_iotrace>
-
-#
-# CONFIG_PERFMON enables code to interface with performance monitoring hardware,
-# which count hardware events like cache misses and branch mispredicts.
-#
-options     CONFIG_PERFMON         # <config_perfmon>
 
 options     PGO                    # <pgo>
 

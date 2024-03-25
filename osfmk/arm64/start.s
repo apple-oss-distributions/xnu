@@ -25,14 +25,14 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <arm64/proc_reg.h>
+#include "assym.s"
 #include <arm64/asm.h>
+#include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>
 #include <pexpert/arm64/board_config.h>
 #include <mach_assert.h>
 #include <machine/asm.h>
-#include "assym.s"
 #include <arm64/tunables/tunables.s>
 #include <arm64/exception_asm.h>
 
@@ -162,6 +162,8 @@ Lnext_cpu_data_entry:
 	b.eq	Lskip_cpu_reset_handler				// Not found
 	b		Lcheck_cpu_data_entry	// loop
 Lfound_cpu_data_entry:
+
+
 	adrp	x20, EXT(const_boot_args)@page
 	add		x20, x20, EXT(const_boot_args)@pageoff
 	ldr		x0, [x21, CPU_RESET_HANDLER]		// Call CPU reset handler
@@ -786,7 +788,7 @@ common_start:
 
 	APPLY_TUNABLES x12, x13, x14
 
-#if HAS_CLUSTER
+#if HAS_CLUSTER && !NO_CPU_OVRD
 	// Unmask external IRQs if we're restarting from non-retention WFI
 	mrs		x9, CPU_OVRD
 	and		x9, x9, #(~(ARM64_REG_CYC_OVRD_irq_mask | ARM64_REG_CYC_OVRD_fiq_mask))

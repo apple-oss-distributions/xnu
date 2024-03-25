@@ -432,6 +432,8 @@ local syscalls = {
         'uint64_t identifier',
         'mach_vm_address_t buffer',
         'mach_vm_size_t size',
+        'mach_vm_size_t size2',
+        'mach_vm_size_t offset',
       },
     },
 

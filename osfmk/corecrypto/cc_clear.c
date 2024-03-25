@@ -1,4 +1,4 @@
-/* Copyright (c) (2014-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2014-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -48,15 +48,17 @@
  * it and can't assume it points to any function in particular
  * (such as memset, which it then might further "optimize").
  */
+    #if CC_EFI
+static void(*const volatile zero_mem_ptr)(void *, size_t) = EfiCommonLibZeroMem;
+    #else
 static void* (*const volatile memset_ptr)(void*, int, size_t) = memset;
+    #endif
 #endif
 
 void
 cc_clear(size_t len, void *dst)
 {
-	CC_ENSURE_DIT_ENABLED
-
-	    FIPSPOST_TRACE_EVENT;
+	FIPSPOST_TRACE_EVENT;
 
 #if CC_HAS_MEMSET_S
 	memset_s(dst, len, 0, len);
@@ -65,7 +67,11 @@ cc_clear(size_t len, void *dst)
 #elif CC_HAS_EXPLICIT_BZERO
 	explicit_bzero(dst, len);
 #else
+    #if CC_EFI
+	(zero_mem_ptr)(dst, len);
+    #else
 	(memset_ptr)(dst, 0, len);
+    #endif
 
 	/* One more safeguard, should all hell break loose - a memory barrier.
 	 * The volatile function pointer _should_ work, but compilers are by

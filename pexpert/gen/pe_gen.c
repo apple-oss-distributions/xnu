@@ -36,6 +36,9 @@
 
 #include <libkern/section_keywords.h>
 
+#if CONFIG_SPTM
+#include <sptm/sptm_xnu.h>
+#endif
 
 #if defined(__arm64__)
 SECURITY_READ_ONLY_LATE(static uint32_t) gPEKernelConfigurationBitmask;
@@ -144,6 +147,31 @@ PE_get_random_seed(unsigned char *dst_random_seed, uint32_t request_size)
 	uint32_t        size = 0;
 	uint8_t         *random_seed;
 
+#if CONFIG_SPTM
+	char const prefix[] = "randseed";
+	size_t const prefix_len = sizeof(prefix) - 1;
+
+	extern const sptm_bootstrap_args_xnu_t *SPTMArgs;
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-qual"
+	/* Legal, because we are not locked down yet. */
+	random_seed = (uint8_t*)&SPTMArgs->random_seed;
+#pragma GCC diagnostic pop
+
+	size = (uint32_t)SPTMArgs->random_seed_length;
+
+	if (size < prefix_len) {
+		panic("random seed field too short");
+	}
+
+	if (memcmp(random_seed, prefix, prefix_len) != 0) {
+		panic("random seed corrupted");
+	}
+
+	random_seed += prefix_len;
+	size -= prefix_len;
+#else /* CONFIG_SPTM */
 	DTEntry         entryP;
 
 	if ((SecureDTLookupEntry(NULL, "/chosen", &entryP) != kSuccess)
@@ -154,6 +182,7 @@ PE_get_random_seed(unsigned char *dst_random_seed, uint32_t request_size)
 		random_seed = NULL;
 		size = 0;
 	}
+#endif /* CONFIG_SPTM */
 
 	if (random_seed == NULL || size == 0) {
 		panic("no random seed");

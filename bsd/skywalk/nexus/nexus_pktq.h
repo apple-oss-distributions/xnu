@@ -177,7 +177,7 @@ __attribute__((always_inline))
 static inline struct __kern_packet *
 nx_pktq_safe_deq(struct nx_pktq *q)
 {
-	struct __kern_packet *ret;
+	struct __kern_packet *__single ret;
 
 	nx_pktq_lock(q);
 	ret = __pktq_deq(q);
@@ -212,7 +212,7 @@ static inline struct __kern_packet *
 nx_pktq_safe_deq_all(struct nx_pktq *q, struct __kern_packet **last,
     uint32_t *qlenp, uint64_t *qsizep)
 {
-	struct __kern_packet *ret;
+	struct __kern_packet *__single ret;
 
 	nx_pktq_lock(q);
 	ret = __pktq_deq_all(q, last, qlenp, qsizep);

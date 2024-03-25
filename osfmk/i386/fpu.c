@@ -74,7 +74,7 @@
 #include <i386/proc_reg.h>
 #include <i386/misc_protos.h>
 #include <i386/thread.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 
 xstate_t        fpu_capability = UNDEFINED;     /* extended state capability */
 xstate_t        fpu_default = UNDEFINED;        /* default extended state */

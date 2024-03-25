@@ -407,12 +407,12 @@ ipf_pkt2mbuf(struct fsw_ip_frag_mgr *mgr, struct __kern_packet *pkt)
 	ASSERT(l3t_len <= mbuf_maxlen(m));
 
 	if (pkt->pkt_pflags & PKT_F_MBUF_DATA) {
-		bcopy(pkt->pkt_mbuf->m_data + pkt->pkt_l2_len,
-		    m->m_data, l3t_len);
+		bcopy(m_mtod_current(pkt->pkt_mbuf) + pkt->pkt_l2_len,
+		    m_mtod_current(m), l3t_len);
 	} else {
 		MD_BUFLET_ADDR_ABS(pkt, buf);
 		buf += (pkt->pkt_headroom + pkt->pkt_l2_len);
-		bcopy(buf, m->m_data, l3t_len);
+		bcopy(buf, m_mtod_current(m), l3t_len);
 	}
 	m->m_pkthdr.len = m->m_len = l3t_len;
 

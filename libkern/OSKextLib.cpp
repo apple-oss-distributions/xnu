@@ -31,6 +31,7 @@ extern "C" {
 #include <libkern/mkext.h>
 };
 
+#include <kern/telemetry.h>
 #include <libkern/c++/OSContainers.h>
 #include <libkern/c++/OSKext.h>
 #include <libkern/OSKextLib.h>
@@ -479,6 +480,36 @@ kmod_panic_dump(vm_offset_t * addr, unsigned int cnt)
 	OSKext::printKextsInBacktrace(addr, cnt, &paniclog_append_noflush, 0);
 
 	return;
+}
+
+void
+telemetry_backtrace_add_kexts(
+	char                 *buf,
+	size_t                buflen,
+	uintptr_t            *frames,
+	uint32_t              framecnt)
+{
+	__block size_t pos = 0;
+
+	OSKext::foreachKextInBacktrace(frames, framecnt, OSKext::kPrintKextsLock,
+	    ^(OSKextLoadedKextSummary *summary, uint32_t index __unused){
+			uuid_string_t uuid;
+			uint64_t tmpAddr;
+			uint64_t tmpSize;
+
+			(void) uuid_unparse(summary->uuid, uuid);
+
+#if defined(__arm__) || defined(__arm64__)
+			tmpAddr = summary->text_exec_address;
+			tmpSize = summary->text_exec_size;
+#else
+			tmpAddr = summary->address;
+			tmpSize = summary->size;
+#endif
+			tmpAddr -= vm_kernel_stext;
+			pos += scnprintf(buf + pos, buflen - pos, "%s@%llx:%llx\n",
+			uuid, tmpAddr, tmpAddr + tmpSize - 1);
+		});
 }
 
 /********************************************************************/

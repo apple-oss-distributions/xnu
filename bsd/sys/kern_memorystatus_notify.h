@@ -33,6 +33,8 @@
 #include <sys/proc.h>
 #include <sys/param.h>
 
+#if BSD_KERNEL_PRIVATE
+
 #if VM_PRESSURE_EVENTS
 
 extern vm_pressure_level_t memorystatus_vm_pressure_level;
@@ -66,5 +68,7 @@ if (cond) { printf(format, ##__VA_ARGS__); } \
 #endif
 
 #endif /* VM_PRESSURE_EVENTS */
+
+#endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* SYS_MEMORYSTATUS_NOTIFY_H */

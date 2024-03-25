@@ -560,7 +560,7 @@ sched_group_check_thread(sched_group_t group, thread_t thread)
 	thread_t elem;
 	int pri = thread->sched_pri;
 
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 
 	q = &group->runq.queues[pri];
 
@@ -593,7 +593,7 @@ global_check_entry_queue(entry_queue_t main_entryq)
 	assert(entry->sched_pri == group->runq.highq);
 
 	assert(entry == thread_entry);
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 }
 
 static void
@@ -605,7 +605,7 @@ group_check_run_queue(entry_queue_t main_entryq, sched_group_t group)
 
 	thread_t thread = group_first_thread(group);
 
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 
 	sched_entry_t sched_entry = group_entry_for_pri(thread->sched_group, thread->sched_pri);
 
@@ -794,7 +794,7 @@ group_run_queue_enqueue_thread(
 	circle_queue_t  queue = &rq->queues[thread_pri];
 	boolean_t       result = FALSE;
 
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 	assert_thread_magic(thread);
 
 	if (circle_queue_empty(queue)) {
@@ -835,7 +835,7 @@ group_run_queue_remove_thread(
 	boolean_t       result = FALSE;
 
 	assert_thread_magic(thread);
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 
 	circle_dequeue(queue, &thread->runq_links);
 
@@ -852,7 +852,7 @@ group_run_queue_remove_thread(
 		result = TRUE;
 	}
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq_locked(thread);
 
 	return result;
 }
@@ -881,7 +881,7 @@ sched_global_dequeue_thread(entry_queue_t main_entryq)
 
 	thread = group_run_queue_dequeue_thread(group_runq, &thread_pri, &pri_level_empty);
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(thread);
 
 	if (!pri_level_empty) {
 		entry_queue_enqueue_entry(main_entryq, entry, SCHED_TAILQ);
@@ -910,7 +910,7 @@ sched_global_deep_drain_dequeue_thread(entry_queue_t main_entryq)
 
 	thread = group_run_queue_dequeue_thread(group_runq, &thread_pri, &pri_level_empty);
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(thread);
 
 	if (pri_level_empty) {
 		entry_queue_remove_entry(main_entryq, entry);
@@ -932,7 +932,7 @@ sched_group_dequeue_thread(
 
 	thread = group_run_queue_dequeue_thread(group_runq, &thread_pri, &pri_level_empty);
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(thread);
 
 	if (pri_level_empty) {
 		entry_queue_remove_entry(main_entryq, group_entry_for_pri(group, thread_pri));
@@ -1149,7 +1149,7 @@ sched_multiq_processor_enqueue(
 		assert(thread->bound_processor == processor);
 
 		result = run_queue_enqueue(multiq_bound_runq(processor), thread, options);
-		thread->runq = processor;
+		thread_set_runq_locked(thread, processor);
 
 		return result;
 	}
@@ -1158,7 +1158,7 @@ sched_multiq_processor_enqueue(
 	    thread->sched_group,
 	    thread, options);
 
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 
 	return FALSE;
 }
@@ -1346,18 +1346,18 @@ sched_multiq_processor_queue_remove(
 
 	pset_lock(pset);
 
-	if (thread->runq != PROCESSOR_NULL) {
+	if (thread_get_runq_locked(thread) != PROCESSOR_NULL) {
 		/*
 		 * Thread is on a run queue and we have a lock on
 		 * that run queue.
 		 */
 
-		assert(thread->runq == processor);
+		thread_assert_runq_nonnull(thread);
 
 		if (thread->bound_processor != PROCESSOR_NULL) {
 			assert(processor == thread->bound_processor);
 			run_queue_remove(multiq_bound_runq(processor), thread);
-			thread->runq = PROCESSOR_NULL;
+			thread_clear_runq_locked(thread);
 		} else {
 			sched_group_remove_thread(multiq_main_entryq(processor),
 			    thread->sched_group,

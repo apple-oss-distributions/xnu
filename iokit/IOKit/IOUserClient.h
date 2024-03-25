@@ -302,6 +302,8 @@ public:
 	static void initialize( void );
 	static void destroyUserReferences( OSObject * obj );
 	static bool finalizeUserReferences( OSObject * obj );
+	void ipcEnter(int locking);
+	void ipcExit(int locking);
 	OSPtr<IOMemoryMap>  mapClientMemory64( IOOptionBits type,
 	    task_t task,
 	    IOOptionBits mapFlags = kIOMapAnywhere,

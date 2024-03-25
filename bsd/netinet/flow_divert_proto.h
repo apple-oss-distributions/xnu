@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020, 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2017, 2020, 2022, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -41,6 +41,8 @@
 #define FLOW_DIVERT_PKT_GROUP_INIT              6
 #define FLOW_DIVERT_PKT_PROPERTIES_UPDATE       7
 #define FLOW_DIVERT_PKT_APP_MAP_CREATE          9
+#define FLOW_DIVERT_PKT_FLOW_STATES_REQUEST     10
+#define FLOW_DIVERT_PKT_FLOW_STATES             11
 
 #define FLOW_DIVERT_TLV_NIL                     0
 #define FLOW_DIVERT_TLV_ERROR_CODE              5
@@ -76,11 +78,12 @@
 #define FLOW_DIVERT_TLV_CFIL_ID                 36
 #define FLOW_DIVERT_TLV_DATAGRAM_SIZE           37
 #define FLOW_DIVERT_TLV_ORDER                   38
+#define FLOW_DIVERT_TLV_FLOW_STATE              39
 
 #define FLOW_DIVERT_FLOW_TYPE_TCP               1
 #define FLOW_DIVERT_FLOW_TYPE_UDP               3
 
-#define FLOW_DIVERT_CHUNK_SIZE                  4096
+#define FLOW_DIVERT_CHUNK_SIZE                  65600
 
 #define FLOW_DIVERT_TOKEN_GETOPT_MAX_SIZE       128
 
@@ -104,6 +107,15 @@
 struct flow_divert_packet_header {
 	uint8_t             packet_type;
 	uint32_t            conn_id;
+};
+
+struct flow_divert_flow_state {
+	uint32_t conn_id;
+	uint64_t bytes_written_by_app;
+	uint64_t bytes_sent;
+	uint64_t bytes_received;
+	uint32_t send_window;
+	uint32_t send_buffer_bytes;
 };
 
 #endif /* __FLOW_DIVERT_PROTO_H__ */

@@ -73,7 +73,7 @@ extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
  */
 
 kern_return_t task_exception_notify(exception_type_t exception,
-    mach_exception_data_type_t code, mach_exception_data_type_t subcode);
+    mach_exception_data_type_t code, mach_exception_data_type_t subcode, const bool fatal);
 
 #define GUARD_REQUIRED (GUARD_DUP)
 #define GUARD_ALL      (GUARD_REQUIRED |        \
@@ -226,12 +226,13 @@ fd_guard_ast(
 	mach_exception_code_t code,
 	mach_exception_subcode_t subcode)
 {
+	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY.
+	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-	if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		psignal(current_proc(), SIGKILL);
 	} else {
 		exit_with_guard_exception(current_proc(), code, subcode);
@@ -427,6 +428,7 @@ guarded_close_np(proc_t p, struct guarded_close_np_args *uap,
     __unused int32_t *retval)
 {
 	struct fileproc *fp;
+	kauth_cred_t p_cred;
 	int fd = uap->fd;
 	int error;
 	guardid_t uguard;
@@ -443,7 +445,9 @@ guarded_close_np(proc_t p, struct guarded_close_np_args *uap,
 		return error;
 	}
 	fp_drop(p, fd, fp, 1);
-	return fp_close_and_unlock(p, fd, fp, 0);
+
+	p_cred = current_cached_proc_cred(p);
+	return fp_close_and_unlock(p, p_cred, fd, fp, 0);
 }
 
 /*
@@ -759,6 +763,7 @@ int
 falloc_guarded(struct proc *p, struct fileproc **fp, int *fd,
     vfs_context_t ctx, const guardid_t *guard, u_int attrs)
 {
+	kauth_cred_t p_cred = current_cached_proc_cred(p);
 	struct gfp_crarg crarg;
 
 	if (((attrs & GUARD_REQUIRED) != GUARD_REQUIRED) ||
@@ -770,7 +775,7 @@ falloc_guarded(struct proc *p, struct fileproc **fp, int *fd,
 	crarg.gca_guard = *guard;
 	crarg.gca_attrs = (uint16_t)attrs;
 
-	return falloc_withinit(p, fp, fd, ctx, guarded_fileproc_init, &crarg);
+	return falloc_withinit(p, p_cred, ctx, fp, fd, guarded_fileproc_init, &crarg);
 }
 
 #if CONFIG_MACF && CONFIG_VNGUARD
@@ -1310,12 +1315,13 @@ void
 vn_guard_ast(thread_t __unused t,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode)
 {
+	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY.
+	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-	if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		psignal(current_proc(), SIGKILL);
 	} else {
 		exit_with_guard_exception(current_proc(), code, subcode);

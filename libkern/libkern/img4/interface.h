@@ -55,7 +55,7 @@
  * it can be tested at build-time and not require rev-locked submissions of xnu
  * and AppleImage4.
  */
-#define IMG4_INTERFACE_VERSION (18u)
+#define IMG4_INTERFACE_VERSION (20u)
 
 /*!
  * @typegroup
@@ -208,6 +208,15 @@ typedef const img4_buff_t *(*img4_get_payload_t)(
 
 typedef const img4_chip_t *(*img4_chip_get_cryptex1_boot_t)(
 	const img4_chip_t *chip
+	);
+
+typedef const img4_nonce_domain_t *(*img4_nonce_domain_get_from_handle_t)(
+	uint32_t handle
+	);
+
+typedef errno_t (*const img4_nonce_domain_peek_nonce_t)(
+	const img4_nonce_domain_t *nd,
+	img4_nonce_t *n
 	);
 
 typedef struct _img4_interface {
@@ -366,6 +375,19 @@ typedef struct _img4_interface {
 		const img4_runtime_object_spec_t *runtime_object_spec_local_policy;
 		const img4_chip_t *chip_ap_local_blessed;
 	} i4if_v18;
+	struct {
+		img4_nonce_domain_peek_nonce_t nonce_domain_peek_nonce;
+		const img4_chip_t *chip_cryptex1_boot_relaxed_x86;
+		const img4_chip_t *chip_cryptex1_preboot_relaxed_x86;
+		const img4_chip_t *chip_cryptex1_boot_static_x86;
+		const img4_chip_t *chip_cryptex1_preboot_static_x86;
+	} i4if_v19;
+	struct {
+		img4_nonce_domain_get_from_handle_t nonce_domain_get_from_handle;
+		const img4_chip_t *chip_cryptex1_generic;
+		const img4_chip_t *chip_cryptex1_generic_supplemental;
+		const img4_chip_t *chip_cryptex1_generic_x86;
+	} i4if_v20;
 } img4_interface_t;
 
 __BEGIN_DECLS

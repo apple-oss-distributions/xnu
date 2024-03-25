@@ -195,7 +195,7 @@ const mach_trap_t       mach_trap_table[MACH_TRAP_TABLE_COUNT] = {
 /* 85 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
 /* 86 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
 /* 87 */ MACH_TRAP(kern_invalid, 0, 0, NULL),
-/* 88 */ MACH_TRAP(_exclaves_ctl_trap, 5, 8, munge_wwlll),
+/* 88 */ MACH_TRAP(_exclaves_ctl_trap, 7, 12, munge_wwlllll),
 /* 89 */ MACH_TRAP(mach_timebase_info_trap, 1, 1, munge_w),
 /* 90 */ MACH_TRAP(mach_wait_until_trap, 1, 2, munge_l),
 /* 91 */ MACH_TRAP(mk_timer_create_trap, 0, 0, NULL, .mach_trap_returns_port = 1),

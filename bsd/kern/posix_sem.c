@@ -444,7 +444,7 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 	 * attempt to allocate a new fp; if unsuccessful, the fp will be
 	 * left unmodified (NULL).
 	 */
-	error = falloc(p, &fp, &indx, vfs_context_current());
+	error = falloc(p, &fp, &indx);
 	if (error) {
 		goto bad;
 	}
@@ -782,6 +782,7 @@ int
 sem_close(proc_t p, struct sem_close_args *uap, __unused int32_t *retval)
 {
 	int fd = CAST_DOWN_EXPLICIT(int, uap->sem);
+	kauth_cred_t p_cred;
 	struct fileproc *fp;
 
 	AUDIT_ARG(fd, fd); /* XXX This seems wrong; uap->sem is a pointer */
@@ -795,7 +796,9 @@ sem_close(proc_t p, struct sem_close_args *uap, __unused int32_t *retval)
 		proc_fdunlock(p);
 		return EBADF;
 	}
-	return fp_close_and_unlock(p, fd, fp, 0);
+
+	p_cred = current_cached_proc_cred(p);
+	return fp_close_and_unlock(p, p_cred, fd, fp, 0);
 }
 
 int

@@ -727,12 +727,16 @@ sys_ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
 		interruptible |= THREAD_WAIT_NOREPORT;
 	}
 
-	if (timeout) {
-		nanoseconds_to_deadline(timeout, &deadline);
-	}
-
 	turnstile_update_inheritor(ts, owner_thread,
 	    (TURNSTILE_DELAYED_UPDATE | TURNSTILE_INHERITOR_THREAD));
+
+	if (timeout) {
+		if (flags & ULF_DEADLINE) {
+			deadline = timeout;
+		} else {
+			nanoseconds_to_deadline(timeout, &deadline);
+		}
+	}
 
 	wr = waitq_assert_wait64(&ts->ts_waitq, CAST_EVENT64_T(ULOCK_TO_EVENT(ull)),
 	    interruptible, deadline);

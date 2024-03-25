@@ -87,6 +87,8 @@ enum {
 	kIOWaitQuietBeforeRoot =      0x01000000ULL,
 	kIOTrackingBoot     =         0x02000000ULL,
 
+	kIOLogExclaves      =         0x100000000ULL,
+
 	_kIODebugTopFlag    = 0x8000000000000000ULL// force enum to be 64 bits
 };
 

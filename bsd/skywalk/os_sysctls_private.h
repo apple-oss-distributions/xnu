@@ -120,7 +120,8 @@
 	X(uint32_t, use_min_curr_rtt, 1)                                \
 	X(uint32_t, fin_timeout, 30)                                    \
 	X(uint32_t, accurate_ecn, 0)                                    \
-	X(int32_t, tso, 1)
+	X(int32_t, tso, 1)                                              \
+	X(int32_t, awdl_rtobase, 100)
 
 #define SKMEM_SYSCTL_KERN_IPC_LIST                                      \
 	X(uint32_t, throttle_best_effort, 0)
@@ -132,6 +133,7 @@
 #define SKMEM_SYSCTL_TCP_HAS_FIN_TIMEOUT 1
 #define SKMEM_SYSCTL_TCP_HAS_ACC_ECN 1
 #define SKMEM_SYSCTL_TCP_HAS_ACC_ECN_OPTION 1
+#define SKMEM_SYSCTL_TCP_HAS_AWDL_RTOBASE 1
 /*
  * When adding a new type above, be sure to add a corresponding
  * printf format below. Clients use NW_SYSCTL_PRI_##type

@@ -193,6 +193,8 @@ extern ipc_port_t iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobje
 typedef struct ipc_kmsg * ipc_kmsg_t;
 extern ipc_kmsg_t ipc_kmsg_alloc_uext_reply(size_t);
 extern mach_msg_header_t * ikm_header(ipc_kmsg_t);
+extern void * ikm_udata_from_header(
+	ipc_kmsg_t              kmsg);
 #endif /* MACH_KERNEL_PRIVATE */
 
 extern kern_return_t

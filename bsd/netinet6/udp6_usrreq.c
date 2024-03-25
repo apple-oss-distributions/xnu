@@ -156,6 +156,8 @@ extern int esp_udp_encap_port;
 #include <skywalk/core/skywalk_var.h>
 #endif /* SKYWALK */
 
+#include <net/sockaddr_utils.h>
+
 /*
  * UDP protocol inplementation.
  * Per RFC 768, August, 1980.
@@ -228,7 +230,7 @@ udp6_append(struct inpcb *last, struct ip6_hdr *ip6,
 	}
 	so_recv_data_stat(last->in6p_socket, n, 0);
 	if (sbappendaddr(&last->in6p_socket->so_rcv,
-	    (struct sockaddr *)udp_in6, n, opts, NULL) == 0) {
+	    SA(udp_in6), n, opts, NULL) == 0) {
 		udpstat.udps_fullsock++;
 	} else {
 		sorwakeup(last->in6p_socket);
@@ -396,7 +398,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 				int blocked;
 
 				IM6O_LOCK(imo);
-				bzero(&mcaddr, sizeof(struct sockaddr_in6));
+				SOCKADDR_ZERO(&mcaddr, sizeof(struct sockaddr_in6));
 				mcaddr.sin6_len = sizeof(struct sockaddr_in6);
 				mcaddr.sin6_family = AF_INET6;
 				mcaddr.sin6_addr = ip6->ip6_dst;
@@ -639,7 +641,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	}
 	so_recv_data_stat(in6p->in6p_socket, m, 0);
 	if (sbappendaddr(&in6p->in6p_socket->so_rcv,
-	    (struct sockaddr *)&udp_in6, m, opts, NULL) == 0) {
+	    SA(&udp_in6), m, opts, NULL) == 0) {
 		m = NULL;
 		opts = NULL;
 		udpstat.udps_fullsock++;
@@ -743,11 +745,11 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 			 * through NECP.
 			 */
 			in6_pcbnotify(&udbinfo, sa, uh.uh_dport,
-			    (struct sockaddr*)ip6cp->ip6c_src, uh.uh_sport,
+			    SA(ip6cp->ip6c_src), uh.uh_sport,
 			    cmd, cmdarg, NULL);
 		} else {
 			in6_pcbnotify(&udbinfo, sa, uh.uh_dport,
-			    (struct sockaddr*)ip6cp->ip6c_src, uh.uh_sport,
+			    SA(ip6cp->ip6c_src), uh.uh_sport,
 			    cmd, cmdarg, notify);
 		}
 #if SKYWALK
@@ -762,7 +764,7 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		sock_laddr.sin6.sin6_addr = ip6->ip6_src;
 
 		protoctl_event_enqueue_nwk_wq_entry(ifp,
-		    (struct sockaddr *)&sock_laddr, sa,
+		    SA(&sock_laddr), sa,
 		    uh.uh_sport, uh.uh_dport, IPPROTO_UDP,
 		    cmd, &prctl_ev_val);
 #endif /* SKYWALK */
@@ -858,7 +860,7 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
 		struct sockaddr_in6 *sin6_p;
 
-		sin6_p = (struct sockaddr_in6 *)(void *)nam;
+		sin6_p = SIN6(nam);
 
 		if (IN6_IS_ADDR_UNSPECIFIED(&sin6_p->sin6_addr)) {
 			inp->inp_vflag |= INP_IPV4;
@@ -871,7 +873,7 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			inp->inp_vflag &= ~INP_IPV6;
 			inp->inp_vflag |= INP_V4MAPPEDV6;
 
-			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
+			error = in_pcbbind(inp, SA(&sin), p);
 			if (error != 0) {
 				inp->inp_vflag = old_flags;
 			}
@@ -894,7 +896,7 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 {
 	struct inpcb *inp;
 	int error;
-	struct sockaddr_in6 *sin6_p = (struct sockaddr_in6 *)(void *)nam;
+	struct sockaddr_in6 *sin6_p = SIN6(nam);
 
 #if defined(NECP) && defined(FLOW_DIVERT)
 	int should_use_flow_divert = 0;
@@ -947,8 +949,7 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			inp->inp_vflag &= ~INP_IPV6;
 			inp->inp_vflag |= INP_V4MAPPEDV6;
 
-			error = in_pcbconnect(inp, (struct sockaddr *)&sin,
-			    p, IFSCOPE_NONE, NULL);
+			error = in_pcbconnect(inp, SA(&sin), p, IFSCOPE_NONE, NULL);
 			if (error == 0) {
 #if NECP
 				/* Update NECP client with connected five-tuple */
@@ -1128,7 +1129,7 @@ udp6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
 	if (CFIL_DGRAM_FILTERED(so) && !addr && IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
 		cfil_tag = cfil_dgram_get_socket_state(m, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
-			addr = (struct sockaddr *)cfil_faddr;
+			addr = SA(cfil_faddr);
 		}
 	}
 #endif
@@ -1155,7 +1156,7 @@ udp6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
 		if (addr == NULL) {
 			hasv4addr = (inp->inp_vflag & INP_IPV4);
 		} else {
-			sin6 = (struct sockaddr_in6 *)(void *)addr;
+			sin6 = SIN6(addr);
 			hasv4addr =
 			    IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr) ? 1 : 0;
 		}

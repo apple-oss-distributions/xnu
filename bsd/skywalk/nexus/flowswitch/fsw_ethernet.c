@@ -36,6 +36,7 @@
 #include <net/ethernet.h>
 #include <net/route.h>
 #include <sys/eventhandler.h>
+#include <net/sockaddr_utils.h>
 
 #define FSW_ETHER_LEN_PADDED     16
 #define FSW_ETHER_PADDING        (FSW_ETHER_LEN_PADDED - ETHER_HDR_LEN)
@@ -252,7 +253,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 		 * Note we pass NULL as "hint" parameter, as tgt_sa
 		 * is already refererring to the target address.
 		 */
-		bzero(&sdl, sizeof(sdl));
+		SOCKADDR_ZERO(&sdl, sizeof(sdl));
 		err = arp_lookup_ip(ifp, SIN(tgt_sa), &sdl, sizeof(sdl),
 		    NULL, m);
 

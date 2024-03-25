@@ -1,6 +1,7 @@
-from __future__ import absolute_import, division, print_function
-
-from xnu import *
+from xnu import (
+        kern, ArgumentError, unsigned, lldb_command, header, GetEnumValue,
+        GetEnumValues, GetEnumName, GetThreadName, GetProcStartAbsTimeForTask,
+        GetRecentTimestamp, GetProcNameForTask, FindTasksByName, IterateQueue)
 
 
 def validate_args(opts, valid_flags):
@@ -76,26 +77,29 @@ class RecountSum(object):
 
     def __init__(self, mach_times=False):
         self._mach_times = mach_times
-        self._user_time_mach = 0
-        self._system_time_mach = 0
-        self._instructions = 0
-        self._cycles = 0
+        self._levels = RecountPlan.levels()
+        self._times_mach = [0] * len(self._levels)
+        self._instructions = [0] * len(self._levels)
+        self._cycles = [0] * len(self._levels)
         self._energy_nj = 0
         self._valid_count = 0
 
     def add_usage(self, usage):
-        self._user_time_mach += unsigned(usage.ru_user_time_mach)
-        self._system_time_mach += unsigned(usage.ru_system_time_mach)
-        if hasattr(usage, 'ru_cycles'):
-            self._instructions += unsigned(usage.ru_instructions)
-            self._cycles += unsigned(usage.ru_cycles)
-            if unsigned(usage.ru_cycles) != 0:
-                self._valid_count += 1
+        for (_, level) in self._levels:
+            metrics = usage.ru_metrics[level]
+            self._times_mach[level] += unsigned(metrics.rm_time_mach)
+            if hasattr(metrics, 'rm_cycles'):
+                self._instructions[level] += unsigned(metrics.rm_instructions)
+                self._cycles[level] += unsigned(metrics.rm_cycles)
+                if unsigned(metrics.rm_cycles) != 0:
+                    self._valid_count += 1
         if hasattr(usage, 'ru_energy_nj'):
             self._energy_nj += unsigned(usage.ru_energy_nj)
 
     def user_sys_times(self):
-        return (self._user_time_mach, self._system_time_mach)
+        user_level = GetEnumValue('recount_level_t', 'RCT_LVL_USER')
+        user_time = self._times_mach[user_level]
+        return (user_time, sum(self._times_mach) - user_time)
 
     def div_valid(self, numer, denom):
         if self._valid_count == 0 or denom == 0:
@@ -107,28 +111,48 @@ class RecountSum(object):
             return time
         return kern.GetNanotimeFromAbstime(time) / 1e9
 
+    def time(self):
+        time = sum(self._times_mach)
+        if self._mach_times:
+            return time
+        return kern.GetNanotimeFromAbstime(time)
+
     def fmt_args(self):
-        time_ns = kern.GetNanotimeFromAbstime(
-                self._system_time_mach + self._user_time_mach)
-        power_w = self._energy_nj / time_ns if time_ns != 0 else 0
-        return [
-                self._convert_time(self._system_time_mach),
-                self._convert_time(self._user_time_mach),
-                scale_suffix(self._cycles),
-                self.div_valid(self._cycles, time_ns),
-                scale_suffix(self._instructions),
-                self.div_valid(self._cycles, self._instructions),
+        level_args = [[
+                level_name,
+                self._convert_time(self._times_mach[level]),
+                scale_suffix(self._cycles[level]),
+                self.div_valid(
+                        self._cycles[level],
+                        kern.GetNanotimeFromAbstime(self._times_mach[level])),
+                scale_suffix(self._instructions[level]),
+                self.div_valid(self._cycles[level], self._instructions[level]),
+                '-',
+                '-'] for (level_name, level) in
+                RecountPlan.levels()]
+
+        total_time_ns = kern.GetNanotimeFromAbstime(sum(self._times_mach))
+        total_cycles = sum(self._cycles)
+        total_insns = sum(self._instructions)
+        power_w = self._energy_nj / total_time_ns if total_time_ns != 0 else 0
+        level_args.append([
+                '*',
+                total_time_ns / 1e9, scale_suffix(total_cycles),
+                self.div_valid(total_cycles, total_time_ns),
+                scale_suffix(total_insns),
+                self.div_valid(total_cycles, total_insns),
                 scale_suffix(self._energy_nj / 1e9, 'J'),
-                scale_suffix(power_w, 'W')]
+                scale_suffix(power_w, 'W')])
+        return level_args
 
     def fmt_basic_args(self):
-        return [
-                self._convert_time(self._system_time_mach),
-                self._convert_time(self._user_time_mach),
-                self._cycles,
-                self._instructions,
-                self._energy_nj / 1e9]
-
+        return [[
+                level_name,
+                self._convert_time(self._times_mach[level]),
+                self._cycles[level],
+                self._instructions[level],
+                '-'] for (level_name, level) in
+                RecountPlan.levels()]
 
 
 class RecountPlan(object):
@@ -143,12 +167,12 @@ class RecountPlan(object):
 
         plan = kern.GetGlobalVariable('recount_' + name + '_plan')
         topo = plan.rpl_topo
-        if topo == GetEnumValue('recount_topo_t::RCT_TOPO_CPU'):
+        if topo == GetEnumValue('recount_topo_t', 'RCT_TOPO_CPU'):
             self._group_column = 'cpu'
             self._group_count = unsigned(kern.globals.real_ncpus)
             self._group_names = [
                     'cpu-{}'.format(i) for i in range(self._group_count)]
-        elif topo == GetEnumValue('recount_topo_t::RCT_TOPO_CPU_KIND'):
+        elif topo == GetEnumValue('recount_topo_t', 'RCT_TOPO_CPU_KIND'):
             if kern.arch.startswith('arm64'):
                 self._group_column = 'cpu-kind'
                 cluster_mask = int(kern.globals.topology_info.cluster_types)
@@ -158,7 +182,7 @@ class RecountPlan(object):
                         for i in range(self._group_count)]
             else:
                 self._group_count = 1
-        elif topo == GetEnumValue('recount_topo_t::RCT_TOPO_SYSTEM'):
+        elif topo == GetEnumValue('recount_topo_t', 'RCT_TOPO_SYSTEM'):
             self._group_count = 1
         else:
             raise RuntimeError('{}: Unexpected recount topography', topo)
@@ -167,9 +191,9 @@ class RecountPlan(object):
         return '{:>12d}' if self._mach_times else '{:>12.05f}'
 
     def _usage_fmt(self):
-        prefix = '{n}{t} {t}'.format(
+        prefix = '{n}{{:>6s}} {t} '.format(
                 t=self.time_fmt(), n='{:>8s} ' if self._group_column else '')
-        return prefix + ' {:>8s} {:>7.3g} {:>8s} {:>5.03f} {:>9s} {:>9s}'
+        return prefix + '{:>8s} {:>7.3g} {:>8s} {:>5.03f} {:>9s} {:>9s}'
 
     def usages(self, usages):
         for i in range(self._group_count):
@@ -180,77 +204,114 @@ class RecountPlan(object):
             yield tracks[i].rt_usage
 
     def usage_header(self):
-        fmt = '{:>12s} {:>12s} {:>8s} {:>7s} {:>8s} {:>5s} {:>9s} {:>9s}'.format(
-                'sys-time', 'user-time', 'cycles', 'GHz', 'insns', 'CPI',
-                'energy', 'power',)
+        fmt = '{:>6s} {:>12s} {:>8s} {:>7s} {:>8s} {:>5s} {:>9s} {:>9s}'.format(  # noqa: E501
+                'level', 'time', 'cycles', 'GHz', 'insns',
+                'CPI', 'energy', 'power',)
         if self._group_column:
             fmt = '{:>8s} '.format(self._group_column) + fmt
         return fmt
 
+    def levels():
+        names = ['kernel', 'user']
+        levels = list(zip(names, GetEnumValues('recount_level_t', [
+                'RCT_LVL_' + name.upper() for name in names])))
+        try:
+            levels.append(('secure',
+                    GetEnumValue('recount_level_t', 'RCT_LVL_SECURE')))
+        except KeyError:
+            # RCT_LVL_SECURE is not defined on this system.
+            pass
+        return levels
+
     def format_usage(self, usage, name=None, sum=None, O=None):
-        usr_time = unsigned(usage.ru_user_time_mach)
-        usr_time_ns = kern.GetNanotimeFromAbstime(usr_time)
-        sys_time = unsigned(usage.ru_system_time_mach)
-        sys_time_ns = kern.GetNanotimeFromAbstime(sys_time)
-        all_time_ns = usr_time_ns + sys_time_ns
-        if not self._mach_times:
-            usr_time = usr_time_ns / 1e9
-        if not self._mach_times:
-            sys_time = sys_time_ns / 1e9
-        if hasattr(usage, 'ru_cycles'):
-            cycles = unsigned(usage.ru_cycles)
-            freq = cycles / all_time_ns if all_time_ns != 0 else 0
-            insns = unsigned(usage.ru_instructions)
-            cpi = cycles / insns if insns != 0 else 0
-        else:
-            cycles = 0
-            freq = 0
-            insns = 0
-            cpi = 0
+        rows = []
+
+        levels = RecountPlan.levels()
+        total_time = 0
+        total_time_ns = 0
+        total_cycles = 0
+        total_insns = 0
+        for (level_name, level) in levels:
+            metrics = usage.ru_metrics[level]
+            time = unsigned(metrics.rm_time_mach)
+            time_ns = kern.GetNanotimeFromAbstime(time)
+            total_time_ns += time_ns
+            if not self._mach_times:
+                time = time_ns / 1e9
+            total_time += time
+            if hasattr(metrics, 'rm_cycles'):
+                cycles = unsigned(metrics.rm_cycles)
+                total_cycles += cycles
+                freq = cycles / time_ns if time_ns != 0 else 0
+                insns = unsigned(metrics.rm_instructions)
+                total_insns += insns
+                cpi = cycles / insns if insns != 0 else 0
+            else:
+                cycles = 0
+                freq = 0
+                insns = 0
+                cpi = 0
+            rows.append([
+                    level_name, time, scale_suffix(cycles), freq,
+                    scale_suffix(insns), cpi, '-', '-'])
+
         if hasattr(usage, 'ru_energy_nj'):
             energy_nj = unsigned(usage.ru_energy_nj)
-            time_ns = usr_time_ns + sys_time_ns
-            if time_ns != 0:
-                power_w = energy_nj / time_ns
+            if total_time_ns != 0:
+                power_w = energy_nj / total_time_ns
             else:
                 power_w = 0
         else:
             energy_nj = 0
             power_w = 0
+        if total_insns != 0:
+            total_freq = total_cycles / total_time_ns if total_time_ns != 0 else 0
+            total_cpi = total_cycles / total_insns
+        else:
+            total_freq = 0
+            total_cpi = 0
+
+        rows.append([
+                '*', total_time, scale_suffix(total_cycles), total_freq,
+                scale_suffix(total_insns), total_cpi,
+                scale_suffix(energy_nj / 1e9, 'J'),
+                scale_suffix(power_w, 'W')])
+
         if sum:
             sum.add_usage(usage)
 
-        args = [
-                sys_time, usr_time, scale_suffix(cycles), freq,
-                scale_suffix(insns), cpi, scale_suffix(energy_nj / 1e9, 'J'),
-                scale_suffix(power_w, 'W')]
         if self._group_column:
-            args.insert(0, name)
+            for row in rows:
+                row.insert(0, name)
 
-        return O.format(self._usage_fmt(), *args)
+        return [O.format(self._usage_fmt(), *row) for row in rows]
 
     def format_sum(self, sum, O=None):
-        return O.format(self._usage_fmt(), '*', *sum.fmt_args())
+        lines = []
+        for line in sum.fmt_args():
+            lines.append(O.format(self._usage_fmt(), '*', *line))
+        return lines
 
     def format_usages(self, usages, O=None):  # noqa: E741
         sum = RecountSum(self._mach_times) if self._group_count > 1 else None
         str = ''
         for (i, usage) in enumerate(self.usages(usages)):
             name = self._group_names[i] if i < len(self._group_names) else None
-            str += self.format_usage(usage, name=name, sum=sum, O=O) + '\n'
+            lines = self.format_usage(usage, name=name, sum=sum, O=O)
+            str += '\n'.join(lines) + '\n'
         if sum:
-            str += self.format_sum(sum, O=O)
+            str += '\n'.join(self.format_sum(sum, O=O))
         return str
 
-    def format_tracks(self, tracks, newlines=True, O=None):  # noqa: E741
+    def format_tracks(self, tracks, O=None):  # noqa: E741
         sum = RecountSum(self._mach_times) if self._group_count > 1 else None
         str = ''
-        nl = '\n' if newlines else ''
         for (i, usage) in enumerate(self.track_usages(tracks)):
             name = self._group_names[i] if i < len(self._group_names) else None
-            str += self.format_usage(usage, name=name, sum=sum, O=O) + nl
+            lines = self.format_usage(usage, name=name, sum=sum, O=O)
+            str += '\n'.join(lines) + '\n'
         if sum:
-            str += self.format_sum(sum, O=O)
+            str += '\n'.join(self.format_sum(sum, O=O))
         return str
 
     def sum_usages(self, usages, sum=None):
@@ -390,15 +451,16 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
     if active_threads:
         thread_plan = RecountPlan('thread', mach_times=mach_times)
     hdr_prefix = '{:>18s} {:>4s} {:>4s} '.format('processor', 'cpu', 'kind',)
-    hdr_suffix = ' {:>12s} {:>12s} {:>8s}'.format(
-            'idle-time', 'total-time', 'idle-pct')
+    header_fmt = ' {:>12s} {:>12s} {:>8s}'
+    hdr_suffix = header_fmt.format('idle-time', 'total-time', 'idle-pct')
+    null_suffix = header_fmt.format('-', '-', '-')
+    levels = RecountPlan.levels()
     with O.table(hdr_prefix + plan.usage_header() + hdr_suffix):
         for pr in prs:
             usage = pr.pr_recount.rpr_active.rt_usage
             idle_time = pr.pr_recount.rpr_idle_time_mach
-            total_time = (
-                    usage.ru_system_time_mach + usage.ru_user_time_mach +
-                    idle_time)
+            times = [usage.ru_metrics[i].rm_time_mach for (_, i) in levels]
+            total_time = sum(times) + idle_time
             if not mach_times:
                 idle_time = kern.GetNanotimeFromAbstime(idle_time) / 1e9
                 total_time = kern.GetNanotimeFromAbstime(total_time) / 1e9
@@ -415,7 +477,12 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
                     ' ' + plan.time_fmt().format(idle_time) + ' ' +
                     plan.time_fmt().format(total_time) +
                     ' {:>7.2f}%'.format(idle_time / total_time * 100))
-            O.write(prefix + plan.format_usage(usage, O=O) + suffix + '\n')
+            usage_lines = plan.format_usage(usage, O=O)
+            for (i, line) in enumerate(usage_lines):
+                line_suffix = null_suffix
+                if i + 1 == len(usage_lines):
+                    line_suffix = suffix
+                O.write(prefix + line + line_suffix + '\n')
             if active_threads:
                 active_thread = unsigned(pr.active_thread)
                 if active_thread != 0:
@@ -460,41 +527,47 @@ def GetRecountProcessorDiagnostics(pr, cur_time, O=None):
             cur_time - time, since_usrchg)
 
 
-@header('{:>12s} {:>12s} {:>12s} {:>20s} {:>20s} {:>12s}'.format(
-        'group', 'sys-time', 'user-time', 'cycles', 'insns', 'energy'))
+@header('{:>12s} {:>6s} {:>12s} {:>20s} {:>20s}'.format(
+        'group', 'level', 'time', 'cycles', 'insns'))
 def RecountDiagnoseTask(task_ptrs, cmd_options={}, O=None):  # noqa: E74
     if '-F' in cmd_options:
         tasks = FindTasksByName(cmd_options['-F'])
     else:
         tasks = [kern.GetValueFromAddress(t, 'task_t') for t in task_ptrs]
 
-    line_fmt = '{:12s} = {:10.3f}'
-    row_fmt = '{:>12s} {:>12.3f} {:>12.3f} {:>20d} {:20d} {:12.3f}'
+    line_fmt = '{:20s} = {:10.3f}'
+    row_fmt = '{:>12s} {:>6s} {:>12.3f} {:>20d} {:>20d}'
 
     task_plan = RecountPlan('task', mach_times=False)
     term_plan = RecountPlan('task_terminated', mach_times=False)
-    thread_plan = RecountPlan('thread', mach_times=False)
     for task in tasks:
         print_task_description(task)
         with O.table(RecountDiagnoseTask.header):
             task_sum = task_plan.sum_tracks(task.tk_recount.rtk_lifetime)
-            print(O.format(row_fmt, 'task', *task_sum.fmt_basic_args()))
+            for line in task_sum.fmt_basic_args():
+                line = line[:-1]
+                print(O.format(row_fmt, 'task', *line))
 
             term_sum = term_plan.sum_usages(task.tk_recount.rtk_terminated)
-            print(O.format(row_fmt, 'terminated', *term_sum.fmt_basic_args()))
+            for line in term_sum.fmt_basic_args():
+                print(O.format(row_fmt, 'terminated', *line))
+            term_sum_ns = term_sum.time()
 
-            threads_sum = RecountSum(mach_times=False)
-            for thread in IterateQueue(task.threads, 'thread *', 'task_threads'):
+            threads_sum = RecountSum(mach_times=True)
+            threads_time_mach = threads_sum.time()
+            for thread in IterateQueue(
+                    task.threads, 'thread *', 'task_threads'):
                 usr_time, sys_time = GetThreadUserSysTime(thread)
-                threads_sum_mach += usr_time + sys_time
+                threads_time_mach += usr_time + sys_time
 
-            threads_sum_ns = kern.GetNanotimeFromAbstime(threads_sum_mach)
+            threads_sum_ns = kern.GetNanotimeFromAbstime(threads_time_mach)
             print(line_fmt.format('threads CPU', threads_sum_ns / 1e9))
 
-            all_threads_sum_ns = threads_sum_ns + terminated_threads_sum_ns
+            all_threads_sum_ns = threads_sum_ns + term_sum_ns
             print(line_fmt.format('all threads CPU', all_threads_sum_ns / 1e9))
 
-            print(line_fmt.format('discrepancy', task_sum_ns - all_threads_sum_ns))
+            print(line_fmt.format(
+                    'discrepancy', task_sum.time() - all_threads_sum_ns))
 
 
 def RecountDiagnose(cmd_args=[], cmd_options={}, O=None):  # noqa: E741
@@ -503,7 +576,7 @@ def RecountDiagnose(cmd_args=[], cmd_options={}, O=None):  # noqa: E741
 
     if cmd_args[0] == 'task':
         validate_args(cmd_options, ['F'])
-        RecountDiagnoseTask(cmd_args[0], cmd_options=cmd_options, O=O)
+        RecountDiagnoseTask(cmd_args[1:], cmd_options=cmd_options, O=O)
     else:
         raise ArgumentError('{}: invalid diagnose subcommand'.format(
                 cmd_args[0]))

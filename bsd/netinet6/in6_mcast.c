@@ -82,6 +82,7 @@
 #include <net/if_dl.h>
 #include <net/net_api_stats.h>
 #include <net/route.h>
+#include <net/sockaddr_utils.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -96,6 +97,8 @@
 #include <netinet6/nd6.h>
 #include <netinet6/mld6_var.h>
 #include <netinet6/scope6_var.h>
+
+#include <net/sockaddr_utils.h>
 
 static void     im6f_commit(struct in6_mfilter *);
 static int      im6f_get_source(struct in6_mfilter *imf,
@@ -188,17 +191,15 @@ static LCK_ATTR_DECLARE(in6_multihead_lock_attr, 0, 0);
 static LCK_GRP_DECLARE(in6_multihead_lock_grp, "in6_multihead");
 
 /* List of trash in6_multi entries protected by in6m_trash_lock */
-static TAILQ_HEAD(, in6_multi_dbg) in6m_trash_head;
+static TAILQ_HEAD(, in6_multi_dbg) in6m_trash_head = TAILQ_HEAD_INITIALIZER(in6m_trash_head);
 static LCK_MTX_DECLARE_ATTR(in6m_trash_lock, &in6_multihead_lock_grp,
     &in6_multihead_lock_attr);
 
 #if DEBUG
-static unsigned int in6m_debug = 1;             /* debugging (enabled) */
+static TUNABLE(bool, in6m_debug, "ifa_debug", true); /* debugging (enabled) */
 #else
-static unsigned int in6m_debug;                 /* debugging (disabled) */
+static TUNABLE(bool, in6m_debug, "ifa_debug", false); /* debugging (disabled) */
 #endif /* !DEBUG */
-static struct zone *in6m_zone;                  /* zone for in6_multi */
-#define IN6M_ZONE_NAME          "in6_multi"     /* zone name */
 
 static KALLOC_TYPE_DEFINE(imm_zone, struct in6_multi_mship, NET_KT_DEFAULT);
 static KALLOC_TYPE_DEFINE(ip6ms_zone, struct ip6_msource, NET_KT_DEFAULT);
@@ -267,14 +268,16 @@ im6o_grow(struct ip6_moptions *imo)
 	struct in6_multi        **omships;
 	struct in6_mfilter       *nmfilters;
 	struct in6_mfilter       *omfilters;
+	int                       err;
 	size_t                    idx;
-	size_t                    oldmax;
-	size_t                    newmax;
+	uint16_t                  oldmax;
+	uint16_t                  newmax;
 
 	IM6O_LOCK_ASSERT_HELD(imo);
 
 	nmships = NULL;
 	nmfilters = NULL;
+	err = 0;
 	omships = imo->im6o_membership;
 	omfilters = imo->im6o_mfilters;
 	oldmax = imo->im6o_max_memberships;
@@ -284,28 +287,54 @@ im6o_grow(struct ip6_moptions *imo)
 		return ETOOMANYREFS;
 	}
 
-	if ((nmships = krealloc_type(struct in6_multi *, oldmax, newmax,
-	    omships, Z_WAITOK | Z_ZERO)) == NULL) {
-		return ENOMEM;
+	if ((nmships = kalloc_type(struct in6_multi *, newmax,
+	    Z_WAITOK | Z_ZERO)) == NULL) {
+		err = ENOMEM;
+		goto cleanup;
 	}
 
-	imo->im6o_membership = nmships;
-
-	if ((nmfilters = krealloc_type(struct in6_mfilter, oldmax, newmax,
-	    omfilters, Z_WAITOK | Z_ZERO)) == NULL) {
-		return ENOMEM;
+	if ((nmfilters = kalloc_type(struct in6_mfilter, newmax,
+	    Z_WAITOK | Z_ZERO)) == NULL) {
+		err = ENOMEM;
+		goto cleanup;
 	}
 
-	imo->im6o_mfilters = nmfilters;
+	/* Copy the existing memberships and release the memory. */
+	if (omships != NULL) {
+		VERIFY(oldmax <= newmax);
+		memcpy(nmships, omships, oldmax * sizeof(struct in6_multi *));
+		kfree_type(struct in6_multi *, oldmax, omships);
+	}
+
+	/* Copy the existing filters and release the memory. */
+	if (omfilters != NULL) {
+		VERIFY(oldmax <= newmax);
+		memcpy(nmfilters, omfilters, oldmax * sizeof(struct in6_mfilter));
+		kfree_type(struct in6_mfilter, oldmax, omfilters);
+	}
 
 	/* Initialize newly allocated source filter heads. */
 	for (idx = oldmax; idx < newmax; idx++) {
 		im6f_init(&nmfilters[idx], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
-	imo->im6o_max_memberships = (u_short)newmax;
+	imo->im6o_membership = nmships;
+	nmships = NULL;
+	imo->im6o_mfilters = nmfilters;
+	nmfilters = NULL;
+	imo->im6o_max_memberships = newmax;
 
 	return 0;
+cleanup:
+	if (nmfilters != NULL) {
+		kfree_type(struct in6_mfilter, newmax, nmfilters);
+	}
+
+	if (nmships != NULL) {
+		kfree_type(struct in6_multi *, newmax, nmships);
+	}
+
+	return err;
 }
 
 /*
@@ -451,8 +480,8 @@ in6_mc_get(struct ifnet *ifp, const struct in6_addr *group,
     struct in6_multi **pinm)
 {
 	struct sockaddr_in6      gsin6;
-	struct ifmultiaddr      *ifma;
-	struct in6_multi        *inm;
+	struct ifmultiaddr      *__single ifma;
+	struct in6_multi        *__single inm;
 	int                      error;
 
 	*pinm = NULL;
@@ -484,7 +513,7 @@ in6_mc_get(struct ifnet *ifp, const struct in6_addr *group,
 	 * Check if a link-layer group is already associated
 	 * with this network-layer group on the given ifnet.
 	 */
-	error = if_addmulti(ifp, (struct sockaddr *)&gsin6, &ifma);
+	error = if_addmulti(ifp, SA(&gsin6), &ifma);
 	if (error != 0) {
 		return error;
 	}
@@ -977,7 +1006,7 @@ im6s_merge(struct ip6_msource *ims, const struct in6_msource *lims,
 static int
 in6m_merge(struct in6_multi *inm, /*const*/ struct in6_mfilter *imf)
 {
-	struct ip6_msource      *ims, *nims = NULL;
+	struct ip6_msource      *ims, *__single nims = NULL;
 	struct in6_msource      *lims;
 	int                      schanged, error;
 	int                      nsrc0, nsrc1;
@@ -1014,7 +1043,7 @@ in6m_merge(struct in6_multi *inm, /*const*/ struct in6_mfilter *imf)
 		im6s_merge(nims, lims, 0);
 	}
 	if (error) {
-		struct ip6_msource *bims;
+		struct ip6_msource *__single bims;
 
 		RB_FOREACH_REVERSE_FROM(ims, ip6_msource_tree, nims) {
 			lims = (struct in6_msource *)ims;
@@ -1233,7 +1262,7 @@ in6_mc_join(struct ifnet *ifp, const struct in6_addr *mcaddr,
     const int delay)
 {
 	struct in6_mfilter       timf;
-	struct in6_multi        *inm = NULL;
+	struct in6_multi        *__single inm = NULL;
 	int                      error = 0;
 	struct mld_tparams       mtp;
 
@@ -1409,8 +1438,8 @@ in6p_block_unblock_source(struct inpcb *inp, struct sockopt *sopt)
 	doblock = 0;
 
 	memset(&gsr, 0, sizeof(struct group_source_req));
-	gsa = (struct sockaddr_in6 *)&gsr.gsr_group;
-	ssa = (struct sockaddr_in6 *)&gsr.gsr_source;
+	gsa = SIN6(&gsr.gsr_group);
+	ssa = SIN6(&gsr.gsr_source);
 
 	switch (sopt->sopt_name) {
 	case MCAST_BLOCK_SOURCE:
@@ -1433,8 +1462,7 @@ in6p_block_unblock_source(struct inpcb *inp, struct sockopt *sopt)
 		}
 
 		ifnet_head_lock_shared();
-		if (gsr.gsr_interface == 0 ||
-		    (u_int)if_index < gsr.gsr_interface) {
+		if (gsr.gsr_interface == 0 || !IF_INDEX_IN_RANGE(gsr.gsr_interface)) {
 			ifnet_head_done();
 			return EADDRNOTAVAIL;
 		}
@@ -1600,13 +1628,13 @@ in6p_findmoptions(struct inpcb *inp)
 	imo->im6o_num_memberships = 0;
 	imo->im6o_max_memberships = IPV6_MIN_MEMBERSHIPS;
 	imo->im6o_membership = immp;
+	imo->im6o_mfilters = imfp;
 
 	/* Initialize per-group source filters. */
 	for (idx = 0; idx < IPV6_MIN_MEMBERSHIPS; idx++) {
 		im6f_init(&imfp[idx], MCAST_UNDEFINED, MCAST_EXCLUDE);
 	}
 
-	imo->im6o_mfilters = imfp;
 	inp->in6p_moptions = imo; /* keep reference from ip6_allocmoptions() */
 	IM6O_ADDREF(imo);       /* for caller */
 
@@ -1665,13 +1693,13 @@ in6p_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 		return EINVAL;
 	}
 
-	gsa = (struct sockaddr_in6 *)&msfr.msfr_group;
+	gsa = SIN6(&msfr.msfr_group);
 	if (!IN6_IS_ADDR_MULTICAST(&gsa->sin6_addr)) {
 		return EINVAL;
 	}
 
 	ifnet_head_lock_shared();
-	if (msfr.msfr_ifindex == 0 || (u_int)if_index < msfr.msfr_ifindex) {
+	if (msfr.msfr_ifindex == 0 || !IF_INDEX_IN_RANGE(msfr.msfr_ifindex)) {
 		ifnet_head_done();
 		return EADDRNOTAVAIL;
 	}
@@ -1751,7 +1779,7 @@ in6p_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 			continue;
 		}
 		if (tss != NULL && nsrcs > 0) {
-			psin = (struct sockaddr_in6 *)ptss;
+			psin = SIN6(ptss);
 			psin->sin6_family = AF_INET6;
 			psin->sin6_len = sizeof(struct sockaddr_in6);
 			psin->sin6_addr = lims->im6s_addr;
@@ -1931,7 +1959,7 @@ in6p_lookup_v4addr(struct ipv6_mreq *mreq, struct ip_mreq *v4mreq)
 	struct sockaddr_in *sin;
 
 	ifnet_head_lock_shared();
-	if (mreq->ipv6mr_interface > (unsigned int)if_index) {
+	if (!IF_INDEX_IN_RANGE(mreq->ipv6mr_interface)) {
 		ifnet_head_done();
 		return EADDRNOTAVAIL;
 	} else {
@@ -1945,9 +1973,9 @@ in6p_lookup_v4addr(struct ipv6_mreq *mreq, struct ip_mreq *v4mreq)
 	if (ifa == NULL) {
 		return EADDRNOTAVAIL;
 	}
-	sin = (struct sockaddr_in *)(uintptr_t)(size_t)ifa->ifa_addr;
+	sin = SIN(ifa->ifa_addr);
 	v4mreq->imr_interface.s_addr = sin->sin_addr.s_addr;
-	IFA_REMREF(ifa);
+	ifa_remref(ifa);
 
 	return 0;
 }
@@ -1966,7 +1994,7 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 	struct ifnet                    *ifp;
 	struct in6_mfilter              *imf;
 	struct ip6_moptions             *imo;
-	struct in6_multi                *inm = NULL;
+	struct in6_multi                *__single inm = NULL;
 	struct in6_msource              *lims = NULL;
 	size_t                           idx;
 	int                              error, is_new;
@@ -1979,8 +2007,8 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 	is_new = 0;
 
 	memset(&gsr, 0, sizeof(struct group_source_req));
-	gsa = (struct sockaddr_in6 *)&gsr.gsr_group;
-	ssa = (struct sockaddr_in6 *)&gsr.gsr_source;
+	gsa = SIN6(&gsr.gsr_group);
+	ssa = SIN6(&gsr.gsr_source);
 
 	/*
 	 * Chew everything into struct group_source_req.
@@ -2033,7 +2061,7 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 			ifp = in6p_lookup_mcast_ifp(inp, gsa);
 		} else {
 			ifnet_head_lock_shared();
-			if ((u_int)if_index < mreq.ipv6mr_interface) {
+			if (!IF_INDEX_IN_RANGE(mreq.ipv6mr_interface)) {
 				ifnet_head_done();
 				return EADDRNOTAVAIL;
 			}
@@ -2086,7 +2114,7 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 
 		ifnet_head_lock_shared();
 		if (gsr.gsr_interface == 0 ||
-		    (u_int)if_index < gsr.gsr_interface) {
+		    !IF_INDEX_IN_RANGE(gsr.gsr_interface)) {
 			ifnet_head_done();
 			return EADDRNOTAVAIL;
 		}
@@ -2357,8 +2385,8 @@ in6p_leave_group(struct inpcb *inp, struct sockopt *sopt)
 	is_final = 1;
 
 	memset(&gsr, 0, sizeof(struct group_source_req));
-	gsa = (struct sockaddr_in6 *)&gsr.gsr_group;
-	ssa = (struct sockaddr_in6 *)&gsr.gsr_source;
+	gsa = SIN6(&gsr.gsr_group);
+	ssa = SIN6(&gsr.gsr_source);
 
 	/*
 	 * Chew everything passed in up into a struct group_source_req
@@ -2472,7 +2500,7 @@ in6p_leave_group(struct inpcb *inp, struct sockopt *sopt)
 	 */
 	if (ifindex != 0) {
 		ifnet_head_lock_shared();
-		if ((u_int)if_index < ifindex) {
+		if (!IF_INDEX_IN_RANGE(ifindex)) {
 			ifnet_head_done();
 			return EADDRNOTAVAIL;
 		}
@@ -2671,7 +2699,7 @@ in6p_set_multicast_if(struct inpcb *inp, struct sockopt *sopt)
 	}
 
 	ifnet_head_lock_shared();
-	if ((u_int)if_index < ifindex) {
+	if (!IF_INDEX_IN_RANGE(ifindex)) {
 		ifnet_head_done();
 		return EINVAL;
 	}
@@ -2757,7 +2785,7 @@ in6p_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 		return EINVAL;
 	}
 
-	gsa = (struct sockaddr_in6 *)&msfr.msfr_group;
+	gsa = SIN6(&msfr.msfr_group);
 	if (!IN6_IS_ADDR_MULTICAST(&gsa->sin6_addr)) {
 		return EINVAL;
 	}
@@ -2765,7 +2793,7 @@ in6p_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	gsa->sin6_port = 0;     /* ignore port */
 
 	ifnet_head_lock_shared();
-	if (msfr.msfr_ifindex == 0 || (u_int)if_index < msfr.msfr_ifindex) {
+	if (msfr.msfr_ifindex == 0 || !IF_INDEX_IN_RANGE(msfr.msfr_ifindex)) {
 		ifnet_head_done();
 		return EADDRNOTAVAIL;
 	}
@@ -2808,7 +2836,7 @@ in6p_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	 * allows us to deal with page faults up-front.
 	 */
 	if (msfr.msfr_nsrcs > 0) {
-		struct in6_msource      *lims;
+		struct in6_msource      *__single lims;
 		struct sockaddr_in6     *psin;
 		struct sockaddr_storage *kss, *pkss;
 		unsigned int             i;
@@ -2854,7 +2882,7 @@ in6p_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 		 * every time, as the key space is common.
 		 */
 		for (i = 0, pkss = kss; i < msfr.msfr_nsrcs; i++, pkss++) {
-			psin = (struct sockaddr_in6 *)pkss;
+			psin = SIN6(pkss);
 			if (psin->sin6_family != AF_INET6) {
 				error = EAFNOSUPPORT;
 				break;
@@ -3065,12 +3093,12 @@ sysctl_ip6_mcast_filters SYSCTL_HANDLER_ARGS
 	struct in6_multi                *inm;
 	struct in6_multistep            step;
 	struct ip6_msource              *ims;
-	int                             *name;
+	int                              *name;
 	int                              retval = 0;
 	u_int                            namelen;
 	uint32_t                         fmode, ifindex;
 
-	name = (int *)arg1;
+
 	namelen = arg2;
 
 	if (req->newptr != USER_ADDR_NULL) {
@@ -3082,9 +3110,11 @@ sysctl_ip6_mcast_filters SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
+	name = __unsafe_forge_bidi_indexable(int *, arg1, namelen * sizeof(int));
+
 	ifindex = name[0];
 	ifnet_head_lock_shared();
-	if (ifindex <= 0 || ifindex > (u_int)if_index) {
+	if (!IF_INDEX_IN_RANGE(ifindex)) {
 		MLD_PRINTF(("%s: ifindex %u out of range\n",
 		    __func__, ifindex));
 		ifnet_head_done();
@@ -3155,24 +3185,18 @@ next:
 	return retval;
 }
 
-void
-in6_multi_init(void)
-{
-	PE_parse_boot_argn("ifa_debug", &in6m_debug, sizeof(in6m_debug));
-
-	TAILQ_INIT(&in6m_trash_head);
-
-	vm_size_t in6m_size = (in6m_debug == 0) ? sizeof(struct in6_multi) :
-	    sizeof(struct in6_multi_dbg);
-	in6m_zone = zone_create(IN6M_ZONE_NAME, in6m_size, ZC_ZFREE_CLEARMEM);
-}
-
 static struct in6_multi *
 in6_multi_alloc(zalloc_flags_t how)
 {
-	struct in6_multi *in6m;
+	struct in6_multi *__single in6m;
 
-	in6m = zalloc_flags(in6m_zone, how | Z_ZERO);
+	if (in6m_debug == 0) {
+		in6m = kalloc_type(struct in6_multi, how | Z_ZERO);
+	} else {
+		struct in6_multi_dbg *__single in6m_dbg;
+		in6m_dbg = kalloc_type(struct in6_multi_dbg, how | Z_ZERO);
+		in6m = (struct in6_multi *__single)in6m_dbg;
+	}
 	if (in6m != NULL) {
 		lck_mtx_init(&in6m->in6m_lock, &in6_multihead_lock_grp,
 		    &in6_multihead_lock_attr);
@@ -3222,7 +3246,14 @@ in6_multi_free(struct in6_multi *in6m)
 	IN6M_UNLOCK(in6m);
 
 	lck_mtx_destroy(&in6m->in6m_lock, &in6_multihead_lock_grp);
-	zfree(in6m_zone, in6m);
+	if (!in6m_debug) {
+		kfree_type(struct in6_multi, in6m);
+	} else {
+		struct in6_multi_dbg *__single in6m_dbg =
+		    (struct in6_multi_dbg *__single)in6m;
+		kfree_type(struct in6_multi_dbg, in6m_dbg);
+		in6m = NULL;
+	}
 }
 
 static void
@@ -3401,7 +3432,8 @@ in6m_remref(struct in6_multi *in6m, int locked)
 static void
 in6m_trace(struct in6_multi *in6m, int refhold)
 {
-	struct in6_multi_dbg *in6m_dbg = (struct in6_multi_dbg *)in6m;
+	struct in6_multi_dbg *__single in6m_dbg =
+	    (struct in6_multi_dbg *__single)in6m;
 	ctrace_t *tr;
 	u_int32_t idx;
 	u_int16_t *cnt;
@@ -3491,7 +3523,7 @@ in6ms_free(struct in6_msource *in6ms)
 
 #ifdef MLD_DEBUG
 
-static const char *in6m_modestrs[] = { "un\n", "in", "ex" };
+static const char *in6m_modestrs[] = { "un", "in", "ex" };
 
 static const char *
 in6m_mode_str(const int mode)
@@ -3503,15 +3535,15 @@ in6m_mode_str(const int mode)
 }
 
 static const char *in6m_statestrs[] = {
-	"not-member\n",
-	"silent\n",
-	"reporting\n",
-	"idle\n",
-	"lazy\n",
-	"sleeping\n",
-	"awakening\n",
-	"query-pending\n",
-	"sg-query-pending\n",
+	"not-member",
+	"silent",
+	"reporting",
+	"idle",
+	"lazy",
+	"sleeping",
+	"awakening",
+	"query-pending",
+	"sg-query-pending",
 	"leaving"
 };
 

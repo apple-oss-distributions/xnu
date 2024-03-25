@@ -636,6 +636,8 @@ struct exclaves_ctl_trap_args {
 	PAD_ARG_(uint64_t, identifier);
 	PAD_ARG_(mach_vm_address_t, buffer);
 	PAD_ARG_(mach_vm_size_t, size);
+	PAD_ARG_(mach_vm_size_t, size2);
+	PAD_ARG_(mach_vm_size_t, offset);
 };
 extern kern_return_t _exclaves_ctl_trap(
 	struct exclaves_ctl_trap_args *args);

@@ -9,7 +9,9 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @typedef img4_chip_select_array_t
@@ -283,7 +285,7 @@ typedef struct _img4_chip_instance {
 IMG4_API_AVAILABLE_20200508
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1
 img4_chip_t *
-img4_chip_init_from_buff(void *buff, size_t len);
+img4_chip_init_from_buff(void *__sized_by(len) buff, size_t len);
 #else
 #define img4_chip_init_from_buff (img4if->i4if_v7.chip_init_from_buff)
 #endif
@@ -517,6 +519,8 @@ img4_chip_custom(const img4_chip_instance_t *chip_instance, img4_chip_t *chip);
 #define img4_chip_custom(...) (img4if->i4if_v7.chip_custom(__VA_ARGS__))
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_CHIP_H

@@ -95,7 +95,8 @@ typedef struct vm_shared_region *vm_shared_region_t;
 #include <vm/vm_object.h>
 #include <vm/memory_object.h>
 
-#define PAGE_SIZE_FOR_SR_SLIDE  4096
+#define PAGE_SIZE_FOR_SR_SLIDE          4096
+#define PAGE_SIZE_FOR_SR_SLIDE_16KB     16384
 
 /*
  * Documentation for the slide info format can be found in the dyld project in
@@ -173,21 +174,37 @@ struct vm_shared_region_slide_info_entry_v4 {
 #define DYLD_CACHE_SLIDE4_PAGE_EXTRA_END           0x8000  // last chain entry for page
 
 
+typedef struct vm_shared_region_slide_info_entry_v5 *vm_shared_region_slide_info_entry_v5_t;
+struct vm_shared_region_slide_info_entry_v5 {
+	uint32_t    version;        // currently 5
+	uint32_t    page_size;      // 16384
+	uint32_t    page_starts_count;
+	uint64_t    value_add;
+	uint16_t    page_starts[] /* page_starts_count */;
+};
+
+#define DYLD_CACHE_SLIDE_V5_PAGE_ATTR_NO_REBASE    0xFFFF    // page has no rebasing
+
 
 typedef union vm_shared_region_slide_info_entry *vm_shared_region_slide_info_entry_t;
 union vm_shared_region_slide_info_entry {
-	uint32_t version;
+	struct {
+		uint32_t version;
+		uint32_t page_size; // only valid to use this on version >= 2
+	};
 	struct vm_shared_region_slide_info_entry_v1 v1;
 	struct vm_shared_region_slide_info_entry_v2 v2;
 	struct vm_shared_region_slide_info_entry_v3 v3;
 	struct vm_shared_region_slide_info_entry_v4 v4;
+	struct vm_shared_region_slide_info_entry_v5 v5;
 };
 
 #define MIN_SLIDE_INFO_SIZE \
     MIN(sizeof(struct vm_shared_region_slide_info_entry_v1), \
     MIN(sizeof(struct vm_shared_region_slide_info_entry_v2), \
     MIN(sizeof(struct vm_shared_region_slide_info_entry_v3), \
-    sizeof(struct vm_shared_region_slide_info_entry_v4))))
+    MIN(sizeof(struct vm_shared_region_slide_info_entry_v4), \
+    sizeof(struct vm_shared_region_slide_info_entry_v5)))))
 
 /*
  * This is the information used by the shared cache pager for sub-sections
@@ -237,8 +254,8 @@ struct vm_shared_region {
 #if __ARM_MIXED_PAGE_SIZE__
 	uint8_t                 sr_page_shift;
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
-	bool                    sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
-	bool                    sr_slide_in_progress;
+	thread_t                sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
+	thread_t                sr_slide_in_progress;
 	bool                    sr_64bit;
 	bool                    sr_persists;
 	bool                    sr_uuid_copied;

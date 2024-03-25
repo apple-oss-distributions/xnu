@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -13,12 +13,9 @@
 #define _CORECRYPTO_CCN_H_
 
 #include <corecrypto/cc.h>
-#include <stdint.h>
-#include <stdarg.h>
 
 CC_PTRCHECK_CAPABLE_HEADER()
 
-typedef uint8_t cc_byte;
 typedef size_t  cc_size;
 
 #if CCN_UNIT_SIZE == 8
@@ -67,21 +64,14 @@ typedef int32_t cc_int;
 /* Return the size of a ccn of size bytes in bytes. */
 #define ccn_sizeof_size(_size_)  ccn_sizeof_n(ccn_nof_size(_size_))
 
-/* Returns the value of bit _k_ of _ccn_, both are only evaluated once.  */
-CC_INLINE cc_unit ccn_bit(const cc_unit *cc_indexable x, size_t k)
-{
-    return 1 & (x[k >> CCN_LOG2_BITS_PER_UNIT] >> (k & (CCN_UNIT_BITS - 1)));
-}
-
-/* Set the value of bit _k_ of _ccn_ to the value _v_  */
-CC_INLINE void ccn_set_bit(cc_unit *cc_indexable x, size_t k, cc_unit v)
-{
-    if (v) {
-        x[k >> CCN_LOG2_BITS_PER_UNIT] |= (cc_unit)1 << (k & (CCN_UNIT_BITS - 1));
-    } else {
-        x[k >> CCN_LOG2_BITS_PER_UNIT] &= ~((cc_unit)1 << (k & (CCN_UNIT_BITS - 1)));
-    }
-}
+/*!
+ @function ccn_set_bit
+ @param x The input cc_unit
+ @param k The index to set
+ @param v The value to set
+ */
+CC_NONNULL_ALL
+void ccn_set_bit(cc_unit *cc_indexable x, size_t k, cc_unit v);
 
 /* Macros for making ccn constants.  You must use list of CCN64_C() instances
  separated by commas, with an optional smaller sized CCN32_C, CCN16_C, or
@@ -170,6 +160,10 @@ CC_INLINE void ccn_set_bit(cc_unit *cc_indexable x, size_t k, cc_unit v)
     CCN64_C(e7,e6,e5,e4,e3,e2,e1,e0),\
     CCN64_C(f7,f6,f5,f4,f3,f2,f1,f0)
 
+#define CCN448_C(g7,g6,g5,g4,g3,g2,g1,g0,f7,f6,f5,f4,f3,f2,f1,f0,e7,e6,e5,e4,e3,e2,e1,e0,d7,d6,d5,d4,d3,d2,d1,d0,c7,c6,c5,c4,c3,c2,c1,c0,b7,b6,b5,b4,b3,b2,b1,b0,a7,a6,a5,a4,a3,a2,a1,a0) \
+    CCN256_C(d7,d6,d5,d4,d3,d2,d1,d0,c7,c6,c5,c4,c3,c2,c1,c0,b7,b6,b5,b4,b3,b2,b1,b0,a7,a6,a5,a4,a3,a2,a1,a0),\
+    CCN192_C(g7,g6,g5,g4,g3,g2,g1,g0,f7,f6,f5,f4,f3,f2,f1,f0,e7,e6,e5,e4,e3,e2,e1,e0)
+
 #define CCN528_C(i1,i0,h7,h6,h5,h4,h3,h2,h1,h0,g7,g6,g5,g4,g3,g2,g1,g0,f7,f6,f5,f4,f3,f2,f1,f0,e7,e6,e5,e4,e3,e2,e1,e0,d7,d6,d5,d4,d3,d2,d1,d0,c7,c6,c5,c4,c3,c2,c1,c0,b7,b6,b5,b4,b3,b2,b1,b0,a7,a6,a5,a4,a3,a2,a1,a0) \
     CCN256_C(d7,d6,d5,d4,d3,d2,d1,d0,c7,c6,c5,c4,c3,c2,c1,c0,b7,b6,b5,b4,b3,b2,b1,b0,a7,a6,a5,a4,a3,a2,a1,a0),\
     CCN256_C(h7,h6,h5,h4,h3,h2,h1,h0,g7,g6,g5,g4,g3,g2,g1,g0,f7,f6,f5,f4,f3,f2,f1,f0,e7,e6,e5,e4,e3,e2,e1,e0),\
@@ -179,23 +173,9 @@ CC_INLINE void ccn_set_bit(cc_unit *cc_indexable x, size_t k, cc_unit v)
 #define CCN224_N  ccn_nof(224)
 #define CCN256_N  ccn_nof(256)
 #define CCN384_N  ccn_nof(384)
+#define CCN448_N  ccn_nof(448)
 #define CCN512_N  ccn_nof(512)
 #define CCN521_N  ccn_nof(521)
-
-/* Return the number of used units after stripping leading 0 units.  */
-CC_PURE CC_NONNULL((2))
-cc_size ccn_n(cc_size n, const cc_unit *cc_counted_by(n) s) __asm__("_ccn_n");
-
-/*! @function ccn_shift_right
- @abstract Shifts s to the right by k bits, where 0 <= k < CCN_UNIT_BITS.
-
- @param n Length of r and s
- @param r Resulting big int.
- @param s Big int to shift.
- @param k Number of bits to shift by.
- */
-CC_NONNULL_ALL
-void ccn_shift_right(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, size_t k) __asm__("_ccn_shift_right");
 
 /* s == 0 -> return 0 | s > 0 -> return index (starting at 1) of most
  * significant bit that is 1.
@@ -208,13 +188,13 @@ size_t ccn_bitlen(cc_size n, const cc_unit *cc_counted_by(n) s);
 
 /* s == 0 -> return true | s != 0 -> return false
  { N bit } N = n * sizeof(cc_unit) * 8 */
-#define ccn_is_zero(_n_, _s_) (!ccn_n(_n_, _s_))
+#define ccn_is_zero(_n_, _s_) (!ccn_n((_n_), (_s_)))
 
 /* s == 1 -> return true | s != 1 -> return false
  { N bit } N = n * sizeof(cc_unit) * 8 */
-#define ccn_is_one(_n_, _s_) (ccn_n(_n_, _s_) == 1 && _s_[0] == 1)
+#define ccn_is_one(_n_, _s_) (ccn_n((_n_), (_s_)) == 1 && (_s_)[0] == 1)
 
-#define ccn_is_zero_or_one(_n_, _s_) (((_n_)==0) || ((ccn_n(_n_, _s_) <= 1) && (_s_[0] <= 1)))
+#define ccn_is_zero_or_one(_n_, _s_) (((_n_)==0) || ((ccn_n((_n_), (_s_)) <= 1) && ((_s_)[0] <= 1)))
 
 /* s < t -> return - 1 | s == t -> return 0 | s > t -> return 1
  { N bit, N bit -> int } N = n * sizeof(cc_unit) * 8 */
@@ -242,42 +222,15 @@ int ccn_cmpn(cc_size ns, const cc_unit *cc_counted_by(ns) s, cc_size nt, const c
 CC_NONNULL((2, 3, 4))
 cc_unit ccn_sub(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, const cc_unit *cc_counted_by(n) t) __asm__("_ccn_sub");
 
-/* s - v -> r return 1 iff v > s return 0 otherwise.
- { N bit, sizeof(cc_unit) * 8 bit -> N bit } N = n * sizeof(cc_unit) * 8 */
-CC_NONNULL((2, 3))
-cc_unit ccn_sub1(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, cc_unit v);
-
-/* s - t -> r return 1 iff t > s
- { N bit, NT bit -> N bit  NT <= N} N = n * sizeof(cc_unit) * 8 */
-CC_INLINE
-CC_NONNULL((2, 3, 5))
-cc_unit ccn_subn(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s,
-             cc_size nt, const cc_unit *cc_counted_by(nt) t) {
-    assert(n >= nt);
-    return ccn_sub1(n - nt, r + nt, s + nt, ccn_sub(nt, r, s, t));
-}
-
-
 /* s + t -> r return carry if result doesn't fit in n bits.
  { N bit, N bit -> N bit } N = n * sizeof(cc_unit) * 8 */
 CC_NONNULL((2, 3, 4))
-cc_unit ccn_add(cc_size n, cc_unit *cc_sized_by(n) r, const cc_unit *cc_sized_by(n) s, const cc_unit *cc_sized_by(n) t) __asm__("_ccn_add");
+cc_unit ccn_add(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, const cc_unit *cc_counted_by(n) t) __asm__("_ccn_add");
 
 /* s + v -> r return carry if result doesn't fit in n bits.
  { N bit, sizeof(cc_unit) * 8 bit -> N bit } N = n * sizeof(cc_unit) * 8 */
 CC_NONNULL((2, 3))
 cc_unit ccn_add1(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, cc_unit v);
-
-/* s + t -> r return carry if result doesn't fit in n bits
- { N bit, NT bit -> N bit  NT <= N} N = n * sizeof(cc_unit) * 8 */
-CC_INLINE
-CC_NONNULL((2, 3, 5))
-cc_unit ccn_addn(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s,
-                 cc_size nt, const cc_unit *cc_counted_by(nt) t) {
-    assert(n >= nt);
-    return ccn_add1(n - nt, r + nt, s + nt, ccn_add(nt, r, s, t));
-}
-
 
 /*!
  @function   ccn_read_uint
@@ -380,20 +333,8 @@ int ccn_write_uint_padded_ct(cc_size n, const cc_unit *cc_sized_by(n) s, size_t 
  case truncation is required.
  */
 
-CC_INLINE CC_NONNULL((2, 4)) size_t ccn_write_uint_padded(cc_size n, const cc_unit *cc_counted_by(n) s, size_t out_size, uint8_t *cc_sized_by(out_size) out)
-{
-    size_t offset = 0;
-    // Try first the non-truncation case
-    int offset_int = ccn_write_uint_padded_ct(n, s, out_size, out);
-    if (offset_int >= 0) {
-        // It worked
-        offset = (size_t)offset_int;
-    } else {
-        // Truncation case, execution depends on the position of the MSByte
-        ccn_write_uint(n, s, out_size, out);
-    }
-    return offset;
-}
+CC_NONNULL((2, 4))
+size_t ccn_write_uint_padded(cc_size n, const cc_unit *cc_counted_by(n) s, size_t out_size, uint8_t *cc_sized_by(out_size) out);
 
 
 /*  Return actual size in bytes needed to serialize s as int
@@ -414,40 +355,11 @@ size_t ccn_write_int_size(cc_size n, const cc_unit *cc_counted_by(n) s);
 CC_NONNULL((2, 4))
 void ccn_write_int(cc_size n, const cc_unit *cc_counted_by(n) s, size_t out_size, void *cc_sized_by(out_size) out);
 
-/* s -> r
- { n bit -> n bit } */
-CC_NONNULL((2, 3))
-void ccn_set(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s);
-
-CC_INLINE CC_NONNULL((2))
-void ccn_zero(cc_size n, cc_unit *cc_sized_by(n) r) {
-    cc_clear(ccn_sizeof_n(n),r);
-}
-
-CC_INLINE CC_NONNULL((2))
-void ccn_clear(cc_size n, cc_unit *cc_sized_by(n) r) {
-    cc_clear(ccn_sizeof_n(n),r);
-}
+CC_NONNULL((2))
+void ccn_zero(cc_size n, cc_unit *cc_sized_by(n) r);
 
 CC_NONNULL((2))
-void ccn_zero_multi(cc_size n, cc_unit *cc_counted_by(n) r, ...) CC_SENTINEL;
-
-CC_INLINE CC_NONNULL((2))
-void ccn_seti(cc_size n, cc_unit *cc_counted_by(n) r, cc_unit v) {
-    assert(n > 0);
-    r[0] = v;
-    ccn_zero(n - 1, r + 1);
-}
-
-CC_INLINE CC_NONNULL((2, 4))
-void ccn_setn(cc_size n, cc_unit *cc_counted_by(n) r, const cc_size s_size, const cc_unit *cc_counted_by(s_size) s) {
-    assert(n > 0);
-    assert(s_size <= n);
-    if (s_size > 0) {
-        ccn_set(s_size, r, s);
-    }
-    ccn_zero(n - s_size, r + s_size);
-}
+void ccn_seti(cc_size n, cc_unit *cc_counted_by(n) r, cc_unit v);
 
 #define CC_SWAP_HOST_BIG_64(x) \
     ((uint64_t)((((uint64_t)(x) & 0xff00000000000000ULL) >> 56) | \
@@ -476,27 +388,15 @@ void ccn_setn(cc_size n, cc_unit *cc_counted_by(n) r, const cc_size s_size, cons
 #error Unsupported CCN_UNIT_SIZE
 #endif
 
-/* Swap units in r in place from cc_unit vector byte order to big endian byte order (or back). */
-CC_INLINE CC_NONNULL((2))
-void ccn_swap(cc_size n, cc_unit *cc_counted_by(n) r) {
-    cc_unit *local_r = r;
-    cc_unit *e;
-    for (e = local_r + n - 1; local_r < e; ++local_r, --e) {
-        cc_unit t = CC_UNIT_TO_BIG(*local_r);
-        *local_r = CC_UNIT_TO_BIG(*e);
-        *e = t;
-    }
-    if (n & 1)
-        *local_r = CC_UNIT_TO_BIG(*local_r);
-}
+/*!
+ @function ccn_swap
+ @discussion Swaps r inplace from cc_unit vector byte order to big endian byte order (or back)
+ */
+CC_NONNULL((2))
+void ccn_swap(cc_size n, cc_unit *cc_counted_by(n) r);
 
-CC_INLINE CC_NONNULL((2, 3, 4))
-void ccn_xor(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, const cc_unit *cc_counted_by(n) t) {
-    cc_size _n = n;
-    while (_n--) {
-        r[_n] = s[_n] ^ t[_n];
-    }
-}
+CC_NONNULL((2, 3, 4))
+void ccn_xor(cc_size n, cc_unit *cc_counted_by(n) r, const cc_unit *cc_counted_by(n) s, const cc_unit *cc_counted_by(n) t);
 
 /* Debugging */
 CC_NONNULL((2))
@@ -507,18 +407,7 @@ void ccn_lprint(cc_size n, const char *cc_cstring label, const cc_unit *cc_count
 /* Forward declaration so we don't depend on ccrng.h. */
 struct ccrng_state;
 
-#if 0
-CC_INLINE CC_NONNULL((2, 3))
-int ccn_random(cc_size n, cc_unit *cc_counted_by(n) r, struct ccrng_state *rng) {
-    return (RNG)->generate((RNG), ccn_sizeof_n(n), (unsigned char *)r);
-}
-#else
 #define ccn_random(_n_,_r_,_ccrng_ctx_) \
     ccrng_generate(_ccrng_ctx_, ccn_sizeof_n(_n_), (unsigned char *)_r_)
-#endif
-
-/* Make a ccn of size ccn_nof(nbits) units with up to nbits sized random value. */
-CC_NONNULL((2, 3))
-int ccn_random_bits(cc_size nbits, cc_unit *cc_unsafe_indexable r, struct ccrng_state *rng);
 
 #endif /* _CORECRYPTO_CCN_H_ */

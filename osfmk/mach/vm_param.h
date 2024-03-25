@@ -284,6 +284,18 @@ extern vm_offset_t              vm_kernel_slid_base;
 extern vm_offset_t              vm_kernel_slid_top;
 extern vm_offset_t              vm_kernel_slide;
 
+#if CONFIG_SPTM
+typedef struct {
+	vm_offset_t unslid_base;
+	vm_offset_t unslid_top;
+	vm_offset_t slid_base;
+	vm_offset_t slid_top;
+	vm_offset_t slide;
+} vm_image_offsets;
+
+extern vm_image_offsets         vm_sptm_offsets;
+extern vm_image_offsets         vm_txm_offsets;
+#endif /* CONFIG_SPTM */
 
 extern vm_offset_t              vm_kernel_addrperm;
 extern vm_offset_t              vm_kext_base;
@@ -322,7 +334,17 @@ vm_is_addr_slid(vm_offset_t addr)
 	const bool is_slid_kern_addr =
 	    (stripped_addr >= vm_kernel_slid_base) && (stripped_addr < vm_kernel_slid_top);
 
+#if CONFIG_SPTM
+	const bool is_slid_sptm_addr =
+	    (stripped_addr >= vm_sptm_offsets.slid_base) && (stripped_addr < vm_sptm_offsets.slid_top);
+
+	const bool is_slid_txm_addr =
+	    (stripped_addr >= vm_txm_offsets.slid_base) && (stripped_addr < vm_txm_offsets.slid_top);
+
+	return is_slid_kern_addr || is_slid_sptm_addr || is_slid_txm_addr;
+#else
 	return is_slid_kern_addr;
+#endif /* CONFIG_SPTM */
 }
 
 #define VM_KERNEL_IS_SLID(_o) (vm_is_addr_slid((vm_offset_t)(_o)))

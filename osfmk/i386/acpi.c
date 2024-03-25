@@ -67,6 +67,7 @@
 
 #include <kern/cpu_data.h>
 #include <kern/machine.h>
+#include <kern/monotonic.h>
 #include <kern/timer_queue.h>
 #include <console/serial_protos.h>
 #include <machine/pal_routines.h>
@@ -77,10 +78,6 @@
 #endif
 #include <IOKit/IOPlatformExpert.h>
 #include <sys/kdebug.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -219,9 +216,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	data.refcon = refcon;
 #endif
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_down(cdp);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
 #endif /* KPERF */
@@ -374,9 +371,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* Restart timer interrupts */
 	rtc_timer_start();
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_up(cdp);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_curcpu_up();
 #endif /* KPERF */
@@ -436,9 +433,9 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 
 	assert(cpu_number() == master_cpu);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_down(cpu_datap(0));
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kptimer_stop_curcpu();
 #endif /* KPERF */
@@ -446,9 +443,9 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 	/* Cancel any pending deadline */
 	setPop(0);
 	while (lapic_is_interrupting(LAPIC_TIMER_VECTOR)
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	    || lapic_is_interrupting(LAPIC_VECTOR(PERFCNT))
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	    ) {
 		(void) ml_set_interrupts_enabled(TRUE);
 		setPop(0);
@@ -508,9 +505,9 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 		MACHDBG_CODE(DBG_MACH_SCHED, MACH_DEEP_IDLE) | DBG_FUNC_END,
 		acpi_wake_abstime, acpi_wake_abstime - acpi_idle_abstime, 0, 0, 0);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_cpu_up(cpu_datap(0));
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	/* Like S3 sleep, turn on tracing if trace_wake boot-arg is present */
 	if (kdebug_enable == 0) {

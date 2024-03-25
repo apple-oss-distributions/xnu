@@ -1,4 +1,4 @@
-/* Copyright (c) (2012,2014-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2012,2014-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -61,6 +61,8 @@ ccsha256_di(void)
 	return &ccsha256_vng_intel_SupplementalSSE3_di;
 #elif CC_USE_ASM && CCSHA2_VNG_ARM
 	return &ccsha256_vng_arm_di;
+#elif CCSHA256_ARMV6M_ASM
+	return &ccsha256_v6m_di;
 #else
 	return &ccsha256_ltc_di;
 #endif

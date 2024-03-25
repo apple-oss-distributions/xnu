@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -44,20 +44,13 @@ struct cczp {
 #define CCZP_PRIME(ZP) ((ZP)->ccn)
 #define CCZP_BITLEN(ZP) ((ZP)->bitlen)
 
-CC_NONNULL((1)) CC_INLINE cc_size cczp_n(cczp_const_t zp)
-{
-    return CCZP_N(zp);
-}
+CC_NONNULL((1))
+cc_size cczp_n(cczp_const_t zp);
 
-CC_NONNULL((1)) CC_INLINE const cc_unit * cc_indexable cczp_prime(cczp_const_t zp)
-{
-    return CCZP_PRIME(zp);
-}
+CC_NONNULL((1))
+const cc_unit * cc_indexable cczp_prime(cczp_const_t zp);
 
-CC_NONNULL((1)) CC_INLINE size_t cczp_bitlen(cczp_const_t zp)
-{
-    cc_assert(ccn_bitlen(cczp_n(zp), cczp_prime(zp)) == CCZP_BITLEN(zp));
-    return (size_t)CCZP_BITLEN(zp);
-}
+CC_NONNULL((1))
+size_t cczp_bitlen(cczp_const_t zp);
 
 #endif /* _CORECRYPTO_CCZP_H_ */

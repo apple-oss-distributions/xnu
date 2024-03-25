@@ -100,3 +100,11 @@ in_stat_set_activity_bitmap(activity_bitmap_t *activity, uint64_t now)
 		activity->bitmap[1] |= IN_STAT_SET_MOST_SIGNIFICANT_BIT;
 	}
 }
+
+void
+in_stat_clear_activity_bitmap(activity_bitmap_t *activity)
+{
+	activity->start = 0;
+	activity->bitmap[0] = 0;
+	activity->bitmap[1] = 0;
+}

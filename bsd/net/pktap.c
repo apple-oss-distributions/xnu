@@ -1135,9 +1135,9 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 				 * chain because bpf_tap_imp() disregard the packet length
 				 * of the mbuf packet header.
 				 */
-				if (mbuf_setdata(m, m->m_data + pre, m->m_len - pre) == 0) {
+				if (mbuf_setdata(m, m_mtod_current(m) + pre, m->m_len - pre) == 0) {
 					bpf_tap_func(pktap->pktp_ifp, DLT_RAW, m, NULL, 0);
-					mbuf_setdata(m, m->m_data - pre, m->m_len + pre);
+					mbuf_setdata(m, m_mtod_current(m) - pre, m->m_len + pre);
 				}
 			}
 		}
@@ -1281,9 +1281,9 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 					 * chain because bpf_tap_imp() disregard the packet length
 					 * of the mbuf packet header.
 					 */
-					if (mbuf_setdata(m, m->m_data + data_adjust, m->m_len - data_adjust) == 0) {
+					if (mbuf_setdata(m, m_mtod_current(m) + data_adjust, m->m_len - data_adjust) == 0) {
 						bpf_tap_func(pktap->pktp_ifp, DLT_PKTAP, m, hdr, hdr_size);
-						mbuf_setdata(m, m->m_data - data_adjust, m->m_len + data_adjust);
+						mbuf_setdata(m, m_mtod_current(m) - data_adjust, m->m_len + data_adjust);
 					}
 				}
 			}

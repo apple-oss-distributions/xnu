@@ -289,7 +289,7 @@ __nexus_attr_from_params(nexus_attr_t nxa, const struct nxprov_params *p)
 
 __attribute__((always_inline))
 static inline int
-__nexus_provider_reg_prepare(struct nxprov_reg *reg, const nexus_name_t name,
+__nexus_provider_reg_prepare(struct nxprov_reg *reg, const uint8_t *__null_terminated name,
     const nexus_type_t type, const nexus_attr_t nxa)
 {
 	struct nxprov_params *p = &reg->nxpreg_params;
@@ -298,7 +298,7 @@ __nexus_provider_reg_prepare(struct nxprov_reg *reg, const nexus_name_t name,
 	bzero(reg, sizeof(*reg));
 	reg->nxpreg_version = NXPROV_REG_CURRENT_VERSION;
 	p->nxp_namelen = (uint32_t)strlcpy((char *)p->nxp_name,
-	    (const char *)name, sizeof(nexus_name_t));
+	    (const char *__null_terminated)name, sizeof(nexus_name_t));
 	if (p->nxp_namelen == 0) {
 		err = EINVAL;
 		goto done;

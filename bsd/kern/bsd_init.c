@@ -789,6 +789,11 @@ bsd_init(void)
 	/* Initialize kernel memory status notifications */
 	bsd_init_kprintf("calling memorystatus_init\n");
 	memorystatus_init();
+
+	/* Fixup memorystatus fields of the kernel process (only for logging purposes) */
+	kernproc->p_memstat_state |= P_MEMSTAT_INTERNAL;
+	kernproc->p_memstat_effectivepriority = JETSAM_PRIORITY_INTERNAL;
+	kernproc->p_memstat_requestedpriority = JETSAM_PRIORITY_INTERNAL;
 #endif /* CONFIG_MEMORYSTATUS */
 
 	bsd_init_kprintf("calling sysctl_mib_init\n");
@@ -1165,7 +1170,7 @@ bsd_utaskbootstrap(void)
 	 * Clone the bootstrap process from the kernel process, without
 	 * inheriting either task characteristics or memory from the kernel;
 	 */
-	thread = cloneproc(TASK_NULL, NULL, kernproc, CLONEPROC_FLAGS_MEMSTAT_INTERNAL);
+	thread = cloneproc(TASK_NULL, NULL, kernproc, CLONEPROC_INITPROC);
 
 	/* Hold the reference as it will be dropped during shutdown */
 	initproc = proc_find(1);

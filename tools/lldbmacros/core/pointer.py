@@ -33,14 +33,9 @@ Example:
 
     ... Operate on val as usual.
 """
-
-from __future__ import absolute_import, division, print_function
-
-from builtins import map, filter
 from operator import methodcaller
 from abc import ABCMeta, abstractmethod
 
-import six
 import lldb
 
 from .caching import cache_statically
@@ -68,8 +63,7 @@ class Singleton(MetaPointerPolicy):
         return cls._instances[cls]
 
 
-@six.add_metaclass(ABCMeta)
-class PointerPolicy(object):
+class PointerPolicy(object, metaclass=ABCMeta):
     """ Abstract base class common to every custom pointer policy. """
 
     @classmethod
@@ -94,8 +88,7 @@ class PointerPolicy(object):
 # Inspecting respective CPU state would be more appropriate.
 
 
-@six.add_metaclass(Singleton)
-class NativePointer(PointerPolicy):
+class NativePointer(PointerPolicy, metaclass=Singleton):
     """ Policy for native pointers.
 
         Strips top bits of a pointer if TBI is in use. Otherwise

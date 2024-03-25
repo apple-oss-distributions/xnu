@@ -140,6 +140,12 @@
 #include <machine/monotonic.h>
 #endif /* CONFIG_PERVASIVE_CPI */
 
+#if CONFIG_EXCLAVES
+#include "exclaves_resource.h"
+#include "exclaves_boot.h"
+#include "kern/exclaves.tightbeam.h"
+#endif /* CONFIG_EXCLAVES */
+
 #include <os/log.h>
 
 #include <vm/pmap.h>
@@ -156,6 +162,7 @@
 #include <sys/signalvar.h> /* for coredump */
 #include <sys/bsdtask_info.h>
 #include <sys/kdebug_triage.h>
+#include <sys/code_signing.h> /* for address_space_debugged */
 /*
  * Exported interfaces
  */
@@ -209,6 +216,17 @@ static void task_port_with_flavor_no_senders(ipc_port_t, mach_msg_type_number_t)
 static void task_suspension_no_senders(ipc_port_t, mach_msg_type_number_t);
 static inline void task_zone_init(void);
 
+#if CONFIG_EXCLAVES
+static bool task_should_panic_on_exit_due_to_conclave_taint(task_t task);
+static bool task_is_conclave_tainted(task_t task);
+static void task_set_conclave_taint(task_t task);
+kern_return_t task_crash_info_conclave_upcall(task_t task,
+    const xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
+kern_return_t
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *_Nonnull result, void *kcdata_ptr);
+extern void *fake_crash_buffer;
+extern uint32_t fake_crash_buffer_length;
+#endif /* CONFIG_EXCLAVES */
 
 IPC_KOBJECT_DEFINE(IKOT_TASK_NAME);
 IPC_KOBJECT_DEFINE(IKOT_TASK_CONTROL,
@@ -384,6 +402,7 @@ void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO
 #if CONFIG_PROC_RESOURCE_LIMITS
 void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, int current_size, int soft_limit, int hard_limit);
 mach_port_name_t current_task_get_fatal_port_name(void);
+void __attribute__((noinline)) SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_KQWORKLOOPS(task_t task, int current_size, int soft_limit, int hard_limit);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 kern_return_t task_suspend_internal_locked(task_t);
@@ -392,7 +411,7 @@ kern_return_t task_resume_internal_locked(task_t);
 kern_return_t task_resume_internal(task_t);
 static kern_return_t task_start_halt_locked(task_t task, boolean_t should_mark_corpse);
 
-extern kern_return_t iokit_task_terminate(task_t task);
+extern kern_return_t iokit_task_terminate(task_t task, int phase);
 extern void          iokit_task_app_suspended_changed(task_t task);
 
 extern kern_return_t exception_deliver(thread_t, exception_type_t, mach_exception_data_t, mach_msg_type_number_t, struct exception_action *, lck_mtx_t *);
@@ -683,16 +702,73 @@ task_set_platform_binary(
 	}
 }
 
+#if XNU_TARGET_OS_OSX
+#if DEVELOPMENT || DEBUG
+SECURITY_READ_ONLY_LATE(bool) AMFI_bootarg_disable_mach_hardening = false;
+#endif /* DEVELOPMENT || DEBUG */
+
+void
+task_disable_mach_hardening(task_t task)
+{
+	task_ro_flags_set(task, TFRO_MACH_HARDENING_OPT_OUT);
+}
+
+bool
+task_opted_out_mach_hardening(task_t task)
+{
+	return task_ro_flags_get(task) & TFRO_MACH_HARDENING_OPT_OUT;
+}
+#endif /* XNU_TARGET_OS_OSX */
+
+/*
+ * Use the `task_is_hardened_binary` macro below
+ * when applying new security policies.
+ *
+ * Kernel security policies now generally apply to
+ * "hardened binaries" - which are platform binaries, and
+ * third party binaries who adopt hardened runtime on ios.
+ */
 boolean_t
 task_get_platform_binary(task_t task)
 {
 	return (task_ro_flags_get(task) & TFRO_PLATFORM) != 0;
 }
 
+static boolean_t
+task_get_hardened_runtime(task_t task)
+{
+	return (task_ro_flags_get(task) & TFRO_HARDENED) != 0;
+}
+
+boolean_t
+task_is_hardened_binary(task_t task)
+{
+	return task_get_platform_binary(task) ||
+	       task_get_hardened_runtime(task);
+}
+
+void
+task_set_hardened_runtime(
+	task_t task,
+	bool is_hardened)
+{
+	if (is_hardened) {
+		task_ro_flags_set(task, TFRO_HARDENED);
+	} else {
+		task_ro_flags_clear(task, TFRO_HARDENED);
+	}
+}
+
 boolean_t
 task_is_a_corpse(task_t task)
 {
 	return (task_ro_flags_get(task) & TFRO_CORPSE) != 0;
+}
+
+boolean_t
+task_is_ipc_active(task_t task)
+{
+	return task->ipc_active;
 }
 
 void
@@ -905,9 +981,9 @@ task_wait_to_return(void)
 	 * to execute any code, make sure its credentials are cached,
 	 * and notify any interested parties.
 	 */
-	extern void mach_kauth_cred_thread_update(void);
+	extern void current_cached_proc_cred_update(void);
 
-	mach_kauth_cred_thread_update();
+	current_cached_proc_cred_update();
 	if (returnwaitflags & TRW_LEXEC_COMPLETE) {
 		mac_proc_notify_exec_complete(current_proc());
 	}
@@ -1375,9 +1451,9 @@ init_task_ledgers(void)
 	    task_wakeups_rate_exceeded, NULL, NULL);
 	ledger_set_callback(t, task_ledgers.physical_writes, task_io_rate_exceeded, (void *)FLAVOR_IO_PHYSICAL_WRITES, NULL);
 
-#if !XNU_MONITOR
+#if CONFIG_SPTM || !XNU_MONITOR
 	ledger_template_complete(t);
-#else /* !XNU_MONITOR */
+#else /* CONFIG_SPTM || !XNU_MONITOR */
 	ledger_template_complete_secure_alloc(t);
 #endif /* XNU_MONITOR */
 	task_ledger_template = t;
@@ -1421,9 +1497,10 @@ task_create_internal(
 	counter_alloc(&(new_task->faults));
 
 #if defined(HAS_APPLE_PAC)
+	const uint8_t disable_user_jop = inherit_memory ? parent_task->disable_user_jop : FALSE;
 	ml_task_set_rop_pid(new_task, parent_task, inherit_memory);
-	ml_task_set_jop_pid(new_task, parent_task, inherit_memory);
-	ml_task_set_disable_user_jop(new_task, inherit_memory ? parent_task->disable_user_jop : FALSE);
+	ml_task_set_jop_pid(new_task, parent_task, inherit_memory, disable_user_jop);
+	ml_task_set_disable_user_jop(new_task, disable_user_jop);
 #endif
 
 
@@ -1438,14 +1515,17 @@ task_create_internal(
 			 * so that the child's map is in sync with the forked reclamation
 			 * metadata.
 			 */
-			vm_deferred_reclamation_buffer_lock(parent_task->deferred_reclamation_metadata);
+			vm_deferred_reclamation_buffer_lock(
+				parent_task->deferred_reclamation_metadata);
 		}
 #endif /* CONFIG_DEFERRED_RECLAIM */
 		new_task->map = vm_map_fork(ledger, parent_task->map, 0);
 #if CONFIG_DEFERRED_RECLAIM
-		if (parent_task->deferred_reclamation_metadata) {
+		if (new_task->map != NULL &&
+		    parent_task->deferred_reclamation_metadata) {
 			new_task->deferred_reclamation_metadata =
-			    vm_deferred_reclamation_buffer_fork(new_task, parent_task->deferred_reclamation_metadata);
+			    vm_deferred_reclamation_buffer_fork(new_task,
+			    parent_task->deferred_reclamation_metadata);
 		}
 #endif /* CONFIG_DEFERRED_RECLAIM */
 	} else {
@@ -1506,13 +1586,18 @@ task_create_internal(
 		parent_t_flags_ro = task_ro_flags_get(parent_task);
 	}
 
-#if __has_feature(ptrauth_calls)
-	/* Inherit the pac exception flags from parent if in fork */
 	if (parent_task && inherit_memory) {
+#if __has_feature(ptrauth_calls)
+		/* Inherit the pac exception flags from parent if in fork */
 		task_ro_data.t_flags_ro |= (parent_t_flags_ro & (TFRO_PAC_ENFORCE_USER_STATE |
 		    TFRO_PAC_EXC_FATAL));
+#endif /* __has_feature(ptrauth_calls) */
+		/* Inherit the hardened binary flags from parent if in fork */
+		task_ro_data.t_flags_ro |= parent_t_flags_ro & (TFRO_HARDENED | TFRO_PLATFORM);
+#if XNU_TARGET_OS_OSX
+		task_ro_data.t_flags_ro |= parent_t_flags_ro & TFRO_MACH_HARDENING_OPT_OUT;
+#endif /* XNU_TARGET_OS_OSX */
 	}
-#endif
 
 #ifdef MACH_BSD
 	new_task->corpse_info = NULL;
@@ -1562,7 +1647,9 @@ task_create_internal(
 
 	new_task->affinity_space = NULL;
 
+#if CONFIG_CPU_COUNTERS
 	new_task->t_kpc = 0;
+#endif /* CONFIG_CPU_COUNTERS */
 
 	new_task->pidsuspended = FALSE;
 	new_task->frozen = FALSE;
@@ -1681,6 +1768,7 @@ task_create_internal(
 			new_task->t_flags |= TF_INSN_COPY_OPTOUT;
 		}
 #endif
+
 		new_task->priority = BASEPRI_DEFAULT;
 		new_task->max_priority = MAXPRI_USER;
 
@@ -2008,8 +2096,8 @@ task_deallocate_internal(
 
 	ipc_task_terminate(task);
 
-	/* let iokit know */
-	iokit_task_terminate(task);
+	/* let iokit know 2 */
+	iokit_task_terminate(task, 2);
 
 	/* Unregister task from userspace coredumps on panic */
 	kern_unregister_userspace_coredump(task);
@@ -2052,6 +2140,7 @@ task_deallocate_internal(
 		task->is_large_corpse = false;
 	}
 	is_release(task->itk_space);
+
 	if (task->t_rr_ranges) {
 		restartable_ranges_release(task->t_rr_ranges);
 	}
@@ -2498,6 +2587,9 @@ task_mark_corpse(task_t task)
 	 */
 	ipc_task_disable(task);
 
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
+
 	/* terminate the ipc space */
 	ipc_space_terminate(task->itk_space);
 
@@ -2573,6 +2665,7 @@ task_port_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 	task_remove_from_corpse_task_list(task);
 
 	task_clear_corpse(task);
+	vm_map_unset_corpse_source(task->map);
 	task_terminate_internal(task);
 }
 
@@ -2968,6 +3061,10 @@ task_terminate_internal(
 	task->active = FALSE;
 	ipc_task_disable(task);
 
+#if CONFIG_EXCLAVES
+	task_stop_conclave(task, false);
+#endif /* CONFIG_EXCLAVES */
+
 #if CONFIG_TELEMETRY
 	/*
 	 * Notify telemetry that this task is going away.
@@ -3016,6 +3113,9 @@ task_terminate_internal(
 	 *	Clear the watchport boost on the task.
 	 */
 	task_remove_turnstile_watchports(task);
+
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
 
 	/*
 	 *	Destroy the IPC space, leaving just a reference for it.
@@ -3099,12 +3199,12 @@ task_terminate_internal(
 	 */
 	thread_interrupt_level(interrupt_save);
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	/* force the task to release all ctrs */
 	if (task->t_kpc & TASK_KPC_FORCED_ALL_CTRS) {
 		kpc_force_all_ctrs(task, 0);
 	}
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if CONFIG_COALITIONS
 	/*
@@ -3214,8 +3314,37 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 	 * gives us a better chance of not having to wait there.
 	 */
 	task_hold_locked(task);
-	dispatchqueue_offset = get_dispatchqueue_offset_from_proc(get_bsdtask_info(task));
 
+#if CONFIG_EXCLAVES
+	if (should_mark_corpse) {
+		void *crash_info_ptr = task_get_corpseinfo(task);
+		queue_iterate(&task->threads, thread, thread_t, task_threads) {
+			if (crash_info_ptr != NULL && thread->th_exclaves_state & TH_EXCLAVES_RPC) {
+				struct thread_crash_exclaves_info info = { 0 };
+
+				info.tcei_flags = kExclaveRPCActive;
+				if (thread->th_exclaves_state & TH_EXCLAVES_SCHEDULER_REQUEST) {
+					info.tcei_flags |= kExclaveSchedulerRequest;
+				}
+				if (thread->th_exclaves_state & TH_EXCLAVES_UPCALL) {
+					info.tcei_flags |= kExclaveUpcallActive;
+				}
+				info.tcei_scid = thread->th_exclaves_scheduling_context_id;
+				info.tcei_thread_id = thread->thread_id;
+
+				kcdata_push_data(crash_info_ptr,
+				    STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO,
+				    sizeof(struct thread_crash_exclaves_info), &info);
+			}
+		}
+
+		task_unlock(task);
+		task_stop_conclave(task, true);
+		task_lock(task);
+	}
+#endif /* CONFIG_EXCLAVES */
+
+	dispatchqueue_offset = get_dispatchqueue_offset_from_proc(get_bsdtask_info(task));
 	/*
 	 * Terminate all the other threads in the task.
 	 */
@@ -3284,6 +3413,16 @@ task_complete_halt(task_t task)
 		task_unlock(task);
 	}
 
+#if CONFIG_DEFERRED_RECLAIM
+	if (task->deferred_reclamation_metadata) {
+		vm_deferred_reclamation_buffer_uninstall(
+			task->deferred_reclamation_metadata);
+		vm_deferred_reclamation_buffer_deallocate(
+			task->deferred_reclamation_metadata);
+		task->deferred_reclamation_metadata = NULL;
+	}
+#endif /* CONFIG_DEFERRED_RECLAIM */
+
 	/*
 	 *	Give the machine dependent code a chance
 	 *	to perform cleanup of task-level resources
@@ -3296,6 +3435,9 @@ task_complete_halt(task_t task)
 	 *	Destroy all synchronizers owned by the task.
 	 */
 	task_synchronizer_destroy_all(task);
+
+	/* let iokit know 1 */
+	iokit_task_terminate(task, 1);
 
 	/*
 	 *	Terminate the IPC space.  A long time ago,
@@ -3317,7 +3459,8 @@ task_complete_halt(task_t task)
 	 * Kick out any IOKitUser handles to the task. At best they're stale,
 	 * at worst someone is racing a SUID exec.
 	 */
-	iokit_task_terminate(task);
+	/* let iokit know 2 */
+	iokit_task_terminate(task, 2);
 }
 
 #ifdef CONFIG_TASK_SUSPEND_STATS
@@ -3494,7 +3637,7 @@ task_hold_locked(
 }
 
 /*
- *	task_hold:
+ *	task_hold_and_wait
  *
  *	Same as the internal routine above, except that is must lock
  *	and verify that the task is active.  This differs from task_suspend
@@ -3505,7 +3648,7 @@ task_hold_locked(
  *      CONDITIONS: the caller holds a reference on the task
  */
 kern_return_t
-task_hold(
+task_hold_and_wait(
 	task_t          task)
 {
 	if (task == TASK_NULL) {
@@ -3513,40 +3656,17 @@ task_hold(
 	}
 
 	task_lock(task);
-
 	if (!task->active) {
 		task_unlock(task);
-
 		return KERN_FAILURE;
 	}
 
 #ifdef CONFIG_TASK_SUSPEND_STATS
 	_task_mark_suspend_source(task);
 #endif /* CONFIG_TASK_SUSPEND_STATS */
+
 	task_hold_locked(task);
-	task_unlock(task);
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-task_wait(
-	task_t          task,
-	boolean_t       until_not_runnable)
-{
-	if (task == TASK_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	task_lock(task);
-
-	if (!task->active) {
-		task_unlock(task);
-
-		return KERN_FAILURE;
-	}
-
-	task_wait_locked(task, until_not_runnable);
+	task_wait_locked(task, FALSE);
 	task_unlock(task);
 
 	return KERN_SUCCESS;
@@ -6462,8 +6582,8 @@ task_power_info_locked(
 	struct recount_usage usage_perf = { 0 };
 	recount_task_usage_perf_only(task, &usage, &usage_perf);
 
-	info->total_user = usage.ru_user_time_mach;
-	info->total_system = usage.ru_system_time_mach;
+	info->total_user = usage.ru_metrics[RCT_LVL_USER].rm_time_mach;
+	info->total_system = recount_usage_system_time_mach(&usage);
 	runnable_time_sum = task->total_runnable_time;
 
 	if (ginfo) {
@@ -6471,8 +6591,7 @@ task_power_info_locked(
 	}
 
 	if (infov2) {
-		infov2->task_ptime = usage_perf.ru_system_time_mach +
-		    usage_perf.ru_user_time_mach;
+		infov2->task_ptime = recount_usage_time_mach(&usage_perf);
 		infov2->task_pset_switches = task->ps_switch;
 #if CONFIG_PERVASIVE_ENERGY
 		infov2->task_energy = usage.ru_energy_nj;
@@ -6508,17 +6627,23 @@ task_power_info_locked(
 	if (extra_info) {
 		extra_info->runnable_time = runnable_time_sum;
 #if CONFIG_PERVASIVE_CPI
-		extra_info->cycles = usage.ru_cycles;
-		extra_info->instructions = usage.ru_instructions;
-		extra_info->pcycles = usage_perf.ru_cycles;
-		extra_info->pinstructions = usage_perf.ru_instructions;
-		extra_info->user_ptime = usage_perf.ru_user_time_mach;
-		extra_info->system_ptime = usage_perf.ru_system_time_mach;
+		extra_info->cycles = recount_usage_cycles(&usage);
+		extra_info->instructions = recount_usage_instructions(&usage);
+		extra_info->pcycles = recount_usage_cycles(&usage_perf);
+		extra_info->pinstructions = recount_usage_instructions(&usage_perf);
+		extra_info->user_ptime = usage_perf.ru_metrics[RCT_LVL_USER].rm_time_mach;
+		extra_info->system_ptime = recount_usage_system_time_mach(&usage_perf);
 #endif // CONFIG_PERVASIVE_CPI
 #if CONFIG_PERVASIVE_ENERGY
 		extra_info->energy = usage.ru_energy_nj;
 		extra_info->penergy = usage_perf.ru_energy_nj;
 #endif // CONFIG_PERVASIVE_ENERGY
+#if RECOUNT_SECURE_METRICS
+		if (PE_i_can_has_debugger(NULL)) {
+			extra_info->secure_time = usage.ru_metrics[RCT_LVL_SECURE].rm_time_mach;
+			extra_info->secure_ptime = usage_perf.ru_metrics[RCT_LVL_SECURE].rm_time_mach;
+		}
+#endif // RECOUNT_SECURE_METRICS
 	}
 }
 
@@ -7046,6 +7171,10 @@ PROC_CROSSED_HIGH_WATERMARK__SEND_EXC_RESOURCE_AND_SUSPEND(int max_footprint_mb,
 	 * or the process wants synchronous EXC_RESOURCE exceptions.
 	 */
 	if ((exception_options & EXEC_RESOURCE_FATAL) || send_sync_exc_resource || !exc_via_corpse_forking) {
+		if (exception_options & EXEC_RESOURCE_FATAL) {
+			vm_map_set_corpse_source(task->map);
+		}
+
 		/* Do not send a EXC_RESOURCE if corpse_for_fatal_memkill is set */
 		if (send_sync_exc_resource || !corpse_for_fatal_memkill) {
 			/*
@@ -7264,7 +7393,6 @@ task_convert_phys_footprint_limit(
 	}
 	return KERN_SUCCESS;
 }
-
 
 kern_return_t
 task_set_phys_footprint_limit_internal(
@@ -7929,6 +8057,8 @@ task_wakeups_rate_exceeded(int warning, __unused const void *param0, __unused co
 	}
 }
 
+TUNABLE(bool, enable_wakeup_reports, "enable_wakeup_reports", false); /* Enable wakeup reports. */
+
 void __attribute__((noinline))
 SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS(void)
 {
@@ -7971,10 +8101,12 @@ SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS(void)
 	    fatal ? "FATAL " : "",
 	    lei.lei_limit, lei.lei_refill_period / NSEC_PER_SEC);
 
-	kr = send_resource_violation(send_cpu_wakes_violation, task, &lei,
-	    fatal ? kRNFatalLimitFlag : 0);
-	if (kr) {
-		printf("send_resource_violation(CPU wakes, ...): error %#x\n", kr);
+	if (enable_wakeup_reports) {
+		kr = send_resource_violation(send_cpu_wakes_violation, task, &lei,
+		    fatal ? kRNFatalLimitFlag : 0);
+		if (kr) {
+			printf("send_resource_violation(CPU wakes, ...): error %#x\n", kr);
+		}
 	}
 
 #ifdef EXC_RESOURCE_MONITORS
@@ -8227,9 +8359,9 @@ task_port_space_ast(__unused task_t task)
 {
 	uint32_t current_size, soft_limit, hard_limit;
 	assert(task == current_task());
-	kern_return_t ret = ipc_space_get_table_size_and_limits(task->itk_space,
+	bool should_notify = ipc_space_check_table_size_limit(task->itk_space,
 	    &current_size, &soft_limit, &hard_limit);
-	if (ret == KERN_SUCCESS) {
+	if (should_notify) {
 		SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task, current_size, soft_limit, hard_limit);
 	}
 }
@@ -8284,12 +8416,11 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task_t task, uint32_t
 	__unused mach_port_t task_fatal_port = MACH_PORT_NULL;
 	mach_exception_data_type_t      code[EXCEPTION_CODE_MAX];
 
-#ifdef MACH_BSD
 	pid = proc_selfpid();
 	if (get_bsdtask_info(task) != NULL) {
 		procname = proc_name_address(get_bsdtask_info(task));
 	}
-#endif
+
 	/*
 	 * Only kernel_task and launchd may be allowed to
 	 * have really large ipc space.
@@ -8337,16 +8468,67 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task_t task, uint32_t
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 }
 
+#if CONFIG_PROC_RESOURCE_LIMITS
+void
+task_kqworkloop_ast(task_t task, int current_size, int soft_limit, int hard_limit)
+{
+	assert(task == current_task());
+	return SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_KQWORKLOOPS(task, current_size, soft_limit, hard_limit);
+}
+
+void __attribute__((noinline))
+SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_KQWORKLOOPS(task_t task, int current_size, int soft_limit, int hard_limit)
+{
+	int pid = 0;
+	char *procname = (char *) "unknown";
+#ifdef MACH_BSD
+	pid = proc_selfpid();
+	if (get_bsdtask_info(task) != NULL) {
+		procname = proc_name_address(get_bsdtask_info(task));
+	}
+#endif
+	if (pid == 0 || pid == 1) {
+		return;
+	}
+
+	os_log(OS_LOG_DEFAULT, "process %s[%d] caught allocating too many kqworkloops. \
+	    Num of kqworkloops allocated %u; \n", procname, pid, current_size);
+
+	int limit = 0;
+	resource_notify_flags_t flags = kRNFlagsNone;
+	mach_port_t task_fatal_port = MACH_PORT_NULL;
+	if (hard_limit) {
+		flags |= kRNHardLimitFlag;
+		limit = hard_limit;
+
+		task_fatal_port = task_allocate_fatal_port();
+		if (task_fatal_port == MACH_PORT_NULL) {
+			os_log(OS_LOG_DEFAULT, "process %s[%d] Unable to create task token ident object", procname, pid);
+			task_bsdtask_kill(task);
+		}
+	} else {
+		flags |= kRNSoftLimitFlag;
+		limit = soft_limit;
+	}
+
+	kern_return_t kr;
+	kr = send_resource_violation_with_fatal_port(send_kqworkloops_violation, task, (int64_t)current_size, (int64_t)limit, task_fatal_port, flags);
+	if (kr) {
+		os_log(OS_LOG_DEFAULT, "send_resource_violation_with_fatal_port(kqworkloops, ...): error %#x\n", kr);
+	}
+	if (task_fatal_port) {
+		ipc_port_release_send(task_fatal_port);
+	}
+}
+
+
 void
 task_filedesc_ast(__unused task_t task, __unused int current_size, __unused int soft_limit, __unused int hard_limit)
 {
-#if CONFIG_PROC_RESOURCE_LIMITS
 	assert(task == current_task());
 	SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task, current_size, soft_limit, hard_limit);
-#endif /* CONFIG_PROC_RESOURCE_LIMITS */
 }
 
-#if CONFIG_PROC_RESOURCE_LIMITS
 void __attribute__((noinline))
 SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, int current_size, int soft_limit, int hard_limit)
 {
@@ -8689,8 +8871,8 @@ task_inspect(task_inspect_t task_insp, task_inspect_flavor_t flavor,
 		}
 
 		recount_sum(&recount_task_plan, task->tk_recount.rtk_lifetime, &stats);
-		bc->instructions = stats.ru_instructions;
-		bc->cycles = stats.ru_cycles;
+		bc->instructions = recount_usage_instructions(&stats);
+		bc->cycles = recount_usage_cycles(&stats);
 		size = TASK_INSPECT_BASIC_COUNTS_COUNT;
 		break;
 	}
@@ -8906,8 +9088,8 @@ task_set_exc_guard_ctrl_port_default(
 {
 	task_control_port_options_t opts = TASK_CONTROL_PORT_OPTIONS_NONE;
 
-	if (task_get_platform_binary(task)) {
-		/* set exc guard default behavior for first-party code */
+	if (task_is_hardened_binary(task)) {
+		/* set exc guard default behavior for hardened binaries */
 		task->task_exc_guard = (task_exc_guard_default & TASK_EXC_GUARD_ALL);
 
 		if (1 == task_pid(task)) {
@@ -9391,15 +9573,26 @@ task_is_translated(task_t task)
 #endif
 
 
+
 #if __has_feature(ptrauth_calls)
-/* All pac violations will be delivered as fatal exceptions irrespective of
- * the enable_pac_exception boot-arg value.
+/* On FPAC, we want to deliver all PAC violations as fatal exceptions, regardless
+ * of the enable_pac_exception boot-arg value or any other entitlements.
+ * The only case where we allow non-fatal PAC exceptions on FPAC is for debugging,
+ * which requires Developer Mode enabled.
+ *
+ * On non-FPAC hardware, we gate the decision behind entitlements and the
+ * enable_pac_exception boot-arg.
+ */
+extern int gARM_FEAT_FPAC;
+/*
+ * Having the PAC_EXCEPTION_ENTITLEMENT entitlement means we always enforce all
+ * of the PAC exception hardening: fatal exceptions and signed user state.
  */
 #define PAC_EXCEPTION_ENTITLEMENT "com.apple.private.pac.exception"
 /*
- * When enable_pac_exception boot-arg is set to true, processes
- * can choose to get non-fatal pac exception delivery by setting
- * this entitlement.
+ * On non-FPAC hardware, when enable_pac_exception boot-arg is set to true,
+ * processes can choose to get non-fatal PAC exception delivery by setting
+ * the SKIP_PAC_EXCEPTION_ENTITLEMENT entitlement.
  */
 #define SKIP_PAC_EXCEPTION_ENTITLEMENT "com.apple.private.skip.pac.exception"
 
@@ -9408,23 +9601,32 @@ task_set_pac_exception_fatal_flag(
 	task_t task)
 {
 	assert(task != TASK_NULL);
-	bool pac_entitlement = false;
+	bool pac_hardened_task = false;
 	uint32_t set_flags = 0;
 
-	if (enable_pac_exception && IOTaskHasEntitlement(task, SKIP_PAC_EXCEPTION_ENTITLEMENT)) {
+	/*
+	 * On non-FPAC hardware, we allow gating PAC exceptions behind
+	 * SKIP_PAC_EXCEPTION_ENTITLEMENT and the boot-arg.
+	 */
+	if (!gARM_FEAT_FPAC && enable_pac_exception &&
+	    IOTaskHasEntitlement(task, SKIP_PAC_EXCEPTION_ENTITLEMENT)) {
 		return;
 	}
 
-	if (IOTaskHasEntitlement(task, PAC_EXCEPTION_ENTITLEMENT)) {
-		pac_entitlement = true;
-	}
-
-	if (pac_entitlement) {
+	if (IOTaskHasEntitlement(task, PAC_EXCEPTION_ENTITLEMENT) || task_get_hardened_runtime(task)) {
+		pac_hardened_task = true;
 		set_flags |= TFRO_PAC_ENFORCE_USER_STATE;
 	}
-	if (pac_entitlement || (enable_pac_exception && task_get_platform_binary(task))) {
-		set_flags |= TFRO_PAC_EXC_FATAL;
+
+	/* On non-FPAC hardware, gate the fatal property behind entitlements and boot-arg. */
+	if (pac_hardened_task ||
+	    ((enable_pac_exception || gARM_FEAT_FPAC) && task_get_platform_binary(task))) {
+		/* If debugging is configured, do not make PAC exception fatal. */
+		if (address_space_debugged(task_get_proc_raw(task)) != KERN_SUCCESS) {
+			set_flags |= TFRO_PAC_EXC_FATAL;
+		}
 	}
+
 	if (set_flags != 0) {
 		task_ro_flags_set(task, set_flags);
 	}
@@ -9715,6 +9917,289 @@ task_check_memorythreshold_is_valid(task_t task, uint64_t new_limit, bool is_dia
 }
 #endif
 
+#if CONFIG_EXCLAVES
+kern_return_t
+task_add_conclave(task_t task, const char *task_conclave_id)
+{
+	/*
+	 * Make this EXCLAVES_BOOT_STAGE_2 until userspace is actually
+	 * triggering the EXCLAVESKIT boot stage.
+	 */
+	kern_return_t kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_2);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	return exclaves_conclave_attach(EXCLAVES_DOMAIN_KERNEL, task_conclave_id, task);
+}
+
+kern_return_t
+task_start_conclave_and_lookup_resources(mach_port_name_t port __unused, bool conclave_start,
+    struct exclaves_resource_user *conclave_resource_user, int resource_count)
+{
+	kern_return_t kr = KERN_FAILURE;
+	assert3u(port, ==, MACH_PORT_NULL);
+	exclaves_resource_t *conclave = task_get_conclave(current_task());
+	if (conclave == NULL) {
+		return kr;
+	}
+
+	if (conclave_start) {
+		kr = exclaves_conclave_launch(conclave);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+		task_set_conclave_taint(current_task());
+	}
+
+	kr = exclaves_conclave_lookup_resources(conclave, conclave_resource_user, resource_count);
+	return kr;
+}
+
+kern_return_t
+task_inherit_conclave(task_t old_task, task_t new_task)
+{
+	if (old_task->conclave == NULL) {
+		return KERN_SUCCESS;
+	}
+
+	return exclaves_conclave_inherit(old_task->conclave, old_task, new_task);
+}
+
+void
+task_clear_conclave(task_t task)
+{
+	if (task->exclave_crash_info) {
+		kfree_data(task->exclave_crash_info, CONCLAVE_CRASH_BUFFER_PAGECOUNT * PAGE_SIZE);
+		task->exclave_crash_info = NULL;
+	}
+
+	if (task->conclave == NULL) {
+		return;
+	}
+
+	/*
+	 * XXX
+	 * This should only fail if either the conclave is in an unexpected
+	 * state (i.e. not ATTACHED) or if the wrong port is supplied.
+	 * We should re-visit this and make sure we guarantee the above
+	 * constraints.
+	 */
+	__assert_only kern_return_t ret =
+	    exclaves_conclave_detach(task->conclave, task);
+	assert3u(ret, ==, KERN_SUCCESS);
+}
+
+void
+task_stop_conclave(task_t task, bool gather_crash_bt)
+{
+	thread_t thread = current_thread();
+
+	if (task->conclave == NULL) {
+		return;
+	}
+
+	if (task_should_panic_on_exit_due_to_conclave_taint(task)) {
+		panic("Conclave tainted task %p terminated\n", task);
+	}
+
+	/* Stash the task on current thread for conclave teardown */
+	thread->conclave_stop_task = task;
+
+	__assert_only kern_return_t ret =
+	    exclaves_conclave_stop(task->conclave, gather_crash_bt);
+
+	thread->conclave_stop_task = TASK_NULL;
+
+	assert3u(ret, ==, KERN_SUCCESS);
+}
+
+kern_return_t
+task_stop_conclave_upcall(void)
+{
+	task_t task = current_task();
+	if (task->conclave == NULL) {
+		return KERN_INVALID_TASK;
+	}
+
+	return exclaves_conclave_stop_upcall(task->conclave, task);
+}
+
+kern_return_t
+task_suspend_conclave_upcall(uint64_t *scid_list, size_t scid_list_count)
+{
+	task_t task = current_task();
+	thread_t thread;
+	int scid_count = 0;
+	kern_return_t kr;
+	if (task->conclave == NULL) {
+		return KERN_INVALID_TASK;
+	}
+
+	kr = task_hold_and_wait(task);
+
+	task_lock(task);
+	queue_iterate(&task->threads, thread, thread_t, task_threads)
+	{
+		if (thread->th_exclaves_state & TH_EXCLAVES_RPC) {
+			scid_list[scid_count++] = thread->th_exclaves_scheduling_context_id;
+			if (scid_count >= scid_list_count) {
+				break;
+			}
+		}
+	}
+
+	task_unlock(task);
+	return kr;
+}
+
+kern_return_t
+task_crash_info_conclave_upcall(task_t task, const xnuupcalls_conclavesharedbuffer_s *shared_buf,
+    uint32_t length)
+{
+	if (task->conclave == NULL) {
+		return KERN_INVALID_TASK;
+	}
+
+	/* Allocate the buffer and memcpy it */
+	int task_crash_info_buffer_size = 0;
+	uint8_t * task_crash_info_buffer;
+
+	if (!length) {
+		printf("Conclave upcall: task_crash_info_conclave_upcall did not return any page addresses\n");
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	task_crash_info_buffer_size = CONCLAVE_CRASH_BUFFER_PAGECOUNT * PAGE_SIZE;
+	assert3u(task_crash_info_buffer_size, >=, length);
+
+	task_crash_info_buffer = kalloc_data(task_crash_info_buffer_size, Z_WAITOK);
+	if (!task_crash_info_buffer) {
+		panic("task_crash_info_conclave_upcall: cannot allocate buffer for task_info shared memory");
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	uint8_t * dst = task_crash_info_buffer;
+	uint32_t remaining = length;
+	for (size_t i = 0; i < CONCLAVE_CRASH_BUFFER_PAGECOUNT; i++) {
+		if (remaining) {
+			memcpy(dst, (uint8_t*)phystokv((pmap_paddr_t)shared_buf->physaddr[i]), PAGE_SIZE);
+			remaining = (remaining >= PAGE_SIZE) ? remaining - PAGE_SIZE : 0;
+			dst += PAGE_SIZE;
+		}
+	}
+
+	task_lock(task);
+	if (task->exclave_crash_info == NULL && task->active) {
+		task->exclave_crash_info = task_crash_info_buffer;
+		task->exclave_crash_info_length = length;
+		task_crash_info_buffer = NULL;
+	}
+	task_unlock(task);
+
+	if (task_crash_info_buffer) {
+		kfree_data(task_crash_info_buffer, task_crash_info_buffer_size);
+	}
+
+	return KERN_SUCCESS;
+}
+
+exclaves_resource_t *
+task_get_conclave(task_t task)
+{
+	return task->conclave;
+}
+
+extern boolean_t IOPMRootDomainGetWillShutdown(void);
+
+TUNABLE(bool, disable_conclave_taint, "disable_conclave_taint", true); /* Do not taint processes when they talk to conclave, so system does not panic when exit. */
+
+static bool
+task_should_panic_on_exit_due_to_conclave_taint(task_t task)
+{
+	/* Check if boot-arg to disable conclave taint is set */
+	if (disable_conclave_taint) {
+		return false;
+	}
+
+	/* Check if the system is shutting down */
+	if (IOPMRootDomainGetWillShutdown()) {
+		return false;
+	}
+
+	return task_is_conclave_tainted(task);
+}
+
+static bool
+task_is_conclave_tainted(task_t task)
+{
+	return (task->t_exclave_state & TES_CONCLAVE_TAINTED) != 0 &&
+	       !(task->t_exclave_state & TES_CONCLAVE_UNTAINTABLE);
+}
+
+static void
+task_set_conclave_taint(task_t task)
+{
+	os_atomic_or(&task->t_exclave_state, TES_CONCLAVE_TAINTED, relaxed);
+}
+
+void
+task_set_conclave_untaintable(task_t task)
+{
+	os_atomic_or(&task->t_exclave_state, TES_CONCLAVE_UNTAINTABLE, relaxed);
+}
+
+void
+task_add_conclave_crash_info(task_t task, void *crash_info_ptr)
+{
+	__block kern_return_t error = KERN_SUCCESS;
+	tb_error_t tberr = TB_ERROR_SUCCESS;
+	void *crash_info;
+	uint32_t crash_info_length = 0;
+
+	if (task->conclave == NULL) {
+		return;
+	}
+
+	if (task->exclave_crash_info_length == 0 && fake_crash_buffer_length == 0) {
+		return;
+	}
+
+	error = kcdata_add_container_marker(crash_info_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
+	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+	if (error != KERN_SUCCESS) {
+		return;
+	}
+
+	if (task->exclave_crash_info_length == 0) {
+		crash_info = fake_crash_buffer;
+		crash_info_length = fake_crash_buffer_length;
+	} else {
+		crash_info = task->exclave_crash_info;
+		crash_info_length = task->exclave_crash_info_length;
+	}
+
+	tberr = stackshot_stackshotresult__unmarshal(crash_info,
+	    (uint64_t)crash_info_length, ^(stackshot_stackshotresult_s result){
+		error = stackshot_exclaves_process_stackshot(&result, crash_info_ptr);
+		if (error != KERN_SUCCESS) {
+		        printf("stackshot_exclaves_process_result: error processing stackshot result %d\n", error);
+		}
+	});
+	if (tberr != TB_ERROR_SUCCESS) {
+		printf("task_conclave_crash: task_add_conclave_crash_info could not unmarshal stackshot data 0x%x\n", tberr);
+		error = KERN_FAILURE;
+		goto error_exit;
+	}
+
+error_exit:
+	kcdata_add_container_marker(crash_info_ptr, KCDATA_TYPE_CONTAINER_END,
+	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+
+	return;
+}
+
+#endif /* CONFIG_EXCLAVES */
 
 #pragma mark task utils
 

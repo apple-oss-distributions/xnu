@@ -106,7 +106,7 @@ esp_aes_schedule(
 	struct secasvar *sav)
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-	aes_ctx *ctx = (aes_ctx*)sav->sched;
+	aes_ctx *ctx = (aes_ctx*)sav->sched_enc;
 
 	aes_decrypt_key((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc), &ctx->decrypt);
 	aes_encrypt_key((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc), &ctx->encrypt);
@@ -317,7 +317,7 @@ esp_cbc_decrypt_aes(
 		}
 		// no need to check output pointer alignment
 		aes_decrypt_cbc(sp, iv, len >> 4, dptr + dn,
-		    (aes_decrypt_ctx*)(&(((aes_ctx*)sav->sched)->decrypt)));
+		    (aes_decrypt_ctx*)(&(((aes_ctx*)sav->sched_enc)->decrypt)));
 
 		// update unaligned pointers
 		if (!IPSEC_IS_P2ALIGNED(sp_unaligned)) {
@@ -541,7 +541,7 @@ esp_cbc_encrypt_aes(
 		}
 		// no need to check output pointer alignment
 		aes_encrypt_cbc(sp, ivp, len >> 4, dptr + dn,
-		    (aes_encrypt_ctx*)(&(((aes_ctx*)sav->sched)->encrypt)));
+		    (aes_encrypt_ctx*)(&(((aes_ctx*)sav->sched_enc)->encrypt)));
 
 		// update unaligned pointers
 		if (!IPSEC_IS_P2ALIGNED(sp_unaligned)) {
@@ -612,7 +612,7 @@ esp_aes_cbc_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 		return EINVAL;
 	}
 
-	ctx = (aes_encrypt_ctx *)(&(((aes_ctx *)sav->sched)->encrypt));
+	ctx = (aes_encrypt_ctx *)(&(((aes_ctx *)sav->sched_enc)->encrypt));
 
 	VERIFY((input_data_len >> 4) <= UINT32_MAX);
 	if (__improbable((rc = aes_encrypt_cbc(input_data, ivp,
@@ -653,7 +653,7 @@ esp_aes_cbc_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 		return EINVAL;
 	}
 
-	ctx = (aes_decrypt_ctx *)(&(((aes_ctx *)sav->sched)->decrypt));
+	ctx = (aes_decrypt_ctx *)(&(((aes_ctx *)sav->sched_enc)->decrypt));
 
 	VERIFY((input_data_len >> 4) <= UINT32_MAX);
 	if (__improbable((rc = aes_decrypt_cbc(input_data, iv,
@@ -677,7 +677,7 @@ esp_gcm_schedule( __unused const struct esp_algorithm *algo,
     struct secasvar *sav)
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 	const u_int ivlen = sav->ivlen;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
@@ -746,7 +746,7 @@ int
 esp_gcm_encrypt_finalize(struct secasvar *sav,
     unsigned char *tag, size_t tag_bytes)
 {
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 	return aes_encrypt_finalize_gcm(tag, tag_bytes, ctx->encrypt);
 }
 
@@ -754,7 +754,7 @@ int
 esp_gcm_decrypt_finalize(struct secasvar *sav,
     unsigned char *tag, size_t tag_bytes)
 {
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 	return aes_decrypt_finalize_gcm(tag, tag_bytes, ctx->decrypt);
 }
 
@@ -796,7 +796,7 @@ esp_gcm_encrypt_aes(
 		return EINVAL;
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 
 	if (aes_encrypt_reset_gcm(ctx->encrypt)) {
 		ipseclog((LOG_ERR, "%s: gcm reset failure\n", __FUNCTION__));
@@ -982,7 +982,7 @@ esp_gcm_decrypt_aes(
 		memcpy(nonce + sizeof(nonce) - sizeof(esp.esp_seq), &esp.esp_seq, sizeof(esp.esp_seq));
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 	if (aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt)) {
 		ipseclog((LOG_ERR, "%s: failed to set IV\n", __FUNCTION__));
 		cc_clear(sizeof(nonce), nonce);
@@ -1083,8 +1083,7 @@ esp_aes_gcm_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 		return EINVAL;
 	}
 
-	aes_gcm_ctx *ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
-
+	aes_gcm_ctx *ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 	if (__improbable((rc = aes_encrypt_reset_gcm(ctx->encrypt)) != 0)) {
 		esp_log_err("Context reset failure %d, SPI 0x%08x\n",
 		    rc, ntohl(sav->spi));
@@ -1210,7 +1209,7 @@ esp_aes_gcm_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 		memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IVLEN);
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
+	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
 
 	if (__improbable((rc = aes_decrypt_set_iv_gcm(nonce, sizeof(nonce),
 	    ctx->decrypt)) != 0)) {

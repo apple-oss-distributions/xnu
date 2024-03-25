@@ -1,10 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import chr
-from builtins import hex
-from builtins import range
-from builtins import bytes
-
 from xnu import *
 from utils import *
 from process import *
@@ -240,11 +233,11 @@ def ShowTaskUserArgs(cmd_args=None, cmd_options={}):
 
             if string_area_addr <= ptr and ptr < string_area_addr+string_area_size :
                 string_offset = ptr - string_area_addr
-                string = string_area[string_offset:]
+                string = string_area[string_offset:].decode()
             else:
                 string = GetUserspaceString(task, ptr)
 
-            print(name + "[]: " + string)
+            print(name + "[]: " + string + '\n')
 
     return True
 
@@ -463,7 +456,7 @@ def _ExtractDataFromString(strdata, offset, data_type, length=0):
 
     data = struct.unpack(unpack_str, strdata[offset:(offset + length)])[0]
     if data_type == 'string':
-        return six.ensure_binary(data)
+        return data.decode()
 
     return data
 
@@ -485,7 +478,7 @@ def GetUserspaceString(task, string_address):
         if len(str_data) < 32:
             break # short read or found NUL byte
         string_address += 32
-    return six.ensure_str(b"".join(retval))
+    return b"".join(retval).decode()
 
 def GetImageInfo(task, mh_image_address, mh_path_address, approx_end_address=None):
     """ Print user library informaiton.
@@ -677,7 +670,7 @@ def ShowTaskUserDyldInfo(cmd_args=None):
     """ Inspect the dyld global info for the given user task & print out all fields including error messages
         Syntax: (lldb)showtaskuserdyldinfo <task_t>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("No arguments passed")
         print(ShowTaskUserDyldInfo.__doc__.strip())
         return
@@ -817,8 +810,8 @@ def ShowTaskUserDyldInfo(cmd_args=None):
 
         if dyld_all_image_infos_version >= 12:
             out_str += "sharedCacheSlide \t\t\t: {:#x}\n".format(dyld_all_image_infos_sharedCacheSlide)
-        if dyld_all_image_infos_version >= 13 and dyld_all_image_infos_sharedCacheUUID != b"":
-            out_str += "sharedCacheUUID \t\t\t: {:s}\n".format(six.ensure_str(dyld_all_image_infos_sharedCacheUUID))
+        if dyld_all_image_infos_version >= 13 and dyld_all_image_infos_sharedCacheUUID != "":
+            out_str += "sharedCacheUUID \t\t\t: {:s}\n".format(dyld_all_image_infos_sharedCacheUUID)
     else:
         out_str += "No dyld information available for task\n"
     print(out_str)

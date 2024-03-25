@@ -101,19 +101,17 @@ bool ml_did_interrupt_userspace(void);
 /* Clear interrupt spin debug state for thread */
 
 #if SCHED_HYGIENE_DEBUG
-void ml_adjust_preemption_disable_time(thread_t thread, int64_t duration);
-
 void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 #define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)                                          \
 	    if (sched_hygiene_debug_pmc) {                                                      \
 	        mt_cur_cpu_cycles_instrs_speculative(&thread->machine.intmask_cycles,           \
 	                &thread->machine.intmask_instr);                                        \
 	    }
-#else
+#else /* CONFIG_CPU_COUNTERS */
 #define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)
-#endif
+#endif /* !CONFIG_CPU_COUNTERS */
 
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)                                    \
 do {                                                                                        \
@@ -205,14 +203,12 @@ typedef void (*lockdown_handler_t)(void *);
 typedef void (*platform_error_handler_t)(void *refcon, vm_offset_t fault_addr);
 
 /*
- * The exception callback (ex_cb) module allows kernel drivers to
- * register and receive callbacks for exceptions, and indicate
- * actions to be taken by the platform kernel
- * Currently this is supported for ARM64 but extending support for ARM32
- * should be straightforward
+ * The exception callback (ex_cb) module is obsolete.  Some definitions related
+ * to ex_cb were exported through the SDK, and are only left here for historical
+ * reasons.
  */
 
-/* Supported exception classes for callbacks */
+/* Unused.  Left for historical reasons. */
 typedef enum{
 	EXCB_CLASS_ILLEGAL_INSTR_SET,
 #ifdef CONFIG_XNUPOST
@@ -220,43 +216,36 @@ typedef enum{
 	EXCB_CLASS_TEST2,
 	EXCB_CLASS_TEST3,
 #endif
-	EXCB_CLASS_MAX          // this must be last
+	EXCB_CLASS_MAX
 }
 ex_cb_class_t;
 
-/* Actions indicated by callbacks to be taken by platform kernel */
+/* Unused.  Left for historical reasons. */
 typedef enum{
-	EXCB_ACTION_RERUN,      // re-run the faulting instruction
-	EXCB_ACTION_NONE,       // continue normal exception handling
+	EXCB_ACTION_RERUN,
+	EXCB_ACTION_NONE,
 #ifdef CONFIG_XNUPOST
 	EXCB_ACTION_TEST_FAIL,
 #endif
 }
 ex_cb_action_t;
 
-/*
- * Exception state
- * We cannot use a private kernel data structure such as arm_saved_state_t
- * The CPSR and ESR are not clobbered when the callback function is invoked so
- * those registers can be examined by the callback function;
- * the same is done in the platform error handlers
- */
+/* Unused.  Left for historical reasons. */
 typedef struct{
 	vm_offset_t far;
 }
 ex_cb_state_t;
 
-/* callback type definition */
+/* Unused.  Left for historical reasons. */
 typedef ex_cb_action_t (*ex_cb_t) (
 	ex_cb_class_t           cb_class,
-	void                            *refcon,// provided at registration
-	const ex_cb_state_t     *state  // exception state
+	void                            *refcon,
+	const ex_cb_state_t     *state
 	);
 
 /*
- * Callback registration
- * Currently we support only one registered callback per class but
- * it should be possible to support more callbacks
+ * This function is unimplemented.  Its definition is left for historical
+ * reasons.
  */
 kern_return_t ex_cb_register(
 	ex_cb_class_t   cb_class,
@@ -264,7 +253,8 @@ kern_return_t ex_cb_register(
 	void                    *refcon );
 
 /*
- * Called internally by platform kernel to invoke the registered callback for class
+ * This function is unimplemented.  Its definition is left for historical
+ * reasons.
  */
 ex_cb_action_t ex_cb_invoke(
 	ex_cb_class_t   cb_class,
@@ -700,11 +690,6 @@ ml_static_protect(
 	vm_size_t size,
 	vm_prot_t new_prot);
 
-typedef int ml_page_protection_t;
-
-/* Return the type of page protection supported */
-ml_page_protection_t ml_page_protection_type(void);
-
 /* virtual to physical on wired pages */
 vm_offset_t ml_vtophys(
 	vm_offset_t vaddr);
@@ -714,6 +699,11 @@ void ml_cpu_get_info(ml_cpu_info_t *ml_cpu_info);
 void ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type);
 
 #endif /* __APPLE_API_UNSTABLE */
+
+typedef int ml_page_protection_t;
+
+/* Return the type of page protection supported */
+ml_page_protection_t ml_page_protection_type(void);
 
 #ifdef __APPLE_API_PRIVATE
 #ifdef  XNU_KERNEL_PRIVATE
@@ -1328,7 +1318,7 @@ extern void sched_perfcontrol_edge_matrix_set(sched_clutch_edge *edge_matrix, bo
  * per-cluster bitmasks. The preferred_bitmask is a bitmask of CPU cores where if a bit is set,
  * CLPC would prefer threads to be scheduled on that core if it is idle. The migration_bitmask
  * is a bitmask of CPU cores where if a bit is set, CLPC would prefer threads no longer continue
- * running on that core if there is an idle core from the preferred_bitmask that is available.
+ * running on that core if there is any other non-avoided idle core in the cluster that is available.
  */
 
 extern void sched_perfcontrol_edge_cpu_rotation_bitmasks_set(uint32_t cluster_id, uint64_t preferred_bitmask, uint64_t migration_bitmask);
@@ -1392,9 +1382,11 @@ uint32_t ml_update_cluster_wfe_recommendation(uint32_t wfe_cluster_id, uint64_t 
 
 uint64_t ml_default_rop_pid(void);
 uint64_t ml_default_jop_pid(void);
+uint64_t ml_non_arm64e_user_jop_pid(void);
 void ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit);
-void ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit);
-void ml_task_set_jop_pid_from_shared_region(task_t task);
+void ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit, boolean_t disable_user_jop);
+void ml_task_set_jop_pid_from_shared_region(task_t task, boolean_t disable_user_jop);
+uint8_t ml_task_get_disable_user_jop(task_t task);
 void ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop);
 void ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop);
 void ml_thread_set_jop_pid(thread_t thread, task_t task);
@@ -1443,6 +1435,7 @@ uint64_t ml_gpu_stat(thread_t);
 
 #if __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE)
 extern void ml_expect_fault_begin(expected_fault_handler_t, uintptr_t);
+extern void ml_expect_fault_pc_begin(expected_fault_handler_t, uintptr_t);
 extern void ml_expect_fault_end(void);
 #endif /* __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE) */
 
@@ -1475,6 +1468,21 @@ void ml_report_minor_badness(uint32_t badness_id);
  */
 uint64_t ml_get_backtrace_pc(struct arm_saved_state *state);
 #endif /* XNU_KERNEL_PRIVATE */
+
+#ifdef KERNEL_PRIVATE
+/**
+ * Given a physical address, return whether that address is owned by the secure
+ * world.
+ *
+ * @note This does not include memory shared between XNU and the secure world.
+ *
+ * @param paddr The physical address to check.
+ *
+ * @return True if the physical address is owned and being used exclusively by
+ *        the secure world, false otherwise.
+ */
+bool ml_paddr_is_exclaves_owned(vm_offset_t paddr);
+#endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 

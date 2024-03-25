@@ -177,12 +177,13 @@ rejected_syscall_guard_ast(
 	mach_exception_data_type_t code,
 	mach_exception_data_type_t subcode)
 {
+	const bool fatal = true;
 	/*
 	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
 	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY.
+	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
-	if (task_exception_notify(EXC_GUARD, code, subcode) == KERN_SUCCESS) {
+	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
 		psignal_uthread(t, SIGSYS);
 	} else {
 		exit_with_guard_exception(current_proc(), code, subcode);

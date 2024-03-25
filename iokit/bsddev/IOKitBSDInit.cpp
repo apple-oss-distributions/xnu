@@ -52,6 +52,7 @@ extern "C" {
 #include <sys/vnode_internal.h>
 #include <sys/mount.h>
 #include <corecrypto/ccsha2.h>
+#include <kdp/sk_core.h>
 
 // how long to wait for matching root device, secs
 #if DEBUG
@@ -1126,31 +1127,34 @@ IOPolledCoreFileMode_t gIOPolledCoreFileMode = kIOPolledCoreFileModeNotInitializ
 
 #if IOPOLLED_COREFILE
 
+#define ONE_MB                  1024ULL * 1024ULL
+
 #if defined(XNU_TARGET_OS_BRIDGE)
 // On bridgeOS allocate a 150MB corefile and leave 150MB free
-#define kIOCoreDumpSize         150ULL*1024ULL*1024ULL
-#define kIOCoreDumpFreeSize     150ULL*1024ULL*1024ULL
+#define kIOCoreDumpSize         150ULL * ONE_MB
+#define kIOCoreDumpFreeSize     150ULL * ONE_MB
 
-#elif !defined(XNU_TARGET_OS_OSX) /* defined(XNU_TARGET_OS_BRIDGE) */
-// On embedded devices with >3GB DRAM we allocate a 500MB corefile
-// otherwise allocate a 350MB corefile. Leave 350 MB free
+#elif defined(XNU_TARGET_OS_OSX)
 
-#define kIOCoreDumpMinSize      350ULL*1024ULL*1024ULL
-#define kIOCoreDumpLargeSize    500ULL*1024ULL*1024ULL
-
-#define kIOCoreDumpFreeSize     350ULL*1024ULL*1024ULL
-
-#else /* defined(XNU_TARGET_OS_BRIDGE) */
 // on macOS devices allocate a corefile sized at 1GB / 32GB of DRAM,
 // fallback to a 1GB corefile and leave at least 1GB free
-#define kIOCoreDumpMinSize              1024ULL*1024ULL*1024ULL
-#define kIOCoreDumpIncrementalSize      1024ULL*1024ULL*1024ULL
+#define kIOCoreDumpMinSize              1024ULL * ONE_MB
+#define kIOCoreDumpIncrementalSize      1024ULL * ONE_MB
 
-#define kIOCoreDumpFreeSize     1024ULL*1024ULL*1024ULL
+#define kIOCoreDumpFreeSize     1024ULL * ONE_MB
 
 // on older macOS devices we allocate a 1MB file at boot
 // to store a panic time stackshot
-#define kIOStackshotFileSize    1024ULL*1024ULL
+#define kIOStackshotFileSize    ONE_MB
+
+#else /* defined(XNU_TARGET_OS_BRIDGE) */
+
+// On embedded devices with >3GB DRAM we allocate a 500MB corefile
+// otherwise allocate a 350MB corefile. Leave 350 MB free
+#define kIOCoreDumpMinSize      350ULL * ONE_MB
+#define kIOCoreDumpLargeSize    500ULL * ONE_MB
+
+#define kIOCoreDumpFreeSize     350ULL * ONE_MB
 
 #endif /* defined(XNU_TARGET_OS_BRIDGE) */
 
@@ -1178,7 +1182,7 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 	    sizeof(requested_corefile_size))) {
 		IOLog("Boot-args specify %d MB kernel corefile\n", requested_corefile_size);
 
-		*ideal_size = *fallback_size = (requested_corefile_size * 1024ULL * 1024ULL);
+		*ideal_size = *fallback_size = (requested_corefile_size * ONE_MB);
 		return;
 	}
 
@@ -1202,7 +1206,7 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 #pragma unused(mode)
 	*ideal_size = *fallback_size = kIOCoreDumpMinSize;
 
-	if (max_mem > (3 * 1024ULL * 1024ULL * 1024ULL)) {
+	if (max_mem > (3 * 1024ULL * ONE_MB)) {
 		*ideal_size = kIOCoreDumpLargeSize;
 	}
 
@@ -1210,14 +1214,18 @@ IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_
 #else /* defined(XNU_TARGET_OS_BRIDGE) */
 	if (mode == kIOPolledCoreFileModeCoredump) {
 		*ideal_size = *fallback_size = kIOCoreDumpMinSize;
-		if (kIOCoreDumpIncrementalSize != 0 && max_mem > (32 * 1024ULL * 1024ULL * 1024ULL)) {
-			*ideal_size = ((ROUNDUP(max_mem, (32 * 1024ULL * 1024ULL * 1024ULL)) / (32 * 1024ULL * 1024ULL * 1024ULL)) * kIOCoreDumpIncrementalSize);
+		if (kIOCoreDumpIncrementalSize != 0 && max_mem > (32 * 1024ULL * ONE_MB)) {
+			*ideal_size = ((ROUNDUP(max_mem, (32 * 1024ULL * ONE_MB)) / (32 * 1024ULL * ONE_MB)) * kIOCoreDumpIncrementalSize);
 		}
 		*free_space_to_leave = kIOCoreDumpFreeSize;
 	} else if (mode == kIOPolledCoreFileModeStackshot) {
 		*ideal_size = *fallback_size = *free_space_to_leave = kIOStackshotFileSize;
 	}
 #endif /* defined(XNU_TARGET_OS_BRIDGE) */
+
+#if EXCLAVES_COREDUMP
+	*ideal_size += sk_core_size();
+#endif /* EXCLAVES_COREDUMP */
 
 	return;
 }

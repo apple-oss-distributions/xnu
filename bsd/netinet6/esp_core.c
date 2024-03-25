@@ -351,7 +351,7 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 
 	lck_mtx_lock(sadb_mutex);
 	/* already allocated */
-	if (sav->sched && sav->schedlen != 0) {
+	if (sav->sched_enc && sav->schedlen_enc != 0) {
 		lck_mtx_unlock(sadb_mutex);
 		return 0;
 	}
@@ -373,16 +373,16 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 		return 0;
 	}
 
-	sav->schedlen = (*algo->schedlen)(algo);
-	if ((signed) sav->schedlen < 0) {
+	sav->schedlen_enc = (*algo->schedlen)(algo);
+	if ((signed) sav->schedlen_enc < 0) {
 		lck_mtx_unlock(sadb_mutex);
 		return EINVAL;
 	}
 
 //#### that malloc should be replaced by a saved buffer...
-	sav->sched = kalloc_data(sav->schedlen, Z_NOWAIT);
-	if (!sav->sched) {
-		sav->schedlen = 0;
+	sav->sched_enc = kalloc_data(sav->schedlen_enc, Z_NOWAIT);
+	if (!sav->sched_enc) {
+		sav->schedlen_enc = 0;
 		lck_mtx_unlock(sadb_mutex);
 		return ENOBUFS;
 	}
@@ -391,10 +391,10 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 	if (error) {
 		ipseclog((LOG_ERR, "esp_schedule %s: error %d\n",
 		    algo->name, error));
-		bzero(sav->sched, sav->schedlen);
-		kfree_data(sav->sched, sav->schedlen);
-		sav->sched = NULL;
-		sav->schedlen = 0;
+		bzero(sav->sched_enc, sav->schedlen_enc);
+		kfree_data(sav->sched_enc, sav->schedlen_enc);
+		sav->sched_enc = NULL;
+		sav->schedlen_enc = 0;
 	}
 	lck_mtx_unlock(sadb_mutex);
 	return error;
@@ -523,7 +523,7 @@ esp_des_schedule(
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 	if (des_ecb_key_sched((des_cblock *)_KEYBUF(sav->key_enc),
-	    (des_ecb_key_schedule *)sav->sched)) {
+	    (des_ecb_key_schedule *)sav->sched_enc)) {
 		return EINVAL;
 	} else {
 		return 0;
@@ -540,7 +540,7 @@ esp_des_blockdecrypt(
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
 	return des_ecb_encrypt((des_cblock *)d, (des_cblock *)d,
-	           (des_ecb_key_schedule *)sav->sched, DES_DECRYPT);
+	           (des_ecb_key_schedule *)sav->sched_enc, DES_DECRYPT);
 }
 
 static int
@@ -553,7 +553,7 @@ esp_des_blockencrypt(
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
 	return des_ecb_encrypt((des_cblock *)d, (des_cblock *)d,
-	           (des_ecb_key_schedule *)sav->sched, DES_ENCRYPT);
+	           (des_ecb_key_schedule *)sav->sched_enc, DES_ENCRYPT);
 }
 
 static int
@@ -689,7 +689,7 @@ esp_3des_schedule(
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
 	if (des3_ecb_key_sched((des_cblock *)_KEYBUF(sav->key_enc),
-	    (des3_ecb_key_schedule *)sav->sched)) {
+	    (des3_ecb_key_schedule *)sav->sched_enc)) {
 		return EINVAL;
 	} else {
 		return 0;
@@ -706,7 +706,7 @@ esp_3des_blockdecrypt(
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
 	return des3_ecb_encrypt((des_cblock *)d, (des_cblock *)d,
-	           (des3_ecb_key_schedule *)sav->sched, DES_DECRYPT);
+	           (des3_ecb_key_schedule *)sav->sched_enc, DES_DECRYPT);
 }
 
 static int
@@ -719,7 +719,7 @@ esp_3des_blockencrypt(
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
 	return des3_ecb_encrypt((des_cblock *)d, (des_cblock *)d,
-	           (des3_ecb_key_schedule *)sav->sched, DES_ENCRYPT);
+	           (des3_ecb_key_schedule *)sav->sched_enc, DES_ENCRYPT);
 }
 
 static int
@@ -1244,7 +1244,7 @@ esp_cbc_des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 
 		/* encrypt */
 		if (__improbable((rc = des_ecb_encrypt((des_cblock *)&input_data[soff],
-		    (des_cblock *)&output_data[soff], (des_ecb_key_schedule *)sav->sched,
+		    (des_cblock *)&output_data[soff], (des_ecb_key_schedule *)sav->sched_enc,
 		    DES_ENCRYPT)) != 0)) {
 			esp_log_err("encrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
 			return rc;
@@ -1288,7 +1288,7 @@ esp_cbc_des_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 	while (soff < input_data_len) {
 		/* decrypt */
 		if (__improbable((rc = des_ecb_encrypt((des_cblock *)&input_data[soff],
-		    (des_cblock *)&output_data[soff], (des_ecb_key_schedule *)sav->sched,
+		    (des_cblock *)&output_data[soff], (des_ecb_key_schedule *)sav->sched_enc,
 		    DES_DECRYPT)) != 0)) {
 			esp_log_err("decrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
 			return rc;
@@ -1341,7 +1341,7 @@ esp_cbc_3des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 
 		/* encrypt */
 		if (__improbable((rc = des3_ecb_encrypt((des_cblock *)&input_data[soff],
-		    (des_cblock *)&output_data[soff], (des3_ecb_key_schedule *)sav->sched,
+		    (des_cblock *)&output_data[soff], (des3_ecb_key_schedule *)sav->sched_enc,
 		    DES_ENCRYPT)) != 0)) {
 			esp_log_err("encrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
 			return rc;
@@ -1385,7 +1385,7 @@ esp_cbc_3des_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 	while (soff < input_data_len) {
 		/* decrypt */
 		if (__improbable((rc = des3_ecb_encrypt((des_cblock *)&input_data[soff],
-		    (des_cblock *)&output_data[soff], (des3_ecb_key_schedule *)sav->sched,
+		    (des_cblock *)&output_data[soff], (des3_ecb_key_schedule *)sav->sched_enc,
 		    DES_DECRYPT)) != 0)) {
 			esp_log_err("decrypt failed %d, SPI 0x%08x", rc, ntohl(sav->spi));
 			return rc;
@@ -1483,9 +1483,18 @@ esp_auth(
 		}
 	}
 
+	/*
+	 * pre-compute and cache intermediate key
+	 */
+	if (__improbable((error = ah_schedule(algo, sav)) != 0)) {
+		esp_log_info("ah schedule failed %d, SPI 0x%08x\n", error, ntohl(sav->spi));
+		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 5, error, 0, 0, 0);
+		return error;
+	}
+
 	error = (*algo->init)(&s, sav);
 	if (error) {
-		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 5, 0, 0, 0, 0);
+		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 6, error, 0, 0, 0);
 		return error;
 	}
 	while (0 < length) {
@@ -1506,7 +1515,7 @@ esp_auth(
 	}
 	(*algo->result)(&s, (caddr_t) sumbuf, sizeof(sumbuf));
 	bcopy(sumbuf, sum, siz);        /*XXX*/
-	KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 6, 0, 0, 0, 0);
+	KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 7, 0, 0, 0, 0);
 	return 0;
 }
 
@@ -1549,17 +1558,26 @@ esp_auth_data(struct secasvar *sav, uint8_t *input_data, size_t input_data_len,
 		return EINVAL;
 	}
 
+	/*
+	 * pre-compute and cache intermediate key
+	 */
+	if (__improbable((err = ah_schedule(algo, sav)) != 0)) {
+		esp_log_info("ah schedule failed %d, SPI 0x%08x\n", err, ntohl(sav->spi));
+		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 3, err, 0, 0, 0);
+		return err;
+	}
+
 	err = (*algo->init)(&state, sav);
 	if (__improbable(err != 0)) {
 		esp_log_err("esp auth: algo init failed with error %d, "
 		    "SPI 0x%08x\n", err, ntohl(sav->spi));
-		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 3, error, 0, 0, 0);
+		KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 4, err, 0, 0, 0);
 		return err;
 	}
 
 	(*algo->update)(&state, (caddr_t)input_data, input_data_len);
 	(*algo->result)(&state, (caddr_t)out_auth, auth_size);
-	KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 4, 0, 0, 0, 0);
+	KERNEL_DEBUG(DBG_FNC_ESPAUTH | DBG_FUNC_END, 5, 0, 0, 0, 0);
 	return 0;
 }
 

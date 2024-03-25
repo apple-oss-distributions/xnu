@@ -216,6 +216,7 @@ private:
 	IOReturn unserializeImage(const uint8_t *image, IOByteCount length);
 	IOReturn reclaim(void);
 	uint32_t findCurrentBank(void);
+	size_t   getAppendSize(void);
 
 	static bool convertObjectToProp(uint8_t *buffer, uint32_t *length, const char *propSymbol, OSObject *propObject);
 	static bool convertPropToObject(const uint8_t *propName, uint32_t propNameLength, const uint8_t *propData, uint32_t propDataLength,
@@ -243,7 +244,7 @@ public:
 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
 	virtual bool     setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
-	virtual bool     sync(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn sync(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn flush(const uuid_t guid, IONVRAMOperation op) APPLE_KEXT_OVERRIDE;
 	virtual void     reload(void) APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getGeneration(void) const APPLE_KEXT_OVERRIDE;
@@ -873,6 +874,10 @@ IONVRAMV3Handler::setVariable(const uuid_t varGuid, const char *variableName, OS
 {
 	uuid_t destGuid;
 
+	if (strcmp(variableName, "reclaim-int") == 0) {
+		return reclaim();
+	}
+
 	if (getSystemPartitionActive()) {
 		// System region case, if they're using the GUID directly or it's on the system allow list
 		// force it to use the System GUID
@@ -950,15 +955,20 @@ exit:
 IOReturn
 IONVRAMV3Handler::reclaim(void)
 {
-	IOReturn ret;
-	struct   v3_store_header newStoreHeader;
-	struct   v3_var_header *varHeader;
-	struct   nvram_v3_var_entry *varEntry;
-	OSData   *entryContainer;
-	size_t   new_bank_offset = sizeof(struct v3_store_header);
-	uint32_t next_bank = (_currentBank + 1) % _bankCount;
+	IOReturn             ret;
+	struct               v3_store_header newStoreHeader;
+	struct               v3_var_header *varHeader;
+	struct               nvram_v3_var_entry *varEntry;
+	OSData               *entryContainer;
+	size_t               new_bank_offset = sizeof(struct v3_store_header);
+	uint32_t             next_bank = (_currentBank + 1) % _bankCount;
+	uint8_t              *bankData;
+	OSSharedPtr<OSArray> remainingEntries;
 
 	DEBUG_INFO("called\n");
+
+	bankData = (uint8_t *)IOMallocData(_bankSize);
+	require_action(bankData != nullptr, exit, ret = kIOReturnNoMemory);
 
 	ret = _nvramController->select(next_bank);
 	verify_noerr_action(ret, DEBUG_INFO("select of bank %#08x failed\n", next_bank));
@@ -968,6 +978,8 @@ IONVRAMV3Handler::reclaim(void)
 
 	_currentBank = next_bank;
 
+	remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
+
 	for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
 		entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
 		varEntry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
@@ -976,16 +988,19 @@ IONVRAMV3Handler::reclaim(void)
 		DEBUG_INFO("entry %u %s, new_state=%#x, e_offset=%#lx, state=%#x\n",
 		    i, varEntry->header.name_data_buf, varEntry->new_state, varEntry->existing_offset, varHeader->state);
 
-		if (varEntry->new_state == VAR_NEW_STATE_NONE) {
-			ret = _nvramController->write(new_bank_offset, (uint8_t *)varHeader, variable_length(varHeader));
-			require_noerr_action(ret, exit, DEBUG_ERROR("var write failed, ret=%08x\n", ret));
+		if ((varEntry->new_state == VAR_NEW_STATE_NONE) ||
+		    (varEntry->new_state == VAR_NEW_STATE_APPEND)) {
+			varHeader->state = VAR_ADDED;
 
+			memcpy(bankData + new_bank_offset, (uint8_t *)varHeader, variable_length(varHeader));
+
+			varEntry->new_state = VAR_NEW_STATE_NONE;
 			varEntry->existing_offset = new_bank_offset;
 			new_bank_offset += variable_length(varHeader);
+
+			remainingEntries->setObject(entryContainer);
 		} else {
-			// Set existing offset to 0 so that they will either be appended
-			// or any remaining removals will be dropped
-			varEntry->existing_offset = 0;
+			// entryContainer not added to remainingEntries, entry dropped
 		}
 	}
 
@@ -995,27 +1010,60 @@ IONVRAMV3Handler::reclaim(void)
 
 	newStoreHeader.generation = _generation;
 
-	ret = _nvramController->write(0, (uint8_t *)&newStoreHeader, sizeof(newStoreHeader));
-	require_noerr_action(ret, exit, DEBUG_ERROR("store header write failed, ret=%08x\n", ret));
+	memcpy(bankData, (uint8_t *)&newStoreHeader, sizeof(newStoreHeader));
+
+	ret = _nvramController->write(0, bankData, new_bank_offset);
+	require_noerr_action(ret, exit, DEBUG_ERROR("reclaim bank write failed, ret=%08x\n", ret));
 
 	_currentOffset = (uint32_t)new_bank_offset;
 
-	DEBUG_INFO("Reclaim complete, _generation=%u, _currentOffset=%#x\n", _generation, _currentOffset);
+	DEBUG_INFO("Reclaim complete, _currentBank=%u _generation=%u, _currentOffset=%#x\n", _currentBank, _generation, _currentOffset);
+
+	_newData = false;
+
+	_varEntries.reset(remainingEntries.get(), OSRetain);
 
 exit:
+	IOFreeData(bankData, _bankSize);
+
 	return ret;
+}
+
+size_t
+IONVRAMV3Handler::getAppendSize(void)
+{
+	struct nvram_v3_var_entry *varEntry;
+	struct v3_var_header      *varHeader;
+	OSData                    *entryContainer;
+	size_t                    appendSize = 0;
+
+	for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
+		entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
+		varEntry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
+		varHeader = &varEntry->header;
+
+		if (varEntry->new_state == VAR_NEW_STATE_APPEND) {
+			appendSize += variable_length(varHeader);
+		}
+	}
+
+	return appendSize;
 }
 
 IOReturn
 IONVRAMV3Handler::syncRaw(void)
 {
-	IOReturn             ret = kIOReturnSuccess;
-	size_t               varEndOffset;
-	size_t               varStartOffset;
-	struct               nvram_v3_var_entry *varEntry;
-	struct               v3_var_header *varHeader;
-	OSData               *entryContainer;
-	OSSharedPtr<OSArray> remainingEntries;
+	IOReturn                  ret = kIOReturnSuccess;
+	struct nvram_v3_var_entry *varEntry;
+	struct v3_var_header      *varHeader;
+	OSData                    *entryContainer;
+	OSSharedPtr<OSArray>      remainingEntries;
+	uint8_t                   *appendBuffer = nullptr;
+	size_t                    appendBufferOffset = 0;
+	size_t                    *invalidateOffsets = nullptr;
+	size_t                    invalidateOffsetsCount = 0;
+	size_t                    invalidateOffsetIndex = 0;
+	size_t                    invalidatedSize = 0;
 
 	require_action(_nvramController != nullptr, exit, DEBUG_INFO("No _nvramController\n"));
 	require_action(_newData == true, exit, DEBUG_INFO("No _newData to sync\n"));
@@ -1023,102 +1071,100 @@ IONVRAMV3Handler::syncRaw(void)
 
 	DEBUG_INFO("_varEntries->getCount()=%#x\n", _varEntries->getCount());
 
-	remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
+	if (getAppendSize() + _currentOffset < _bankSize) {
+		// No reclaim, build append and invalidate list
 
-	for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
-		size_t space_needed = 0;
-		uint8_t state;
+		remainingEntries = OSArray::withCapacity(_varEntries->getCapacity());
 
-		entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
-		varEntry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
-		varHeader = &varEntry->header;
+		appendBuffer = (uint8_t *)IOMallocData(_bankSize);
+		require_action(appendBuffer, exit, ret = kIOReturnNoMemory);
 
-		DEBUG_INFO("%s new_state=%d, e_off=%#lx, c_off=%#x, uuid=%x%x, nameSize=%#x, dataSize=%#x\n",
-		    varEntry->header.name_data_buf,
-		    varEntry->new_state, varEntry->existing_offset, _currentOffset,
-		    varHeader->guid[0], varHeader->guid[1],
-		    varHeader->nameSize, varHeader->dataSize);
+		invalidateOffsetsCount = _varEntries->getCount();
+		invalidateOffsets = (size_t *)IOMallocData(invalidateOffsetsCount * sizeof(size_t));
+		require_action(invalidateOffsets, exit, ret = kIOReturnNoMemory);
 
-		if (varEntry->new_state == VAR_NEW_STATE_APPEND) {
-			space_needed = variable_length(varHeader);
+		for (unsigned int i = 0; i < _varEntries->getCount(); i++) {
+			entryContainer = OSDynamicCast(OSData, _varEntries->getObject(i));
+			varEntry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
+			varHeader = &varEntry->header;
 
-			// reclaim if needed
-			if ((_currentOffset + space_needed) > _bankSize) {
-				ret = reclaim();
-				require_noerr_action(ret, exit, DEBUG_ERROR("reclaim fail, ret=%#x\n", ret));
+			DEBUG_INFO("entry %s, new_state=%#02x state=%#02x, existing_offset=%#zx\n",
+			    varEntry->header.name_data_buf, varEntry->new_state, varEntry->header.state, varEntry->existing_offset);
 
-				// Check after reclaim...
-				if ((_currentOffset + space_needed) > _bankSize) {
-					DEBUG_ERROR("nvram full!\n");
-					goto exit;
+			if (varEntry->new_state == VAR_NEW_STATE_APPEND) {
+				size_t varSize = variable_length(varHeader);
+				size_t prevOffset = varEntry->existing_offset;
+
+				varHeader->state = VAR_ADDED;
+				varEntry->existing_offset = _currentOffset + appendBufferOffset;
+				varEntry->new_state = VAR_NEW_STATE_NONE;
+
+				DEBUG_INFO("Appending %s in append buffer offset %#zx, actual offset %#zx, prevOffset %#zx, varsize=%#zx\n",
+				    varEntry->header.name_data_buf, appendBufferOffset, varEntry->existing_offset, prevOffset, varSize);
+
+				// Write to append buffer
+				memcpy(appendBuffer + appendBufferOffset, (uint8_t *)varHeader, varSize);
+				appendBufferOffset += varSize;
+
+				if (prevOffset) {
+					invalidateOffsets[invalidateOffsetIndex++] = prevOffset;
+					invalidatedSize += variable_length((struct v3_var_header *)prevOffset);
 				}
 
-				DEBUG_INFO("%s AFTER reclaim new_state=%d, e_off=%#lx, c_off=%#x, uuid=%x%x, nameSize=%#x, dataSize=%#x\n",
-				    varEntry->header.name_data_buf,
-				    varEntry->new_state, varEntry->existing_offset, _currentOffset,
-				    varHeader->guid[0], varHeader->guid[1],
-				    varHeader->nameSize, varHeader->dataSize);
-			}
+				remainingEntries->setObject(entryContainer);
+			} else if (varEntry->new_state == VAR_NEW_STATE_REMOVE) {
+				if (varEntry->existing_offset) {
+					DEBUG_INFO("marking entry at offset %#lx deleted\n", varEntry->existing_offset);
 
-			if (varEntry->existing_offset) {
-				// Mark existing entry as VAR_IN_DELETED_TRANSITION
-				state = varHeader->state & VAR_IN_DELETED_TRANSITION;
-				DEBUG_INFO("invalidating with state=%#x\n", state);
+					invalidateOffsets[invalidateOffsetIndex++] = varEntry->existing_offset;
+					invalidatedSize += variable_length((struct v3_var_header *)varEntry->existing_offset);
+				} else {
+					DEBUG_INFO("No existing_offset , removing\n");
+				}
 
-				ret = _nvramController->write(varEntry->existing_offset + offsetof(struct v3_var_header, state), &state, sizeof(state));
-				require_noerr_action(ret, exit, DEBUG_ERROR("new state w fail, ret=%#x\n", ret));
-			}
-
-			varStartOffset = _currentOffset;
-			varEndOffset = _currentOffset;
-
-			// Append new entry as VAR_ADDED
-			varHeader->state = VAR_ADDED;
-
-			ret = _nvramController->write(varStartOffset, (uint8_t *)varHeader, variable_length(varHeader));
-			require_noerr_action(ret, exit, DEBUG_ERROR("variable write fail, ret=%#x\n", ret); );
-
-			varEndOffset += variable_length(varHeader);
-
-			if (varEntry->existing_offset) {
-				// Mark existing entry as VAR_DELETED
-				state = varHeader->state & VAR_DELETED & VAR_IN_DELETED_TRANSITION;
-
-				ret = _nvramController->write(varEntry->existing_offset + offsetof(struct v3_var_header, state), &state, sizeof(state));
-				require_noerr_action(ret, exit, DEBUG_ERROR("existing state w fail, ret=%#x\n", ret));
-			}
-
-			varEntry->existing_offset = varStartOffset;
-			varEntry->new_state = VAR_NEW_STATE_NONE;
-
-			_currentOffset = (uint32_t)varEndOffset;
-
-			remainingEntries->setObject(entryContainer);
-		} else if (varEntry->new_state == VAR_NEW_STATE_REMOVE) {
-			if (varEntry->existing_offset) {
-				DEBUG_INFO("marking entry at offset %#lx deleted\n", varEntry->existing_offset);
-
-				// Mark existing entry as VAR_IN_DELETED_TRANSITION
-				state = varHeader->state & VAR_DELETED & VAR_IN_DELETED_TRANSITION;
-
-				ret = _nvramController->write(varEntry->existing_offset + offsetof(struct v3_var_header, state), &state, sizeof(state));
-				require_noerr_action(ret, exit, DEBUG_ERROR("existing state w fail, ret=%#x\n", ret));
+				// not re-added to remainingEntries
 			} else {
-				DEBUG_INFO("No existing, removing\n");
+				DEBUG_INFO("skipping\n");
+				remainingEntries->setObject(entryContainer);
 			}
-
-			// not re-added to remainingEntries
-		} else {
-			DEBUG_INFO("skipping\n");
-			remainingEntries->setObject(entryContainer);
 		}
+
+		if (appendBufferOffset > 0) {
+			// Write appendBuffer
+			DEBUG_INFO("Appending append buffer size=%#zx at offset=%#x\n", appendBufferOffset, _currentOffset);
+			ret = _nvramController->write(_currentOffset, appendBuffer, appendBufferOffset);
+			require_noerr_action(ret, exit, DEBUG_ERROR("could not re-append, ret=%#x\n", ret));
+
+			_currentOffset += appendBufferOffset;
+		} else {
+			DEBUG_INFO("No entries to append\n");
+		}
+
+		if (invalidateOffsetIndex > 0) {
+			// Invalidate Entries
+			for (unsigned int i = 0; i < invalidateOffsetIndex; i++) {
+				uint8_t state = VAR_ADDED & VAR_DELETED & VAR_IN_DELETED_TRANSITION;
+
+				ret = _nvramController->write(invalidateOffsets[i] + offsetof(struct v3_var_header, state), &state, sizeof(state));
+				require_noerr_action(ret, exit, DEBUG_ERROR("unable to invalidate at offset %#zx, ret=%#x\n", invalidateOffsets[i], ret));
+				DEBUG_INFO("Invalidated entry at offset=%#zx\n", invalidateOffsets[i]);
+			}
+		} else {
+			DEBUG_INFO("No entries to invalidate\n");
+		}
+
+		_newData = false;
+
+		_varEntries.reset(remainingEntries.get(), OSRetain);
+	} else {
+		// Will need to reclaim, rebuild store and write everything at once
+		ret = reclaim();
 	}
 
-	_varEntries.reset(remainingEntries.get(), OSRetain);
-
-	_newData = false;
-
 exit:
+	IOFreeData(appendBuffer, _bankSize);
+	IOFreeData(invalidateOffsets, invalidateOffsetsCount * sizeof(size_t));
+
 	return ret;
 }
 
@@ -1166,12 +1212,12 @@ IONVRAMV3Handler::syncBlock(void)
 		varEntry = (struct nvram_v3_var_entry *)entryContainer->getBytesNoCopy();
 		varHeader = &varEntry->header;
 
-		varHeader->state = VAR_ADDED;
-
 		DEBUG_INFO("entry %u %s, new_state=%#x, e_offset=%#lx, state=%#x\n",
 		    i, varEntry->header.name_data_buf, varEntry->new_state, varEntry->existing_offset, varHeader->state);
 
 		if (varEntry->new_state != VAR_NEW_STATE_REMOVE) {
+			varHeader->state = VAR_ADDED;
+
 			memcpy(block + new_bank_offset, (uint8_t *)varHeader, variable_length(varHeader));
 
 			varEntry->existing_offset = new_bank_offset;
@@ -1201,7 +1247,7 @@ exit:
 	return ret;
 }
 
-bool
+IOReturn
 IONVRAMV3Handler::sync(void)
 {
 	IOReturn ret;
@@ -1219,17 +1265,13 @@ IONVRAMV3Handler::sync(void)
 		if (ret != kIOReturnSuccess) {
 			ret = reclaim();
 			require_noerr_action(ret, exit, DEBUG_ERROR("Reclaim recovery failed, ret=%#x", ret));
-
-			// Attempt to save again (will rewrite the variables still in APPEND) on the new bank
-			ret = syncRaw();
-			require_noerr_action(ret, exit, DEBUG_ERROR("syncRaw retry failed, ret=%#x", ret));
 		}
 	} else {
 		ret = syncBlock();
 	}
 
 exit:
-	return ret == kIOReturnSuccess;
+	return ret;
 }
 
 uint32_t

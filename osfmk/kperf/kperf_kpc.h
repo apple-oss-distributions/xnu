@@ -29,9 +29,9 @@
 #ifndef __KPERF_KPC_H__
 #define __KPERF_KPC_H__
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
+
 #include <kern/kpc.h> /* KPC_MAX_COUNTERS */
-#endif
 
 void kperf_kpc_thread_ast(thread_t thread);
 
@@ -50,5 +50,7 @@ void kperf_kpc_cpu_sample(struct kpcdata *, int);
 void kperf_kpc_thread_log(const struct kpcdata *);
 void kperf_kpc_cpu_log(const struct kpcdata *);
 void kperf_kpc_config_log(const struct kpcdata *);
+
+#endif /* CONFIG_CPU_COUNTERS */
 
 #endif /* __KPERF_KPC_H__ */

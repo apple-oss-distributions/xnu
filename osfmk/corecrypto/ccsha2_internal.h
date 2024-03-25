@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2012,2014-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -44,6 +44,11 @@
 
 #define CCSHA2_SHA256_USE_SHA512_K (CC_SMALL_CODE && !CCSHA2_DISABLE_SHA512)
 
+#if CCSHA256_ARMV6M_ASM
+extern const struct ccdigest_info ccsha256_v6m_di;
+void ccsha256_v6m_compress(ccdigest_state_t c, size_t num, const void *p) __asm__("_ccsha256_v6m_compress");
+#endif
+
 void ccsha256_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *buf);
 void ccsha512_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *in);
 
@@ -61,6 +66,10 @@ extern const struct ccdigest_info ccsha512_vng_intel_SupplementalSSE3_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_AVX2_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_AVX1_di;
 extern const struct ccdigest_info ccsha512_256_vng_intel_SupplementalSSE3_di;
+#endif
+
+#if CC_USE_L4
+extern const struct ccdigest_info ccsha256_trng_di;
 #endif
 
 extern const uint32_t ccsha256_K[64];

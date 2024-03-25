@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <arm/pmap/pmap_internal.h>
+#include <arm/preemption_disable_internal.h>
 
 /**
  * Placeholder for random pmap functionality that doesn't fit into any of the
@@ -41,15 +42,12 @@
 void
 pmap_abandon_measurement(void)
 {
-#if SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG)
-	thread_t t = current_thread();
-
+#if SCHED_HYGIENE_DEBUG
+	struct _preemption_disable_pcpu *pcpu = PERCPU_GET(_preemption_disable_pcpu_data);
 	uint64_t istate = pmap_interrupts_disable();
-	pmap_pin_kernel_pages((vm_map_offset_t)&(t->machine), sizeof(t->machine));
-	if (t->machine.preemption_disable_mt != 0) {
-		t->machine.preemption_disable_abandon = true;
+	if (pcpu->pdp_start.pds_mach_time != 0) {
+		pcpu->pdp_abandon = true;
 	}
-	pmap_unpin_kernel_pages((vm_map_offset_t)&(t->machine), sizeof(t->machine));
 	pmap_interrupts_restore(istate);
-#endif /* SCHED_HYGIENE_DEBUG && (DEVELOPMENT || DEBUG) */
+#endif /* SCHED_HYGIENE_DEBUG */
 }

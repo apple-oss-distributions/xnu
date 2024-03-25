@@ -15,6 +15,7 @@
 #include <kern/zalloc.h>
 #include <libkern/libkern.h>
 #include <pexpert/device_tree.h>
+#include <kern/task.h>
 
 #if HYPERVISOR
 #include <kern/hv_support.h>
@@ -411,3 +412,27 @@ SYSCTL_QUAD(_machdep, OID_AUTO, sim_stretched_io_ns, CTLFLAG_KERN | CTLFLAG_RW |
 #endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
 
 #endif /* ML_IO_TIMEOUTS_ENABLED */
+
+int opensource_kernel = 1;
+SYSCTL_INT(_kern, OID_AUTO, opensource_kernel, CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &opensource_kernel, 0, "Opensource Kernel");
+
+static int
+machdep_ptrauth_enabled SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, oidp)
+
+#if __has_feature(ptrauth_calls)
+	task_t task = current_task();
+	int ret = !ml_task_get_disable_user_jop(task);
+#else
+	const int ret = 0;
+#endif
+
+	return SYSCTL_OUT(req, &ret, sizeof(ret));
+}
+
+SYSCTL_PROC(_machdep, OID_AUTO, ptrauth_enabled,
+    CTLTYPE_INT | CTLFLAG_KERN | CTLFLAG_RD,
+    0, 0,
+    machdep_ptrauth_enabled, "I", "");

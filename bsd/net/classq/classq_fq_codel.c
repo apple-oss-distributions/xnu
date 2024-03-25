@@ -128,6 +128,8 @@ fq_codel_init(void)
 	_CASSERT(AQM_KTRACE_STATS_FLOW_DESTROY == 0x8310014);
 	_CASSERT(AQM_KTRACE_STATS_FLOW_REPORT_CE == 0x8310018);
 	_CASSERT(AQM_KTRACE_STATS_GET_QLEN == 0x831001c);
+	_CASSERT(AQM_KTRACE_TX_NOT_READY == 0x8310020);
+	_CASSERT(AQM_KTRACE_TX_PACEMAKER == 0x8310024);
 }
 
 fq_t *
@@ -703,6 +705,8 @@ fq_tx_time_ready(fq_if_t *fqs, fq_t *fq, uint64_t now, uint64_t *ready_time)
 	}
 
 	ASSERT(pkt_tx_time != FQ_INVALID_TX_TS);
+	KDBG(AQM_KTRACE_TX_NOT_READY, fq->fq_flowhash,
+	    AQM_KTRACE_FQ_GRP_SC_IDX(fq), now, pkt_tx_time);
 	return FALSE;
 }
 

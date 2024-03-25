@@ -1,12 +1,6 @@
 """
 Miscellaneous (Intel) platform-specific commands.
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import hex
-from builtins import range
-from builtins import memoryview
-
 from core import caching
 from xnu import *
 import xnudefines
@@ -491,7 +485,7 @@ def ReadMsr64(cmd_args=None):
     """ Read the specified MSR. The CPU can be optionally specified
         Syntax: readmsr64 <msr> [lcpu]
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(ReadMsr64.__doc__)
         return
     
@@ -509,7 +503,7 @@ def WriteMsr64(cmd_args=None):
     """ Write the specified MSR. The CPU can be optionally specified
         Syntax: writemsr64 <msr> <value> [lcpu]
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print(WriteMsr64.__doc__)
         return
     msr_address = ArgumentStringToInt(cmd_args[0])

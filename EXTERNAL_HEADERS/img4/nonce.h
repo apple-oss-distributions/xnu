@@ -49,6 +49,10 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
+OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
+
 /*!
  * @typedef img4_nonce_domain_t
  * An opaque type describing a nonce domain.
@@ -107,6 +111,14 @@ typedef struct _img4_nonce_domain img4_nonce_domain_t;
  * The enumerated constant corresponding to
  * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_ASSET}.
  *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_GENERIC
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_GENERIC}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_SIMULATOR
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_CRYPTEX1_SIMULATOR}.
+ *
  * @const _IMG4_NONCE_DOMAIN_INDEX_CNT
  * A sentinel value indicating the number of nonce domains.
  */
@@ -121,6 +133,8 @@ OS_CLOSED_ENUM(img4_nonce_domain_index, uint64_t,
 	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_SNUF_STUB,
 	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_BOOT,
 	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_ASSET,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_GENERIC,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX1_SIMULATOR,
 	_IMG4_NONCE_DOMAIN_INDEX_CNT,
 );
 
@@ -335,6 +349,48 @@ const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_asset;
 #endif
 
 /*!
+ * @const IMG4_NONCE_DOMAIN_CRYPTEX1_GENERIC
+ * The nonce domain governing personalizations for the virtual Cryptex1
+ * coprocessor's generic supplemental objects. This domain corresponds to a
+ * value of 3 for the Cryptex1,NonceDomain tag. Use of this domain requires the
+ *
+ *     com.apple.private.img4.nonce.cryptex1.supplemental
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_generic;
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_GENERIC \
+		(&_img4_nonce_domain_cryptex1_generic)
+#else
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_GENERIC \
+		(img4if->i4if_v20.nonce_domain_cryptex1_generic)
+#endif
+
+/*!
+ * @const IMG4_NONCE_DOMAIN_CRYPTEX1_SIMULATOR
+ * The nonce domain governing personalizations for the virtual Cryptex1
+ * coprocessor's Simulator runtime objects. This domain corresponds to a value
+ * of 4 for the Cryptex1,NonceDomain tag. Use of this domain requires the
+ *
+ *     com.apple.private.img4.nonce.cryptex1.simulator
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_cryptex1_simulator;
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_SIMULATOR \
+		(&_img4_nonce_domain_cryptex1_simulator)
+#else
+#define IMG4_NONCE_DOMAIN_CRYPTEX1_SIMULATOR \
+		(img4if->i4if_v20.nonce_domain_cryptex1_simulator)
+#endif
+
+/*!
  * @function img4_nonce_domain_copy_nonce
  * Copies the current value of the nonce in the given domain.
  *
@@ -431,5 +487,62 @@ img4_nonce_domain_preroll_nonce(const img4_nonce_domain_t *nd, img4_nonce_t *n);
 #define img4_nonce_domain_preroll_nonce(...) \
 		(img4if->i4if_v14.nonce_domain_preroll_nonce(__VA_ARGS__))
 #endif
+
+/*!
+ * @function img4_nonce_domain_peek_nonce
+ * Copies the current proposed value of a nonce domain.
+ *
+ * @param nd
+ * The nonce domain.
+ *
+ * @param n
+ * Upon successful return, storage that will contain the current proposed
+ * nonce. The provided structure's {@link i4n_version} must be initialized to
+ * {@link IMG4_NONCE_VERSION}.
+ *
+ * @result
+ * Upon success, zero is returned. The implementation may also return one of the
+ * following error codes directly:
+ *
+ *     [EPERM]      The caller lacked the entitlement necessary to roll the
+ *                  given nonce
+ *     [ENOENT]     The nonce doesn't have a proposed value
+ *     [ENOTSUP]    Nonce management is not available on the host
+ *     [EACCES]     The nonce requested is not accessible in this environment
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20220714
+OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
+errno_t
+img4_nonce_domain_peek_nonce(const img4_nonce_domain_t *nd, img4_nonce_t *n);
+#else
+#define img4_nonce_domain_peek_nonce(...) \
+		(img4if->i4if_v19.nonce_domain_peek_nonce(__VA_ARGS__))
+#endif
+
+/*!
+ * @function img4_nonce_domain_get_from_handle
+ * Obtains the nonce domain for the given integer handle.
+ *
+ * @param handle
+ * The nonce domain handle.
+ *
+ * @result
+ * The nonce domain associated with the provided handle. If no domain is
+ * associated with the handle, NULL is returned.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20221202
+OS_EXPORT OS_WARN_RESULT
+const img4_nonce_domain_t *_Nullable
+img4_nonce_domain_get_from_handle(uint32_t handle);
+#else
+#define img4_nonce_domain_get_from_handle(...) \
+		(img4if->i4if_v20.nonce_domain_get_from_handle(__VA_ARGS__))
+#endif
+
+OS_ASSUME_PTR_ABI_SINGLE_END
+OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_NONCE_H

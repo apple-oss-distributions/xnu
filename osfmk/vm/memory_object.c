@@ -365,8 +365,8 @@ memory_object_lock_request(
  */
 kern_return_t
 memory_object_destroy(
-	memory_object_control_t control,
-	kern_return_t           reason)
+	memory_object_control_t                 control,
+	vm_object_destroy_reason_t   reason)
 {
 	vm_object_t             object;
 
@@ -882,8 +882,8 @@ RETRY_COW_OF_LOCK_REQUEST:
 	if (copy_object != VM_OBJECT_NULL && copy_object != object) {
 		if ((flags & MEMORY_OBJECT_DATA_PURGE)) {
 			vm_object_lock_assert_exclusive(copy_object);
-			copy_object->shadow_severed = TRUE;
-			copy_object->shadowed = FALSE;
+			VM_OBJECT_SET_SHADOW_SEVERED(copy_object, TRUE);
+			VM_OBJECT_SET_SHADOWED(copy_object, FALSE);
 			copy_object->shadow = NULL;
 			/*
 			 * delete the ref the COW was holding on the target object
@@ -1064,7 +1064,7 @@ vm_object_set_attributes_common(
 	assert(!object->internal);
 	object_became_ready = !object->pager_ready;
 	object->copy_strategy = copy_strategy;
-	object->can_persist = may_cache;
+	VM_OBJECT_SET_CAN_PERSIST(object, may_cache);
 
 	/*
 	 *	Wake up anyone waiting for the ready attribute
@@ -1072,7 +1072,7 @@ vm_object_set_attributes_common(
 	 */
 
 	if (object_became_ready) {
-		object->pager_ready = TRUE;
+		VM_OBJECT_SET_PAGER_READY(object, TRUE);
 		vm_object_wakeup(object, VM_OBJECT_EVENT_PAGER_READY);
 	}
 
@@ -1670,7 +1670,7 @@ memory_object_mark_trusted(
 
 	if (object != VM_OBJECT_NULL) {
 		vm_object_lock(object);
-		object->pager_trusted = TRUE;
+		VM_OBJECT_SET_PAGER_TRUSTED(object, TRUE);
 		vm_object_unlock(object);
 	}
 }
@@ -1695,7 +1695,7 @@ memory_object_mark_as_tracked(
 
 	vm_object_lock(object);
 	*old_value = object->fbdp_tracked;
-	object->fbdp_tracked = new_value;
+	VM_OBJECT_SET_FBDP_TRACKED(object, new_value);
 	vm_object_unlock(object);
 
 	return KERN_SUCCESS;
@@ -1755,7 +1755,7 @@ memory_object_mark_for_realtime(
 	}
 
 	vm_object_lock(object);
-	object->for_realtime = for_realtime;
+	VM_OBJECT_SET_FOR_REALTIME(object, for_realtime);
 	vm_object_unlock(object);
 }
 

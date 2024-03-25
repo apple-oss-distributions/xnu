@@ -62,8 +62,8 @@ enum{
 	, NSTAT_EVENT_SRC_FLOW_STATE_OUTBOUND    = 0x00002000
 	, NSTAT_EVENT_SRC_FLOW_UUID_ASSIGNED     = 0x00004000
 	, NSTAT_EVENT_SRC_FLOW_UUID_CHANGED      = 0x00008000
+	, NSTAT_EVENT_SRC_ATTRIBUTION_CHANGE     = 0x00010000
 #if (DEBUG || DEVELOPMENT)
-	, NSTAT_EVENT_SRC_RESERVED_1             = 0x00010000
 	, NSTAT_EVENT_SRC_RESERVED_2             = 0x00020000
 #endif /* (DEBUG || DEVELOPMENT) */
 };
@@ -355,9 +355,6 @@ enum{
 #define NSTAT_IFNET_ROUTE_VALUE_UNOBTAINABLE      0x2000
 #define NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE 0x4000
 #define NSTAT_IFNET_IS_LLW               0x8000
-
-// Note that many usages of interface properties are constrained to be within a 16 bit field.
-// The following may be used if the properties are in a wider field, and is shorthand for WiFi and not AWDL or LLW..
 #define NSTAT_IFNET_IS_WIFI_INFRA        0x10000
 
 // Not interface properties, but used for filtering in similar fashion
@@ -1153,18 +1150,6 @@ extern int nstat_test_privacy_transparency;
 
 #pragma mark -- System Information Internal Support --
 
-typedef struct nstat_sysinfo_mbuf_stats {
-	u_int32_t       total_256b;     /* Peak usage, 256B pool */
-	u_int32_t       total_2kb;      /* Peak usage, 2KB pool */
-	u_int32_t       total_4kb;      /* Peak usage, 4KB pool */
-	u_int32_t       total_16kb;     /* Peak usage, 16KB pool */
-	u_int32_t       sbmb_total;     /* Total mbufs in sock buffer pool */
-	u_int32_t       sb_atmbuflimit; /* Memory limit reached for socket buffer autoscaling */
-	u_int32_t       draincnt;       /* Number of times mbuf pool has been drained under memory pressure */
-	u_int32_t       memreleased;    /* Memory (bytes) released from mbuf pool to VM */
-	u_int32_t       sbmb_floor;     /* Lowest mbufs in sock buffer pool */
-} nstat_sysinfo_mbuf_stats;
-
 typedef struct nstat_sysinfo_tcp_stats {
 	/* When adding/removing here, also adjust NSTAT_SYSINFO_TCP_STATS_COUNT */
 	u_int32_t       ipv4_avgrtt;    /* Average RTT for IPv4 */
@@ -1280,7 +1265,6 @@ typedef struct nstat_sysinfo_data {
 	uint32_t                flags;
 	uint32_t                unsent_data_cnt; /* Before sleeping */
 	union {
-		nstat_sysinfo_mbuf_stats mb_stats;
 		nstat_sysinfo_tcp_stats tcp_stats;
 		nstat_sysinfo_ifnet_ecn_stats ifnet_ecn_stats;
 		nstat_sysinfo_lim_stats lim_stats;
@@ -1368,7 +1352,7 @@ typedef struct nstat_progress_digest {
 
 // When things have been set up, Netstats can request a refresh of its data.
 typedef bool (userland_stats_request_vals_fn)(userland_stats_provider_context *ctx,
-    u_int16_t *ifflagsp,
+    u_int32_t *ifflagsp,
     nstat_progress_digest *digestp,
     nstat_counts *countsp,
     void *metadatap);
@@ -1409,12 +1393,7 @@ int ntstat_userland_list_n(short proto, struct sysctl_req *req);
 
 // Utilities for userland stats reporting
 
-// Original form for backwards compatibility, should be replaced in due course
-u_int16_t nstat_ifnet_to_flags(struct ifnet *ifp);
-
-// Preferred form returns a 32 bit quantity, for easier handling of NSTAT_IFNET_IS_WIFI_INFRA and future expansion
-u_int32_t nstat_ifnet_to_flags_extended(struct ifnet *ifp);
-
+u_int32_t nstat_ifnet_to_flags(struct ifnet *ifp);
 
 // Generic external provider reporting
 

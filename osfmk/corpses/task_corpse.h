@@ -53,7 +53,12 @@ typedef struct kcdata_item      *task_crashinfo_item_t;
 
 #ifdef XNU_KERNEL_PRIVATE
 
+#ifdef CONFIG_EXCLAVES
+/* Larger buffer to accomodate exclave backtrace info */
+#define CORPSEINFO_ALLOCATION_SIZE (1024 * 48)
+#else
 #define CORPSEINFO_ALLOCATION_SIZE (1024 * 16)
+#endif /* CONFIG_EXCLAVES */
 #define BTINFO_ALLOCATION_SIZE (1024 * 20)
 
 #if XNU_TARGET_OS_WATCH

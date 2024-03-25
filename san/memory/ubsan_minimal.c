@@ -43,8 +43,8 @@
 #define UBSAN_M_NONE            (0x0000)
 #define UBSAN_M_PANIC           (0x0001)
 
-#define UBSAN_MINIMAL_TRAPS_START       UBSAN_SIGNED_OVERFLOW_TRAP
-#define UBSAN_MINIMAL_TRAPS_END         UBSAN_SIGNED_OVERFLOW_TRAP
+#define UBSAN_MINIMAL_TRAPS_START       UBSAN_SOFT_TRAP_SIGNED_OF
+#define UBSAN_MINIMAL_TRAPS_END         UBSAN_SOFT_TRAP_SIGNED_OF
 
 struct ubsan_minimal_trap_desc {
 	uint16_t        id;
@@ -56,7 +56,7 @@ struct ubsan_minimal_trap_desc {
 static __security_const_late
 #endif /* RELEASE */
 struct ubsan_minimal_trap_desc ubsan_traps[] = {
-	{ UBSAN_SIGNED_OVERFLOW_TRAP, UBSAN_M_NONE, "signed-overflow" },
+	{ UBSAN_SOFT_TRAP_SIGNED_OF, UBSAN_M_NONE, "signed-overflow" },
 };
 
 static SECURITY_READ_ONLY_LATE(bool) ubsan_minimal_enabled = false;
@@ -150,29 +150,29 @@ SYSCTL_PROC(_kern_ubsan_minimal, OID_AUTO, test, CTLTYPE_INT | CTLFLAG_RW | CTLF
 UBSAN_M_ATTR void
 __ubsan_handle_divrem_overflow_minimal(void)
 {
-	asm volatile ("brk #%0" : : "i"(UBSAN_SIGNED_OVERFLOW_TRAP));
+	asm volatile ("brk #%0" : : "i"(UBSAN_SOFT_TRAP_SIGNED_OF));
 }
 
 UBSAN_M_ATTR void
 __ubsan_handle_negate_overflow_minimal(void)
 {
-	asm volatile ("brk #%0" : : "i"(UBSAN_SIGNED_OVERFLOW_TRAP));
+	asm volatile ("brk #%0" : : "i"(UBSAN_SOFT_TRAP_SIGNED_OF));
 }
 
 UBSAN_M_ATTR void
 __ubsan_handle_mul_overflow_minimal(void)
 {
-	asm volatile ("brk #%0" : : "i"(UBSAN_SIGNED_OVERFLOW_TRAP));
+	asm volatile ("brk #%0" : : "i"(UBSAN_SOFT_TRAP_SIGNED_OF));
 }
 
 UBSAN_M_ATTR void
 __ubsan_handle_sub_overflow_minimal(void)
 {
-	asm volatile ("brk #%0" : : "i"(UBSAN_SIGNED_OVERFLOW_TRAP));
+	asm volatile ("brk #%0" : : "i"(UBSAN_SOFT_TRAP_SIGNED_OF));
 }
 
 UBSAN_M_ATTR void
 __ubsan_handle_add_overflow_minimal(void)
 {
-	asm volatile ("brk #%0" : : "i"(UBSAN_SIGNED_OVERFLOW_TRAP));
+	asm volatile ("brk #%0" : : "i"(UBSAN_SOFT_TRAP_SIGNED_OF));
 }

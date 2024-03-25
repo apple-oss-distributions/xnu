@@ -12,10 +12,6 @@ ktrace/kdebug_coproc_tests: OTHER_LDFLAGS = $(KTRACE_LDFLAGS)
 ktrace/kdebug_coproc_tests: OTHER_CFLAGS += test_utils.c
 ktrace/kdebug_coproc_tests: CODE_SIGN_ENTITLEMENTS = stackshot-entitlements.plist
 
-ktrace/kpc_tests: OTHER_LDFLAGS += $(KTRACE_LDFLAGS)
-ktrace/kpc_tests: INVALID_ARCHS = i386
-ktrace/kpc_tests: CODE_SIGN_ENTITLEMENTS = stackshot-entitlements.plist
-
 ktrace/kperf_tests: OTHER_CFLAGS += ktrace/kperf_helpers.c drop_priv.c
 ktrace/kperf_tests: OTHER_LDFLAGS += $(KTRACE_LDFLAGS)
 ktrace/kperf_tests: CODE_SIGN_ENTITLEMENTS = stackshot-entitlements.plist

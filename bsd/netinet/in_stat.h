@@ -43,6 +43,7 @@ typedef struct activity_bitmap {
 #ifdef BSD_KERNEL_PRIVATE
 
 extern void in_stat_set_activity_bitmap(activity_bitmap_t *activity, uint64_t now);
+extern void in_stat_clear_activity_bitmap(activity_bitmap_t *activity);
 
 #endif /* BSD_KERNEL_PRIVATE */
 

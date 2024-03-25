@@ -36,6 +36,13 @@ __private_extern__ void if_redirect_init(void);
 /* Arbitrary identifier for params type */
 #define RD_CREATE_PARAMS_TYPE 0x2D27
 
+/*
+ * This lets us create an rd interface without auto-attaching fsw. Sometimes we
+ * need to be able to disable fsw auto-attachment, one example being skywalk
+ * unit tests (e.g. skt_xferrdudpping): rdar://109413097
+ */
+#define RD_CREATE_PARAMS_TYPE_NOATTACH 0x2D28
+
 struct if_redirect_create_params {
 	uint16_t ircp_type;
 	uint16_t ircp_len;

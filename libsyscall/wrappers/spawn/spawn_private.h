@@ -63,6 +63,9 @@ int     posix_spawnattr_set_filedesclimit_ext(posix_spawnattr_t * __restrict att
     uint32_t filedesc_soft_limit, uint32_t filedesc_hard_limit)  __API_AVAILABLE(macos(12.0), ios(15.0), tvos(15.0), watchos(8.0));
 
 #define POSIX_SPAWN_IMPORTANCE_PORT_COUNT 128
+int     posix_spawnattr_set_kqworklooplimit_ext(posix_spawnattr_t * __restrict attr,
+    uint32_t kqwl_soft_limit, uint32_t kqwl_hard_limit) __API_AVAILABLE(macos(14.3), ios(17.4), tvos(17.4), watchos(10.4));
+
 int     posix_spawnattr_set_importancewatch_port_np(posix_spawnattr_t * __restrict attr,
     int count, mach_port_t portarray[])  __API_AVAILABLE(macos(10.9), ios(6.0));
 
@@ -110,6 +113,8 @@ int     posix_spawnattr_set_crash_behavior_np(posix_spawnattr_t *attr, uint32_t 
 int     posix_spawnattr_set_crash_behavior_deadline_np(posix_spawnattr_t *attr, uint64_t deadline, uint32_t flags) __API_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
 
 int     posix_spawnattr_set_launch_type_np(posix_spawnattr_t *attr, uint8_t launch_type) __SPI_AVAILABLE(macos(13.0), ios(16.0), tvos(16.0), watchos(9.0));
+
+int     posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_t flags) __SPI_AVAILABLE(macos(14.0), ios(17.0), tvos(17.0), watchos(10.0));
 
 int     posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr, const int policy) __SPI_AVAILABLE(macos(13.3), ios(16.4), tvos(16.4), watchos(9.4));
 

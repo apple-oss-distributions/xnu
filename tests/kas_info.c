@@ -90,6 +90,38 @@ T_DECL(kernel_text_slide_invalid,
 	test_kas_info_invalid_args(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR);
 }
 
+static bool
+sptm_enabled(void)
+{
+	int page_protection_type, err;
+	size_t size = sizeof(page_protection_type);
+	err = sysctlbyname("kern.page_protection_type", &page_protection_type, &size, NULL, 0);
+	T_ASSERT_POSIX_SUCCESS(err, "sysctl(\"kern.page_protection_type\");");
+	return page_protection_type == 2;
+}
+
+T_DECL(sptm_txm_text_slide,
+    "ensures that kas_info can return the SPTM/TXM text slides")
+{
+	const uint64_t sptm_slide = kernel_slide(KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR);
+	const uint64_t txm_slide = kernel_slide(KAS_INFO_TXM_TEXT_SLIDE_SELECTOR);
+
+	if (sptm_enabled()) {
+		T_ASSERT_GT_ULLONG(sptm_slide, 0ULL, "Ensure the SPTM slide is non-zero on an SPTM-enabled system");
+		T_ASSERT_GT_ULLONG(txm_slide, 0ULL, "Ensure the TXM slide is non-zero on an SPTM-enabled system");
+	} else {
+		/* When not running on an SPTM-enabled system, this selector should return zero. */
+		T_ASSERT_EQ(sptm_slide, 0ULL, "Ensure the SPTM slide is zero on a non-SPTM system");
+		T_ASSERT_EQ(txm_slide, 0ULL, "Ensure the TXM slide is zero on a non-SPTM system");
+	}
+}
+
+T_DECL(sptm_txm_text_slide_invalid,
+    "ensures that kas_info handles invalid input to [SPTM|TXM]_TEXT_SLIDE_SELECTOR")
+{
+	test_kas_info_invalid_args(KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR);
+	test_kas_info_invalid_args(KAS_INFO_TXM_TEXT_SLIDE_SELECTOR);
+}
 
 static char const*
 kernel_path(void)

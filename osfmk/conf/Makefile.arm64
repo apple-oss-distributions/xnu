@@ -10,6 +10,7 @@ UNCONFIGURED_HIB_FILES=					\
            bcopy.o			\
            bzero.o			\
            cc_clear.o			\
+           cc_dit.o			\
            ccdigest_init.o		\
            ccdigest_update.o		\
            ccdigest_final_64be.o	\

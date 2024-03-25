@@ -29,6 +29,8 @@
  * Copyright (c) 1987 NeXT, Inc.
  */
 
+#include <sys/_types/_dev_t.h>     /* dev_t */
+
 struct consdev {
 	char    *cn_name;       /* name of device in dev_name_list */
 	int     (*cn_probe)(void);      /* probe and fill in consdev info */
@@ -58,7 +60,9 @@ extern  struct consdev constab[];
 extern  struct consdev *cn_tab;
 extern  struct tty *cn_tty;
 
-extern struct tty       *constty;               /* current console device */
+/* Returns tty with +1 retain count, use ttyfree() to release. */
+extern struct tty       *copy_constty(void);               /* current console device */
+extern struct tty       *set_constty(struct tty *);
 
 int consopen(dev_t, int, int, struct proc *);
 int consclose(dev_t, int, int, struct proc *);

@@ -1,22 +1,15 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import object
-
 import operator
-import six
 
 from abc import ABCMeta, abstractmethod
 from core import (
     caching,
     gettype,
 )
-from six import add_metaclass
 
 from .kmem import KMem, MemoryRange
 
 
-@add_metaclass(ABCMeta)
-class MemoryObject(object):
+class MemoryObject(object, metaclass=ABCMeta):
     """
     Abstract class for any memory object resolved by Whatis
     """

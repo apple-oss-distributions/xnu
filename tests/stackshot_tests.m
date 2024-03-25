@@ -6,6 +6,7 @@
 #include <kern/block_hint.h>
 #include <kdd.h>
 #include <libproc.h>
+#include <os/atomic_private.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/dyld_priv.h>
@@ -16,10 +17,13 @@
 #include <pthread/workqueue_private.h>
 #include <dispatch/private.h>
 #include <stdalign.h>
+
 #import <zlib.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/IOKitLibPrivate.h>
 #import <IOKit/IOKitKeysPrivate.h>
+
+
 
 T_GLOBAL_META(
 		T_META_NAMESPACE("xnu.stackshot"),
@@ -80,7 +84,6 @@ static const NSString* asyncstack_expected_stack_key = @"asyncstack_expected_sta
 static const NSString* driverkit_found_key = @"driverkit_found_key"; // callback when driverkit process is found. argument is the process pid.
 static const NSString* sp_throttled_expected_ctxt_key = @"sp_throttled_expected_ctxt_key"; // -> @(ctxt), required for PARSE_STACKSHOT_THROTTLED_SP
 static const NSString* sp_throttled_expect_flag = @"sp_throttled_expect_flag"; // -> @(is_throttled), required for PARSE_STACKSHOT_THROTTLED_SP
-
 
 #define TEST_STACKSHOT_QUEUE_LABEL        "houston.we.had.a.problem"
 #define TEST_STACKSHOT_QUEUE_LABEL_LENGTH sizeof(TEST_STACKSHOT_QUEUE_LABEL)
@@ -683,6 +686,7 @@ T_DECL(transitioning_tasks, "test that stackshot contains transitioning task inf
 
         T_ASSERT_POSIX_SUCCESS(kill(pid, SIGUSR1), "signaled pre-exec child to exec");
 
+	/* wait for a signal from post-exec child */
         dispatch_semaphore_wait(child_ready_sem, DISPATCH_TIME_FOREVER);
 
         T_ASSERT_POSIX_SUCCESS(sysctlbyname("debug.proc_exit_lpexit_spin_pid", NULL, NULL, &pid, sizeof(pid)), "set debug.proc_exit_lpexit_spin_pid =  %d, ", pid);
@@ -934,7 +938,10 @@ T_DECL(exec, "test getting full task snapshots for a task that execs")
 	});
 }
 
-T_DECL(exec_inprogress, "test stackshots of processes in the middle of exec")
+T_DECL(
+	exec_inprogress,
+	"test stackshots of processes in the middle of exec",
+	T_META_ENABLED(false) /* rdar://111691318 */)
 {
 	pid_t pid;
 	/* a BASH quine which execs itself as long as the parent doesn't exit */
@@ -1086,7 +1093,7 @@ T_DECL(asyncstack, "test swift async stack entries")
 	T_QUIET; T_ASSERT_POSIX_ZERO(pthread_join(pthread, NULL), "wait for thread");
 
 }
-#endif
+#endif /* #ifdef _LP64 */
 
 static uint32_t
 get_user_promotion_basepri(void)
@@ -2198,6 +2205,7 @@ T_DECL(throttled_sp,
 	T_ASSERT_POSIX_SUCCESS(waitpid(client_pid, NULL, 0), "waiting for the client to exit");
 }
 
+
 #pragma mark performance tests
 
 #define SHOULD_REUSE_SIZE_HINT 0x01
@@ -2789,6 +2797,10 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				break;
 			}
 
+			if (container_type == STACKSHOT_KCCONTAINER_EXCLAVES) {
+				break;
+			}
+
 			/*
 			 * treat containers other than tasks/transitioning_tasks
 			 * as expanded in-line.
@@ -3150,6 +3162,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 							[asyncstack_stack[i] unsignedLongLongValue], "frame %zu matches", i);
 					}
 				}
+
 			}
 			T_EXPECT_TRUE(found_main_thread, "found main thread for current task in stackshot");
 			T_EXPECT_FALSE(found_null_kernel_frame, "should not see any NULL kernel frames");
@@ -3260,6 +3273,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 	if (expect_asyncstack) {
 		T_QUIET; T_ASSERT_TRUE(found_asyncstack, "found async stack threadid");
 	}
+
 
 	T_ASSERT_FALSE(KCDATA_ITER_FOREACH_FAILED(iter), "successfully iterated kcdata");
 

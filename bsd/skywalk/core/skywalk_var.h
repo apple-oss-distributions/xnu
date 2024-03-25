@@ -356,7 +356,7 @@ extern uint32_t sk_channel_buflet_alloc;
 extern uint32_t sk_min_pool_size;
 
 struct sk_protect;
-typedef const struct sk_protect *sk_protect_t;
+typedef const struct sk_protect *__single sk_protect_t;
 
 __attribute__((always_inline))
 static inline boolean_t
@@ -505,8 +505,8 @@ extern boolean_t skywalk_netif_direct_enabled(void);
 extern void sk_gen_guard_id(boolean_t, const uuid_t, guardid_t *);
 extern const char *sk_uuid_unparse(const uuid_t, uuid_string_t);
 #if SK_LOG
-extern const char *sk_dump(const char *, const void *, int, int,
-    char *, int);
+extern const char *sk_dump(const char *label, const void *__sized_by(len)obj,
+    int len, int dumplen, char *__counted_by(lim)dst, int lim);
 extern const char *sk_proc_name_address(struct proc *);
 extern int sk_proc_pid(struct proc *);
 extern const char *sk_sa_ntop(struct sockaddr *, char *, size_t);

@@ -453,30 +453,38 @@ wrapper_mach_vm_map_2MB(vm_map_t map, mach_vm_address_t * address, mach_vm_size_
 	           VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
 }
 
-mach_port_t
-memory_entry(mach_vm_size_t * size)
+kern_return_t
+memory_entry(mach_vm_size_t * size, mach_port_t *object_handle)
 {
-	mach_port_t object_handle    = MACH_PORT_NULL;
 	mach_vm_size_t original_size = *size;
+	kern_return_t kr;
 
-	T_QUIET; T_ASSERT_MACH_SUCCESS(mach_make_memory_entry_64(mach_task_self(), size, (memory_object_offset_t)0,
-	    (MAP_MEM_NAMED_CREATE | VM_PROT_ALL), &object_handle, 0),
-	    "mach_make_memory_entry_64()");
+	kr = mach_make_memory_entry_64(mach_task_self(), size,
+	    (memory_object_offset_t)0, (MAP_MEM_NAMED_CREATE | VM_PROT_ALL),
+	    object_handle, 0);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 	T_QUIET; T_ASSERT_EQ(*size, round_page(original_size),
 	    "mach_make_memory_entry_64() unexpectedly returned a named "
 	    "entry of size 0x%jx (%ju).\n"
 	    "Should have returned a "
 	    "named entry of size 0x%jx (%ju).",
 	    (uintmax_t)*size, (uintmax_t)*size, (uintmax_t)original_size, (uintmax_t)original_size);
-	return object_handle;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
 wrapper_mach_vm_map_named_entry(vm_map_t map, mach_vm_address_t * address, mach_vm_size_t size, int flags)
 {
-	mach_port_t object_handle = memory_entry(&size);
+	mach_port_t object_handle = MACH_PORT_NULL;
+	kern_return_t kr = memory_entry(&size, &object_handle);
+
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 	check_fixed_address(address, size);
-	kern_return_t kr = mach_vm_map(map, address, size, (mach_vm_offset_t)0, flags, object_handle, (memory_object_offset_t)0, FALSE,
+	kr = mach_vm_map(map, address, size, (mach_vm_offset_t)0, flags, object_handle, (memory_object_offset_t)0, FALSE,
 	    VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(mach_port_deallocate(mach_task_self(), object_handle), "mach_port_deallocate()");
 	return kr;
@@ -1687,12 +1695,15 @@ test_mach_vm_map_protection_inheritance_error()
 	    ? (mach_vm_offset_t)0
 	    : (mach_vm_offset_t)get_mask();
 	int flag                    = get_address_flag();
-	mach_port_t object_handle   = (get_allocator() == wrapper_mach_vm_map_named_entry) ? memory_entry(&size) : MACH_PORT_NULL;
+	mach_port_t object_handle   = MACH_PORT_NULL;
 	vm_prot_t cur_protections[] = {VM_PROT_DEFAULT, VM_PROT_ALL + 1, ~VM_PROT_IS_MASK, INT_MAX};
 	vm_prot_t max_protections[] = {VM_PROT_ALL, VM_PROT_ALL + 1, ~VM_PROT_IS_MASK, INT_MAX};
 	vm_inherit_t inheritances[] = {VM_INHERIT_DEFAULT, VM_INHERIT_LAST_VALID + 1, UINT_MAX};
 	int i, j, k;
 
+	if (get_allocator() == wrapper_mach_vm_map_named_entry) {
+		assert_mach_success(memory_entry(&size, &object_handle), "mach_make_memory_entry_64()");
+	}
 	logv("Allocating 0x%jx (%ju) byte%s", (uintmax_t)size, (uintmax_t)size, (size == 1) ? "" : "s");
 	if (!(flag & VM_FLAGS_ANYWHERE)) {
 		logv(" at address 0x%jx", (uintmax_t)address);

@@ -433,7 +433,8 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		/*
 		 * Entitlement check.
 		 */
-		error = mac_proc_check_map_anon(p, user_addr, user_size, prot, flags, &maxprot);
+		error = mac_proc_check_map_anon(p, current_cached_proc_cred(p),
+		    user_addr, user_size, prot, flags, &maxprot);
 		if (error) {
 			return EINVAL;
 		}
@@ -1284,6 +1285,9 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 #else /* MACH_ASSERT */
 		return ENOTSUP;
 #endif /* MACH_ASSERT */
+	case MADV_ZERO:
+		new_behavior = VM_BEHAVIOR_ZERO;
+		break;
 	default:
 		return EINVAL;
 	}
@@ -1321,6 +1325,10 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 		return EINVAL;
 	case KERN_NO_SPACE:
 		return ENOMEM;
+	case KERN_PROTECTION_FAILURE:
+		return EPERM;
+	case KERN_NO_ACCESS:
+		return ENOTSUP;
 	}
 
 	return EINVAL;

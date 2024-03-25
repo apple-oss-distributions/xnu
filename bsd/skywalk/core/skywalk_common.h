@@ -126,14 +126,14 @@ __sk_copy64_8(uint64_t *src, uint64_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy32_8(uint32_t *src, uint32_t *dst)
+__sk_copy32_8(uint32_t *__counted_by(2)src, uint32_t *__counted_by(2)dst)
 {
 #if defined(__x86_64__)
 	/* use unaligned scalar move on x86_64 */
 	__sk_copy64_8((uint64_t *)(void *)src, (uint64_t *)(void *)dst);
 #else
-	*dst++ = *src++;                /* dw[0] */
-	*dst = *src;                    /* dw[1] */
+	dst[0] = src[0]; /* dw[0] */
+	dst[1] = src[1]; /* dw[1] */
 #endif
 }
 
@@ -141,12 +141,94 @@ __sk_copy32_8(uint32_t *src, uint32_t *dst)
  * Copy 16-bytes total, 64-bit aligned, scalar.
  */
 static inline void
-__sk_copy64_16(uint64_t *src, uint64_t *dst)
+__sk_copy64_16(uint64_t *__counted_by(2)src, uint64_t *__counted_by(2)dst)
 {
-	*dst++ = *src++;        /* [#0*8] */
-	*dst = *src;            /* [#1*8] */
+	dst[0] = src[0]; /* [#0*8] */
+	dst[1] = src[1]; /* [#1*8] */
 }
 
+/*
+ * Copy 16-bytes total, 32-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy32_16(uint32_t *__counted_by(4)src, uint32_t *__counted_by(4)dst)
+{
+	dst[0] = src[0]; /* [#0*4] */
+	dst[1] = src[1]; /* [#1*4] */
+	dst[2] = src[2]; /* [#2*4] */
+	dst[3] = src[3]; /* [#3*4] */
+}
+
+/*
+ * Copy 20-bytes total, 64-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy64_20(uint64_t *__sized_by(20)src, uint64_t *__sized_by(20)dst)
+{
+	dst[0] = src[0]; /* [#0*8] */
+	dst[1] = src[1]; /* [#1*8] */
+	*(uint32_t *)(dst + 2) = *(uint32_t *)(src + 2); /* [#2*4] */
+}
+
+/*
+ * Copy 24-bytes total, 64-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy64_24(uint64_t *__counted_by(3)src, uint64_t *__counted_by(3)dst)
+{
+	dst[0] = src[0]; /* [#0*8] */
+	dst[1] = src[1]; /* [#1*8] */
+	dst[2] = src[2]; /* [#2*8] */
+}
+
+/*
+ * Copy 32-bytes total, 64-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy64_32(uint64_t *__counted_by(4)src, uint64_t *__counted_by(4)dst)
+{
+	dst[0] = src[0]; /* [#0*8] */
+	dst[1] = src[1]; /* [#1*8] */
+	dst[2] = src[2]; /* [#2*8] */
+	dst[3] = src[3]; /* [#3*8] */
+}
+
+/*
+ * Copy 32-bytes total, 32-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
+{
+	dst[0] = src[0]; /* [#0*4] */
+	dst[1] = src[1]; /* [#1*4] */
+	dst[2] = src[2]; /* [#2*4] */
+	dst[3] = src[3]; /* [#3*4] */
+	dst[4] = src[4]; /* [#4*4] */
+	dst[5] = src[5]; /* [#5*4] */
+	dst[6] = src[6]; /* [#6*4] */
+	dst[7] = src[7]; /* [#7*4] */
+}
+
+/*
+ * Copy 40-bytes total, 64-bit aligned, scalar.
+ */
+__attribute__((always_inline))
+static inline void
+__sk_copy64_40(uint64_t *__counted_by(5)src, uint64_t *__counted_by(5)dst)
+{
+	dst[0] = src[0]; /* [#0*8] */
+	dst[1] = src[1]; /* [#1*8] */
+	dst[2] = src[2]; /* [#2*8] */
+	dst[3] = src[3]; /* [#3*8] */
+	dst[4] = src[4]; /* [#4*8] */
+}
+
+#if defined(__arm64__)
 /*
  * Copy 16-bytes total, 64-bit aligned, SIMD (if available).
  */
@@ -154,7 +236,6 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy64_16(uint64_t *src, uint64_t *dst)
 {
-#if defined(__arm64__)
 	/* no need to save/restore registers on arm64 (SPILL_REGISTERS) */
 	/* BEGIN CSTYLED */
 	__asm__ __volatile__ (
@@ -165,22 +246,6 @@ __sk_vcopy64_16(uint64_t *src, uint64_t *dst)
                 : "v0", "memory"
         );
 	/* END CSTYLED */
-#else
-	__sk_copy64_16(src, dst);
-#endif
-}
-
-/*
- * Copy 16-bytes total, 32-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy32_16(uint32_t *src, uint32_t *dst)
-{
-	*dst++ = *src++;        /* [#0*4] */
-	*dst++ = *src++;        /* [#1*4] */
-	*dst++ = *src++;        /* [#2*4] */
-	*dst = *src;            /* [#3*4] */
 }
 
 /*
@@ -190,24 +255,8 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy32_16(uint32_t *src, uint32_t *dst)
 {
-#if defined(__arm64__)
 	/* use SIMD unaligned move on arm64 */
 	__sk_vcopy64_16((uint64_t *)(void *)src, (uint64_t *)(void *)dst);
-#else
-	__sk_copy32_16(src, dst);
-#endif
-}
-
-/*
- * Copy 20-bytes total, 64-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy64_20(uint64_t *src, uint64_t *dst)
-{
-	*dst++ = *src++;                        /* [#0*8] */
-	*dst++ = *src++;                        /* [#1*8] */
-	*(uint32_t *)dst = *(uint32_t *)src;    /* [#2*4] */
 }
 
 /*
@@ -217,36 +266,21 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy64_20(uint64_t *src, uint64_t *dst)
 {
-#if defined(__arm64__)
 	/*
-	 * Load pair 2x16-bytes, store single 16-bytes and 4-bytes;
+	 * Load/store 16 + 4 bytes;
 	 * no need to save/restore registers on arm64 (SPILL_REGISTERS).
 	 */
 	/* BEGIN CSTYLED */
 	__asm__ __volatile__ (
-                "ldp	q0, q1, [%[src]]	\n\t"
+                "ldr	q0, [%[src]]		\n\t"
                 "str	q0, [%[dst]]		\n\t"
-                "str	s1, [%[dst], #16]	\n\t"
+                "ldr	s0, [%[src], #16]	\n\t"
+                "str	s0, [%[dst], #16]	\n\t"
                 :
                 : [src] "r" (src), [dst] "r" (dst)
-                : "v0", "v1", "memory"
+                : "v0", "memory"
         );
 	/* END CSTYLED */
-#else
-	__sk_copy64_20(src, dst);
-#endif
-}
-
-/*
- * Copy 24-bytes total, 64-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy64_24(uint64_t *src, uint64_t *dst)
-{
-	*dst++ = *src++;        /* [#0*8] */
-	*dst++ = *src++;        /* [#1*8] */
-	*dst = *src;            /* [#2*8] */
 }
 
 /*
@@ -256,7 +290,6 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy64_24(uint64_t *src, uint64_t *dst)
 {
-#if defined(__arm64__)
 	/*
 	 * Use 16-bytes load/store and 8-bytes load/store on arm64;
 	 * no need to save/restore registers on arm64 (SPILL_REGISTERS).
@@ -272,22 +305,6 @@ __sk_vcopy64_24(uint64_t *src, uint64_t *dst)
                 : "v0", "memory"
         );
 	/* END CSTYLED */
-#else
-	__sk_copy64_24(src, dst);
-#endif
-}
-
-/*
- * Copy 32-bytes total, 64-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy64_32(uint64_t *src, uint64_t *dst)
-{
-	*dst++ = *src++;        /* [#0*8] */
-	*dst++ = *src++;        /* [#1*8] */
-	*dst++ = *src++;        /* [#2*8] */
-	*dst = *src;            /* [#3*8] */
 }
 
 /*
@@ -297,7 +314,6 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy64_32(uint64_t *src, uint64_t *dst)
 {
-#if defined(__arm64__)
 	/* no need to save/restore registers on arm64 (SPILL_REGISTERS) */
 	/* BEGIN CSTYLED */
 	__asm__ __volatile__ (
@@ -308,26 +324,6 @@ __sk_vcopy64_32(uint64_t *src, uint64_t *dst)
                 : "v0", "v1", "memory"
         );
 	/* END CSTYLED */
-#else
-	__sk_copy64_32(src, dst);
-#endif
-}
-
-/*
- * Copy 32-bytes total, 32-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy32_32(uint32_t *src, uint32_t *dst)
-{
-	*dst++ = *src++;        /* [#0*4] */
-	*dst++ = *src++;        /* [#1*4] */
-	*dst++ = *src++;        /* [#2*4] */
-	*dst++ = *src++;        /* [#3*4] */
-	*dst++ = *src++;        /* [#4*4] */
-	*dst++ = *src++;        /* [#5*4] */
-	*dst++ = *src++;        /* [#6*4] */
-	*dst = *src;            /* [#7*4] */
 }
 
 /*
@@ -335,28 +331,10 @@ __sk_copy32_32(uint32_t *src, uint32_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy32_32(uint32_t *src, uint32_t *dst)
+__sk_vcopy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
 {
-#if defined(__arm64__)
 	/* use SIMD unaligned move on arm64 */
 	__sk_vcopy64_32((uint64_t *)(void *)src, (uint64_t *)(void *)dst);
-#else
-	__sk_copy32_32(src, dst);
-#endif
-}
-
-/*
- * Copy 40-bytes total, 64-bit aligned, scalar.
- */
-__attribute__((always_inline))
-static inline void
-__sk_copy64_40(uint64_t *src, uint64_t *dst)
-{
-	*dst++ = *src++;        /* [#0*8] */
-	*dst++ = *src++;        /* [#1*8] */
-	*dst++ = *src++;        /* [#2*8] */
-	*dst++ = *src++;        /* [#3*8] */
-	*dst = *src;            /* [#4*8] */
 }
 
 /*
@@ -366,7 +344,6 @@ __attribute__((always_inline))
 static inline void
 __sk_vcopy64_40(uint64_t *src, uint64_t *dst)
 {
-#if defined(__arm64__)
 	/*
 	 * Use 32-bytes load/store pair and 8-bytes load/store on arm64;
 	 * no need to save/restore registers on arm64 (SPILL_REGISTERS).
@@ -382,12 +359,8 @@ __sk_vcopy64_40(uint64_t *src, uint64_t *dst)
                 : "v0", "v1", "memory"
         );
 	/* END CSTYLED */
-#else
-	__sk_copy64_40(src, dst);
-#endif
 }
 
-#if defined(__arm64__)
 /*
  * On arm64, the following inline assembly fixed-length routines have
  * fewer clock cycles than bzero().  We can directly use vector registers
@@ -530,15 +503,17 @@ extern size_t sk_copy_thres;
  */
 __attribute__((always_inline))
 static inline void
-sk_copy64_4x(uint32_t *src, uint32_t *dst, size_t l)
+sk_copy64_4x(uint32_t *__sized_by(l)src, uint32_t *__sized_by(l)dst, size_t l)
 {
 #if (DEVELOPMENT || DEBUG)
 	if (__probable(l <= sk_copy_thres)) {
 #else
 	if (__probable(l <= SK_COPY_THRES)) {
 #endif /* (!DEVELOPMENT && !DEBUG! */
-		while ((ssize_t)(l -= 4) >= 0) {
-			*dst++ = *src++;        /* [#n*4] */
+		int i;
+
+		for (i = 0; i < l / 4; i++) {
+			dst[i] = src[i]; /* [#i*4] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -550,15 +525,17 @@ sk_copy64_4x(uint32_t *src, uint32_t *dst, size_t l)
  */
 __attribute__((always_inline))
 static inline void
-sk_copy64_8x(uint64_t *src, uint64_t *dst, size_t l)
+sk_copy64_8x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 {
 #if (DEVELOPMENT || DEBUG)
 	if (__probable(l <= sk_copy_thres)) {
 #else
 	if (__probable(l <= SK_COPY_THRES)) {
 #endif /* (!DEVELOPMENT && !DEBUG! */
-		while ((ssize_t)(l -= 8) >= 0) {
-			*dst++ = *src++;        /* [#n*8] */
+		int i;
+
+		for (i = 0; i < l / 8; i++) {
+			dst[i] = src[i]; /* [#i*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -570,18 +547,21 @@ sk_copy64_8x(uint64_t *src, uint64_t *dst, size_t l)
  */
 __attribute__((always_inline))
 static inline void
-sk_copy64_32x(uint64_t *src, uint64_t *dst, size_t l)
+sk_copy64_32x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 {
 #if (DEVELOPMENT || DEBUG)
 	if (__probable(l <= sk_copy_thres)) {
 #else
 	if (__probable(l <= SK_COPY_THRES)) {
 #endif /* (!DEVELOPMENT && !DEBUG! */
-		while ((ssize_t)(l -= 32) >= 0) {
-			*dst++ = *src++;        /* [#0*8] */
-			*dst++ = *src++;        /* [#1*8] */
-			*dst++ = *src++;        /* [#2*8] */
-			*dst++ = *src++;        /* [#3*8] */
+		int n, i;
+
+		for (n = 0; n < l / 32; n++) {
+			i = n * 4;
+			dst[i] = src[i];         /* [#(i+0)*8] */
+			dst[i + 1] = src[i + 1]; /* [#(i+1)*8] */
+			dst[i + 2] = src[i + 2]; /* [#(i+2)*8] */
+			dst[i + 3] = src[i + 3]; /* [#(i+3)*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -593,22 +573,25 @@ sk_copy64_32x(uint64_t *src, uint64_t *dst, size_t l)
  */
 __attribute__((always_inline))
 static inline void
-sk_copy64_64x(uint64_t *src, uint64_t *dst, size_t l)
+sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 {
 #if (DEVELOPMENT || DEBUG)
 	if (__probable(l <= sk_copy_thres)) {
 #else
 	if (__probable(l <= SK_COPY_THRES)) {
 #endif /* (!DEVELOPMENT && !DEBUG! */
-		while ((ssize_t)(l -= 64) >= 0) {
-			*dst++ = *src++;        /* [#0*8] */
-			*dst++ = *src++;        /* [#1*8] */
-			*dst++ = *src++;        /* [#2*8] */
-			*dst++ = *src++;        /* [#3*8] */
-			*dst++ = *src++;        /* [#4*8] */
-			*dst++ = *src++;        /* [#5*8] */
-			*dst++ = *src++;        /* [#6*8] */
-			*dst++ = *src++;        /* [#7*8] */
+		int n, i;
+
+		for (n = 0; n < l / 64; n++) {
+			i = n * 8;
+			dst[i] = src[i];         /* [#(i+0)*8] */
+			dst[i + 1] = src[i + 1]; /* [#(i+1)*8] */
+			dst[i + 2] = src[i + 2]; /* [#(i+2)*8] */
+			dst[i + 3] = src[i + 3]; /* [#(i+3)*8] */
+			dst[i + 4] = src[i + 4]; /* [#(i+4)*8] */
+			dst[i + 5] = src[i + 5]; /* [#(i+5)*8] */
+			dst[i + 6] = src[i + 6]; /* [#(i+6)*8] */
+			dst[i + 7] = src[i + 7]; /* [#(i+7)*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -892,8 +875,9 @@ extern void __sk_tag_make(const struct sk_tag_spec *spec);
  *  @param n number of bytes
  */
 static inline int
-__sk_memcmp_mask_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask, size_t n)
+__sk_memcmp_mask_scalar(const uint8_t *__counted_by(n)src1,
+    const uint8_t *__counted_by(n)src2,
+    const uint8_t *__counted_by(n)byte_mask, size_t n)
 {
 	uint32_t result = 0;
 	for (size_t i = 0; i < n; i++) {
@@ -903,51 +887,61 @@ __sk_memcmp_mask_scalar(const uint8_t *src1, const uint8_t *src2,
 }
 
 static inline int
-__sk_memcmp_mask_16B_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask)
+__sk_memcmp_mask_16B_scalar(const uint8_t *__counted_by(16)src1,
+    const uint8_t *__counted_by(16)src2,
+    const uint8_t *__counted_by(16)byte_mask)
 {
 	return __sk_memcmp_mask_scalar(src1, src2, byte_mask, 16);
 }
 
 static inline int
-__sk_memcmp_mask_32B_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask)
+__sk_memcmp_mask_32B_scalar(const uint8_t *__counted_by(32)src1,
+    const uint8_t *__counted_by(32)src2,
+    const uint8_t *__counted_by(32)byte_mask)
 {
 	return __sk_memcmp_mask_scalar(src1, src2, byte_mask, 32);
 }
 
 static inline int
-__sk_memcmp_mask_48B_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask)
+__sk_memcmp_mask_48B_scalar(const uint8_t *__counted_by(48)src1,
+    const uint8_t *__counted_by(48)src2,
+    const uint8_t *__counted_by(48)byte_mask)
 {
 	return __sk_memcmp_mask_scalar(src1, src2, byte_mask, 48);
 }
 
 static inline int
-__sk_memcmp_mask_64B_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask)
+__sk_memcmp_mask_64B_scalar(const uint8_t *__counted_by(64)src1,
+    const uint8_t *__counted_by(64)src2,
+    const uint8_t *__counted_by(64)byte_mask)
 {
 	return __sk_memcmp_mask_scalar(src1, src2, byte_mask, 64);
 }
 
 static inline int
-__sk_memcmp_mask_80B_scalar(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask)
+__sk_memcmp_mask_80B_scalar(const uint8_t *__counted_by(80)src1,
+    const uint8_t *__counted_by(80)src2,
+    const uint8_t *__counted_by(80)byte_mask)
 {
 	return __sk_memcmp_mask_scalar(src1, src2, byte_mask, 80);
 }
 
 #if defined(__arm64__) || defined(__arm__) || defined(__x86_64__)
-extern int os_memcmp_mask_16B(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask);
-extern int os_memcmp_mask_32B(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask);
-extern int os_memcmp_mask_48B(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask);
-extern int os_memcmp_mask_64B(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask);
-extern int os_memcmp_mask_80B(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask);
+extern int os_memcmp_mask_16B(const uint8_t *__counted_by(16)src1,
+    const uint8_t *__counted_by(16)src2,
+    const uint8_t *__counted_by(16)byte_mask);
+extern int os_memcmp_mask_32B(const uint8_t *__counted_by(32)src1,
+    const uint8_t *__counted_by(32)src2,
+    const uint8_t *__counted_by(32)byte_mask);
+extern int os_memcmp_mask_48B(const uint8_t *__counted_by(48)src1,
+    const uint8_t *__counted_by(48)src2,
+    const uint8_t *__counted_by(48)byte_mask);
+extern int os_memcmp_mask_64B(const uint8_t *__counted_by(64)src1,
+    const uint8_t *__counted_by(64)src2,
+    const uint8_t *__counted_by(64)byte_mask);
+extern int os_memcmp_mask_80B(const uint8_t *__counted_by(80)src1,
+    const uint8_t *__counted_by(80)src2,
+    const uint8_t *__counted_by(80)byte_mask);
 
 /*
  * Use SIMD variants based on ARM64 and x86_64.
@@ -974,8 +968,9 @@ extern int os_memcmp_mask_80B(const uint8_t *src1, const uint8_t *src2,
  *  @param n number of bytes
  */
 static inline int
-__sk_memcmp_mask(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask, size_t n)
+__sk_memcmp_mask(const uint8_t *__counted_by(n)src1,
+    const uint8_t *__counted_by(n)src2,
+    const uint8_t *__counted_by(n)byte_mask, size_t n)
 {
 	uint32_t result = 0;
 	size_t i = 0;

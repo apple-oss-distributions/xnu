@@ -101,9 +101,9 @@ struct ctl_cb {
 	struct kctl             *kctl;          /* back pointer to controller */
 	void                    *userdata;
 	struct sockaddr_ctl     sac;
-	u_int32_t               usecount;
-	u_int32_t               kcb_usecount;
-	u_int32_t               require_clearing_count;
+	uint32_t                usecount;
+	uint32_t                kcb_usecount;
+	uint32_t                require_clearing_count;
 #if DEVELOPMENT || DEBUG
 	enum ctl_status         status;
 #endif /* DEVELOPMENT || DEBUG */
@@ -241,10 +241,6 @@ SYSCTL_INT(_net_systm_kctl, OID_AUTO, panicdebug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_panic_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
-u_int32_t ctl_send_list_mode = 1;
-SYSCTL_INT(_net_systm_kctl, OID_AUTO, send_list_mode,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_send_list_mode, 0, "");
-
 #define KCTL_TBL_INC 16
 
 static uintptr_t kctl_tbl_size = 0;
@@ -309,7 +305,7 @@ ctl_attach(struct socket *so, int proto, struct proc *p)
 	 * may be use for packetization and we do not want to
 	 * drop packets based on the sbspace hint that was just provided
 	 */
-	if (so->so_proto->pr_type == SOCK_DGRAM) {
+	if (SOCK_CHECK_TYPE(so, SOCK_DGRAM)) {
 		so->so_rcv.sb_flags |= SB_KCTL;
 		so->so_snd.sb_flags |= SB_KCTL;
 	}
@@ -377,7 +373,9 @@ ctl_kcb_decrement_use_count(struct ctl_cb *kcb)
 {
 	assert(kcb->kcb_usecount != 0);
 	kcb->kcb_usecount--;
-	wakeup((caddr_t)&kcb->kcb_usecount);
+	if (kcb->require_clearing_count != 0) {
+		wakeup((caddr_t)&kcb->kcb_usecount);
+	}
 }
 
 static int
@@ -423,7 +421,6 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct sockaddr_ctl     sa;
 	struct ctl_cb *kcb = (struct ctl_cb *)so->so_pcb;
 	struct ctl_cb *kcb_next = NULL;
-	u_int32_t recvbufsize, sendbufsize;
 
 	if (kcb == 0) {
 		panic("ctl_setup_kctl so_pcb null");
@@ -512,28 +509,12 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 	kctlstat.kcs_connections++;
 	lck_mtx_unlock(&ctl_mtx);
 
-	/*
-	 * rdar://15526688: Limit the send and receive sizes to sb_max
-	 * by using the same scaling as sbreserve()
-	 */
-	if (kctl->sendbufsize > sb_max_adj) {
-		sendbufsize = (u_int32_t)sb_max_adj;
-	} else {
-		sendbufsize = kctl->sendbufsize;
-	}
-
-	if (kctl->recvbufsize > sb_max_adj) {
-		recvbufsize = (u_int32_t)sb_max_adj;
-	} else {
-		recvbufsize = kctl->recvbufsize;
-	}
-
-	error = soreserve(so, sendbufsize, recvbufsize);
+	error = soreserve(so, kctl->sendbufsize, kctl->recvbufsize);
 	if (error) {
 		if (ctl_debug) {
 			printf("%s - soreserve(%llx, %u, %u) error %d\n",
 			    __func__, (uint64_t)VM_KERNEL_ADDRPERM(so),
-			    sendbufsize, recvbufsize, error);
+			    kctl->sendbufsize, kctl->recvbufsize, error);
 		}
 		goto done;
 	}
@@ -870,7 +851,7 @@ ctl_send_list(struct socket *so, struct mbuf *m, u_int *pktcnt, int flags)
 		goto done;
 	}
 
-	if (kctl->send_list != NULL && ctl_send_list_mode == 0) {
+	if (kctl->send_list != NULL) {
 		struct mbuf *nxt;
 
 		for (nxt = m; update_tc && nxt != NULL; nxt = nxt->m_nextpkt) {
@@ -948,8 +929,7 @@ ctl_rcvbspace(struct socket *so, size_t datasize,
 
 		if ((u_int32_t) space >= datasize) {
 			error = 0;
-		} else if (tcp_cansbgrow(sb) &&
-		    sb->sb_hiwat < autorcvbuf_max) {
+		} else if (sb->sb_hiwat < autorcvbuf_max) {
 			/*
 			 * Grow with a little bit of leeway
 			 */
@@ -1202,7 +1182,7 @@ ctl_enqueuedata(void *kctlref, u_int32_t unit, void *data, size_t len,
 			mlen = len - curlen;
 		}
 		n->m_len = (int32_t)mlen;
-		bcopy((char *)data + curlen, n->m_data, mlen);
+		bcopy((char *)data + curlen, m_mtod_current(n), mlen);
 		curlen += mlen;
 	}
 	mbuf_pkthdr_setlen(m, curlen);
@@ -1258,9 +1238,7 @@ ctl_getenqueuepacketcount(kern_ctl_ref kctlref, u_int32_t unit, u_int32_t *pcnt)
 	cnt = 0;
 	m1 = so->so_rcv.sb_mb;
 	while (m1 != NULL) {
-		if (m1->m_type == MT_DATA ||
-		    m1->m_type == MT_HEADER ||
-		    m1->m_type == MT_OOBDATA) {
+		if (m_has_mtype(m1, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 			cnt += 1;
 		}
 		m1 = m1->m_nextpkt;
@@ -1985,7 +1963,7 @@ kcb_find_socket(kern_ctl_ref kctlref, u_int32_t unit, u_int32_t *kctlflags)
 	}
 
 	kcb->usecount--;
-	if (kcb->usecount == 0) {
+	if (kcb->usecount == 0 && kcb->require_clearing_count != 0) {
 		wakeup((event_t)&kcb->usecount);
 	}
 

@@ -166,6 +166,9 @@ static void mcache_reap_done(void *);
 static void mcache_reap_timeout(thread_call_param_t __unused, thread_call_param_t);
 static void mcache_notify(mcache_t *, u_int32_t);
 static void mcache_purge(void *);
+__attribute__((noreturn))
+static void mcache_audit_panic(mcache_audit_t *mca, void *addr, size_t offset,
+    int64_t expected, int64_t got);
 
 static LIST_HEAD(, mcache) mcache_head;
 mcache_t *mcache_audit_cache;
@@ -1716,7 +1719,8 @@ mcache_dump_mca(char buf[static DUMP_MCA_BUF_SIZE], mcache_audit_t *mca)
 	return buf;
 }
 
-__private_extern__ void
+__attribute__((noreturn))
+static void
 mcache_audit_panic(mcache_audit_t *mca, void *addr, size_t offset,
     int64_t expected, int64_t got)
 {

@@ -7,8 +7,6 @@
 
     Note: The Format of the function has to be populate_<variable_name> so that the automated updating will pick it up.
 """
-from __future__ import absolute_import
-
 import os, re
 
 def GetStateString(strings_dict, state):
@@ -193,6 +191,16 @@ IO_BITS_KOTYPE = 0x3ff
 
 # File: kern_memorystatus.h
 P_MEMSTAT_FROZEN = 0x00000002
+
+
+P_PLATFORM_MACOSEXCLAVEKIT = 16
+P_PLATFORM_IOSEXCLAVEKIT = 18
+
+#File: osfmk/ipc/ipc_importance.h
+IIE_TYPE_BITS = 1
+IIE_TYPE_MASK = ((1 << IIE_TYPE_BITS) - 1)
+IIE_TYPE_TASK =     0x00000000
+IIE_TYPE_INHERIT =  0x00000001
 
 
 if __name__ == "__main__":

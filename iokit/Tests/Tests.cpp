@@ -1895,6 +1895,81 @@ Test100367284(int)
 	return kIOReturnSuccess;
 }
 
+// Test the lockForArbitration(not-required) path
+
+struct LockForArbitrationTestThreadArgs {
+	OSSharedPtr<IOService> a;
+	OSSharedPtr<IOService> b;
+	IOLock lock;
+	int state;
+};
+
+static void
+TestLockForArbitrationThread(void * arg, wait_result_t result __unused)
+{
+	LockForArbitrationTestThreadArgs * threadArgs = (LockForArbitrationTestThreadArgs *)arg;
+	bool ok;
+
+	ok = threadArgs->b->lockForArbitration();
+	assert(ok);
+
+	IOLockLock(&threadArgs->lock);
+	threadArgs->state = 1;
+	thread_wakeup(&threadArgs->state);
+	IOLockUnlock(&threadArgs->lock);
+
+	ok = threadArgs->a->lockForArbitration(false);
+	assert(!ok);            // fails
+	threadArgs->b->unlockForArbitration();
+
+	IOLockLock(&threadArgs->lock);
+	threadArgs->state = 2;
+	thread_wakeup(&threadArgs->state);
+	IOLockUnlock(&threadArgs->lock);
+}
+
+static int
+TestLockForArbitration(int)
+{
+	struct LockForArbitrationTestThreadArgs threadArgs;
+	thread_t thread;
+	kern_return_t kr;
+	bool ok;
+
+	threadArgs.a = OSMakeShared<IOService>();
+	threadArgs.a->init();
+	threadArgs.b = OSMakeShared<IOService>();
+	threadArgs.b->init();
+	IOLockInlineInit(&threadArgs.lock);
+	threadArgs.state = 0;
+
+	ok = threadArgs.a->lockForArbitration();
+	assert(ok);
+
+	IOLockLock(&threadArgs.lock);
+	kr = kernel_thread_start(&TestLockForArbitrationThread, (void *)&threadArgs, &thread);
+	assert(kr == KERN_SUCCESS);
+	while (1 != threadArgs.state) {
+		IOLockSleep(&threadArgs.lock, &threadArgs.state, THREAD_UNINT);
+	}
+	IOLockUnlock(&threadArgs.lock);
+
+	ok = threadArgs.b->lockForArbitration();
+	assert(ok);
+	threadArgs.b->unlockForArbitration();
+	threadArgs.a->unlockForArbitration();
+
+	IOLockLock(&threadArgs.lock);
+	while (2 != threadArgs.state) {
+		IOLockSleep(&threadArgs.lock, &threadArgs.state, THREAD_UNINT);
+	}
+	IOLockUnlock(&threadArgs.lock);
+	IOLockInlineDestroy(&threadArgs.lock);
+
+	return kIOReturnSuccess;
+}
+
+// --
 
 #endif  /* DEVELOPMENT || DEBUG */
 
@@ -1973,6 +2048,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 #endif /* TEST_ZLIB */
 	if (changed && newValue) {
+		error = TestLockForArbitration(newValue);
+		assert(KERN_SUCCESS == error);
 		error = Test100367284(newValue);
 		assert(KERN_SUCCESS == error);
 		error = IOWorkLoopTest(newValue);
@@ -2012,6 +2089,7 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 
 	return error;
 }
+
 
 SYSCTL_PROC(_kern, OID_AUTO, iokittest,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,

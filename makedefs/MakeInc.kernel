@@ -29,11 +29,6 @@ endif
 # Generate xnu version file early (from build environment or SDK/KDK)
 do_build_setup:: $(XNU_VERSION)
 
-ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
-do_build_setup::
-	$(_v)$(CAT) > $(OBJPATH)/compile_commands.json < /dev/null
-endif
-
 ifeq ($(BUILD_STATIC_LINK),1)
 ifeq ($(USE_LTO),1)
 # <rdar://problem/46252406>
@@ -103,6 +98,13 @@ do_build_kernel_dSYM: $(TARGET)/$(KERNEL_FILE_NAME).dSYM
 	@:
 
 endif
+
+do_build_all:: do_build_compile_commands_json
+
+.PHONY: do_build_compile_commands_json
+
+do_build_compile_commands_json: $(TARGET)/compile_commands.json
+	@:
 
 .LDFLAGS: ALWAYS
 	$(_v)$(REPLACECONTENTS) $@ $(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) $(LD_KERNEL_LIBS)
@@ -232,6 +234,10 @@ else
 	$(_v)$(CAT) $(filter %.filelist,$+) < /dev/null > link.filelist
 	$(_v)$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist link.filelist $(filter %.o,$+) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES)
 endif
+
+$(TARGET)/compile_commands.json: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist))
+	$(_v)files="$$(sed -e 's/$$/.json/' $(filter %.filelist,$+))"; \
+	sed -e '1s/^/[\'$$'\n''/' -e '$$s/,$$/\'$$'\n'']/' $$files > compile_commands.json
 
 # for now, rename LASTDATA_CONST to LAST on static kernel cache builds
 EXTRA_KC_LINKARGS = -Wl,-rename_segment,__LASTDATA_CONST,__LAST

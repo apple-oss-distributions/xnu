@@ -1,11 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import chr
-from builtins import zip
-from builtins import hex
-from builtins import range
-from builtins import object
-
 from xnu import *
 from utils import *
 from kdp import *
@@ -36,7 +28,7 @@ def CastIOKitClass(obj, target_type):
     # We need to do that so that LLDB doesn't try to "helpfully"
     # Guess which instance type it is...
     v.SetPreferDynamicValue(lldb.eNoDynamicValues)
-    if isinstance(target_type, six.string_types):
+    if isinstance(target_type, str):
         target_type = gettype(target_type)
     return value(v.Cast(target_type))
 
@@ -1792,8 +1784,8 @@ def showpreoslog(cmd_args=None):
 
     err = lldb.SBError()
     if preoslog.wrapped > 0:
-        print(six.ensure_str(preoslog.data.GetString(err, preoslog.offset + 1)))
-    print(six.ensure_str(preoslog.data.GetString(err, 0)))
+        print(preoslog.data.GetString(err, preoslog.offset + 1))
+    print(preoslog.data.GetString(err, 0))
     print("-----preoslog log end-------")
     return True
 

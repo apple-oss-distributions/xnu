@@ -188,23 +188,23 @@ T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter")
 	for (int dontTrunc = 0; dontTrunc <= 1; dontTrunc++) {
 		T_QUIET; T_EXPECT_POSIX_SUCCESS(setsockopt(recvSocket, SOL_SOCKET, SO_DONTTRUNC, (void *)&dontTrunc, sizeof(dontTrunc)), "setsockopt(SO_DONTTRUNC)");
 
-		T_LOG("\n================= recvmsg_x() test =================\n");
+		T_LOG("\n================= recvmsg_x(%d, %d, %d) SO_DONTTRUNC %d =================\n", NMSGS, BUFFERLEN, 50, dontTrunc);
 		sendPackets(sendSocket, (struct sockaddr *)&addr, NMSGS, BUFFERLEN);
 		recvPackets_x(recvSocket, NMSGS, BUFFERLEN, 50);
 
-		T_LOG("\n================= recvmsg_x() test =================\n");
+		T_LOG("\n================= recvmsg_x(%d, %d, %d) SO_DONTTRUNC %d =================\n", NMSGS, BUFFERLEN * 2, 50, dontTrunc);
 		sendPackets(sendSocket, (struct sockaddr *)&addr, NMSGS, BUFFERLEN);
 		recvPackets_x(recvSocket, NMSGS, BUFFERLEN * 2, 50);
 
-		T_LOG("\n================= recvmsg_x() test =================\n");
+		T_LOG("\n================= recvmsg_x(%d, %d, %d) SO_DONTTRUNC %d =================\n", NMSGS, BUFFERLEN / 2, 50, dontTrunc);
 		sendPackets(sendSocket, (struct sockaddr *)&addr, NMSGS, BUFFERLEN);
 		recvPackets_x(recvSocket, NMSGS, BUFFERLEN / 2, 50);
 
-		T_LOG("\n================= recvmsg_x() test =================\n");
+		T_LOG("\n================= recvmsg_x(%d, %d, %d) SO_DONTTRUNC %d =================\n", NMSGS, BUFFERLEN, 10, dontTrunc);
 		sendPackets(sendSocket, (struct sockaddr *)&addr, NMSGS, BUFFERLEN);
 		recvPackets_x(recvSocket, NMSGS, BUFFERLEN, 10);
 
-		T_LOG("\n================= recvmsg_x() test =================\n");
+		T_LOG("\n================= recvmsg_x(%d, %d, %d) SO_DONTTRUNC %d =================\n", NMSGS, BUFFERLEN / 2, 10, dontTrunc);
 		sendPackets(sendSocket, (struct sockaddr *)&addr, NMSGS, BUFFERLEN);
 		recvPackets_x(recvSocket, NMSGS, BUFFERLEN / 2, 10);
 	}

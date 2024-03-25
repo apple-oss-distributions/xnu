@@ -56,6 +56,8 @@
 #ifndef _LIBKERN_TREE_H_
 #define _LIBKERN_TREE_H_
 
+#include <sys/cdefs.h>
+
 /*
  * This file defines data structures for different types of trees:
  * splay trees and red-black trees.
@@ -454,36 +456,38 @@ _sc_ void name##_RB_SETCOLOR(struct type*,int)
 /* Main rb operation.
  * Moves node close to the key of elm to top
  */
-#define RB_GENERATE(name, type, field, cmp)                             \
-struct type *name##_RB_GETPARENT(struct type *elm) {                            \
+#define RB_GENERATE(name, type, field, cmp)                         \
+struct type *name##_RB_GETPARENT(struct type *elm) {                \
 	struct type *parent = _RB_PARENT(elm, field);                   \
-	if( parent != NULL) {                                           \
-	        parent = (struct type*)((uintptr_t)parent & ~RB_COLOR_MASK);\
-	        return( (struct type*) ( (parent == (struct type*) RB_PLACEHOLDER) ? NULL: parent));\
+	if( parent == NULL || parent == (struct type*)RB_PLACEHOLDER) { \
+	        return __unsafe_forge_single(struct type*, NULL);       \
 	}                                                               \
-	return((struct type*)NULL);                                     \
-}                                                                       \
-int name##_RB_GETCOLOR(struct type *elm) {                                      \
+	return __unsafe_forge_single(struct type*,                      \
+	                (uintptr_t)parent & ~RB_COLOR_MASK);            \
+}                                                                   \
+int name##_RB_GETCOLOR(struct type *elm) {                          \
 	int color = 0;                                                  \
 	color = (int)((uintptr_t)_RB_PARENT(elm,field) & RB_COLOR_MASK);\
 	return(color);                                                  \
-}                                                                       \
-void name##_RB_SETCOLOR(struct type *elm,int color) {                           \
+}                                                                   \
+void name##_RB_SETCOLOR(struct type *elm,int color) {               \
 	struct type *parent = name##_RB_GETPARENT(elm);                 \
-	if(parent == (struct type*)NULL)                                \
+	if(parent == (struct type*)NULL) {                              \
 	        parent = (struct type*) RB_PLACEHOLDER;                 \
-	_RB_PARENT(elm, field) = (struct type*)((uintptr_t)parent | (unsigned int)color);\
-}                                                                       \
+	}                                                               \
+	_RB_PARENT(elm, field) = __unsafe_forge_single(struct type*,    \
+	                (uintptr_t)parent | (unsigned int)color);       \
+}                                                                   \
 struct type *name##_RB_SETPARENT(struct type *elm, struct type *parent) {       \
-	int color = name##_RB_GETCOLOR(elm);                                    \
+	int color = name##_RB_GETCOLOR(elm);                            \
 	_RB_PARENT(elm, field) = parent;                                \
-	if(color) name##_RB_SETCOLOR(elm, color);                               \
-	return(name##_RB_GETPARENT(elm));                                       \
-}                                                                       \
-                                                                        \
-void                                                                    \
-name##_RB_INSERT_COLOR(struct name *head, struct type *elm)             \
-{                                                                       \
+	if(color) name##_RB_SETCOLOR(elm, color);                       \
+	return(name##_RB_GETPARENT(elm));                               \
+}                                                                   \
+                                                                    \
+void                                                                \
+name##_RB_INSERT_COLOR(struct name *head, struct type *elm)         \
+{                                                                   \
 	struct type *parent, *gparent, *tmp;                            \
 	while ((parent = name##_RB_GETPARENT(elm)) != NULL &&           \
 	    name##_RB_GETCOLOR(parent) == RB_RED) {                     \

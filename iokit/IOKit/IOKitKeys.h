@@ -270,6 +270,7 @@
 #define kIONVRAMSyncNowPropertyKey      "IONVRAM-SYNCNOW-PROPERTY"
 #define kIONVRAMActivateCSRConfigPropertyKey    "IONVRAM-ARMCSR-PROPERTY"
 #define kIODTNVRAMPanicInfoKey          "aapl,panic-info"
+#define kIONVRAMDeletePropertyKeyWRet   "IONVRAM-DELETEWRET-PROPERTY"
 
 // keys for complex boot information
 #define kIOBootDeviceKey          "IOBootDevice"                // dict | array of dicts

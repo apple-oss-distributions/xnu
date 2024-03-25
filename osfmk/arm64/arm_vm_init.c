@@ -2141,9 +2141,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	kasan_init();
 #endif /* KASAN */
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_early_init();
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	arm_set_user_tbi();
 

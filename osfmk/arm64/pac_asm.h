@@ -111,6 +111,7 @@
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER
 	mov		x1, \new_jop_key
 	hvc		#0
+	cbnz		x0, .
 	LOAD_SMCCC_CLOBBERED_REGISTERS
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
@@ -131,6 +132,7 @@
 	MOV64	x0, VMAPPLE_PAC_SET_B_KEYS
 	mov		x1, \new_rop_key
 	hvc		#0
+	cbnz		x0, .
 	LOAD_SMCCC_CLOBBERED_REGISTERS
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
@@ -155,6 +157,7 @@
 	 */
 	mov		x0, #VMAPPLE_PAC_SET_INITIAL_STATE
 	hvc		#0
+	cbnz		x0, .
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
 

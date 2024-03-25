@@ -3,18 +3,10 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file. 
 """
-from __future__ import absolute_import, print_function
-
-from builtins import hex
-from builtins import range
-from builtins import object
-
 import sys, re, time, os, time
 import lldb
 import struct
-import six
 
-from core import PY3
 from core.cvalue import *
 from core.configuration import *
 from core.lazytarget import *
@@ -228,7 +220,7 @@ def WriteStringToMemoryAddress(stringval, addr):
     serr = lldb.SBError()
     length = len(stringval) + 1
     format_string = "%ds" % length
-    sdata = struct.pack(format_string,stringval)
+    sdata = struct.pack(format_string,stringval.encode())
     numbytes = LazyTarget.GetProcess().WriteMemory(addr, sdata, serr)
     if numbytes == length and serr.Success():
         return True
@@ -511,21 +503,10 @@ def RunShellCommand(command):
         import shlex
         command = shlex.split(command)
 
-    if PY3:
-        result = subprocess.run(command, capture_output=True, encoding="utf-8")
-        returncode =  result.returncode
-        stdout = result.stdout
-        stderr = result.stderr
-    else:
-        try:
-            process = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-            stdout, stderr = process.communicate()
-            returncode = process.returncode
-        except OSError as e:
-            # This usually happens if the command cannot be found (e.g. ["derp"]), NOT because the command failed
-            returncode = 255
-            stdout = ""
-            stderr = str(e)
+    result = subprocess.run(command, capture_output=True, encoding="utf-8")
+    returncode =  result.returncode
+    stdout = result.stdout
+    stderr = result.stderr
 
     if returncode != 0:
         print("Failed to run command. Command: {}, "

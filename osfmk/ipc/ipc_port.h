@@ -103,7 +103,8 @@ typedef unsigned int ipc_port_timestamp_t;
 struct ipc_port_request {
 	union {
 		struct ipc_port                *ipr_soright;
-		struct host_notify_entry       *ipr_hnotify;
+		struct host_notify_entry *XNU_PTRAUTH_SIGNED_PTR("ipc_port_request.ipr_hnotify") ipr_hnotify;
+		struct ipc_port_request *XNU_PTRAUTH_SIGNED_PTR("ipc_port_request.ipr_hn_slot") ipr_hn_slot;
 	};
 
 	union {
@@ -303,8 +304,9 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_to_object(port)              (&(port)->ip_object)
 #define ip_active(port)                 io_active(ip_to_object(port))
 #define ip_mq_lock_held(port)           io_lock_held(ip_to_object(port))
-#define ip_mq_lock(port)                io_lock(ip_to_object(port))
-#define ip_mq_lock_try(port)            io_lock_try(ip_to_object(port))
+#define ip_mq_lock(port)                ipc_object_lock(ip_to_object(port), IOT_PORT)
+#define ip_mq_lock_check_aligned(port)  ipc_object_lock_check_aligned(ip_to_object(port), IOT_PORT)
+#define ip_mq_lock_try(port)            ipc_object_lock_try(ip_to_object(port), IOT_PORT)
 #define ip_mq_lock_held_kdp(port)       io_lock_held_kdp(ip_to_object(port))
 #define ip_mq_unlock(port)              io_unlock(ip_to_object(port))
 
@@ -314,6 +316,8 @@ extern void __ipc_right_delta_overflow_panic(
 #define ip_release_live(port)           io_release_live(ip_to_object(port))
 #define ip_validate(port) \
 	zone_id_require(ZONE_ID_IPC_PORT, sizeof(struct ipc_port), port)
+#define ip_validate_aligned(port) \
+	zone_id_require_aligned(ZONE_ID_IPC_PORT, port)
 
 #define ip_from_waitq(wq)               __container_of(wq, struct ipc_port, ip_waitq)
 #define ip_from_mq(mq)                  __container_of(mq, struct ipc_port, ip_messages)
@@ -654,7 +658,7 @@ __options_decl(ipc_port_init_flags_t, uint32_t, {
 	IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS           = 0x00000080,
 	IPC_PORT_INIT_PROVISIONAL_REPLY                 = 0x00000100,
 	IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT        = 0x00000200,
-	IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS     = 0x00000300,
+	IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS     = 0x00000400,
 });
 
 /* Initialize a newly-allocated port */

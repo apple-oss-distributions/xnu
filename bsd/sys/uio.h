@@ -119,9 +119,16 @@ enum uio_seg {
 	UIO_SYSSPACE32          = 11    /* deprecated */
 };
 
+enum {
+	UIOF_USERSPACE          = (1 << UIO_USERSPACE),
+	UIOF_SYSSPACE           = (1 << UIO_SYSSPACE),
+	UIOF_USERSPACE32        = (1 << UIO_USERSPACE32),
+	UIOF_USERSPACE64        = (1 << UIO_USERSPACE64),
+	UIOF_SYSSPACE32         = (1 << UIO_SYSSPACE32),
+};
+
 #define UIO_SEG_IS_USER_SPACE( a_uio_seg )  \
-	( (a_uio_seg) == UIO_USERSPACE64 || (a_uio_seg) == UIO_USERSPACE32 || \
-	  (a_uio_seg) == UIO_USERSPACE )
+	((1 << a_uio_seg) & (UIOF_USERSPACE64 | UIOF_USERSPACE32 | UIOF_USERSPACE))
 
 
 __BEGIN_DECLS

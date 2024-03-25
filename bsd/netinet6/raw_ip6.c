@@ -604,7 +604,7 @@ rip6_output(
 			 * Sinced stsock->sin6_scope_id is unsigned, we don't
 			 * need to check if it's < 0
 			 */
-			if (if_index < dstsock->sin6_scope_id) {
+			if (!IF_INDEX_IN_RANGE(dstsock->sin6_scope_id)) {
 				error = ENXIO;  /* XXX EINVAL? */
 				ifnet_head_done();
 				goto bad;
@@ -669,7 +669,7 @@ rip6_output(
 				ifnet_release(oifp);
 			}
 			ifnet_head_lock_shared();
-			if (index == 0 || if_index < index) {
+			if (!IF_INDEX_IN_RANGE(index)) {
 				panic("bad if_index on interface from route");
 			}
 			oifp = ifindex2ifnet[index];
@@ -1100,12 +1100,12 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		    (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY | IN6_IFF_CLAT46 |
 		    IN6_IFF_DETACHED | IN6_IFF_DEPRECATED)) {
 			IFA_UNLOCK(ifa);
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 			return EADDRNOTAVAIL;
 		}
 		outif = ifa->ifa_ifp;
 		IFA_UNLOCK(ifa);
-		IFA_REMREF(ifa);
+		ifa_remref(ifa);
 	}
 	inp->in6p_laddr = sin6.sin6_addr;
 	inp->in6p_last_outifp = outif;

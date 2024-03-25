@@ -208,6 +208,22 @@ extern kern_return_t pmap_next_page_large(ppnum_t *pnum);
 extern void pmap_hi_pages_done(void);
 #endif
 
+#if CONFIG_SPTM
+__enum_decl(pmap_mapping_type_t, uint8_t, {
+	PMAP_MAPPING_TYPE_INFER = SPTM_UNTYPED,
+	PMAP_MAPPING_TYPE_DEFAULT = XNU_DEFAULT,
+	PMAP_MAPPING_TYPE_ROZONE = XNU_ROZONE,
+	PMAP_MAPPING_TYPE_RESTRICTED = XNU_KERNEL_RESTRICTED
+});
+#else
+__enum_decl(pmap_mapping_type_t, uint8_t, {
+	PMAP_MAPPING_TYPE_INFER = 0,
+	PMAP_MAPPING_TYPE_DEFAULT,
+	PMAP_MAPPING_TYPE_ROZONE,
+	PMAP_MAPPING_TYPE_RESTRICTED
+});
+#endif
+
 /*
  * Report virtual space available for the kernel.
  */
@@ -238,7 +254,8 @@ extern kern_return_t    pmap_enter(     /* Enter a mapping */
 	vm_prot_t       prot,
 	vm_prot_t       fault_type,
 	unsigned int    flags,
-	boolean_t       wired);
+	boolean_t       wired,
+	pmap_mapping_type_t mapping_type);
 
 extern kern_return_t    pmap_enter_options(
 	pmap_t pmap,
@@ -249,7 +266,8 @@ extern kern_return_t    pmap_enter_options(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	void *arg);
+	void *arg,
+	pmap_mapping_type_t mapping_type);
 extern kern_return_t    pmap_enter_options_addr(
 	pmap_t pmap,
 	vm_map_offset_t v,
@@ -259,7 +277,8 @@ extern kern_return_t    pmap_enter_options_addr(
 	unsigned int flags,
 	boolean_t wired,
 	unsigned int options,
-	void *arg);
+	void *arg,
+	pmap_mapping_type_t mapping_type);
 
 extern void             pmap_remove_some_phys(
 	pmap_t          pmap,
@@ -572,12 +591,17 @@ extern kern_return_t pmap_unnest(pmap_t,
 #define PMAP_UNNEST_CLEAN       1
 
 #if __arm64__
+#if CONFIG_SPTM
 #define PMAP_FORK_NEST 1
+#endif /* CONFIG_SPTM */
+
+#if PMAP_FORK_NEST
 extern kern_return_t pmap_fork_nest(
 	pmap_t old_pmap,
 	pmap_t new_pmap,
 	vm_map_offset_t *nesting_start,
 	vm_map_offset_t *nesting_end);
+#endif /* PMAP_FORK_NEST */
 #endif /* __arm64__ */
 
 extern kern_return_t pmap_unnest_options(pmap_t,
@@ -670,6 +694,9 @@ extern const pmap_t     kernel_pmap;            /* The kernel's map */
 #define PMAP_OPTIONS_FF_WIRED   0x10000
 #endif
 #define PMAP_OPTIONS_XNU_USER_DEBUG 0x20000
+
+/* Indicates that pmap_enter() or pmap_remove() is being called with preemption already disabled. */
+#define PMAP_OPTIONS_NOPREEMPT  0x80000
 
 #define PMAP_OPTIONS_MAP_TPRO 0x40000
 
@@ -844,6 +871,109 @@ pmap_performs_stage2_translations(const pmap_t pmap);
 #endif /* defined(__arm64__) */
 #endif /* XNU_KERNEL_PRIVATE */
 
+#if CONFIG_SPTM
+/*
+ * The TrustedExecutionMonitor address space data structure is kept within the
+ * pmap structure in order to provide a coherent API to the rest of the kernel
+ * for working with code signing monitors.
+ *
+ * However, a lot of parts of the kernel don't have visibility into the pmap
+ * data structure as they are opaque unless you're in the Mach portion of the
+ * kernel. To allievate this, we provide pmap APIs to the rest of the kernel.
+ */
+#include <TrustedExecutionMonitor/API.h>
+
+/*
+ * All pages allocated by TXM are also kept within the TXM VM object, which allows
+ * tracking it for accounting and debugging purposes.
+ */
+extern vm_object_t txm_vm_object;
+
+/**
+ * Acquire the pointer of the kernel pmap being used for the system.
+ */
+extern pmap_t
+pmap_txm_kernel_pmap(void);
+
+/**
+ * Acquire the TXM address space object stored within the pmap.
+ */
+extern TXMAddressSpace_t*
+pmap_txm_addr_space(const pmap_t pmap);
+
+/**
+ * Set the TXM address space object within the pmap.
+ */
+extern void
+pmap_txm_set_addr_space(
+	pmap_t pmap,
+	TXMAddressSpace_t *txm_addr_space);
+
+/**
+ * Set the trust level of the TXM address space object within the pmap.
+ */
+extern void
+pmap_txm_set_trust_level(
+	pmap_t pmap,
+	CSTrust_t trust_level);
+
+/**
+ * Get the trust level of the TXM address space object within the pmap.
+ */
+extern kern_return_t
+pmap_txm_get_trust_level_kdp(
+	pmap_t pmap,
+	CSTrust_t *trust_level);
+
+/**
+ * Take a shared lock on the pmap in order to enforce safe concurrency for
+ * an operation on the TXM address space object. Passing in NULL takes the lock
+ * on the current pmap.
+ */
+extern void
+pmap_txm_acquire_shared_lock(pmap_t pmap);
+
+/**
+ * Release the shared lock which was previously acquired for operations on
+ * the TXM address space object. Passing in NULL releases the lock for the
+ * current pmap.
+ */
+extern void
+pmap_txm_release_shared_lock(pmap_t pmap);
+
+/**
+ * Take an exclusive lock on the pmap in order to enforce safe concurrency for
+ * an operation on the TXM address space object. Passing in NULL takes the lock
+ * on the current pmap.
+ */
+extern void
+pmap_txm_acquire_exclusive_lock(pmap_t pmap);
+
+/**
+ * Release the exclusive lock which was previously acquired for operations on
+ * the TXM address space object. Passing in NULL releases the lock for the
+ * current pmap.
+ */
+extern void
+pmap_txm_release_exclusive_lock(pmap_t pmap);
+
+/**
+ * Transfer a page to the TXM_DEFAULT type after resolving its mapping from its
+ * virtual to physical address.
+ */
+extern void
+pmap_txm_transfer_page(const vm_address_t addr);
+
+/**
+ * Grab an available page from the VM free list, add it to the TXM VM object and
+ * then transfer it to be owned by TXM.
+ *
+ * Returns the physical address of the page allocated.
+ */
+extern vm_map_address_t
+pmap_txm_allocate_page(void);
+
+#endif /* CONFIG_SPTM */
 
 
 #endif  /* KERNEL_PRIVATE */

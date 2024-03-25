@@ -38,6 +38,14 @@
 
 __BEGIN_DECLS
 
+/**
+ * Check if the PPL based code signing is enabled on the system or not. With a bit of
+ * a refactor on how this function is defined, we could soon move this within the
+ * XNU_KERNEL_PRIVATE directive.
+ */
+bool
+pmap_cs_enabled(void);
+
 #if XNU_KERNEL_PRIVATE
 /*
  * Any declarations for types or functions which don't need to be exported to kernel
@@ -51,6 +59,7 @@ __BEGIN_DECLS
 
 #include <vm/pmap.h>
 #include <kern/lock_rw.h>
+#include <libkern/image4/dlxk.h>
 #include <TrustCache/API.h>
 
 
@@ -58,7 +67,9 @@ __BEGIN_DECLS
 #define PMAP_CS_INCLUDE_CODE_SIGNING 1
 #endif
 
-#if   XNU_MONITOR
+#if CONFIG_SPTM
+#define PMAP_CS_PPL_MONITOR 0
+#elif XNU_MONITOR
 #define PMAP_CS_PPL_MONITOR 1
 #else
 #define PMAP_CS_PPL_MONITOR 0
@@ -73,7 +84,7 @@ __BEGIN_DECLS
  * require a lot of changes throughout the codebase.
  *
  * PMAP_CS_PPL_MONITOR is defined when we have XNU_MONITOR _and_ we explicitly don't
- * have . This effectively means that whenever we have PMAP_CS_PPL_MONITOR,
+ * have CONFIG_SPTM. This effectively means that whenever we have PMAP_CS_PPL_MONITOR,
  * we should also always have PMAP_CS_INCLUDE_CODE_SIGNING. Lets enforce this with a
  * build check.
  */
@@ -103,6 +114,14 @@ extern bool ppl_developer_mode_set;
 
 /* State of developer mode on the system */
 extern bool ppl_developer_mode_storage;
+
+/*
+ * State of lockdown mode on the system. This variable is an exclusive view of
+ * lockdown mode state for the PPL, and we capture this because the kernel's
+ * view of lockdown mode isn't immutable.
+ */
+extern bool ppl_lockdown_mode_enabled;
+extern bool ppl_lockdown_mode_enforce_jit;
 
 /**
  * Check the PPL trust cache runtime if a particular trust cache has already been
@@ -167,7 +186,9 @@ pmap_toggle_developer_mode(
 
 #if PMAP_CS_INCLUDE_CODE_SIGNING
 
+#ifndef CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
 #define CORE_ENTITLEMENTS_I_KNOW_WHAT_IM_DOING
+#endif
 
 #include <CoreEntitlements/CoreEntitlementsPriv.h>
 #include <kern/cs_blobs.h>
@@ -175,6 +196,7 @@ pmap_toggle_developer_mode(
 #include <libkern/crypto/sha1.h>
 #include <libkern/crypto/sha2.h>
 #include <libkern/coretrust/coretrust.h>
+
 
 /* Validation data for a provisioning profile */
 typedef struct _pmap_cs_profile {
@@ -738,23 +760,6 @@ pmap_accelerate_entitlements(
 
 #endif /* PMAP_CS_INCLUDE_CODE_SIGNING */
 
-#endif /* XNU_KERNEL_PRIVATE */
-
-/* Availability macros for AppleImage4 */
-#if defined(__arm__) || defined(__arm64__)
-#define PMAP_SUPPORTS_IMAGE4_NONCE 1
-#define PMAP_SUPPORTS_IMAGE4_OBJECT_EXECUTION 1
-#endif
-
-/* Availability macros for developer mode */
-#define PMAP_SUPPORTS_DEVELOPER_MODE 1
-
-/**
- * Check if the PPL based code signing is enabled on the system or not.
- */
-bool
-pmap_cs_enabled(void);
-
 /**
  * The PPl allocates some space for AppleImage4 to store some of its data. It needs to
  * allocate this space since this region needs to be PPL protected, and the macro which
@@ -816,6 +821,18 @@ pmap_image4_copy_object(
 	img4_runtime_object_spec_index_t obj_spec_index,
 	vm_address_t object_out,
 	size_t *object_length);
+
+/**
+ * Entry point for the new AppleImage4 to enter the PPL monitor for it's variety of
+ * tasks.
+ */
+errno_t
+pmap_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size);
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS
 

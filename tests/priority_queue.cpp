@@ -252,7 +252,7 @@ T_DECL(priority_queue_sched_stable_max, "Basic stable sched priority queue testi
 		if (c1.stamp != c2.stamp) {
 		        if (c1.modifier) {
 		                /* younger is better */
-		                return c1.stamp < c1.stamp ? 1 : -1;
+		                return c1.stamp < c2.stamp ? 1 : -1;
 			} else {
 		                /* older is better */
 		                return c1.stamp > c2.stamp ? 1 : -1;

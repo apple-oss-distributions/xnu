@@ -3680,6 +3680,27 @@ pmap_load_io_rgns(void)
 }
 
 /**
+ * Checks if a pmap-io-range is exempted from being enforced under certain
+ * conditions.
+ *
+ * @param io_range The pmap-io-range to be checked
+ *
+ * @return NULL if the pmap-io-range should be exempted. Otherwise, returns
+ *         the passed in pmap-io-range.
+ */
+static pmap_io_range_t*
+pmap_exempt_io_range(pmap_io_range_t *io_range)
+{
+#if DEBUG || DEVELOPMENT
+	if (__improbable(io_range->signature == 'RVBR')) {
+		return NULL;
+	}
+#endif /* DEBUG || DEVELOPMENT */
+
+	return io_range;
+}
+
+/**
  * Find and return the PPL I/O range that contains the passed in physical
  * address.
  *
@@ -3723,7 +3744,7 @@ pmap_find_io_attr(pmap_paddr_t paddr)
 
 		if (cmp == 0) {
 			/* Success! Found the wanted I/O range. */
-			return &io_attr_table[middle];
+			return pmap_exempt_io_range(&io_attr_table[middle]);
 		} else if (begin == end) {
 			/* We've checked every range and didn't find a match. */
 			break;

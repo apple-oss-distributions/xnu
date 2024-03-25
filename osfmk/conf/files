@@ -44,7 +44,7 @@ OPTIONS/config_ecc_logging	optional config_ecc_logging
 OPTIONS/config_dtrace		optional config_dtrace
 OPTIONS/no_kextd		optional no_kextd
 OPTIONS/config_quiesce_counter  optional config_quiesce_counter
-OPTIONS/config_perfmon          optional config_perfmon
+OPTIONS/config_cpu_counters     optional config_cpu_counters
 
 #
 # gssd files
@@ -70,6 +70,10 @@ osfmk/UserNotification/KUNCUserNotifications.c	standard
 
 osfmk/kdp/kdp.c			optional config_kdp_interactive_debugging
 osfmk/kern/kern_stackshot.c	standard
+osfmk/kern/testpoints.c			optional debug
+osfmk/kern/testpoints.c			optional development
+osfmk/kern/exclaves_test_stackshot.c	optional debug
+osfmk/kern/exclaves_test_stackshot.c	optional development
 osfmk/kdp/kdp_common.c			standard
 osfmk/kdp/kdp_udp.c			optional mach_kdp
 osfmk/kdp/kdp_core.c			optional mach_kdp
@@ -125,6 +129,20 @@ osfmk/kern/ecc_logging.c			optional config_ecc_logging
 osfmk/kern/energy_perf.c		standard
 osfmk/kern/exception.c		standard
 osfmk/kern/exclaves.c		standard
+osfmk/kern/exclaves_conclave.c	standard
+osfmk/kern/exclaves_boot.c		standard
+osfmk/kern/exclaves_upcalls.c		standard
+osfmk/kern/exclaves_driverkit.c		standard
+osfmk/kern/exclaves_frame_mint.c	standard
+osfmk/kern/exclaves_log.c		standard
+osfmk/kern/exclaves_panic.c		standard
+osfmk/kern/exclaves_resource.c		standard
+osfmk/kern/exclaves_sensor.c		standard
+osfmk/kern/exclaves_shared_memory.c	standard
+osfmk/kern/exclaves_storage.c		standard
+osfmk/kern/exclaves_tests.c		standard
+osfmk/kern/exclaves_inspection.c	standard
+./kern/exclaves.tightbeam.c			optional config_exclaves
 osfmk/kern/extmod_statistics.c		standard
 osfmk/kern/host.c			standard
 osfmk/kern/host_notify.c		standard
@@ -204,6 +222,7 @@ osfmk/kern/copyout_shim.c	optional copyout_shim
 osfmk/kern/task_ident.c     standard
 osfmk/kern/socd_client.c   	standard
 osfmk/kern/iotrace.c		optional config_iotrace
+osfmk/kern/epoch_sync.c		optional config_exclaves
 
 ./mach/clock_server.c			standard
 ./mach/clock_reply_user.c		standard
@@ -322,16 +341,15 @@ osfmk/kperf/thread_samplers.c           optional kperf
 osfmk/kperf/task_samplers.c             optional kperf
 osfmk/kperf/meminfo.c                   optional kperf
 osfmk/kperf/kptimer.c                   optional kperf
-osfmk/kperf/kperf_kpc.c                 optional kperf
+osfmk/kperf/kperf_kpc.c                 optional kperf config_cpu_counters
 osfmk/kperf/kdebug_trigger.c            optional kperf
 osfmk/kperf/lazy.c                      optional kperf
-osfmk/kern/kpc_thread.c                 optional kpc
-osfmk/kern/kpc_common.c                 optional kpc
-osfmk/kern/cpc.c                        optional kpc
+osfmk/kern/kpc_thread.c                 optional config_cpu_counters
+# This includes stubs for exported functions without CPU counter support.
+osfmk/kern/kpc_common.c                 standard
+osfmk/kern/cpc.c                        standard
 
-osfmk/kern/kern_monotonic.c optional monotonic
-
-osfmk/kern/kern_perfmon.c optional config_perfmon
+osfmk/kern/kern_monotonic.c optional config_cpu_counters
 
 osfmk/console/serial_general.c	standard
 osfmk/console/serial_console.c	optional	serial_console
@@ -346,9 +364,15 @@ osfmk/corecrypto/cc_clear.c	standard
 osfmk/corecrypto/cc_cmp_safe.c	standard
 osfmk/corecrypto/cc_abort.c	standard
 osfmk/corecrypto/cc_try_abort.c	standard
+osfmk/corecrypto/cc_dit.c	standard
+osfmk/corecrypto/cccbc.c	standard
+osfmk/corecrypto/ccdrbg.c	standard
 osfmk/corecrypto/ccdrbg_nisthmac.c	standard
 osfmk/corecrypto/ccdigest_init.c	standard
 osfmk/corecrypto/ccdigest_update.c	standard
+osfmk/corecrypto/ccgcm.c	standard
+osfmk/corecrypto/ccmode_gcm_gf_mult.c	standard
+osfmk/corecrypto/ccmode_gcm_mult_h.c	standard
 osfmk/corecrypto/cchmac.c	standard
 osfmk/corecrypto/cchmac_init.c	standard
 osfmk/corecrypto/cchmac_update.c	standard

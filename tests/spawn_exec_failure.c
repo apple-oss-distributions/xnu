@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <libproc.h>
 #include <sys/reason.h>
+#include <sys/sysctl.h>
 #include <TargetConditionals.h>
 
 T_GLOBAL_META(
@@ -69,6 +70,28 @@ bad_spawnattr_helper()
 	__spawn_exec(args, POSIX_SPAWN_SETSID);
 }
 
+static bool
+is_cs_enforcement_enabled()
+{
+	static const size_t max_size = 4096;
+	bool result;
+	size_t args_size = max_size;
+
+	char *bootargs = calloc(max_size, 1);
+	int err = sysctlbyname("kern.bootargs", bootargs, &args_size, NULL, 0);
+	if (err) {
+		T_LOG("sysctlbyname failed. err=%d", errno);
+		result = false;
+	} else if (strnstr(bootargs, "cs_enforcement_disable=1", max_size)) {
+		result = false;
+	} else {
+		result = true;
+	}
+
+	free(bootargs);
+	return result;
+}
+
 static void
 setup_child_and_wait_for_exit(
 	void (*do_exec)(void),
@@ -105,6 +128,9 @@ T_DECL(spawn_exec_double_set_sid, "exec fails upon trying to set SID twice")
 
 T_DECL(spawn_exec_invalid_cs, "exec fails due to invalid code signature")
 {
+	if (!is_cs_enforcement_enabled()) {
+		T_SKIP("cs enforcement is disabled.");
+	}
 #if defined(__arm64__)
 	setup_child_and_wait_for_exit(invalid_code_signature_helper, OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
 #else /* __arm64__ */

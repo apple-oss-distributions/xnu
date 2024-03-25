@@ -157,8 +157,8 @@
 	                                 * first packet processed after a wake event */
 
 #define KEV_POWER_SUBCLASS              14
-#define KEV_POWER_WAKE_PACKET           1
-#define KEV_POWER_UNATTRIBUTED_WAKE     2
+#define KEV_POWER_WAKE_PACKET           1 /* wake attributable to process with port offloaded to driver */
+#define KEV_POWER_UNATTRIBUTED_WAKE     2 /* wake without port offloaded to driver */
 
 #endif /* PRIVATE */
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */

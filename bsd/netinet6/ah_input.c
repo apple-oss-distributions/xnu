@@ -455,7 +455,7 @@ ah4_input(struct mbuf *m, int off)
 		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
 		if (ifa) {
 			m->m_pkthdr.rcvif = ifa->ifa_ifp;
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		}
 
 		// Input via IPsec interface
@@ -846,7 +846,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
 		if (ifa) {
 			m->m_pkthdr.rcvif = ifa->ifa_ifp;
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		}
 
 		// Input via IPsec interface

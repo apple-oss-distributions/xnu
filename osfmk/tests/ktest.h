@@ -33,6 +33,7 @@
 #define T_SYM(sym) ktest_ ## sym
 
 #include <stdarg.h>
+#include <ptrcheck.h>
 
 extern unsigned int T_SYM(current_line);
 extern const char * T_SYM(current_file);
@@ -112,8 +113,8 @@ extern T_SYM(temp) T_SYM(temp1), T_SYM(temp2), T_SYM(temp3);
 
 #define T_SAVEINFO do {\
 	T_SYM(current_line) = __LINE__;\
-	T_SYM(current_func) = (const char *)__func__;\
-	T_SYM(current_file) = (const char *)__FILE__;\
+	T_SYM(current_func) = __func__;\
+	T_SYM(current_file) = __FILE__;\
 } while(0)
 
 #define T_SET_AUX_VARS do {\

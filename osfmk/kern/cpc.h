@@ -44,6 +44,10 @@ __enum_decl(cpc_hw_t, unsigned int, {
 	CPC_HW_COUNT,
 });
 
+__result_use_check bool cpc_hw_acquire(cpc_hw_t hw, const char *owner_name);
+bool cpc_hw_in_use(cpc_hw_t hw);
+void cpc_hw_release(cpc_hw_t hw, const char *owner_name);
+
 /// Return whether the event encoding `event_selector` is allowed on a given `hw`.
 ///
 /// Parameters:

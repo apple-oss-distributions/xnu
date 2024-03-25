@@ -29,7 +29,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else ifneq ($(findstring _host,$(RC_ProjectName)),)
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE
+SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T6020 T8101 T8103 T8112 VMAPPLE
 
 endif
 
@@ -58,7 +58,9 @@ COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
 
 MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
 MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
-MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+MACHINE_FLAGS_ARM64_T8112 = -DARM64_BOARD_CONFIG_T8112 			-mcpu=apple-a15
+MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000			-mcpu=apple-a14
+MACHINE_FLAGS_ARM64_T6020 = -DARM64_BOARD_CONFIG_T6020 			-mcpu=apple-a15
 MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
 MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
 
@@ -179,7 +181,7 @@ WARNFLAGS_STD := $(WARNFLAGS_STD) \
 	-Wno-error=cast-function-type-strict
 
 WARNFLAGS_STD := $(WARNFLAGS_STD) \
-	-Wno-error=declaration-after-statement
+	-Wno-declaration-after-statement
 
 # Hand-written sign conversion diagnostics are resolved, but the
 # auto-generated ones need mig and iig to be updated to fix.  Disable the
@@ -394,8 +396,10 @@ endif
 endif # ifndef BOUND_CHECKS_SOFT
 ifeq ($(BOUND_CHECKS_SOFT),1)
 CFLAGS_BOUND_CHECKS_SOFT =  -fbounds-attributes -ftrap-function=ml_bound_chk_soft_trap -ftrap-function-returns
+CFLAGS_BOUND_CHECKS_DEBUG =	$(CFLAGS_BOUND_CHECKS_SOFT) -DBOUND_CHECKS_DEBUG=1
 else
 CFLAGS_BOUND_CHECKS_SOFT =
+CFLAGS_BOUND_CHECKS_DEBUG =
 endif
 
 #
@@ -466,7 +470,6 @@ CFLAGS_KASAN_INSTRUMENTATION_TBI = -DKASAN_TBI=1 -DKASAN_SCALE=$(KASAN_SCALE_TBI
 	-mllvm -hwasan-mapping-offset=$(KASAN_OFFSET) \
 	-mllvm -hwasan-instrument-atomics=1 \
 	-mllvm -hwasan-instrument-stack=$(HWASAN_INSTRUMENT_STACK) \
-	-mllvm -hwasan-uar-retag-to-zero=0 \
 	-mllvm -hwasan-generate-tags-with-calls=1 \
 	-mllvm -hwasan-instrument-with-calls=0 \
 	-mllvm -hwasan-use-short-granules=0 \
@@ -567,6 +570,10 @@ ifeq ($(SAN),1)
 CFLAGS_GEN += -fsanitize-ignorelist=$(OBJROOT)/san/kasan-blacklist-$(CURRENT_ARCH_CONFIG_LC)
 endif
 
+# Any extra flags that get passed at the command line during build.
+ifeq ($(CFLAGS_EXTRA),)
+CFLAGS_EXTRA =
+endif
 
 CFLAGS	= $(CFLAGS_GEN) \
 		  $($(addsuffix $(CURRENT_MACHINE_CONFIG),MACHINE_FLAGS_$(CURRENT_ARCH_CONFIG)_)) \
@@ -577,7 +584,8 @@ CFLAGS	= $(CFLAGS_GEN) \
 		  $(DEPLOYMENT_TARGET_FLAGS) \
 		  $(DEPLOYMENT_TARGET_DEFINES) \
 		  $(BOUND_CHECKS_DEFINES) \
-		  $(DEFINES)
+		  $(DEFINES) \
+		  $(CFLAGS_EXTRA)
 
 #
 # Default C++ flags
@@ -666,6 +674,9 @@ LDFLAGS_KERNEL_DEVELOPMENT =
 LDFLAGS_KERNEL_KASAN = $(LDFLAGS_KERNEL_DEVELOPMENT)
 LDFLAGS_KERNEL_DEBUG	=
 LDFLAGS_KERNEL_PROFILE	=
+
+# Tightbeam finds modules in the "tightbeam" subdirectory.
+TIGHTBEAM_MODULE_DIR       = $(SDKROOT)/usr/local/lib/kernel/tightbeam
 
 # KASLR static slide config:
 ifndef SLIDE
@@ -809,8 +820,7 @@ LDFLAGS_KERNEL_GENARM64 = \
 	-Wl,-sectcreate,"__PLK_LINKEDIT",__data,/dev/null
 
 LDFLAGS_KERNEL_SEGARM64_SEG_ORDER = \
-	__TEXT:__DATA_CONST:__LINKEDIT:__TEXT_EXEC:__TEXT_BOOT_EXEC:__KLD:__PPLTEXT:__PPLTRAMP:__PPLDATA_CONST:__LASTDATA_CONST:__LAST:__PPLDATA:__KLDDATA:__DATA:__HIBDATA:__BOOTDATA
-
+	__TEXT:__DATA_CONST:__DATA_SPTM:__LINKEDIT:__TEXT_EXEC:__TEXT_BOOT_EXEC:__KLD:__PPLTEXT:__PPLTRAMP:__PPLDATA_CONST:__LASTDATA_CONST:__LAST:__PPLDATA:__KLDDATA:__DATA:__HIBDATA:__BOOTDATA
 
 LDFLAGS_KERNEL_SEGARM64 = \
 	-Wl,-rename_section,__PPLDATA,__const,__PPLDATA_CONST,__const \
@@ -880,7 +890,7 @@ LDFILES_KERNEL_ONLY = $(TARGET)/all-kpi.exp $(TARGET)/all-alias.exp $(TARGET)/sy
 LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
 # Link opensource binary library
-ifneq ($(filter T6000 T8101 VMAPPLE T6000 T8101 VMAPPLE,$(CURRENT_MACHINE_CONFIG)),)
+ifneq ($(filter T6000 T6020 T8101 T8103 T8112 VMAPPLE T6000 T6020 T8101 T8103 T8112 VMAPPLE,$(CURRENT_MACHINE_CONFIG)),)
 	LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
 endif
 
@@ -971,21 +981,6 @@ LDFLAGS_KERNEL_LTO =
 LDFLAGS_NOSTRIP_FLAG =
 LDFLAGS_KERNEL_STRIP_LTO =
 CFLAGS_NOLTO_FLAG =
-endif
-
-ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
-# To build the json compilation database, kernel compile commands are
-# substituted with JSONCOMPILATIONDB, which appends compile commands to the
-# compilation database (compile_commands.json) rather than executing them.
-# Because kernel compilations do not actually occur in this mode, downstream
-# build steps (dSYM, static link, etc) that depend on *.o outputs must be bypassed.
-BUILD_DSYM	:= 0
-BUILD_STATIC_LINK := 0
-DO_CTFMERGE  	:= 0
-KCC		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CC)
-KC++		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CXX)
-S_KCC		= $(JSONCOMPILATIONDB) $(OBJPATH)/compile_commands.json $(PWD) $< $(CC)
-STRIP		= true
 endif
 
 #

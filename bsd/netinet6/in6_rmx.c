@@ -127,6 +127,8 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 
+#include <net/sockaddr_utils.h>
+
 extern int      tvtohz(struct timeval *);
 
 static int in6_rtqtimo_run;             /* in6_rtqtimo is scheduled to run */
@@ -157,11 +159,11 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
     struct radix_node *treenodes)
 {
 	struct rtentry *rt = (struct rtentry *)treenodes;
-	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)(void *)rt_key(rt);
+	struct sockaddr_in6 *sin6 = SIN6(rt_key(rt));
 	struct radix_node *ret;
 	char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
 	uint32_t flags = rt->rt_flags;
-	boolean_t verbose = (rt_verbose > 1);
+	boolean_t verbose = (rt_verbose > 0);
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
@@ -234,7 +236,7 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		 * Find out if it is because of an
 		 * ND6 entry and delete it if so.
 		 */
-		rt2 = rtalloc1_scoped_locked((struct sockaddr *)sin6, 0,
+		rt2 = rtalloc1_scoped_locked(SA(sin6), 0,
 		    RTF_CLONING | RTF_PRCLONING, sin6_get_ifscope(rt_key(rt)));
 		if (rt2 != NULL) {
 			char dbufc[MAX_IPv6_STR_LEN];
@@ -250,16 +252,16 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 			    rt2->rt_gateway->sa_family == AF_LINK) {
 				if (verbose) {
 					os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert "
-					    "route to %s:%s, flags=%b, due to "
+					    "route to %s:%s, flags=0x%x, due to "
 					    "existing ND6 route %s->%s "
-					    "flags=%b, attempting to delete\n",
+					    "flags=0x%x, attempting to delete\n",
 					    __func__, dbuf,
 					    (rt->rt_ifp != NULL) ?
 					    rt->rt_ifp->if_xname : "",
-					    rt->rt_flags, RTF_BITS,
+					    rt->rt_flags,
 					    dbufc, (rt2->rt_ifp != NULL) ?
 					    rt2->rt_ifp->if_xname : "",
-					    rt2->rt_flags, RTF_BITS);
+					    rt2->rt_flags);
 				}
 				/*
 				 * Safe to drop rt_lock and use rt_key,
@@ -292,7 +294,7 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		 *	net route entry, 3ffe:0501:: -> if0.
 		 *	This case should not raise an error.
 		 */
-		rt2 = rtalloc1_scoped_locked((struct sockaddr *)sin6, 0,
+		rt2 = rtalloc1_scoped_locked(SA(sin6), 0,
 		    RTF_CLONING | RTF_PRCLONING, sin6_get_ifscope(rt_key(rt)));
 		if (rt2 != NULL) {
 			RT_LOCK(rt2);
@@ -319,21 +321,21 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	if (ret != NULL) {
 		if (flags != rt->rt_flags) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
-			    "oflags=%b, flags=%b\n", __func__,
+			    "oflags=0x%x, flags=0x%x\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
-			    rt->rt_ifp->if_xname : "", flags, RTF_BITS,
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_ifp->if_xname : "", flags,
+			    rt->rt_flags);
 		} else {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 	} else {
 		os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert route to %s->%s->%s, "
-		    "flags=%b, already exists\n", __func__, dbuf, gbuf,
+		    "flags=0x%x, already exists\n", __func__, dbuf, gbuf,
 		    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-		    rt->rt_flags, RTF_BITS);
+		    rt->rt_flags);
 	}
 done:
 	return ret;
@@ -354,14 +356,14 @@ in6_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 		if (rt->rt_flags & RTF_DYNAMIC) {
 			in6dynroutes--;
 		}
-		if (rt_verbose > 1) {
+		if (rt_verbose) {
 			char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s deleted, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 		RT_UNLOCK(rt);
 	}
@@ -385,9 +387,9 @@ in6_validate(struct radix_node *rn)
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s validated, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 
 		/*
@@ -492,9 +494,9 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 
 		if (verbose) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to %s->%s->%s, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 		/*
 		 * Delete the route from the radix tree but since we are
@@ -519,10 +521,10 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 				    gbuf, sizeof(gbuf));
 			}
 			os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
-			    "%s->%s->%s, flags=%b, err=%d\n", __func__,
+			    "%s->%s->%s, flags=0x%x, err=%d\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 			    rt->rt_ifp->if_xname : "", rt->rt_flags,
-			    RTF_BITS, err);
+			    err);
 		}
 	} else {
 		uint64_t timenow;
@@ -533,9 +535,9 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 
 		if (verbose) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s invalidated, "
-			    "flags=%b, expire=T+%u\n", __func__, dbuf, gbuf,
+			    "flags=0x%x, expire=T+%u\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS, rt->rt_expire - timenow);
+			    rt->rt_flags, rt->rt_expire - timenow);
 		}
 
 		/* We have at least one entry; arm the timer if not already */
@@ -594,10 +596,10 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 
 			if (verbose) {
 				os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to "
-				    "%s->%s->%s, flags=%b, draining=%d\n",
+				    "%s->%s->%s, flags=0x%x, draining=%d\n",
 				    __func__, dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
-				    RTF_BITS, ap->draining);
+				    ap->draining);
 			}
 			RT_ADDREF_LOCKED(rt);   /* for us to free below */
 			/*
@@ -619,10 +621,10 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 					    gbuf, sizeof(gbuf));
 				}
 				os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
-				    "%s->%s->%s, flags=%b, err=%d\n", __func__,
+				    "%s->%s->%s, flags=0x%x, err=%d\n", __func__,
 				    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
-				    RTF_BITS, err);
+				    err);
 				RT_UNLOCK(rt);
 			} else {
 				ap->killed++;
@@ -635,12 +637,12 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 				rt_setexpire(rt, timenow + rtq_reallyold);
 				if (verbose) {
 					os_log_debug(OS_LOG_DEFAULT, "%s: route to "
-					    "%s->%s->%s, flags=%b, adjusted "
+					    "%s->%s->%s, flags=0x%x, adjusted "
 					    "expire=T+%u (was T+%u)\n",
 					    __func__, dbuf, gbuf,
 					    (rt->rt_ifp != NULL) ?
 					    rt->rt_ifp->if_xname : "",
-					    rt->rt_flags, RTF_BITS,
+					    rt->rt_flags,
 					    (rt->rt_expire - timenow), expire);
 				}
 			}
@@ -739,7 +741,7 @@ in6_sched_rtqtimo(struct timeval *atv)
 			tv.tv_sec = MAX(rtq_timeout / 10, 1);
 			atv = &tv;
 		}
-		if (rt_verbose > 1) {
+		if (rt_verbose > 2) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: timer scheduled in "
 			    "T+%llus.%lluu\n", __func__,
 			    (uint64_t)atv->tv_sec, (uint64_t)atv->tv_usec);

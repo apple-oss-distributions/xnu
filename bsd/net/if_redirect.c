@@ -1147,7 +1147,8 @@ redirect_clone_create(struct if_clone *ifc, uint32_t unit, void *param)
 		DTRACE_SKYWALK1(copyin__failed, int, error);
 		return error;
 	}
-	if (params.ircp_type != RD_CREATE_PARAMS_TYPE ||
+	if ((params.ircp_type != RD_CREATE_PARAMS_TYPE &&
+	    params.ircp_type != RD_CREATE_PARAMS_TYPE_NOATTACH) ||
 	    params.ircp_len != sizeof(params)) {
 		RDLOG_ERR("invalid type(0x%x) or len(0x%d)", params.ircp_type,
 		    params.ircp_len);
@@ -1183,6 +1184,9 @@ redirect_clone_create(struct if_clone *ifc, uint32_t unit, void *param)
 	rd_init.ver = IFNET_INIT_CURRENT_VERSION;
 	rd_init.len = sizeof(rd_init);
 	rd_init.flags |= (IFNET_INIT_SKYWALK_NATIVE | IFNET_INIT_IF_ADV);
+	if (params.ircp_type == RD_CREATE_PARAMS_TYPE_NOATTACH) {
+		rd_init.flags |= IFNET_INIT_NX_NOAUTO;
+	}
 	rd_init.uniqueid = rd->rd_name;
 	rd_init.uniqueid_len = (uint32_t)strlen(rd->rd_name);
 	rd_init.name = ifc->ifc_name;

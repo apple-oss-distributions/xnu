@@ -140,6 +140,7 @@ struct tcphdr tcp_savetcp;
 #endif /* MPTCP */
 
 #include <corecrypto/ccaes.h>
+#include <net/sockaddr_utils.h>
 
 #define DBG_LAYER_BEG           NETDBG_CODE(DBG_NETTCP, 0)
 #define DBG_LAYER_END           NETDBG_CODE(DBG_NETTCP, 2)
@@ -170,6 +171,7 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, blackhole,
     CTLFLAG_RW | CTLFLAG_LOCKED, &blackhole, 0,
     "Do not send RST when dropping refused connections");
 
+/* TODO - remove once uTCP stopped using it */
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, aggressive_rcvwnd_inc,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_aggressive_rcvwnd_inc, 1,
     "Be more aggressive about increasing the receive-window.");
@@ -255,6 +257,10 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, do_better_lr,
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_min_curr_rtt,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_use_min_curr_rtt, 1,
     "Use a min of k=4 RTT samples for congestion controllers");
+
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, awdl_rtobase,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_awdl_rtobase, 100,
+    "Initial RTO for AWDL interface");
 
 extern int tcp_acc_iaj_high;
 extern int tcp_acc_iaj_react_limit;
@@ -968,34 +974,6 @@ tcp6_input(struct mbuf **mp, int *offp, int proto)
 	return IPPROTO_DONE;
 }
 
-/* Depending on the usage of mbuf space in the system, this function
- * will return true or false. This is used to determine if a socket
- * buffer can take more memory from the system for auto-tuning or not.
- */
-u_int8_t
-tcp_cansbgrow(struct sockbuf *sb)
-{
-	/* Calculate the host level space limit in terms of _MSIZE buffers.
-	 * We can use a maximum of half of the available mbuf space for
-	 * socket buffers.
-	 */
-	u_int32_t mblim = (nmbclusters >> 1) * (MCLBYTES / _MSIZE);
-
-	/* Calculate per sb limit in terms of bytes. We optimize this limit
-	 * for upto 16 socket buffers.
-	 */
-
-	u_int32_t sbspacelim = ((nmbclusters >> 4) << MCLSHIFT);
-
-	if ((total_sbmb_cnt < mblim) &&
-	    (sb->sb_hiwat < sbspacelim)) {
-		return 1;
-	} else {
-		OSIncrementAtomic64(&sbmb_limreached);
-	}
-	return 0;
-}
-
 static void
 tcp_sbrcv_reserve(struct tcpcb *tp, struct sockbuf *sbrcv,
     u_int32_t newsize, u_int32_t idealsize, u_int32_t rcvbuf_max)
@@ -1043,7 +1021,6 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 	 */
 	if (tcp_do_autorcvbuf == 0 ||
 	    (sbrcv->sb_flags & SB_AUTOSIZE) == 0 ||
-	    tcp_cansbgrow(sbrcv) == 0 ||
 	    sbrcv->sb_hiwat >= tcp_autorcvbuf_max ||
 	    (tp->t_flagsext & TF_RECV_THROTTLE) ||
 	    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ||
@@ -1065,6 +1042,14 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 				int32_t rcvbuf_inc;
 				uint32_t idealsize;
 
+				/*
+				 * Increase receive-buffer aggressively if we
+				 * received more than 150% of what was received
+				 * in the previous round. Because, that means
+				 * the sender is in TCP slow-start and so
+				 * we need to give it more space to not be
+				 * limiting the sender with a small receive-window.
+				 */
 				if (tp->rfbuf_cnt > tp->rfbuf_space + (tp->rfbuf_space >> 1)) {
 					rcvbuf_inc = (tp->rfbuf_cnt << 2) - sbrcv->sb_hiwat;
 					idealsize = (tp->rfbuf_cnt << 2);
@@ -1100,55 +1085,18 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 		 * on the link.
 		 */
 		if (TSTMP_GEQ(to->to_tsecr, tp->rfbuf_ts)) {
-			if (tcp_aggressive_rcvwnd_inc) {
-				tp->rfbuf_cnt += pktlen;
-			}
+			tp->rfbuf_cnt += pktlen;
 
-			if ((tcp_aggressive_rcvwnd_inc == 0 &&
-			    tp->rfbuf_cnt + pktlen > (sbrcv->sb_hiwat -
-			    (sbrcv->sb_hiwat >> 1))) ||
-			    (tcp_aggressive_rcvwnd_inc &&
-			    tp->rfbuf_cnt > tp->rfbuf_space)) {
+			if (tp->rfbuf_cnt > tp->rfbuf_space) {
 				int32_t rcvbuf_inc;
 				uint32_t idealsize;
 
-				if (tcp_aggressive_rcvwnd_inc == 0) {
-					int32_t min_incr;
-
-					tp->rfbuf_cnt += pktlen;
-					/*
-					 * Increment the receive window by a
-					 * multiple of maximum sized segments.
-					 * This will prevent a connection from
-					 * sending smaller segments on wire if it
-					 * is limited by the receive window.
-					 *
-					 * Set the ideal size based on current
-					 * bandwidth measurements. We set the
-					 * ideal size on receive socket buffer to
-					 * be twice the bandwidth delay product.
-					 */
-					rcvbuf_inc = (tp->rfbuf_cnt << 1)
-					    - sbrcv->sb_hiwat;
-
-					/*
-					 * Make the increment equal to 8 segments
-					 * at least
-					 */
-					min_incr = tp->t_maxseg << tcp_autorcvbuf_inc_shift;
-					if (rcvbuf_inc < min_incr) {
-						rcvbuf_inc = min_incr;
-					}
-
-					idealsize = (tp->rfbuf_cnt << 1);
+				if (tp->rfbuf_cnt > tp->rfbuf_space + (tp->rfbuf_space >> 1)) {
+					rcvbuf_inc = (tp->rfbuf_cnt << 2) - sbrcv->sb_hiwat;
+					idealsize = (tp->rfbuf_cnt << 2);
 				} else {
-					if (tp->rfbuf_cnt > tp->rfbuf_space + (tp->rfbuf_space >> 1)) {
-						rcvbuf_inc = (tp->rfbuf_cnt << 2) - sbrcv->sb_hiwat;
-						idealsize = (tp->rfbuf_cnt << 2);
-					} else {
-						rcvbuf_inc = (tp->rfbuf_cnt << 1) - sbrcv->sb_hiwat;
-						idealsize = (tp->rfbuf_cnt << 1);
-					}
+					rcvbuf_inc = (tp->rfbuf_cnt << 1) - sbrcv->sb_hiwat;
+					idealsize = (tp->rfbuf_cnt << 1);
 				}
 
 				tp->rfbuf_space = tp->rfbuf_cnt;
@@ -2594,7 +2542,7 @@ findpcb:
 			}
 			if (so->so_filt || check_cfil) {
 				if (isipv6) {
-					struct sockaddr_in6     *sin6 = (struct sockaddr_in6*)&from;
+					struct sockaddr_in6     *sin6 = SIN6(&from);
 
 					sin6->sin6_len = sizeof(*sin6);
 					sin6->sin6_family = AF_INET6;
@@ -2603,7 +2551,7 @@ findpcb:
 					sin6->sin6_addr = ip6->ip6_src;
 					sin6->sin6_scope_id = 0;
 
-					sin6 = (struct sockaddr_in6*)&to2;
+					sin6 = SIN6(&to2);
 
 					sin6->sin6_len = sizeof(struct sockaddr_in6);
 					sin6->sin6_family = AF_INET6;
@@ -2612,14 +2560,14 @@ findpcb:
 					sin6->sin6_addr = ip6->ip6_dst;
 					sin6->sin6_scope_id = 0;
 				} else {
-					struct sockaddr_in *sin = (struct sockaddr_in*)&from;
+					struct sockaddr_in *sin = SIN(&from);
 
 					sin->sin_len = sizeof(*sin);
 					sin->sin_family = AF_INET;
 					sin->sin_port = th->th_sport;
 					sin->sin_addr = ip->ip_src;
 
-					sin = (struct sockaddr_in*)&to2;
+					sin = SIN(&to2);
 
 					sin->sin_len = sizeof(struct sockaddr_in);
 					sin->sin_family = AF_INET;
@@ -2629,7 +2577,7 @@ findpcb:
 			}
 
 			if (so->so_filt) {
-				so2 = sonewconn(so, 0, (struct sockaddr*)&from);
+				so2 = sonewconn(so, 0, SA(&from));
 			} else {
 				so2 = sonewconn(so, 0, NULL);
 			}
@@ -2637,7 +2585,7 @@ findpcb:
 				tcpstat.tcps_listendrop++;
 				if (tcp_dropdropablreq(so)) {
 					if (so->so_filt) {
-						so2 = sonewconn(so, 0, (struct sockaddr*)&from);
+						so2 = sonewconn(so, 0, SA(&from));
 					} else {
 						so2 = sonewconn(so, 0, NULL);
 					}
@@ -2809,8 +2757,7 @@ findpcb:
 
 #if CONTENT_FILTER
 			if (check_cfil) {
-				int error = cfil_sock_attach(so2, (struct sockaddr*)&to2, (struct sockaddr*)&from,
-				    CFS_CONNECTION_DIR_IN);
+				int error = cfil_sock_attach(so2, SA(&to2), SA(&from), CFS_CONNECTION_DIR_IN);
 				if (error != 0) {
 					TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, " cfil_sock_attach failed");
 					goto drop;
@@ -3426,8 +3373,7 @@ findpcb:
 				inp->inp_lifscope = in6_addr2scopeid(ifp, &inp->in6p_laddr);
 				in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
 			}
-			if (in6_pcbconnect(inp, (struct sockaddr *)sin6,
-			    kernel_proc)) {
+			if (in6_pcbconnect(inp, SA(sin6), kernel_proc)) {
 				inp->in6p_laddr = laddr6;
 				kfree_type(struct sockaddr_in6, sin6);
 				inp->inp_lifscope = lifscope;
@@ -3452,8 +3398,7 @@ findpcb:
 			if (inp->inp_laddr.s_addr == INADDR_ANY) {
 				inp->inp_laddr = ip->ip_dst;
 			}
-			if (in_pcbconnect(inp, (struct sockaddr *)sin, kernel_proc,
-			    IFSCOPE_NONE, NULL)) {
+			if (in_pcbconnect(inp, SA(sin), kernel_proc, IFSCOPE_NONE, NULL)) {
 				inp->inp_laddr = laddr;
 				kfree_type(struct sockaddr_in, sin);
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, " LISTEN in_pcbconnect failed");
@@ -6758,9 +6703,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 		mss = bufsize;
 	} else {
 		bufsize = (((bufsize + mss - 1) / mss) * mss);
-		if (bufsize > sb_max_adj) {
-			bufsize = (uint32_t)sb_max_adj;
-		}
 		(void)sbreserve(&so->so_snd, bufsize);
 	}
 	tp->t_maxseg = mss;
@@ -6780,9 +6722,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	bufsize = so->so_rcv.sb_hiwat;
 	if (bufsize > mss) {
 		bufsize = (((bufsize + mss - 1) / mss) * mss);
-		if (bufsize > sb_max_adj) {
-			bufsize = (uint32_t)sb_max_adj;
-		}
 		(void)sbreserve(&so->so_rcv, bufsize);
 	}
 

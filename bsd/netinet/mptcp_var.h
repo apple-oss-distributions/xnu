@@ -117,6 +117,7 @@ struct mptses {
 #define MPTE_CELL_PROHIBITED    0x100           /* Cell access has been prohibited based on signal quality */
 #define MPTE_FORCE_V0           0x200           /* Force MPTCP to use version 0 regradless of tcp cache */
 #define MPTE_FORCE_V1           0x400           /* Force MPTCP to use version 1 regradless of tcp cache */
+#define MPTE_ITFINFO_INIT       0x800           /* Set when the itfinfo has been initialized */
 	uint8_t mpte_svctype;                   /* MPTCP Service type */
 	uint8_t mpte_lost_aid;                  /* storing lost address id */
 	uint8_t mpte_addrid_last;               /* storing address id parm */

@@ -209,9 +209,7 @@ struct sockaddr_inifscope {
  */
 
 union sockaddr_in_4_6 {
-#if !__has_ptrcheck
 	struct sockaddr             sa;
-#endif
 	struct __sockaddr_header    sah;
 	struct sockaddr_in          sin;
 	struct sockaddr_in6         sin6;

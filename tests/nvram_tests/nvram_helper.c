@@ -182,7 +182,7 @@ ConvertValueToCFTypeRef(CFTypeID typeID, const char *value)
 /**
  * @brief Prints the variable. returns kIOReturnNotFound if not found
  */
-kern_return_t
+static kern_return_t
 GetVariable(const char *name, io_registry_entry_t optionsRef)
 {
 	CFStringRef nameRef = NULL;
@@ -235,7 +235,7 @@ GetVarType(const char *name, io_registry_entry_t optionsRef)
 /**
  * @brief Set the named variable with the value passed in
  */
-kern_return_t
+static kern_return_t
 SetVariable(const char *name, const char *value, io_registry_entry_t optionsRef)
 {
 	CFStringRef nameRef;
@@ -261,19 +261,25 @@ SetVariable(const char *name, const char *value, io_registry_entry_t optionsRef)
 		}
 		result = IORegistryEntrySetCFProperty(optionsRef, nameRef, valueRef);
 	} else {
-		// skip testing different CFTypeIDs if there is no entry and it's a delete operation.
-		if (value == NULL) {
-			return result;
-		}
-		// In the default case, try data, string, number, then boolean.
-		CFTypeID types[] = {CFDataGetTypeID(),
-			            CFStringGetTypeID(), CFNumberGetTypeID(), CFBooleanGetTypeID()};
-		for (unsigned long i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
-			valueRef = ConvertValueToCFTypeRef(types[i], value);
+		// if it's one of the delete/sync keys, it has to be an OSString since the "value" will be the variable name.
+		if (strncmp(name, kIONVRAMDeletePropertyKey, strlen(kIONVRAMDeletePropertyKey)) == 0 ||
+		    strncmp(name, kIONVRAMDeletePropertyKeyWRet, strlen(kIONVRAMDeletePropertyKeyWRet)) == 0 ||
+		    strncmp(name, kIONVRAMSyncNowPropertyKey, strlen(kIONVRAMSyncNowPropertyKey)) == 0) {
+			valueRef = ConvertValueToCFTypeRef(CFStringGetTypeID(), value);
 			if (valueRef != 0) {
 				result = IORegistryEntrySetCFProperty(optionsRef, nameRef, valueRef);
-				if (result == KERN_SUCCESS || result == kIOReturnNoMemory || result == kIOReturnNoSpace) {
-					break;
+			}
+		} else {
+			// In the default case, try data, string, number, then boolean.
+			CFTypeID types[] = {CFDataGetTypeID(),
+				            CFStringGetTypeID(), CFNumberGetTypeID(), CFBooleanGetTypeID()};
+			for (unsigned long i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+				valueRef = ConvertValueToCFTypeRef(types[i], value);
+				if (valueRef != 0) {
+					result = IORegistryEntrySetCFProperty(optionsRef, nameRef, valueRef);
+					if (result == KERN_SUCCESS || result == kIOReturnNoMemory || result == kIOReturnNoSpace) {
+						break;
+					}
 				}
 			}
 		}
@@ -287,7 +293,7 @@ SetVariable(const char *name, const char *value, io_registry_entry_t optionsRef)
 /**
  * @brief Delete named variable
  */
-kern_return_t
+static kern_return_t
 DeleteVariable(const char *name, io_registry_entry_t optionsRef)
 {
 	// Since delete always returns ok, read to make sure it is deleted.
@@ -297,6 +303,24 @@ DeleteVariable(const char *name, io_registry_entry_t optionsRef)
 		}
 	}
 	return KERN_FAILURE;
+}
+
+/**
+ * @brief Delete named variable with return code
+ */
+static kern_return_t
+DeleteVariableWRet(const char *name, io_registry_entry_t optionsRef)
+{
+	return SetVariable(kIONVRAMDeletePropertyKeyWRet, name, optionsRef);
+}
+
+/**
+ * @brief Sync to nvram store
+ */
+static kern_return_t
+SyncNVRAM(const char *name, io_registry_entry_t optionsRef)
+{
+	return SetVariable(name, name, optionsRef);
 }
 
 /**
@@ -330,11 +354,14 @@ GetOpString(nvram_op op)
 	case OP_SET:
 		return "write";
 	case OP_DEL:
+	case OP_DEL_RET:
 		return "delete";
 	case OP_RES:
 		return "reset";
 	case OP_OBL:
 		return "obliterate";
+	case OP_SYN:
+		return "sync";
 	default:
 		return "unknown";
 	}
@@ -350,6 +377,8 @@ GetRetString(kern_return_t ret)
 		return "failure";
 	case kIOReturnNotPrivileged:
 		return "not privileged";
+	case kIOReturnError:
+		return "general error";
 	default:
 		return "unknown";
 	}
@@ -377,8 +406,14 @@ TestVarOp(nvram_op op, const char *var, const char *val, kern_return_t exp_ret, 
 	case OP_DEL:
 		ret = DeleteVariable(var, optionsRef);
 		break;
+	case OP_DEL_RET:
+		ret = DeleteVariableWRet(var, optionsRef);
+		break;
 	case OP_RES:
 		ret = SetVariable("ResetNVRam", "1", optionsRef);
+		break;
+	case OP_SYN:
+		ret = SyncNVRAM(var, optionsRef);
 		break;
 	case OP_OBL:
 		// Obliterate NVram (system guid deletes all variables in system region, common guid deletes all non-system variables)
@@ -386,6 +421,12 @@ TestVarOp(nvram_op op, const char *var, const char *val, kern_return_t exp_ret, 
 		break;
 	default:
 		T_FAIL("TestVarOp: Invalid NVRAM operation %d\n", op);
+		return;
+	}
+
+	// Use kIOReturnInvalid as don't care about return value.
+	if (exp_ret == kIOReturnInvalid) {
+		T_PASS("Operation %s for variable %s returned %s(%#x) but doesn't have an expected return\n", GetOpString(op), var, GetRetString(ret), ret);
 		return;
 	}
 
@@ -397,5 +438,5 @@ TestVarOp(nvram_op op, const char *var, const char *val, kern_return_t exp_ret, 
 		}
 	}
 
-	T_ASSERT_EQ(ret, exp_ret, "Operation %s for variable %s returned %s(%#x) as expected\n", GetOpString(op), var, GetRetString(exp_ret), ret);
+	T_ASSERT_EQ(ret, exp_ret, "Operation %s for variable %s returned %s(%#x) as expected\n", GetOpString(op), var, GetRetString(ret), ret);
 }

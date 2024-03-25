@@ -2,11 +2,6 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, print_function
-
-from builtins import hex
-from builtins import range
-
 from xnu import *
 from utils import *
 from string import *
@@ -77,25 +72,27 @@ def GetKernChannelSummary(kc):
         u=GetUUIDSummary(kc.ch_info.cinfo_ch_id))
 
 @lldb_type_summary(['__kern_channel_ring *'])
-@header('{:<20s} {:<65s} {:>10s} | {:<5s} {:<5s} | {:<5s} {:<5s} | {:<5s} {:<5s}'.format(
-        'kernchannelring', 'name', 'flags', 'kh', 'kt', 'rh', 'rt', 'h', 't'))
+@header('  {:<20s} {:<16s} {:>10s} | {:<5s} {:<5s} | {:<5s} {:<5s}'.format(
+        'addr', 'name', 'flags', 'kh', 'kt', 'rh', 'rt'))
+#@header('  {:<20s} {:<16s} {:>10s} | {:<5s} {:<5s} | {:<5s} {:<5s} | {:<5s} {:<5s}'.format(
+#        'addr', 'name', 'flags', 'kh', 'kt', 'rh', 'rt', 'h', 't'))
 def GetKernChannelRingSummary(kring):
     """ Summarizes a __kern_channel_ring and related information
 
         returns: str - summary of kern_channel_ring
     """
 
-    format_string = '{o: <#020x} "{name: <63s}" {flags: >#010x} | {kh: <5d} {kt: <5d} | {rh: <5d} {rt: <5d} | {h: <5d} {t: <5d}'
+    format_string = '  {addr: <#020x} {name: <16s} {flags: >#010x} | {kh: <5d} {kt: <5d} | {rh: <5d} {rt: <5d}'# | {h: <5d} {t: <5d}'
     return format_string.format(
-        o=kring,
+        addr=kring,
         name=kring.ckr_name,
         flags=kring.ckr_flags,
         kh=kring.ckr_khead,
         kt=kring.ckr_ktail,
         rh=kring.ckr_rhead,
-        rt=kring.ckr_rtail,
-        h=kring.ckr_ring.ring_head,
-        t=kring.ckr_ring.ring_tail)
+        rt=kring.ckr_rtail)
+        #h=kring.ckr_ring.ring_head, ## user_ring might not be present in memory
+        #t=kring.ckr_ring.ring_tail)
 
 @lldb_command('showprocchannels')
 def ShowProcChannels(cmd_args=None):
@@ -182,7 +179,7 @@ def ShowBufCtl(cmd_args=None) :
     """ Show slabs and bufctls of a skmem cache
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0:
         print("Missing argument 0 (skmem_cache address).")
         return
 
@@ -274,7 +271,7 @@ def ShowSkmemRegion(cmd_args=None) :
     """ Show segments of a skmem region
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0 :
         print("Missing argument 0 (skmem_region address).")
         return
 
@@ -307,7 +304,7 @@ def ShowChannelUppHash(cmd_args=None) :
     """ Show channel user packet pool hash chain
     """
 
-    if (cmd_args == None or len(cmd_args) == 0) :
+    if cmd_args is None or len(cmd_args) == 0 :
         print("Missing argument 0 (skmem_cache address).")
         return
 
@@ -429,7 +426,7 @@ def GetNsTokenSummary(nt):
 
     ports = "%u" % nt.nt_port
 
-    ifp = "(struct ifnet *)" + hex(nt.nt_ifp)
+    ifp = "(ifnet *)" + hex(nt.nt_ifp)
 
     owner = netns_flag_strings[nt.nt_flags & NETNS_OWNER_MASK]
 
@@ -458,7 +455,7 @@ def ShowNetNSTokens(cmd_args=None):
         with no args, shows unbound tokens
     """
 
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
         print("No ifp argument provided, showing unbound tokens")
         tokenhead = kern.globals.netns_unbound_tokens
     elif len(cmd_args) > 0:
@@ -485,7 +482,7 @@ def IterateSTAILQ_HEAD(headval, element_name):
 def ShowNexusChannels(cmd_args=None):
     """ show nexus channels
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
         print("Missing argument 0 (kern_nexus address).")
         return
 
@@ -631,23 +628,25 @@ def ShowProcNECP(cmd_args=None):
 
 def NexusTypePtr(nx):
     if nx.nx_prov.nxprov_params.nxp_type == GetEnumValue("nexus_type_t::NEXUS_TYPE_FLOW_SWITCH"):
-        return "(struct nx_flowswitch *){:18s}".format(hex(nx.nx_arg))
+        type_str = "{:>18s}{:18s}".format("(nx_flowswitch *)", hex(nx.nx_arg))
     elif nx.nx_prov.nxprov_params.nxp_type == GetEnumValue("nexus_type_t::NEXUS_TYPE_NET_IF"):
-        return "     (struct nx_netif *){:18s}".format(hex(nx.nx_arg))
+        type_str = "{:>18s}{:18s}".format("(nx_netif *)", hex(nx.nx_arg))
     elif nx.nx_prov.nxprov_params.nxp_type == GetEnumValue("nexus_type_t::NEXUS_TYPE_USER_PIPE"):
-        return "     (struct nx_upipe *){:18s}".format(hex(nx.nx_arg))
+        type_str = "{:>18s}{:18s}".format("(nx_upipe *)", hex(nx.nx_arg))
     elif nx.nx_prov.nxprov_params.nxp_type == GetEnumValue("nexus_type_t::NEXUS_TYPE_KERNEL_PIPE"):
-        return "   (struct kern_nexus *){:18s}".format(hex(nx))
+        type_str = "{:>36s}".format("kpipe")
     else:
-        return "unknown"
+        type_str = "unknown"
+
+    return "(kern_nexus *){:18s} {:s}".format(hex(nx), type_str)
 
 def GetStructNexusSummary(nx):
     nexus_summary_string = ""
     nexus_summary_string += "{0:s} ".format(NexusTypePtr(nx))
-    nexus_summary_string += "{0:30s} ".format(str(Cast(addressof(nx.nx_prov.nxprov_params.nxp_name), 'char *')))
-    nexus_summary_string += "rings: tx {:2d} rx {:2d} slots: {:4d} rx {:4d} bufsize {:5d} metasize {:5d} mhints {:2d} ".format(
-            nx.nx_prov.nxprov_params.nxp_tx_rings,
+    nexus_summary_string += "{0:40s} ".format(str(Cast(addressof(nx.nx_prov.nxprov_params.nxp_name), 'char *')))
+    nexus_summary_string += "{:2d} {:2d} {:4d} {:4d} {:5d} {:5d} {:2d} ".format(
             nx.nx_prov.nxprov_params.nxp_rx_rings,
+            nx.nx_prov.nxprov_params.nxp_tx_rings,
             nx.nx_prov.nxprov_params.nxp_rx_slots,
             nx.nx_prov.nxprov_params.nxp_tx_slots,
             nx.nx_prov.nxprov_params.nxp_buf_size,
@@ -667,6 +666,9 @@ def ShowNexuses(cmd_args=None):
     for nx in IterateRBTreeEntry(nexuses, 'nx_link'):
         nexus_summaries.append(GetStructNexusSummary(nx))
     nexus_summaries.sort()
+    print("{:111s} rings   slots".format(""))
+    print("{:^32s} {:^36s} {:40s} rx tx   rx  tx   buf    md   mhints".
+          format("nexus", "instance", "name"))
     for nx_str in nexus_summaries:
         print("{0:s}".format(nx_str))
 
@@ -693,14 +695,15 @@ def FlowKeyStr(fk):
             unsigned(fk.fk_proto), ntohs(fk.fk_sport), ntohs(fk.fk_dport))
 
 def FlowEntryStr(fe):
-    return "(struct flow_entry*){} {} ".format(hex(fe), FlowKeyStr(fe.fe_key))
+    return "(flow_entry*){} {} {} {}".format(
+        hex(fe), GetUUIDSummary(fe.fe_uuid), FlowKeyStr(fe.fe_key), str(fe.fe_proc_name))
 
 def GetFlowEntryPid(fe):
     return fe.fe_pid
 
 def GetFlowswitchFlowEntries(fsw):
-    fm = kern.GetValueFromAddress(unsigned(fsw.fsw_flow_mgr), 'struct flow_mgr *')
-    cht = kern.GetValueFromAddress(unsigned(fm.fm_flow_table), 'struct cuckoo_hashtable *')
+    fm = kern.GetValueFromAddress(unsigned(fsw.fsw_flow_mgr), 'flow_mgr *')
+    cht = kern.GetValueFromAddress(unsigned(fm.fm_flow_table), 'cuckoo_hashtable *')
 
     flows = []
     def GetCuckooNodeAsFLowEntry(node, hashValue):
@@ -714,10 +717,10 @@ def IsNexusAFlowswitch(nx):
     return nx.nx_prov.nxprov_params.nxp_type == GetEnumValue('nexus_type_t::NEXUS_TYPE_FLOW_SWITCH')
 
 def GetNexusAsFlowswitch(nx):
-    return kern.GetValueFromAddress(unsigned(nx.nx_arg), 'struct nx_flowswitch *')
+    return kern.GetValueFromAddress(unsigned(nx.nx_arg), 'nx_flowswitch *')
 
 def FlowswitchStr(fsw):
-    return "{}:\n(struct nx_flowswitch *){}".format(str(fsw.fsw_ifp.if_xname), hex(fsw))
+    return "{}:\n(nx_flowswitch *){}".format(str(fsw.fsw_ifp.if_xname), hex(fsw))
 
 @lldb_command('showflowswitches')
 def ShowFlowswitches(cmd_args=None):
@@ -773,7 +776,7 @@ def ShowCuckooHashtable(cmd_args=None):
 
     cht = kern.GetValueFromAddress(cmd_args[0], 'struct cuckoo_hashtable *')
 
-    print("(struct cuckoo_hashtable *){:18s} capacity {:d} entries {:d}".format(hex(cht), cht._capacity, cht._n_entries))
+    print("(cuckoo_hashtable *){:18s} capacity {:d} entries {:d}".format(hex(cht), cht._capacity, cht._n_entries))
     def CuckooHashtablePrintNode(node, hashValue):
         print("  node {} hash 0x{:08x}".format(hex(node), int(hashValue)))
 
@@ -786,6 +789,6 @@ def ShowProtoNS(cmd_args=None):
 
     protons_tokens = kern.globals.protons_tokens
     for pt in IterateRBTreeEntry(protons_tokens, 'pt_link'):
-        print("(struct protons_token *){} protocol {:3} pid {:5} epid {:5} ref {:2} flags {}".format(
+        print("(protons_token *){} protocol {:3} pid {:5} epid {:5} ref {:2} flags {}".format(
                 hex(pt), int(pt.pt_protocol), int(pt.pt_pid), int(pt.pt_epid),
                 int(pt.pt_refcnt.ref_count), hex(pt.pt_flags)))

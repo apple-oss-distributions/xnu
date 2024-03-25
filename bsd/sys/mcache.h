@@ -288,13 +288,7 @@ __private_extern__ void mcache_audit_free_verify(mcache_audit_t *,
 __private_extern__ void mcache_audit_free_verify_set(mcache_audit_t *,
     void *, size_t, size_t);
 __private_extern__ char *mcache_dump_mca(char buf[DUMP_MCA_BUF_SIZE], mcache_audit_t *);
-__private_extern__ void mcache_audit_panic(mcache_audit_t *, void *, size_t,
-    int64_t, int64_t) __abortlike;
 
-extern int32_t total_sbmb_cnt;
-extern int32_t total_sbmb_cnt_floor;
-extern int32_t total_sbmb_cnt_peak;
-extern int64_t sbmb_limreached;
 extern mcache_t *mcache_audit_cache;
 
 #ifdef  __cplusplus

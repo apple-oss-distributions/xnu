@@ -153,10 +153,10 @@ __startup_func
 static void
 ktrace_startup(void)
 {
+#if CONFIG_CPU_COUNTERS
 	extern void kpc_init(void);
-#if KPC
 	kpc_init();
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 #if KPERF
 	kperf_init();
 #endif /* KPERF */

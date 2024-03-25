@@ -161,9 +161,9 @@ kernel_trap(_kernelrpc_mach_port_type_trap,-76,3)
 kernel_trap(_kernelrpc_mach_port_request_notification_trap,-77,7)
 
 #if defined(__LP64__)
-kernel_trap(_exclaves_ctl_trap,-88,5)
+kernel_trap(_exclaves_ctl_trap,-88,7)
 #else	/* __LP64__ */
-kernel_trap(_exclaves_ctl_trap,-88,8)
+kernel_trap(_exclaves_ctl_trap,-88,12)
 #endif	/* __LP64__ */
 
 kernel_trap(mach_timebase_info_trap,-89,1)

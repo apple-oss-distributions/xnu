@@ -131,6 +131,10 @@
 #define z_debug_assert(expr)  (void)(expr)
 #endif
 
+#if CONFIG_PROB_GZALLOC && CONFIG_SPTM
+#error This is not a supported configuration
+#endif
+
 /* Returns pid of the task with the largest number of VM map entries.  */
 extern pid_t find_largest_process_vm_map_entries(void);
 
@@ -430,15 +434,9 @@ __startup_data
 static struct zone_page_metadata
     zone_early_meta_array_startup[ZONE_EARLY_META_INLINE_COUNT];
 
-#if __x86_64__
-/*
- * On Intel we can't "free" pmap stolen pages,
- * so instead we use a static array in __KLDDATA
- * which gets reclaimed at lockdown time.
- */
-__startup_data __attribute__((aligned(PAGE_SIZE)))
-static uint8_t zone_early_pages_to_cram[PAGE_SIZE * 16];
-#endif
+
+__startup_data __attribute__((aligned(PAGE_MAX_SIZE)))
+static uint8_t zone_early_pages_to_cram[PAGE_MAX_SIZE * 16];
 
 /*
  *	The zone_locks_grp allows for collecting lock statistics.
@@ -1471,6 +1469,32 @@ zone_id_require(zone_id_t zid, vm_size_t esize, void *addr)
 		return;
 	}
 	zone_id_require_panic(zid, addr);
+}
+
+void
+zone_id_require_aligned(zone_id_t zid, void *addr)
+{
+	zone_t zone = zone_by_id(zid);
+	vm_offset_t elem, offs;
+
+	elem = (vm_offset_t)addr;
+	offs = (elem & PAGE_MASK) - zone_elem_inner_offs(zone);
+
+	if (from_zone_map(addr, 1)) {
+		struct zone_page_metadata *meta;
+
+		meta = zone_meta_from_addr(elem);
+		if (meta->zm_chunk_len == ZM_SECONDARY_PAGE) {
+			offs += ptoa(meta->zm_page_index);
+		}
+
+		if (zid == meta->zm_index &&
+		    Z_FAST_ALIGNED(offs, zone->z_align_magic)) {
+			return;
+		}
+	}
+
+	zone_invalid_element_panic(zone, elem);
 }
 
 bool
@@ -3401,11 +3425,9 @@ zleak_should_enable_for_zone(zone_t z)
 	if (z->z_btlog) {
 		return false;
 	}
-#if KASAN_FAKESTACK
-	if (z->z_kasan_fakestacks) {
+	if (z->z_exhausts) {
 		return false;
 	}
-#endif
 	if (zone_exhaustible(z)) {
 		return z->z_wired_cur * 8 >= z->z_wired_max * 7;
 	}
@@ -3759,6 +3781,7 @@ zfree_log(zone_t zone, vm_offset_t addr, uint32_t count, void *fp)
  */
 
 static void zone_reclaim_elements(zone_t z, uint16_t n, vm_offset_t *elems);
+static void zone_depot_trim(zone_t z, uint32_t target, struct zone_depot *zd);
 static thread_call_data_t zone_expand_callout;
 
 __attribute__((overloadable))
@@ -3782,6 +3805,9 @@ zone_kma_flags(zone_t z, zone_security_flags_t zsflags, zalloc_flags_t flags)
 
 	if (zsflags.z_noencrypt) {
 		kmaflags |= KMA_NOENCRYPT;
+	}
+	if (zsflags.z_submap_idx == Z_SUBMAP_IDX_DATA) {
+		kmaflags |= KMA_DATA;
 	}
 	if (flags & Z_NOPAGEWAIT) {
 		kmaflags |= KMA_NOPAGEWAIT;
@@ -4620,24 +4646,26 @@ __attribute__((noinline))
 static bool
 zalloc_expand_drain_exhausted_caches_locked(zone_t z)
 {
+	struct zone_depot zd;
 	zone_magazine_t mag = NULL;
 
-	z->z_depot_size = 0;
-	z->z_depot_cleanup = true;
+	if (z->z_depot_size) {
+		z->z_depot_size = 0;
+		z->z_depot_cleanup = true;
 
-	zpercpu_foreach(zc, z->z_pcpu_cache) {
-		uint32_t n;
+		zone_depot_init(&zd);
+		zone_depot_trim(z, 0, &zd);
 
-		assert(zone_cache_smr(zc) == NULL);
-		zone_depot_lock_nopreempt(zc);
-		n = zc->zc_depot.zd_full;
-		if (n) {
-			zone_recirc_lock_nopreempt(z);
+		zone_recirc_lock_nopreempt(z);
+		if (zd.zd_full) {
 			zone_depot_move_full(&z->z_recirc,
-			    &zc->zc_depot, n, NULL);
-			zone_recirc_unlock_nopreempt(z);
+			    &zd, zd.zd_full, NULL);
 		}
-		zone_depot_unlock_nopreempt(zc);
+		if (zd.zd_empty) {
+			zone_depot_move_empty(&z->z_recirc,
+			    &zd, zd.zd_empty, NULL);
+		}
+		zone_recirc_unlock_nopreempt(z);
 	}
 
 	zone_recirc_lock_nopreempt(z);
@@ -4671,17 +4699,65 @@ zalloc_needs_refill(zone_t zone, zalloc_flags_t flags)
 	return (flags & Z_NOFAIL) != 0;
 }
 
+static void
+zone_wakeup_exhausted_waiters(zone_t z)
+{
+	z->z_exhausted_wait = false;
+	EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z, false);
+	thread_wakeup(&z->z_expander);
+}
+
 __attribute__((noinline))
 static void
 __ZONE_EXHAUSTED_AND_WAITING_HARD__(zone_t z)
 {
-	z->z_exhausted_wait = true;
-	EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z);
+	if (z->z_pcpu_cache && z->z_depot_size &&
+	    zalloc_expand_drain_exhausted_caches_locked(z)) {
+		return;
+	}
+
+	if (!z->z_exhausted_wait) {
+		zone_recirc_lock_nopreempt(z);
+		z->z_exhausted_wait = true;
+		zone_recirc_unlock_nopreempt(z);
+		EVENT_INVOKE(ZONE_EXHAUSTED, zone_index(z), z, true);
+	}
+
 	assert_wait(&z->z_expander, TH_UNINT);
 	zone_unlock(z);
 	thread_block(THREAD_CONTINUE_NULL);
 	zone_lock(z);
-	z->z_exhausted_wait = false;
+}
+
+static pmap_mapping_type_t
+zone_mapping_type(zone_t z)
+{
+	zone_security_flags_t zsflags = zone_security_config(z);
+
+	/*
+	 * If the zone has z_submap_idx is not Z_SUBMAP_IDX_DATA or
+	 * Z_SUBMAP_IDX_READ_ONLY, mark the corresponding mapping
+	 * type as PMAP_MAPPING_TYPE_RESTRICTED.
+	 */
+	switch (zsflags.z_submap_idx) {
+	case Z_SUBMAP_IDX_DATA:
+		return PMAP_MAPPING_TYPE_DEFAULT;
+	case Z_SUBMAP_IDX_READ_ONLY:
+		return PMAP_MAPPING_TYPE_ROZONE;
+	default:
+		return PMAP_MAPPING_TYPE_RESTRICTED;
+	}
+}
+
+static vm_prot_t
+zone_page_prot(zone_security_flags_t zsflags)
+{
+	switch (zsflags.z_submap_idx) {
+	case Z_SUBMAP_IDX_READ_ONLY:
+		return VM_PROT_READ;
+	default:
+		return VM_PROT_READ | VM_PROT_WRITE;
+	}
 }
 
 static void
@@ -4862,11 +4938,11 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
 		vm_object_t object;
 		object = kernel_object_default;
 		vm_object_lock(object);
+
 		kernel_memory_populate_object_and_unlock(object,
 		    addr + ptoa(cur_pages), addr + ptoa(cur_pages), ptoa(pages), page_list,
 		    zone_kma_flags(z, zsflags, flags), VM_KERN_MEMORY_ZONE,
-		    (zsflags.z_submap_idx == Z_SUBMAP_IDX_READ_ONLY)
-		    ? VM_PROT_READ : VM_PROT_READ | VM_PROT_WRITE);
+		    zone_page_prot(zsflags), zone_mapping_type(z));
 
 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
 
@@ -5207,7 +5283,16 @@ again:
 	}
 
 #if OS_ATOMIC_HAS_LLSC
+	uint32_t castries = 20;
 	do {
+		if (__improbable(castries-- == 0)) {
+			/*
+			 * rdar://115922110 On many many cores devices,
+			 * this can fail for a very long time.
+			 */
+			goto again;
+		}
+
 		m = os_atomic_load_exclusive(&pgz_slot_head, dependency);
 		if (__improbable(m->zm_pgz_slot_next == NULL)) {
 			/*
@@ -5286,12 +5371,12 @@ pgz_protect(zone_t zone, vm_offset_t addr, void *fp)
 	 * Try to double-map the page (may fail if Z_NOWAIT).
 	 * we will always find a PA because pgz_init() pre-expanded the pmap.
 	 */
-	vm_offset_t  new_addr = pgz_addr(slot);
 	pmap_paddr_t pa = kvtophys(trunc_page(addr));
-
+	vm_offset_t  new_addr = pgz_addr(slot);
 	kr = pmap_enter_options_addr(kernel_pmap, new_addr, pa,
 	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE,
-	    get_preemption_level() ? PMAP_OPTIONS_NOWAIT : 0, NULL);
+	    get_preemption_level() ? (PMAP_OPTIONS_NOWAIT | PMAP_OPTIONS_NOPREEMPT) : 0,
+	    NULL, PMAP_MAPPING_TYPE_INFER);
 
 	if (__improbable(kr != KERN_SUCCESS)) {
 		pgz_slot_free(slot);
@@ -5337,8 +5422,9 @@ pgz_unprotect(vm_offset_t addr, void *fp)
 		goto double_free;
 	}
 
-	pmap_remove(kernel_pmap, vm_memtag_canonicalize_address(trunc_page(addr)),
-	    vm_memtag_canonicalize_address(trunc_page(addr) + PAGE_SIZE));
+	pmap_remove_options(kernel_pmap, vm_memtag_canonicalize_address(trunc_page(addr)),
+	    vm_memtag_canonicalize_address(trunc_page(addr) + PAGE_SIZE),
+	    PMAP_OPTIONS_REMOVE | PMAP_OPTIONS_NOPREEMPT);
 
 	pgz_backtrace(pgz_bt(slot, true), fp);
 
@@ -5534,7 +5620,7 @@ pgz_init(void)
 	for (uint32_t slot = 0; slot < pgz_slots; slot++) {
 		(void)pmap_enter_options_addr(kernel_pmap, pgz_addr(slot), 0,
 		    VM_PROT_NONE, VM_PROT_NONE, 0, FALSE,
-		    PMAP_OPTIONS_NOENTER, NULL);
+		    PMAP_OPTIONS_NOENTER, NULL, PMAP_MAPPING_TYPE_INFER);
 	}
 
 	/* do this last as this will enable pgz */
@@ -5693,8 +5779,7 @@ zfree_drop(zone_t zone, vm_offset_t addr)
 	}
 
 	if (__improbable(zone->z_exhausted_wait)) {
-		zone->z_exhausted_wait = false;
-		thread_wakeup(&zone->z_expander);
+		zone_wakeup_exhausted_waiters(zone);
 	}
 }
 
@@ -5760,6 +5845,7 @@ zfree_cached_recirculate(zone_t zone, zone_cache_t cache)
 {
 	zone_magazine_t mag = NULL, tmp = NULL;
 	smr_t smr = zone_cache_smr(cache);
+	bool wakeup_exhausted = false;
 
 	if (zone->z_recirc.zd_empty == 0) {
 		mag = zone_magazine_alloc(Z_NOWAIT);
@@ -5781,9 +5867,19 @@ zfree_cached_recirculate(zone_t zone, zone_cache_t cache)
 		} else {
 			zone_depot_insert_tail_full(&zone->z_recirc, tmp);
 		}
+
+		wakeup_exhausted = zone->z_exhausted_wait;
 	}
 
 	zone_recirc_unlock_nopreempt(zone);
+
+	if (__improbable(wakeup_exhausted)) {
+		zone_lock_nopreempt(zone);
+		if (zone->z_exhausted_wait) {
+			zone_wakeup_exhausted_waiters(zone);
+		}
+		zone_unlock_nopreempt(zone);
+	}
 
 	return mag ? cache : NULL;
 }
@@ -5813,6 +5909,7 @@ zfree_cached_trim(zone_t zone, zone_cache_t cache)
 			tmp = zone_magazine_replace(cache, mag, true);
 			zone_depot_insert_tail_full(&cache->zc_depot, tmp);
 		}
+
 		zone_depot_unlock_nopreempt(cache);
 
 		return mag ? cache : NULL;
@@ -5933,7 +6030,7 @@ __attribute__((always_inline))
 void *
 zcache_mark_invalid(zone_t zone, void *elem)
 {
-	vm_size_t esize = zone_elem_inner_offs(zone);
+	vm_size_t esize = zone_elem_inner_size(zone);
 
 	ZFREE_LOG(zone, (vm_offset_t)elem, 1);
 	return (void *)__zcache_mark_invalid(zone, (vm_offset_t)elem, ZFREE_PACK_SIZE(esize, esize));
@@ -6253,15 +6350,19 @@ kfree_type_impl_internal(
 {
 	zone_t zsig = kt_view->kt_zsig;
 	zone_t z = kt_view->kt_zv.zv_zone;
-	struct zone_page_metadata *meta = zone_meta_from_addr((vm_offset_t) ptr);
-	zone_id_t zidx_meta = meta->zm_index;
-	zone_security_flags_t zsflags_meta = zone_security_array[zidx_meta];
+	struct zone_page_metadata *meta;
+	zone_id_t zidx_meta;
+	zone_security_flags_t zsflags_meta;
 	zone_security_flags_t zsflags_z = zone_security_config(z);
 	zone_security_flags_t zsflags_zsig;
 
 	if (NULL == ptr) {
 		return;
 	}
+
+	meta = zone_meta_from_addr((vm_offset_t) ptr);
+	zidx_meta = meta->zm_index;
+	zsflags_meta = zone_security_array[zidx_meta];
 
 	if ((zsflags_z.z_kheap_id == KHEAP_ID_DATA_BUFFERS) ||
 	    zone_has_index(z, zidx_meta)) {
@@ -6859,6 +6960,51 @@ zcache_alloc_fail(zone_id_t zid, zstack_t stack, uint32_t count)
 	return stack;
 }
 
+#define ZCACHE_ALLOC_RETRY  ((void *)-1)
+
+__attribute__((noinline))
+static void *
+zcache_alloc_one(
+	zone_id_t               zid,
+	zalloc_flags_t          flags,
+	zone_cache_ops_t        ops)
+{
+	zone_t zone = zone_by_id(zid);
+	void *o;
+
+	/*
+	 * First try to allocate in rudimentary zones without ever going into
+	 * __ZONE_EXHAUSTED_AND_WAITING_HARD__() by clearing Z_NOFAIL.
+	 */
+	enable_preemption();
+	o = ops->zc_op_alloc(zid, flags & ~Z_NOFAIL);
+	if (__probable(o)) {
+		os_atomic_inc(&zone->z_elems_avail, relaxed);
+	} else if (__probable(flags & Z_NOFAIL)) {
+		zone_cache_t cache;
+		vm_offset_t index;
+		int cpu;
+
+		zone_lock(zone);
+
+		cpu   = cpu_number();
+		cache = zalloc_cached_get_pcpu_cache(zone, ops, cpu, flags);
+		o     = ZCACHE_ALLOC_RETRY;
+		if (__probable(cache)) {
+			index = --cache->zc_alloc_cur;
+			o     = (void *)cache->zc_alloc_elems[index];
+			cache->zc_alloc_elems[index] = 0;
+			o = ops->zc_op_mark_valid(zid, o);
+		} else if (zone->z_elems_free == 0) {
+			__ZONE_EXHAUSTED_AND_WAITING_HARD__(zone);
+		}
+
+		zone_unlock(zone);
+	}
+
+	return o;
+}
+
 __attribute__((always_inline))
 static zstack_t
 zcache_alloc_n_ext(
@@ -6888,18 +7034,16 @@ zcache_alloc_n_ext(
 			void *o;
 
 			if (ops) {
-				enable_preemption();
-				o = ops->zc_op_alloc(zid, flags);
+				o = zcache_alloc_one(zid, flags, ops);
 			} else {
 				o = zalloc_item(zone, zone->z_stats, flags).addr;
 			}
 			if (__improbable(o == NULL)) {
 				return zcache_alloc_fail(zid, stack, count);
 			}
-			if (ops) {
-				os_atomic_inc(&zone->z_elems_avail, relaxed);
+			if (ops == NULL || o != ZCACHE_ALLOC_RETRY) {
+				zstack_push(&stack, o);
 			}
-			zstack_push(&stack, o);
 		}
 
 		if (stack.z_count == count) {
@@ -7977,8 +8121,10 @@ compute_zone_working_set_size(__unused void *param)
 			uint16_t size = z->z_depot_size;
 
 			if (zone_exhausted(z)) {
-				z->z_depot_size = 0;
-				z->z_depot_cleanup = true;
+				if (z->z_depot_size) {
+					z->z_depot_size = 0;
+					z->z_depot_cleanup = true;
+				}
 			} else if (size < z->z_depot_limit && cur > zc_grow_level()) {
 				/*
 				 * lose history on purpose now
@@ -9039,10 +9185,11 @@ zone_init_defaults(zone_id_t zid)
 }
 
 void
-zone_set_exhaustible(zone_t zone, vm_size_t nelems)
+zone_set_exhaustible(zone_t zone, vm_size_t nelems, bool exhausts_by_design)
 {
 	zone_lock(zone);
 	zone->z_wired_max = zone_alloc_pages_for_nelems(zone, nelems);
+	zone->z_exhausts = exhausts_by_design;
 	zone_unlock(zone);
 }
 
@@ -10070,26 +10217,10 @@ zone_metadata_init(void)
 	 *         (including rewriting their content).
 	 */
 
-#if __x86_64__
 	kernel_memory_populate(reloc_base, early_sz,
-	    KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL,
+	    KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL | KMA_TAG,
 	    VM_KERN_MEMORY_OSFMK);
 	__nosan_memcpy((void *)reloc_base, (void *)early_r.min_address, early_sz);
-#else
-	for (vm_address_t addr = early_r.min_address;
-	    addr < early_r.max_address; addr += PAGE_SIZE) {
-		pmap_paddr_t pa = kvtophys(trunc_page(addr));
-		__assert_only kern_return_t kr;
-
-		unsigned int pmap_flags = 0;
-
-
-		kr = pmap_enter_options_addr(kernel_pmap, addr + reloc_delta,
-		    pa, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, pmap_flags, TRUE,
-		    0, NULL);
-		assert(kr == KERN_SUCCESS);
-	}
-#endif
 
 #if KASAN
 	kasan_notify_address(reloc_base, early_sz);
@@ -10126,10 +10257,6 @@ zone_metadata_init(void)
 			vm_map_relocate_early_elem(zid, addr, reloc_delta);
 		}
 	}
-
-#if !__x86_64__
-	pmap_remove(kernel_pmap, early_r.min_address, early_r.max_address);
-#endif
 }
 
 __startup_data
@@ -10395,12 +10522,8 @@ zone_early_mem_init(vm_size_t size)
 	 * the VM submap (even for architectures when those zones
 	 * do not live there).
 	 */
-#if __x86_64__
 	assert3u(size, <=, sizeof(zone_early_pages_to_cram));
 	mem = (vm_offset_t)zone_early_pages_to_cram;
-#else
-	mem = (vm_offset_t)pmap_steal_zone_memory(size, PAGE_SIZE);
-#endif
 
 	zone_info.zi_meta_base = zone_early_meta_array_startup -
 	    zone_pva_from_addr(mem).packed_address;

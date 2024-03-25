@@ -271,7 +271,12 @@ struct bpf_comp_stats {
 #define BIOCGHDRCOMPON  _IOR('B', 137, int)
 #define BIOCGDIRECTION  _IOR('B', 138, int)
 #define BIOCSDIRECTION  _IOW('B', 139, int)
+#define BIOCSWRITEMAX  _IOW('B', 140, u_int)
+#define BIOCGWRITEMAX  _IOR('B', 141, u_int)
+#define BIOCGBATCHWRITE  _IOR('B', 142, int)
+#define BIOCSBATCHWRITE  _IOW('B', 143, int)
 #endif /* PRIVATE */
+
 /*
  * Structure prepended to each packet.
  */

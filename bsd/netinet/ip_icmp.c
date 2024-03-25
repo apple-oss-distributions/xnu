@@ -106,6 +106,7 @@
 #include <net/necp.h>
 #endif /* NECP */
 
+#include <net/sockaddr_utils.h>
 
 /*
  * ICMP routines: error generation, receive packet processing, and
@@ -501,13 +502,13 @@ icmp_input(struct mbuf *m, int hlen)
 	}
 
 	/* Initialize */
-	bzero(&icmpsrc, sizeof(icmpsrc));
+	SOCKADDR_ZERO(&icmpsrc, sizeof(icmpsrc));
 	icmpsrc.sin_len = sizeof(struct sockaddr_in);
 	icmpsrc.sin_family = AF_INET;
-	bzero(&icmpdst, sizeof(icmpdst));
+	SOCKADDR_ZERO(&icmpdst, sizeof(icmpdst));
 	icmpdst.sin_len = sizeof(struct sockaddr_in);
 	icmpdst.sin_family = AF_INET;
-	bzero(&icmpgw, sizeof(icmpgw));
+	SOCKADDR_ZERO(&icmpgw, sizeof(icmpgw));
 	icmpgw.sin_len = sizeof(struct sockaddr_in);
 	icmpgw.sin_family = AF_INET;
 
@@ -621,7 +622,7 @@ deliver:
 
 			lck_mtx_unlock(inet_domain_mutex);
 
-			(*ctlfunc)(code, (struct sockaddr *)&icmpsrc,
+			(*ctlfunc)(code, SA(&icmpsrc),
 			    (void *)&ctl_param, m->m_pkthdr.rcvif);
 
 			lck_mtx_lock(inet_domain_mutex);
@@ -706,14 +707,14 @@ badcode:
 			icmpdst.sin_addr = ip->ip_dst;
 		}
 		ia = (struct in_ifaddr *)ifaof_ifpforaddr(
-			(struct sockaddr *)&icmpdst, m->m_pkthdr.rcvif);
+			SA(&icmpdst), m->m_pkthdr.rcvif);
 		if (ia == 0) {
 			break;
 		}
 		IFA_LOCK(&ia->ia_ifa);
 		if (ia->ia_ifp == 0) {
 			IFA_UNLOCK(&ia->ia_ifa);
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 			ia = NULL;
 			break;
 		}
@@ -727,7 +728,7 @@ badcode:
 			}
 		}
 		IFA_UNLOCK(&ia->ia_ifa);
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 reflect:
 		ip->ip_len += hlen;     /* since ip_input deducts this */
 		icmpstat.icps_reflect++;
@@ -775,12 +776,12 @@ reflect:
 			    dst_str, gw_str, src_str);
 		}
 		icmpsrc.sin_addr = icp->icmp_ip.ip_dst;
-		rtredirect(m->m_pkthdr.rcvif, (struct sockaddr *)&icmpsrc,
-		    (struct sockaddr *)&icmpdst, NULL, RTF_GATEWAY | RTF_HOST,
-		    (struct sockaddr *)&icmpgw, NULL);
-		pfctlinput(PRC_REDIRECT_HOST, (struct sockaddr *)&icmpsrc);
+		rtredirect(m->m_pkthdr.rcvif, SA(&icmpsrc),
+		    SA(&icmpdst), NULL, RTF_GATEWAY | RTF_HOST,
+		    SA(&icmpgw), NULL);
+		pfctlinput(PRC_REDIRECT_HOST, SA(&icmpsrc));
 #if IPSEC
-		key_sa_routechange((struct sockaddr *)&icmpsrc);
+		key_sa_routechange(SA(&icmpsrc));
 #endif
 		break;
 
@@ -837,7 +838,7 @@ icmp_reflect(struct mbuf *m)
 	TAILQ_FOREACH(ia, INADDR_HASH(t.s_addr), ia_hash) {
 		IFA_LOCK(&ia->ia_ifa);
 		if (t.s_addr == IA_SIN(ia)->sin_addr.s_addr) {
-			IFA_ADDREF_LOCKED(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
 			goto match;
 		}
@@ -852,7 +853,7 @@ icmp_reflect(struct mbuf *m)
 		IFA_LOCK(&ia->ia_ifa);
 		if (ia->ia_ifp && (ia->ia_ifp->if_flags & IFF_BROADCAST) &&
 		    t.s_addr == satosin(&ia->ia_broadaddr)->sin_addr.s_addr) {
-			IFA_ADDREF_LOCKED(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
 			break;
 		}
@@ -862,13 +863,13 @@ match:
 	lck_rw_done(&in_ifaddr_rwlock);
 
 	/* Initialize */
-	bzero(&icmpdst, sizeof(icmpdst));
+	SOCKADDR_ZERO(&icmpdst, sizeof(icmpdst));
 	icmpdst.sin_len = sizeof(struct sockaddr_in);
 	icmpdst.sin_family = AF_INET;
 	icmpdst.sin_addr = t;
 	if ((ia == (struct in_ifaddr *)0) && m->m_pkthdr.rcvif) {
 		ia = (struct in_ifaddr *)ifaof_ifpforaddr(
-			(struct sockaddr *)&icmpdst, m->m_pkthdr.rcvif);
+			SA(&icmpdst), m->m_pkthdr.rcvif);
 	}
 	/*
 	 * The following happens if the packet was not addressed to us,
@@ -882,7 +883,7 @@ match:
 			m_freem(m);
 			goto done;
 		}
-		IFA_ADDREF(&ia->ia_ifa);
+		ifa_addref(&ia->ia_ifa);
 		lck_rw_done(&in_ifaddr_rwlock);
 	}
 	IFA_LOCK_SPIN(&ia->ia_ifa);
@@ -890,7 +891,7 @@ match:
 	IFA_UNLOCK(&ia->ia_ifa);
 	ip->ip_src = t;
 	ip->ip_ttl = (u_char)ip_defttl;
-	IFA_REMREF(&ia->ia_ifa);
+	ifa_remref(&ia->ia_ifa);
 	ia = NULL;
 
 	if (optlen > 0) {

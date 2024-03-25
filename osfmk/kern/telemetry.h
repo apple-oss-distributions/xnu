@@ -61,41 +61,49 @@ __options_decl(kernel_brk_options_t, uint32_t, {
 
 #define KERNEL_BRK_TELEMETRY_OPTIONS 0xf0
 
+/* these show up in telemetry, do not renumber */
 __enum_decl(kernel_brk_type_t, uint32_t, {
-	KERNEL_BRK_TYPE_KASAN,             /* <Unrecoverable> KASan violation traps */
-	KERNEL_BRK_TYPE_PTRAUTH,           /* <Unrecoverable> Pointer Auth failure traps */
-	KERNEL_BRK_TYPE_CLANG,             /* <Unrecoverable> Clang sanitizer traps */
-	KERNEL_BRK_TYPE_LIBCXX,            /* <Unrecoverable> Libc++ abort trap*/
-	KERNEL_BRK_TYPE_TELEMETRY,         /* <Rerecoverable> Soft telemetry collection traps */
+	KERNEL_BRK_TYPE_KASAN          = 0,     /* <unrecoverable> KASan violation traps */
+	KERNEL_BRK_TYPE_PTRAUTH        = 1,     /* <unrecoverable> Pointer Auth failure traps */
+	KERNEL_BRK_TYPE_CLANG          = 2,     /* <unrecoverable> Clang sanitizer traps */
+	KERNEL_BRK_TYPE_LIBCXX         = 3,     /* <unrecoverable> Libc++ abort trap*/
+	KERNEL_BRK_TYPE_TELEMETRY      = 4,     /* <  recoverable> Soft telemetry collection traps */
+	KERNEL_BRK_TYPE_XNU            = 5,     /* <??recoverable> XNU defined traps */
 
-	KERNEL_BRK_TYPE_TEST,              /* Development only */
+	KERNEL_BRK_TYPE_TEST           = ~0u,   /* Development only */
 });
 
 enum kernel_brk_trap_comment {
 	/* CLANG (reserved)       : [0x0000 ~ 0x00FF] <Intel only> */
-	CLANG_TRAPS_X86_START          = 0x0000,
-	CLANG_BOUND_CHK_TRAP_X86       = 0x0019, /* bound check fatal trap */
-	CLANG_TRAPS_X86_END            = 0x00FF,
+	CLANG_X86_TRAP_START           = 0x0000,
+	CLANG_X86_TRAP_BOUND_CHK       = 0x0019, /* bound check fatal trap */
+	CLANG_X86_TRAP_END             = 0x00FF,
 
 	/* LIBCXX                 : [0x0800 ~ 0x0800] */
-	LIBCXX_TRAPS_START             = 0x0800,
-	LIBCXX_ABORT_TRAP              = 0x0800, /* libcxx abort() in libcxx_support/stdlib.h */
-	LIBCXX_TRAPS_END               = 0x0800,
+	LIBCXX_TRAP_START              = 0x0800,
+	LIBCXX_TRAP_ABORT              = 0x0800, /* libcxx abort() in libcxx_support/stdlib.h */
+	LIBCXX_TRAP_END                = 0x0800,
 
 	/* KASAN (kasan-tbi.h)    : [0x0900 ~ 0x093F] <ARM only> */
 
-	/* CLANG (reserved)       : [0x5500 ~ 0x56FF] <ARM only> */
-	CLANG_TRAPS_ARM_START          = 0x5500,
-	CLANG_BOUND_CHK_TRAP_ARM       = 0x5519, /* bound check fatal trap */
-	CLANG_TRAPS_ARM_END            = 0X55FF,
+	/* CLANG (reserved)       : [0x5500 ~ 0x55FF] <ARM only> */
+	CLANG_ARM_TRAP_START           = 0x5500,
+	CLANG_ARM_TRAP_BOUND_CHK       = 0x5519, /* bound check fatal trap */
+	CLANG_ARM_TRAP_END             = 0x55FF,
+
+	/* Software defined       : [0xB000 ~ 0xBFFF] */
+	XNU_HARD_TRAP_START            = 0xB000,
+	XNU_HARD_TRAP_STRING_CHK       = 0xBFFE, /* read traps in string.h */
+	XNU_HARD_TRAP_END              = 0xBFFF,
 
 	/* PTRAUTH (sleh.c)       : [0xC470 ~ 0xC473] <ARM only> */
 
 	/* TELEMETRY              : [0xFF00 ~ 0xFFFE] */
-	TELEMETRY_TRAPS_START          = 0xFF00,
-	UBSAN_SIGNED_OVERFLOW_TRAP     = 0xFF00, /* ubsan minimal signed overflow*/
-	CLANG_BOUND_CHK_SOFT_TRAP      = 0xFF19, /* ml_bound_chk_soft_trap */
-	TELEMETRY_TRAPS_END            = 0xFFFE,
+	XNU_SOFT_TRAP_START            = 0xFF00,
+	UBSAN_SOFT_TRAP_SIGNED_OF      = 0xFF00, /* ubsan minimal signed overflow*/
+	CLANG_SOFT_TRAP_BOUND_CHK      = 0xFF19, /* ml_bound_chk_soft_trap */
+	XNU_SOFT_TRAP_STRING_CHK       = 0xFFFE, /* read traps in string.h */
+	XNU_SOFT_TRAP_END              = 0xFFFE,
 
 	/* TEST */
 	TEST_RECOVERABLE_SOFT_TRAP     = 0xFFFF, /* development only */
@@ -137,6 +145,13 @@ extern void telemetry_kernel_brk(
 	kernel_brk_options_t  options,
 	void                  *state,
 	uint16_t              comment);
+
+/* implemented in OSKextLib.cpp */
+extern void telemetry_backtrace_add_kexts(
+	char                 *buf,
+	size_t                buflen,
+	uintptr_t            *frames,
+	uint32_t              framecnt);
 
 /* boolean_t must be used since variable is loaded from assembly. */
 extern volatile boolean_t telemetry_needs_record;

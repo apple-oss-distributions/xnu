@@ -184,8 +184,24 @@ extern void         kauth_cred_unref(kauth_cred_t *credp);
  *
  * This function doesn't take a reference, and the returned pointer is valid
  * for the duration of the current syscall.
+ *
+ * This function returns cached credentials without a reference which are valid
+ * for the duration of a MACF hook.  If a copy of this pointer has to be stashed,
+ * the credentials must be retained with kauth_cred_ref().
+ *
+ * (this function should really be called @c current_thread_cred())
  */
-extern kauth_cred_t kauth_cred_get(void);
+extern kauth_cred_t kauth_cred_get(void) __pure2;
+#define current_thread_cred()           kauth_cred_get()
+
+/*!
+ * @brief
+ * Returns the current MAC label slot value for the thread assumed credentials.
+ *
+ * @discussion
+ * These might differ from the proc's credential if settid() has been called.
+ */
+extern intptr_t current_thread_cred_label_get(int slot) __pure2;
 
 /*!
  * @brief
@@ -198,8 +214,61 @@ extern kauth_cred_t kauth_cred_get(void);
  * The caller must call kauth_cred_unref() to dispose of the returned value.
  *
  * This is equivalent to @c kauth_cred_ref(kauth_cred_get())
+ *
+ * (this function should really be called @c current_thread_cred_ref())
  */
 extern kauth_cred_t kauth_cred_get_with_ref(void);
+#define current_thread_cred_ref()       kauth_cred_get_with_ref()
+
+/*!
+ * @brief
+ * Returns the current cached proc credentials.
+ *
+ * @discussion
+ * This function will panic if its argument is neither PROC_NULL nor
+ * current_proc() (this can be used to protect against programming mistakes
+ * assuming the incorrect context).
+ *
+ * Note that this function returns the credential the proc had
+ * at the time of the last syscall this thread performed.
+ *
+ * This function returns cached credentials without a reference which are valid
+ * for the duration of a syscall only. If a copy of this pointer has to be
+ * stashed, the credentials must be retained with kauth_cred_ref().
+ *
+ * For the freshest credentials, kauth_cred_proc_ref()
+ * must be used against @c current_proc().
+ *
+ * This never returns NULL/NOCRED.
+ */
+extern kauth_cred_t current_cached_proc_cred(proc_t) __pure2;
+
+/*!
+ * @brief
+ * Returns the current MAC label slot value for the cached proc credentials.
+ */
+extern intptr_t current_cached_proc_label_get(int slot) __pure2;
+
+/*!
+ * @brief
+ * Returns the current cached proc credentials, with a reference.
+ *
+ * @discussion
+ * This function will panic if its argument is neither PROC_NULL nor
+ * current_proc() (this can be used to protect against programming mistakes
+ * assuming the incorrect context).
+ *
+ * Note that this function returns the credential the proc had
+ * at the time of the last syscall this thread performed.
+ *
+ * For the freshest credentials, kauth_cred_proc_ref()
+ * must be used against @c current_proc().
+ *
+ * The caller must call kauth_cred_unref() to dispose of the returned value.
+ *
+ * This never returns NULL/NOCRED.
+ */
+extern kauth_cred_t current_cached_proc_cred_ref(proc_t);
 
 /*!
  * @brief
@@ -212,6 +281,24 @@ extern kauth_cred_t kauth_cred_get_with_ref(void);
  * The caller must call kauth_cred_unref() to dispose of the returned value.
  */
 extern kauth_cred_t kauth_cred_proc_ref(proc_t procp);
+
+/*!
+ * @brief
+ * Returns the specified proc credentials, with a reference, or NOCRED.
+ *
+ * @discussion
+ * The caller must call kauth_cred_unref() to dispose of the returned value.
+ */
+extern kauth_cred_t kauth_cred_proc_ref_for_pid(pid_t pid);
+
+/*!
+ * @brief
+ * Returns the specified proc credentials, with a reference, or NOCRED.
+ *
+ * @discussion
+ * The caller must call kauth_cred_unref() to dispose of the returned value.
+ */
+extern kauth_cred_t kauth_cred_proc_ref_for_pidversion(pid_t pid, uint32_t version);
 
 
 /*!
@@ -380,6 +467,8 @@ extern int          groupmember(gid_t gid, kauth_cred_t cred);
 
 
 #ifdef KERNEL_PRIVATE
+#pragma mark kauth_cred: private KPI
+
 extern int          kauth_cred_getgroups(kauth_cred_t _cred, gid_t *_groups, size_t *_groupcount);
 
 #endif /* KERNEL_PRIVATE */
@@ -455,10 +544,12 @@ extern int          kauth_cred_gid_subset(kauth_cred_t _cred1, kauth_cred_t _cre
 extern kauth_cred_t kauth_cred_require(kauth_cred_t cred) __pure2;
 
 extern void         kauth_cred_set(kauth_cred_t *credp, kauth_cred_t new_cred);
-extern void         kauth_cred_set_and_unref(kauth_cred_t *credp, kauth_cred_t *new_credp);
 #if CONFIG_EXT_RESOLVER
 extern void         kauth_resolver_identity_reset(void);
 #endif
+
+/* update the thread's proc cred cache, called on syscall entry */
+extern void         current_cached_proc_cred_update(void);
 
 /*
  * `kauth_cred_set` and `kauth_cred_unref` take pointers to a
@@ -471,13 +562,6 @@ extern void         kauth_resolver_identity_reset(void);
     do { \
 	    kauth_cred_t _cred __single = *(credp); \
 	    (kauth_cred_set)(&_cred, (new_cred)); \
-	    *(credp) = _cred; \
-    } while (0)
-
-#define kauth_cred_set_and_unref(credp, new_credp) \
-    do { \
-	    kauth_cred_t _cred __single = *(credp); \
-	    (kauth_cred_set_and_unref)(&_cred, (new_credp)); \
 	    *(credp) = _cred; \
     } while (0)
 

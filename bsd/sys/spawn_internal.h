@@ -254,6 +254,9 @@ typedef struct _posix_spawnattr {
 	uint32_t        psa_crash_count;
 	uint32_t        psa_throttle_timeout;
 
+	uint32_t        psa_kqworkloop_soft_limit; /* kqworkloop soft limit */
+	uint32_t        psa_kqworkloop_hard_limit; /* kqworkloop hard limit */
+
 	/*
 	 * NOTE: Extensions array pointers must stay at the end so that
 	 * everything above this point stays the same size on different bitnesses
@@ -362,6 +365,7 @@ __options_decl(posix_spawn_options, uint32_t, {
 	PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS   = 0x1,
 	PSA_OPTION_ALT_ROSETTA                  = 0x2,
 	PSA_OPTION_DATALESS_IOPOLICY            = 0x4,
+	PSA_OPTION_USE_SEC_TRANSITION_SHIMS     = 0x8,
 });
 
 /*

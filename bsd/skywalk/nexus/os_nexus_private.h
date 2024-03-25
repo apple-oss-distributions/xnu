@@ -397,6 +397,7 @@ struct nx_flow_req {
 	packet_svc_class_t              nfr_svc_class;
 	uuid_t                          nfr_euuid;
 	uint32_t                        nfr_policy_id;
+	uint32_t                        nfr_skip_policy_id;
 	pid_t                           nfr_epid;
 	flowadv_idx_t                   nfr_flowadv_idx;
 	uuid_t                          nfr_bind_key;

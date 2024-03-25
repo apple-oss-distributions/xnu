@@ -35,6 +35,8 @@
 #include <mach/exception.h>
 #include <mach/thread_status.h>
 #include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/code_signing.h>
 #include <TargetConditionals.h>
 #include <mach/semaphore.h>
 

@@ -150,6 +150,7 @@ struct tty {
 #else
 	int     t_refcnt;               /* reference count */
 #endif
+	thread_t t_locked_thread;       /* thread that owns the lock */
 };
 
 #define TTY_NULL (struct tty *)NULL
@@ -303,7 +304,9 @@ int     ttcompat(struct tty *tp, u_long com, caddr_t data, int flag,
 #endif /* KERNEL_PRIVATE */
 
 void tty_lock(struct tty *tp);
+bool tty_trylock(struct tty *tp);
 void tty_unlock(struct tty *tp);
+bool tty_islocked(struct tty *tp);
 
 void     termioschars(struct termios *t);
 int      tputchar(int c, struct tty *tp);
@@ -333,6 +336,7 @@ int      ttysleep(struct tty *tp,
 int      ttywait(struct tty *tp);
 struct tty *ttymalloc(void);
 void     ttyfree(struct tty *);
+void     ttyfree_locked(struct tty *);
 
 #ifdef XNU_KERNEL_PRIVATE
 extern void ttyhold(struct tty *tp);

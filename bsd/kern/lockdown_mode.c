@@ -92,6 +92,7 @@ get_lockdown_mode_state(void)
 	}
 	lck_mtx_unlock(&lockdown_mode_init_mtx);
 
+
 	return lockdown_mode_state;
 }
 

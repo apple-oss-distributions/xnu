@@ -71,14 +71,13 @@
 
 #if CONFIG_MACF
 #include <security/mac.h>
+#include <security/mac_policy.h>
 #include <security/mac_framework.h>
 #include <security/_label.h>
 #endif
 
 #include <os/hash.h>
 #include <IOKit/IOBSD.h>
-
-void mach_kauth_cred_thread_update( void );
 
 /* Set to 1 to turn on KAUTH_DEBUG for kern_credential.c */
 #if 0
@@ -3447,10 +3446,52 @@ kauth_cred_get(void)
 	return current_thread_ro()->tro_cred;
 }
 
-void
-mach_kauth_cred_thread_update(void)
+intptr_t
+current_thread_cred_label_get(int slot)
 {
-	kauth_cred_thread_update(current_thread(), current_proc());
+#if CONFIG_MACF
+	return mac_label_get(kauth_cred_get()->cr_label, slot);
+#else
+	return 0;
+#endif
+}
+
+__abortlike
+static void
+current_cached_proc_cred_panic(proc_t p)
+{
+	panic("current_cached_proc_cred(%p) called but current_proc() is %p",
+	    p, current_proc());
+}
+
+kauth_cred_t
+current_cached_proc_cred(proc_t p)
+{
+	thread_ro_t tro = current_thread_ro();
+
+	if (tro->tro_proc != p && p != PROC_NULL) {
+		current_cached_proc_cred_panic(p);
+	}
+	return tro->tro_realcred;
+}
+
+intptr_t
+current_cached_proc_label_get(int slot)
+{
+#if CONFIG_MACF
+	return mac_label_get(current_cached_proc_cred(PROC_NULL)->cr_label, slot);
+#else
+	return 0;
+#endif
+}
+
+kauth_cred_t
+current_cached_proc_cred_ref(proc_t p)
+{
+	kauth_cred_t cred = current_cached_proc_cred(p);
+
+	kauth_cred_ref(cred);
+	return cred;
 }
 
 __attribute__((noinline))
@@ -3458,20 +3499,21 @@ static void
 kauth_cred_thread_update_slow(thread_ro_t tro, proc_t proc)
 {
 	struct ucred *cred = kauth_cred_proc_ref(proc);
-	thread_ro_update_cred(tro, cred);
+	struct thread_ro_creds my_creds = tro->tro_creds;
+
+	if (my_creds.tro_realcred != cred) {
+		if (my_creds.tro_realcred == my_creds.tro_cred) {
+			kauth_cred_set(&my_creds.tro_cred, cred);
+		}
+		kauth_cred_set(&my_creds.tro_realcred, cred);
+		zalloc_ro_update_field(ZONE_ID_THREAD_RO,
+		    tro, tro_creds, &my_creds);
+	}
 	kauth_cred_unref(&cred);
 }
 
 /*
- * kauth_cred_thread_update
- *
- * Description:	Given a uthread, a proc, and whether or not the proc is locked,
- *		late-bind the uthread cred to the proc cred.
- *
- * Parameters:	thread_t			The thread to update
- *		proc_t				The process to update to
- *
- * Returns:	(void)
+ * current_cached_proc_cred_update
  *
  * Notes:	This code is common code called from system call or trap entry
  *		in the case that the process thread may have been changed
@@ -3479,13 +3521,13 @@ kauth_cred_thread_update_slow(thread_ro_t tro, proc_t proc)
  */
 __attribute__((always_inline))
 void
-kauth_cred_thread_update(thread_t thread, proc_t proc)
+current_cached_proc_cred_update(void)
 {
-	thread_ro_t tro = get_thread_ro(thread);
+	thread_ro_t tro  = current_thread_ro();
+	proc_t      proc = tro->tro_proc;
 
 	if (__improbable(tro->tro_task != kernel_task &&
-	    tro->tro_cred != proc_ucred_unsafe(proc) &&
-	    (tro->tro_flags & TRO_SETUID) == 0)) {
+	    tro->tro_realcred != proc_ucred_unsafe(proc))) {
 		kauth_cred_thread_update_slow(tro, proc);
 	}
 }
@@ -3539,6 +3581,76 @@ kauth_cred_proc_ref(proc_t procp)
 		proc_ucred_unlock(procp);
 	}
 	return cred;
+}
+
+static kauth_cred_t
+__kauth_cred_proc_ref_for_pidversion_slow(pid_t pid, uint32_t pidvers, bool dovers)
+{
+	kauth_cred_t cred = NOCRED;
+	proc_t procp;
+
+	procp = proc_find(pid);
+	if (procp == PROC_NULL) {
+		return NOCRED;
+	}
+
+	if (dovers && proc_get_ro(procp)->p_idversion != pidvers) {
+		proc_rele(procp);
+		return NOCRED;
+	}
+
+	cred = kauth_cred_proc_ref(procp);
+	proc_rele(procp);
+
+	return cred;
+}
+
+static inline kauth_cred_t
+__kauth_cred_proc_ref_for_pidversion(pid_t pid, uint32_t pidvers, bool dovers)
+{
+	kauth_cred_t cred = NOCRED;
+	struct proc_ro *pro;
+	proc_t procp;
+	int err;
+
+	smr_proc_task_enter();
+	procp = proc_find_noref_smr(pid);
+	if (procp == PROC_NULL) {
+		err = ESRCH;
+	} else {
+		pro = proc_get_ro(procp);
+		cred = proc_ucred_smr(procp);
+		if (dovers && pro->p_idversion != pidvers) {
+			err = ESRCH;
+		} else if (!ucred_rw_tryref(kauth_cred_rw(cred))) {
+			err = EAGAIN;
+		} else {
+			err = 0;
+		}
+	}
+	smr_proc_task_leave();
+
+	if (__probable(err == 0)) {
+		return cred;
+	}
+
+	if (err == EAGAIN) {
+		return __kauth_cred_proc_ref_for_pidversion_slow(pid, pidvers, dovers);
+	}
+
+	return NOCRED;
+}
+
+kauth_cred_t
+kauth_cred_proc_ref_for_pid(pid_t pid)
+{
+	return __kauth_cred_proc_ref_for_pidversion(pid, 0, false);
+}
+
+kauth_cred_t
+kauth_cred_proc_ref_for_pidversion(pid_t pid, uint32_t pidvers)
+{
+	return __kauth_cred_proc_ref_for_pidversion(pid, pidvers, true);
 }
 
 /*
@@ -4336,30 +4448,6 @@ void
 			kauth_cred_drop(old_cred);
 			kauth_cred_unref(&old_cred);
 		}
-	}
-}
-
-void
-(kauth_cred_set_and_unref)(kauth_cred_t * credp, kauth_cred_t * new_credp)
-{
-	kauth_cred_t old_cred = *credp;
-	kauth_cred_t new_cred = *new_credp;
-
-	if (old_cred != new_cred) {
-		/*
-		 * `new_cred` must be valid to be unref'd, so omit the
-		 * `IS_VALID_CRED` check.
-		 */
-		kauth_cred_hold(new_cred);
-		*credp = new_cred;
-		*new_credp = NOCRED;
-
-		if (IS_VALID_CRED(old_cred)) {
-			kauth_cred_drop(old_cred);
-			kauth_cred_unref(&old_cred);
-		}
-	} else {
-		kauth_cred_unref(new_credp);
 	}
 }
 

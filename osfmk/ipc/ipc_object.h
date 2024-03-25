@@ -199,8 +199,10 @@ extern zone_t __single ipc_object_zones[IOT_NUMBER];
 #define io_from_waitq(waitq) \
 	(&__container_of(waitq, struct ipc_object_waitq, iowq_waitq)->iowq_object)
 
-#define io_lock(io)          ipc_object_lock(io)
-#define io_lock_try(io)      ipc_object_lock_try(io)
+#define io_lock(io) ({ \
+	ipc_object_t __io = (io); \
+	ipc_object_lock(__io, io_otype(__io)); \
+})
 #define io_unlock(io)        ipc_object_unlock(io)
 #define io_lock_held(io)     assert(waitq_held(io_waitq(io)))
 #define io_lock_held_kdp(io) waitq_held(io_waitq(io))
@@ -226,16 +228,22 @@ extern struct label *io_getlabel(ipc_object_t obj);
  */
 
 extern void ipc_object_lock(
-	ipc_object_t    object);
+	ipc_object_t            object,
+	ipc_object_type_t       type);
+
+extern void ipc_object_lock_check_aligned(
+	ipc_object_t            object,
+	ipc_object_type_t       type);
 
 extern bool ipc_object_lock_allow_invalid(
-	ipc_object_t    object) __result_use_check;
+	ipc_object_t            object) __result_use_check;
 
 extern bool ipc_object_lock_try(
-	ipc_object_t    object);
+	ipc_object_t            object,
+	ipc_object_type_t       type);
 
 extern void ipc_object_unlock(
-	ipc_object_t    object);
+	ipc_object_t            object);
 
 extern void ipc_object_deallocate_register_queue(void);
 
@@ -273,7 +281,12 @@ extern kern_return_t ipc_object_translate_two(
 
 /* Validate an object as belonging to the correct zone */
 extern void ipc_object_validate(
-	ipc_object_t object);
+	ipc_object_t            object,
+	ipc_object_type_t       type);
+
+extern void ipc_object_validate_aligned(
+	ipc_object_t            object,
+	ipc_object_type_t       type);
 
 /* Allocate a dead-name entry */
 extern kern_return_t

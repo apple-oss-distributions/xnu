@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -111,6 +111,8 @@
 #include <security/mac_framework.h>
 #endif /* MAC_SOCKET_SUBSET */
 
+#include <net/sockaddr_utils.h>
+
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
 
@@ -169,16 +171,6 @@ static int disconnectx_nocancel(proc_ref_t, disconnectx_args_ref_t,
     int_ref_t);
 static int socket_common(proc_ref_t, int, int, int, pid_t, int32_ref_t, int);
 
-#if DEBUG || DEVELOPMENT
-static int internalize_user_msghdr_array(const void_ptr_t, int, int,
-    u_int count, user_msghdr_x_ptr_t, uio_ref_ptr_t);
-
-static void externalize_user_msghdr_array(void_ptr_t, int, int, u_int count,
-    const user_msghdr_x_ptr_t, uio_ref_ptr_t);
-
-static void free_uio_array(uio_ref_ptr_t, u_int count);
-static boolean_t uio_array_is_valid(uio_ref_ptr_t, u_int count);
-#endif /* DEBUG || DEVELOPMENT */
 static int internalize_recv_msghdr_array(const void_ptr_t, int, int,
     u_int count, user_msghdr_x_ptr_t, recv_msg_elem_ptr_t);
 static u_int externalize_recv_msghdr_array(proc_ref_t, socket_ref_t, void_ptr_t,
@@ -301,7 +293,7 @@ socket_common(proc_ref_t p,
 		}
 	}
 
-	error = falloc(p, &fp, &fd, vfs_context_current());
+	error = falloc(p, &fp, &fd);
 	if (error) {
 		return error;
 	}
@@ -375,7 +367,7 @@ bind(__unused proc_t p, struct bind_args *uap, __unused int32_ref_t retval)
 	} else {
 		error = getsockaddr_s(so, &ss, uap->name, uap->namelen, TRUE);
 		if (error == 0) {
-			sa = (sockaddr_ref_t)&ss;
+			sa = SA(&ss);
 			want_free = FALSE;
 		}
 	}
@@ -618,7 +610,7 @@ check_again:
 	}
 
 	fflag = fp->f_flag;
-	error = falloc(p, &fp, &newfd, vfs_context_current());
+	error = falloc(p, &fp, &newfd);
 	if (error) {
 		/*
 		 * Probably ran out of file descriptors.
@@ -791,7 +783,7 @@ connect_nocancel(proc_t p, struct connect_nocancel_args *uap, int32_ref_t retval
 	} else {
 		error = getsockaddr_s(so, &ss, uap->name, uap->namelen, !dgram);
 		if (error == 0) {
-			sa = (sockaddr_ref_t)&ss;
+			sa = SA(&ss);
 		}
 	}
 	if (error != 0) {
@@ -880,7 +872,7 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 		} else {
 			error = getsockaddr_s(so, &ss, ep.sae_srcaddr, ep.sae_srcaddrlen, dgram);
 			if (error == 0) {
-				src = (sockaddr_ref_t)&ss;
+				src = SA(&ss);
 			}
 		}
 
@@ -900,7 +892,7 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 	} else {
 		error = getsockaddr_s(so, &sd, ep.sae_dstaddr, ep.sae_dstaddrlen, dgram);
 		if (error == 0) {
-			dst = (sockaddr_ref_t)&sd;
+			dst = SA(&sd);
 		}
 	}
 
@@ -936,7 +928,7 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 		 * get location of iovecs within the uio.
 		 * then copyin the iovecs from user space.
 		 */
-		iovp = uio_iovsaddr(auio);
+		iovp = uio_iovsaddr_user(auio);
 		if (iovp == NULL) {
 			error = ENOMEM;
 			goto out;
@@ -949,7 +941,7 @@ connectx_nocancel(proc_ref_t p, connectx_args_ref_t uap, int_ref_t retval)
 		}
 
 		/* finish setup of uio_t */
-		error = uio_calculateresid(auio);
+		error = uio_calculateresid_user(auio);
 		if (error != 0) {
 			goto out;
 		}
@@ -1211,7 +1203,7 @@ socketpair(proc_ref_t p, struct socketpair_args *uap,
 		goto free1;
 	}
 
-	error = falloc(p, &fp1, &fd, vfs_context_current());
+	error = falloc(p, &fp1, &fd);
 	if (error) {
 		goto free2;
 	}
@@ -1220,7 +1212,7 @@ socketpair(proc_ref_t p, struct socketpair_args *uap,
 	fp_set_data(fp1, so1);
 	sv[0] = fd;
 
-	error = falloc(p, &fp2, &fd, vfs_context_current());
+	error = falloc(p, &fp2, &fd);
 	if (error) {
 		goto free3;
 	}
@@ -1327,7 +1319,7 @@ sendit(proc_ref_t p, struct socket *so, user_msghdr_ref_t mp, uio_t uiop,
 			error = getsockaddr_s(so, &ss, mp->msg_name,
 			    mp->msg_namelen, TRUE);
 			if (error == 0) {
-				to = (sockaddr_ref_t)&ss;
+				to = SA(&ss);
 				want_free = FALSE;
 			}
 		}
@@ -1556,7 +1548,7 @@ sendmsg_nocancel(proc_ref_t p, struct sendmsg_nocancel_args *uap,
 		 * get location of iovecs within the uio.
 		 * then copyin the iovecs from user space.
 		 */
-		iovp = uio_iovsaddr(auio);
+		iovp = uio_iovsaddr_user(auio);
 		if (iovp == NULL) {
 			error = ENOBUFS;
 			goto done;
@@ -1570,7 +1562,7 @@ sendmsg_nocancel(proc_ref_t p, struct sendmsg_nocancel_args *uap,
 		user_msg.msg_iov = CAST_USER_ADDR_T(iovp);
 
 		/* finish setup of uio_t */
-		error = uio_calculateresid(auio);
+		error = uio_calculateresid_user(auio);
 		if (error) {
 			goto done;
 		}
@@ -1599,207 +1591,6 @@ done:
 
 	return error;
 }
-
-#if DEBUG || DEVELOPMENT
-static int
-sendmsg_x_old(proc_ref_t p, struct sendmsg_x_args *uap, user_ssize_t *retval)
-{
-	int error = 0;
-	user_msghdr_x_ptr_t user_msg_x = NULL;
-	uio_ref_ptr_t uiop = NULL;
-	socket_ref_t so;
-	u_int i;
-	sockaddr_ref_t to = NULL;
-	user_ssize_t len_before = 0, len_after;
-	int need_drop = 0;
-	size_t size_of_msghdr;
-	void_ptr_t umsgp = NULL;
-	u_int uiocnt = 0;
-	int has_addr_or_ctl = 0;
-
-	KERNEL_DEBUG(DBG_FNC_SENDMSG_X | DBG_FUNC_START, 0, 0, 0, 0, 0);
-
-	size_of_msghdr = IS_64BIT_PROCESS(p) ?
-	    sizeof(struct user64_msghdr_x) : sizeof(struct user32_msghdr_x);
-
-	if (uap->flags & MSG_SKIPCFIL) {
-		error = EPERM;
-		goto out;
-	}
-
-	error = file_socket(uap->s, &so);
-	if (error) {
-		goto out;
-	}
-	need_drop = 1;
-	if (so == NULL) {
-		error = EBADF;
-		goto out;
-	}
-
-	/*
-	 * Input parameter range check
-	 */
-	if (uap->cnt == 0 || uap->cnt > UIO_MAXIOV) {
-		error = EINVAL;
-		goto out;
-	}
-	/*
-	 * Clip to max currently allowed
-	 */
-	if (uap->cnt > somaxsendmsgx) {
-		uap->cnt = somaxsendmsgx > 0 ? somaxsendmsgx : 1;
-	}
-
-	user_msg_x = kalloc_type(struct user_msghdr_x, uap->cnt,
-	    Z_WAITOK | Z_ZERO);
-	if (user_msg_x == NULL) {
-		DBG_PRINTF("%s user_msg_x alloc failed", __func__);
-		error = ENOMEM;
-		goto out;
-	}
-	uiop = kalloc_type(uio_ref_t, uap->cnt, Z_WAITOK | Z_ZERO);
-	if (uiop == NULL) {
-		DBG_PRINTF("%s uiop alloc failed", __func__);
-		error = ENOMEM;
-		goto out;
-	}
-
-	umsgp = kalloc_data(uap->cnt * size_of_msghdr, Z_WAITOK | Z_ZERO);
-	if (umsgp == NULL) {
-		DBG_PRINTF("%s user_msg_x alloc failed", __func__);
-		error = ENOMEM;
-		goto out;
-	}
-	error = copyin(uap->msgp, umsgp, uap->cnt * size_of_msghdr);
-	if (error) {
-		DBG_PRINTF("%s copyin() failed", __func__);
-		goto out;
-	}
-	error = internalize_user_msghdr_array(umsgp,
-	    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-	    UIO_WRITE, uap->cnt, user_msg_x, uiop);
-	if (error) {
-		DBG_PRINTF("%s copyin_user_msghdr_array() failed", __func__);
-		goto out;
-	}
-	/*
-	 * Make sure the size of each message iovec and
-	 * the aggregate size of all the iovec is valid
-	 */
-	if (uio_array_is_valid(uiop, uap->cnt) == false) {
-		error = EINVAL;
-		goto out;
-	}
-
-	/*
-	 * Sanity check on passed arguments
-	 */
-	for (i = 0; i < uap->cnt; i++) {
-		struct user_msghdr_x *mp = user_msg_x + i;
-
-		/*
-		 * No flags on send message
-		 */
-		if (mp->msg_flags != 0) {
-			error = EINVAL;
-			goto out;
-		}
-		/*
-		 * No support for address or ancillary data (yet)
-		 */
-		if (mp->msg_name != USER_ADDR_NULL || mp->msg_namelen != 0) {
-			has_addr_or_ctl = 1;
-		}
-
-		if (mp->msg_control != USER_ADDR_NULL ||
-		    mp->msg_controllen != 0) {
-			has_addr_or_ctl = 1;
-		}
-
-#if CONFIG_MACF_SOCKET_SUBSET
-		/*
-		 * We check the state without holding the socket lock;
-		 * if a race condition occurs, it would simply result
-		 * in an extra call to the MAC check function.
-		 *
-		 * Note: The following check is never true taken with the
-		 * current limitation that we do not accept to pass an address,
-		 * this is effectively placeholder code. If we add support for
-		 * addresses, we will have to check every address.
-		 */
-		if (to != NULL &&
-		    !(so->so_state & SS_DEFUNCT) &&
-		    (error = mac_socket_check_send(kauth_cred_get(), so, to))
-		    != 0) {
-			goto out;
-		}
-#endif /* MAC_SOCKET_SUBSET */
-	}
-
-	len_before = uio_array_resid(uiop, uap->cnt);
-
-	for (i = 0; i < uap->cnt; i++) {
-		struct user_msghdr_x *mp = user_msg_x + i;
-		struct user_msghdr user_msg;
-		uio_t auio = uiop[i];
-		int32_t tmpval;
-
-		user_msg.msg_flags = mp->msg_flags;
-		user_msg.msg_controllen = mp->msg_controllen;
-		user_msg.msg_control = mp->msg_control;
-		user_msg.msg_iovlen = mp->msg_iovlen;
-		user_msg.msg_iov = mp->msg_iov;
-		user_msg.msg_namelen = mp->msg_namelen;
-		user_msg.msg_name = mp->msg_name;
-
-		error = sendit(p, so, &user_msg, auio, uap->flags,
-		    &tmpval);
-		if (error != 0) {
-			break;
-		}
-		uiocnt += 1;
-	}
-
-	len_after = uio_array_resid(uiop, uap->cnt);
-
-	VERIFY(len_after <= len_before);
-
-	if (error != 0) {
-		if (len_after != len_before && (error == ERESTART ||
-		    error == EINTR || error == EWOULDBLOCK ||
-		    error == ENOBUFS)) {
-			error = 0;
-		}
-		/* Generation of SIGPIPE can be controlled per socket */
-		if (error == EPIPE && !(so->so_flags & SOF_NOSIGPIPE) &&
-		    !(uap->flags & MSG_NOSIGNAL)) {
-			psignal(p, SIGPIPE);
-		}
-	}
-	if (error == 0) {
-		externalize_user_msghdr_array(umsgp,
-		    IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
-		    UIO_WRITE, uiocnt, user_msg_x, uiop);
-
-		*retval = (int)(uiocnt);
-	}
-out:
-	if (need_drop) {
-		file_drop(uap->s);
-	}
-	kfree_data(umsgp, uap->cnt * size_of_msghdr);
-	if (uiop != NULL) {
-		free_uio_array(uiop, uap->cnt);
-		kfree_type(uio_ref_t, uap->cnt, uiop);
-	}
-	kfree_type(struct user_msghdr_x, uap->cnt, user_msg_x);
-
-	KERNEL_DEBUG(DBG_FNC_SENDMSG_X | DBG_FUNC_END, error, 0, 0, 0, 0);
-
-	return error;
-}
-#endif /* DEBUG || DEVELOPMENT */
 
 static int
 internalize_user_msg_x(struct user_msghdr *user_msg, uio_t *auiop, proc_ref_t p, void_ptr_t user_msghdr_x_src)
@@ -1856,7 +1647,7 @@ internalize_user_msg_x(struct user_msghdr *user_msg, uio_t *auiop, proc_ref_t p,
 	 */
 	if (auio != NULL) {
 		if (auio->uio_max_iovs >= user_msg->msg_iovlen) {
-			uio_reset(auio, 0,
+			uio_reset_fast(auio, 0,
 			    is_p_64bit_process ? UIO_USERSPACE64 : UIO_USERSPACE32,
 			    UIO_WRITE);
 		} else {
@@ -1881,7 +1672,7 @@ internalize_user_msg_x(struct user_msghdr *user_msg, uio_t *auiop, proc_ref_t p,
 		 * get location of iovecs within the uio.
 		 * then copyin the iovecs from user space.
 		 */
-		struct user_iovec *iovp = uio_iovsaddr(auio);
+		struct user_iovec *iovp = uio_iovsaddr_user(auio);
 		if (iovp == NULL) {
 			error = ENOBUFS;
 			goto done;
@@ -1895,7 +1686,7 @@ internalize_user_msg_x(struct user_msghdr *user_msg, uio_t *auiop, proc_ref_t p,
 		user_msg->msg_iov = CAST_USER_ADDR_T(iovp);
 
 		/* finish setup of uio_t */
-		error = uio_calculateresid(auio);
+		error = uio_calculateresid_user(auio);
 		if (error) {
 			goto done;
 		}
@@ -1947,7 +1738,7 @@ mbuf_packet_from_uio(socket_ref_t so, mbuf_ref_ref_t mp, uio_t auio)
 		}
 		int len = imin((int)mlen, bytes_to_copy);
 
-		error = uiomove(mtod(m, caddr_t), (int)len, auio);
+		error = uio_copyin_user(mtod(m, caddr_t), (int)len, auio);
 		if (error != 0) {
 			os_log(OS_LOG_DEFAULT, "mbuf_packet_from_uio: len %d error %d",
 			    len, error);
@@ -2049,11 +1840,12 @@ sendit_x(proc_ref_t p, socket_ref_t so, struct sendmsg_x_args *uap, u_int *retva
 			m = control;
 		}
 		MBUFQ_ENQUEUE(&pktlist, m);
+
+		pkt_cnt += 1;
 	}
 
 	top = MBUFQ_FIRST(&pktlist);
 	MBUFQ_INIT(&pktlist);
-	pkt_cnt = uap->cnt;
 	error = sosend_list(so, top, total_pkt_len, &pkt_cnt, flags);
 	if (error != 0) {
 		os_log(OS_LOG_DEFAULT, "sendit_x: sosend_list error %d\n", error);
@@ -2078,12 +1870,6 @@ sendmsg_x(proc_ref_t p, struct sendmsg_x_args *uap, user_ssize_t *retval)
 	socket_ref_t so;
 	u_int uiocnt = 0;
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
-
-#if DEBUG || DEVELOPMENT
-	if (sendmsg_x_mode == 2) {
-		return sendmsg_x_old(p, uap, retval);
-	}
-#endif /* DEBUG || DEVELOPMENT */
 
 	KERNEL_DEBUG(DBG_FNC_SENDMSG_X | DBG_FUNC_START, 0, 0, 0, 0, 0);
 	AUDIT_ARG(fd, uap->s);
@@ -2633,7 +2419,7 @@ recvmsg_nocancel(proc_ref_t p, struct recvmsg_nocancel_args *uap,
 	 * get location of iovecs within the uio.  then copyin the iovecs from
 	 * user space.
 	 */
-	iovp = uio_iovsaddr(auio);
+	iovp = uio_iovsaddr_user(auio);
 	if (iovp == NULL) {
 		error = ENOMEM;
 		goto done;
@@ -2648,7 +2434,7 @@ recvmsg_nocancel(proc_ref_t p, struct recvmsg_nocancel_args *uap,
 	}
 
 	/* finish setup of uio_t */
-	error = uio_calculateresid(auio);
+	error = uio_calculateresid_user(auio);
 	if (error) {
 		goto done;
 	}
@@ -2972,8 +2758,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		struct user_iovec *iovp;
 		struct mbuf *n;
 
-		if (m->m_type != MT_OOBDATA && m->m_type != MT_DATA &&
-		    m->m_type != MT_HEADER) {
+		if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 			panic("%s: m %p m_type %d != MT_DATA", __func__, m, m->m_type);
 		}
 
@@ -3013,7 +2798,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		 */
 		if (auio != NULL) {
 			if (auio->uio_max_iovs <= user_msg.msg_iovlen) {
-				uio_reset(auio, 0, spacetype, UIO_READ);
+				uio_reset_fast(auio, 0, spacetype, UIO_READ);
 			} else {
 				uio_free(auio);
 				auio = NULL;
@@ -3033,7 +2818,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		 * get location of iovecs within the uio then copy the iovecs
 		 * from user space.
 		 */
-		iovp = uio_iovsaddr(auio);
+		iovp = uio_iovsaddr_user(auio);
 		if (iovp == NULL) {
 			error = ENOMEM;
 			DBG_PRINTF("%s uio_iovsaddr() failed %d\n",
@@ -3047,7 +2832,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 			    __func__, error);
 			goto done;
 		}
-		error = uio_calculateresid(auio);
+		error = uio_calculateresid_user(auio);
 		if (error != 0) {
 			DBG_PRINTF("%s uio_calculateresid() failed %d\n",
 			    __func__, error);
@@ -3059,7 +2844,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		for (n = m; n != NULL; n = n->m_next) {
 			user_ssize_t resid = uio_resid(auio);
 			if (resid < n->m_len) {
-				error = uiomove(mtod(n, caddr_t), (int)n->m_len, auio);
+				error = uio_copyout_user(mtod(n, caddr_t), (int)n->m_len, auio);
 				if (error != 0) {
 					DBG_PRINTF("%s uiomove() failed\n",
 					    __func__);
@@ -3069,7 +2854,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 				break;
 			}
 
-			error = uiomove(mtod(n, caddr_t), (int)n->m_len, auio);
+			error = uio_copyout_user(mtod(n, caddr_t), (int)n->m_len, auio);
 			if (error != 0) {
 				DBG_PRINTF("%s uiomove() failed\n",
 				    __func__);
@@ -3257,8 +3042,6 @@ out:
 	file_drop(uap->s);
 	return error;
 }
-
-
 
 /*
  * Returns:	0			Success
@@ -3573,7 +3356,7 @@ getsockaddr(struct socket *so, sockaddr_ref_ref_t namp, user_addr_t uaddr,
 		return EINVAL;
 	}
 
-	sa = (sockaddr_ref_t)alloc_sockaddr(len, Z_WAITOK | Z_NOFAIL);
+	sa = SA(alloc_sockaddr(len, Z_WAITOK | Z_NOFAIL));
 
 	error = copyin(uaddr, (caddr_t)sa, len);
 	if (error) {
@@ -3637,93 +3420,6 @@ getsockaddr_s(struct socket *so, sockaddr_storage_ref_t ss,
 	return error;
 }
 
-#if DEBUG || DEVELOPMENT
-int
-internalize_user_msghdr_array(const void_ptr_t src, int spacetype, int direction,
-    u_int count, user_msghdr_x_ptr_t dst, uio_ref_ptr_t uiop)
-{
-	int error = 0;
-	u_int i;
-	u_int namecnt = 0;
-	u_int ctlcnt = 0;
-
-	for (i = 0; i < count; i++) {
-		uio_t auio;
-		struct user_iovec *iovp;
-		struct user_msghdr_x *user_msg = dst + i;
-
-		if (spacetype == UIO_USERSPACE64) {
-			const struct user64_msghdr_x *msghdr64;
-
-			msghdr64 = ((const struct user64_msghdr_x *)src) + i;
-
-			user_msg->msg_name = (user_addr_t)msghdr64->msg_name;
-			user_msg->msg_namelen = msghdr64->msg_namelen;
-			user_msg->msg_iov = (user_addr_t)msghdr64->msg_iov;
-			user_msg->msg_iovlen = msghdr64->msg_iovlen;
-			user_msg->msg_control = (user_addr_t)msghdr64->msg_control;
-			user_msg->msg_controllen = msghdr64->msg_controllen;
-			user_msg->msg_flags = msghdr64->msg_flags;
-			user_msg->msg_datalen = (size_t)msghdr64->msg_datalen;
-		} else {
-			const struct user32_msghdr_x *msghdr32;
-
-			msghdr32 = ((const struct user32_msghdr_x *)src) + i;
-
-			user_msg->msg_name = msghdr32->msg_name;
-			user_msg->msg_namelen = msghdr32->msg_namelen;
-			user_msg->msg_iov = msghdr32->msg_iov;
-			user_msg->msg_iovlen = msghdr32->msg_iovlen;
-			user_msg->msg_control = msghdr32->msg_control;
-			user_msg->msg_controllen = msghdr32->msg_controllen;
-			user_msg->msg_flags = msghdr32->msg_flags;
-			user_msg->msg_datalen = msghdr32->msg_datalen;
-		}
-
-		if (user_msg->msg_iovlen <= 0 ||
-		    user_msg->msg_iovlen > UIO_MAXIOV) {
-			error = EMSGSIZE;
-			goto done;
-		}
-		auio = uio_create(user_msg->msg_iovlen, 0, spacetype,
-		    direction);
-		if (auio == NULL) {
-			error = ENOMEM;
-			goto done;
-		}
-		uiop[i] = auio;
-
-		iovp = uio_iovsaddr(auio);
-		if (iovp == NULL) {
-			error = ENOMEM;
-			goto done;
-		}
-		error = copyin_user_iovec_array(user_msg->msg_iov,
-		    spacetype, user_msg->msg_iovlen, iovp);
-		if (error) {
-			goto done;
-		}
-		user_msg->msg_iov = CAST_USER_ADDR_T(iovp);
-
-		error = uio_calculateresid(auio);
-		if (error) {
-			goto done;
-		}
-		user_msg->msg_datalen = uio_resid(auio);
-
-		if (user_msg->msg_name && user_msg->msg_namelen) {
-			namecnt++;
-		}
-		if (user_msg->msg_control && user_msg->msg_controllen) {
-			ctlcnt++;
-		}
-	}
-done:
-
-	return error;
-}
-#endif /* DEBUG || DEVELOPMENT */
-
 int
 internalize_recv_msghdr_array(const void_ptr_t src, int spacetype, int direction,
     u_int count, user_msghdr_x_ptr_t dst,
@@ -3777,7 +3473,7 @@ internalize_recv_msghdr_array(const void_ptr_t src, int spacetype, int direction
 			goto done;
 		}
 
-		iovp = uio_iovsaddr(recv_msg_elem->uio);
+		iovp = uio_iovsaddr_user(recv_msg_elem->uio);
 		if (iovp == NULL) {
 			error = ENOMEM;
 			goto done;
@@ -3789,7 +3485,7 @@ internalize_recv_msghdr_array(const void_ptr_t src, int spacetype, int direction
 		}
 		user_msg->msg_iov = CAST_USER_ADDR_T(iovp);
 
-		error = uio_calculateresid(recv_msg_elem->uio);
+		error = uio_calculateresid_user(recv_msg_elem->uio);
 		if (error) {
 			goto done;
 		}
@@ -3806,38 +3502,6 @@ done:
 
 	return error;
 }
-
-#if DEBUG || DEVELOPMENT
-void
-externalize_user_msghdr_array(void_ptr_t dst, int spacetype, int direction,
-    u_int count, const user_msghdr_x_ptr_t src, uio_ref_ptr_t uiop)
-{
-#pragma unused(direction)
-	u_int i;
-
-	for (i = 0; i < count; i++) {
-		const struct user_msghdr_x *user_msg = src + i;
-		uio_t auio = uiop[i];
-		user_ssize_t len = user_msg->msg_datalen - uio_resid(auio);
-
-		if (spacetype == UIO_USERSPACE64) {
-			struct user64_msghdr_x *msghdr64;
-
-			msghdr64 = ((struct user64_msghdr_x *)dst) + i;
-
-			msghdr64->msg_flags = user_msg->msg_flags;
-			msghdr64->msg_datalen = len;
-		} else {
-			struct user32_msghdr_x *msghdr32;
-
-			msghdr32 = ((struct user32_msghdr_x *)dst) + i;
-
-			msghdr32->msg_flags = user_msg->msg_flags;
-			msghdr32->msg_datalen = (user32_size_t)len;
-		}
-	}
-}
-#endif /* DEBUG || DEVELOPMENT */
 
 u_int
 externalize_recv_msghdr_array(proc_ref_t p, socket_ref_t so, void_ptr_t dst,
@@ -3898,68 +3562,6 @@ externalize_recv_msghdr_array(proc_ref_t p, socket_ref_t so, void_ptr_t dst,
 	}
 	return retcnt;
 }
-
-#if DEBUG || DEVELOPMENT
-void
-free_uio_array(uio_ref_ptr_t uiop, u_int count)
-{
-	u_int i;
-
-	for (i = 0; i < count; i++) {
-		if (uiop[i] != NULL) {
-			uio_free(uiop[i]);
-		}
-	}
-}
-#endif /* DEBUG || DEVELOPMENT */
-
-/* Extern linkage requires using __counted_by instead of bptr */
-__private_extern__ user_ssize_t
-uio_array_resid(uio_ref_t * __counted_by(count)uiop, u_int count)
-{
-	user_ssize_t len = 0;
-	u_int i;
-
-	for (i = 0; i < count; i++) {
-		struct uio *auio = uiop[i];
-
-		if (auio != NULL) {
-			len += uio_resid(auio);
-		}
-	}
-	return len;
-}
-
-#if DEBUG || DEVELOPMENT
-static boolean_t
-uio_array_is_valid(uio_ref_ptr_t uiop, u_int count)
-{
-	user_ssize_t len = 0;
-	u_int i;
-
-	for (i = 0; i < count; i++) {
-		struct uio *auio = uiop[i];
-
-		if (auio != NULL) {
-			user_ssize_t resid = uio_resid(auio);
-
-			/*
-			 * Sanity check on the validity of the iovec:
-			 * no point of going over sb_max
-			 */
-			if (resid < 0 || resid > (user_ssize_t)sb_max) {
-				return false;
-			}
-
-			len += resid;
-			if (len < 0 || len > (user_ssize_t)sb_max) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-#endif /* DEBUG || DEVELOPMENT */
 
 recv_msg_elem_ptr_t
 alloc_recv_msg_array(u_int count)

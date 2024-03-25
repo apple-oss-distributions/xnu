@@ -35,9 +35,7 @@
 #include <kern/host.h>
 #include <kern/ledger.h>
 #include <kern/mach_param.h> /* for TASK_CHUNK */
-#if MONOTONIC
 #include <kern/monotonic.h>
-#endif /* MONOTONIC */
 #include <kern/policy_internal.h>
 #include <kern/task.h>
 #include <kern/smr_hash.h>
@@ -897,13 +895,12 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	cru_out->cpu_time_eqos_len = COALITION_NUM_THREAD_QOS_TYPES;
 	memcpy(cru_out->cpu_time_eqos, cpu_time_eqos, sizeof(cru_out->cpu_time_eqos));
 
-	cru_out->cpu_ptime = stats_perf_only.ru_system_time_mach +
-	    stats_perf_only.ru_user_time_mach;
+	cru_out->cpu_ptime = recount_usage_time_mach(&stats_perf_only);
 #if CONFIG_PERVASIVE_CPI
-	cru_out->cpu_cycles = stats_sum.ru_cycles;
-	cru_out->cpu_instructions = stats_sum.ru_instructions;
-	cru_out->cpu_pinstructions = stats_perf_only.ru_instructions;
-	cru_out->cpu_pcycles = stats_perf_only.ru_cycles;
+	cru_out->cpu_instructions = recount_usage_instructions(&stats_sum);
+	cru_out->cpu_cycles = recount_usage_cycles(&stats_sum);
+	cru_out->cpu_pinstructions = recount_usage_instructions(&stats_perf_only);
+	cru_out->cpu_pcycles = recount_usage_cycles(&stats_perf_only);
 #endif // CONFIG_PERVASIVE_CPI
 
 	ledger_dereference(sum_ledger);

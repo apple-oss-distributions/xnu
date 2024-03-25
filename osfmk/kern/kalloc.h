@@ -552,11 +552,11 @@ static inline void *
 __sized_by(size)
 __kalloc_data(vm_size_t size, zalloc_flags_t flags)
 {
-	void *addr = (kalloc_data)(size, flags);
+	void *__unsafe_indexable addr = (kalloc_data)(size, flags);
 	if (flags & Z_NOFAIL) {
 		__builtin_assume(addr != NULL);
 	}
-	return addr;
+	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, size) : NULL;
 }
 
 #define kalloc_data(size, fl) __kalloc_data(size, fl)
@@ -576,11 +576,11 @@ __krealloc_data(
 	vm_size_t           new_size,
 	zalloc_flags_t      flags)
 {
-	void *addr = (krealloc_data)(ptr, old_size, new_size, flags);
+	void *__unsafe_indexable addr = (krealloc_data)(ptr, old_size, new_size, flags);
 	if (flags & Z_NOFAIL) {
 		__builtin_assume(addr != NULL);
 	}
-	return addr;
+	return addr ? __unsafe_forge_bidi_indexable(uint8_t *, addr, new_size) : NULL;
 }
 
 #define krealloc_data(ptr, old_size, new_size, fl) \
@@ -654,6 +654,8 @@ extern void kfree_data_addr(
  * @param elem          The address of the element to free
  */
 #define kfree_type(...)  KALLOC_DISPATCH(kfree_type, ##__VA_ARGS__)
+#define kfree_type_counted_by(type, count, elem) \
+	kfree_type_counted_by_3(type, count, elem)
 
 #ifdef XNU_KERNEL_PRIVATE
 #define kalloc_type_tag(...)     KALLOC_DISPATCH(kalloc_type_tag, ##__VA_ARGS__)
@@ -821,12 +823,9 @@ __options_decl(kt_granule_t, uint32_t, {
  * @param ptr           the pointer whose type needs to be checked.
  * @param type          the type which the pointer will be checked against.
  */
-#define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)                   \
-	_Pragma("clang diagnostic push")                               \
-	_Pragma("clang diagnostic ignored \"-Wvoid-ptr-dereference\"") \
-	(__builtin_xnu_types_compatible(__typeof__(*(ptr)), type) ||   \
-	    __builtin_xnu_types_compatible(__typeof__(*(ptr)), void))  \
-	_Pragma("clang diagnostic pop")
+#define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)                         \
+	(__builtin_xnu_types_compatible(os_get_pointee_type(ptr), type) ||   \
+	    __builtin_xnu_types_compatible(os_get_pointee_type(ptr), void))  \
 
 #define KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
 	_Static_assert(KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type), \
@@ -1179,7 +1178,9 @@ extern vm_size_t kalloc_next_good_size(
 	KALLOC_ARRAY_TYPE_DECL_(name, e_type_t, 0, e_type_t, sizeof(e_type_t))
 
 #define KALLOC_ARRAY_TYPE_DECL_3(name, h_type_t, e_type_t) \
-	KALLOC_ARRAY_TYPE_DECL_(name, e_type_t, 0, e_type_t, sizeof(e_type_t))
+	KALLOC_ARRAY_TYPE_DECL_(name,                                           \
+	    h_type_t, kt_realign_sizeof(h_type_t, e_type_t),                    \
+	    e_type_t, sizeof(e_type_t))                                         \
 
 #define KALLOC_ARRAY_TYPE_DEFINE_3(name, e_type_t, flags) \
 	KALLOC_TYPE_VAR_DEFINE_3(name ## _kt_view, e_type_t, flags)
@@ -1246,6 +1247,9 @@ kt_demangle_var_view(void *ptr)
 
 #define kt_is_var_view(ptr)  ((uintptr_t)(ptr) & 1)
 
+#define kt_realign_sizeof(h_ty, e_ty) \
+	((sizeof(h_ty) + _Alignof(e_ty) - 1) & -_Alignof(e_ty))
+
 static inline vm_size_t
 kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 {
@@ -1277,6 +1281,17 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 	    kt_size(0, sizeof(type), __kfree_count));                          \
 })
 
+#define kfree_type_counted_by_3(type, count_var, elem_var) ({              \
+	void *__bidi_indexable __elem_copy = (elem_var);                       \
+	__auto_type __kfree_count = (count_var);                               \
+	(elem_var) = 0;                                                        \
+	(count_var) = 0;                                                       \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(__elem_copy, type);              \
+	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
+	kfree_type_var_impl(kt_view_var, __elem_copy,                          \
+	    kt_size(0, sizeof(type), __kfree_count));                          \
+})
+
 #define kfree_type_4(hdr_ty, e_ty, count, elem) ({                             \
 	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, hdr_ty);                   \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
@@ -1284,7 +1299,8 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 	__auto_type __kfree_count = (count);                                   \
 	kfree_type_var_impl(kt_view_var,                                       \
 	    os_ptr_load_and_erase(elem),                                       \
-	    kt_size(sizeof(hdr_ty), sizeof(e_ty), __kfree_count));             \
+	    kt_size(kt_realign_sizeof(hdr_ty, e_ty), sizeof(e_ty),             \
+	    __kfree_count));                                                   \
 })
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -1307,7 +1323,7 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
 	(hdr_ty *)kalloc_type_var_impl(kt_view_var,                            \
-	    kt_size(sizeof(hdr_ty), sizeof(e_ty), count),                      \
+	    kt_size(kt_realign_sizeof(hdr_ty, e_ty), sizeof(e_ty), count),     \
 	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
 #define kalloc_type_4(hdr_ty, e_ty, count, flags) \
@@ -1331,8 +1347,8 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 	    KT_SHARED_ACCT);                                                   \
 	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, hdr_ty);                   \
 	(hdr_ty *)__krealloc_type(kt_view_var, elem,                           \
-	    kt_size(sizeof(hdr_ty), sizeof(e_ty), old_count),                  \
-	    kt_size(sizeof(hdr_ty), sizeof(e_ty), new_count),                  \
+	    kt_size(kt_realign_sizeof(hdr_ty, e_ty), sizeof(e_ty), old_count), \
+	    kt_size(kt_realign_sizeof(hdr_ty, e_ty), sizeof(e_ty), new_count), \
 	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
 #define krealloc_type_6(hdr_ty, e_ty, old_count, new_count, elem, flags) \
@@ -1342,18 +1358,17 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 #else /* XNU_KERNEL_PRIVATE */
 
 #define kalloc_type_3(type, count, flags) ({                                   \
-	_Static_assert((flags) == Z_WAITOK, "kexts can only pass Z_WAITOK");   \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
 	(type *)kalloc_type_var_impl(kt_view_var,                              \
 	    kt_size(0, sizeof(type), count), flags, NULL);                     \
 })
 
 #define kalloc_type_4(hdr_ty, e_ty, count, flags) ({                           \
-	_Static_assert((flags) == Z_WAITOK, "kexts can only pass Z_WAITOK");   \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
-	(hdr_ty *)kalloc_type_var_impl(kt_view_var, kt_size(sizeof(hdr_ty),    \
-	    sizeof(e_ty), count), flags, NULL);                                \
+	(hdr_ty *)kalloc_type_var_impl(kt_view_var,                            \
+	    kt_size(kt_realign_sizeof(hdr_ty, e_ty), sizeof(e_ty), count),     \
+	    flags, NULL);                                                      \
 })
 
 #endif /* !XNU_KERNEL_PRIVATE */
@@ -1401,6 +1416,35 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 
 #endif /* !XNU_KERNEL_PRIVATE */
 
+#define __kfree_data_elem_count_size(elem_var, count_var, size) ({             \
+	void *__bidi_indexable __elem_copy = (elem_var);                           \
+	(elem_var) = 0;                                                            \
+	(count_var) = 0;                                                           \
+	kfree_data(__elem_copy, size);                                             \
+})
+
+/*
+ * kfree_data_sized_by is the kfree_data equivalent that is compatible with
+ * -fbounds-safety's __sized_by pointers. Consistently with the -fbounds-safety
+ * semantics, `size` must be the byte size of the allocation that is freed (for
+ * instance, 20 for an array of 5 uint32_t).
+ */
+#define kfree_data_sized_by(elem, size) ({                                     \
+	__auto_type __size = (size);                                               \
+	__kfree_data_elem_count_size(elem, size, __size);                          \
+})
+
+/*
+ * kfree_data_counted_by is the kfree_data equivalent that is compatible with
+ * -fbounds-safety's __counted_by pointers. Consistently with the
+ * -fbounds-safety semantics, `count` must be the object count of the allocation
+ * that is freed (for instance, 5 for an array of 5 uint32_t).
+ */
+#define kfree_data_counted_by(elem, count) ({                                  \
+	__auto_type __size = (count) * sizeof(*(elem));                            \
+	__kfree_data_elem_count_size(elem, count, __size);                         \
+})
+
 #if __has_feature(address_sanitizer)
 # define __kalloc_no_kasan __attribute__((no_sanitize("address")))
 #else
@@ -1431,7 +1475,7 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
  * lead to a panic as the zone is null. Therefore assert that size
  * is less than KALLOC_SAFE_ALLOC_SIZE.
  */
-#ifdef XNU_KERNEL_PRIVATE
+#if XNU_KERNEL_PRIVATE || defined(KALLOC_TYPE_STRICT_SIZE_CHECK)
 #define KALLOC_TYPE_SIZE_CHECK(size)                           \
 	_Static_assert(size <= KALLOC_SAFE_ALLOC_SIZE,             \
 	"type is too large");

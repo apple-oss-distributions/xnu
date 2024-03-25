@@ -1,4 +1,4 @@
-/* Copyright (c) (2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -13,6 +13,7 @@
 #define _CORECRYPTO_CCRNG_SCHEDULE_H_
 
 #include <corecrypto/cc.h>
+#include <corecrypto/ccdrbg.h>
 #include <stdatomic.h>
 
 // Depending on the environment and platform APIs available, different
@@ -32,34 +33,23 @@ typedef enum {
     CCRNG_SCHEDULE_MUST_RESEED = 3,
 } ccrng_schedule_action_t;
 
-CC_INLINE bool
-ccrng_schedule_action_is_reseed(ccrng_schedule_action_t action)
-{
-    return (action == CCRNG_SCHEDULE_TRY_RESEED ||
-            action == CCRNG_SCHEDULE_MUST_RESEED);
-}
-
-typedef enum {
-    CCRNG_SCHEDULE_RESEED_SUCCEEDED = 1,
-    CCRNG_SCHEDULE_RESEED_FAILED = 2,
-} ccrng_schedule_result_t;
-
 typedef struct ccrng_schedule_ctx ccrng_schedule_ctx_t;
 
-// The schedule interface provides two function pointers: one to check the
-// schedule and one to propagate the result of the reseed.
+// The schedule interface provides two function pointers: one to check
+// the schedule and one to notify the schedule of a successful reseed.
 typedef struct ccrng_schedule_info {
     ccrng_schedule_action_t (*read)(ccrng_schedule_ctx_t *ctx);
-    void (*update)(ccrng_schedule_ctx_t *ctx, ccrng_schedule_result_t result);
+    void (*notify_reseed)(ccrng_schedule_ctx_t *ctx);
 } ccrng_schedule_info_t;
 
 struct ccrng_schedule_ctx {
     const ccrng_schedule_info_t *info;
+    bool must_reseed;
 };
 
 ccrng_schedule_action_t ccrng_schedule_read(ccrng_schedule_ctx_t *ctx);
 
-void ccrng_schedule_update(ccrng_schedule_ctx_t *ctx, ccrng_schedule_result_t update);
+void ccrng_schedule_notify_reseed(ccrng_schedule_ctx_t *ctx);
 
 // This is a concrete schedule implementation where the state of the
 // entropy source is communicated via a flag. The entropy source can
@@ -85,16 +75,40 @@ typedef struct ccrng_schedule_constant_ctx {
 void ccrng_schedule_constant_init(ccrng_schedule_constant_ctx_t *ctx,
                                   ccrng_schedule_action_t action);
 
+// This is a concrete schedule implementation that returns "must
+// reseed" over a given interval of time.
 typedef struct ccrng_schedule_timer_ctx {
     ccrng_schedule_ctx_t schedule_ctx;
     uint64_t (*get_time)(void);
     uint64_t reseed_interval;
-    uint64_t last_read_time;
     uint64_t last_reseed_time;
 } ccrng_schedule_timer_ctx_t;
 
 void ccrng_schedule_timer_init(ccrng_schedule_timer_ctx_t *ctx,
                                uint64_t (*get_time)(void),
                                uint64_t reseed_interval);
+
+// This is a concrete schedule implementation that combines the
+// results of two constituent sub-schedules. Specifically, it returns
+// the more "urgent" recommendation between the two.
+typedef struct ccrng_schedule_tree_ctx {
+    ccrng_schedule_ctx_t schedule_ctx;
+    ccrng_schedule_ctx_t *left;
+    ccrng_schedule_ctx_t *right;
+} ccrng_schedule_tree_ctx_t;
+
+void ccrng_schedule_tree_init(ccrng_schedule_tree_ctx_t *ctx,
+                              ccrng_schedule_ctx_t *left,
+                              ccrng_schedule_ctx_t *right);
+
+typedef struct ccrng_schedule_drbg_ctx {
+    ccrng_schedule_ctx_t schedule_ctx;
+    const struct ccdrbg_info *drbg_info;
+    struct ccdrbg_state *drbg_ctx;
+} ccrng_schedule_drbg_ctx_t;
+
+void ccrng_schedule_drbg_init(ccrng_schedule_drbg_ctx_t *ctx,
+                              const struct ccdrbg_info *drbg_info,
+                              struct ccdrbg_state *drbg_ctx);
 
 #endif /* _CORECRYPTO_CCRNG_SCHEDULE_H_ */

@@ -138,6 +138,8 @@
 
 #undef tcp_minmssoverload
 
+#include <net/sockaddr_utils.h>
+
 #include <corecrypto/ccaes.h>
 #include <libkern/crypto/aes.h>
 #include <libkern/crypto/md5.h>
@@ -151,6 +153,8 @@ static tcp_cc tcp_ccgen;
 
 extern struct tcptimerlist tcp_timer_list;
 extern struct tcptailq tcp_tw_tailq;
+
+extern int tcp_awdl_rtobase;
 
 SYSCTL_SKMEM_TCP_INT(TCPCTL_MSSDFLT, mssdflt, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_mssdflt, TCP_MSS, "Default TCP Maximum Segment Size");
@@ -809,7 +813,7 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 	} else {
 		m_freem(m->m_next);
 		m->m_next = 0;
-		m->m_data = (caddr_t)ipgen;
+		m->m_data = (uintptr_t)ipgen;
 		/* m_len is set later */
 		tlen = 0;
 #define xchg(a, b, type) { type t; t = a; a = b; b = t; }
@@ -1273,6 +1277,24 @@ tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 		    TCP_REXMTVAL(tp),
 		    tp->t_rttmin, TCPTV_REXMTMAX,
 		    TCP_ADD_REXMTSLOP(tp));
+	} else if (tp->t_state < TCPS_ESTABLISHED && tp->t_srtt == 0 &&
+	    tp->t_rxtshift == 0) {
+		struct ifnet *ifp = rt->rt_ifp;
+
+		if (ifp != NULL && (ifp->if_eflags & IFEF_AWDL) != 0) {
+			/*
+			 * AWDL needs a special value for the default initial retransmission timeout
+			 */
+			if (tcp_awdl_rtobase > tcp_TCPTV_MIN) {
+				tp->t_rttvar = ((tcp_awdl_rtobase - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
+			} else {
+				tp->t_rttvar = ((tcp_TCPTV_MIN - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
+			}
+			TCPT_RANGESET(tp->t_rxtcur,
+			    TCP_REXMTVAL(tp),
+			    tp->t_rttmin, TCPTV_REXMTMAX,
+			    TCP_ADD_REXMTSLOP(tp));
+		}
 	}
 
 	TCP_LOG_RTT_INFO(tp);
@@ -1509,7 +1531,7 @@ tcp_close(struct tcpcb *tp)
 			if (rt == NULL) {
 				goto no_valid_rt;
 			}
-			sin6 = (struct sockaddr_in6 *)(void *)rt_key(rt);
+			sin6 = SIN6(rt_key(rt));
 			if (IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr)) {
 				goto no_valid_rt;
 			}
@@ -2347,8 +2369,7 @@ tcp_handle_msgsize(struct ip *ip, struct inpcb *inp)
 	if ((rt == NULL) ||
 	    !(rt->rt_flags & RTF_HOST) ||
 	    (rt->rt_flags & (RTF_CLONING | RTF_PRCLONING))) {
-		rt = rtalloc1_scoped((struct sockaddr *)&icmpsrc, 0,
-		    RTF_CLONING | RTF_PRCLONING, ifscope);
+		rt = rtalloc1_scoped(SA(&icmpsrc), 0, RTF_CLONING | RTF_PRCLONING, ifscope);
 	} else if (rt) {
 		RT_LOCK(rt);
 		rtref(rt);
@@ -2420,7 +2441,7 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 		off = 0;
 	}
 
-	faddr = ((struct sockaddr_in *)(void *)sa)->sin_addr;
+	faddr = SIN(sa)->sin_addr;
 	if (sa->sa_family != AF_INET || faddr.s_addr == INADDR_ANY) {
 		return;
 	}
@@ -2492,7 +2513,7 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 		sock_laddr.sin.sin_addr = ip->ip_src;
 
 		protoctl_event_enqueue_nwk_wq_entry(ifp,
-		    (struct sockaddr *)&sock_laddr, sa,
+		    SA(&sock_laddr), sa,
 		    th->th_sport, th->th_dport, IPPROTO_TCP,
 		    cmd, &prctl_ev_val);
 #endif /* SKYWALK */
@@ -2603,8 +2624,7 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 #endif /* SKYWALK */
 
 	if (ip6 == NULL) {
-		in6_pcbnotify(&tcbinfo, sa, 0, (struct sockaddr *)(size_t)sa6_src,
-		    0, cmd, NULL, notify);
+		in6_pcbnotify(&tcbinfo, sa, 0, SA(sa6_src), 0, cmd, NULL, notify);
 #if SKYWALK
 		protoctl_event_enqueue_nwk_wq_entry(ifp, NULL, sa,
 		    0, 0, IPPROTO_TCP, cmd, NULL);
@@ -2655,7 +2675,7 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		sock_laddr.sin6.sin6_addr = ip6->ip6_src;
 
 		protoctl_event_enqueue_nwk_wq_entry(ifp,
-		    (struct sockaddr *)&sock_laddr, sa,
+		    SA(&sock_laddr), sa,
 		    t_ports.th_sport, t_ports.th_dport, IPPROTO_TCP,
 		    cmd, &prctl_ev_val);
 #endif /* SKYWALK */
@@ -2962,8 +2982,7 @@ tcp_rtlookup(struct inpcb *inp, unsigned int input_ifscope)
 
 			ro->ro_dst.sa_family = AF_INET;
 			ro->ro_dst.sa_len = sizeof(struct sockaddr_in);
-			((struct sockaddr_in *)(void *)&ro->ro_dst)->sin_addr =
-			    inp->inp_faddr;
+			SIN(&ro->ro_dst)->sin_addr = inp->inp_faddr;
 
 			/*
 			 * If the socket was bound to an interface, then
@@ -3059,7 +3078,7 @@ tcp_rtlookup6(struct inpcb *inp, unsigned int input_ifscope)
 			struct sockaddr_in6 *dst6;
 			unsigned int ifscope;
 
-			dst6 = (struct sockaddr_in6 *)&ro6->ro_dst;
+			dst6 = SIN6(&ro6->ro_dst);
 			dst6->sin6_family = AF_INET6;
 			dst6->sin6_len = sizeof(*dst6);
 			dst6->sin6_addr = inp->in6p_faddr;
@@ -3337,7 +3356,6 @@ tcp_sbrcv_grow_rwin(struct tcpcb *tp, struct sockbuf *sb)
 	}
 
 	if (tcp_do_autorcvbuf == 1 &&
-	    tcp_cansbgrow(sb) &&
 	    (tp->t_flags & TF_SLOWLINK) == 0 &&
 	    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) == 0 &&
 	    (rcvbuf - sb->sb_cc) < rcvbufinc &&
@@ -4146,8 +4164,7 @@ tcp_fill_keepalive_offload_frames(ifnet_t ifp,
 			socket_unlock(so, 1);
 			continue;
 		}
-		bcopy(m->m_data, frame->data + frame_data_offset,
-		    m->m_len);
+		bcopy(m_mtod_current(m), frame->data + frame_data_offset, m->m_len);
 		m_freem(m);
 
 		/*
@@ -4158,7 +4175,7 @@ tcp_fill_keepalive_offload_frames(ifnet_t ifp,
 			socket_unlock(so, 1);
 			continue;
 		}
-		bcopy(m->m_data, frame->reply_data + frame_data_offset,
+		bcopy(m_mtod_current(m), frame->reply_data + frame_data_offset,
 		    m->m_len);
 		m_freem(m);
 

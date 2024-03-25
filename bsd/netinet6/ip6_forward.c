@@ -125,6 +125,8 @@ adjust_scope_and_pktlen(struct mbuf *m,
 
 #endif /* PF */
 
+#include <net/sockaddr_utils.h>
+
 /*
  * Forward a packet.  If some error occurs return the sender
  * an icmp packet.  Note we can't always generate a meaningful
@@ -276,7 +278,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	 * processing may modify the mbuf.
 	 */
 	mcopy = m_copym_mode(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN),
-	    M_DONTWAIT, M_COPYM_COPY_HDR);
+	    M_DONTWAIT, NULL, NULL, M_COPYM_COPY_HDR);
 #if IPSEC
 	if (ipsec_bypass != 0) {
 		goto skip_ipsec;
@@ -409,7 +411,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 #endif /* IPSEC */
 skip_ipsec:
 
-	dst = (struct sockaddr_in6 *)&ip6forward_rt->ro_dst;
+	dst = SIN6(&ip6forward_rt->ro_dst);
 	if ((rt = ip6forward_rt->ro_rt) != NULL) {
 		RT_LOCK(rt);
 		/* Take an extra ref for ourselves */
@@ -459,7 +461,7 @@ skip_ipsec:
 		}
 		ROUTE_RELEASE(ip6forward_rt);
 
-		bzero(dst, sizeof(*dst));
+		SOCKADDR_ZERO(dst, sizeof(*dst));
 		dst->sin6_len = sizeof(struct sockaddr_in6);
 		dst->sin6_family = AF_INET6;
 		dst->sin6_addr = ip6->ip6_dst;
@@ -610,7 +612,7 @@ skip_ipsec:
 	}
 
 	if (rt->rt_flags & RTF_GATEWAY) {
-		dst = (struct sockaddr_in6 *)(void *)rt->rt_gateway;
+		dst = SIN6(rt->rt_gateway);
 	}
 
 	/*

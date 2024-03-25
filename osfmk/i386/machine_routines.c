@@ -45,7 +45,7 @@
 #include <i386/bit_routines.h>
 #include <i386/mp_events.h>
 #include <i386/pmCPU.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/tsc.h>
 #include <i386/cpu_threads.h>
 #include <i386/proc_reg.h>
@@ -55,9 +55,8 @@
 #include <i386/misc_protos.h>
 #include <kern/timer_queue.h>
 #include <vm/vm_map.h>
-#if KPC
+#include <kern/monotonic.h>
 #include <kern/kpc.h>
-#endif
 #include <architecture/i386/pio.h>
 #include <i386/cpu_data.h>
 #if DEBUG
@@ -65,10 +64,6 @@
 #else
 #define DBG(x...)
 #endif
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 extern void     wakeup(void *);
 
@@ -568,11 +563,11 @@ register_cpu(
 	 */
 	this_cpu_datap->cpu_phys_number = lapic_id;
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	if (kpc_register_cpu(this_cpu_datap) != TRUE) {
 		goto failed;
 	}
-#endif
+#endif /* CONFIG_CPU_COUNTERS */
 
 	if (!boot_cpu) {
 		cpu_thread_alloc(this_cpu_datap->cpu_number);
@@ -591,13 +586,12 @@ register_cpu(
 	return KERN_SUCCESS;
 
 failed:
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_unregister_cpu(this_cpu_datap);
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	return KERN_FAILURE;
 }
-
 
 kern_return_t
 ml_processor_register(

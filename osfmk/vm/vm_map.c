@@ -384,6 +384,11 @@ static kern_return_t    vm_map_can_reuse(
 	vm_map_offset_t start,
 	vm_map_offset_t end);
 
+static kern_return_t    vm_map_zero(
+	vm_map_t        map,
+	vm_map_offset_t start,
+	vm_map_offset_t end);
+
 static kern_return_t    vm_map_random_address_for_size(
 	vm_map_t                map,
 	vm_map_offset_t        *address,
@@ -958,12 +963,16 @@ vm_map_apple_protected(
 		if (tmp_entry.vme_start < start) {
 			if (tmp_entry.vme_start != start_aligned) {
 				kr = KERN_INVALID_ADDRESS;
+				vm_object_deallocate(protected_object);
+				goto done;
 			}
 			crypto_start += (start - tmp_entry.vme_start);
 		}
 		if (tmp_entry.vme_end > end) {
 			if (tmp_entry.vme_end != end_aligned) {
 				kr = KERN_INVALID_ADDRESS;
+				vm_object_deallocate(protected_object);
+				goto done;
 			}
 			crypto_end -= (tmp_entry.vme_end - end);
 		}
@@ -1875,6 +1884,8 @@ vm_map_lookup_entry(
 	if (VM_KERNEL_ADDRESS(address)) {
 		address = VM_KERNEL_STRIP_UPTR(address);
 	}
+
+
 #if CONFIG_PROB_GZALLOC
 	if (map->pmap == kernel_pmap) {
 		assertf(!pgz_owned(address),
@@ -2566,6 +2577,52 @@ vm_map_enter(
 		}
 	}
 
+	if (entry_for_jit
+	    && cur_protection != VM_PROT_ALL) {
+		/*
+		 * Native macOS processes and all non-macOS processes are
+		 * expected to create JIT regions via mmap(MAP_JIT, RWX) but
+		 * the RWX requirement was not enforced, and thus, we must live
+		 * with our sins. We are now dealing with a JIT mapping without
+		 * RWX.
+		 *
+		 * We deal with these by letting the MAP_JIT stick in order
+		 * to avoid CS violations when these pages are mapped executable
+		 * down the line. In order to appease the page table monitor (you
+		 * know what I'm talking about), these pages will end up being
+		 * marked as XNU_USER_DEBUG, which will be allowed because we
+		 * don't enforce the code signing monitor on macOS systems. If
+		 * the user-space application ever changes permissions to RWX,
+		 * which they are allowed to since the mapping was originally
+		 * created with MAP_JIT, then they'll switch over to using the
+		 * XNU_USER_JIT type, and won't be allowed to downgrade any
+		 * more after that.
+		 *
+		 * When not on macOS, a MAP_JIT mapping without VM_PROT_ALL is
+		 * strictly disallowed.
+		 */
+
+#if XNU_TARGET_OS_OSX
+		/*
+		 * Continue to allow non-RWX JIT
+		 */
+#else
+		/* non-macOS: reject JIT regions without RWX */
+		DTRACE_VM3(cs_wx,
+		    uint64_t, 0,
+		    uint64_t, 0,
+		    vm_prot_t, cur_protection);
+		printf("CODE SIGNING: %d[%s] %s(%d): JIT requires RWX: failing. \n",
+		    proc_selfpid(),
+		    (get_bsdtask_info(current_task())
+		    ? proc_name_address(get_bsdtask_info(current_task()))
+		    : "?"),
+		    __FUNCTION__,
+		    cur_protection);
+		return KERN_PROTECTION_FAILURE;
+#endif
+	}
+
 	/*
 	 * If the task has requested executable lockdown,
 	 * deny any new executable mapping.
@@ -2811,7 +2868,7 @@ vm_map_enter(
 		}
 
 		if (overwrite) {
-			vmr_flags_t remove_flags = VM_MAP_REMOVE_NO_MAP_ALIGN;
+			vmr_flags_t remove_flags = VM_MAP_REMOVE_NO_MAP_ALIGN | VM_MAP_REMOVE_TO_OVERWRITE;
 			kern_return_t remove_kr;
 
 			/*
@@ -2955,19 +3012,20 @@ vm_map_enter(
 	    vm_memory_malloc_no_cow(user_alias)) {
 		if (object == VM_OBJECT_NULL) {
 			object = vm_object_allocate(size);
+			vm_object_lock(object);
 			object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-			object->true_share = FALSE;
+			VM_OBJECT_SET_TRUE_SHARE(object, FALSE);
 			if (malloc_no_cow_except_fork &&
 			    !purgable &&
 			    !entry_for_jit &&
 			    !entry_for_tpro &&
 			    vm_memory_malloc_no_cow(user_alias)) {
 				object->copy_strategy = MEMORY_OBJECT_COPY_DELAY_FORK;
-				object->true_share = TRUE;
+				VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 			}
 			if (purgable) {
 				task_t owner;
-				object->purgable = VM_PURGABLE_NONVOLATILE;
+				VM_OBJECT_SET_PURGABLE(object, VM_PURGABLE_NONVOLATILE);
 				if (map->pmap == kernel_pmap) {
 					/*
 					 * Purgeable mappings made in a kernel
@@ -2985,10 +3043,9 @@ vm_map_enter(
 				assert(object->vo_owner == NULL);
 				assert(object->resident_page_count == 0);
 				assert(object->wired_page_count == 0);
-				vm_object_lock(object);
 				vm_purgeable_nonvolatile_enqueue(object, owner);
-				vm_object_unlock(object);
 			}
+			vm_object_unlock(object);
 			offset = (vm_object_offset_t)0;
 		}
 	} else if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT) {
@@ -3243,14 +3300,14 @@ vm_map_enter(
 
 				/* create one vm_object per superpage */
 				sp_object = vm_object_allocate((vm_map_size_t)(entry->vme_end - entry->vme_start));
+				vm_object_lock(sp_object);
 				sp_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-				sp_object->phys_contiguous = TRUE;
+				VM_OBJECT_SET_PHYS_CONTIGUOUS(sp_object, TRUE);
 				sp_object->vo_shadow_offset = (vm_object_offset_t)VM_PAGE_GET_PHYS_PAGE(pages) * PAGE_SIZE;
 				VME_OBJECT_SET(entry, sp_object, false, 0);
 				assert(entry->use_pmap);
 
 				/* enter the base pages into the object */
-				vm_object_lock(sp_object);
 				for (sp_offset = 0;
 				    sp_offset < SUPERPAGE_SIZE;
 				    sp_offset += PAGE_SIZE) {
@@ -4422,6 +4479,8 @@ vm_map_enter_mem_object_helper(
 					if (!copy &&
 					    copy_object != VM_OBJECT_NULL &&
 					    copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
+						bool is_writable;
+
 						/*
 						 * We need to resolve our side of this
 						 * "symmetric" copy-on-write now; we
@@ -4437,8 +4496,15 @@ vm_map_enter_mem_object_helper(
 						// assert(copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC);
 						VME_OBJECT_SHADOW(copy_entry, copy_size, TRUE);
 						assert(copy_object != VME_OBJECT(copy_entry));
-						if (!copy_entry->needs_copy &&
-						    copy_entry->protection & VM_PROT_WRITE) {
+						is_writable = false;
+						if (copy_entry->protection & VM_PROT_WRITE) {
+							is_writable = true;
+#if __arm64e__
+						} else if (copy_entry->used_for_tpro) {
+							is_writable = true;
+#endif /* __arm64e__ */
+						}
+						if (!copy_entry->needs_copy && is_writable) {
 							vm_prot_t prot;
 
 							prot = copy_entry->protection & ~VM_PROT_WRITE;
@@ -4457,7 +4523,7 @@ vm_map_enter_mem_object_helper(
 						vm_object_lock(copy_object);
 						/* we're about to make a shared mapping of this object */
 						copy_object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
-						copy_object->true_share = TRUE;
+						VM_OBJECT_SET_TRUE_SHARE(copy_object, TRUE);
 						vm_object_unlock(copy_object);
 					}
 
@@ -4900,7 +4966,7 @@ vm_map_enter_mem_object_helper(
 				kr = pmap_enter_options(target_map->pmap,
 				    va, UPL_PHYS_PAGE(page_list, i),
 				    cur_protection, VM_PROT_NONE,
-				    0, TRUE, pmap_options, NULL);
+				    0, TRUE, pmap_options, NULL, PMAP_MAPPING_TYPE_INFER);
 				if (kr != KERN_SUCCESS) {
 					OSIncrementAtomic64(&vm_prefault_nb_bailout);
 					if (kernel_prefault) {
@@ -7139,7 +7205,7 @@ vm_map_wire_nested(
 				assertf(!entry->needs_copy,
 				    "entry %p\n", entry);
 				object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
-				object->true_share = TRUE;
+				VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 			}
 			vm_object_unlock(object);
 		}
@@ -7896,10 +7962,11 @@ virt_memory_guard_ast(
 		}
 	}
 
+	const bool fatal = task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL;
 	/* Raise exception synchronously and see if handler claimed it */
-	sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode);
+	sync_exception_result = task_exception_notify(EXC_GUARD, code, subcode, fatal);
 
-	if (task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL) {
+	if (fatal) {
 		/*
 		 * If Synchronous EXC_GUARD delivery was successful then
 		 * kill the process and return, else kill the process
@@ -8106,6 +8173,18 @@ vm_map_delete(
 
 	if (map->terminated || os_ref_get_count_raw(&map->map_refcnt) == 0) {
 		state |= VMDS_GAPS_OK;
+	}
+
+	if (map->corpse_source &&
+	    !(flags & VM_MAP_REMOVE_TO_OVERWRITE) &&
+	    !map->terminated) {
+		/*
+		 * The map is being used for corpses related diagnostics.
+		 * So skip any entry removal to avoid perturbing the map state.
+		 * The cleanup will happen in task_terminate_internal after the
+		 * call to task_port_no_senders.
+		 */
+		goto out;
 	}
 
 	interruptible = (flags & VM_MAP_REMOVE_INTERRUPTIBLE) ?
@@ -10694,12 +10773,28 @@ vm_map_copy_overwrite_aligned(
 		 *	If the destination contains temporary unshared memory,
 		 *	we can perform the copy by throwing it away and
 		 *	installing the source data.
+		 *
+		 *	Exceptions for mappings with special semantics:
+		 *	+ "permanent" entries,
+		 *	+ JIT regions,
+		 *	+ TPRO regions,
+		 *      + pmap-specific protection policies,
+		 *	+ VM objects with COPY_NONE copy strategy.
 		 */
 
 		object = VME_OBJECT(entry);
 		if ((!entry->is_shared &&
+		    !entry->vme_permanent &&
+		    !entry->used_for_jit &&
+#if __arm64e__
+		    !entry->used_for_tpro &&
+#endif /* __arm64e__ */
+		    !(entry->protection & VM_PROT_EXECUTE) &&
+		    !pmap_has_prot_policy(dst_map->pmap, entry->translated_allow_execute, entry->protection) &&
 		    ((object == VM_OBJECT_NULL) ||
-		    (object->internal && !object->true_share))) ||
+		    (object->internal &&
+		    !object->true_share &&
+		    object->copy_strategy != MEMORY_OBJECT_COPY_NONE))) ||
 		    entry->needs_copy) {
 			vm_object_t     old_object = VME_OBJECT(entry);
 			vm_object_offset_t      old_offset = VME_OFFSET(entry);
@@ -11863,6 +11958,7 @@ vm_map_copyin_internal(
 	boolean_t       entry_was_shared;
 	vm_map_entry_t  saved_src_entry;
 
+
 	if (flags & ~VM_MAP_COPYIN_ALL_FLAGS) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -12330,10 +12426,10 @@ CopySlowly:
 
 			if (preserve_purgeable &&
 			    src_object->purgable != VM_PURGABLE_DENY) {
-				new_object->true_share = TRUE;
+				VM_OBJECT_SET_TRUE_SHARE(new_object, TRUE);
 
 				/* start as non-volatile with no owner... */
-				new_object->purgable = VM_PURGABLE_NONVOLATILE;
+				VM_OBJECT_SET_PURGABLE(new_object, VM_PURGABLE_NONVOLATILE);
 				vm_purgeable_nonvolatile_enqueue(new_object, NULL);
 				/* ... and move to src_object's purgeable state */
 				if (src_object->purgable != VM_PURGABLE_NONVOLATILE) {
@@ -12880,6 +12976,8 @@ vm_map_fork_share(
 	    (object->vo_size >
 	    (vm_map_size_t)(old_entry->vme_end -
 	    old_entry->vme_start)))) {
+		bool is_writable;
+
 		/*
 		 *	We need to create a shadow.
 		 *	There are three cases here.
@@ -12967,8 +13065,15 @@ vm_map_fork_share(
 		 *	to remove write permission.
 		 */
 
-		if (!old_entry->needs_copy &&
-		    (old_entry->protection & VM_PROT_WRITE)) {
+		is_writable = false;
+		if (old_entry->protection & VM_PROT_WRITE) {
+			is_writable = true;
+#if __arm64e__
+		} else if (old_entry->used_for_tpro) {
+			is_writable = true;
+#endif /* __arm64e__ */
+		}
+		if (!old_entry->needs_copy && is_writable) {
 			vm_prot_t prot;
 
 			assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection));
@@ -13596,6 +13701,7 @@ slow_vm_map_fork_copy:
 		pmap_set_tpro(new_map->pmap);
 	}
 
+
 	vm_map_unlock(new_map);
 	vm_map_unlock(old_map);
 	vm_map_deallocate(old_map);
@@ -14162,7 +14268,7 @@ RetrySubMap:
 				copy_object = sub_object;
 				vm_object_lock(sub_object);
 				vm_object_reference_locked(sub_object);
-				sub_object->shadowed = TRUE;
+				VM_OBJECT_SET_SHADOWED(sub_object, TRUE);
 				vm_object_unlock(sub_object);
 
 				assert(submap_entry->wired_count == 0);
@@ -14481,7 +14587,7 @@ protection_failure:
 
 			if (VME_OBJECT(entry)->shadowed == FALSE) {
 				vm_object_lock(VME_OBJECT(entry));
-				VME_OBJECT(entry)->shadowed = TRUE;
+				VM_OBJECT_SET_SHADOWED(VME_OBJECT(entry), TRUE);
 				vm_object_unlock(VME_OBJECT(entry));
 			}
 			VME_OBJECT_SHADOW(entry,
@@ -16201,6 +16307,9 @@ vm_map_behavior_set(
 		return vm_map_pageout(map, start, end);
 #endif /* MACH_ASSERT */
 
+	case VM_BEHAVIOR_ZERO:
+		return vm_map_zero(map, start, end);
+
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -16682,6 +16791,14 @@ vm_map_reusable_pages(
 			reusable_no_write = TRUE;
 		}
 
+		if (entry->vme_xnu_user_debug) {
+			/*
+			 * User debug pages might be write-protected by hardware,
+			 * so do not attempt to write to these pages.
+			 */
+			reusable_no_write = TRUE;
+		}
+
 		vm_object_lock(object);
 		if (((object->ref_count == 1) ||
 		    (object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC &&
@@ -16882,6 +16999,166 @@ vm_map_pageout(
 	return KERN_SUCCESS;
 }
 #endif /* MACH_ASSERT */
+
+/*
+ * This function determines if the zero operation can be run on the
+ * respective entry. Additional checks on the object are in
+ * vm_object_zero_preflight.
+ */
+static kern_return_t
+vm_map_zero_entry_preflight(vm_map_entry_t entry)
+{
+	/*
+	 * Zeroing is restricted to writable non-executable entries and non-JIT
+	 * regions.
+	 */
+	if (!(entry->protection & VM_PROT_WRITE) ||
+	    (entry->protection & VM_PROT_EXECUTE) ||
+	    entry->used_for_jit ||
+	    entry->vme_xnu_user_debug) {
+		return KERN_PROTECTION_FAILURE;
+	}
+
+	/*
+	 * Zeroing for copy on write isn't yet supported. Zeroing is also not
+	 * allowed for submaps.
+	 */
+	if (entry->needs_copy || entry->is_sub_map) {
+		return KERN_NO_ACCESS;
+	}
+
+	return KERN_SUCCESS;
+}
+
+/*
+ * This function translates entry's start and end to offsets in the object
+ */
+static void
+vm_map_get_bounds_in_object(
+	vm_map_entry_t      entry,
+	vm_map_offset_t     start,
+	vm_map_offset_t     end,
+	vm_map_offset_t    *start_offset,
+	vm_map_offset_t    *end_offset)
+{
+	if (entry->vme_start < start) {
+		*start_offset = start - entry->vme_start;
+	} else {
+		*start_offset = 0;
+	}
+	*end_offset = MIN(end, entry->vme_end) - entry->vme_start;
+	*start_offset += VME_OFFSET(entry);
+	*end_offset += VME_OFFSET(entry);
+}
+
+/*
+ * This function iterates through the entries in the requested range
+ * and zeroes any resident pages in the corresponding objects. Compressed
+ * pages are dropped instead of being faulted in and zeroed.
+ */
+static kern_return_t
+vm_map_zero(
+	vm_map_t        map,
+	vm_map_offset_t start,
+	vm_map_offset_t end)
+{
+	vm_map_entry_t                  entry;
+	vm_map_offset_t                 cur = start;
+	kern_return_t                   ret;
+
+	/*
+	 * This operation isn't supported where the map page size is less than
+	 * the hardware page size. Caller will need to handle error and
+	 * explicitly zero memory if needed.
+	 */
+	if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT) {
+		return KERN_NO_ACCESS;
+	}
+
+	/*
+	 * The MADV_ZERO operation doesn't require any changes to the
+	 * vm_map_entry_t's, so the read lock is sufficient.
+	 */
+	vm_map_lock_read(map);
+	assert(map->pmap != kernel_pmap);       /* protect alias access */
+
+	/*
+	 * The madvise semantics require that the address range be fully
+	 * allocated with no holes. Otherwise, we're required to return
+	 * an error. This check needs to be redone if the map has changed.
+	 */
+	if (!vm_map_range_check(map, cur, end, &entry)) {
+		vm_map_unlock_read(map);
+		return KERN_INVALID_ADDRESS;
+	}
+
+	/*
+	 * Examine each vm_map_entry_t in the range.
+	 */
+	while (entry != vm_map_to_entry(map) && entry->vme_start < end) {
+		vm_map_offset_t cur_offset;
+		vm_map_offset_t end_offset;
+		unsigned int last_timestamp = map->timestamp;
+		vm_object_t object = VME_OBJECT(entry);
+
+		ret = vm_map_zero_entry_preflight(entry);
+		if (ret != KERN_SUCCESS) {
+			vm_map_unlock_read(map);
+			return ret;
+		}
+
+		if (object == VM_OBJECT_NULL) {
+			entry = entry->vme_next;
+			continue;
+		}
+
+		vm_map_get_bounds_in_object(entry, cur, end, &cur_offset, &end_offset);
+		vm_object_lock(object);
+		/*
+		 * Take a reference on the object as vm_object_zero will drop the object
+		 * lock when it encounters a busy page.
+		 */
+		vm_object_reference_locked(object);
+		vm_map_unlock_read(map);
+
+		ret = vm_object_zero(object, cur_offset, end_offset);
+		vm_object_unlock(object);
+		vm_object_deallocate(object);
+		if (ret != KERN_SUCCESS) {
+			return ret;
+		}
+		/*
+		 * Update cur as vm_object_zero has succeeded.
+		 */
+		cur += (end_offset - cur_offset);
+		if (cur == end) {
+			return KERN_SUCCESS;
+		}
+
+		/*
+		 * If the map timestamp has changed, restart by relooking up cur in the
+		 * map
+		 */
+		vm_map_lock_read(map);
+		if (last_timestamp != map->timestamp) {
+			/*
+			 * Relookup cur in the map
+			 */
+			if (!vm_map_range_check(map, cur, end, &entry)) {
+				vm_map_unlock_read(map);
+				return KERN_INVALID_ADDRESS;
+			}
+			continue;
+		}
+		/*
+		 * If the map hasn't changed proceed with the next entry
+		 */
+		entry = entry->vme_next;
+	}
+
+	vm_map_unlock_read(map);
+	return KERN_SUCCESS;
+}
 
 
 /*
@@ -17239,6 +17516,76 @@ vm_map_remap_extract(
 			    inheritance,
 			    vmk_flags);
 			vm_map_deallocate(submap);
+
+			if (result == KERN_SUCCESS &&
+			    submap_needs_copy &&
+			    !copy) {
+				/*
+				 * We were asked for a "shared"
+				 * re-mapping but had to ask for a
+				 * "copy-on-write" remapping of the
+				 * submap's mapping to honor the
+				 * submap's "needs_copy".
+				 * We now need to resolve that
+				 * pending "copy-on-write" to
+				 * get something we can share.
+				 */
+				vm_map_entry_t copy_entry;
+				vm_object_offset_t copy_offset;
+				vm_map_size_t copy_size;
+				vm_object_t copy_object;
+				copy_entry = vm_map_copy_first_entry(map_copy);
+				copy_size = copy_entry->vme_end - copy_entry->vme_start;
+				copy_object = VME_OBJECT(copy_entry);
+				copy_offset = VME_OFFSET(copy_entry);
+				if (copy_object == VM_OBJECT_NULL) {
+					assert(copy_offset == 0);
+					assert(!copy_entry->needs_copy);
+					if (copy_entry->max_protection == VM_PROT_NONE) {
+						assert(copy_entry->protection == VM_PROT_NONE);
+						/* nothing to share */
+					} else {
+						assert(copy_offset == 0);
+						copy_object = vm_object_allocate(copy_size);
+						VME_OFFSET_SET(copy_entry, 0);
+						VME_OBJECT_SET(copy_entry, copy_object, false, 0);
+						assert(copy_entry->use_pmap);
+					}
+				} else if (copy_object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC) {
+					/* already shareable */
+					assert(!copy_entry->needs_copy);
+				} else if (copy_entry->needs_copy ||
+				    copy_object->shadowed ||
+				    (object->internal &&
+				    !object->true_share &&
+				    !copy_entry->is_shared &&
+				    copy_object->vo_size > copy_size)) {
+					VME_OBJECT_SHADOW(copy_entry, copy_size, TRUE);
+					assert(copy_entry->use_pmap);
+					if (copy_entry->needs_copy) {
+						/* already write-protected */
+					} else {
+						vm_prot_t prot;
+						prot = copy_entry->protection & ~VM_PROT_WRITE;
+						vm_object_pmap_protect(copy_object,
+						    copy_offset,
+						    copy_size,
+						    PMAP_NULL,
+						    PAGE_SIZE,
+						    0,
+						    prot);
+					}
+					copy_entry->needs_copy = FALSE;
+				}
+				copy_object = VME_OBJECT(copy_entry);
+				copy_offset = VME_OFFSET(copy_entry);
+				if (copy_object &&
+				    copy_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
+					copy_object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+					copy_object->true_share = TRUE;
+				}
+			}
+
 			return result;
 		}
 
@@ -17528,12 +17875,21 @@ vm_map_remap_extract(
 			    (object->internal && !object->true_share &&
 			    !src_entry->is_shared &&
 			    object->vo_size > entry_size)) {
+				bool is_writable;
+
 				VME_OBJECT_SHADOW(src_entry, entry_size,
 				    vm_map_always_shadow(map));
 				assert(src_entry->use_pmap);
 
-				if (!src_entry->needs_copy &&
-				    (src_entry->protection & VM_PROT_WRITE)) {
+				is_writable = false;
+				if (src_entry->protection & VM_PROT_WRITE) {
+					is_writable = true;
+#if __arm64e__
+				} else if (src_entry->used_for_tpro) {
+					is_writable = true;
+#endif /* __arm64e__ */
+				}
+				if (!src_entry->needs_copy && is_writable) {
 					vm_prot_t prot;
 
 					assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection));
@@ -17600,7 +17956,7 @@ vm_map_remap_extract(
 				 */
 				object->copy_strategy =
 				    MEMORY_OBJECT_COPY_DELAY;
-				object->true_share = TRUE;
+				VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 			}
 			vm_object_unlock(object);
 		}
@@ -17927,6 +18283,7 @@ vm_map_single_jit(
 	vm_map_unlock(map);
 }
 #endif /* XNU_TARGET_OS_OSX */
+
 
 /*
  * Callers of this function must call vm_map_copy_require on
@@ -21392,13 +21749,32 @@ again:
 				 * at the end of a successful evaluation phase, we want to avoid doing no-op calls
 				 * on this task's purgeable objects. Hence the check for only volatile objects.
 				 */
-				if (evaluation_phase == FALSE &&
-				    (src_object->purgable == VM_PURGABLE_VOLATILE) &&
-				    (src_object->ref_count == 1)) {
-					vm_object_lock(src_object);
-					vm_object_purge(src_object, 0);
-					vm_object_unlock(src_object);
+				if (evaluation_phase ||
+				    src_object->purgable != VM_PURGABLE_VOLATILE ||
+				    src_object->ref_count != 1) {
+					continue;
 				}
+				vm_object_lock(src_object);
+				if (src_object->purgable == VM_PURGABLE_VOLATILE &&
+				    src_object->ref_count == 1) {
+					purgeable_q_t old_queue;
+
+					/* object should be on a purgeable queue */
+					assert(src_object->objq.next != NULL &&
+					    src_object->objq.prev != NULL);
+					/* move object from its volatile queue to the nonvolatile queue */
+					old_queue = vm_purgeable_object_remove(src_object);
+					assert(old_queue);
+					if (src_object->purgeable_when_ripe) {
+						/* remove a token from that volatile queue */
+						vm_page_lock_queues();
+						vm_purgeable_token_delete_first(old_queue);
+						vm_page_unlock_queues();
+					}
+					/* purge the object */
+					vm_object_purge(src_object, 0);
+				}
+				vm_object_unlock(src_object);
 				continue;
 			}
 
@@ -21957,20 +22333,47 @@ vm_map_entry_cs_associate(
 
 	vm_map_lock_assert_exclusive(map);
 
-	if (entry->used_for_jit) {
-		cs_ret = csm_associate_jit_region(
-			map->pmap,
-			entry->vme_start,
-			entry->vme_end - entry->vme_start);
-		goto done;
-	}
-
+	/*
+	 * Check for a debug association mapping before we check for used_for_jit. This
+	 * allows non-RWX JIT on macOS systems to masquerade their mappings as USER_DEBUG
+	 * pages instead of USER_JIT. These non-RWX JIT pages cannot be marked as USER_JIT
+	 * since they are mapped with RW or RX permissions, which the page table monitor
+	 * denies on USER_JIT pages. Given that, if they're not mapped as USER_DEBUG,
+	 * they will be mapped as USER_EXEC, and that will cause another page table monitor
+	 * violation when those USER_EXEC pages are mapped as RW.
+	 *
+	 * Since these pages switch between RW and RX through mprotect, they mimic what
+	 * we expect a debugger to do. As the code signing monitor does not enforce mappings
+	 * on macOS systems, this works in our favor here and allows us to continue to
+	 * support these legacy-programmed applications without sacrificing security on
+	 * the page table or the code signing monitor. We don't need to explicitly check
+	 * for entry_for_jit here and the mapping permissions. If the initial mapping is
+	 * created with RX, then the application must map it as RW in order to first write
+	 * to the page (MAP_JIT mappings must be private and anonymous). The switch to
+	 * RX will cause vm_map_protect to mark the entry as vmkf_remap_prot_copy.
+	 * Similarly, if the mapping was created as RW, and then switched to RX,
+	 * vm_map_protect will again mark the entry as a copy, and both these cases
+	 * lead to this if-statement being entered.
+	 *
+	 * For more information: rdar://115313336.
+	 */
 	if (vmk_flags.vmkf_remap_prot_copy) {
 		cs_ret = csm_associate_debug_region(
 			map->pmap,
 			entry->vme_start,
 			entry->vme_end - entry->vme_start);
-		if (cs_ret == KERN_SUCCESS) {
+
+		/*
+		 * csm_associate_debug_region returns not supported when the code signing
+		 * monitor is disabled. This is intentional, since cs_ret is checked towards
+		 * the end of the function, and if it is not supported, then we still want the
+		 * VM to perform code-signing enforcement on this entry. That said, if we don't
+		 * mark this as a xnu_user_debug page when the code-signing monitor is disabled,
+		 * then it never gets retyped to XNU_USER_DEBUG frame type, which then causes
+		 * an issue with debugging (since it'll be mapped in as XNU_USER_EXEC in some
+		 * cases, which will cause a violation when attempted to be mapped as writable).
+		 */
+		if ((cs_ret == KERN_SUCCESS) || (cs_ret == KERN_NOT_SUPPORTED)) {
 			entry->vme_xnu_user_debug = TRUE;
 		}
 #if DEVELOPMENT || DEBUG
@@ -21985,6 +22388,14 @@ vm_map_entry_cs_associate(
 			    cs_ret);
 		}
 #endif /* DEVELOPMENT || DEBUG */
+		goto done;
+	}
+
+	if (entry->used_for_jit) {
+		cs_ret = csm_associate_jit_region(
+			map->pmap,
+			entry->vme_start,
+			entry->vme_end - entry->vme_start);
 		goto done;
 	}
 
@@ -22112,6 +22523,37 @@ done:
 
 #endif /* CODE_SIGNING_MONITOR */
 
+inline bool
+vm_map_is_corpse_source(vm_map_t map)
+{
+	bool status = false;
+	if (map) {
+		vm_map_lock_read(map);
+		status = map->corpse_source;
+		vm_map_unlock_read(map);
+	}
+	return status;
+}
+
+inline void
+vm_map_set_corpse_source(vm_map_t map)
+{
+	if (map) {
+		vm_map_lock(map);
+		map->corpse_source = true;
+		vm_map_unlock(map);
+	}
+}
+
+inline void
+vm_map_unset_corpse_source(vm_map_t map)
+{
+	if (map) {
+		vm_map_lock(map);
+		map->corpse_source = false;
+		vm_map_unlock(map);
+	}
+}
 /*
  * FORKED CORPSE FOOTPRINT
  *
@@ -22910,6 +23352,15 @@ vm_map_range_map_init(void)
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_PROB_GUARD);
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_SMALL);
 	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_MALLOC_TINY);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_TCMALLOC);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_LIBNETWORK);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IOACCELERATOR);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IOSURFACE);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_IMAGEIO);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_COREGRAPHICS);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_CORESERVICES);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_COREDATA);
+	bitmap_set(vm_map_user_range_heap_map, VM_MEMORY_LAYERKIT);
 }
 
 static struct mach_vm_range
@@ -23148,7 +23599,7 @@ vm_map_range_configure(vm_map_t map)
 	/* expand the default VM space to the largest possible address */
 	vm_map_set_jumbo(map);
 
-	assert3u(4 * GiB(10), <=, vm_map_max(map) - default_end);
+	assert3u(7 * GiB(10) / 2, <=, vm_map_max(map) - default_end);
 	data_range = vm_map_range_random_uniform(GiB(10),
 	    default_end + PAGE_SIZE, vm_map_max(map), offmask);
 
@@ -23380,7 +23831,7 @@ mach_vm_range_create_v1(
 
 	for (size_t i = 0; i < new_count; i++) {
 		mach_vm_range_t r = &recipe[i].range;
-		mach_vm_size_t s = mach_vm_range_size(r);
+		mach_vm_size_t s;
 
 		if (recipe[i].flags) {
 			return KERN_INVALID_ARGUMENT;
@@ -23395,10 +23846,12 @@ mach_vm_range_create_v1(
 		}
 
 		if (!VM_MAP_PAGE_ALIGNED(r->min_address, mask) ||
-		    !VM_MAP_PAGE_ALIGNED(r->max_address, mask)) {
+		    !VM_MAP_PAGE_ALIGNED(r->max_address, mask) ||
+		    r->min_address >= r->max_address) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
+		s = mach_vm_range_size(r);
 		if (!mach_vm_range_contains(&void1, r->min_address, s) &&
 		    !mach_vm_range_contains(&void2, r->min_address, s)) {
 			return KERN_INVALID_ARGUMENT;

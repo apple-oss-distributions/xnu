@@ -85,6 +85,13 @@ ENTRY(bcopy_no_overwrite)
  */
 ENTRY(bcopy)
 	xchgq	%rsi,%rdi
+	jmp	EXT(memmove)
+
+/*
+ * memmove(dst, src, cnt)
+ *        rdi, rsi, rdx
+ */
+ENTRY(memmove)
 	movq	%rdx,%rcx
 
 	movq	%rdi,%rax

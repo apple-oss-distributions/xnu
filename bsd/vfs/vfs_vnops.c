@@ -428,7 +428,9 @@ again:
 		/* Inherit USEDVP, vnode_open() supported flags only */
 		ndp->ni_cnd.cn_flags &= (USEDVP | NOCROSSMOUNT);
 		ndp->ni_cnd.cn_flags |= LOCKPARENT | LOCKLEAF | AUDITVNPATH1;
-		ndp->ni_flag = NAMEI_COMPOUNDOPEN;
+		/* Inherit NAMEI_ROOTDIR flag only */
+		ndp->ni_flag &= NAMEI_ROOTDIR;
+		ndp->ni_flag |= NAMEI_COMPOUNDOPEN;
 #if NAMEDRSRCFORK
 		/* open calls are allowed for resource forks. */
 		ndp->ni_cnd.cn_flags |= CN_ALLOWRSRCFORK;
@@ -550,7 +552,9 @@ continue_create_lookup:
 		if (fmode & FENCRYPTED) {
 			ndp->ni_cnd.cn_flags |= CN_RAW_ENCRYPTED | CN_SKIPNAMECACHE;
 		}
-		ndp->ni_flag = NAMEI_COMPOUNDOPEN;
+		/* Inherit NAMEI_ROOTDIR flag only */
+		ndp->ni_flag &= NAMEI_ROOTDIR;
+		ndp->ni_flag |= NAMEI_COMPOUNDOPEN;
 
 		/* preserve NOFOLLOW from vnode_open() */
 		if (fmode & O_NOFOLLOW || fmode & O_SYMLINK || (origcnflags & FOLLOW) == 0) {
@@ -722,7 +726,7 @@ bad:
 		 * but according to vnode_authorize or VNOP_OPEN it
 		 * no longer exists.
 		 *
-		 * EREDRIVEOPEN: means that we were hit by the tty allocation race.
+		 * EREDRIVEOPEN: means that we were hit by the tty allocation race or NFSv4 open/create race.
 		 */
 		if (((error == ENOENT) && (*fmodep & O_CREAT)) || (error == EREDRIVEOPEN) || ref_failed) {
 			/*

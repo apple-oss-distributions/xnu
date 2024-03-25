@@ -207,6 +207,15 @@ static mach_msg_return_t ipc_kmsg_option_check(ipc_port_t port, mach_msg_option6
  */
 #define CA_MACH_SERVICE_PORT_NAME_LEN                   86
 
+/* zone for cached ipc_kmsg_t structures */
+ZONE_DECLARE_ID(ZONE_ID_IPC_KMSG, struct ipc_kmsg);
+ZONE_INIT(NULL, "ipc kmsgs", IKM_SAVED_KMSG_SIZE,
+    ZC_CACHING | ZC_ZFREE_CLEARMEM, ZONE_ID_IPC_KMSG, NULL);
+#define ikm_require(kmsg) \
+	zone_id_require(ZONE_ID_IPC_KMSG, IKM_SAVED_MSG_SIZE, kmsg)
+#define ikm_require_aligned(kmsg) \
+	zone_id_require_aligned(ZONE_ID_IPC_KMSG, kmsg)
+
 struct reply_port_semantics_violations_rb_entry {
 	char proc_name[CA_PROCNAME_LEN];
 	char service_name[CA_MACH_SERVICE_PORT_NAME_LEN];
@@ -295,14 +304,6 @@ stash_reply_port_semantics_violations_telemetry(mach_service_port_info_t sp_info
 {
 	struct reply_port_semantics_violations_rb_entry *entry;
 
-	lck_spin_lock(&reply_port_telemetry_lock);
-
-	if (reply_port_semantics_violations_rb_index == REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
-		/* Dropping the event since buffer is full. */
-		lck_spin_unlock(&reply_port_telemetry_lock);
-		return;
-	}
-
 	task_t task = current_task_early();
 	if (task) {
 		struct proc_ro *pro = current_thread_ro()->tro_proc_ro;
@@ -312,17 +313,25 @@ stash_reply_port_semantics_violations_telemetry(mach_service_port_info_t sp_info
 #ifdef MACH_BSD
 		proc_name = proc_name_address(get_bsdtask_info(task));
 #endif /* MACH_BSD */
-		entry = &reply_port_semantics_violations_rb[reply_port_semantics_violations_rb_index++];
-		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
-
+		const char *team_id = csproc_get_identity(current_proc());
+		const char *signing_id = csproc_get_teamid(current_proc());
 		char *service_name = (char *) "unknown";
 		if (sp_info) {
 			service_name = sp_info->mspi_string_name;
 		}
+
+		lck_spin_lock(&reply_port_telemetry_lock);
+
+		if (reply_port_semantics_violations_rb_index >= REPLY_PORT_SEMANTICS_VIOLATIONS_RB_SIZE) {
+			/* Dropping the event since buffer is full. */
+			lck_spin_unlock(&reply_port_telemetry_lock);
+			return;
+		}
+		entry = &reply_port_semantics_violations_rb[reply_port_semantics_violations_rb_index++];
+		strlcpy(entry->proc_name, proc_name, CA_PROCNAME_LEN);
+
 		strlcpy(entry->service_name, service_name, CA_MACH_SERVICE_PORT_NAME_LEN);
 		entry->reply_port_semantics_violation = reply_port_semantics_violation;
-		const char *team_id = csproc_get_identity(current_proc());
-		const char *signing_id = csproc_get_teamid(current_proc());
 		if (team_id) {
 			strlcpy(entry->team_id, team_id, CA_TEAMID_MAX_LEN);
 		}
@@ -746,7 +755,7 @@ ikm_sign(ipc_kmsg_t kmsg)
 	ikm_sig_scratch_t scratch;
 	uintptr_t sig;
 
-	zone_require(ipc_kmsg_zone, kmsg);
+	ikm_require(kmsg);
 
 	ikm_init_sig(kmsg, &scratch);
 
@@ -801,7 +810,7 @@ ikm_validate_sig_internal(
 	uintptr_t sig;
 	char *str;
 
-	zone_require(ipc_kmsg_zone, kmsg);
+	ikm_require_aligned(kmsg);
 
 	ikm_init_sig(kmsg, &scratch);
 
@@ -821,10 +830,8 @@ ikm_validate_sig_internal(
 			str = "header trailer";
 			goto failure;
 		}
-		return;
-#else
-		panic("Partial kmsg signature validation only supported on PAC devices.");
 #endif
+		return;
 	}
 
 	ikm_body_sig(kmsg, &scratch);
@@ -867,18 +874,18 @@ ikm_validate_sig(
 
 /*
  * Purpose:
- *       Validate kmsg signature. [Exported in header]
- *       partial:  Only validate header + trailer.
- *
- * Condition:
- *       On non-PAC devices, `partial` must be set to false.
+ *       Validate a partial kmsg signature. [Exported in header]
+ *       Only validate header + trailer.
  */
 void
-ipc_kmsg_validate_sig(
-	ipc_kmsg_t kmsg,
-	bool       partial)
+ipc_kmsg_validate_partial_sig(
+	ipc_kmsg_t kmsg)
 {
-	ikm_validate_sig_internal(kmsg, partial);
+#if __has_feature(ptrauth_calls)
+	ikm_validate_sig_internal(kmsg, true);
+#else
+	(void)kmsg;
+#endif
 }
 
 #if DEBUG_MSGS_K64
@@ -1508,9 +1515,6 @@ ipc_kmsg_trace_send(ipc_kmsg_t kmsg,
 }
 #endif
 
-/* zone for cached ipc_kmsg_t structures */
-ZONE_DEFINE(ipc_kmsg_zone, "ipc kmsgs", IKM_SAVED_KMSG_SIZE,
-    ZC_CACHING | ZC_ZFREE_CLEARMEM);
 static TUNABLE(bool, enforce_strict_reply, "ipc_strict_reply", false);
 
 /*
@@ -1898,7 +1902,7 @@ ipc_kmsg_alloc(
 		}
 	}
 
-	kmsg = zalloc_flags(ipc_kmsg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	kmsg = zalloc_id(ZONE_ID_IPC_KMSG, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	kmsg->ikm_type = kmsg_type;
 	kmsg->ikm_aux_size = aux_size;
 
@@ -2034,7 +2038,7 @@ ipc_kmsg_free(
 		panic("strange kmsg type");
 	}
 
-	zfree(ipc_kmsg_zone, kmsg);
+	zfree_id(ZONE_ID_IPC_KMSG, kmsg);
 	/* kmsg struct freed */
 }
 
@@ -2704,11 +2708,6 @@ ipc_kmsg_get_from_user(
 	if (!(option64 & MACH64_MSG_VECTOR)) {
 		assert(aux_addr == 0);
 		assert(aux_size == 0);
-	}
-
-	/* Keep DriverKit messages linear for now */
-	if (option64 & MACH64_SEND_DK_CALL) {
-		flags |= IPC_KMSG_ALLOC_LINEAR;
 	}
 
 	kmsg = ipc_kmsg_alloc(kmsg_size, aux_size, desc_count, flags);
@@ -5554,7 +5553,7 @@ handle_reply_again:
 				ipc_port_t reply_subst = IP_NULL;
 				ipc_entry_t entry;
 
-				ip_mq_lock(reply);
+				ip_mq_lock_check_aligned(reply);
 
 				/* Is the reply port still active and allowed to be copied out? */
 				if (!ip_active(reply) ||
@@ -5670,7 +5669,7 @@ done_with_reply:
 				if ((option & MACH_RCV_VOUCHER) != 0) {
 					ipc_entry_t entry;
 
-					ip_mq_lock(voucher);
+					ip_mq_lock_check_aligned(voucher);
 
 					if (ipc_right_reverse(space, ip_to_object(voucher),
 					    &voucher_name, &entry)) {
@@ -5949,9 +5948,9 @@ ipc_kmsg_copyout_reply_object(
 		return MACH_MSG_IPC_SPACE;
 	}
 
-	io_lock(object);
+	ip_mq_lock(port);
 
-	if (!io_active(object)) {
+	if (!ip_active(port)) {
 		*namep = MACH_PORT_DEAD;
 		kr = MACH_MSG_SUCCESS;
 		goto out;
@@ -6627,7 +6626,7 @@ ipc_kmsg_copyout_dest_to_user(
 	ipc_space_t     space)
 {
 	mach_msg_bits_t mbits;
-	ipc_object_t dest;
+	ipc_port_t dest;
 	ipc_object_t reply;
 	ipc_object_t voucher;
 	mach_msg_type_name_t dest_type;
@@ -6640,7 +6639,7 @@ ipc_kmsg_copyout_dest_to_user(
 
 	hdr = ikm_header(kmsg);
 	mbits = hdr->msgh_bits;
-	dest = ip_to_object(hdr->msgh_remote_port);
+	dest = hdr->msgh_remote_port;
 	reply = ip_to_object(hdr->msgh_local_port);
 	voucher = ip_to_object(ipc_kmsg_get_voucher_port(kmsg));
 	voucher_name = hdr->msgh_voucher_port;
@@ -6648,17 +6647,18 @@ ipc_kmsg_copyout_dest_to_user(
 	reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	voucher_type = MACH_MSGH_BITS_VOUCHER(mbits);
 
-	assert(IO_VALID(dest));
+	assert(IP_VALID(dest));
 
 	ipc_importance_assert_clean(kmsg);
 
-	io_lock(dest);
-	if (io_active(dest)) {
-		ipc_object_copyout_dest(space, dest, dest_type, &dest_name);
+	ip_mq_lock(dest);
+	if (ip_active(dest)) {
+		ipc_object_copyout_dest(space, ip_to_object(dest),
+		    dest_type, &dest_name);
 		/* dest is unlocked */
 	} else {
-		io_unlock(dest);
-		io_release(dest);
+		ip_mq_unlock(dest);
+		ip_release(dest);
 		dest_name = MACH_PORT_DEAD;
 	}
 
@@ -6709,7 +6709,7 @@ ipc_kmsg_copyout_dest_to_kernel(
 	ipc_kmsg_t      kmsg,
 	ipc_space_t     space)
 {
-	ipc_object_t dest;
+	ipc_port_t dest;
 	mach_port_t reply;
 	mach_msg_type_name_t dest_type;
 	mach_msg_type_name_t reply_type;
@@ -6719,20 +6719,21 @@ ipc_kmsg_copyout_dest_to_kernel(
 	ikm_validate_sig(kmsg);
 
 	hdr = ikm_header(kmsg);
-	dest = ip_to_object(hdr->msgh_remote_port);
+	dest = hdr->msgh_remote_port;
 	reply = hdr->msgh_local_port;
 	dest_type = MACH_MSGH_BITS_REMOTE(hdr->msgh_bits);
 	reply_type = MACH_MSGH_BITS_LOCAL(hdr->msgh_bits);
 
-	assert(IO_VALID(dest));
+	assert(IP_VALID(dest));
 
-	io_lock(dest);
-	if (io_active(dest)) {
-		ipc_object_copyout_dest(space, dest, dest_type, &dest_name);
+	ip_mq_lock(dest);
+	if (ip_active(dest)) {
+		ipc_object_copyout_dest(space, ip_to_object(dest),
+		    dest_type, &dest_name);
 		/* dest is unlocked */
 	} else {
-		io_unlock(dest);
-		io_release(dest);
+		ip_mq_unlock(dest);
+		ip_release(dest);
 		dest_name = MACH_PORT_DEAD;
 	}
 

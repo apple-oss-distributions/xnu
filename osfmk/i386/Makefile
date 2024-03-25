@@ -56,7 +56,7 @@ INSTALL_MD_LCL_LIST = cpu_capabilities.h
 
 INSTALL_SF_MD_LCL_LIST = ${INSTALL_MD_LIST} ${INSTALL_MD_LCL_LIST}
 
-INSTALL_KF_MD_LIST = asm.h cpuid.h eflags.h locks.h machine_routines.h proc_reg.h vmx.h
+INSTALL_KF_MD_LIST = asm.h cpuid.h eflags.h locks.h machine_routines.h proc_reg.h vmx.h trap.h
 
 INSTALL_KF_MD_LCL_LIST = $(filter-out bit_routines.h cpu_data.h pal_i386.h, $(EXPORT_ONLY_FILES))
 

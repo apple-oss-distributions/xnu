@@ -303,6 +303,7 @@ __ZN6OSData12initWithDataEPKS_jj
 __ZN6OSData12withCapacityEj
 __ZN6OSData13initWithBytesEPKvj
 __ZN6OSData14ensureCapacityEj
+__ZN6OSData15setSerializableEb
 __ZN6OSData15withBytesNoCopyEPvj
 __ZN6OSData16initWithCapacityEj
 __ZN6OSData18setDeallocFunctionEPFvPvjE
@@ -706,6 +707,8 @@ _flush_dcache
 _flush_dcache64
 _gOSKextUnresolved
 _img4_interface_register
+_image4_dlxk_link
+_image4_dlxk_get
 _inet_ntop
 _inflate
 _inflateEnd

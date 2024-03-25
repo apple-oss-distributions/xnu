@@ -80,7 +80,7 @@ __nosan_strlcat(char *__sized_by(sz)dst, const char *__null_terminated src, size
 	return strlcat(dst, src, sz);
 }
 static inline size_t
-__nosan_strnlen(const char *__null_terminated src, size_t sz)
+__nosan_strnlen(const char *__counted_by(sz)src, size_t sz)
 {
 	return strnlen(src, sz);
 }
@@ -89,7 +89,7 @@ __nosan_strlen(const char *__null_terminated src)
 {
 	return strlen(src);
 }
-#if !__has_ptrcheck
+#if !__has_ptrcheck && !__has_include(<__xnu_libcxx_sentinel.h>)
 static inline char *
 __nosan_strncpy(char *dst, const char *src, size_t sz)
 {
@@ -114,7 +114,7 @@ __nosan_strncat(char *dst, const char *src, size_t sz)
 #pragma clang diagnostic pop
 #endif
 }
-#endif /* !__has_ptrcheck */
+#endif /* !__has_ptrcheck && !__has_include(<__xnu_libcxx_sentinel.h>) */
 
 #if KASAN
 void *__asan_memcpy(void *src __sized_by(sz), const void *dst __sized_by(sz), size_t sz);

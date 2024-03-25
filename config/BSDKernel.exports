@@ -128,7 +128,11 @@ _ctl_enqueuedata
 _ctl_enqueuembuf
 _ctl_getenqueuespace
 _ctl_register
+_current_cached_proc_cred
+_current_cached_proc_cred_ref
+_current_cached_proc_label_get
 _current_proc
+_current_thread_cred_label_get
 _desiredvnodes
 _devfs_make_node
 _devfs_make_node_clone

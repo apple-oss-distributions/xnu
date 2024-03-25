@@ -32,7 +32,11 @@
 #include <kern/thread.h>
 #if defined(__arm64__)
 #include <pexpert/arm64/board_config.h>
+#if CONFIG_SPTM
+#include <arm64/sptm/pmap/pmap_pt_geometry.h>
+#else /* CONFIG_SPTM */
 #include <arm/pmap/pmap_pt_geometry.h>
+#endif /* CONFIG_SPTM */
 #endif /* defined(__arm64__) */
 #include <vm/vm_map.h>
 
@@ -51,8 +55,11 @@ kern_return_t test_pmap_iommu_disconnect(void);
 kern_return_t test_pmap_extended(void);
 void test_pmap_call_overhead(unsigned int num_loops);
 uint64_t test_pmap_page_protect_overhead(unsigned int num_loops, unsigned int num_aliases);
+#if CONFIG_SPTM
+kern_return_t test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings);
+#endif
 
-#define PMAP_TEST_VA (0xDEAD << PAGE_SHIFT)
+#define PMAP_TEST_VA (0xDEADULL << PAGE_SHIFT)
 
 typedef struct {
 	pmap_t pmap;
@@ -62,6 +69,14 @@ typedef struct {
 	volatile boolean_t stop;
 } pmap_test_thread_args;
 
+
+/**
+ * Helper for creating a new pmap to be used for testing.
+ *
+ * @param flags Flags to pass to pmap_create_options()
+ *
+ * @return The newly-allocated pmap, or NULL if allocation fails.
+ */
 static pmap_t
 pmap_create_wrapper(unsigned int flags)
 {
@@ -74,6 +89,42 @@ pmap_create_wrapper(unsigned int flags)
 	new_pmap = pmap_create_options(ledger, 0, flags);
 	ledger_dereference(ledger);
 	return new_pmap;
+}
+
+/**
+ * Helper for allocating a wired VM page to be used for testing.
+ *
+ * @note The allocated page will be wired with the VM_KERN_MEMORY_PTE tag,
+ *       which will attribute the page to the pmap module.
+ *
+ * @return the newly-allocated vm_page_t, or NULL if allocation fails.
+ */
+static vm_page_t
+pmap_test_alloc_vm_page(void)
+{
+	vm_page_t m = vm_page_grab();
+	if (m != VM_PAGE_NULL) {
+		vm_page_lock_queues();
+		vm_page_wire(m, VM_KERN_MEMORY_PTE, TRUE);
+		vm_page_unlock_queues();
+	}
+	return m;
+}
+
+/**
+ * Helper for freeing a VM page previously allocated by pmap_test_alloc_vm_page().
+ *
+ * @param m The page to free.  This may be NULL, in which case this function will
+ *          do nothing.
+ */
+static void
+pmap_test_free_vm_page(vm_page_t m)
+{
+	if (m != VM_PAGE_NULL) {
+		vm_page_lock_queues();
+		vm_page_free(m);
+		vm_page_unlock_queues();
+	}
 }
 
 static void
@@ -95,7 +146,7 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 	if (new_pmap == NULL) {
 		return KERN_FAILURE;
 	}
-	vm_page_t m = vm_page_grab();
+	vm_page_t m = pmap_test_alloc_vm_page();
 	if (m == VM_PAGE_NULL) {
 		pmap_destroy(new_pmap);
 		return KERN_FAILURE;
@@ -106,16 +157,14 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 	    &args, thread_kern_get_pri(current_thread()), &disconnect_thread);
 	if (res) {
 		pmap_destroy(new_pmap);
-		vm_page_lock_queues();
-		vm_page_free(m);
-		vm_page_unlock_queues();
+		pmap_test_free_vm_page(m);
 		return res;
 	}
 	thread_deallocate(disconnect_thread);
 
 	while (num_loops-- != 0) {
 		kr = pmap_enter(new_pmap, PMAP_TEST_VA, phys_page,
-		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
 	}
 
@@ -124,9 +173,7 @@ test_pmap_enter_disconnect(unsigned int num_loops)
 	thread_block(THREAD_CONTINUE_NULL);
 
 	pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + PAGE_SIZE);
-	vm_page_lock_queues();
-	vm_page_free(m);
-	vm_page_unlock_queues();
+	pmap_test_free_vm_page(m);
 	pmap_destroy(new_pmap);
 	return KERN_SUCCESS;
 }
@@ -137,7 +184,7 @@ pmap_remove_thread(void *arg, wait_result_t __unused wres)
 	pmap_test_thread_args *args = arg;
 	do {
 		kern_return_t kr = pmap_enter_options(args->pmap, args->va, args->pn,
-		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL);
+		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
 		pmap_remove(args->pmap, args->va, args->va + PAGE_SIZE);
 	} while (!args->stop);
@@ -161,7 +208,7 @@ test_pmap_compress_remove(unsigned int num_loops)
 	if (new_pmap == NULL) {
 		return KERN_FAILURE;
 	}
-	vm_page_t m = vm_page_grab();
+	vm_page_t m = pmap_test_alloc_vm_page();
 	if (m == VM_PAGE_NULL) {
 		pmap_destroy(new_pmap);
 		return KERN_FAILURE;
@@ -172,9 +219,7 @@ test_pmap_compress_remove(unsigned int num_loops)
 	    &args, thread_kern_get_pri(current_thread()), &remove_thread);
 	if (res) {
 		pmap_destroy(new_pmap);
-		vm_page_lock_queues();
-		vm_page_free(m);
-		vm_page_unlock_queues();
+		pmap_test_free_vm_page(m);
 		return res;
 	}
 	thread_deallocate(remove_thread);
@@ -189,9 +234,7 @@ test_pmap_compress_remove(unsigned int num_loops)
 
 	pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + PAGE_SIZE);
 	pmap_destroy(new_pmap);
-	vm_page_lock_queues();
-	vm_page_free(m);
-	vm_page_unlock_queues();
+	pmap_test_free_vm_page(m);
 	return KERN_SUCCESS;
 }
 
@@ -271,8 +314,8 @@ test_pmap_nesting(unsigned int num_loops)
 
 	vm_page_t m1 = VM_PAGE_NULL, m2 = VM_PAGE_NULL;
 
-	m1 = vm_page_grab();
-	m2 = vm_page_grab();
+	m1 = pmap_test_alloc_vm_page();
+	m2 = pmap_test_alloc_vm_page();
 	if ((m1 == VM_PAGE_NULL) || (m2 == VM_PAGE_NULL)) {
 		kr = KERN_FAILURE;
 		goto test_nesting_cleanup;
@@ -297,7 +340,7 @@ test_pmap_nesting(unsigned int num_loops)
 				continue;
 			}
 			kr = pmap_enter(nested_pmap, va, (rand_mod == 1) ? pp1 : pp2, VM_PROT_READ,
-			    VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+			    VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 			assert(kr == KERN_SUCCESS);
 		}
 		kr = pmap_nest(main_pmap, nested_pmap, nesting_start, nesting_size);
@@ -418,14 +461,8 @@ test_pmap_nesting(unsigned int num_loops)
 	}
 
 test_nesting_cleanup:
-	vm_page_lock_queues();
-	if (m1 != VM_PAGE_NULL) {
-		vm_page_free(m1);
-	}
-	if (m2 != VM_PAGE_NULL) {
-		vm_page_free(m2);
-	}
-	vm_page_unlock_queues();
+	pmap_test_free_vm_page(m1);
+	pmap_test_free_vm_page(m2);
 
 	return kr;
 }
@@ -450,6 +487,8 @@ test_pmap_iommu_disconnect(void)
 kern_return_t
 test_pmap_extended(void)
 {
+#if !CONFIG_SPTM /* SPTM TODO: remove this condition once the SPTM supports 4K and stage-2 mappings */
+#endif /* !CONFIG_SPTM */
 	return KERN_SUCCESS;
 }
 
@@ -470,14 +509,8 @@ test_pmap_page_protect_overhead(unsigned int num_loops __unused, unsigned int nu
 	uint64_t duration = 0;
 #if defined(__arm64__)
 	pmap_t new_pmap = pmap_create_wrapper(0);
-	vm_page_t m = vm_page_grab();
+	vm_page_t m = pmap_test_alloc_vm_page();
 	kern_return_t kr = KERN_SUCCESS;
-
-	vm_page_lock_queues();
-	if (m != VM_PAGE_NULL) {
-		vm_page_wire(m, VM_KERN_MEMORY_PTE, TRUE);
-	}
-	vm_page_unlock_queues();
 
 	if ((new_pmap == NULL) || (m == VM_PAGE_NULL)) {
 		goto ppo_cleanup;
@@ -488,7 +521,7 @@ test_pmap_page_protect_overhead(unsigned int num_loops __unused, unsigned int nu
 	for (unsigned int loop = 0; loop < num_loops; ++loop) {
 		for (unsigned int alias = 0; alias < num_aliases; ++alias) {
 			kr = pmap_enter(new_pmap, PMAP_TEST_VA + (PAGE_SIZE * alias), phys_page,
-			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 			assert(kr == KERN_SUCCESS);
 		}
 
@@ -502,14 +535,297 @@ test_pmap_page_protect_overhead(unsigned int num_loops __unused, unsigned int nu
 	}
 
 ppo_cleanup:
-	vm_page_lock_queues();
-	if (m != VM_PAGE_NULL) {
-		vm_page_free(m);
-	}
-	vm_page_unlock_queues();
+	pmap_test_free_vm_page(m);
 	if (new_pmap != NULL) {
 		pmap_destroy(new_pmap);
 	}
 #endif
 	return duration;
 }
+
+#if CONFIG_SPTM
+
+typedef struct {
+	pmap_test_thread_args args;
+	unsigned int num_mappings;
+	volatile unsigned int nthreads;
+	thread_call_t panic_callout;
+} pmap_hugepv_test_thread_args;
+
+/**
+ * Worker thread that exercises pmap_remove() and pmap_enter() with a huge PV list.
+ * This thread relies on the fact that PV lists are structured with newer PTEs at
+ * the beginning of the list, so it maximizes PV list traversal time by removing
+ * mappings sequentially starting with the beginning VA of the mapping region
+ * (thus the oldest mapping), and then re-entering that removed mapping at the
+ * beginning of the list.
+ *
+ * @param arg Thread argument parameter, actually of type pmap_hugepv_test_thread_args*
+ * @param wres Wait result, currently unused.
+ */
+static void
+hugepv_remove_enter_thread(void *arg, wait_result_t __unused wres)
+{
+	unsigned int mapping = 0;
+	pmap_hugepv_test_thread_args *args = arg;
+	do {
+		vm_map_address_t va = args->args.va + ((vm_offset_t)mapping << PAGE_SHIFT);
+		pmap_remove(args->args.pmap, va, va + PAGE_SIZE);
+		kern_return_t kr = pmap_enter_options(args->args.pmap, va, args->args.pn,
+		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL,
+		    NULL, PMAP_MAPPING_TYPE_INFER);
+		assert(kr == KERN_SUCCESS);
+		if (++mapping == args->num_mappings) {
+			mapping = 0;
+		}
+	} while (!args->args.stop);
+	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
+	os_atomic_thread_fence(acquire);
+	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+		thread_wakeup((event_t)args);
+	}
+}
+
+/**
+ * Worker thread to exercise fast-fault behavior with a huge PV list.
+ * This thread first removes permissions from all mappings for the page, which
+ * does not actually remove the mappings but rather clears their AF bit.
+ * It then simulates a fast fault on one random mapping in the list, which
+ * also clears the fast-fault state for the first 64  mappings in the list.
+ *
+ * @param arg Thread argument parameter, actually of type pmap_hugepv_test_thread_args*
+ * @param wres Wait result, currently unused.
+ */
+static void
+hugepv_fast_fault_thread(void *arg, wait_result_t __unused wres)
+{
+	pmap_hugepv_test_thread_args *args = arg;
+	do {
+		boolean_t success = arm_force_fast_fault(args->args.pn, VM_PROT_NONE, 0, NULL);
+		assert(success);
+		unsigned int rand;
+		read_random(&rand, sizeof(rand));
+		unsigned int mapping = rand % args->num_mappings;
+		arm_fast_fault(args->args.pmap, args->args.va + ((vm_offset_t)mapping << PAGE_SHIFT), VM_PROT_READ, false, FALSE);
+	} while (!args->args.stop);
+	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
+	os_atomic_thread_fence(acquire);
+	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+		thread_wakeup((event_t)args);
+	}
+}
+
+/**
+ * Worker thread for updating cacheability of a physical page with a huge PV list.
+ * This thread simply twiddles all mappings between write-combined and normal (write-back)
+ * cacheability.
+ *
+ * @param arg Thread argument parameter, actually of type pmap_hugepv_test_thread_args*
+ * @param wres Wait result, currently unused.
+ */
+static void
+hugepv_cache_attr_thread(void *arg, wait_result_t __unused wres)
+{
+	pmap_hugepv_test_thread_args *args = arg;
+	do {
+		pmap_set_cache_attributes(args->args.pn, VM_WIMG_WCOMB);
+		pmap_set_cache_attributes(args->args.pn, VM_WIMG_DEFAULT);
+	} while (!args->args.stop);
+	/* Ensure the update of nthreads is not speculated ahead of checking the stop flag. */
+	os_atomic_thread_fence(acquire);
+	if (os_atomic_dec(&args->nthreads, relaxed) == 0) {
+		thread_wakeup((event_t)args);
+	}
+}
+
+/**
+ * Helper function for starting the 2.5-minute panic timer to ensure that we
+ * don't get stuck during test teardown.
+ *
+ * @param panic_callout The timer call to use for the panic callout.
+ */
+static inline void
+huge_pv_start_panic_timer(thread_call_t panic_callout)
+{
+	uint64_t deadline;
+	clock_interval_to_deadline(150, NSEC_PER_SEC, &deadline);
+	thread_call_enter_delayed(panic_callout, deadline);
+}
+
+/**
+ * Timer callout that executes in case the huge PV test incurs excessive (>= 5min)
+ * runtime, which can happen due to unlucky scheduling of the main thread.  In this
+ * case we simply set the "stop" flag and expect the worker threads to exit gracefully.
+ *
+ * @param param0 The pmap_hugepv_test_thread_args used to control the test, cast
+ *               as thread_call_param_t.
+ * @param param1 Unused argument.
+ */
+static void
+huge_pv_test_timeout(thread_call_param_t param0, __unused thread_call_param_t param1)
+{
+	pmap_hugepv_test_thread_args *args = (pmap_hugepv_test_thread_args*)param0;
+	args->args.stop = TRUE;
+	huge_pv_start_panic_timer(args->panic_callout);
+}
+
+/**
+ * Timer callout that executes in case the huge PV test was canceled by
+ * huge_pv_test_timeout above, but failed to terminate within 2.5 minutes.
+ * This callout simply panics to allow inspection of the resultant coredump,
+ * as it should never be reached under correct operation.
+ *
+ * @param param0 Unused argument.
+ * @param param1 Unused argument.
+ */
+static void __attribute__((noreturn))
+huge_pv_test_panic(__unused thread_call_param_t param0, __unused thread_call_param_t param1)
+{
+	panic("%s: test timed out", __func__);
+}
+
+/**
+ * Main test thread for exercising contention on a massive physical-to-virtual
+ * mapping list in the pmap.  This thread creates a large number of mappings
+ * (as requested by the caller) to the same physical page, spawns the above
+ * worker threads to do different operations on that physical page, then while
+ * that is going on it repeatedly calls pmap_page_protect_options() on the page,
+ * for the number of loops specified by the caller.
+ *
+ * @param num_loops Number of iterations to execute in the main thread before
+ *                  stopping the workers.
+ * @param num_mappings The number of alias mappings to create for the same
+ *                     physical page.
+ *
+ * @return KERN_SUCCESS if the test succeeds, KERN_FAILURE if it encounters
+ *         an unexpected setup failure.  Any failed integrity check during
+ *         the actual execution of the worker threads will panic.
+ */
+kern_return_t
+test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings)
+{
+	kern_return_t kr = KERN_SUCCESS;
+	thread_t remove_enter_thread, fast_fault_thread, cache_attr_thread;
+	if ((num_loops == 0) || (num_mappings == 0)) {
+		/**
+		 * If num_mappings is 0, we'll get into a case in which the
+		 * remove_enter_thread leaves a single dangling mapping, triggering
+		 * a panic when we free the page.  This isn't a valid test
+		 * configuration anyway.
+		 */
+		return KERN_SUCCESS;
+	}
+	pmap_t new_pmap = pmap_create_wrapper(0);
+	if (new_pmap == NULL) {
+		return KERN_FAILURE;
+	}
+	vm_page_t m = pmap_test_alloc_vm_page();
+	if (m == VM_PAGE_NULL) {
+		pmap_destroy(new_pmap);
+		return KERN_FAILURE;
+	}
+
+	ppnum_t phys_page = VM_PAGE_GET_PHYS_PAGE(m);
+
+	for (unsigned int mapping = 0; mapping < num_mappings; ++mapping) {
+		kr = pmap_enter(new_pmap, PMAP_TEST_VA + ((vm_offset_t)mapping << PAGE_SHIFT), phys_page,
+		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	thread_call_t huge_pv_panic_call = thread_call_allocate(huge_pv_test_panic, NULL);
+
+	pmap_hugepv_test_thread_args args = {
+		.args = {.pmap = new_pmap, .stop = FALSE, .va = PMAP_TEST_VA, .pn = phys_page},
+		.nthreads = 0, .num_mappings = num_mappings, .panic_callout = huge_pv_panic_call
+	};
+
+	thread_call_t huge_pv_timer_call = thread_call_allocate(huge_pv_test_timeout, &args);
+
+	kr = kernel_thread_start_priority(hugepv_remove_enter_thread,
+	    &args, thread_kern_get_pri(current_thread()), &remove_enter_thread);
+	if (kr != KERN_SUCCESS) {
+		goto hugepv_cleanup;
+	}
+	++args.nthreads;
+	thread_deallocate(remove_enter_thread);
+
+	kr = kernel_thread_start_priority(hugepv_fast_fault_thread, &args,
+	    thread_kern_get_pri(current_thread()), &fast_fault_thread);
+	if (kr != KERN_SUCCESS) {
+		goto hugepv_cleanup;
+	}
+	++args.nthreads;
+	thread_deallocate(fast_fault_thread);
+
+	kr = kernel_thread_start_priority(hugepv_cache_attr_thread, &args,
+	    thread_kern_get_pri(current_thread()), &cache_attr_thread);
+	if (kr != KERN_SUCCESS) {
+		goto hugepv_cleanup;
+	}
+	++args.nthreads;
+	thread_deallocate(cache_attr_thread);
+
+	/**
+	 * Set up a 5 minute timer to gracefully halt the test upon expiry.
+	 * Ordinarily the test should complete in well less than 5 minutes,
+	 * but it can run longer and hit the 10 minute BATS timeout if this
+	 * thread is really unlucky w.r.t. scheduling (which can happen if
+	 * it is repeatedly preempted and starved by the other threads
+	 * contending on the PVH lock).
+	 */
+	uint64_t deadline;
+	clock_interval_to_deadline(300, NSEC_PER_SEC, &deadline);
+	thread_call_enter_delayed(huge_pv_timer_call, deadline);
+
+	for (unsigned int i = 0; (i < num_loops) && !args.args.stop; i++) {
+		pmap_page_protect_options(phys_page, VM_PROT_READ, 0, NULL);
+		/**
+		 * Yield briefly to give the other workers a chance to get through
+		 * more iterations.
+		 */
+		__builtin_arm_wfe();
+	}
+
+	pmap_disconnect_options(phys_page, PMAP_OPTIONS_COMPRESSOR, NULL);
+
+hugepv_cleanup:
+	thread_call_cancel_wait(huge_pv_timer_call);
+	thread_call_free(huge_pv_timer_call);
+
+	if (__improbable(args.args.stop)) {
+		/**
+		 * If stop is already set, we hit the timeout, so we can't safely block waiting for
+		 * the workers to terminate as they may already be doing so.  Spin in a WFE loop
+		 * instead.
+		 */
+		while (os_atomic_load_exclusive(&args.nthreads, relaxed) != 0) {
+			__builtin_arm_wfe();
+		}
+		os_atomic_clear_exclusive();
+	} else if (args.nthreads > 0) {
+		/* Ensure prior stores to nthreads are visible before the update to args.args.stop. */
+		os_atomic_thread_fence(release);
+		huge_pv_start_panic_timer(huge_pv_panic_call);
+		assert_wait((event_t)&args, THREAD_UNINT);
+		args.args.stop = TRUE;
+		thread_block(THREAD_CONTINUE_NULL);
+		assert(args.nthreads == 0);
+	}
+
+	thread_call_cancel_wait(huge_pv_panic_call);
+	thread_call_free(huge_pv_panic_call);
+
+	if (new_pmap != NULL) {
+		pmap_remove(new_pmap, PMAP_TEST_VA, PMAP_TEST_VA + ((vm_offset_t)num_mappings << PAGE_SHIFT));
+	}
+
+	pmap_test_free_vm_page(m);
+	if (new_pmap != NULL) {
+		pmap_destroy(new_pmap);
+	}
+
+	return kr;
+}
+
+#endif /* CONFIG_SPTM */

@@ -35,6 +35,7 @@
 
 #include <mach_assert.h>
 #include <machine/atomic.h>
+#include <machine/monotonic.h>
 
 #include <kern/assert.h>
 #include <kern/kern_types.h>
@@ -55,10 +56,6 @@
 #if CONFIG_VMX
 #include <i386/vmx/vmx_cpu.h>
 #endif
-
-#if MONOTONIC
-#include <machine/monotonic.h>
-#endif /* MONOTONIC */
 
 #include <san/kcov_data.h>
 
@@ -195,9 +192,9 @@ typedef struct cpu_data {
 	int                     cpu_interrupt_level;
 	volatile int            cpu_preemption_level;
 	volatile int            cpu_running;
-#if !MONOTONIC
+#if !CONFIG_CPU_COUNTERS
 	boolean_t               cpu_fixed_pmcs_enabled;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_CPU_COUNTERS */
 	rtclock_timer_t         rtclock_timer;
 	volatile addr64_t       cpu_active_cr3 __attribute((aligned(64)));
 	union {
@@ -247,16 +244,14 @@ typedef struct cpu_data {
 	uint64_t                cpu_dr7; /* debug control register */
 	uint64_t                cpu_int_event_time;     /* intr entry/exit time */
 	pal_rtc_nanotime_t      *cpu_nanotime;          /* Nanotime info */
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	/* double-buffered performance counter data */
 	uint64_t                *cpu_kpc_buf[2];
 	/* PMC shadow and reload value buffers */
 	uint64_t                *cpu_kpc_shadow;
 	uint64_t                *cpu_kpc_reload;
-#endif
-#if MONOTONIC
 	struct mt_cpu cpu_monotonic;
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	uint32_t                cpu_pmap_pcid_enabled;
 	pcid_t                  cpu_active_pcid;
 	pcid_t                  cpu_last_pcid;
@@ -285,11 +280,11 @@ typedef struct cpu_data {
 	 */
 	uint64_t                cpu_rtimes[CPU_RTIME_BINS];
 	uint64_t                cpu_itimes[CPU_ITIME_BINS];
-#if !MONOTONIC
+#if !CONFIG_CPU_COUNTERS
 	uint64_t                cpu_cur_insns;
 	uint64_t                cpu_cur_ucc;
 	uint64_t                cpu_cur_urc;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_CPU_COUNTERS */
 	uint64_t                cpu_gpmcs[4];
 	uint64_t                cpu_max_observed_int_latency;
 	int                     cpu_max_observed_int_latency_vector;

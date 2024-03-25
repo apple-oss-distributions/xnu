@@ -129,8 +129,8 @@ struct __kern_buflet_ext {
 	PP_BUF_SIZE_DEF((_pp));                                         \
 	(_kbuf)->buf_dlen = 0;                                          \
 	(_kbuf)->buf_doff = 0;                                          \
-	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_pid = (pid_t)-1; \
-	((struct __kern_buflet_ext *)(_kbuf))->kbe_buf_upp_link.sle_next = NULL;\
+	((struct __kern_buflet_ext *__unsafe_indexable)(_kbuf))->kbe_buf_pid = (pid_t)-1; \
+	((struct __kern_buflet_ext *__unsafe_indexable)(_kbuf))->kbe_buf_upp_link.sle_next = NULL;\
 } while (0)
 
 /* initialize struct __user_buflet from struct __kern_buflet */
@@ -423,6 +423,7 @@ struct __kern_packet {
 #define pkt_classq_hash         pkt_flow->flow_classq_hash
 #define pkt_classq_flags        pkt_flow->flow_classq_flags
 #define pkt_policy_id           pkt_flow->flow_policy_id
+#define pkt_skip_policy_id      pkt_flow->flow_skip_policy_id
 #define pkt_policy_euuid        pkt_flow->flow_policy_euuid
 
 	/*
@@ -675,8 +676,10 @@ struct __kern_packet {
 	}                                                               \
 } while (0)
 
-#define SK_PTR_ADDR_KQUM(_ph)   ((struct __kern_quantum *)SK_PTR_ADDR(_ph))
-#define SK_PTR_ADDR_KPKT(_ph)   ((struct __kern_packet *)SK_PTR_ADDR(_ph))
+#define SK_PTR_ADDR_KQUM(_ph)   __unsafe_forge_single(struct __kern_quantum *, \
+	                            ((struct __kern_quantum *)SK_PTR_ADDR(_ph)))
+#define SK_PTR_ADDR_KPKT(_ph)   __unsafe_forge_single(struct __kern_packet *, \
+	                            ((struct __kern_packet *)SK_PTR_ADDR(_ph)))
 #define SK_PTR_KPKT(_pa)        ((struct __kern_packet *)(void *)(_pa))
 #define SK_PKT2PH(_pkt) \
     (SK_PTR_ENCODE((_pkt), METADATA_TYPE((_pkt)), METADATA_SUBTYPE((_pkt))))

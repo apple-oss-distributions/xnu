@@ -39,6 +39,7 @@
 #include <kern/processor.h>
 #include <kern/startup.h>
 #include <kern/debug.h>
+#include <kern/monotonic.h>
 #include <prng/random.h>
 #include <kern/ecc.h>
 #include <machine/machine_routines.h>
@@ -80,9 +81,6 @@
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
 #endif
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #if KPERF
 #include <kperf/kptimer.h>
@@ -195,7 +193,7 @@ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
 extern void configure_misc_apple_boot_args(void);
 extern void configure_misc_apple_regs(bool is_boot_cpu);
 extern void configure_timer_apple_regs(void);
-extern void configure_late_apple_regs(void);
+extern void configure_late_apple_regs(bool cold_boot);
 #endif /* __arm64__ */
 
 
@@ -600,7 +598,7 @@ arm_init(
 	ml_map_cpu_pio();
 
 #if APPLE_ARM64_ARCH_FAMILY
-	configure_late_apple_regs();
+	configure_late_apple_regs(true);
 #endif
 
 #endif
@@ -683,7 +681,7 @@ arm_init_cpu(
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
 #if APPLE_ARM64_ARCH_FAMILY
-	configure_late_apple_regs();
+	configure_late_apple_regs(false);
 #endif
 
 #if HIBERNATION
@@ -779,9 +777,9 @@ arm_init_cpu(
 		bootprofile_wake_from_sleep();
 #endif /* CONFIG_TELEMETRY */
 	}
-#if MONOTONIC && defined(__arm64__)
+#if CONFIG_CPU_COUNTERS
 	mt_wake_per_core();
-#endif /* MONOTONIC && defined(__arm64__) */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if defined(KERNEL_INTEGRITY_CTRR)
 	if (ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] != CTRR_LOCKED) {

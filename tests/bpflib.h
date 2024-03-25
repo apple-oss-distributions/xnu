@@ -41,5 +41,9 @@ int bpf_set_see_sent(int fd, u_int see_send);
 int bpf_set_traffic_class(int fd, int tc);
 int bpf_set_direction(int fd, u_int direction);
 int bpf_get_direction(int fd, u_int *direction);
+int bpf_set_write_size_max(int fd, u_int write_size_max);
+int bpf_get_write_size_max(int fd, u_int *write_size_max);
+int bpf_set_batch_write(int fd, u_int batch_write);
+int bpf_get_batch_write(int fd, u_int *batch_write);
 
 #endif /* _S_BPFLIB_H */

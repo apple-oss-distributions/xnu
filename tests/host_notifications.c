@@ -4,6 +4,10 @@
 
 #include <darwintest.h>
 
+T_GLOBAL_META(
+	T_META_CHECK_LEAKS(false),
+	T_META_LTEPHASE(LTE_POSTINIT));
+
 static void
 do_test(int notify_type, void (^trigger_block)(void))
 {
@@ -30,7 +34,7 @@ do_test(int notify_type, void (^trigger_block)(void))
 	mach_msg_destroy(&message.hdr);
 }
 
-T_DECL(host_notify_calendar_change, "host_request_notification(HOST_NOTIFY_CALENDAR_CHANGE)", T_META_CHECK_LEAKS(false), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(host_notify_calendar_change, "host_request_notification(HOST_NOTIFY_CALENDAR_CHANGE)")
 {
 	do_test(HOST_NOTIFY_CALENDAR_CHANGE, ^{
 		struct timeval tm;
@@ -40,7 +44,7 @@ T_DECL(host_notify_calendar_change, "host_request_notification(HOST_NOTIFY_CALEN
 	});
 }
 
-T_DECL(host_notify_calendar_set, "host_request_notification(HOST_NOTIFY_CALENDAR_SET)", T_META_CHECK_LEAKS(false), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(host_notify_calendar_set, "host_request_notification(HOST_NOTIFY_CALENDAR_SET)")
 {
 	do_test(HOST_NOTIFY_CALENDAR_SET, ^{
 		struct timeval tm;
@@ -48,4 +52,17 @@ T_DECL(host_notify_calendar_set, "host_request_notification(HOST_NOTIFY_CALENDAR
 		        T_SKIP("Unable to settimeofday()");
 		}
 	});
+}
+
+
+T_DECL(host_notify_twice, "host_request_notification(HOST_NOTIFY_CALENDAR_SET)")
+{
+	mach_port_t port;
+
+	T_ASSERT_MACH_SUCCESS(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port), NULL);
+
+	T_ASSERT_MACH_SUCCESS(host_request_notification(mach_host_self(), HOST_NOTIFY_CALENDAR_SET, port),
+	    "first registration succeeds");
+	T_ASSERT_MACH_ERROR(host_request_notification(mach_host_self(), HOST_NOTIFY_CALENDAR_CHANGE, port),
+	    KERN_INVALID_CAPABILITY, "second registration fails");
 }

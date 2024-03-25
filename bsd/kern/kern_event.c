@@ -103,6 +103,7 @@
 #include <kern/ast.h>
 #include <kern/thread.h>
 #include <kern/kcdata.h>
+#include <kern/work_interval.h>
 
 #include <pthread/priority_private.h>
 #include <pthread/workqueue_syscalls.h>
@@ -269,7 +270,9 @@ extern const struct filterops memorystatus_filtops;
 #endif /* CONFIG_MEMORYSTATUS */
 extern const struct filterops fs_filtops;
 extern const struct filterops sig_filtops;
-extern const struct filterops machport_filtops;
+extern const struct filterops machport_attach_filtops;
+extern const struct filterops mach_port_filtops;
+extern const struct filterops mach_port_set_filtops;
 extern const struct filterops pipe_nfiltops;
 extern const struct filterops pipe_rfiltops;
 extern const struct filterops pipe_wfiltops;
@@ -297,6 +300,9 @@ const static struct filterops proc_filtops;
 const static struct filterops timer_filtops;
 const static struct filterops user_filtops;
 const static struct filterops workloop_filtops;
+#if CONFIG_EXCLAVES
+extern const struct filterops exclaves_notification_filtops;
+#endif /* CONFIG_EXCLAVES */
 
 /*
  *
@@ -308,8 +314,7 @@ const static struct filterops workloop_filtops;
  * - Add a filterops to the sysfilt_ops array. Public filters should be added at the end
  *   of the Public Filters section in the array.
  * Private filters:
- * - Add a new "EVFILT_" value to bsd/sys/event.h (typically a positive value)
- *   in the XNU_KERNEL_PRIVATE section of the header
+ * - Add a new "EVFILT_" value to bsd/sys/event_private.h (typically a positive value)
  * - Update the EVFILTID_MAX value to reflect the new addition
  * - Add a filterops to the sysfilt_ops. Private filters should be added at the end of
  *   the Private filters section of the array.
@@ -324,7 +329,7 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[~EVFILT_PROC]                  = &proc_filtops,
 	[~EVFILT_SIGNAL]                = &sig_filtops,
 	[~EVFILT_TIMER]                 = &timer_filtops,
-	[~EVFILT_MACHPORT]              = &machport_filtops,
+	[~EVFILT_MACHPORT]              = &machport_attach_filtops,
 	[~EVFILT_FS]                    = &fs_filtops,
 	[~EVFILT_USER]                  = &user_filtops,
 	[~EVFILT_UNUSED_11]             = &bad_filtops,
@@ -342,6 +347,11 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[~EVFILT_NW_CHANNEL]            = &bad_filtops,
 #endif /* !SKYWALK */
 	[~EVFILT_WORKLOOP]              = &workloop_filtops,
+#if CONFIG_EXCLAVES
+	[~EVFILT_EXCLAVES_NOTIFICATION] = &exclaves_notification_filtops,
+#else /* !CONFIG_EXCLAVES */
+	[~EVFILT_EXCLAVES_NOTIFICATION] = &bad_filtops,
+#endif /* CONFIG_EXCLAVES*/
 
 	/* Private filters */
 	[EVFILTID_KQREAD]               = &kqread_filtops,
@@ -369,6 +379,8 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[EVFILTID_VN]                   = &vnode_filtops,
 	[EVFILTID_TTY]                  = &tty_filtops,
 	[EVFILTID_PTMX]                 = &ptmx_kqops,
+	[EVFILTID_MACH_PORT]            = &mach_port_filtops,
+	[EVFILTID_MACH_PORT_SET]        = &mach_port_set_filtops,
 
 	/* fake filter for detached knotes, keep last */
 	[EVFILTID_DETACHED]             = &bad_filtops,
@@ -915,7 +927,7 @@ knote_low_watermark(const struct knote *kn)
  * Fills in a kevent from the current content of a knote.
  *
  * @discussion
- * This is meant to be called from filter's f_event hooks.
+ * This is meant to be called from filter's f_process hooks.
  * The kevent data is filled with kn->kn_sdata.
  *
  * kn->kn_fflags is cleared if kn->kn_flags has EV_CLEAR set.
@@ -971,7 +983,7 @@ knote_fill_kevent_with_sdata(struct knote *kn, struct kevent_qos_s *kev)
  * Fills in a kevent from the current content of a knote.
  *
  * @discussion
- * This is meant to be called from filter's f_event hooks.
+ * This is meant to be called from filter's f_process hooks.
  * The kevent data is filled with the passed in data.
  *
  * kn->kn_fflags is cleared if kn->kn_flags has EV_CLEAR set.
@@ -3024,8 +3036,8 @@ kqueue_internal(struct proc *p, fp_initfn_t fp_init, void *initarg, int32_t *ret
 	struct fileproc *fp;
 	int fd, error;
 
-	error = falloc_withinit(p, &fp, &fd, vfs_context_current(),
-	    fp_init, initarg);
+	error = falloc_withinit(p, current_cached_proc_cred(p),
+	    vfs_context_current(), &fp, &fd, fp_init, initarg);
 	if (error) {
 		return error;
 	}
@@ -3331,14 +3343,18 @@ kqueue_process_preadopt_thread_group(thread_t thread, struct kqueue *kq, struct 
 		    &old_tg, relaxed);
 		if (success) {
 			thread_set_preadopt_thread_group(thread, tg);
+		} else if (KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
+			/*
+			 * Technically the following set_preadopt should be a no-op since this
+			 * servicer thread preadopts kqwl's permanent tg at bind time.
+			 * See kqueue_threadreq_bind.
+			 */
+			thread_set_preadopt_thread_group(thread, KQWL_GET_PREADOPTED_TG(old_tg));
+		} else {
+			assert(old_tg == KQWL_PREADOPTED_TG_PROCESSED ||
+			    old_tg == KQWL_PREADOPTED_TG_NEVER);
 		}
-
-		__assert_only thread_group_qos_t preadopt_tg;
-		preadopt_tg = os_atomic_load(&kqwl->kqwl_preadopt_tg, relaxed);
-		assert(preadopt_tg == KQWL_PREADOPTED_TG_PROCESSED ||
-		    preadopt_tg == KQWL_PREADOPTED_TG_NEVER);
 	}
-
 	return success;
 }
 #endif
@@ -3385,6 +3401,9 @@ kqworkloop_dealloc(struct kqworkloop *kqwl, bool hash_remove)
 
 		kqhash_lock(fdp);
 		LIST_REMOVE(kqwl, kqwl_hashlink);
+#if CONFIG_PROC_RESOURCE_LIMITS
+		fdp->num_kqwls--;
+#endif
 		kqhash_unlock(fdp);
 	}
 
@@ -3404,14 +3423,18 @@ kqworkloop_dealloc(struct kqworkloop *kqwl, bool hash_remove)
 }
 
 /*!
- * @function kqworkloop_alloc
+ * @function kqworkloop_init
  *
  * @brief
- * Allocates a workloop kqueue.
+ * Initializes an allocated kqworkloop.
  */
 static void
 kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
-    kqueue_id_t id, workq_threadreq_param_t *trp)
+    kqueue_id_t id, workq_threadreq_param_t *trp
+#if CONFIG_PREADOPT_TG
+    , struct thread_group *trp_permanent_preadopt_tg
+#endif
+    )
 {
 	kqwl->kqwl_state     = KQ_WORKLOOP | KQ_DYNAMIC | KQ_KEV_QOS;
 	os_ref_init_raw(&kqwl->kqwl_retains, NULL);
@@ -3434,10 +3457,23 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 	kqwl->kqwl_request.tr_flags = tr_flags;
 	os_atomic_store(&kqwl->kqwl_iotier_override, (uint8_t)THROTTLE_LEVEL_END, relaxed);
 #if CONFIG_PREADOPT_TG
-	if (task_is_app(current_task())) {
-		/* Apps will never adopt a thread group that is not their own. This is a
-		 * gross hack to simulate the post-process that is done in the voucher
-		 * subsystem today for thread groups */
+	if (trp_permanent_preadopt_tg) {
+		/*
+		 * This kqwl is permanently configured with a thread group.
+		 * By using THREAD_QOS_LAST, we make sure kqueue_set_preadopted_thread_group
+		 * has no effect on kqwl_preadopt_tg. At this point, +1 ref on
+		 * trp_permanent_preadopt_tg is transferred to the kqwl.
+		 */
+		thread_group_qos_t kqwl_preadopt_tg;
+		kqwl_preadopt_tg = KQWL_ENCODE_PERMANENT_PREADOPTED_TG(trp_permanent_preadopt_tg);
+		os_atomic_store(&kqwl->kqwl_preadopt_tg, kqwl_preadopt_tg, relaxed);
+	} else if (task_is_app(current_task())) {
+		/*
+		 * Not a specially preconfigured kqwl so it is open to participate in sync IPC
+		 * thread group preadoption; but, apps will never adopt a thread group that
+		 * is not their own. This is a gross hack to simulate the post-process that
+		 * is done in the voucher subsystem today for thread groups.
+		 */
 		os_atomic_store(&kqwl->kqwl_preadopt_tg, KQWL_PREADOPTED_TG_NEVER, relaxed);
 	}
 #endif
@@ -3452,11 +3488,28 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 	kqueue_init(kqwl);
 }
 
+#if CONFIG_PROC_RESOURCE_LIMITS
+void
+kqworkloop_check_limit_exceeded(struct filedesc *fdp)
+{
+	int num_kqwls = fdp->num_kqwls;
+	if (!kqwl_above_soft_limit_notified(fdp) && fdp->kqwl_dyn_soft_limit > 0 &&
+	    num_kqwls > fdp->kqwl_dyn_soft_limit) {
+		kqwl_above_soft_limit_send_notification(fdp);
+		act_set_astproc_resource(current_thread());
+	} else if (!kqwl_above_hard_limit_notified(fdp) && fdp->kqwl_dyn_hard_limit > 0
+	    && num_kqwls > fdp->kqwl_dyn_hard_limit) {
+		kqwl_above_hard_limit_send_notification(fdp);
+		act_set_astproc_resource(current_thread());
+	}
+}
+#endif
+
 /*!
  * @function kqworkloop_get_or_create
  *
  * @brief
- * Wrapper around kqworkloop_alloc that handles the uniquing of workloops.
+ * Wrapper around kqworkloop_init that handles the uniquing of workloops.
  *
  * @returns
  * 0:      success
@@ -3467,7 +3520,11 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
  */
 static int
 kqworkloop_get_or_create(struct proc *p, kqueue_id_t id,
-    workq_threadreq_param_t *trp, unsigned int flags, struct kqworkloop **kqwlp)
+    workq_threadreq_param_t *trp,
+#if CONFIG_PREADOPT_TG
+    struct thread_group *trp_permanent_preadopt_tg,
+#endif
+    unsigned int flags, struct kqworkloop **kqwlp)
 {
 	struct filedesc *fdp = &p->p_fd;
 	struct kqworkloop *alloc_kqwl = NULL;
@@ -3526,7 +3583,15 @@ kqworkloop_get_or_create(struct proc *p, kqueue_id_t id,
 			alloc_kqwl = zalloc_flags(kqworkloop_zone, Z_NOWAIT | Z_ZERO);
 		}
 		if (__probable(alloc_kqwl)) {
-			kqworkloop_init(alloc_kqwl, p, id, trp);
+#if CONFIG_PROC_RESOURCE_LIMITS
+			fdp->num_kqwls++;
+			kqworkloop_check_limit_exceeded(fdp);
+#endif
+			kqworkloop_init(alloc_kqwl, p, id, trp
+#if CONFIG_PREADOPT_TG
+			    , trp_permanent_preadopt_tg
+#endif
+			    );
 			kqworkloop_hash_insert_locked(fdp, id, alloc_kqwl);
 			kqhash_unlock(fdp);
 			*kqwlp = alloc_kqwl;
@@ -3650,8 +3715,8 @@ knotes_dealloc(proc_t p)
  * kqworkloops_dealloc - rebalance retains on kqworkloops created with
  * scheduling parameters
  *
- *		Process is in such a state that it will not try to allocate
- *		any more knotes during this process (stopped for exit or exec).
+ * Process is in such a state that it will not try to allocate
+ * any more kqs or knotes during this process (stopped for exit or exec).
  */
 void
 kqworkloops_dealloc(proc_t p)
@@ -3675,17 +3740,28 @@ kqworkloops_dealloc(proc_t p)
 
 	for (size_t i = 0; i <= fdp->fd_kqhashmask; i++) {
 		LIST_FOREACH_SAFE(kqwl, &fdp->fd_kqhash[i], kqwl_hashlink, kqwln) {
+#if CONFIG_PREADOPT_TG
 			/*
 			 * kqworkloops that have scheduling parameters have an
 			 * implicit retain from kqueue_workloop_ctl that needs
 			 * to be balanced on process exit.
 			 */
-			assert(kqwl->kqwl_params);
+			__assert_only thread_group_qos_t preadopt_tg;
+			preadopt_tg = os_atomic_load(&kqwl->kqwl_preadopt_tg, relaxed);
+#endif
+			assert(kqwl->kqwl_params
+#if CONFIG_PREADOPT_TG
+			    || KQWL_HAS_PERMANENT_PREADOPTED_TG(preadopt_tg)
+#endif
+			    );
+
 			LIST_REMOVE(kqwl, kqwl_hashlink);
 			LIST_INSERT_HEAD(&tofree, kqwl, kqwl_hashlink);
 		}
 	}
-
+#if CONFIG_PROC_RESOURCE_LIMITS
+	fdp->num_kqwls = 0;
+#endif
 	kqhash_unlock(fdp);
 
 	LIST_FOREACH_SAFE(kqwl, &tofree, kqwl_hashlink, kqwln) {
@@ -4667,6 +4743,11 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 	struct kqworkloop *kqwl;
 	struct filedesc *fdp = &p->p_fd;
 	workq_threadreq_param_t trp = { };
+#if CONFIG_PREADOPT_TG
+	struct thread_group *trp_permanent_preadopt_tg = NULL;
+	integer_t trp_preadopt_priority = 0;
+	integer_t trp_preadopt_policy = 0;
+#endif /* CONFIG_PREADOPT_TG */
 
 	switch (cmd) {
 	case KQ_WORKLOOP_CREATE:
@@ -4697,24 +4778,71 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 			break;
 		}
 
-		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_PRI) {
-			trp.trp_flags |= TRP_PRIORITY;
-			trp.trp_pri = (uint8_t)params->kqwlp_sched_pri;
+		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_WORK_INTERVAL) {
+#if CONFIG_PREADOPT_TG
+			kern_return_t kr;
+			kr = kern_work_interval_get_policy_from_port(params->kqwl_wi_port,
+			    &trp_preadopt_policy,
+			    &trp_preadopt_priority,
+			    &trp_permanent_preadopt_tg);
+			if (kr != KERN_SUCCESS) {
+				error = EINVAL;
+				break;
+			}
+			/* The work interval comes with scheduling policy. */
+			if (trp_preadopt_policy) {
+				trp.trp_flags |= TRP_POLICY;
+				trp.trp_pol = (uint8_t)trp_preadopt_policy;
+
+				trp.trp_flags |= TRP_PRIORITY;
+				trp.trp_pri = (uint8_t)trp_preadopt_priority;
+			}
+			/*
+			 * We take +1 ref on a thread group backing this work interval
+			 * via kern_work_interval_get_policy_from_port and pass it on to kqwl.
+			 * If, for whatever reasons, kqworkloop_get_or_create fails, we
+			 * get back this ref.
+			 */
+#else
+			error = ENOTSUP;
+			break;
+#endif /* CONFIG_PREADOPT_TG */
 		}
-		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_POL) {
-			trp.trp_flags |= TRP_POLICY;
-			trp.trp_pol = (uint8_t)params->kqwlp_sched_pol;
-		}
-		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_CPU_PERCENT) {
-			trp.trp_flags |= TRP_CPUPERCENT;
-			trp.trp_cpupercent = (uint8_t)params->kqwlp_cpu_percent;
-			trp.trp_refillms = params->kqwlp_cpu_refillms;
+
+		if (!(trp.trp_flags & (TRP_POLICY | TRP_PRIORITY))) {
+			/*
+			 * We always prefer scheduling policy + priority that comes with
+			 * a work interval. It it does not exist, we fallback to what the user
+			 * has asked.
+			 */
+			if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_PRI) {
+				trp.trp_flags |= TRP_PRIORITY;
+				trp.trp_pri = (uint8_t)params->kqwlp_sched_pri;
+			}
+			if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_SCHED_POL) {
+				trp.trp_flags |= TRP_POLICY;
+				trp.trp_pol = (uint8_t)params->kqwlp_sched_pol;
+			}
+			if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_CPU_PERCENT) {
+				trp.trp_flags |= TRP_CPUPERCENT;
+				trp.trp_cpupercent = (uint8_t)params->kqwlp_cpu_percent;
+				trp.trp_refillms = params->kqwlp_cpu_refillms;
+			}
 		}
 
 		error = kqworkloop_get_or_create(p, params->kqwlp_id, &trp,
+#if CONFIG_PREADOPT_TG
+		    trp_permanent_preadopt_tg,
+#endif /* CONFIG_PREADOPT_TG */
 		    KEVENT_FLAG_DYNAMIC_KQUEUE | KEVENT_FLAG_WORKLOOP |
 		    KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST, &kqwl);
 		if (error) {
+#if CONFIG_PREADOPT_TG
+			/* In case of success, kqwl consumes this +1 ref. */
+			if (trp_permanent_preadopt_tg) {
+				thread_group_release(trp_permanent_preadopt_tg);
+			}
+#endif
 			break;
 		}
 
@@ -4730,6 +4858,9 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 		break;
 	case KQ_WORKLOOP_DESTROY:
 		error = kqworkloop_get_or_create(p, params->kqwlp_id, NULL,
+#if CONFIG_PREADOPT_TG
+		    NULL,
+#endif /* CONFIG_PREADOPT_TG */
 		    KEVENT_FLAG_DYNAMIC_KQUEUE | KEVENT_FLAG_WORKLOOP |
 		    KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST, &kqwl);
 		if (error) {
@@ -5049,14 +5180,26 @@ kqueue_threadreq_initiate(kqueue_t kqu, workq_threadreq_t kqr,
 		kqworkloop_retain(kqwl);
 
 #if CONFIG_PREADOPT_TG
-		/* This thread is the one which is ack-ing the thread group on the kqwl
-		 * under the kqlock and will take action accordingly, pairs with the
-		 * release barrier in kqueue_set_preadopted_thread_group */
-		uint16_t tg_acknowledged;
-		if (os_atomic_cmpxchgv(&kqwl->kqwl_preadopt_tg_needs_redrive,
-		    KQWL_PREADOPT_TG_NEEDS_REDRIVE, KQWL_PREADOPT_TG_CLEAR_REDRIVE,
-		    &tg_acknowledged, acquire)) {
+		thread_group_qos_t kqwl_preadopt_tg = os_atomic_load(
+			&kqwl->kqwl_preadopt_tg, relaxed);
+		if (KQWL_HAS_PERMANENT_PREADOPTED_TG(kqwl_preadopt_tg)) {
+			/*
+			 * This kqwl has been permanently configured with a thread group.
+			 * See kqworkloops with scheduling parameters.
+			 */
 			flags |= WORKQ_THREADREQ_REEVALUATE_PREADOPT_TG;
+		} else {
+			/*
+			 * This thread is the one which is ack-ing the thread group on the kqwl
+			 * under the kqlock and will take action accordingly, pairs with the
+			 * release barrier in kqueue_set_preadopted_thread_group
+			 */
+			uint16_t tg_acknowledged;
+			if (os_atomic_cmpxchgv(&kqwl->kqwl_preadopt_tg_needs_redrive,
+			    KQWL_PREADOPT_TG_NEEDS_REDRIVE, KQWL_PREADOPT_TG_CLEAR_REDRIVE,
+			    &tg_acknowledged, acquire)) {
+				flags |= WORKQ_THREADREQ_REEVALUATE_PREADOPT_TG;
+			}
 		}
 #endif
 	} else {
@@ -5138,15 +5281,26 @@ kqueue_threadreq_modify(kqueue_t kqu, workq_threadreq_t kqr, kq_index_t qos,
 
 #if CONFIG_PREADOPT_TG
 	if (kqu.kq->kq_state & KQ_WORKLOOP) {
-		uint16_t tg_ack_status;
 		struct kqworkloop *kqwl = kqu.kqwl;
-
-		/* This thread is the one which is ack-ing the thread group on the kqwl
-		 * under the kqlock and will take action accordingly, needs acquire
-		 * barrier */
-		if (os_atomic_cmpxchgv(&kqwl->kqwl_preadopt_tg_needs_redrive, KQWL_PREADOPT_TG_NEEDS_REDRIVE,
-		    KQWL_PREADOPT_TG_CLEAR_REDRIVE, &tg_ack_status, acquire)) {
+		thread_group_qos_t kqwl_preadopt_tg = os_atomic_load(
+			&kqwl->kqwl_preadopt_tg, relaxed);
+		if (KQWL_HAS_PERMANENT_PREADOPTED_TG(kqwl_preadopt_tg)) {
+			/*
+			 * This kqwl has been permanently configured with a thread group.
+			 * See kqworkloops with scheduling parameters.
+			 */
 			flags |= WORKQ_THREADREQ_REEVALUATE_PREADOPT_TG;
+		} else {
+			uint16_t tg_ack_status;
+			/*
+			 * This thread is the one which is ack-ing the thread group on the kqwl
+			 * under the kqlock and will take action accordingly, needs acquire
+			 * barrier.
+			 */
+			if (os_atomic_cmpxchgv(&kqwl->kqwl_preadopt_tg_needs_redrive, KQWL_PREADOPT_TG_NEEDS_REDRIVE,
+			    KQWL_PREADOPT_TG_CLEAR_REDRIVE, &tg_ack_status, acquire)) {
+				flags |= WORKQ_THREADREQ_REEVALUATE_PREADOPT_TG;
+			}
 		}
 	}
 #endif
@@ -5232,8 +5386,12 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 		thread_group_qos_t old_tg;
 		thread_group_qos_t new_tg;
 		int ret = os_atomic_rmw_loop(kqr_preadopt_thread_group_addr(kqr), old_tg, new_tg, relaxed, {
-			if (old_tg == KQWL_PREADOPTED_TG_NEVER) {
-			        os_atomic_rmw_loop_give_up(break); // It's an app, nothing to do
+			if ((old_tg == KQWL_PREADOPTED_TG_NEVER) || KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
+			        /*
+			         * Either an app or a kqwl permanently configured with a thread group.
+			         * Nothing to do.
+			         */
+			        os_atomic_rmw_loop_give_up(break);
 			}
 			assert(old_tg != KQWL_PREADOPTED_TG_PROCESSED);
 			new_tg = KQWL_PREADOPTED_TG_SENTINEL;
@@ -5259,6 +5417,15 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 			/* We have taken action on the preadopted thread group set on the
 			 * set on the kqwl, clear any redrive requests */
 			os_atomic_store(&kqu.kqwl->kqwl_preadopt_tg_needs_redrive, KQWL_PREADOPT_TG_CLEAR_REDRIVE, relaxed);
+		} else {
+			if (KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
+				struct thread_group *tg = KQWL_GET_PREADOPTED_TG(old_tg);
+				assert(tg != NULL);
+				thread_set_preadopt_thread_group(thread, tg);
+				/*
+				 * From this point on, kqwl and thread both have +1 ref on this tg.
+				 */
+			}
 		}
 #endif
 		kqueue_update_iotier_override(kqu);
@@ -5787,9 +5954,9 @@ kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
 		        new_tg = KQWL_PREADOPTED_TG_NULL;
 		}
 	});
-	KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, KQWL_PREADOPT_OP_SERVICER_UNBIND, old_tg, KQWL_PREADOPTED_TG_NULL);
 
 	if (ret) {
+		KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, KQWL_PREADOPT_OP_SERVICER_UNBIND, old_tg, KQWL_PREADOPTED_TG_NULL);
 		// Servicer can drop any preadopt thread group it has since it has
 		// unbound.
 		thread_set_preadopt_thread_group(thread, NULL);
@@ -7748,7 +7915,11 @@ kevent_id(struct proc *p, struct kevent_id_args *uap, int32_t *retval)
 	} else if (__improbable(kevent_args_requesting_events(flags, uap->nevents))) {
 		return EXDEV;
 	} else {
-		error = kqworkloop_get_or_create(p, uap->id, NULL, flags, &kqu.kqwl);
+		error = kqworkloop_get_or_create(p, uap->id, NULL,
+#if CONFIG_PREADOPT_TG
+		    NULL,
+#endif /* CONFIG_PREADOPT_TG */
+		    flags, &kqu.kqwl);
 		if (__improbable(error)) {
 			return error;
 		}
@@ -8939,9 +9110,29 @@ pid_kqueue_extinfo(proc_t p, struct kqueue *kq, user_addr_t ubuf,
 	}
 
 	proc_fdlock(p);
-	for (i = 0; i < fdp->fd_knlistsize; i++) {
-		kn = SLIST_FIRST(&fdp->fd_knlist[i]);
+	u_long fd_knlistsize = fdp->fd_knlistsize;
+	struct klist *fd_knlist = fdp->fd_knlist;
+
+	for (i = 0; i < fd_knlistsize; i++) {
+		kn = SLIST_FIRST(&fd_knlist[i]);
 		nknotes = kevent_extinfo_emit(kq, kn, kqext, buflen, nknotes);
+
+		proc_fdunlock(p);
+		proc_fdlock(p);
+		/*
+		 * Reevaluate to see if we have raced with someone who changed this -
+		 * if we have, we return the set of info for fd_knlistsize we knew
+		 * in the beginning except if knotes_dealloc interleaves with us.
+		 * In that case, we bail out early with the set of info captured so far.
+		 */
+		if (fd_knlistsize != fdp->fd_knlistsize) {
+			if (fdp->fd_knlistsize) {
+				/* kq_add_knote might grow fdp->fd_knlist. */
+				fd_knlist = fdp->fd_knlist;
+			} else {
+				break;
+			}
+		}
 	}
 	proc_fdunlock(p);
 
@@ -9007,33 +9198,74 @@ kevent_proc_copy_uptrs(void *proc, uint64_t *buf, uint32_t bufsize)
 	unsigned int nuptrs = 0;
 	unsigned int buflen = bufsize / sizeof(uint64_t);
 	struct kqworkloop *kqwl;
+	u_long size = 0;
+	struct klist *fd_knlist = NULL;
 
 	if (buflen > 0) {
 		assert(buf != NULL);
 	}
 
+	/*
+	 * Copyout the uptrs as much as possible but make sure to drop the respective
+	 * locks and take them again periodically so that we don't blow through
+	 * preemption disabled timeouts. Always reevaluate to see if we have raced
+	 * with someone who changed size of the hash - if we have, we return info for
+	 * the size of the hash we knew in the beginning except if it drops to 0.
+	 * In that case, we bail out with the set of info captured so far
+	 */
 	proc_fdlock(p);
-	for (int i = 0; i < fdp->fd_knlistsize; i++) {
-		nuptrs = klist_copy_udata(&fdp->fd_knlist[i], buf, buflen, nuptrs);
+	size = fdp->fd_knlistsize;
+	fd_knlist = fdp->fd_knlist;
+
+	for (int i = 0; i < size; i++) {
+		nuptrs = klist_copy_udata(&fd_knlist[i], buf, buflen, nuptrs);
+
+		proc_fdunlock(p);
+		proc_fdlock(p);
+		if (size != fdp->fd_knlistsize) {
+			if (fdp->fd_knlistsize) {
+				/* kq_add_knote might grow fdp->fd_knlist. */
+				fd_knlist = fdp->fd_knlist;
+			} else {
+				break;
+			}
+		}
 	}
 	proc_fdunlock(p);
 
 	knhash_lock(fdp);
-	if (fdp->fd_knhashmask != 0) {
-		for (size_t i = 0; i < fdp->fd_knhashmask + 1; i++) {
+	size = fdp->fd_knhashmask;
+
+	if (size != 0) {
+		for (size_t i = 0; i < size + 1; i++) {
 			nuptrs = klist_copy_udata(&fdp->fd_knhash[i], buf, buflen, nuptrs);
+
+			knhash_unlock(fdp);
+			knhash_lock(fdp);
+			/* The only path that can interleave with us today is knotes_dealloc. */
+			if (size != fdp->fd_knhashmask) {
+				break;
+			}
 		}
 	}
 	knhash_unlock(fdp);
 
 	kqhash_lock(fdp);
-	if (fdp->fd_kqhashmask != 0) {
-		for (size_t i = 0; i < fdp->fd_kqhashmask + 1; i++) {
+	size = fdp->fd_kqhashmask;
+
+	if (size != 0) {
+		for (size_t i = 0; i < size + 1; i++) {
 			LIST_FOREACH(kqwl, &fdp->fd_kqhash[i], kqwl_hashlink) {
 				if (nuptrs < buflen) {
 					buf[nuptrs] = kqwl->kqwl_dynamicid;
 				}
 				nuptrs++;
+			}
+
+			kqhash_unlock(fdp);
+			kqhash_lock(fdp);
+			if (size != fdp->fd_kqhashmask) {
+				break;
 			}
 		}
 	}

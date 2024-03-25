@@ -163,8 +163,21 @@ extern void     url_decode(char *str);
  * couldn't fit in the supplied buffer.
  * Use scnprintf() if you need the actual number of bytes (minus the \0)
  */
-int     snprintf(char *, size_t, const char *, ...) __printflike(3, 4);
-int     scnprintf(char *, size_t, const char *, ...) __printflike(3, 4);
+int     snprintf(char *__counted_by(count), size_t count, const char *, ...) __printflike(3, 4);
+int     scnprintf(char *__counted_by(count), size_t count, const char *, ...) __printflike(3, 4);
+
+/*
+ * Like (v)snprintf, but returns a __null_terminated pointer to `dst` (or NULL
+ * if `count` was 0). This can be used to "finalize" editing a char array and
+ * turn it into a NUL-terminated string when -fbounds-safety is enabled.
+ * Care must be taken to avoid aliasing the character data after the string
+ * has been finalized.
+ */
+const char *
+    tsnprintf(char *__counted_by(count) dst, size_t count, const char *fmt, ...) __printflike(3, 4);
+
+const char *
+    vtsnprintf(char *__counted_by(count) dst, size_t count, const char *fmt, va_list ap) __printflike(3, 0);
 
 /* sprintf() is being deprecated. Please use snprintf() instead. */
 int     sprintf(char *bufp, const char *, ...) __deprecated __printflike(2, 3);

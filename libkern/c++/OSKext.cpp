@@ -87,6 +87,9 @@ extern "C" {
 
 #include <san/kasan.h>
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
 
 #if PRAGMA_MARK
 #pragma mark External & Internal Function Protos
@@ -362,6 +365,10 @@ static OSKext          * sKernelKext             = NULL;
 /* Load Tag IDs used by statically loaded binaries (e.g, the kernel itself). */
 enum : uint32_t {
 	kOSKextKernelLoadTag = 0,
+#if CONFIG_SPTM
+	kOSKextSPTMLoadTag   = 1,
+	kOSKextTXMLoadTag    = 2,
+#endif /* CONFIG_SPTM */
 	kOSKextLoadTagCount
 };
 
@@ -392,6 +399,38 @@ kmod_info_t g_kernel_kmod_info = {
 	.stop =            NULL
 };
 
+#if CONFIG_SPTM
+/* The SPTM and TXM need fake kmod structures just like the kernel. */
+kmod_info_t g_sptm_kmod_info = {
+	.next =            NULL,
+	.info_version =    KMOD_INFO_VERSION,
+	.id =              kOSKextSPTMLoadTag,   // Always one after the kernel
+	.name =            kOSKextSPTMIdentifier,// bundle identifier
+	.version =         "0",           // filled in by OSKext::initialize()
+	.reference_count = -1,            // never adjusted; SPTM never unloads
+	.reference_list =  NULL,
+	.address =         0,
+	.size =            0,             // filled in by OSKext::initialize()
+	.hdr_size =        0,
+	.start =           NULL,
+	.stop =            NULL
+};
+
+kmod_info_t g_txm_kmod_info = {
+	.next =            NULL,
+	.info_version =    KMOD_INFO_VERSION,
+	.id =              kOSKextTXMLoadTag,   // Always one after the SPTM
+	.name =            kOSKextTXMIdentifier,// bundle identifier
+	.version =         "0",           // filled in by OSKext::initialize()
+	.reference_count = -1,            // never adjusted; TXM never unloads
+	.reference_list =  NULL,
+	.address =         0,
+	.size =            0,             // filled in by OSKext::initialize()
+	.hdr_size =        0,
+	.start =           NULL,
+	.stop =            NULL
+};
+#endif /* CONFIG_SPTM */
 
 /* Set up a fake kmod_info struct for statically linked kexts that don't have one. */
 
@@ -795,6 +834,26 @@ OSKext::allocAndInitFakeKext(kmod_info_t *kmod_info)
 		 */
 		set_custom_path = false;
 		executable_fallback_name = NULL;
+#if CONFIG_SPTM
+	} else if (kmod_info->id == kOSKextSPTMLoadTag) {
+		load_address = (vm_offset_t)SPTMArgs->debug_header->image[DEBUG_HEADER_ENTRY_SPTM];
+		bundle_name = "sptm";
+
+		/* The addresses in the SPTM Mach-O header are all unslid. */
+		macho_is_unslid = true;
+
+		set_custom_path = true;
+		executable_fallback_name = "sptm.no.binname.in.macho";
+	} else if (kmod_info->id == kOSKextTXMLoadTag) {
+		load_address = (vm_offset_t)SPTMArgs->debug_header->image[DEBUG_HEADER_ENTRY_TXM];
+		bundle_name = "txm";
+
+		/* The addresses in the TXM Mach-O header are all unslid. */
+		macho_is_unslid = true;
+
+		set_custom_path = true;
+		executable_fallback_name = "txm.no.binname.in.macho";
+#endif /* CONFIG_SPTM */
 	} else {
 		panic("%s: Unsupported kmod_info->id (%d)", __func__, kmod_info->id);
 	}
@@ -839,6 +898,30 @@ OSKext::allocAndInitFakeKext(kmod_info_t *kmod_info)
 	fakeKext->flags.jettisonLinkeditSeg = 0;
 	fakeKext->flags.unslidMachO = macho_is_unslid;
 
+#if CONFIG_SPTM
+	if (set_custom_path) {
+		/* Only SPTM/TXM should have custom paths to their executables set. */
+		assert((kmod_info->id == kOSKextSPTMLoadTag) ||
+		    (kmod_info->id == kOSKextTXMLoadTag));
+
+		/* All SPTM/TXM binaries are placed into the same path on internal systems. */
+		fakeKext->path = OSString::withCStringNoCopy("/usr/appleinternal/standalone/platform");
+
+		/**
+		 * Each SPTM/TXM Mach-O should contain a __TEXT,__binname section which contains
+		 * a character array representing the name of the Mach-O executable.
+		 */
+		kernel_section_t *binname_sect =
+		    getsectbynamefromheader((kernel_mach_header_t*)load_address, "__TEXT", "__binname");
+
+		if (binname_sect != NULL) {
+			const char *binname = (const char *)ml_static_slide(binname_sect->addr);
+			fakeKext->executableRelPath = OSString::withCStringNoCopy(binname);
+		} else {
+			fakeKext->executableRelPath = OSString::withCStringNoCopy(executable_fallback_name);
+		}
+	}
+#endif /* CONFIG_SPTM */
 
 	fakeKext->kmod_info = kmod_info;
 	strlcpy(kmod_info->version, osrelease,
@@ -973,6 +1056,11 @@ OSKext::initialize(void)
 	sKernelKext = allocAndInitFakeKext(&g_kernel_kmod_info);
 	assert(sKernelKext);
 
+#if CONFIG_SPTM
+	/* Set up OSKext instances to represent the SPTM/TXM. */
+	OSKext *SPTMKext = allocAndInitFakeKext(&g_sptm_kmod_info);
+	OSKext *TXMKext = allocAndInitFakeKext(&g_txm_kmod_info);
+#endif
 
 	/* Add the kernel kext to the bookkeeping dictionaries. Note that
 	 * the kernel kext doesn't have a kmod_info struct. copyInfo()
@@ -983,10 +1071,25 @@ OSKext::initialize(void)
 	setResult = sLoadedKexts->setObject(sKernelKext);
 	assert(setResult);
 
+#if CONFIG_SPTM
+	setResult = sKextsByID->setObject(SPTMKext->bundleID.get(), SPTMKext);
+	assert(setResult);
+	setResult = sLoadedKexts->setObject(SPTMKext);
+	assert(setResult);
+
+	setResult = sKextsByID->setObject(TXMKext->bundleID.get(), TXMKext);
+	assert(setResult);
+	setResult = sLoadedKexts->setObject(TXMKext);
+	assert(setResult);
+#endif /* CONFIG_SPTM */
 
 	// XXX: better way with OSSharedPtr?
 	// sKernelKext remains a valid pointer even after the decref
 	sKernelKext->release();
+#if CONFIG_SPTM
+	SPTMKext->release();
+	TXMKext->release();
+#endif /* CONFIG_SPTM */
 
 	registryRoot = IORegistryEntry::getRegistryRoot();
 	kernelCPUType = OSNumber::withNumber(
@@ -1038,6 +1141,10 @@ OSKext::initialize(void)
 	    "Kext system initialized.");
 
 	notifyKextLoadObservers(sKernelKext, sKernelKext->kmod_info);
+#if CONFIG_SPTM
+	notifyKextLoadObservers(SPTMKext, SPTMKext->kmod_info);
+	notifyKextLoadObservers(TXMKext, TXMKext->kmod_info);
+#endif
 
 	return;
 }
@@ -1125,8 +1232,12 @@ OSKext::removeKextBootstrap(void)
 		    (int)segment_size); // calls ml_static_mfree
 	} else if (seg_kld && seg_kld->vmaddr && seg_kld->vmsize) {
 		/* With fileset KCs, the Kernel KLD segment is not recorded in the DT. */
+#if !CONFIG_SPTM
 		ml_static_mfree(ml_static_ptovirt(seg_kld->vmaddr - gVirtBase + gPhysBase),
 		    seg_kld->vmsize);
+#else
+		ml_static_mfree(seg_kld->vmaddr), seg_kld->vmsize);
+#endif
 	}
 #endif
 	dt_segment_name = "Kernel-__KLDDATA";
@@ -1135,8 +1246,12 @@ OSKext::removeKextBootstrap(void)
 		    (int)segment_size);  // calls ml_static_mfree
 	} else if (seg_klddata && seg_klddata->vmaddr && seg_klddata->vmsize) {
 		/* With fileset KCs, the Kernel KLDDATA segment is not recorded in the DT. */
+#if !CONFIG_SPTM
 		ml_static_mfree(ml_static_ptovirt(seg_klddata->vmaddr - gVirtBase + gPhysBase),
 		    seg_klddata->vmsize);
+#else
+		ml_static_mfree(seg_klddata->vmaddr, seg_klddata->vmsize);
+#endif
 	}
 #elif __i386__ || __x86_64__
 	/* On x86, use the mapping data from the segment load command to
@@ -1479,13 +1594,26 @@ finish:
 *********************************************************************/
 /* static */
 bool
+OSKext::driverkitEnabled(void)
+{
+#if XNU_TARGET_OS_WATCH
+	return false;
+#else //!XNU_TARGET_OS_WATCH
+	return true;
+#endif //XNU_TARGET_OS_WATCH
+}
+
+/*********************************************************************
+*********************************************************************/
+/* static */
+bool
 OSKext::iokitDaemonAvailable(void)
 {
 	int notused;
 	if (PE_parse_boot_argn("-restore", &notused, sizeof(notused))) {
 		return false;
 	}
-	return true;
+	return driverkitEnabled();
 }
 
 /*********************************************************************
@@ -4981,7 +5109,13 @@ OSKext::isExecutable(void)
 bool
 OSKext::isSpecialKernelBinary(void)
 {
+#if CONFIG_SPTM
+	return (this->kmod_info) &&
+	       ((this->kmod_info->id == kOSKextSPTMLoadTag) ||
+	       (this->kmod_info->id == kOSKextTXMLoadTag));
+#else
 	return false;
+#endif
 }
 
 /*********************************************************************
@@ -7465,7 +7599,11 @@ OSKext::jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh)
 	    linkeditseg->vmaddr, linkeditseg->vmsize);
 #else
 	/* BootKC on arm64 is not vm mapped, but is slid */
+#if !CONFIG_SPTM
 	vm_offset_t linkedit_vmaddr = ml_static_ptovirt((vm_offset_t)(linkeditseg->vmaddr - gVirtBase + gPhysBase));
+#else
+	vm_offset_t linkedit_vmaddr = linkeditseg->vmaddr;
+#endif
 
 	ml_static_mfree(linkedit_vmaddr, (vm_size_t)linkeditseg->vmsize);
 
@@ -8205,7 +8343,7 @@ OSKextLogKextInfo(OSKext *aKext, uint64_t address, uint64_t size, firehose_trace
 	} else {
 		uuid_info->ftui_address = ml_static_unslide(address);
 	}
-	firehose_trace_metadata(firehose_stream_metadata, trace_id, stamp, uuid_info, uuid_info_len);
+	os_log_encoded_metadata(trace_id, stamp, uuid_info, uuid_info_len);
 	return;
 }
 
@@ -15468,8 +15606,6 @@ OSKext::printKextsInBacktrace(
 {
 	addr64_t    summary_page = 0;
 	addr64_t    last_summary_page = 0;
-	bool        found_kmod = false;
-	u_int       i = 0;
 
 	if (kPrintKextsLock & flags) {
 		if (!sKextSummariesLock) {
@@ -15493,7 +15629,39 @@ OSKext::printKextsInBacktrace(
 		}
 	}
 
-	for (i = 0; i < gLoadedKextSummaries->numSummaries; ++i) {
+	foreachKextInBacktrace(addr, cnt, 0, ^(OSKextLoadedKextSummary *summary, uint32_t index) {
+		if (index == 0 && !(kPrintKextsTerse & flags)) {
+		        (*printf_func)("      Kernel Extensions in backtrace:\n");
+		}
+
+		printSummary(summary, printf_func, flags);
+	});
+
+finish:
+	if (kPrintKextsLock & flags) {
+		IOLockUnlock(sKextSummariesLock);
+	}
+
+	return;
+}
+
+void
+OSKext::foreachKextInBacktrace(
+	vm_offset_t   * addr,
+	uint32_t        cnt,
+	uint32_t        flags,
+	void         (^ handler)(OSKextLoadedKextSummary *summary, uint32_t index))
+{
+	uint32_t n = 0;
+
+	if (kPrintKextsLock & flags) {
+		if (!sKextSummariesLock) {
+			return;
+		}
+		IOLockLock(sKextSummariesLock);
+	}
+
+	for (uint32_t i = 0; i < gLoadedKextSummaries->numSummaries; ++i) {
 		OSKextLoadedKextSummary * summary;
 
 		summary = gLoadedKextSummaries->summaries + i;
@@ -15505,22 +15673,12 @@ OSKext::printKextsInBacktrace(
 			continue;
 		}
 
-		if (!found_kmod) {
-			if (!(kPrintKextsTerse & flags)) {
-				(*printf_func)("      Kernel Extensions in backtrace:\n");
-			}
-			found_kmod = true;
-		}
-
-		printSummary(summary, printf_func, flags);
+		handler(summary, n++);
 	}
 
-finish:
 	if (kPrintKextsLock & flags) {
 		IOLockUnlock(sKextSummariesLock);
 	}
-
-	return;
 }
 
 /*********************************************************************

@@ -1,4 +1,4 @@
-/* Copyright (c) (2015-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2015-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -18,36 +18,12 @@
 
 #include <corecrypto/cccmac.h>
 
-/* This provide an implementation of SIV
- as specified in https://tools.ietf.org/html/rfc5297
- also in http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/siv/siv.pdf
- Counter Mode where IV is based on CMAC
- */
-
-cc_aligned_struct(16) ccsiv_ctx;
-
-struct ccmode_siv {
-    size_t size;        /* first argument to ccsiv_ctx_decl(). */
-    size_t block_size;
-    int (*CC_SPTR(ccmode_siv, init))(const struct ccmode_siv *siv, ccsiv_ctx *ctx,
-                 size_t key_len, const uint8_t *key);
-    int (*CC_SPTR(ccmode_siv, set_nonce))(ccsiv_ctx *ctx,  size_t nbytes, const uint8_t *in);  // could just be ccm with NULL out
-    int (*CC_SPTR(ccmode_siv, auth))(ccsiv_ctx *ctx,  size_t nbytes, const uint8_t *in);  // could just be ccm with NULL out
-    int (*CC_SPTR(ccmode_siv, crypt))(ccsiv_ctx *ctx, size_t nbytes, const uint8_t *in, uint8_t *out);
-    int (*CC_SPTR(ccmode_siv, reset))(ccsiv_ctx *ctx);
-    const struct ccmode_cbc *cbc;
-    const struct ccmode_ctr *ctr;
-};
-
 #define ccsiv_ctx_decl(_size_, _name_)  cc_ctx_decl_vla(ccsiv_ctx, _size_, _name_)
 #define ccsiv_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
 
 // Functions
 
-CC_INLINE size_t ccsiv_context_size(const struct ccmode_siv *mode)
-{
-    return mode->size;
-}
+size_t ccsiv_context_size(const struct ccmode_siv *mode);
 
 /*!
 @function ccsiv_block_size
@@ -57,10 +33,7 @@ CC_INLINE size_t ccsiv_context_size(const struct ccmode_siv *mode)
 
 @discussion     Used to return the current block size of the SIV mode. Note that the tag in this mode is an output of the underlying blockcipher and therefore the tag length corresponds to the block size.
 */
-CC_INLINE size_t ccsiv_block_size(const struct ccmode_siv *mode)
-{
-    return mode->block_size;
-}
+size_t ccsiv_block_size(const struct ccmode_siv *mode);
 
 /*!
  @function   ccsiv_ciphertext_size
@@ -71,11 +44,7 @@ CC_INLINE size_t ccsiv_block_size(const struct ccmode_siv *mode)
 
  @discussion returns the length of the aead ciphertext that the context will generate which includes both the encrypted plaintext and tag.
  */
-CC_INLINE size_t ccsiv_ciphertext_size(const struct ccmode_siv *mode,
-                                       size_t plaintext_size)
-{
-    return plaintext_size + mode->cbc->block_size;
-}
+size_t ccsiv_ciphertext_size(const struct ccmode_siv *mode, size_t plaintext_size);
 
 /*!
  @function   ccsiv_plaintext_size
@@ -87,14 +56,7 @@ CC_INLINE size_t ccsiv_ciphertext_size(const struct ccmode_siv *mode,
  @discussion returns the length of the plaintext which results from the decryption of a ciphertext of the corresponding size (here ciphertext size includes the tag).
  */
 
-CC_INLINE size_t ccsiv_plaintext_size(const struct ccmode_siv *mode,
-                                       size_t ciphertext_size)
-{
-    if (ciphertext_size<mode->cbc->block_size) {
-        return 0; // error
-    }
-    return ciphertext_size - mode->cbc->block_size;
-}
+size_t ccsiv_plaintext_size(const struct ccmode_siv *mode, size_t ciphertext_size);
 
 /*!
  @function   ccsiv_init
@@ -126,11 +88,8 @@ CC_INLINE size_t ccsiv_plaintext_size(const struct ccmode_siv *mode,
 
 Importantly, all the bits in the key need to be random. Duplicating a smaller key to achieve a longer key length will result in an insecure implementation.
  */
-CC_INLINE int ccsiv_init(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
-                          size_t key_byte_len, const uint8_t *key)
-{
-    return mode->init(mode, ctx, key_byte_len, key);
-}
+int ccsiv_init(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
+               size_t key_byte_len, const uint8_t *key);
 
 /*!
  @function   ccsiv_set_nonce
@@ -146,11 +105,8 @@ CC_INLINE int ccsiv_init(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
  randomization of the ciphertext (preventing deterministic encryption). While the length of the nonce is not limmited, the
  amount of entropy that can be provided is limited by the number of bits in the block of the associated block-cipher.
  */
-CC_INLINE int ccsiv_set_nonce(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
-                         size_t nbytes, const uint8_t *in)
-{
-    return mode->set_nonce(ctx, nbytes, in);
-}
+int ccsiv_set_nonce(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
+                    size_t nbytes, const uint8_t *in);
 
 /*!
  @function   ccsiv_aad
@@ -162,11 +118,8 @@ CC_INLINE int ccsiv_set_nonce(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
 
  @discussion Adds the associated data given by in to the computation of the tag in the associated data. Note this call is optional and no  associated data needs to be provided. Multiple pieces of associated data can be provided by multiple calls to this  function. Note the associated data in this case is simply computed as the concatenation of all of the associated data inputs.
  */
-CC_INLINE int ccsiv_aad(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
-                            size_t nbytes, const uint8_t *in)
-{
-    return mode->auth(ctx, nbytes, in);
-}
+int ccsiv_aad(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
+              size_t nbytes, const uint8_t *in);
 
 /*!
  @function   ccsiv_crypt
@@ -195,11 +148,8 @@ CC_INLINE int ccsiv_aad(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
 
  Decryption can be done in place in memory by setting in=out. Encryption cannot be done in place. However, if one is trying to minimize memory usage one can set out = in - block_length, which results in the ciphertext being encrypted inplace, and the IV being prepended before the ciphertext.
  */
-CC_INLINE int ccsiv_crypt(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
-                            size_t nbytes, const uint8_t *in, uint8_t *out)
-{
-    return mode->crypt(ctx, nbytes, in, out);
-}
+int ccsiv_crypt(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
+                size_t nbytes, const uint8_t *in, uint8_t *out);
 
 /*!
  @function   ccsiv_reset
@@ -208,10 +158,7 @@ CC_INLINE int ccsiv_crypt(const struct ccmode_siv *mode, ccsiv_ctx *ctx,
  @param      mode               Descriptor for the mode
  @param      ctx                Intialized ctx
  */
-CC_INLINE int ccsiv_reset(const struct ccmode_siv *mode, ccsiv_ctx *ctx)
-{
-    return mode->reset(ctx);
-}
+int ccsiv_reset(const struct ccmode_siv *mode, ccsiv_ctx *ctx);
 
 /*!
  @function   ccsiv_one_shot
@@ -245,24 +192,10 @@ Note that the ciphrtext itself is encrypted in place, but the IV prefixes the ci
 
  */
 
-CC_INLINE int ccsiv_one_shot(const struct ccmode_siv *mode,
-                              size_t key_len, const uint8_t *key,
-                              unsigned nonce_nbytes, const uint8_t* nonce,
-                              unsigned adata_nbytes, const uint8_t* adata,
-                              size_t in_nbytes, const uint8_t *in, uint8_t *out)
-{
-    int rc;
-    ccsiv_ctx_decl(mode->size, ctx);
-    rc=mode->init(mode, ctx, key_len, key);
-    if (rc) {return rc;}
-    rc=mode->set_nonce(ctx, nonce_nbytes, nonce);
-    if (rc) {return rc;}
-    rc=mode->auth(ctx, adata_nbytes, adata);
-    if (rc) {return rc;}
-    rc=mode->crypt(ctx, in_nbytes, in, out);
-    if (rc) {return rc;}
-    ccsiv_ctx_clear(mode->size, ctx);
-    return rc;
-}
+int ccsiv_one_shot(const struct ccmode_siv *mode,
+                   size_t key_len, const uint8_t *key,
+                   unsigned nonce_nbytes, const uint8_t* nonce,
+                   unsigned adata_nbytes, const uint8_t* adata,
+                   size_t in_nbytes, const uint8_t *in, uint8_t *out);
 
 #endif /* _CORECRYPTO_CCMODE_H_ */

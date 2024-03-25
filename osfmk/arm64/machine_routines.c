@@ -69,6 +69,9 @@
 #endif
 
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif /* CONFIG_SPTM */
 
 #include <libkern/section_keywords.h>
 
@@ -79,10 +82,20 @@
  * bits back to read/write.  However it will still catch xnu changes that
  * accidentally write to HID bits after they've been made read-only.
  */
+SECURITY_READ_ONLY_LATE(bool) skip_spr_lockdown_glb = 0;
 
-#if KPC
+/*
+ * On some SoCs, PIO lockdown is applied in assembly in early boot by
+ * secondary CPUs.
+ * Since the cluster_pio_ro_ctl value is dynamic, it is stored here by the
+ * primary CPU so that it doesn't have to be computed each time by the
+ * startup code.
+ */
+SECURITY_READ_ONLY_LATE(uint64_t) cluster_pio_ro_ctl_mask_glb = 0;
+
+#if CONFIG_CPU_COUNTERS
 #include <kern/kpc.h>
-#endif
+#endif /* CONFIG_CPU_COUNTERS */
 
 #define MPIDR_CPU_ID(mpidr_el1_val)             (((mpidr_el1_val) & MPIDR_AFF0_MASK) >> MPIDR_AFF0_SHIFT)
 #define MPIDR_CLUSTER_ID(mpidr_el1_val)         (((mpidr_el1_val) & MPIDR_AFF1_MASK) >> MPIDR_AFF1_SHIFT)
@@ -121,8 +134,13 @@ extern vm_offset_t   vm_kernelcache_top;
 /* Location of the physmap / physical aperture */
 extern uint64_t physmap_base;
 
+#if defined(CONFIG_SPTM)
+extern const arm_physrange_t *arm_vm_kernelcache_ranges;
+extern int arm_vm_kernelcache_numranges;
+#else /* defined(CONFIG_SPTM) */
 extern vm_offset_t arm_vm_kernelcache_phys_start;
 extern vm_offset_t arm_vm_kernelcache_phys_end;
+#endif /* defined(CONFIG_SPTM) */
 
 #if defined(HAS_IPI)
 unsigned int gFastIPI = 1;
@@ -433,6 +451,8 @@ ml_feature_supported(uint32_t feature_bit)
 
 	MRS(aidr_el1_value, "AIDR_EL1");
 
+#ifdef APPLEAVALANCHE
+#endif // APPLEAVALANCHE
 
 	return aidr_el1_value & feature_bit;
 }
@@ -515,6 +535,16 @@ set_invalidate_hmac_function(invalidate_fn_t fn)
 void
 machine_lockdown(void)
 {
+
+#if CONFIG_SPTM
+	/**
+	 * On devices that make use of the SPTM, the SPTM is responsible for
+	 * managing system register locks. Due to this, we skip the call to
+	 * spr_lockdown() below.
+	 */
+#else
+#endif
+
 	arm_vm_prot_finalize(PE_state.bootArgs);
 
 #if CONFIG_KERNEL_INTEGRITY
@@ -531,6 +561,26 @@ machine_lockdown(void)
 #endif
 #endif /* KERNEL_INTEGRITY_WT */
 
+#if CONFIG_SPTM
+	extern void pmap_prepare_commpages(void);
+	pmap_prepare_commpages();
+
+	/**
+	 * sptm_lockdown_xnu() disables preemption like all SPTM calls, but may take
+	 * a fair amount of time as it involves retyping a large number of pages.
+	 * This preemption latency is not really a concern since we're still fairly
+	 * early in the boot process, so just explicitly disable preemption before
+	 * invoking the SPTM and abandon preemption latency measurements before
+	 * re-enabling it.
+	 */
+	disable_preemption();
+	/* Signal the SPTM that XNU is ready for RO memory to actually become read-only */
+	sptm_lockdown_xnu();
+#if SCHED_HYGIENE_DEBUG
+	abandon_preemption_disable_measurement();
+#endif /* SCHED_HYGIENE_DEBUG */
+	enable_preemption();
+#else
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	/* KTRR
 	 *
@@ -540,6 +590,7 @@ machine_lockdown(void)
 
 	rorgn_lockdown();
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+#endif /* CONFIG_SPTM */
 
 #if XNU_MONITOR
 	pmap_lockdown_ppl();
@@ -1092,6 +1143,9 @@ ml_parse_cpu_topology(void)
 			topology_info.boot_cluster = cluster;
 		}
 
+#if CONFIG_SPTM
+		sptm_register_cpu(cpu->phys_id);
+#endif
 	}
 
 #if HAS_CLUSTER
@@ -1119,7 +1173,6 @@ ml_parse_cpu_topology(void)
 #endif
 	assert(topology_info.boot_cpu != NULL);
 	ml_read_chip_revision(&topology_info.chip_revision);
-
 
 	/*
 	 * Set TPIDR_EL0 to indicate the correct cpu number & cluster id,
@@ -1476,20 +1529,21 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 
 	*processor_out = processor;
 	*ipi_handler_out = cpu_signal_handler;
-#if CPMU_AIC_PMI && MONOTONIC
+#if CPMU_AIC_PMI && CONFIG_CPU_COUNTERS
 	*pmi_handler_out = mt_cpmu_aic_pmi;
 #else
 	*pmi_handler_out = NULL;
-#endif /* CPMU_AIC_PMI && MONOTONIC */
+#endif /* CPMU_AIC_PMI && CONFIG_CPU_COUNTERS */
 	if (in_processor_info->idle_tickle != (idle_tickle_t *) NULL) {
 		*in_processor_info->idle_tickle = (idle_tickle_t) cpu_idle_tickle;
 	}
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	if (kpc_register_cpu(this_cpu_datap) != TRUE) {
 		goto processor_register_error;
 	}
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
+
 
 	if (!is_boot_cpu) {
 		random_cpu_init(this_cpu_datap->cpu_number);
@@ -1500,9 +1554,9 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	return KERN_SUCCESS;
 
 processor_register_error:
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_unregister_cpu(this_cpu_datap);
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 	if (!is_boot_cpu) {
 		cpu_data_free(this_cpu_datap);
 	}
@@ -1626,6 +1680,13 @@ ml_static_slide(
 {
 	vm_offset_t slid_vaddr = 0;
 
+#if CONFIG_SPTM
+	if ((vaddr >= vm_sptm_offsets.unslid_base) && (vaddr < vm_sptm_offsets.unslid_top)) {
+		slid_vaddr = vaddr + vm_sptm_offsets.slide;
+	} else if ((vaddr >= vm_txm_offsets.unslid_base) && (vaddr < vm_txm_offsets.unslid_top)) {
+		slid_vaddr = vaddr + vm_txm_offsets.slide;
+	} else
+#endif /* CONFIG_SPTM */
 	{
 		slid_vaddr = vaddr + vm_kernel_slide;
 	}
@@ -1647,6 +1708,19 @@ ml_static_unslide(
 		return 0;
 	}
 
+#if CONFIG_SPTM
+	/**
+	 * Addresses coming from the SPTM and TXM have a different slide than the
+	 * rest of the kernel.
+	 */
+	if ((vaddr >= vm_sptm_offsets.slid_base) && (vaddr < vm_sptm_offsets.slid_top)) {
+		return vaddr - vm_sptm_offsets.slide;
+	}
+
+	if ((vaddr >= vm_txm_offsets.slid_base) && (vaddr < vm_txm_offsets.slid_top)) {
+		return vaddr - vm_txm_offsets.slide;
+	}
+#endif /* CONFIG_SPTM */
 
 	return vaddr - vm_kernel_slide;
 }
@@ -1659,6 +1733,22 @@ ml_static_protect(
 	vm_size_t size,
 	vm_prot_t new_prot __unused)
 {
+#if CONFIG_SPTM
+	/**
+	 * Retype any frames that may be passed to the VM to XNU_DEFAULT.
+	 */
+	for (vm_offset_t sptm_vaddr_cur = vaddr; sptm_vaddr_cur < trunc_page_64(vaddr + size); sptm_vaddr_cur += PAGE_SIZE) {
+		/* Check if this frame is XNU_DEFAULT and only retype it if is not */
+		sptm_paddr_t sptm_paddr_cur = kvtophys_nofail(sptm_vaddr_cur);
+		sptm_frame_type_t current_type = sptm_get_frame_type(sptm_paddr_cur);
+		if (current_type != XNU_DEFAULT) {
+			sptm_retype_params_t retype_params = {.raw = SPTM_RETYPE_PARAMS_NULL};
+			sptm_retype(sptm_paddr_cur, current_type, XNU_DEFAULT, retype_params);
+		}
+	}
+
+	return KERN_SUCCESS;
+#else /* CONFIG_SPTM */
 	pt_entry_t    arm_prot = 0;
 	pt_entry_t    arm_block_prot = 0;
 	vm_offset_t   vaddr_cur;
@@ -1776,8 +1866,24 @@ ml_static_protect(
 
 
 	return result;
+#endif /* CONFIG_SPTM */
 }
 
+#if defined(CONFIG_SPTM)
+/*
+ * Returns true if the given physical address is in one of the boot kernelcache ranges.
+ */
+static bool
+ml_physaddr_in_bootkc_range(vm_offset_t physaddr)
+{
+	for (int i = 0; i < arm_vm_kernelcache_numranges; i++) {
+		if (physaddr >= arm_vm_kernelcache_ranges[i].start_phys && physaddr < arm_vm_kernelcache_ranges[i].end_phys) {
+			return true;
+		}
+	}
+	return false;
+}
+#endif /* defined(CONFIG_SPTM) */
 
 /*
  *	Routine:        ml_static_mfree
@@ -1822,7 +1928,11 @@ ml_static_mfree(
 
 			vm_page_create(ppn, (ppn + 1));
 			freed_pages++;
+#if defined(CONFIG_SPTM)
+			if (ml_physaddr_in_bootkc_range(paddr_cur)) {
+#else
 			if (paddr_cur >= arm_vm_kernelcache_phys_start && paddr_cur < arm_vm_kernelcache_phys_end) {
+#endif
 				freed_kernelcache_pages++;
 			}
 		}
@@ -1844,7 +1954,9 @@ ml_static_mfree(
 ml_page_protection_t
 ml_page_protection_type(void)
 {
-#if   XNU_MONITOR
+#if CONFIG_SPTM
+	return 2;
+#elif XNU_MONITOR
 	return 1;
 #else
 	return 0;
@@ -2231,7 +2343,7 @@ platform_syscall(arm_saved_state_t *state)
 	case 3:
 		/* get cthread */
 		platform_syscall_kprintf("get cthread self.\n");
-		set_saved_state_reg(state, 0, thread_get_cthread_self());
+		set_user_saved_state_reg(state, 0, thread_get_cthread_self());
 		break;
 	case 0: /* I-Cache flush (removed) */
 	case 1: /* D-Cache flush (removed) */
@@ -2429,61 +2541,14 @@ current_thread(void)
 	return current_thread_fast();
 }
 
-typedef struct{
-	ex_cb_t         cb;
-	void            *refcon;
-}
-ex_cb_info_t;
-
-ex_cb_info_t ex_cb_info[EXCB_CLASS_MAX];
-
-/*
- * Callback registration
- * Currently we support only one registered callback per class but
- * it should be possible to support more callbacks
- */
-kern_return_t
-ex_cb_register(
-	ex_cb_class_t   cb_class,
-	ex_cb_t                 cb,
-	void                    *refcon)
-{
-	ex_cb_info_t *pInfo = &ex_cb_info[cb_class];
-
-	if ((NULL == cb) || (cb_class >= EXCB_CLASS_MAX)) {
-		return KERN_INVALID_VALUE;
-	}
-
-	if (NULL == pInfo->cb) {
-		pInfo->cb = cb;
-		pInfo->refcon = refcon;
-		return KERN_SUCCESS;
-	}
-	return KERN_FAILURE;
-}
-
-/*
- * Called internally by platform kernel to invoke the registered callback for class
- */
-ex_cb_action_t
-ex_cb_invoke(
-	ex_cb_class_t   cb_class,
-	vm_offset_t             far)
-{
-	ex_cb_info_t *pInfo = &ex_cb_info[cb_class];
-	ex_cb_state_t state = {far};
-
-	if (cb_class >= EXCB_CLASS_MAX) {
-		panic("Invalid exception callback class 0x%x", cb_class);
-	}
-
-	if (pInfo->cb) {
-		return pInfo->cb(cb_class, pInfo->refcon, &state);
-	}
-	return EXCB_ACTION_NONE;
-}
-
 #if defined(HAS_APPLE_PAC)
+uint8_t
+ml_task_get_disable_user_jop(task_t task)
+{
+	assert(task);
+	return task->disable_user_jop;
+}
+
 void
 ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop)
 {
@@ -2518,18 +2583,25 @@ ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit)
  * times during task creation, so we need to split this into two steps.
  */
 void
-ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit)
+ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit, boolean_t disable_user_jop)
 {
 	if (inherit) {
 		task->jop_pid = parent_task->jop_pid;
+	} else if (disable_user_jop) {
+		task->jop_pid = ml_non_arm64e_user_jop_pid();
 	} else {
 		task->jop_pid = ml_default_jop_pid();
 	}
 }
 
 void
-ml_task_set_jop_pid_from_shared_region(task_t task)
+ml_task_set_jop_pid_from_shared_region(task_t task, boolean_t disable_user_jop)
 {
+	if (disable_user_jop) {
+		task->jop_pid = ml_non_arm64e_user_jop_pid();
+		return;
+	}
+
 	vm_shared_region_t sr = vm_shared_region_get(task);
 	/*
 	 * If there's no shared region, we can assign the key arbitrarily.  This
@@ -2690,6 +2762,20 @@ ml_expect_fault_begin(expected_fault_handler_t expected_fault_handler, uintptr_t
 	thread_t thread = current_thread();
 	thread->machine.expected_fault_handler = expected_fault_handler;
 	thread->machine.expected_fault_addr = expected_fault_addr;
+	thread->machine.expected_fault_pc = 0;
+}
+
+/** Expect an exception to be thrown at EXPECTED_FAULT_PC */
+void
+ml_expect_fault_pc_begin(expected_fault_handler_t expected_fault_handler, uintptr_t expected_fault_pc)
+{
+	thread_t thread = current_thread();
+	thread->machine.expected_fault_handler = expected_fault_handler;
+	thread->machine.expected_fault_addr = 0;
+	uintptr_t raw_func = (uintptr_t)ptrauth_strip(
+		(void *)expected_fault_pc,
+		ptrauth_key_function_pointer);
+	thread->machine.expected_fault_pc = raw_func;
 }
 
 void
@@ -2698,6 +2784,7 @@ ml_expect_fault_end(void)
 	thread_t thread = current_thread();
 	thread->machine.expected_fault_handler = NULL;
 	thread->machine.expected_fault_addr = 0;
+	thread->machine.expected_fault_pc = 0;
 }
 #endif /* CONFIG_XNUPOST */
 
@@ -2811,11 +2898,31 @@ ml_cluster_wfe_timeout(uint32_t wfe_cluster_id)
 __pure2 bool
 ml_addr_in_non_xnu_stack(__unused uintptr_t addr)
 {
-#if   XNU_MONITOR
+#if CONFIG_SPTM
+	/**
+	 * If the address is within one of the SPTM-allocated per-cpu stacks, then
+	 * return true.
+	 */
+	if ((addr >= SPTMArgs->cpu_stack_papt_start) &&
+	    (addr < SPTMArgs->cpu_stack_papt_end)) {
+		return true;
+	}
+
+	/**
+	 * If the address is within one of the TXM thread stacks, then return true.
+	 * The SPTM guarantees that these stacks are virtually contiguous.
+	 */
+	if ((addr >= SPTMArgs->txm_thread_stacks[0]) &&
+	    (addr < SPTMArgs->txm_thread_stacks[MAX_CPUS - 1])) {
+		return true;
+	}
+
+	return false;
+#elif XNU_MONITOR
 	return (addr >= (uintptr_t)pmap_stacks_start) && (addr < (uintptr_t)pmap_stacks_end);
 #else
 	return false;
-#endif /* XNU_MONITOR */
+#endif /* CONFIG_SPTM || XNU_MONITOR */
 }
 
 uint64_t
@@ -2823,7 +2930,56 @@ ml_get_backtrace_pc(struct arm_saved_state *state)
 {
 	assert((state != NULL) && is_saved_state64(state));
 
+#if CONFIG_SPTM
+	/**
+	 * On SPTM-based systems, when a non-XNU domain (e.g., SPTM) is interrupted,
+	 * the PC value saved into the state is not the actual PC at the interrupted
+	 * point, but a fixed value to a handler that knows how to re-enter the
+	 * interrupted domain. The interrupted domain's actual PC value is saved
+	 * into x14, so let's return that instead.
+	 */
+	if (ml_addr_in_non_xnu_stack(get_saved_state_fp(state))) {
+		return saved_state64(state)->x[14];
+	}
+#endif /* CONFIG_SPTM */
 
 	return get_saved_state_pc(state);
 }
 
+
+bool
+ml_paddr_is_exclaves_owned(vm_offset_t paddr)
+{
+#if CONFIG_SPTM
+	const sptm_frame_type_t type = sptm_get_frame_type(paddr);
+	return type == SK_DEFAULT || type == SK_IO;   // SK_SHARED_R[OW] are not exclusively exclaves frames
+#else
+	#pragma unused(paddr)
+	return false;
+#endif /* CONFIG_SPTM */
+}
+
+/**
+ * Panic because an ARM saved-state accessor expected user saved-state but was
+ * passed non-user saved-state.
+ *
+ * @param ss invalid saved-state (CPSR.M != EL0)
+ */
+void
+ml_panic_on_invalid_old_cpsr(const arm_saved_state_t *ss)
+{
+	panic("invalid CPSR in user saved-state %p", ss);
+}
+
+/**
+ * Panic because an ARM saved-state accessor was passed user saved-state and
+ * asked to assign a non-user CPSR.
+ *
+ * @param ss original EL0 saved-state
+ * @param cpsr invalid new CPSR value (CPSR.M != EL0)
+ */
+void
+ml_panic_on_invalid_new_cpsr(const arm_saved_state_t *ss, uint32_t cpsr)
+{
+	panic("attempt to set non-user CPSR %#010x on user saved-state %p", cpsr, ss);
+}

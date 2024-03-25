@@ -196,6 +196,11 @@ evaluate_rules(const char *rules_file_path, const char *fname, char **envs,
 				if (strcmp(alt_rosetta, "1") == 0) {
 					*psa_options |= PSA_OPTION_ALT_ROSETTA;
 				}
+			} else if (memcmp(line, "has_sec_transition:", strlen("has_sec_transition:")) == 0) {
+				char *enable_sec_transitions = line + strlen("has_sec_transition:");
+				if (strcmp(enable_sec_transitions, "1") == 0) {
+					*psa_options |= PSA_OPTION_USE_SEC_TRANSITION_SHIMS;
+				}
 			}
 
 			memmove(read_buffer, newline_pos + 1, sizeof(read_buffer) - line_length);

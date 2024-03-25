@@ -9,6 +9,11 @@ module DarwinPrivate.Mach [system] {
     export *
   }
 
+  module exclaves_l4 {
+    header "mach/exclaves_l4.h"
+    export *
+  }
+
   module mach_right {
     header "mach/mach_right_private.h"
     export *
@@ -61,6 +66,11 @@ module DarwinPrivate.Mach [system] {
 
   module thread_policy {
     header "mach/thread_policy_private.h"
+    export *
+  }
+
+  module vm_reclaim {
+    header "mach/vm_reclaim.h"
     export *
   }
 }

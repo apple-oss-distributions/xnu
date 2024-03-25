@@ -1,12 +1,6 @@
 """
 Wrappers around globals and caches to service the kmem package
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import bytes
-from builtins import range
-from builtins import object
-
 from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from core import (
@@ -15,7 +9,6 @@ from core import (
     lldbwrap,
 )
 from ctypes import c_int64
-from six import add_metaclass
 
 class MemoryRange(namedtuple('MemoryRange', ['start', 'end'])):
     @property
@@ -73,8 +66,7 @@ class VMPointerUnpacker(object):
         return self.unpack(sbv.chkGetValueAsUnsigned())
 
 
-@add_metaclass(ABCMeta)
-class KMem(object):
+class KMem(object, metaclass=ABCMeta):
     """
     Singleton class that holds various important information
     that is needed to make sense of the kernel memory layout,
@@ -186,6 +178,7 @@ class KMem(object):
         self.kn_kq_packing = VMPointerUnpacker(target, 'kn_kq_packing_params')
         self.vm_page_packing = VMPointerUnpacker(target, 'vm_page_packing_params')
         self.rwlde_caller_packing = VMPointerUnpacker(target, 'rwlde_caller_packing_params')
+        self.c_slot_packing = VMPointerUnpacker(target, 'c_slot_packing_params')
 
     @staticmethod
     @caching.cache_statically

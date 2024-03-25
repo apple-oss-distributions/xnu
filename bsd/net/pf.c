@@ -2760,7 +2760,7 @@ pf_send_tcp(const struct pf_rule *r, sa_family_t af,
 	m->m_data += max_linkhdr;
 	m->m_pkthdr.len = m->m_len = len;
 	m->m_pkthdr.rcvif = NULL;
-	bzero(m->m_data, len);
+	bzero(m_mtod_current(m), len);
 	switch (af) {
 #if INET
 	case AF_INET:

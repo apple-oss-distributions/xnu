@@ -149,6 +149,7 @@ void serverRemove(IOUserServer * server);
 void serverAck(IOUserServer * server);
 bool serverSlept(void);
 void systemHalt(int howto);
+bool checkPMReady(void);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -167,7 +168,6 @@ class IOUserServer : public IOUserClient2022
 	uint8_t               fRootNotifier;
 	uint8_t               fSystemPowerAck;
 	uint8_t               fSystemOff;
-	uint8_t               fPowerManagementFailed;
 	IOUserServerCheckInToken * fCheckInToken;
 	OSDextStatistics    * fStatistics;
 	bool                  fPlatformDriver;
@@ -232,11 +232,11 @@ public:
 	void                   systemPower(bool powerOff);
 	void                               systemHalt(int howto);
 	static void            powerSourceChanged(bool acAttached);
+	bool                   checkPMReady();
 
 	IOReturn                                setPowerState(unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateWillChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
-	void                                    setPowerManagementFailed(bool failed);
 
 	IOPStrings *           copyInStringArray(const char * string, uint32_t userSize);
 	uint32_t               stringArrayIndex(IOPStrings * array, const char * look);
@@ -262,7 +262,7 @@ public:
 	static OSObject      * target(OSAction * action, IORPCMessage * message);
 
 	IOReturn               rpc(IORPC rpc);
-	IOReturn               server(ipc_kmsg_t requestkmsg, ipc_kmsg_t * preply);
+	IOReturn               server(ipc_kmsg_t requestkmsg, IORPCMessage * message, ipc_kmsg_t * preply);
 	kern_return_t          waitInterruptTrap(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6);
 	static bool            shouldLeakObjects();
 	static void            beginLeakingObjects();

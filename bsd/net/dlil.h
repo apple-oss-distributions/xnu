@@ -365,7 +365,6 @@ extern boolean_t ifnet_detach_netif_nexus(ifnet_t ifp);
 extern boolean_t ifnet_add_netagent(ifnet_t ifp);
 extern boolean_t ifnet_remove_netagent(ifnet_t ifp);
 extern void      ifnet_attach_native_flowswitch(ifnet_t ifp);
-extern void      ifnet_start_set_pacemaker_time(ifnet_t ifp, uint64_t tx_time);
 extern void      ifnet_start_ignore_delay(ifnet_t interface);
 extern int       ifnet_set_flowswitch_rx_callback(ifnet_t ifp, ifnet_fsw_rx_cb_t cb, void *arg);
 extern int       ifnet_get_flowswitch_rx_callback(ifnet_t ifp, ifnet_fsw_rx_cb_t *cbp, void **argp);
@@ -403,7 +402,7 @@ extern void dlil_node_absent(struct ifnet *, struct sockaddr *);
 extern int dlil_node_present_v2(struct ifnet *, struct sockaddr *, struct sockaddr_dl *, int32_t, int,
     int, u_int8_t[48]);
 
-extern const void *dlil_ifaddr_bytes(const struct sockaddr_dl *, size_t *,
+extern const void *__indexable dlil_ifaddr_bytes(const struct sockaddr_dl *, size_t *,
     kauth_cred_t *);
 
 extern void dlil_report_issues(struct ifnet *, u_int8_t[DLIL_MODIDLEN],

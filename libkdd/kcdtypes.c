@@ -532,6 +532,93 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, i, "stackshot_task_codesigning_info");
 		break;
 
+	case STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct thread_exclaves_info, tei_scid);
+		_SUBTYPE(KC_ST_UINT32, struct thread_exclaves_info, tei_thread_offset);
+		_SUBTYPE(KC_ST_UINT32, struct thread_exclaves_info, tei_flags);
+		setup_type_definition(retval, type_id, i, "exclaves_thread_info");
+		break;
+
+	case STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct thread_crash_exclaves_info, tcei_scid);
+		_SUBTYPE(KC_ST_UINT64, struct thread_crash_exclaves_info, tcei_thread_id);
+		_SUBTYPE(KC_ST_UINT32, struct thread_crash_exclaves_info, tcei_flags);
+		setup_type_definition(retval, type_id, i, "exclaves_crash_thread_info");
+		break;
+
+	case STACKSHOT_KCCONTAINER_EXCLAVES:
+		setup_type_definition(retval, type_id, 0, "threads_exclave");
+		break;
+
+	case STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT:
+		setup_type_definition(retval, type_id, 0, "thread_exclave");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct exclave_scresult_info, esc_id);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_scresult_info, esc_flags);
+		setup_type_definition(retval, type_id, i, "exclave_scresult_info");
+		break;
+
+	case STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY:
+		setup_type_definition(retval, type_id, 0, "exclave_ipcstackentry");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct exclave_ipcstackentry_info, eise_asid);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_ipcstackentry_info, eise_tnid);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_ipcstackentry_info, eise_invocationid);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_ipcstackentry_info, eise_flags);
+		setup_type_definition(retval, type_id, i, "exclave_ipcstackentry_info");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK:
+		setup_type_definition(retval, type_id, 1, "secure_ecstack_entry");
+		setup_subtype_description(&subtypes[0], KC_ST_UINT64, 0, "lr");
+		subtypes[0].kcs_flags |= KCS_SUBTYPE_FLAGS_STRUCT;
+		break;
+
+	case STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE:
+		setup_type_definition(retval, type_id, 0, "exclave_addressspace");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_id);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_flags);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_layoutid);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_slide);
+		setup_type_definition(retval, type_id, i, "exclave_addressspace_info");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME:
+		i = 0;
+		_STRINGTYPE("exclave_addressspace_name");
+		setup_type_definition(retval, type_id, i, "exclave_addressspace_name");
+		break;
+
+	case STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT:
+		setup_type_definition(retval, type_id, 0, "exclave_textlayout");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO:
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_info, layout_id);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_info, etl_flags);
+		setup_type_definition(retval, type_id, i, "exclave_textlayout_info");
+		break;
+
+	case STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS:
+		i = 0;
+		_SUBTYPE_ARRAY(KC_ST_UINT8, struct exclave_textlayout_segment, layoutSegment_uuid, 16);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_textlayout_segment, layoutSegment_loadAddress);
+		setup_type_definition(retval, type_id, i, "exclave_textlayout_segments");
+		break;
+
 	case STACKSHOT_KCTYPE_BOOTARGS: {
 		i = 0;
 		_STRINGTYPE("boot_args");

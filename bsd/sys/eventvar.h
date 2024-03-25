@@ -267,9 +267,13 @@ typedef struct thread_group *thread_group_qos_t;
 
 /* The possible states for kqwl_preadopt_tg:
  *
- * 1) Valid thread group with a QoS masked in the last 3 bits.
+ * 1) Valid thread group with a QoS masked in the last 3 bits. This is used today
+ * by sync IPC thread group preadoption path with max QoS < THREAD_QOS_LAST.
  * 2) A known constant value (enumerated below). For these known constant
  * values, no QoS is merged into them.
+ * 3) Permanently associated with a thread group from a work interval that this
+ * kqwl is configured with. The QoS masked in last 3 bits will be THREAD_QOS_LAST
+ * to uniquely identify it from (1). See KQWL_HAS_PERMANENT_PREADOPTED_TG.
  *
  * @const KQWL_PREADOPTED_TG_NULL
  *		NULL implies that the kqwl is capable of preadopting a thread group and it
@@ -303,18 +307,31 @@ typedef struct thread_group *thread_group_qos_t;
 #define KQWL_GET_PREADOPTED_TG_QOS(tg) \
 	        (thread_qos_t) (((uintptr_t) tg) & KQWL_PREADOPT_TG_QOS_MASK)
 
-#define KQWL_CAN_ADOPT_PREADOPT_TG(tg) \
-	        ((tg != KQWL_PREADOPTED_TG_SENTINEL) && \
-	        (tg != KQWL_PREADOPTED_TG_NEVER) && \
-	        (tg != KQWL_PREADOPTED_TG_PROCESSED))
-
-
 #define KQWL_HAS_VALID_PREADOPTED_TG(tg) \
 	        ((tg != KQWL_PREADOPTED_TG_NULL) && \
 	        (tg != KQWL_PREADOPTED_TG_SENTINEL) && \
 	        (tg != KQWL_PREADOPTED_TG_NEVER) && \
 	        (tg != KQWL_PREADOPTED_TG_PROCESSED) && \
 	        (KQWL_GET_PREADOPTED_TG(tg) != NULL))
+
+/*
+ * The preadopt thread group on a kqwl can be permanently configured when the kqwl
+ * is created so it does not change over the course of the kqwl's lifetime. Such
+ * kqwl does not participate in thread group preadoption for incoming sync IPCs.
+ * Today, this happens for kqwl configured with os workgroups.
+ */
+#define KQWL_ENCODE_PERMANENT_PREADOPTED_TG(tg) \
+	        KQWL_ENCODE_PREADOPTED_TG_QOS(tg, THREAD_QOS_LAST)
+
+#define KQWL_HAS_PERMANENT_PREADOPTED_TG(tg) \
+	        (KQWL_HAS_VALID_PREADOPTED_TG(tg) && \
+	        (KQWL_GET_PREADOPTED_TG_QOS(tg) == THREAD_QOS_LAST))
+
+#define KQWL_CAN_ADOPT_PREADOPT_TG(tg) \
+	        ((tg != KQWL_PREADOPTED_TG_SENTINEL) && \
+	        (tg != KQWL_PREADOPTED_TG_NEVER) && \
+	        (tg != KQWL_PREADOPTED_TG_PROCESSED) && \
+	                (!KQWL_HAS_PERMANENT_PREADOPTED_TG(tg)))
 
 struct thread_group *
 kqr_preadopt_thread_group(workq_threadreq_t req);

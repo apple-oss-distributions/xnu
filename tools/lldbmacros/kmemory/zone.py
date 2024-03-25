@@ -1,9 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import range
-from builtins import object
-
-import six
 import struct
 
 from core import (
@@ -546,7 +540,7 @@ class Zone(object):
         kmem = KMem.get_shared()
         zarr = kmem.zone_array
 
-        if isinstance(index_name_or_addr, six.string_types):
+        if isinstance(index_name_or_addr, str):
             mangled_name = index_name_or_addr.replace(' ', '.')
             zid = self._find_zone_id_by_mangled_name(mangled_name)
         elif index_name_or_addr <= kmem.num_zones:
@@ -683,7 +677,7 @@ class Zone(object):
         """ Returns the zone's BTLog or None """
 
         try:
-            btlog = zone.sbv.xGetPointeeByName('z_btlog')
+            btlog = self.sbv.xGetPointeeByName('z_btlog')
             return BTLog(btlog)
         except:
             return None
@@ -752,7 +746,7 @@ class Zone(object):
         """ all addresses in per-cpu caches or per-cpu depots """
 
         pcpu = self.sbv.GetChildMemberWithName('z_pcpu_cache')
-        into = into or set()
+        into = into if into is not None else set()
 
         if pcpu.GetValueAsAddress():
             target = pcpu.target
@@ -781,7 +775,7 @@ class Zone(object):
 
         return self._depotElements(
             self.sbv.chkGetChildMemberWithName('z_recirc'),
-            into = into or set()
+            into = into if into is not None else set()
         )
 
     def iter_all(self, ty = None):

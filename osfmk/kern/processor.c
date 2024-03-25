@@ -668,10 +668,10 @@ processor_cpu_load_info(processor_t processor,
 	uint64_t idle_time = 0;
 	recount_processor_usage(&processor->pr_recount, &usage, &idle_time);
 
-	ticks[CPU_STATE_USER] += (uint32_t)(usage.ru_user_time_mach /
+	ticks[CPU_STATE_USER] += (uint32_t)(usage.ru_metrics[RCT_LVL_USER].rm_time_mach /
 	    hz_tick_interval);
-	ticks[CPU_STATE_SYSTEM] += (uint32_t)(usage.ru_system_time_mach /
-	    hz_tick_interval);
+	ticks[CPU_STATE_SYSTEM] += (uint32_t)(
+		recount_usage_system_time_mach(&usage) / hz_tick_interval);
 	ticks[CPU_STATE_IDLE] += (uint32_t)(idle_time / hz_tick_interval);
 }
 

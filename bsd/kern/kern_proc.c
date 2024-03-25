@@ -230,7 +230,10 @@ static void pgrp_replace(proc_t p, struct pgrp *pgrp);
 static int csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user_addr_t uaddittoken);
 static boolean_t proc_parent_is_currentproc(proc_t p);
 
+#if CONFIG_PROC_RESOURCE_LIMITS
 extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
+extern void task_kqworkloop_ast(task_t task, int current_size, int soft_limit, int hard_limit);
+#endif
 
 struct fixjob_iterargs {
 	struct pgrp * pg;
@@ -1542,12 +1545,11 @@ proc_forcequota(proc_t p)
 int
 proc_suser(proc_t p)
 {
-	kauth_cred_t my_cred;
 	int error;
 
-	my_cred = kauth_cred_proc_ref(p);
-	error = suser(my_cred, &p->p_acflag);
-	kauth_cred_unref(&my_cred);
+	smr_proc_task_enter();
+	error = suser(proc_ucred_smr(p), &p->p_acflag);
+	smr_proc_task_leave();
 	return error;
 }
 
@@ -1813,6 +1815,12 @@ proc_exitstatus(proc_t p)
 	return p->p_xstat & 0xffff;
 }
 
+bool
+proc_is_zombie(proc_t p)
+{
+	return proc_list_exited(p);
+}
+
 void
 proc_setexecutableuuid(proc_t p, const unsigned char *uuid)
 {
@@ -1831,6 +1839,23 @@ proc_getexecutableuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
 	if (size >= sizeof(uuid_t)) {
 		memcpy(uuidbuf, proc_executableuuid_addr(p), sizeof(uuid_t));
 	}
+}
+
+void
+proc_getresponsibleuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
+{
+	if (size >= sizeof(uuid_t)) {
+		memcpy(uuidbuf, p->p_responsible_uuid, sizeof(uuid_t));
+	}
+}
+
+void
+proc_setresponsibleuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
+{
+	if (p != NULL && uuidbuf != NULL && size >= sizeof(uuid_t)) {
+		memcpy(p->p_responsible_uuid, uuidbuf, sizeof(uuid_t));
+	}
+	return;
 }
 
 /* Return vnode for executable with an iocount. Must be released with vnode_put() */
@@ -2031,6 +2056,18 @@ phash_remove_locked(struct proc *p)
 	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
 
 	smr_hash_serialized_remove(&pid_hash, &p->p_hash, &pid_hash_traits);
+}
+
+proc_t
+proc_find_noref_smr(int pid)
+{
+	smrh_key_t key = SMRH_SCALAR_KEY(pid);
+
+	if (__improbable(pid == 0)) {
+		return kernproc;
+	}
+
+	return smr_hash_entered_find(&pid_hash, key, &pid_hash_traits);
 }
 
 proc_t
@@ -2874,6 +2911,7 @@ proc_is_translated(proc_t p)
 }
 
 
+
 int
 proc_is_classic(proc_t p __unused)
 {
@@ -3568,14 +3606,16 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			error = ENOTSUP;
 			break;
 		}
-#endif
+#endif /* CONFIG_CSR */
+		task_t task = proc_task(pt);
 
 		proc_lock(pt);
 		proc_csflags_clear(pt, CS_PLATFORM_BINARY | CS_PLATFORM_PATH);
+		task_set_hardened_runtime(task, false);
 		csproc_clear_platform_binary(pt);
 		proc_unlock(pt);
 		break;
-#else
+#else  /* DEVELOPMENT || DEBUG */
 		error = ENOTSUP;
 		break;
 #endif /* !DEVELOPMENT || DEBUG */
@@ -4664,6 +4704,15 @@ proc_set_responsible_pid(proc_t target_proc, pid_t responsible_pid)
 {
 	if (target_proc != NULL) {
 		target_proc->p_responsible_pid = responsible_pid;
+
+		// Also save the responsible UUID
+		if (responsible_pid >= 0) {
+			proc_t responsible_proc = proc_find(responsible_pid);
+			if (responsible_proc != PROC_NULL) {
+				proc_getexecutableuuid(responsible_proc, target_proc->p_responsible_uuid, sizeof(target_proc->p_responsible_uuid));
+				proc_rele(responsible_proc);
+			}
+		}
 	}
 	return;
 }
@@ -4844,47 +4893,126 @@ proc_set_filedesc_limits(proc_t p, int soft_limit, int hard_limit)
 
 	return retval;
 }
+
+int
+proc_set_kqworkloop_limits(proc_t p, int soft_limit, int hard_limit)
+{
+	struct filedesc *fdp = &p->p_fd;
+	lck_mtx_lock_spin_always(&fdp->fd_kqhashlock);
+
+	fdp->kqwl_dyn_soft_limit = soft_limit;
+	fdp->kqwl_dyn_hard_limit = hard_limit;
+	/* Make sure existing limits aren't exceeded already */
+	kqworkloop_check_limit_exceeded(fdp);
+
+	lck_mtx_unlock(&fdp->fd_kqhashlock);
+	return 0;
+}
+
+static int
+proc_evaluate_fd_limits_ast(proc_t p, struct filedesc *fdp, int *soft_limit, int *hard_limit)
+{
+	int fd_current_size, fd_soft_limit, fd_hard_limit;
+	proc_fdlock(p);
+
+	fd_current_size = fdp->fd_nfiles_open;
+	fd_hard_limit = fdp->fd_nfiles_hard_limit;
+	fd_soft_limit = fdp->fd_nfiles_soft_limit;
+
+	/*
+	 * If a thread is going to take action on a specific limit exceeding, it also
+	 * clears it out to a SENTINEL so that future threads don't reevaluate the
+	 * limit as having exceeded again
+	 */
+	if (fd_hard_limit > 0 && fd_current_size >= fd_hard_limit) {
+		/* Clear our soft limit when we are sending hard limit notification */
+		fd_soft_limit = 0;
+
+		fdp->fd_nfiles_hard_limit = FD_LIMIT_SENTINEL;
+	} else if (fd_soft_limit > 0 && fd_current_size >= fd_soft_limit) {
+		/* Clear out hard limit when we are sending soft limit notification */
+		fd_hard_limit = 0;
+
+		fdp->fd_nfiles_soft_limit = FD_LIMIT_SENTINEL;
+	} else {
+		/* Neither limits were exceeded */
+		fd_soft_limit = fd_hard_limit = 0;
+	}
+
+	proc_fdunlock(p);
+
+	*soft_limit = fd_soft_limit;
+	*hard_limit = fd_hard_limit;
+	return fd_current_size;
+}
+
+static int
+proc_evaluate_kqwl_limits_ast(struct filedesc *fdp, int *soft_limit, int *hard_limit)
+{
+	lck_mtx_lock_spin_always(&fdp->fd_kqhashlock);
+
+	int kqwl_current_size = fdp->num_kqwls;
+	int kqwl_soft_limit = fdp->kqwl_dyn_soft_limit;
+	int kqwl_hard_limit = fdp->kqwl_dyn_hard_limit;
+
+	/*
+	 * If a thread is going to take action on a specific limit exceeding, it also
+	 * clears it out to a SENTINEL so that future threads don't reevaluate the
+	 * limit as having exceeded again
+	 */
+	if (kqwl_hard_limit > 0 && kqwl_current_size >= kqwl_hard_limit) {
+		/* Clear our soft limit when we are sending hard limit notification */
+		kqwl_soft_limit = 0;
+
+		fdp->kqwl_dyn_hard_limit = KQWL_LIMIT_SENTINEL;
+	} else if (kqwl_soft_limit > 0 && kqwl_current_size >= kqwl_soft_limit) {
+		/* Clear out hard limit when we are sending soft limit notification */
+		kqwl_hard_limit = 0;
+
+		fdp->kqwl_dyn_soft_limit = KQWL_LIMIT_SENTINEL;
+	} else {
+		/* Neither limits were exceeded */
+		kqwl_soft_limit = kqwl_hard_limit = 0;
+	}
+
+	lck_mtx_unlock(&fdp->fd_kqhashlock);
+
+	*soft_limit = kqwl_soft_limit;
+	*hard_limit = kqwl_hard_limit;
+	return kqwl_current_size;
+}
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 void
 proc_filedesc_ast(__unused task_t task)
 {
 #if CONFIG_PROC_RESOURCE_LIMITS
-	int current_size, soft_limit, hard_limit;
 	assert(task == current_task());
 	proc_t p = get_bsdtask_info(task);
 	struct filedesc *fdp = &p->p_fd;
 
-	proc_fdlock(p);
-	current_size = fdp->fd_nfiles_open;
-	hard_limit = fdp->fd_nfiles_hard_limit;
-	soft_limit = fdp->fd_nfiles_soft_limit;
-
 	/*
-	 * Check if the thread sending the soft limit notification arrives after
-	 * the one that sent the hard limit notification
+	 * At this point, we can possibly race with other threads which set the AST
+	 * due to triggering the soft/hard limits for fd or kqworkloops.
+	 *
+	 * The first thread to reach this logic will always evaluate hard limit for fd
+	 * or kqworkloops even if it was the one which triggered the soft limit for
+	 * them.
+	 *
+	 * If a thread takes action on a specific limit, it will clear the limit value
+	 * in the fdp with a SENTINEL to indicate to other racing threads that they no
+	 * longer need to evaluate it.
 	 */
-
-	if (hard_limit > 0 && current_size >= hard_limit) {
-		if (fd_hard_limit_already_notified(fdp)) {
-			soft_limit = hard_limit = 0;
-		} else {
-			fd_hard_limit_notified(fdp);
-			soft_limit = 0;
-		}
-	} else if (soft_limit > 0 && current_size >= soft_limit) {
-		if (fd_soft_limit_already_notified(fdp)) {
-			soft_limit = hard_limit = 0;
-		} else {
-			fd_soft_limit_notified(fdp);
-			hard_limit = 0;
-		}
-	}
-
-	proc_fdunlock(p);
+	int soft_limit, hard_limit;
+	int fd_current_size = proc_evaluate_fd_limits_ast(p, fdp, &soft_limit, &hard_limit);
 
 	if (hard_limit || soft_limit) {
-		task_filedesc_ast(task, current_size, soft_limit, hard_limit);
+		return task_filedesc_ast(task, fd_current_size, soft_limit, hard_limit);
+	}
+
+	int kqwl_current_size = proc_evaluate_kqwl_limits_ast(fdp, &soft_limit, &hard_limit);
+	if (hard_limit || soft_limit) {
+		return task_kqworkloop_ast(task, kqwl_current_size, soft_limit, hard_limit);
 	}
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 }

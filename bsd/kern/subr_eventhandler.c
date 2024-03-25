@@ -117,8 +117,8 @@ eventhandler_register_internal(
 	struct eventhandler_list *list,
 	const char *name, eventhandler_tag epn)
 {
-	struct eventhandler_list                *new_list;
-	struct eventhandler_entry               *ep;
+	struct eventhandler_list                *__single new_list;
+	struct eventhandler_entry               *__single ep;
 
 	VERIFY(strlen(name) <= (sizeof(new_list->el_name) - 1));
 
@@ -183,7 +183,7 @@ eventhandler_register(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
     struct eventhandler_list *list, const char *name,
     void *func, struct eventhandler_entry_arg arg, int priority)
 {
-	struct eventhandler_entry_generic       *eg;
+	struct eventhandler_entry_generic       *__single eg;
 
 	/* allocate an entry for this handler, populate it */
 	eg = kalloc_type(struct eventhandler_entry_generic, Z_WAITOK_ZERO);
@@ -197,7 +197,7 @@ eventhandler_register(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
 void
 eventhandler_deregister(struct eventhandler_list *list, eventhandler_tag tag)
 {
-	struct eventhandler_entry       *ep = tag;
+	struct eventhandler_entry       *__single ep = tag;
 
 	EHL_LOCK_ASSERT(list, LCK_MTX_ASSERT_OWNED);
 	if (ep != NULL) {
@@ -251,13 +251,13 @@ static struct eventhandler_list *
 _eventhandler_find_list(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
     const char *name)
 {
-	struct eventhandler_list        *list;
+	struct eventhandler_list        *__single list;
 
 	VERIFY(evthdlr_lists_ctxt != NULL);
 
 	LCK_MTX_ASSERT(&evthdlr_lists_ctxt->eventhandler_mutex, LCK_MTX_ASSERT_OWNED);
 	TAILQ_FOREACH(list, &evthdlr_lists_ctxt->eventhandler_lists, el_link) {
-		if (!strcmp(name, list->el_name)) {
+		if (!strlcmp(list->el_name, name, EVENTHANDLER_MAX_NAME)) {
 			break;
 		}
 	}
@@ -271,7 +271,7 @@ struct eventhandler_list *
 eventhandler_find_list(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
     const char *name)
 {
-	struct eventhandler_list        *list;
+	struct eventhandler_list        *__single list;
 
 	if (evthdlr_lists_ctxt == NULL) {
 		evthdlr_lists_ctxt = &evthdlr_lists_ctxt_glb;
@@ -299,7 +299,8 @@ eventhandler_find_list(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt,
 void
 eventhandler_prune_list(struct eventhandler_list *list)
 {
-	struct eventhandler_entry *ep, *en;
+	struct eventhandler_entry *__single ep, *__single en;
+
 	int pruned = 0;
 
 	evhlog((LOG_DEBUG, "%s: pruning list \"%s\"", __func__, list->el_name));
@@ -325,8 +326,8 @@ eventhandler_prune_list(struct eventhandler_list *list)
 void
 eventhandler_lists_ctxt_destroy(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt)
 {
-	struct eventhandler_list        *list = NULL;
-	struct eventhandler_list        *list_next = NULL;
+	struct eventhandler_list        *__single list = NULL;
+	struct eventhandler_list        *__single list_next = NULL;
 
 	lck_mtx_lock(&evthdlr_lists_ctxt->eventhandler_mutex);
 	TAILQ_FOREACH_SAFE(list, &evthdlr_lists_ctxt->eventhandler_lists,

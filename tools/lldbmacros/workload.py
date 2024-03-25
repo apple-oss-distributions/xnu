@@ -1,6 +1,3 @@
-from __future__ import absolute_import
-from __future__ import print_function
-
 from xnu import *
 
 @lldb_type_summary(['workload_config_entry_t *'])

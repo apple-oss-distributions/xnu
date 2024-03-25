@@ -2752,6 +2752,15 @@ nx_netif_verify_tso_config(struct nx_netif *nif)
 	uint32_t tso_v4_mtu = 0;
 	uint32_t tso_v6_mtu = 0;
 
+	/*
+	 * compat interfaces always use 128-byte buffers on the device packet
+	 * pool side (for holding headers for classification) so no need to check
+	 * the size here.
+	 */
+	if (!SKYWALK_NATIVE(ifp)) {
+		return;
+	}
+
 	if ((ifp->if_hwassist & IFNET_TSO_IPV4) != 0) {
 		tso_v4_mtu = ifp->if_tso_v4_mtu;
 	}
@@ -4060,19 +4069,7 @@ netif_transmit(struct ifnet *ifp, uint32_t flags)
 	if (netif_use_starter_thread(ifp, flags)) {
 		return;
 	}
-	/*
-	 * If no longer attached, don't issue doorbell as ifp
-	 * is being destroyed; else hold an IO refcnt to
-	 * prevent the interface from being detached.
-	 */
-	if (!ifnet_datamov_begin(ifp)) {
-		return;
-	}
 	nx_netif_doorbell_internal(ifp, flags);
-	/*
-	 * Release the IO refcnt taken above.
-	 */
-	ifnet_datamov_end(ifp);
 }
 
 static struct ifclassq *

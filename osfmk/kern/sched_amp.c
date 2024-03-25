@@ -283,7 +283,7 @@ sched_amp_processor_enqueue(
 	boolean_t       result;
 
 	result = run_queue_enqueue(rq, thread, options);
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 
 	return result;
 }
@@ -455,25 +455,23 @@ sched_amp_processor_queue_remove(
 	processor_t processor,
 	thread_t    thread)
 {
-	run_queue_t             rq;
 	processor_set_t         pset = processor->processor_set;
 
 	pset_lock(pset);
 
-	rq = amp_runq_for_thread(processor, thread);
-
-	if (processor == thread->runq) {
+	if (processor == thread_get_runq_locked(thread)) {
 		/*
 		 * Thread is on a run queue and we have a lock on
 		 * that run queue.
 		 */
+		run_queue_t rq = amp_runq_for_thread(processor, thread);
 		run_queue_remove(rq, thread);
 	} else {
 		/*
 		 * The thread left the run queue before we could
 		 * lock the run queue.
 		 */
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 		processor = PROCESSOR_NULL;
 	}
 

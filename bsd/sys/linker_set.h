@@ -70,6 +70,8 @@
  * conserved.  Set names may not exceed 16 characters.
  */
 
+#include <sys/cdefs.h> /* __unsafe_indexable */
+
 #ifdef KERNEL
 # include <mach-o/loader.h>
 # include <libkern/kernel_mach_header.h>
@@ -229,10 +231,10 @@ __linker_get_slide(struct mach_header *_header)
 #endif
 }
 
-static __inline void **
+static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_begin(MACH_HEADER_TYPE *_header, const char *_set)
 __attribute__((__const__));
-static __inline void **
+static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_begin(MACH_HEADER_TYPE *_header, const char *_set)
 {
 	char *_set_begin;
@@ -243,10 +245,10 @@ __linker_set_object_begin(MACH_HEADER_TYPE *_header, const char *_set)
 	return (void **)(uintptr_t)_set_begin;
 }
 
-static __inline void **
+static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_limit(MACH_HEADER_TYPE *_header, const char *_set)
 __attribute__((__const__));
-static __inline void **
+static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_limit(MACH_HEADER_TYPE *_header, const char *_set)
 {
 	char *_set_begin;

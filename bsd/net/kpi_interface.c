@@ -1077,9 +1077,9 @@ ifnet_set_offload_common(ifnet_t interface, ifnet_offload_t offload, boolean_t s
 	}
 #endif /* SKYWALK */
 	if (dlil_verbose) {
-		log(LOG_DEBUG, "%s: set offload flags=%b\n",
+		log(LOG_DEBUG, "%s: set offload flags=0x%x\n",
 		    if_name(interface),
-		    interface->if_hwassist, IFNET_OFFLOADF_BITS);
+		    interface->if_hwassist);
 	}
 	ifnet_lock_done(interface);
 
@@ -2116,7 +2116,7 @@ one:
 					goto done;
 				}
 				ifal->ifal_ifa = ifa;
-				IFA_ADDREF_LOCKED(ifa);
+				ifa_addref(ifa);
 				SLIST_INSERT_HEAD(&ifal_head, ifal, ifal_le);
 				++count;
 				IFA_UNLOCK(ifa);
@@ -2153,13 +2153,13 @@ done:
 					(*addresses)[index] = ifal->ifal_ifa;
 					index++;
 				} else {
-					IFA_REMREF(ifal->ifal_ifa);
+					ifa_remref(ifal->ifal_ifa);
 				}
 			} else {
 				(*addresses)[--count] = ifal->ifal_ifa;
 			}
 		} else {
-			IFA_REMREF(ifal->ifal_ifa);
+			ifa_remref(ifal->ifal_ifa);
 		}
 		kfree_type(struct ifnet_addr_list, ifal);
 	}
@@ -2183,7 +2183,7 @@ ifnet_free_address_list(ifaddr_t *addresses)
 	}
 
 	for (i = 0; addresses[i] != NULL; i++) {
-		IFA_REMREF(addresses[i]);
+		ifa_remref(addresses[i]);
 	}
 
 	kfree_type(ifaddr_t, i + 1, addresses);
@@ -2295,10 +2295,9 @@ ifnet_guarded_lladdr_copy_bytes(ifnet_t interface, void *lladdr, size_t length)
 	kauth_cred_t *credp;
 	errno_t error;
 
-	credp = NULL;
 #if CONFIG_MACF
 	marks = net_thread_marks_push(NET_THREAD_CKREQ_LLADDR);
-	cred = kauth_cred_proc_ref(current_proc());
+	cred  = current_cached_proc_cred(PROC_NULL);
 	credp = &cred;
 #else
 	credp = NULL;
@@ -2308,7 +2307,6 @@ ifnet_guarded_lladdr_copy_bytes(ifnet_t interface, void *lladdr, size_t length)
 	    credp);
 
 #if CONFIG_MACF
-	kauth_cred_unref(credp);
 	net_thread_marks_pop(marks);
 #endif
 
@@ -2634,7 +2632,7 @@ ifaddr_reference(ifaddr_t ifa)
 		return EINVAL;
 	}
 
-	IFA_ADDREF(ifa);
+	ifa_addref(ifa);
 	return 0;
 }
 
@@ -2645,7 +2643,7 @@ ifaddr_release(ifaddr_t ifa)
 		return EINVAL;
 	}
 
-	IFA_REMREF(ifa);
+	ifa_remref(ifa);
 	return 0;
 }
 

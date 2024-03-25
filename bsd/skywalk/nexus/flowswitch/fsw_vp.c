@@ -272,21 +272,6 @@ fsw_vp_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 	return 0;
 }
 
-int
-fsw_vp_na_attach(struct kern_nexus *nx, const char *cr_name,
-    struct nexus_adapter *na)
-{
-#pragma unused(nx)
-	SK_LOCK_ASSERT_HELD();
-	ASSERT(nx->nx_prov->nxprov_params->nxp_type == NEXUS_TYPE_FLOW_SWITCH);
-	ASSERT(VPNA(na)->vpna_fsw == NULL);
-
-	(void) strncpy(na->na_name, cr_name, sizeof(na->na_name) - 1);
-	na->na_name[sizeof(na->na_name) - 1] = '\0';
-
-	return 0;
-}
-
 static int
 fsw_vp_na_special(struct nexus_adapter *na, struct kern_channel *ch,
     struct chreq *chr, nxspec_cmd_t spec_cmd)
@@ -349,7 +334,7 @@ done:
  * Create a nexus_vp_adapter that describes a flow switch port.
  */
 int
-fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
+fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr, struct proc *p,
     struct nexus_vp_adapter **ret)
 {
 	struct nxprov_params *nxp = NX_PROV(nx)->nxprov_params;
@@ -375,7 +360,9 @@ fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
 	ASSERT(vpna->vpna_up.na_free == fsw_vp_na_free);
 
 	na = &vpna->vpna_up;
-	(void) strncpy(na->na_name, chr->cr_name, sizeof(na->na_name) - 1);
+	(void) snprintf(na->na_name, sizeof(na->na_name), "fsw_%s[%u]_%s.%d",
+	    fsw->fsw_ifp ? if_name(fsw->fsw_ifp) : "??", chr->cr_port,
+	    proc_best_name(p), proc_pid(p));
 	na->na_name[sizeof(na->na_name) - 1] = '\0';
 	uuid_generate_random(na->na_uuid);
 

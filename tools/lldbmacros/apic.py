@@ -1,7 +1,3 @@
-from __future__ import absolute_import, print_function
-
-from builtins import range
-
 from xnu import *
 from misc import DoReadMsr64, DoWriteMsr64
 
@@ -268,7 +264,7 @@ def LapicRead32(cmd_args=None):
         be optionally specified
         Syntax: lapic_read32 <offset> [lcpu]
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(LapicRead32.__doc__)
         return
     if not IsArchX86_64():
@@ -290,7 +286,7 @@ def LapicWrite32(cmd_args=None):
         failure. Prints nothing upon success.
         Syntax: lapic_write32 <offset> <val> [lcpu]
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print(LapicWrite32.__doc__)
         return
     if not IsArchX86_64():
@@ -318,7 +314,7 @@ def IoApicRead32(cmd_args=None):
     """ Read the IOAPIC register at the specified offset.
         Syntax: ioapic_read32 <offset>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(IoApicRead32.__doc__)
         return
     if not IsArchX86_64():
@@ -334,7 +330,7 @@ def IoApicWrite32(cmd_args=None):
     """ Write the IOAPIC register at the specified offset.
         Syntax: ioapic_write32 <offset> <val>
     """
-    if cmd_args == None or len(cmd_args) < 2:
+    if cmd_args is None or len(cmd_args) < 2:
         print(IoApicWrite32.__doc__)
         return
     if not IsArchX86_64():

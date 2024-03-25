@@ -28,7 +28,7 @@
 #ifndef KERN_MONOTONIC_H
 #define KERN_MONOTONIC_H
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -127,6 +127,6 @@ __END_DECLS
 
 #endif /* MACH_KERNEL_PRIVATE */
 
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #endif /* !defined(KERN_MONOTONIC_H) */

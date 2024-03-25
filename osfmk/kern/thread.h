@@ -163,11 +163,6 @@ __options_closed_decl(thread_tag_t, uint16_t, {
 	THREAD_TAG_USER_JOIN    = 0x40,
 });
 
-__options_closed_decl(thread_ro_flags_t, uint16_t, {
-	TRO_NONE                = 0x0000,
-	TRO_SETUID              = 0x0001,
-});
-
 typedef struct thread_ro *thread_ro_t;
 
 /*!
@@ -185,12 +180,25 @@ typedef struct thread_ro *thread_ro_t;
 struct thread_ro {
 	struct thread              *tro_owner;
 #if MACH_BSD
-	struct ucred               *tro_cred;
+	__xnu_struct_group(thread_ro_creds, tro_creds, {
+		/*
+		 * @c tro_cred holds the current thread credentials.
+		 *
+		 * For most threads, this is a cache of the proc's
+		 * credentials that has been updated at the last
+		 * syscall boundary via current_cached_proc_cred_update().
+		 *
+		 * If the thread assumed a different identity using settid(),
+		 * then the proc cached credential lives in @c tro_realcred
+		 * instead.
+		 */
+		struct ucred       *tro_cred;
+		struct ucred       *tro_realcred;
+	});
 	struct proc                *tro_proc;
 	struct proc_ro             *tro_proc_ro;
 #endif
 	struct task                *tro_task;
-	thread_ro_flags_t           tro_flags;
 
 	struct ipc_port            *tro_self_port;
 	struct ipc_port            *tro_settable_self_port;             /* send right */
@@ -257,6 +265,42 @@ __options_decl(thread_work_interval_flags_t, uint32_t, {
 	TH_WORK_INTERVAL_FLAGS_RT_ALLOWED      = 0x4,
 });
 
+#if CONFIG_EXCLAVES
+/* Thread exclaves interrupt-safe state bits (ORd) */
+__options_decl(thread_exclaves_intstate_flags_t, uint32_t, {
+	/* Thread is currently executing in secure kernel or exclaves userspace
+	 * or was interrupted/preempted while doing so. */
+	TH_EXCLAVES_EXECUTION                  = 0x1,
+});
+
+__options_decl(thread_exclaves_state_flags_t, uint16_t, {
+/* Thread exclaves state bits (ORd) */
+	/* Thread is handling RPC from a client in xnu or Darwin userspace (but
+	 * may have returned to xnu due to an exclaves scheduler request or having
+	 * upcalled). Must not re-enter exclaves via RPC or return to Darwin
+	 * userspace. */
+	TH_EXCLAVES_RPC                        = 0x1,
+	/* Thread has made an upcall RPC request back into xnu while handling RPC
+	 * into exclaves from a client in xnu or Darwin userspace. Must not
+	 * re-enter exclaves via RPC or return to Darwin userspace. */
+	TH_EXCLAVES_UPCALL                     = 0x2,
+	/* Thread has made an exclaves scheduler request (such as a wait or wake)
+	 * from the xnu scheduler while handling RPC into exclaves from a client in
+	 * xnu or Darwin userspace. Must not re-enter exclaves via RPC or return to
+	 * Darwin userspace. */
+	TH_EXCLAVES_SCHEDULER_REQUEST          = 0x4,
+});
+
+__options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
+	/* Thread is on Stackshot's inspection queue */
+	TH_EXCLAVES_INSPECTION_STACKSHOT       = 0x1,
+	/* Thread is on Kperf's inspection queue */
+	TH_EXCLAVES_INSPECTION_KPERF           = 0x2,
+	/* Thread must not be inspected (may deadlock, etc.) - set by collector thread*/
+	TH_EXCLAVES_INSPECTION_NOINSPECT       = 0x8000,
+});
+
+#endif /* CONFIG_EXCLAVES */
 
 typedef union thread_rr_state {
 	uint32_t trr_value;
@@ -312,9 +356,11 @@ struct thread {
 	 *	then it is locked by the associated run queue lock. It is
 	 *	set to PROCESSOR_NULL without holding the thread lock, but the
 	 *	transition from PROCESSOR_NULL to non-null must be done
-	 *	under the thread lock and the run queue lock.
+	 *	under the thread lock and the run queue lock. To enforce the
+	 *	protocol, runq should only be accessed using the
+	 *	thread_get/set/clear_runq functions and locked variants below.
 	 *
-	 *	New waitq APIs allow the 'links' and 'runq' fields to be
+	 *	New waitq APIs allow the 'links' and '__runq' fields to be
 	 *	anywhere in the thread structure.
 	 */
 	union {
@@ -325,7 +371,7 @@ struct thread {
 	};
 
 	event64_t               wait_event;     /* wait queue event */
-	processor_t             runq;           /* run queue assignment */
+	struct { processor_t    runq; } __runq; /* internally managed run queue assignment, see above comment */
 	waitq_t                 waitq;          /* wait queue this thread is enqueued on */
 	struct turnstile       *turnstile;      /* thread's turnstile, protected by primitives interlock */
 	void                   *inheritor;      /* inheritor of the primitive the thread will block on */
@@ -571,6 +617,7 @@ struct thread {
 	/* Fail-safe computation since last unblock or qualifying yield */
 	uint64_t                computation_metered;
 	uint64_t                computation_epoch;
+	uint64_t                computation_interrupt_epoch;
 	uint64_t                safe_release;           /* when to release fail-safe */
 
 	/* Call out from scheduler */
@@ -635,8 +682,10 @@ struct thread {
 			mach_msg_option64_t     option;         /* 64 bits options for receive */
 			mach_port_name_t        receiver_name;  /* the receive port name */
 			union {
-				struct ipc_kmsg   *kmsg;        /* received message */
-				struct ipc_mqueue *peekq;       /* mqueue to peek at */
+				struct ipc_kmsg   *XNU_PTRAUTH_SIGNED_PTR("thread.ith_kmsg")  kmsg;  /* received message */
+#if MACH_FLIPC
+				struct ipc_mqueue *XNU_PTRAUTH_SIGNED_PTR("thread.ith_peekq") peekq; /* mqueue to peek at */
+#endif /* MACH_FLIPC */
 			};
 		} receive;
 		struct {
@@ -758,12 +807,15 @@ struct thread {
 	uint32_t                kperf_pet_gen;  /* last generation of PET that sampled this thread*/
 	uint32_t                kperf_c_switch; /* last dispatch detection */
 	uint32_t                kperf_pet_cnt;  /* how many times a thread has been sampled by PET */
+#if CONFIG_EXCLAVES
+	uint32_t                kperf_exclaves_ast;
+#endif
 #endif
 
-#ifdef KPC
+#ifdef CONFIG_CPU_COUNTERS
 	/* accumulated performance counters for this thread */
 	uint64_t               *kpc_buf;
-#endif
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if HYPERVISOR
 	/* hypervisor virtual CPU object associated with this thread */
@@ -921,10 +973,47 @@ struct thread {
 #endif /* CONFIG_IOSCHED */
 	struct knote            *ith_knote;         /* knote fired for rcv */
 
+#if CONFIG_SPTM
+	/* TXM thread stack associated with this thread */
+	uintptr_t               txm_thread_stack;
+#endif
 
+#if CONFIG_EXCLAVES
+	/* Per-thread IPC buffer for exclaves communication. Only modified by the
+	 * current thread on itself. */
+	void                    *th_exclaves_ipc_buffer;
+	/* Exclaves scheduling context ID corresponding to IPC buffer, communicated
+	 * to the exclaves scheduler component. Only modified by the current
+	 * thread on itself. */
+	uint64_t                th_exclaves_scheduling_context_id;
+	/* Thread exclaves interrupt-safe state. Only mutated by the current thread
+	 * on itself with interrupts disabled, and only ever read by the current
+	 * thread (with no locking), including from interrupt context, or during
+	 * debug/stackshot. */
+	thread_exclaves_intstate_flags_t th_exclaves_intstate;
+	/* Thread exclaves state. Only mutated by the current thread on itself, and
+	 * only ever read by the current thread (with no locking). Unsafe to read
+	 * from interrupt context. */
+	thread_exclaves_state_flags_t th_exclaves_state;
+	/* Thread stackshot state. Prevents returning to Exclave world until after
+	 * an external agent has triggered inspection (likely via Exclave stackshot),
+	 * and woken this thread. */
+	thread_exclaves_inspection_flags_t _Atomic th_exclaves_inspection_state;
+	/* Task for which conclave teardown is being called by this thread. Used
+	 * for context by conclave crash info upcall to find the task for appending
+	 * the conclave crash info. */
+	task_t conclave_stop_task;
+	/* Queue of threads being inspected by Stackshot.
+	 * Modified under exclaves_collect_mtx. */
+	queue_chain_t th_exclaves_inspection_queue_stackshot;
+	/* Queue of threads being inspected by kperf.
+	 * Modified under exclaves_collect_mtx. */
+	queue_chain_t th_exclaves_inspection_queue_kperf;
+#endif /* CONFIG_EXCLAVES */
 };
 
 #define ith_state           saved.receive.state
+#define ith_seqno           saved.receive.seqno
 #define ith_object          saved.receive.object
 #define ith_msg_addr        saved.receive.msg_addr
 #define ith_aux_addr        saved.receive.aux_addr
@@ -935,8 +1024,9 @@ struct thread {
 #define ith_option          saved.receive.option
 #define ith_receiver_name   saved.receive.receiver_name
 #define ith_kmsg            saved.receive.kmsg
+#if MACH_FLIPC
 #define ith_peekq           saved.receive.peekq
-#define ith_seqno           saved.receive.seqno
+#endif /* MACH_FLIPC */
 
 #define sth_waitsemaphore   saved.sema.waitsemaphore
 #define sth_signalsemaphore saved.sema.signalsemaphore
@@ -1489,8 +1579,7 @@ extern void             uthread_cred_ref(struct ucred *);
 extern void             uthread_cred_free(struct ucred *);
 extern void             uthread_destroy(struct uthread *);
 extern void             uthread_reset_proc_refcount(struct uthread *);
-extern void             thread_ro_update_cred(thread_ro_t, struct ucred *);
-extern void             thread_ro_update_flags(thread_ro_t, thread_ro_flags_t add, thread_ro_flags_t clr);
+
 extern void             uthread_set_exec_data(struct uthread *uth, struct image_params *imgp);
 extern bool             uthread_is64bit(struct uthread *uth) __pure2;
 #if PROC_REF_DEBUG
@@ -1577,6 +1666,8 @@ extern void thread_update_io_stats(thread_t, int size, int io_flags);
 
 extern kern_return_t    thread_set_voucher_name(mach_port_name_t name);
 extern kern_return_t thread_get_voucher_origin_pid(thread_t thread, int32_t *pid);
+extern kern_return_t thread_get_voucher_origin_proximate_pid(thread_t thread,
+    int32_t *origin_pid, int32_t *proximate_pid);
 extern kern_return_t thread_get_current_voucher_origin_pid(int32_t *pid);
 
 extern void thread_enable_send_importance(thread_t thread, boolean_t enable);
@@ -1724,6 +1815,48 @@ extern size_t thread_get_current_exec_path(char *path, size_t size);
 extern void
 thread_get_thread_name(thread_t th, char* name);
 
+/* Read the runq assignment, under the thread lock. */
+extern processor_t thread_get_runq(thread_t thread);
+
+/*
+ * Read the runq assignment, under both the thread lock and
+ * the pset lock corresponding to the last non-null assignment.
+ */
+extern processor_t thread_get_runq_locked(thread_t thread);
+
+/*
+ * Set the runq assignment to a non-null value, under both the
+ * thread lock and the pset lock corresponding to the new
+ * assignment.
+ */
+extern void thread_set_runq_locked(thread_t thread, processor_t new_runq);
+
+/*
+ * Set the runq assignment to PROCESSOR_NULL, under the pset
+ * lock corresponding to the current non-null assignment.
+ */
+extern void thread_clear_runq(thread_t thread);
+
+/*
+ * Set the runq assignment to PROCESSOR_NULL, under both the
+ * thread lock and the pset lock corresponding to the current
+ * non-null assignment.
+ */
+extern void thread_clear_runq_locked(thread_t thread);
+
+/*
+ * Assert the runq assignment to be PROCESSOR_NULL, under
+ * some guarantee that the runq will not change from null to
+ * non-null, such as holding the thread lock.
+ */
+extern void thread_assert_runq_null(thread_t thread);
+
+/*
+ * Assert the runq assignment to be non-null, under the pset
+ * lock corresponding to the current non-null assignment.
+ */
+extern void thread_assert_runq_nonnull(thread_t thread);
+
 extern bool thread_supports_cooperative_workqueue(thread_t thread);
 extern void thread_arm_workqueue_quantum(thread_t thread);
 extern void thread_disarm_workqueue_quantum(thread_t thread);
@@ -1731,6 +1864,18 @@ extern void thread_disarm_workqueue_quantum(thread_t thread);
 extern void thread_evaluate_workqueue_quantum_expiry(thread_t thread);
 extern bool thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace);
 
+#if CONFIG_SPTM
+
+extern void
+thread_associate_txm_thread_stack(uintptr_t thread_stack);
+
+extern void
+thread_disassociate_txm_thread_stack(uintptr_t thread_stack);
+
+extern uintptr_t
+thread_get_txm_thread_stack(void);
+
+#endif /* CONFIG_SPTM */
 
 /* Kernel side prototypes for MIG routines */
 extern kern_return_t thread_get_exception_ports(

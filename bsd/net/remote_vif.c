@@ -534,11 +534,11 @@ rvi_bpf_tap(ifnet_t ifp, mbuf_t m, int outgoing, struct rvi_client_t *client,
 			}
 		}
 
-		if (mbuf_setdata(m, m->m_data + pktap_hdr->pth_frame_pre_length,
+		if (mbuf_setdata(m, m_mtod_current(m) + pktap_hdr->pth_frame_pre_length,
 		    m->m_len - pktap_hdr->pth_frame_pre_length) == 0) {
 			bpf_tap_fn(client->_ifp, DLT_RAW, m, NULL, 0);
-			mbuf_setdata(m, m->m_data  - pktap_hdr->pth_frame_pre_length,
-			    m->m_len  + pktap_hdr->pth_frame_pre_length);
+			mbuf_setdata(m, m_mtod_current(m) - pktap_hdr->pth_frame_pre_length,
+			    m->m_len + pktap_hdr->pth_frame_pre_length);
 		}
 	}
 

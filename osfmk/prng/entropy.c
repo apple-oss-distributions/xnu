@@ -90,17 +90,10 @@ typedef enum health_test_result {
 // Along with various counters and the buffer itself, this includes
 // the state for two FIPS continuous health tests.
 typedef struct entropy_data {
-	// State for a SHA256 computation. This is used to accumulate
+	// State for a SHA512 computation. This is used to accumulate
 	// entropy samples from across all CPUs. It is finalized when
 	// entropy is provided to the consumer of this module.
-	SHA256_CTX sha256_ctx;
-
-	// Since the corecrypto kext is not loaded when this module is
-	// initialized, we cannot initialize the SHA256 state at that
-	// time. Instead, we initialize it lazily during entropy
-	// consumption. This flag tracks whether initialization is
-	// complete.
-	bool sha256_ctx_init;
+	SHA512_CTX sha512_ctx;
 
 	// A buffer to hold a bitmap with one bit per sample of an entropy
 	// buffer. We are able to reuse this instance across all the
@@ -206,6 +199,8 @@ __startup_func
 void
 entropy_init(void)
 {
+	SHA512_Init(&entropy_data.sha512_ctx);
+
 	lck_grp_init(&entropy_data.lock_group, "entropy-data", LCK_GRP_ATTR_NULL);
 	lck_mtx_init(&entropy_data.mutex, &entropy_data.lock_group, LCK_ATTR_NULL);
 
@@ -477,7 +472,7 @@ int32_t
 entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 {
 #if (DEVELOPMENT || DEBUG)
-	if (*entropy_size < SHA256_DIGEST_LENGTH) {
+	if (*entropy_size < SHA512_DIGEST_LENGTH) {
 		panic("[entropy_provide] recipient entropy buffer is too small");
 	}
 #endif
@@ -485,26 +480,11 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 	int32_t sample_count = 0;
 	*entropy_size = 0;
 
-	// The first call to this function comes while the corecrypto kext
-	// is being loaded. We require SHA256 to accumulate entropy
-	// samples.
-	if (__improbable(!crypto_init)) {
-		return sample_count;
-	}
-
 	// There is only one consumer (the kernel PRNG), but they could
 	// try to consume entropy from different threads. We simply fail
 	// if a consumption is already in progress.
 	if (!lck_mtx_try_lock(&entropy_data.mutex)) {
 		return sample_count;
-	}
-
-	// This only happens on the first call to this function. We cannot
-	// perform this initialization in entropy_init because the
-	// corecrypto kext is not loaded yet.
-	if (__improbable(!entropy_data.sha256_ctx_init)) {
-		SHA256_Init(&entropy_data.sha256_ctx);
-		entropy_data.sha256_ctx_init = true;
 	}
 
 	health_test_result_t health_test_result = health_test_success;
@@ -539,7 +519,7 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 		// We accumulate the samples regardless of whether the test
 		// failed or a particular sample was filtered. It cannot hurt.
 		entropy_data.total_sample_count += filtered_sample_count;
-		SHA256_Update(&entropy_data.sha256_ctx, e->samples, cpu_sample_count * sizeof(e->samples[0]));
+		SHA512_Update(&entropy_data.sha512_ctx, e->samples, cpu_sample_count * sizeof(e->samples[0]));
 
 		// "Drain" the per-CPU buffer by resetting its sample count.
 		os_atomic_store(&e->sample_count, 0, relaxed);
@@ -569,19 +549,43 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 	// The count of new samples from the consumer's perspective.
 	int32_t n = (int32_t)(entropy_data.total_sample_count - entropy_data.read_sample_count);
 
-	// Assuming one bit of entropy per sample, we buffer at least 256
+	// Assuming one bit of entropy per sample, we buffer at least 512
 	// samples before delivering a high-entropy payload. In theory,
-	// each payload will be a 256-bit seed with full entropy.
-	if (n < 256) {
+	// each payload will be a 512-bit seed with full entropy.
+	//
+	// We buffer an additional 64 bits of entropy to satisfy
+	// over-sampling requirements in FIPS 140-3 IG.
+	if (n < (512 + 64)) {
 		goto out;
 	}
 
-	SHA256_Final(entropy, &entropy_data.sha256_ctx);
-	SHA256_Init(&entropy_data.sha256_ctx);
+	// Extract the entropy seed from the digest context and adjust
+	// counters accordingly.
+	SHA512_Final(entropy, &entropy_data.sha512_ctx);
 	entropy_data.read_sample_count = entropy_data.total_sample_count;
-
 	sample_count = n;
-	*entropy_size = SHA256_DIGEST_LENGTH;
+	*entropy_size = SHA512_DIGEST_LENGTH;
+
+	// Reinitialize the digest context for future entropy
+	// conditioning.
+	SHA512_Init(&entropy_data.sha512_ctx);
+
+	// To harden the entropy conditioner against an attacker with
+	// partial or temporary control of interrupts, we roll the
+	// extracted seed back into the new digest context. Assuming
+	// we are able to reach a threshold of entropy, we can prevent
+	// the attacker from predicting future output seeds.
+	//
+	// Along with the seed, we mix in a fixed label to personalize
+	// this context.
+	const char label[SHA512_BLOCK_LENGTH - SHA512_DIGEST_LENGTH] = "xnu entropy extract seed";
+
+	// We need the combined size of our inputs to equal the
+	// internal SHA512 block size. This will force an additional
+	// compression to provide backtracking resistance.
+	assert(sizeof(label) + *entropy_size == SHA512_BLOCK_LENGTH);
+	SHA512_Update(&entropy_data.sha512_ctx, label, sizeof(label));
+	SHA512_Update(&entropy_data.sha512_ctx, entropy, *entropy_size);
 
 out:
 	lck_mtx_unlock(&entropy_data.mutex);

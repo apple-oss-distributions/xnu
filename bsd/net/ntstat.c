@@ -78,6 +78,8 @@
 #include <netinet6/in6_pcb.h>
 #include <netinet6/in6_var.h>
 
+#include <net/sockaddr_utils.h>
+
 __private_extern__ int  nstat_collect = 1;
 
 #if (DEBUG || DEVELOPMENT)
@@ -277,7 +279,7 @@ static void         nstat_ifnet_report_ecn_stats(void);
 static void         nstat_ifnet_report_lim_stats(void);
 static void         nstat_net_api_report_stats(void);
 static errno_t      nstat_set_provider_filter( nstat_control_state  *state, nstat_msg_add_all_srcs *req);
-static errno_t nstat_control_send_event(nstat_control_state *state, nstat_src *src, u_int64_t event);
+static errno_t      nstat_control_send_event(nstat_control_state *state, nstat_src *src, u_int64_t event);
 
 static u_int32_t    nstat_udp_watchers = 0;
 static u_int32_t    nstat_tcp_watchers = 0;
@@ -299,7 +301,6 @@ static LCK_MTX_DECLARE(nstat_mtx, &nstat_lck_grp);
 
 
 /* some extern definitions */
-extern void mbuf_report_peak_usage(void);
 extern void tcp_report_stats(void);
 
 static void
@@ -312,12 +313,12 @@ nstat_copy_sa_out(
 		return;
 	}
 
-	bcopy(src, dst, src->sa_len);
+	SOCKADDR_COPY(src, dst, src->sa_len);
 	if (src->sa_family == AF_INET6 &&
 	    src->sa_len >= sizeof(struct sockaddr_in6)) {
-		struct sockaddr_in6     *sin6 = (struct sockaddr_in6*)(void *)dst;
+		struct sockaddr_in6     *sin6 = SIN6(dst);
 		if (IN6_IS_SCOPE_EMBED(&sin6->sin6_addr)) {
-			sin6->sin6_scope_id = ((const struct sockaddr_in6*)(const void*)(src))->sin6_scope_id;
+			sin6->sin6_scope_id = (SIN6(src))->sin6_scope_id;
 			if (in6_embedded_scope) {
 				in6_verify_ifscope(&sin6->sin6_addr, sin6->sin6_scope_id);
 				sin6->sin6_scope_id = ntohs(sin6->sin6_addr.s6_addr16[1]);
@@ -344,11 +345,11 @@ nstat_ip_to_sockaddr(
 	sin->sin_addr = *ip;
 }
 
-u_int16_t
+u_int32_t
 nstat_ifnet_to_flags(
 	struct ifnet *ifp)
 {
-	u_int16_t flags = 0;
+	u_int32_t flags = 0;
 	u_int32_t functional_type = if_functional_type(ifp, FALSE);
 
 	/* Panic if someone adds a functional type without updating ntstat. */
@@ -367,11 +368,10 @@ nstat_ifnet_to_flags(
 		flags |= NSTAT_IFNET_IS_WIRED;
 		break;
 	case IFRTYPE_FUNCTIONAL_WIFI_INFRA:
-		flags |= NSTAT_IFNET_IS_WIFI;
+		flags |= NSTAT_IFNET_IS_WIFI | NSTAT_IFNET_IS_WIFI_INFRA;
 		break;
 	case IFRTYPE_FUNCTIONAL_WIFI_AWDL:
-		flags |= NSTAT_IFNET_IS_WIFI;
-		flags |= NSTAT_IFNET_IS_AWDL;
+		flags |= NSTAT_IFNET_IS_WIFI | NSTAT_IFNET_IS_AWDL;
 		break;
 	case IFRTYPE_FUNCTIONAL_CELLULAR:
 		flags |= NSTAT_IFNET_IS_CELLULAR;
@@ -388,32 +388,24 @@ nstat_ifnet_to_flags(
 		flags |= NSTAT_IFNET_IS_CONSTRAINED;
 	}
 	if (ifp->if_xflags & IFXF_LOW_LATENCY) {
-		flags |= NSTAT_IFNET_IS_WIFI;
-		flags |= NSTAT_IFNET_IS_LLW;
+		flags |= NSTAT_IFNET_IS_WIFI | NSTAT_IFNET_IS_LLW;
 	}
 
 	return flags;
 }
 
-static u_int32_t
-extend_ifnet_flags(
-	u_int16_t condensed_flags)
+static void
+nstat_update_local_flag_from_inpcb_route(const struct inpcb *inp,
+    u_int32_t *flags)
 {
-	u_int32_t extended_flags = (u_int32_t)condensed_flags;
-
-	if ((extended_flags & NSTAT_IFNET_IS_WIFI) && ((extended_flags & (NSTAT_IFNET_IS_AWDL | NSTAT_IFNET_IS_LLW)) == 0)) {
-		extended_flags |= NSTAT_IFNET_IS_WIFI_INFRA;
+	if (inp != NULL &&
+	    ((inp->inp_route.ro_rt != NULL &&
+	    IS_LOCALNET_ROUTE(inp->inp_route.ro_rt)) ||
+	    (inp->inp_flags2 & INP2_LAST_ROUTE_LOCAL))) {
+		*flags |= NSTAT_IFNET_IS_LOCAL;
+	} else {
+		*flags |= NSTAT_IFNET_IS_NON_LOCAL;
 	}
-	return extended_flags;
-}
-
-u_int32_t
-nstat_ifnet_to_flags_extended(
-	struct ifnet *ifp)
-{
-	u_int32_t flags = extend_ifnet_flags(nstat_ifnet_to_flags(ifp));
-
-	return flags;
 }
 
 static u_int32_t
@@ -425,7 +417,7 @@ nstat_inpcb_to_flags(
 	if (inp != NULL) {
 		if (inp->inp_last_outifp != NULL) {
 			struct ifnet *ifp = inp->inp_last_outifp;
-			flags = nstat_ifnet_to_flags_extended(ifp);
+			flags = nstat_ifnet_to_flags(ifp);
 
 			struct tcpcb  *tp = intotcpcb(inp);
 			if (tp) {
@@ -434,9 +426,12 @@ nstat_inpcb_to_flags(
 				} else {
 					flags |= NSTAT_IFNET_IS_NON_LOCAL;
 				}
+			} else {
+				nstat_update_local_flag_from_inpcb_route(inp, &flags);
 			}
 		} else {
 			flags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+			nstat_update_local_flag_from_inpcb_route(inp, &flags);
 		}
 		if (inp->inp_socket != NULL &&
 		    (inp->inp_socket->so_flags1 & SOF1_CELLFALLBACK)) {
@@ -693,13 +688,8 @@ nstat_route_lookup(
 	u_int32_t       length,
 	nstat_provider_cookie_t *out_cookie)
 {
-	// rt_lookup doesn't take const params but it doesn't modify the parameters for
-	// the lookup. So...we use a union to eliminate the warning.
-	union{
-		struct sockaddr *sa;
-		const struct sockaddr *const_sa;
-	} dst, mask;
-
+	struct sockaddr                 *dst = NULL;
+	struct sockaddr                 *mask = NULL;
 	const nstat_route_add_param     *param = (const nstat_route_add_param*)data;
 	*out_cookie = NULL;
 
@@ -724,16 +714,16 @@ nstat_route_lookup(
 		return EINVAL;
 	}
 
-	dst.const_sa = (const struct sockaddr*)&param->dst;
-	mask.const_sa = param->mask.v4.sin_family ? (const struct sockaddr*)&param->mask : NULL;
+	dst = __DECONST_SA(&param->dst.v4);
+	mask = param->mask.v4.sin_family ? __DECONST_SA(&param->mask.v4) : NULL;
 
-	struct radix_node_head  *rnh = rt_tables[dst.sa->sa_family];
+	struct radix_node_head  *rnh = rt_tables[dst->sa_family];
 	if (rnh == NULL) {
 		return EAFNOSUPPORT;
 	}
 
 	lck_mtx_lock(rnh_lock);
-	struct rtentry *rt = rt_lookup(TRUE, dst.sa, mask.sa, rnh, param->ifindex);
+	struct rtentry *rt = rt_lookup(TRUE, dst, mask, rnh, param->ifindex);
 	lck_mtx_unlock(rnh_lock);
 
 	if (rt) {
@@ -962,7 +952,7 @@ nstat_route_reporting_allowed(
 		struct ifnet *ifp = rt->rt_ifp;
 
 		if (ifp) {
-			uint32_t interface_properties = nstat_ifnet_to_flags_extended(ifp);
+			uint32_t interface_properties = nstat_ifnet_to_flags(ifp);
 
 			if ((filter->npf_flags & interface_properties) == 0) {
 				retval = false;
@@ -1611,6 +1601,14 @@ nstat_pcb_event(struct inpcb *inp, u_int64_t event)
 		lck_mtx_unlock(&state->ncs_mtx);
 	}
 	lck_mtx_unlock(&nstat_mtx);
+	if (event == NSTAT_EVENT_SRC_ATTRIBUTION_CHANGE) {
+		// As a convenience to clients, the bitmap is cleared when there is an attribution change
+		// There is no interlock preventing clients from polling and collecting a half-cleared bitmap
+		// but as the timestamp should be cleared first that should show that the bitmap is not applicable
+		// The other race condition where an interested client process has exited and the new instance
+		// has not yet shown up seems inconsequential enough not to burden the early exit path with additional checks
+		inp_clear_activity_bitmap(inp);
+	}
 }
 
 
@@ -1784,6 +1782,8 @@ nstat_tcp_copy_descriptor(
 			desc->eupid = so->e_upid;
 			desc->epid = so->e_pid;
 			memcpy(desc->euuid, so->e_uuid, sizeof(so->e_uuid));
+		} else if (!uuid_is_null(so->so_ruuid)) {
+			memcpy(desc->euuid, so->so_ruuid, sizeof(so->so_ruuid));
 		} else {
 			desc->eupid = desc->upid;
 			desc->epid = desc->pid;
@@ -2165,6 +2165,8 @@ nstat_udp_copy_descriptor(
 			desc->eupid = so->e_upid;
 			desc->epid = so->e_pid;
 			memcpy(desc->euuid, so->e_uuid, sizeof(so->e_uuid));
+		} else if (!uuid_is_null(so->so_ruuid)) {
+			memcpy(desc->euuid, so->so_ruuid, sizeof(so->so_ruuid));
 		} else {
 			desc->eupid = desc->upid;
 			desc->epid = desc->pid;
@@ -2448,11 +2450,10 @@ nstat_userland_tcp_reporting_allowed(
 	assert(shad->shad_magic == TU_SHADOW_MAGIC);
 
 	if ((filter->npf_flags & NSTAT_FILTER_IFNET_FLAGS) != 0) {
-		u_int16_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+		u_int32_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 
 		if ((*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, NULL, NULL, NULL)) {
-			u_int32_t extended_ifflags = extend_ifnet_flags(ifflags);
-			if ((filter->npf_flags & extended_ifflags) == 0) {
+			if ((filter->npf_flags & ifflags) == 0) {
 				return false;
 			}
 		}
@@ -2494,11 +2495,10 @@ nstat_userland_udp_reporting_allowed(
 	assert(shad->shad_magic == TU_SHADOW_MAGIC);
 
 	if ((filter->npf_flags & NSTAT_FILTER_IFNET_FLAGS) != 0) {
-		u_int16_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+		u_int32_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 
 		if ((*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, NULL, NULL, NULL)) {
-			u_int32_t extended_ifflags = extend_ifnet_flags(ifflags);
-			if ((filter->npf_flags & extended_ifflags) == 0) {
+			if ((filter->npf_flags & ifflags) == 0) {
 				return false;
 			}
 		}
@@ -2527,11 +2527,10 @@ nstat_userland_quic_reporting_allowed(
 	assert(shad->shad_magic == TU_SHADOW_MAGIC);
 
 	if ((filter->npf_flags & NSTAT_FILTER_IFNET_FLAGS) != 0) {
-		u_int16_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+		u_int32_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 
 		if ((*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, NULL, NULL, NULL)) {
-			u_int32_t extended_ifflags = extend_ifnet_flags(ifflags);
-			if ((filter->npf_flags & extended_ifflags) == 0) {
+			if ((filter->npf_flags & ifflags) == 0) {
 				return false;
 			}
 		}
@@ -3064,7 +3063,7 @@ static inline void
 nstat_retain_gshad(
 	struct nstat_generic_shadow *gshad)
 {
-	assert(gshad->gshad_magic = NSTAT_GENERIC_SHADOW_MAGIC);
+	assert(gshad->gshad_magic == NSTAT_GENERIC_SHADOW_MAGIC);
 
 	OSIncrementAtomic(&gshad->gshad_refcnt);
 }
@@ -3073,7 +3072,7 @@ static void
 nstat_release_gshad(
 	struct nstat_generic_shadow *gshad)
 {
-	assert(gshad->gshad_magic = NSTAT_GENERIC_SHADOW_MAGIC);
+	assert(gshad->gshad_magic == NSTAT_GENERIC_SHADOW_MAGIC);
 
 	if (OSDecrementAtomic(&gshad->gshad_refcnt) == 1) {
 		nstat_release_procdetails(gshad->gshad_procdetails);
@@ -4401,10 +4400,6 @@ nstat_sysinfo_send_data_internal(
 
 	/* get number of key-vals for each kind of stat */
 	switch (data->flags) {
-	case NSTAT_SYSINFO_MBUF_STATS:
-		nkeyvals = sizeof(struct nstat_sysinfo_mbuf_stats) /
-		    sizeof(u_int32_t);
-		break;
 	case NSTAT_SYSINFO_TCP_STATS:
 		nkeyvals = NSTAT_SYSINFO_TCP_STATS_COUNT;
 		break;
@@ -4438,38 +4433,6 @@ nstat_sysinfo_send_data_internal(
 
 	kv = (nstat_sysinfo_keyval *) &syscnt->counts.nstat_sysinfo_keyvals;
 	switch (data->flags) {
-	case NSTAT_SYSINFO_MBUF_STATS:
-	{
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_MBUF_256B_TOTAL,
-		    data->u.mb_stats.total_256b);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_MBUF_2KB_TOTAL,
-		    data->u.mb_stats.total_2kb);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_MBUF_4KB_TOTAL,
-		    data->u.mb_stats.total_4kb);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_MBUF_16KB_TOTAL,
-		    data->u.mb_stats.total_16kb);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_SOCK_MBCNT,
-		    data->u.mb_stats.sbmb_total);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_SOCK_ATMBLIMIT,
-		    data->u.mb_stats.sb_atmbuflimit);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_MBUF_DRAIN_CNT,
-		    data->u.mb_stats.draincnt);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_MBUF_MEM_RELEASED,
-		    data->u.mb_stats.memreleased);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_KEY_SOCK_MBFLOOR,
-		    data->u.mb_stats.sbmb_floor);
-		VERIFY(i == nkeyvals);
-		break;
-	}
 	case NSTAT_SYSINFO_TCP_STATS:
 	{
 		nstat_set_keyval_scalar(&kv[i++],
@@ -5065,7 +5028,6 @@ nstat_sysinfo_send_data(
 static void
 nstat_sysinfo_generate_report(void)
 {
-	mbuf_report_peak_usage();
 	tcp_report_stats();
 	nstat_ifnet_report_ecn_stats();
 	nstat_ifnet_report_lim_stats();
@@ -5227,7 +5189,7 @@ nstat_control_send_event(
 	nstat_src                       *src,
 	u_int64_t               event)
 {
-	errno_t result = 0;
+	errno_t result = ENOTSUP;
 	int failed = 0;
 
 	if (nstat_control_reporting_allowed(state, src, 0)) {
@@ -6881,7 +6843,7 @@ nstat_interface_matches_filter_flag(uint32_t filter_flags, struct ifnet *ifp)
 		uint32_t flag_mask = (NSTAT_FILTER_IFNET_FLAGS & ~(NSTAT_IFNET_IS_NON_LOCAL | NSTAT_IFNET_IS_LOCAL));
 		filter_flags &= flag_mask;
 
-		uint32_t flags = nstat_ifnet_to_flags_extended(ifp);
+		uint32_t flags = nstat_ifnet_to_flags(ifp);
 		if (filter_flags & flags) {
 			result = true;
 		}
@@ -6975,8 +6937,7 @@ tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_
 		assert(shad->shad_magic == TU_SHADOW_MAGIC);
 
 		if ((shad->shad_provider == NSTAT_PROVIDER_TCP_USERLAND) && (shad->shad_live)) {
-			u_int16_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
-			u_int32_t extended_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+			u_int32_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 			if (filter_flags != 0) {
 				bool result = (*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, NULL, NULL, NULL);
 				error = (result)? 0 : EIO;
@@ -6984,9 +6945,8 @@ tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_
 					printf("%s - nstat get ifflags %d\n", __func__, error);
 					continue;
 				}
-				extended_ifflags = extend_ifnet_flags(ifflags);
 
-				if ((extended_ifflags & filter_flags) == 0) {
+				if ((ifflags & filter_flags) == 0) {
 					continue;
 				}
 				// Skywalk locality flags are not yet in place, see <rdar://problem/35607563>
@@ -7010,9 +6970,9 @@ tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_
 				continue;
 			}
 			if ((digest.ifindex == (u_int32_t)ifindex) ||
-			    (filter_flags & extended_ifflags)) {
+			    (filter_flags & ifflags)) {
 #if NSTAT_DEBUG
-				printf("%s - *matched Skywalk* [filter match: %x %x]\n", __func__, filter_flags, extended_flags);
+				printf("%s - *matched Skywalk* [filter match: %x %x]\n", __func__, filter_flags, flags);
 #endif
 				indicators->xp_numflows++;
 				if (digest.connstatus.write_probe_failed) {

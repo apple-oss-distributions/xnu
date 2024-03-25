@@ -29,16 +29,13 @@
 #include <kern/zalloc.h>
 #include <kern/lock_group.h>
 #include <kern/timer_queue.h>
+#include <kern/monotonic.h>
 #include <mach/machine.h>
 #include <i386/cpu_threads.h>
 #include <i386/cpuid.h>
 #include <i386/machine_cpu.h>
 #include <i386/pmCPU.h>
 #include <i386/bit_routines.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 #define DIVISOR_GUARD(denom)                            \
 	if ((denom) == 0) {                             \

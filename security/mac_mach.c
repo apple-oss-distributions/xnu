@@ -118,11 +118,10 @@ mac_task_check_task_id_token_get_task(struct task *task, mach_task_flavor_t flav
 		proc_rele(target_proc);
 	}
 
-	kauth_cred_t cred = kauth_cred_proc_ref(current_proc());
-
 	/* pidentp is NULL for corpse task */
-	MAC_CHECK(proc_check_task_id_token_get_task, cred, pidentp, flavor);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_task_id_token_get_task,
+	    current_cached_proc_cred(PROC_NULL), pidentp, flavor);
+
 	return error;
 }
 
@@ -130,66 +129,54 @@ int
 mac_task_check_get_movable_control_port(void)
 {
 	int error;
-	struct proc *p = current_proc();
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	MAC_CHECK(proc_check_get_movable_control_port, cred);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_get_movable_control_port,
+	    current_cached_proc_cred(PROC_NULL));
+
 	return error;
 }
 
 int
 mac_task_check_set_host_special_port(struct task *task, int id, struct ipc_port *port)
 {
+#pragma unused(task)
 	int error;
 
-	struct proc *p = mac_task_get_proc(task);
-	if (p == NULL) {
-		return ESRCH;
-	}
+	assert(task == current_task());
+	MAC_CHECK(proc_check_set_host_special_port,
+	    current_cached_proc_cred(PROC_NULL), id, port);
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	MAC_CHECK(proc_check_set_host_special_port, cred, id, port);
-	kauth_cred_unref(&cred);
-	proc_rele(p);
 	return error;
 }
 
 int
 mac_task_check_set_host_exception_port(struct task *task, unsigned int exception)
 {
+#pragma unused(task)
 	int error;
 
-	struct proc *p = mac_task_get_proc(task);
-	if (p == NULL) {
-		return ESRCH;
-	}
+	assert(task == current_task());
+	MAC_CHECK(proc_check_set_host_exception_port,
+	    current_cached_proc_cred(PROC_NULL), exception);
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	MAC_CHECK(proc_check_set_host_exception_port, cred, exception);
-	kauth_cred_unref(&cred);
-	proc_rele(p);
 	return error;
 }
 
 int
 mac_task_check_get_task_special_port(struct task *task, struct task *target, int which)
 {
+#pragma unused(task)
 	int error;
 	struct proc *target_proc = NULL;
 	struct proc_ident *pidentp = NULL;
 	struct proc_ident pident;
 
-	struct proc *p = mac_task_get_proc(task);
-	if (p == NULL) {
-		return ESRCH;
-	}
+	assert(task == current_task());
 
 	if (!task_is_a_corpse(target)) {
 		/* only live task has proc */
 		target_proc = mac_task_get_proc(target);
 		if (target_proc == NULL) {
-			proc_rele(p);
 			return ESRCH;
 		}
 		pident = proc_ident(target_proc);
@@ -197,24 +184,20 @@ mac_task_check_get_task_special_port(struct task *task, struct task *target, int
 		proc_rele(target_proc);
 	}
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	proc_rele(p);
-
 	/* pidentp is NULL for corpse task */
-	MAC_CHECK(proc_check_get_task_special_port, cred, pidentp, which);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_get_task_special_port,
+	    current_cached_proc_cred(PROC_NULL), pidentp, which);
+
 	return error;
 }
 
 int
 mac_task_check_set_task_special_port(struct task *task, struct task *target, int which, struct ipc_port *port)
 {
+#pragma unused(task)
 	int error;
 
-	struct proc *p = mac_task_get_proc(task);
-	if (p == NULL) {
-		return ESRCH;
-	}
+	assert(task == current_task());
 
 	/*
 	 * task_set_special_port() is a CONTROL level interface, so we are guaranteed
@@ -224,17 +207,15 @@ mac_task_check_set_task_special_port(struct task *task, struct task *target, int
 
 	struct proc *targetp = mac_task_get_proc(target);
 	if (targetp == NULL) {
-		proc_rele(p);
 		return ESRCH;
 	}
 
 	struct proc_ident pident = proc_ident(targetp);
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
 	proc_rele(targetp);
-	proc_rele(p);
 
-	MAC_CHECK(proc_check_set_task_special_port, cred, &pident, which, port);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_set_task_special_port,
+	    current_cached_proc_cred(PROC_NULL), &pident, which, port);
+
 	return error;
 }
 
@@ -242,36 +223,33 @@ int
 mac_task_check_dyld_process_info_notify_register(void)
 {
 	int error;
-	struct proc *p = current_proc();
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	MAC_CHECK(proc_check_dyld_process_info_notify_register, cred);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_dyld_process_info_notify_register,
+	    current_cached_proc_cred(PROC_NULL));
+
 	return error;
 }
 
 int
 mac_task_check_set_host_exception_ports(struct task *task, unsigned int exception_mask)
 {
+#pragma unused(task)
 	int error = 0;
 	int exception;
+	kauth_cred_t cred = current_cached_proc_cred(PROC_NULL);
 
-	struct proc *p = mac_task_get_proc(task);
-	if (p == NULL) {
-		return ESRCH;
-	}
+	assert(task == current_task());
 
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
 	for (exception = FIRST_EXCEPTION; exception < EXC_TYPES_COUNT; exception++) {
 		if (exception_mask & (1 << exception)) {
-			MAC_CHECK(proc_check_set_host_exception_port, cred, exception);
+			MAC_CHECK(proc_check_set_host_exception_port,
+			    cred, exception);
 			if (error) {
 				break;
 			}
 		}
 	}
-	kauth_cred_unref(&cred);
-	proc_rele(p);
+
 	return error;
 }
 

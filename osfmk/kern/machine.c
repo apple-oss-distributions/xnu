@@ -111,12 +111,24 @@ extern void (*dtrace_cpu_state_changed_hook)(int, boolean_t);
 
 #if defined(__arm64__)
 extern void wait_while_mp_kdp_trap(bool check_SIGPdebug);
+#if CONFIG_SPTM
+#include <arm64/sptm/pmap/pmap_data.h>
+#else
 #include <arm/pmap/pmap_data.h>
-#endif
+#endif /* CONFIG_SPTM */
+#endif /* defined(__arm64__) */
 
 #if defined(__x86_64__)
 #include <i386/panic_notify.h>
 #endif
+
+#if ML_IO_TIMEOUTS_ENABLED
+#if defined(__x86_64__)
+#define ml_io_timestamp mach_absolute_time
+#else
+#define ml_io_timestamp ml_get_timebase
+#endif /* __x86_64__ */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
 
 /*
  *	Exported variables:
@@ -287,6 +299,34 @@ processor_shutdown(
 
 	lck_mtx_lock(&processor_updown_lock);
 
+	spl_t s = splsched();
+	processor_set_t pset = processor->processor_set;
+
+	pset_lock(pset);
+
+	if (processor->state == PROCESSOR_START) {
+		pset_unlock(pset);
+		splx(s);
+
+		processor_wait_for_start(processor);
+
+		s = splsched();
+		pset_lock(pset);
+	}
+
+	/*
+	 * If the processor is dispatching, let it finish.
+	 */
+	while (processor->state == PROCESSOR_DISPATCHING) {
+		pset_unlock(pset);
+		splx(s);
+		delay(1);
+		s = splsched();
+		pset_lock(pset);
+	}
+	pset_unlock(pset);
+	splx(s);
+
 	kern_return_t mark_ret = sched_mark_processor_offline(processor, reason);
 	if (mark_ret != KERN_SUCCESS) {
 		/* Must fail or we deadlock */
@@ -295,8 +335,7 @@ processor_shutdown(
 	}
 
 	ml_cpu_begin_state_transition(processor->cpu_id);
-	spl_t s = splsched();
-	processor_set_t pset = processor->processor_set;
+	s = splsched();
 
 	pset_lock(pset);
 	if (processor->state == PROCESSOR_OFF_LINE) {
@@ -325,16 +364,6 @@ processor_shutdown(
 
 		lck_mtx_unlock(&processor_updown_lock);
 		return KERN_FAILURE;
-	}
-
-	if (processor->state == PROCESSOR_START) {
-		pset_unlock(pset);
-		splx(s);
-
-		processor_wait_for_start(processor);
-
-		s = splsched();
-		pset_lock(pset);
 	}
 
 	/*
@@ -651,12 +680,42 @@ static void
 ml_io_init_timeouts(void)
 {
 	/*
-	 * The timeouts may be completely disabled via an override. Check that
-	 * last and set the timeouts to zero (disabling) if that's the case.
+	 * The timeouts may be completely disabled via an override.
 	 */
 	if (kern_feature_override(KF_IO_TIMEOUT_OVRD)) {
 		os_atomic_store(&report_phy_write_delay_to, 0, relaxed);
 		os_atomic_store(&report_phy_read_delay_to, 0, relaxed);
+		return;
+	}
+
+	/*
+	 * There may be no interrupt masked timeout set.
+	 */
+	const uint64_t interrupt_masked_to = os_atomic_load(&interrupt_masked_timeout, relaxed);
+	if (interrupt_masked_timeout == 0) {
+		return;
+	}
+
+	/*
+	 * Inherit from the interrupt masked timeout if smaller and the timeout
+	 * hasn't been explicitly set via boot-arg.
+	 */
+	uint64_t arg = 0;
+
+	if (!PE_parse_boot_argn("ml-timeout-report-phy-read-delay", &arg, sizeof(arg))) {
+		uint64_t report_phy_read_delay = os_atomic_load(&report_phy_read_delay_to, relaxed);
+		report_phy_read_delay = report_phy_read_delay == 0 ?
+		    interrupt_masked_to :
+		    MIN(report_phy_read_delay, interrupt_masked_to);
+		os_atomic_store(&report_phy_read_delay_to, report_phy_read_delay, relaxed);
+	}
+
+	if (!PE_parse_boot_argn("ml-timeout-report-phy-write-delay", &arg, sizeof(arg))) {
+		uint64_t report_phy_write_delay = os_atomic_load(&report_phy_write_delay_to, relaxed);
+		report_phy_write_delay = report_phy_write_delay == 0 ?
+		    interrupt_masked_to :
+		    MIN(report_phy_write_delay, interrupt_masked_to);
+		os_atomic_store(&report_phy_write_delay_to, report_phy_write_delay, relaxed);
 	}
 }
 
@@ -912,7 +971,7 @@ ml_io_read(uintptr_t vaddr, int size)
 
 	if (__improbable(report_read_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
-		sabs = mach_absolute_time();
+		sabs = ml_io_timestamp();
 		timeread = TRUE;
 	}
 
@@ -958,7 +1017,7 @@ ml_io_read(uintptr_t vaddr, int size)
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timeread == TRUE)) {
-		eabs = mach_absolute_time();
+		eabs = ml_io_timestamp();
 
 		/* Prevent the processor from calling iotrace during its
 		 * initialization procedure. */
@@ -1064,7 +1123,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 #endif /* !defined(__x86_64__) */
 	if (__improbable(report_write_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
-		sabs = mach_absolute_time();
+		sabs = ml_io_timestamp();
 		timewrite = TRUE;
 	}
 
@@ -1108,7 +1167,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timewrite == TRUE)) {
-		eabs = mach_absolute_time();
+		eabs = ml_io_timestamp();
 
 
 		/* Prevent the processor from calling iotrace during its
@@ -1453,28 +1512,13 @@ machine_timeout_bsd_init(void)
 	 */
 	ml_io_init_timeouts();
 
-	PERCPU_DECL(uint64_t _Atomic, preemption_disable_max_mt);
-
+	extern void preemption_disable_reset_max_durations(void);
 	/*
 	 * Reset the preemption disable stats, so that they are not
 	 * polluted by long early boot code.
 	 */
-	percpu_foreach(max_stat, preemption_disable_max_mt) {
-		os_atomic_store(max_stat, 0, relaxed);
-
-		/*
-		 * No additional synchronization needed.  The time when we
-		 * switch to late boot timeouts is relatively arbitrary
-		 * anyway: By now we don't expect any long preemption
-		 * disabling anymore. While that is still a clear delineation
-		 * for the boot CPU, other CPUs can be in the middle of doing
-		 * whatever. So if the missing synchronization causes a new
-		 * maximum to be missed on a secondary CPU, it could just as
-		 * well have been missed by racing with this function.
-		 */
-	}
-
-#endif
+	preemption_disable_reset_max_durations();
+#endif /* SCHED_HYGIENE_DEBUG */
 }
 #endif /* DEVELOPMENT || DEBUG */
 

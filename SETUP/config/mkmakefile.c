@@ -384,7 +384,19 @@ nextopt:
 		goto nextopt;
 	}
 	if (eq(wd, "bound-checks-soft")) {
-		f_flags |= BOUND_CHECKS_SOFT;
+		if (f_flags & BOUND_CHECKS_DEBUG) {
+			printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+			exit(1);
+		}
+		f_flags |= BOUND_CHECKS | BOUND_CHECKS_SOFT;
+		goto nextopt;
+	}
+	if (eq(wd, "bound-checks-debug")) {
+		if (f_flags & BOUND_CHECKS_SOFT) {
+			printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+			exit(1);
+		}
+		f_flags |= BOUND_CHECKS | BOUND_CHECKS_DEBUG;
 		goto nextopt;
 	}
 	nreqs++;
@@ -497,7 +509,20 @@ checkdev:
 				continue;
 			}
 			if (eq(wd, "bound-checks-soft")) {
-				f_flags |= BOUND_CHECKS_SOFT;
+				if (f_flags & BOUND_CHECKS_DEBUG) {
+					printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+					exit(1);
+				}
+				f_flags |= BOUND_CHECKS | BOUND_CHECKS_SOFT;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks-debug")) {
+				if (f_flags & BOUND_CHECKS_SOFT) {
+					printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+					exit(1);
+				}
+				f_flags |= BOUND_CHECKS | BOUND_CHECKS_DEBUG;
 				next_word(fp, wd);
 				continue;
 			}
@@ -739,10 +764,11 @@ do_rules(FILE *f)
 		fprintf(f, "-include %sd\n", tp);
 		if (ftp->f_flags & BOUND_CHECKS) {
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
-		}
-
-		if (ftp->f_flags & BOUND_CHECKS_SOFT) {
-			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
+			if (ftp->f_flags & BOUND_CHECKS_SOFT) {
+				fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
+			} else if (ftp->f_flags & BOUND_CHECKS_DEBUG) {
+				fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_DEBUG}\n", tp);
+			}
 		}
 		fprintf(f, "%so: %s%s%c\n", tp, source_dir, np, och);
 		if (och == 's') {

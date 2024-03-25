@@ -87,6 +87,8 @@
 
 #include <net/net_osdep.h>
 
+#include <net/sockaddr_utils.h>
+
 int ip_gif_ttl = GIF_TTL;
 SYSCTL_INT(_net_inet_ip, IPCTL_GIF_TTL, gifttl, CTLFLAG_RW | CTLFLAG_LOCKED,
     &ip_gif_ttl, 0, "");
@@ -99,12 +101,9 @@ in_gif_output(
 	__unused struct rtentry *rt)
 {
 	struct gif_softc *sc = ifnet_softc(ifp);
-	struct sockaddr_in *dst = (struct sockaddr_in *)
-	    (void *)&sc->gif_ro.ro_dst;
-	struct sockaddr_in *sin_src = (struct sockaddr_in *)
-	    (void *)sc->gif_psrc;
-	struct sockaddr_in *sin_dst = (struct sockaddr_in *)
-	    (void *)sc->gif_pdst;
+	struct sockaddr_in *dst = SIN(&sc->gif_ro.ro_dst);
+	struct sockaddr_in *sin_src = SIN(sc->gif_psrc);
+	struct sockaddr_in *sin_dst = SIN(sc->gif_pdst);
 	struct ip iphdr;        /* capsule IP header, host byte ordered */
 	int proto, error;
 	u_int8_t tos;
@@ -353,8 +352,8 @@ gif_encapcheck4(
 
 	/* sanity check done in caller */
 	sc = (struct gif_softc *)arg;
-	src = (struct sockaddr_in *)(void *)sc->gif_psrc;
-	dst = (struct sockaddr_in *)(void *)sc->gif_pdst;
+	src = SIN(sc->gif_psrc);
+	dst = SIN(sc->gif_pdst);
 
 	GIF_LOCK_ASSERT(sc);
 
@@ -403,11 +402,11 @@ gif_encapcheck4(
 		struct sockaddr_in sin;
 		struct rtentry *rt;
 
-		bzero(&sin, sizeof(sin));
+		SOCKADDR_ZERO(&sin, sizeof(sin));
 		sin.sin_family = AF_INET;
 		sin.sin_len = sizeof(struct sockaddr_in);
 		sin.sin_addr = ip.ip_src;
-		rt = rtalloc1_scoped((struct sockaddr *)&sin, 0, 0,
+		rt = rtalloc1_scoped(SA(&sin), 0, 0,
 		    m->m_pkthdr.rcvif->if_index);
 		if (rt != NULL) {
 			RT_LOCK(rt);

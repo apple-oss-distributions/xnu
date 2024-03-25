@@ -233,7 +233,7 @@ sa6_embedscope(struct sockaddr_in6 *sin6, int defaultok, uint32_t *ret_ifscope)
 		 * zone IDs assuming a one-to-one mapping between interfaces
 		 * and links.
 		 */
-		if (if_index < zoneid) {
+		if (!IF_INDEX_IN_RANGE(zoneid)) {
 			return ENXIO;
 		}
 		ifnet_head_lock_shared();
@@ -302,7 +302,7 @@ sa6_recoverscope(struct sockaddr_in6 *sin6, boolean_t attachcheck)
 		zoneid = ntohs(sin6->sin6_addr.s6_addr16[1]);
 		if (zoneid) {
 			/* sanity check */
-			if (if_index < zoneid) {
+			if (!IF_INDEX_IN_RANGE(zoneid)) {
 				return ENXIO;
 			}
 			/*

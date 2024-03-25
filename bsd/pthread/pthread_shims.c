@@ -510,10 +510,15 @@ thread_will_park_or_terminate(__unused thread_t thread)
 }
 
 static bool
-old_proc_get_pthread_jit_allowlist(struct proc *t)
+proc_get_jit_entitled(struct proc *t)
 {
-	bool unused_late = false;
-	return proc_get_pthread_jit_allowlist(t, &unused_late);
+	task_t task = proc_task(t);
+	if (!task) {
+		return false;
+	}
+
+	pmap_t pmap = get_task_pmap(task);
+	return pmap_get_jit_entitled(pmap);
 }
 
 /*
@@ -539,7 +544,7 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.proc_set_pthhash = proc_set_pthhash,
 	.proc_get_register = proc_get_register,
 	.proc_set_register = proc_set_register,
-	.proc_get_pthread_jit_allowlist = old_proc_get_pthread_jit_allowlist,
+	.proc_get_jit_entitled = proc_get_jit_entitled,
 	.proc_get_pthread_jit_allowlist2 = proc_get_pthread_jit_allowlist,
 
 	/* kernel IPI interfaces */

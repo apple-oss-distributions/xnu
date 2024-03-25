@@ -58,7 +58,7 @@
 #include <i386/mp_desc.h>
 #include <i386/misc_protos.h>
 #include <i386/thread.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/seg.h>
 #include <mach/i386/syscall_sw.h>
 #include <sys/syscall.h>
@@ -67,7 +67,7 @@
 #include <../bsd/sys/sysent.h>
 
 #ifdef MACH_BSD
-extern void mach_kauth_cred_thread_update(void);
+extern void current_cached_proc_cred_update(void);
 extern void throttle_lowpri_io(int);
 #endif
 
@@ -559,7 +559,7 @@ mach_call_munger(x86_saved_state_t *state)
 	}
 
 #ifdef MACH_BSD
-	mach_kauth_cred_thread_update();
+	current_cached_proc_cred_update();
 #endif
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -682,7 +682,7 @@ mach_call_munger64(x86_saved_state_t *state)
 	}
 
 #ifdef MACH_BSD
-	mach_kauth_cred_thread_update();
+	current_cached_proc_cred_update();
 #endif
 
 #if CONFIG_MACF

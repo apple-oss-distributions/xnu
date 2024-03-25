@@ -91,6 +91,8 @@
 
 #include <net/net_osdep.h>
 
+#include <net/sockaddr_utils.h>
+
 int
 in6_gif_output(
 	struct ifnet *ifp,
@@ -99,11 +101,9 @@ in6_gif_output(
 	__unused struct rtentry *rt)
 {
 	struct gif_softc *sc = ifnet_softc(ifp);
-	struct sockaddr_in6 *dst = (struct sockaddr_in6 *)&sc->gif_ro6.ro_dst;
-	struct sockaddr_in6 *sin6_src = (struct sockaddr_in6 *)
-	    (void *)sc->gif_psrc;
-	struct sockaddr_in6 *sin6_dst = (struct sockaddr_in6 *)
-	    (void *)sc->gif_pdst;
+	struct sockaddr_in6 *dst = SIN6(&sc->gif_ro6.ro_dst);
+	struct sockaddr_in6 *sin6_src = SIN6(sc->gif_psrc);
+	struct sockaddr_in6 *sin6_dst = SIN6(sc->gif_pdst);
 	struct ip6_hdr *ip6;
 	int proto;
 	u_int8_t itos, otos;
@@ -194,7 +194,7 @@ in6_gif_output(
 	    !IN6_ARE_ADDR_EQUAL(&dst->sin6_addr, &sin6_dst->sin6_addr) ||
 	    (sc->gif_ro6.ro_rt != NULL && sc->gif_ro6.ro_rt->rt_ifp == ifp)) {
 		/* cache route doesn't match or recursive route */
-		bzero(dst, sizeof(*dst));
+		SOCKADDR_ZERO(dst, sizeof(*dst));
 		dst->sin6_family = sin6_dst->sin6_family;
 		dst->sin6_len = sizeof(struct sockaddr_in6);
 		dst->sin6_addr = sin6_dst->sin6_addr;
@@ -339,8 +339,8 @@ gif_validate6(
 {
 	struct sockaddr_in6 *src, *dst;
 
-	src = (struct sockaddr_in6 *)(void *)sc->gif_psrc;
-	dst = (struct sockaddr_in6 *)(void *)sc->gif_pdst;
+	src = SIN6(sc->gif_psrc);
+	dst = SIN6(sc->gif_pdst);
 
 	/*
 	 * Check for address match.  Note that the check is for an incoming
@@ -359,12 +359,12 @@ gif_validate6(
 		struct sockaddr_in6 sin6;
 		struct rtentry *rt;
 
-		bzero(&sin6, sizeof(sin6));
+		SOCKADDR_ZERO(&sin6, sizeof(sin6));
 		sin6.sin6_family = AF_INET6;
 		sin6.sin6_len = sizeof(struct sockaddr_in6);
 		sin6.sin6_addr = ip6->ip6_src;
 
-		rt = rtalloc1((struct sockaddr *)&sin6, 0, 0);
+		rt = rtalloc1(SA(&sin6), 0, 0);
 		if (rt != NULL) {
 			RT_LOCK(rt);
 		}

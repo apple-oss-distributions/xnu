@@ -205,15 +205,15 @@ extern vm_offset_t other_percpu_base(int cpu_number);
  */
 #define percpu_foreach(it, name) \
 	for (__PERCPU_TYPE(name) it, \
-	    __base_ ## it = NULL, \
-	    __next_ ## it = (typeof(it))percpu_base.start, \
-	    __end_ ## it = (typeof(it))percpu_base.end; \
+	    __unsafe_indexable __base_ ## it = NULL, \
+	    __unsafe_indexable __next_ ## it = __PERCPU_CAST(name, percpu_base.start), \
+	    __unsafe_indexable __end_ ## it = __PERCPU_CAST(name, percpu_base.end); \
         \
-	    (it = (typeof(it))(__PERCPU_ADDR(name) + (vm_address_t)__base_ ## it), \
+	    (it = __PERCPU_CAST(name, __PERCPU_ADDR(name) + (vm_address_t)__base_ ## it), \
 	    __base_ ## it <= __end_ ## it); \
         \
 	    __base_ ## it = __next_ ## it, \
-	    __next_ ## it = (typeof(it))((vm_address_t)__base_ ## it + percpu_section_size()))
+	    __next_ ## it = __PERCPU_CAST(name, (vm_address_t)__base_ ## it + percpu_section_size()))
 
 /*!
  * @macro percpu_foreach_secondary_base()
@@ -238,14 +238,13 @@ extern vm_offset_t other_percpu_base(int cpu_number);
  */
 #define percpu_foreach_secondary(it, name) \
 	for (__PERCPU_TYPE(name) it, \
-	    __base_ ## it = (typeof(it))__unsafe_forge_bidi_indexable(void *, \
-	    percpu_base.start, percpu_base.end - percpu_base.start),          \
-	    __end_ ## it = (typeof(it))((vm_address_t)__base_ ## it  + percpu_base.end - percpu_base.start); \
+	    __unsafe_indexable __base_ ## it = __PERCPU_CAST(name, percpu_base.start), \
+	    __unsafe_indexable __end_ ## it = __PERCPU_CAST(name, percpu_base.end); \
         \
-	    (it = (typeof(it))((vm_address_t)__base_ ## it + __PERCPU_ADDR(name)), \
+	    (it = __PERCPU_CAST(name, __PERCPU_ADDR(name) + (vm_address_t)__base_ ## it), \
 	    __base_ ## it <= __end_ ## it); \
         \
-	    __base_ ## it = (typeof(it))((vm_address_t)__base_ ## it + percpu_section_size()))
+	    __base_ ## it = __PERCPU_CAST(name, (vm_address_t)__base_ ## it + percpu_section_size()))
 
 #pragma mark - implementation details
 
@@ -256,9 +255,9 @@ extern vm_offset_t other_percpu_base(int cpu_number);
 
 #define __percpu                        __attribute__((section("__DATA, __percpu")))
 #define __PERCPU_NAME(name)             percpu_slot_ ## name
-#define __PERCPU_ADDR(name)             ((vm_offset_t)&__PERCPU_NAME(name))
+#define __PERCPU_ADDR(name)             ((caddr_t)&__PERCPU_NAME(name))
 #define __PERCPU_TYPE(name)             typeof(&__PERCPU_NAME(name))
-#define __PERCPU_CAST(name, expr)       ((__PERCPU_TYPE(name))__unsafe_forge_bidi_indexable(void *, (expr), sizeof(__PERCPU_NAME(name))))
+#define __PERCPU_CAST(name, expr)       __unsafe_forge_bidi_indexable(__PERCPU_TYPE(name), (vm_address_t)(expr), sizeof(__PERCPU_NAME(name)))
 
 /*
  * Note for implementors:

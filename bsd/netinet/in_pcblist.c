@@ -91,6 +91,8 @@
 #include <netinet/tcp_var.h>
 #include <netinet6/in6_var.h>
 
+#include <net/sockaddr_utils.h>
+
 #include <os/log.h>
 
 #ifndef ROUNDUP64
@@ -574,36 +576,6 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			continue;
 		}
 
-		if ((so->so_options & SO_NOWAKEFROMSLEEP) &&
-		    !nowakeok) {
-#if DEBUG || DEVELOPMENT
-			char lbuf[MAX_IPv6_STR_LEN + 6] = {};
-			char fbuf[MAX_IPv6_STR_LEN + 6] = {};
-			char pname[MAXCOMLEN + 1];
-
-			proc_name(so->last_pid, pname, sizeof(pname));
-
-			if (protocol == PF_INET) {
-				inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
-				    lbuf, sizeof(lbuf));
-				inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
-				    fbuf, sizeof(fbuf));
-			} else {
-				inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
-				    lbuf, sizeof(lbuf));
-				inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
-				    fbuf, sizeof(fbuf));
-			}
-
-			os_log(OS_LOG_DEFAULT,
-			    "inpcb_get_if_ports_used: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
-			    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
-			    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
-			    ifp->if_xname, pname, so->last_pid);
-#endif /* DEBUG || DEVELOPMENT */
-			continue;
-		}
-
 		if (!(inp->inp_flags & INP_RECV_ANYIF) &&
 		    recvanyifonly) {
 			continue;
@@ -617,6 +589,38 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 		if (!iswildcard &&
 		    !(inp->inp_last_outifp == NULL || ifp == inp->inp_last_outifp)) {
 			continue;
+		}
+
+		if (!iswildcard && (ifp->if_eflags & IFEF_AWDL) != 0) {
+			if (inp->inp_route.ro_rt == NULL ||
+			    (inp->inp_route.ro_rt->rt_flags & (RTF_UP | RTF_CONDEMNED)) != RTF_UP) {
+#if DEBUG || DEVELOPMENT
+				char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+				char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+				char pname[MAXCOMLEN + 1];
+
+				proc_name(so->last_pid, pname, sizeof(pname));
+
+				if (protocol == PF_INET) {
+					inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
+					    lbuf, sizeof(lbuf));
+					inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
+					    fbuf, sizeof(fbuf));
+				} else {
+					inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
+					    lbuf, sizeof(lbuf));
+					inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
+					    fbuf, sizeof(fbuf));
+				}
+
+				os_log(OS_LOG_DEFAULT,
+				    "inpcb_get_if_ports_used: route is down %s %s:%u %s:%u ifp %s proc %s:%d",
+				    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
+				    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
+				    ifp->if_xname, pname, so->last_pid);
+#endif /* DEBUG || DEVELOPMENT */
+				continue;
+			}
 		}
 
 		if (SOCK_PROTO(inp->inp_socket) == IPPROTO_UDP &&
@@ -686,7 +690,43 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			}
 		}
 
-		bitstr_set(bitfield, ntohs(inp->inp_lport));
+#if DEBUG || DEVELOPMENT
+		if ((so->so_options & SO_NOWAKEFROMSLEEP) && !nowakeok) {
+			char lbuf[MAX_IPv6_STR_LEN + 6] = {};
+			char fbuf[MAX_IPv6_STR_LEN + 6] = {};
+			char pname[MAXCOMLEN + 1];
+
+			proc_name(so->last_pid, pname, sizeof(pname));
+
+			if (protocol == PF_INET) {
+				inet_ntop(PF_INET, &inp->inp_laddr.s_addr,
+				    lbuf, sizeof(lbuf));
+				inet_ntop(PF_INET, &inp->inp_faddr.s_addr,
+				    fbuf, sizeof(fbuf));
+			} else {
+				inet_ntop(PF_INET6, &inp->in6p_laddr.s6_addr,
+				    lbuf, sizeof(lbuf));
+				inet_ntop(PF_INET6, &inp->in6p_faddr.s6_addr,
+				    fbuf, sizeof(fbuf));
+			}
+
+			os_log(OS_LOG_DEFAULT,
+			    "inpcb_get_if_ports_used: no wake from sleep %s %s:%u %s:%u ifp %s proc %s:%d",
+			    SOCK_PROTO(inp->inp_socket) == IPPROTO_TCP ? "tcp" : "udp",
+			    lbuf, ntohs(inp->inp_lport), fbuf, ntohs(inp->inp_fport),
+			    ifp->if_xname, pname, so->last_pid);
+		}
+#endif /* DEBUG || DEVELOPMENT */
+
+
+		/*
+		 * When the socket has "no wake from sleep" option, do not set the port in the bitmap
+		 * except if explicetely requested by the driver.
+		 * We always add the socket to the list of port in order to report spurious wakes
+		 */
+		if ((so->so_options & SO_NOWAKEFROMSLEEP) == 0 || nowakeok) {
+			bitstr_set(bitfield, ntohs(inp->inp_lport));
+		}
 
 		(void) if_ports_used_add_inpcb(ifp->if_index, inp);
 	}
@@ -808,7 +848,7 @@ inpcb_find_anypcb_byaddr(struct ifaddr *ifa, struct inpcbinfo *pcbinfo)
 				}
 			}
 			if (af == AF_INET6) {
-				if (in6_are_addr_equal_scoped(IFA_IN6(ifa), &inp->in6p_laddr, ((struct sockaddr_in6 *)(void *)(ifa->ifa_addr))->sin6_scope_id, inp->inp_lifscope)) {
+				if (in6_are_addr_equal_scoped(IFA_IN6(ifa), &inp->in6p_laddr, SIN6(ifa->ifa_addr)->sin6_scope_id, inp->inp_lifscope)) {
 					lck_rw_done(&pcbinfo->ipi_lock);
 					return 1;
 				}

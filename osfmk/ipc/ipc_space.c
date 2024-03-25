@@ -535,36 +535,48 @@ ipc_space_check_limit_exceeded(ipc_space_t space)
 }
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
-kern_return_t
-ipc_space_get_table_size_and_limits(
+/*
+ *	Routine:	ipc_space_check_table_size_limit
+ *	Purpose:
+ *		Query the current size, soft_limit, and hard_limit for the ipc space.
+ *      Returns true if a notification should be sent as a result of the limit
+ *      being exceeded, and if we return true but the soft/hard limit values
+ *      are zero that indicates the system limit has been exceeded. See
+ *      is_at_max_limit_send_notification
+ *	Conditions:
+ *		Nothing locked on entry.
+ *		Nothing locked on exit.
+ *		Returns TRUE if a limit has been exceeded.
+ */
+bool
+ipc_space_check_table_size_limit(
 	ipc_space_t     space,
 	ipc_entry_num_t *current_size,
 	ipc_entry_num_t *soft_limit,
 	ipc_entry_num_t *hard_limit)
 {
-	kern_return_t kr = KERN_SUCCESS;
 	ipc_entry_table_t table;
+	bool should_notify = false;
 
 	if (space == IS_NULL) {
-		return KERN_INVALID_TASK;
+		return false;
 	}
 
 	is_write_lock(space);
 
 	if (!is_active(space)) {
-		kr = KERN_INVALID_TASK;
 		goto exit;
 	}
+	/* space is locked and active */
 
 	table = is_active_table(space);
 	*current_size = ipc_entry_table_count(table) - space->is_table_free;
 	if (is_at_max_limit_notify(space)) {
-		if (is_at_max_limit_already_notified(space)) {
-			kr = KERN_FAILURE;
-		} else {
+		if (!is_at_max_limit_already_notified(space)) {
 			*soft_limit = 0;
 			*hard_limit = 0;
 			is_at_max_limit_notified(space);
+			should_notify = true;
 		}
 		goto exit;
 	}
@@ -574,7 +586,7 @@ ipc_space_get_table_size_and_limits(
 	*hard_limit = space->is_table_size_hard_limit;
 
 	if (!*soft_limit && !*hard_limit) {
-		kr = KERN_INVALID_VALUE;
+		should_notify = false;
 		goto exit;
 	}
 
@@ -583,20 +595,20 @@ ipc_space_get_table_size_and_limits(
 	 * the one that sent the hard limit notification
 	 */
 	if (is_hard_limit_already_notified(space)) {
-		kr = KERN_FAILURE;
 		goto exit;
 	}
 
 	if (*hard_limit > 0 && *current_size >= *hard_limit) {
 		*soft_limit = 0;
+		should_notify = true;
 		is_hard_limit_notified(space);
 	} else {
 		if (is_soft_limit_already_notified(space)) {
-			kr = KERN_FAILURE;
 			goto exit;
 		}
 		if (*soft_limit > 0 && *current_size >= *soft_limit) {
 			*hard_limit = 0;
+			should_notify = true;
 			is_soft_limit_notified(space);
 		}
 	}
@@ -604,7 +616,7 @@ ipc_space_get_table_size_and_limits(
 
 exit:
 	is_write_unlock(space);
-	return kr;
+	return should_notify;
 }
 
 /*

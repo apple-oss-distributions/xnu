@@ -51,7 +51,7 @@ void
 utf8_normalizeOptCaseFoldGetUVersion(unsigned char version[4])
 {
 	version[0] = 15;
-	version[1] = 0;
+	version[1] = 1;
 	version[2] = 0;
 	version[3] = 0;
 	return;

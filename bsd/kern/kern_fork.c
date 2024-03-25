@@ -127,8 +127,6 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #include <kern/thread_call.h>
 #include <kern/zalloc.h>
 
-#include <os/log.h>
-
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #include <security/mac_mach_internal.h>
@@ -148,8 +146,10 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #include <sys/kern_memorystatus.h>
 #endif
 
+static const uint64_t startup_serial_num_procs = 300;
+bool startup_serial_logging_active = true;
+
 /* XXX routines which should have Mach prototypes, but don't */
-void thread_set_parent(thread_t parent, int pid);
 extern void act_thread_catt(void *ctx);
 void thread_set_child(thread_t child, int pid);
 boolean_t thread_is_active(thread_t thread);
@@ -314,7 +314,7 @@ fork1(proc_t parent_proc, thread_t *child_threadp, int kind, coalition_t *coalit
 		if ((child_thread = cloneproc(proc_task(parent_proc),
 		    spawn ? coalitions : NULL,
 		    parent_proc,
-		    spawn ? CLONEPROC_FLAGS_NONE : CLONEPROC_FLAGS_INHERIT_MEMORY)) == NULL) {
+		    spawn ? CLONEPROC_SPAWN : CLONEPROC_FORK)) == NULL) {
 			/* Failed to create thread */
 			err = EAGAIN;
 			goto bad;
@@ -448,8 +448,8 @@ fork_create_child(task_t parent_task,
 	task_t          child_task;
 	kern_return_t   result;
 	proc_ro_t       proc_ro;
-	bool inherit_memory = !!(clone_flags & CLONEPROC_FLAGS_INHERIT_MEMORY);
-	bool in_exec = !!(clone_flags & CLONEPROC_FLAGS_FOR_EXEC);
+	bool inherit_memory = !!(clone_flags & CLONEPROC_FORK);
+	bool in_exec = !!(clone_flags & CLONEPROC_EXEC);
 	/*
 	 * Exec complete hook should be called for spawn and exec, but not for fork.
 	 */
@@ -677,13 +677,13 @@ thread_t
 cloneproc(task_t parent_task, coalition_t *parent_coalitions, proc_t parent_proc, cloneproc_flags_t clone_flags)
 {
 #if !CONFIG_MEMORYSTATUS
-#pragma unused(memstat_internal)
+#pragma unused(cloning_initproc)
 #endif
 	task_t child_task;
 	proc_t child_proc;
 	thread_t child_thread = NULL;
-	bool memstat_internal = !!(clone_flags & CLONEPROC_FLAGS_MEMSTAT_INTERNAL);
-	bool in_exec = !!(clone_flags & CLONEPROC_FLAGS_FOR_EXEC);
+	bool cloning_initproc = !!(clone_flags & CLONEPROC_INITPROC);
+	bool in_exec = !!(clone_flags & CLONEPROC_EXEC);
 
 	if ((child_proc = forkproc(parent_proc, clone_flags)) == NULL) {
 		/* Failed to allocate new process */
@@ -729,10 +729,12 @@ cloneproc(task_t parent_task, coalition_t *parent_coalitions, proc_t parent_proc
 	}
 
 #if CONFIG_MEMORYSTATUS
-	if (memstat_internal ||
+	if (cloning_initproc ||
 	    (in_exec && (parent_proc->p_memstat_state & P_MEMSTAT_INTERNAL))) {
 		proc_list_lock();
 		child_proc->p_memstat_state |= P_MEMSTAT_INTERNAL;
+		child_proc->p_memstat_effectivepriority = JETSAM_PRIORITY_INTERNAL;
+		child_proc->p_memstat_requestedpriority = JETSAM_PRIORITY_INTERNAL;
 		proc_list_unlock();
 	}
 	if (in_exec && parent_proc->p_memstat_relaunch_flags != P_MEMSTAT_RELAUNCH_UNKNOWN) {
@@ -932,7 +934,8 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	rlim_t rlimit_cpu_cur;
 	pid_t pid;
 	struct proc_ro_data proc_ro_data = {};
-	bool in_exec = !!(clone_flags & CLONEPROC_FLAGS_FOR_EXEC);
+	bool in_exec = !!(clone_flags & CLONEPROC_EXEC);
+	bool in_fork = !!(clone_flags & CLONEPROC_FORK);
 
 	child_proc = zalloc_flags(proc_task_zone, Z_WAITOK | Z_ZERO);
 
@@ -1040,11 +1043,13 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 
 	child_proc->p_vfs_iopolicy = (parent_proc->p_vfs_iopolicy & (P_VFS_IOPOLICY_INHERITED_MASK));
 
-	child_proc->p_responsible_pid = parent_proc->p_responsible_pid;
+	proc_set_responsible_pid(child_proc, parent_proc->p_responsible_pid);
 
 	/*
 	 * Note that if the current thread has an assumed identity, this
 	 * credential will be granted to the new process.
+	 * This is OK to do in exec, because it will be over-written during image activation
+	 * before the proc is visible.
 	 */
 	kauth_cred_set(&proc_ro_data.p_ucred.__smr_ptr, kauth_cred_get());
 
@@ -1072,9 +1077,12 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 			child_proc->p_textvp = NULLVP;
 		}
 	}
-
-	/* Inherit the parent flags for code sign */
-	proc_ro_data.p_csflags = ((uint32_t)proc_getcsflags(parent_proc) & ~CS_KILLED);
+	uint64_t csflag_inherit_mask = ~CS_KILLED;
+	if (!in_fork) {
+		/* All non-fork paths should not inherit GTA flag */
+		csflag_inherit_mask &= ~CS_GET_TASK_ALLOW;
+	}
+	proc_ro_data.p_csflags = ((uint32_t)proc_getcsflags(parent_proc) & csflag_inherit_mask);
 
 	child_proc->p_proc_ro = proc_ro_alloc(child_proc, &proc_ro_data, NULL, NULL);
 
@@ -1321,20 +1329,29 @@ uthread_init(task_t task, uthread_t uth, thread_ro_t tro_tpl, int workq_thread)
 	 */
 	if (task == kernel_task) {
 		kauth_cred_set(&tro_tpl->tro_cred, vfs_context0.vc_ucred);
+		kauth_cred_set(&tro_tpl->tro_realcred, vfs_context0.vc_ucred);
 		tro_tpl->tro_proc = kernproc;
 		tro_tpl->tro_proc_ro = kernproc->p_proc_ro;
 	} else if (!task_is_a_corpse(task)) {
 		thread_ro_t curtro = current_thread_ro();
 		proc_t p = get_bsdtask_info(task);
 
-		if (task == curtro->tro_task &&
-		    ((curtro->tro_flags & TRO_SETUID) == 0 || !workq_thread)) {
-			kauth_cred_set(&tro_tpl->tro_cred, curtro->tro_cred);
-			tro_tpl->tro_flags = (curtro->tro_flags & TRO_SETUID);
+		if (task == curtro->tro_task) {
+			kauth_cred_set(&tro_tpl->tro_realcred,
+			    curtro->tro_realcred);
+			if (workq_thread) {
+				kauth_cred_set(&tro_tpl->tro_cred,
+				    curtro->tro_realcred);
+			} else {
+				kauth_cred_set(&tro_tpl->tro_cred,
+				    curtro->tro_cred);
+			}
 			tro_tpl->tro_proc_ro = curtro->tro_proc_ro;
 		} else {
 			kauth_cred_t cred = kauth_cred_proc_ref(p);
-			kauth_cred_set_and_unref(&tro_tpl->tro_cred, &cred);
+			kauth_cred_set(&tro_tpl->tro_realcred, cred);
+			kauth_cred_set(&tro_tpl->tro_cred, cred);
+			kauth_cred_unref(&cred);
 			tro_tpl->tro_proc_ro = task_get_ro(task);
 		}
 		tro_tpl->tro_proc = p;

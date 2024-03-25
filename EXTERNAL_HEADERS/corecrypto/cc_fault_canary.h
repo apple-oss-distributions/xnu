@@ -1,4 +1,4 @@
-/* Copyright (c) (2019-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2019-2023) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -9,8 +9,8 @@
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
-#ifndef corecrypto_cc_fault_canary_h
-#define corecrypto_cc_fault_canary_h
+#ifndef _CORECRYPTO_CC_FAULT_CANARY_H_
+#define _CORECRYPTO_CC_FAULT_CANARY_H_
 
 #include "cc.h"
 
@@ -23,9 +23,8 @@ extern const cc_fault_canary_t CCEC_FAULT_CANARY;
 extern const cc_fault_canary_t CCRSA_PKCS1_FAULT_CANARY;
 extern const cc_fault_canary_t CCRSA_PSS_FAULT_CANARY;
 
-#define CC_FAULT_CANARY_MEMCPY(_dst_, _src_) memcpy(_dst_, _src_, CC_FAULT_CANARY_SIZE)
-#define CC_FAULT_CANARY_CLEAR(_name_) memset(_name_, 0x00, CC_FAULT_CANARY_SIZE)
-
+#define CC_FAULT_CANARY_MEMCPY(_dst_, _src_) cc_memcpy(_dst_, _src_, CC_FAULT_CANARY_SIZE)
+#define CC_FAULT_CANARY_CLEAR(_name_) cc_memset(_name_, 0x00, CC_FAULT_CANARY_SIZE)
 #define CC_FAULT_CANARY_EQUAL(_a_, _b_) (cc_cmp_safe(CC_FAULT_CANARY_SIZE, _a_, _b_) == 0)
 
-#endif /* corecrypto_cc_fault_canary_h */
+#endif // _CORECRYPTO_CC_FAULT_CANARY_H_

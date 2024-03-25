@@ -74,6 +74,7 @@
 #include <kern/thread.h>
 #include <kern/processor.h>
 #include <kern/ledger.h>
+#include <kern/monotonic.h>
 #include <machine/machparam.h>
 #include <kern/machine.h>
 #include <kern/policy_internal.h>
@@ -82,10 +83,6 @@
 #ifdef CONFIG_MACH_APPROXIMATE_TIME
 #include <machine/commpage.h>  /* for commpage_update_mach_approximate_time */
 #endif
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#endif /* MONOTONIC */
 
 /*
  *	thread_quantum_expire:
@@ -167,6 +164,11 @@ thread_quantum_expire(
 
 		new_computation = ctime - thread->computation_epoch;
 		new_computation += thread->computation_metered;
+		/*
+		 * Remove any time spent handling interrupts outside of the thread's
+		 * control.
+		 */
+		new_computation -= recount_current_thread_interrupt_time_mach() - thread->computation_interrupt_epoch;
 
 		bool demote = false;
 		switch (thread->sched_mode) {
@@ -464,7 +466,7 @@ int smt_sched_bonus_16ths = 8;
 void
 lightweight_update_priority(thread_t thread)
 {
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 	assert(thread == current_thread());
 
 	if (thread->sched_mode == TH_MODE_TIMESHARE) {
@@ -946,7 +948,7 @@ sched_validate_mode(sched_mode_t mode)
 void
 sched_set_thread_mode(thread_t thread, sched_mode_t new_mode)
 {
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 
 	sched_validate_mode(new_mode);
 
@@ -975,7 +977,7 @@ sched_set_thread_mode(thread_t thread, sched_mode_t new_mode)
 void
 sched_set_thread_mode_user(thread_t thread, sched_mode_t new_mode)
 {
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 
 	sched_validate_mode(new_mode);
 

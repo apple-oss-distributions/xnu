@@ -295,7 +295,7 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), check if the IP header pointer is 32-bit aligned; if not,
+ * i386 or x86_64 or arm64), check if the IP header pointer is 32-bit aligned; if not,
  * copy the contents of the mbuf chain into a new chain, and free the original
  * one.  Create some head room in the first mbuf of the new chain, in case
  * it's needed later on.
@@ -304,9 +304,9 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
  * mostly align to 32-bit boundaries.  Care should be taken never to use 64-bit
  * load/store operations on the fields in IPv6 headers.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP6_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP6_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do {                 \
 	if (!IP6_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                    \
 	        struct mbuf *_n;                                        \
@@ -327,7 +327,7 @@ static ip6_check_if_result_t ip6_input_check_interface(struct mbuf *, struct ip6
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64___ && !__arm64__ */
 
 static void
 ip6_proto_input(protocol_family_t protocol, mbuf_t packet)
@@ -1123,7 +1123,7 @@ check_with_pf:
 			if (ia6 != NULL) {
 				(void) ip6_setdstifaddr_info(m, 0, ia6);
 				(void) ip6_setsrcifaddr_info(m, ia6->ia_ifp->if_index, NULL);
-				IFA_REMREF(&ia6->ia_ifa);
+				ifa_remref(&ia6->ia_ifa);
 			} else {
 				(void) ip6_setdstifaddr_info(m, inifp->if_index, NULL);
 				(void) ip6_setsrcifaddr_info(m, inifp->if_index, NULL);
@@ -2091,15 +2091,7 @@ ip6_notify_pmtu(struct inpcb *in6p, struct sockaddr_in6 *dst, u_int32_t *mtu)
 		return;
 	}
 
-#ifdef DIAGNOSTIC
-	if (so == NULL) {               /* I believe this is impossible */
-		panic("ip6_notify_pmtu: socket is NULL");
-		/* NOTREACHED */
-	}
-#endif
-
-	if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr) &&
-	    (so->so_proto == NULL || so->so_proto->pr_protocol == IPPROTO_TCP)) {
+	if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr) && SOCK_CHECK_PROTO(so, IPPROTO_TCP)) {
 		return;
 	}
 

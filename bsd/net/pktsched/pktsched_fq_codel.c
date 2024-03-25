@@ -336,11 +336,22 @@ fq_getq_flow_mbuf(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq,
 	return limit_reached;
 }
 
+static void
+fq_if_pacemaker_tcall(thread_call_param_t arg0, thread_call_param_t arg1)
+{
+#pragma unused(arg1)
+	struct ifnet* ifp = (struct ifnet*)arg0;
+	ASSERT(ifp != NULL);
+
+	ifnet_start_ignore_delay(ifp);
+}
+
 fq_if_t *
 fq_if_alloc(struct ifclassq *ifq, classq_pkt_type_t ptype)
 {
 	fq_if_t *fqs;
 
+	ASSERT(ifq->ifcq_ifp != NULL);
 	fqs = zalloc_flags(fq_if_zone, Z_WAITOK | Z_ZERO);
 	fqs->fqs_ifq = ifq;
 	fqs->fqs_ptype = ptype;
@@ -350,6 +361,10 @@ fq_if_alloc(struct ifclassq *ifq, classq_pkt_type_t ptype)
 	STAILQ_INIT(&fqs->fqs_fclist);
 	TAILQ_INIT(&fqs->fqs_empty_list);
 	TAILQ_INIT(&fqs->fqs_combined_grp_list);
+	fqs->fqs_pacemaker_tcall = thread_call_allocate_with_options(fq_if_pacemaker_tcall,
+	    (thread_call_param_t)(ifq->ifcq_ifp), THREAD_CALL_PRIORITY_KERNEL,
+	    THREAD_CALL_OPTIONS_ONCE);
+	ASSERT(fqs->fqs_pacemaker_tcall != NULL);
 
 	return fqs;
 }
@@ -357,6 +372,23 @@ fq_if_alloc(struct ifclassq *ifq, classq_pkt_type_t ptype)
 void
 fq_if_destroy(fq_if_t *fqs)
 {
+	struct ifnet    *ifp = fqs->fqs_ifq->ifcq_ifp;
+	thread_call_t   tcall = fqs->fqs_pacemaker_tcall;
+
+	VERIFY(ifp != NULL);
+	ASSERT(tcall != NULL);
+	IFCQ_LOCK_ASSERT_HELD(fqs->fqs_ifq);
+	LCK_MTX_ASSERT(&ifp->if_start_lock, LCK_MTX_ASSERT_NOTOWNED);
+	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+
+	/*
+	 * Since we are holding the IFCQ lock here, another thread cannot enter AQM
+	 * and schedule a pacemaker call. So we do not need a sleep wait loop here
+	 * cancel wait and free should succeed in one call.
+	 */
+	thread_call_cancel_wait(tcall);
+	ASSERT(thread_call_free(tcall));
+
 	fq_if_purge(fqs);
 	fq_if_destroy_grps(fqs);
 
@@ -780,16 +812,29 @@ fq_if_grps_sc_bitmap_move(fq_grp_tailq_t *grp_list, int pri, fq_if_state dst_sta
 	}
 }
 
+/*
+ * Pacemaker is only scheduled when no packet can be dequeued from AQM
+ * due to pacing. Pacemaker will doorbell the driver when current >= next_tx_time.
+ * This only applies to L4S traffic at this moment.
+ */
 static void
-fq_if_schedule_pacemaker(struct ifclassq *ifq, uint64_t next_tx_time)
+fq_if_schedule_pacemaker(fq_if_t *fqs, uint64_t now, uint64_t next_tx_time)
 {
+	uint64_t deadline = 0;
 	if (!ifclassq_enable_pacing || !ifclassq_enable_l4s) {
 		return;
 	}
 	ASSERT(next_tx_time != FQ_INVALID_TX_TS);
+	ASSERT(fqs->fqs_pacemaker_tcall != NULL);
+	ASSERT(now < next_tx_time);
 
-	struct ifnet *ifp = ifq->ifcq_ifp;
-	ifnet_start_set_pacemaker_time(ifp, next_tx_time);
+	DTRACE_SKYWALK2(pacemaker__schedule, struct ifnet*, fqs->fqs_ifq->ifcq_ifp,
+	    uint64_t, next_tx_time - now);
+	KDBG(AQM_KTRACE_TX_PACEMAKER, fqs->fqs_ifq->ifcq_ifp->if_index, now,
+	    next_tx_time, next_tx_time - now);
+
+	clock_interval_to_deadline((uint32_t)(next_tx_time - now), 1, &deadline);
+	thread_call_enter_delayed(fqs->fqs_pacemaker_tcall, deadline);
 }
 
 static int
@@ -985,7 +1030,7 @@ state_change:
 	}
 	if (next_tx_time != FQ_INVALID_TX_TS) {
 		ASSERT(next_tx_time > now);
-		fq_if_schedule_pacemaker(ifq, next_tx_time);
+		fq_if_schedule_pacemaker(fqs, now, next_tx_time);
 	}
 
 	IFCQ_XMIT_ADD(ifq, total_pktcnt, total_bytecnt);
@@ -1096,7 +1141,7 @@ fq_if_dequeue_sc_classq_multi_separate(struct ifclassq *ifq, mbuf_svc_class_t sv
 		if (next_tx_time != FQ_INVALID_TX_TS) {
 			ASSERT(next_tx_time > now);
 			fq_cl->fcl_stat.fcl_fcl_pacemaker_needed++;
-			fq_if_schedule_pacemaker(ifq, next_tx_time);
+			fq_if_schedule_pacemaker(fqs, now, next_tx_time);
 			break;
 		}
 	}

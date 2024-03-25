@@ -818,17 +818,15 @@ extern boolean_t preemption_enabled(void);
 
 #ifdef MACH_KERNEL_PRIVATE
 
-/*
- * Scheduler algorithm indirection. If only one algorithm is
- * enabled at compile-time, a direction function call is used.
- * If more than one is enabled, calls are dispatched through
- * a function pointer table.
- */
-
 #if   !defined(CONFIG_SCHED_TRADITIONAL) && !defined(CONFIG_SCHED_PROTO) && !defined(CONFIG_SCHED_GRRR) && !defined(CONFIG_SCHED_MULTIQ) && !defined(CONFIG_SCHED_CLUTCH) && !defined(CONFIG_SCHED_EDGE)
 #error Enable at least one scheduler algorithm in osfmk/conf/MASTER.XXX
 #endif
 
+/*
+ * The scheduling policy is fixed at compile-time, in order to save the performance
+ * cost of function pointer indirection that we would otherwise pay each time when
+ * making a policy-specific callout.
+ */
 #if __AMP__
 
 #if CONFIG_SCHED_EDGE

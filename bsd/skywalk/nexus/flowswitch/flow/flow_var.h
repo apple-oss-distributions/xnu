@@ -288,6 +288,7 @@ struct flow_entry {
 	flowadv_idx_t           fe_adv_idx;
 	kern_packet_svc_class_t fe_svc_class;
 	uint32_t                fe_policy_id;   /* policy id matched to flow */
+	uint32_t                fe_skip_policy_id; /* skip policy id matched to flow */
 
 	/**** Misc Group ****/
 	struct nx_flowswitch *  const fe_fsw;
@@ -578,17 +579,17 @@ struct flow_mgr {
 	size_t   fm_flow_hash_count[FKMASK_IDX_MAX]; /* # of flows with mask */
 	uint16_t fm_flow_hash_masks[FKMASK_IDX_MAX];
 
-	void            *fm_owner_buckets;     /* cache-aligned fob */
+	void            *fm_owner_buckets __sized_by(fm_owner_bucket_tot_sz);     /* cache-aligned fob */
 	const size_t    fm_owner_buckets_cnt;  /* total # of fobs */
 	const size_t    fm_owner_bucket_sz;    /* size of each fob */
 	const size_t    fm_owner_bucket_tot_sz; /* allocated size of each fob */
 
-	void            *fm_route_buckets;     /* cache-aligned frb */
+	void            *fm_route_buckets __sized_by(fm_route_bucket_tot_sz);     /* cache-aligned frb */
 	const size_t    fm_route_buckets_cnt;  /* total # of frb */
 	const size_t    fm_route_bucket_sz;    /* size of each frb */
 	const size_t    fm_route_bucket_tot_sz; /* allocated size of each frb */
 
-	void            *fm_route_id_buckets;    /* cache-aligned frib */
+	void            *fm_route_id_buckets __sized_by(fm_route_id_bucket_tot_sz);    /* cache-aligned frib */
 	const size_t    fm_route_id_buckets_cnt; /* total # of frib */
 	const size_t    fm_route_id_bucket_sz;   /* size of each frib */
 	const size_t    fm_route_id_bucket_tot_sz; /* allocated size of each frib */
@@ -637,8 +638,13 @@ flow_key_cmp_mask(const struct flow_key *match,
 	_CASSERT((sizeof(struct flow_entry) % 16) == 0);
 	_CASSERT((offsetof(struct flow_entry, fe_key) % 16) == 0);
 
-	return sk_memcmp_mask_48B((const uint8_t *)match,
-	           (const uint8_t *)key, (const uint8_t *)mask);
+	/* local variables are __bidi_indexable with -fbounds-safety */
+	const struct flow_key *match_idx = match;
+	const struct flow_key *key_idx = key;
+	const struct flow_key *mask_idx = mask;
+
+	return sk_memcmp_mask_48B((const uint8_t *)match_idx,
+	           (const uint8_t *)key_idx, (const uint8_t *)mask_idx);
 }
 
 static inline uint32_t
@@ -839,27 +845,27 @@ __attribute__((always_inline))
 static inline struct flow_owner_bucket *
 flow_mgr_get_fob_at_idx(struct flow_mgr *fm, uint32_t idx)
 {
-	return (struct flow_owner_bucket *)(void *)
-	       ((intptr_t)fm->fm_owner_buckets +
-	       (idx * fm->fm_owner_bucket_sz));
+	char *buckets = fm->fm_owner_buckets;
+	void *bucket = buckets + (idx * fm->fm_owner_bucket_sz);
+	return bucket;
 }
 
 __attribute__((always_inline))
 static inline struct flow_route_bucket *
 flow_mgr_get_frb_at_idx(struct flow_mgr *fm, uint32_t idx)
 {
-	return (struct flow_route_bucket *)(void *)
-	       ((intptr_t)fm->fm_route_buckets +
-	       (idx * fm->fm_route_bucket_sz));
+	char *buckets = fm->fm_route_buckets;
+	void *bucket = buckets + (idx * fm->fm_route_bucket_sz);
+	return bucket;
 }
 
 __attribute__((always_inline))
 static inline struct flow_route_id_bucket *
 flow_mgr_get_frib_at_idx(struct flow_mgr *fm, uint32_t idx)
 {
-	return (struct flow_route_id_bucket *)(void *)
-	       ((intptr_t)fm->fm_route_id_buckets +
-	       (idx * fm->fm_route_id_bucket_sz));
+	char *buckets = fm->fm_route_id_buckets;
+	void *bucket = buckets + (idx * fm->fm_route_id_bucket_sz);
+	return bucket;
 }
 
 __attribute__((always_inline))

@@ -54,6 +54,9 @@
 #include <sys/kauth.h>
 #include <net/necp.h>
 #include <kern/zalloc.h>
+
+#include <net/sockaddr_utils.h>
+
 #include <os/log.h>
 
 #if SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
@@ -1606,6 +1609,11 @@ utun_ctl_bind(kern_ctl_ref kctlref,
 		return EINVAL;
 	}
 
+	if (pcb->utun_ctlref != NULL) {
+		// Return if bind was already called
+		return EINVAL;
+	}
+
 	pcb->utun_ctlref = kctlref;
 	pcb->utun_unit = sac->sc_unit;
 	pcb->utun_max_pending_packets = 1;
@@ -1821,7 +1829,7 @@ utun_remove_address(ifnet_t interface,
 		bzero(&ifr6, sizeof(ifr6));
 		snprintf(ifr6.ifr_name, sizeof(ifr6.ifr_name), "%s%d",
 		    ifnet_name(interface), ifnet_unit(interface));
-		result = ifaddr_address(address, (struct sockaddr*)&ifr6.ifr_addr,
+		result = ifaddr_address(address, SA(&ifr6.ifr_addr),
 		    sizeof(ifr6.ifr_addr));
 		if (result != 0) {
 			os_log_error(OS_LOG_DEFAULT, "utun_remove_address - ifaddr_address failed (v6): %d",

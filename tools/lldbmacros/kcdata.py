@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import absolute_import, print_function, division
 import sys
 import struct
 import mmap
@@ -12,14 +11,8 @@ import logging
 import contextlib
 import base64
 import zlib
-import six
 
-if six.PY3:
-    long = int
-else:
-    # can be removed once we move to Python3.1+
-    from future.utils.surrogateescape import register_surrogateescape
-    register_surrogateescape()
+long = int
 
 class Globals(object):
     pass
@@ -128,6 +121,20 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO' : 0x944,
     'STACKSHOT_KCTYPE_SHAREDCACHE_ID' : 0x945,
     'STACKSHOT_KCTYPE_CODESIGNING_INFO' : 0x946,
+    'STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO' : 0x948,
+    'STACKSHOT_KCCONTAINER_EXCLAVES' : 0x949,
+    'STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT' : 0x94a,
+    'STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO' : 0x94b,
+    'STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY' : 0x94c,
+    'STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO' : 0x94d,
+    'STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK' : 0x94e,
+    'STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE' : 0x94f,
+    'STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO' : 0x950,
+    'STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME' : 0x951,
+    'STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT' : 0x952,
+    'STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO' : 0x953,
+    'STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS' : 0x954,
+    'STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO' : 0x955,
 
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
@@ -188,7 +195,7 @@ def enum(**args):
 # sequences; see PEP-383
 #
 def BytesToString(b):
-    if isinstance(b, six.string_types):
+    if isinstance(b, str):
         return b
     return b.decode('utf-8', errors="surrogateescape")
 
@@ -425,6 +432,11 @@ kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_THREAD')] = 'thread_sn
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_PORTLABEL')] = 'portlabels'
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_SHAREDCACHE')] = 'shared_caches'
 kcdata_type_def_rev[GetTypeForName('KCDATA_BUFFER_BEGIN_XNUPOST_CONFIG')] = 'xnupost_testconfig'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_EXCLAVES')] = 'threads_exclave'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT')] = 'thread_exclave'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY')] = 'exclave_ipcstackentry'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE')] = 'exclave_addressspace'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT')] = 'exclave_textlayout'
 
 class Indent(object):
     def __init__(self):
@@ -605,7 +617,7 @@ class KCObject(object):
             logging.info("0x%08x: %sNESTED_KCDATA" % (self.offset, INDENT()))
             with INDENT.indent():
                 nested_iterator = kcdata_item_iterator(self.i_data[:self.i_size])
-                nested_buffer = KCObject.FromKCItem(six.next(nested_iterator))
+                nested_buffer = KCObject.FromKCItem(next(nested_iterator))
                 if not isinstance(nested_buffer, KCBufferObject):
                     raise Exception("nested buffer isn't a KCBufferObject")
                 nested_buffer.ReadItems(nested_iterator)
@@ -619,7 +631,7 @@ class KCObject(object):
             self.is_naked_type = True
             #self.obj = "data of len %d" % len(self.i_data)
             #self.obj = ''.join(["%x" % ki for ki in struct.unpack('%dB' % len(self.i_data), self.i_data)])
-            if isinstance(self.i_data, six.string_types):
+            if isinstance(self.i_data, str):
                 self.obj = list(map(ord, BytesToString(self.i_data)))
             else:
                 self.obj = [i for i in self.i_data]
@@ -1242,6 +1254,8 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_THREAD')] =
             ),
             'stackshot_latency_thread')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_NAME')] = KCSubTypeElement('pth_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
+
 def set_type(name, *args):
     typ = GetTypeForName(name)
     KNOWN_TYPES_COLLECTION[typ] = KCTypeDescription(GetTypeForName(typ), *args)
@@ -1435,11 +1449,59 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_SOURCE')] = K
     KCSubTypeElement('tss_procname', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(65, 1), 20, 1)
 ), 'suspension_source')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('tei_scid', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('tei_thread_offset', KCSUBTYPE_TYPE.KC_ST_UINT32, 8),
+        KCSubTypeElement.FromBasicCtype('tei_flags', KCSUBTYPE_TYPE.KC_ST_UINT32, 12),
+    ), 'exclaves_thread_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('esc_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('esc_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+    ), 'exclave_scresult_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('eise_asid', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('eise_tnid', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+        KCSubTypeElement.FromBasicCtype('eise_invocationid', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+        KCSubTypeElement.FromBasicCtype('eise_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+    ), 'exclave_ipcstackentry_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK'),
+    (
+        KCSubTypeElement.FromBasicCtype('lr', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+    ), 'secure_ecstack_entry')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('eas_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('eas_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+        KCSubTypeElement.FromBasicCtype('eas_layoutid', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+        KCSubTypeElement.FromBasicCtype('eas_slide', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+    ), 'exclave_addressspace_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME')] = KCSubTypeElement('exclave_addressspace_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO'),
+    (
+        KCSubTypeElement.FromBasicCtype('layout_id', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('etl_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+    ), 'exclave_textlayout_info')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS'),
+    (
+        KCSubTypeElement('layoutSegment_uuid', KCSUBTYPE_TYPE.KC_ST_UINT8, KCSubTypeElement.GetSizeForArray(16, 1), 0, 1),
+        KCSubTypeElement.FromBasicCtype('layoutSegment_loadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+    ), 'exclave_textlayout_segments')
+
 def GetSecondsFromMATime(mat, tb):
     return (float(long(mat) * tb['numer']) / tb['denom']) / 1e9
 
 def GetLongForAddress(address):
-    if isinstance(address, six.string_types):
+    if isinstance(address, str):
         if '0x' in address.lower():
             address = long(address, 16)
         else:
@@ -1512,7 +1574,7 @@ def GetStateDescription(s):
 
 def format_uuid(elementValues):
     # sometimes we get string like "25A926D8-F742-3E5E..."
-    if isinstance(elementValues, six.string_types):
+    if isinstance(elementValues, str):
         return elementValues
     return ''.join("%02x" % i for i in elementValues)
 
@@ -2031,10 +2093,7 @@ def data_from_stream(stream):
     try:
         fmap = mmap.mmap(stream.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ)
     except:
-        if six.PY3:
-            yield stream.buffer.read()
-        else:
-            yield stream.read()
+        yield stream.buffer.read()
     else:
         try:
             yield fmap
@@ -2044,18 +2103,18 @@ def data_from_stream(stream):
 def iterate_kcdatas(kcdata_file):
     with data_from_stream(kcdata_file) as data:
         iterator = kcdata_item_iterator(data)
-        kcdata_buffer = KCObject.FromKCItem(six.next(iterator))
+        kcdata_buffer = KCObject.FromKCItem(next(iterator))
 
         if isinstance(kcdata_buffer, KCCompressedBufferObject):
             kcdata_buffer.ReadItems(iterator)
             decompressed = kcdata_buffer.Decompress(data)
             iterator = kcdata_item_iterator(decompressed)
-            kcdata_buffer = KCObject.FromKCItem(six.next(iterator))
+            kcdata_buffer = KCObject.FromKCItem(next(iterator))
 
         if not isinstance(kcdata_buffer, KCBufferObject):
             # ktrace stackshot chunk
             iterator = kcdata_item_iterator(data[16:])
-            kcdata_buffer = KCObject.FromKCItem(six.next(iterator))
+            kcdata_buffer = KCObject.FromKCItem(next(iterator))
 
         if not isinstance(kcdata_buffer, KCBufferObject):
             try:
@@ -2064,7 +2123,7 @@ def iterate_kcdatas(kcdata_file):
                 pass
             else:
                 iterator = kcdata_item_iterator(decoded)
-                kcdata_buffer = KCObject.FromKCItem(six.next(iterator))
+                kcdata_buffer = KCObject.FromKCItem(next(iterator))
         if not isinstance(kcdata_buffer, KCBufferObject):
             import gzip
             from io import BytesIO
@@ -2074,7 +2133,7 @@ def iterate_kcdatas(kcdata_file):
                 pass
             else:
                 iterator = kcdata_item_iterator(decompressed)
-                kcdata_buffer = KCObject.FromKCItem(six.next(iterator))
+                kcdata_buffer = KCObject.FromKCItem(next(iterator))
 
         if not isinstance(kcdata_buffer, KCBufferObject):
             raise Exception("unknown file type")
@@ -2183,6 +2242,9 @@ PRETTIFY_FLAGS = {
         'kThreadTruncKernBT',
         'kThreadTruncUserBT',
         'kThreadTruncUserAsyncBT',
+        'kThreadExclaveRPCActive',
+        'kThreadExclaveUpcallActive',
+        'kThreadExclaveSchedulerRequest',
     ],
     'ths_state': [
         'TH_WAIT',
@@ -2244,7 +2306,21 @@ PRETTIFY_FLAGS = {
     'portlabel_flags': [
         'label_read_failed',
         'service_throttled',
-    ]
+    ],
+    'esc_flags': [
+        'kExclaveScresultHaveIPCStack',
+    ],
+    'eise_flags': [
+        'kExclaveIpcStackEntryHaveInvocationID',
+        'kExclaveIpcStackEntryHaveStack',
+    ],
+    'eas_flags': [
+        'kExclaveAddressSpaceHaveSlide',
+    ],
+    'etl_flags': [
+        'kExclaveTextLayoutLoadAddressesSynthetic',
+        'kExclaveTextLayoutLoadAddressesUnslid',
+    ],
 }
 PRETTIFY_FLAGS['stackshot_out_flags'] = PRETTIFY_FLAGS['stackshot_in_flags']
 PRETTIFY_FLAGS['tts_ss_flags'] = PRETTIFY_FLAGS['ts_ss_flags']
@@ -2318,7 +2394,7 @@ def prettify_core(data, mosthex, key, portlabels):
     elif mosthex and not PRETTIFY_DONTHEX.get(key, False):
         if isinstance(data, (int, long)):
             return prettify_hex(data)
-        elif isinstance(data, six.string_types) and len(data) > 0 and data.isnumeric():
+        elif isinstance(data, str) and len(data) > 0 and data.isnumeric():
             return prettify_hex(int(data))
         return data
 

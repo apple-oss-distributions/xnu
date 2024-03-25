@@ -175,7 +175,9 @@ vsock_bind_address(struct vsockpcb *pcb, struct vsock_address laddr, struct vsoc
 	if (laddr.port != VMADDR_PORT_ANY) {
 		error = vsock_bind_address_if_free(pcb, laddr.cid, laddr.port, raddr.cid, raddr.port);
 	} else {
+		socket_unlock(pcb->so, 0);
 		lck_mtx_lock(&vsockinfo.port_lock);
+		socket_lock(pcb->so, 0);
 
 		const uint32_t first = VSOCK_PORT_RESERVED;
 		const uint32_t last = VMADDR_PORT_ANY - 1;
@@ -210,29 +212,36 @@ vsock_bind_address(struct vsockpcb *pcb, struct vsock_address laddr, struct vsoc
 }
 
 static void
-vsock_unbind_pcb(struct vsockpcb *pcb, bool is_locked)
+vsock_unbind_pcb_locked(struct vsockpcb *pcb, bool is_locked)
 {
 	if (!pcb) {
 		return;
 	}
 
-	socket_lock_assert_owned(pcb->so);
+	struct socket *so = pcb->so;
+	socket_lock_assert_owned(so);
 
-	soisdisconnected(pcb->so);
-
-	if (!pcb->bound.le_prev) {
+	// Bail if disconnect and already unbound.
+	if (so->so_state & SS_ISDISCONNECTED) {
+		assert(pcb->bound.le_next == NULL);
+		assert(pcb->bound.le_prev == NULL);
 		return;
 	}
 
 	if (!is_locked) {
-		socket_unlock(pcb->so, 0);
+		socket_unlock(so, 0);
 		lck_rw_lock_exclusive(&vsockinfo.bound_lock);
-		socket_lock(pcb->so, 0);
+		socket_lock(so, 0);
+
+		// Case where some other thread also called unbind() on this socket while waiting to acquire its lock.
 		if (!pcb->bound.le_prev) {
+			soisdisconnected(so);
 			lck_rw_done(&vsockinfo.bound_lock);
 			return;
 		}
 	}
+
+	soisdisconnected(so);
 
 	LIST_REMOVE(pcb, bound);
 	pcb->bound.le_next = NULL;
@@ -241,6 +250,12 @@ vsock_unbind_pcb(struct vsockpcb *pcb, bool is_locked)
 	if (!is_locked) {
 		lck_rw_done(&vsockinfo.bound_lock);
 	}
+}
+
+static void
+vsock_unbind_pcb(struct vsockpcb *pcb)
+{
+	vsock_unbind_pcb_locked(pcb, false);
 }
 
 static struct sockaddr *
@@ -327,7 +342,7 @@ vsock_pcb_reset_address(struct vsock_address src, struct vsock_address dst)
 		return EINVAL;
 	}
 
-	errno_t error;
+	errno_t error = 0;
 	struct vsock_transport *transport = NULL;
 
 	if (src.cid == VMADDR_CID_ANY) {
@@ -345,7 +360,13 @@ vsock_pcb_reset_address(struct vsock_address src, struct vsock_address dst)
 	}
 
 	if (src.cid == dst.cid) {
-		error = vsock_put_message(src, dst, VSOCK_RESET, 0, 0, NULL);
+		// Reset both sockets.
+		struct vsockpcb *pcb = vsock_get_matching_pcb(src, dst);
+		if (pcb) {
+			socket_lock_assert_owned(pcb->so);
+			vsock_unbind_pcb(pcb);
+			socket_unlock(pcb->so, 1);
+		}
 	} else {
 		if (!transport) {
 			transport = os_atomic_load(&the_vsock_transport, relaxed);
@@ -419,7 +440,7 @@ static errno_t
 vsock_disconnect_pcb_common(struct vsockpcb *pcb, bool is_locked)
 {
 	socket_lock_assert_owned(pcb->so);
-	vsock_unbind_pcb(pcb, is_locked);
+	vsock_unbind_pcb_locked(pcb, is_locked);
 	return vsock_pcb_reset(pcb);
 }
 
@@ -459,6 +480,7 @@ vsock_sockaddr_vm_validate(struct vsockpcb *pcb, struct sockaddr_vm *addr)
 
 	return 0;
 }
+
 /* VSock Receive Handlers */
 
 static errno_t
@@ -487,7 +509,7 @@ vsock_put_message_connected(struct vsockpcb *pcb, enum vsock_operation op, mbuf_
 		}
 		break;
 	case VSOCK_RESET:
-		vsock_unbind_pcb(pcb, false);
+		vsock_unbind_pcb(pcb);
 		break;
 	default:
 		error = ENOTSUP;
@@ -569,9 +591,10 @@ vsock_put_message_listening(struct vsockpcb *pcb, enum vsock_operation op, struc
 
 done:
 		if (error) {
-			soisdisconnected(so2);
 			if (pcb2) {
-				vsock_unbind_pcb(pcb2, false);
+				vsock_unbind_pcb(pcb2);
+			} else {
+				soisdisconnected(so2);
 			}
 			socket_unlock(so2, 1);
 			vsock_pcb_reset_address(dst, src);
@@ -936,7 +959,7 @@ vsock_detach(struct socket *so)
 		return EINVAL;
 	}
 
-	vsock_unbind_pcb(pcb, false);
+	vsock_unbind_pcb(pcb);
 
 	// Tell the transport that this socket has detached.
 	struct vsock_transport *transport = pcb->transport;
@@ -954,11 +977,8 @@ vsock_detach(struct socket *so)
 	vsockinfo.vsock_gencnt++;
 	lck_rw_done(&vsockinfo.all_lock);
 
-	// Deallocate any resources.
-	zfree(vsockpcb_zone, pcb);
-	so->so_pcb = 0;
+	// Mark this socket for deallocation.
 	so->so_flags |= SOF_PCBCLEARING;
-	sofree(so);
 
 	return 0;
 }
@@ -966,7 +986,6 @@ vsock_detach(struct socket *so)
 static int
 vsock_abort(struct socket *so)
 {
-	soisdisconnected(so);
 	return vsock_detach(so);
 }
 
@@ -1153,7 +1172,7 @@ cleanup:
 		error = !(so->so_state & SS_ISCONNECTED);
 	}
 	if (error) {
-		vsock_unbind_pcb(pcb, false);
+		vsock_unbind_pcb(pcb);
 	}
 
 done:
@@ -1414,12 +1433,58 @@ vsock_init(struct protosw *pp, struct domain *dp)
 	vsockinfo.last_port = VMADDR_PORT_ANY;
 }
 
+static int
+vsock_sofreelastref(struct socket *so, int dealloc)
+{
+	socket_lock_assert_owned(so);
+
+	struct vsockpcb *pcb = sotovsockpcb(so);
+	if (pcb != NULL) {
+		zfree(vsockpcb_zone, pcb);
+	}
+
+	so->so_pcb = NULL;
+	sofreelastref(so, dealloc);
+
+	return 0;
+}
+
+static int
+vsock_unlock(struct socket *so, int refcount, void *lr_saved)
+{
+	lck_mtx_t *mutex_held = so->so_proto->pr_domain->dom_mtx;
+#ifdef MORE_LOCKING_DEBUG
+	LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
+#endif
+	so->unlock_lr[so->next_unlock_lr] = lr_saved;
+	so->next_unlock_lr = (so->next_unlock_lr + 1) % SO_LCKDBG_MAX;
+
+	if (refcount) {
+		if (so->so_usecount <= 0) {
+			panic("%s: bad refcount=%d so=%p (%d, %d, %d) "
+			    "lrh=%s", __func__, so->so_usecount, so,
+			    SOCK_DOM(so), so->so_type,
+			    SOCK_PROTO(so), solockhistory_nr(so));
+			/* NOTREACHED */
+		}
+
+		so->so_usecount--;
+		if (so->so_usecount == 0) {
+			vsock_sofreelastref(so, 1);
+		}
+	}
+	lck_mtx_unlock(mutex_held);
+
+	return 0;
+}
+
 static struct protosw vsocksw[] = {
 	{
 		.pr_type =              SOCK_STREAM,
 		.pr_protocol =          0,
 		.pr_flags =             PR_CONNREQUIRED | PR_WANTRCVD,
 		.pr_init =              vsock_init,
+		.pr_unlock =            vsock_unlock,
 		.pr_usrreqs =           &vsock_usrreqs,
 	}
 };

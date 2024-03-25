@@ -233,9 +233,6 @@
  *   This function will also add some statistics about the compression to the buffer which helps with
  *   decompressing later.
  *
- * Once you are done with the kcdata buffer, call kcdata_deinit_compress to
- * free any buffers that may have been allocated internal to the compression
- * algorithm.
  */
 
 
@@ -545,14 +542,27 @@ struct kcdata_type_definition {
 #define STACKSHOT_KCTYPE_SUSPENSION_INFO             0x938u /* struct stackshot_suspension_info */
 #define STACKSHOT_KCTYPE_SUSPENSION_SOURCE           0x939u /* struct stackshot_suspension_source */
 
-#define STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT         0x940u   /* task_delta_snapshot_v2 */
+#define STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT         0x940u /* task_delta_snapshot_v2 */
 #define STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT       0x941u /* thread_delta_snapshot_v* */
 #define STACKSHOT_KCCONTAINER_SHAREDCACHE            0x942u /* container for shared cache info */
 #define STACKSHOT_KCTYPE_SHAREDCACHE_INFO            0x943u /* dyld_shared_cache_loadinfo_v2 */
 #define STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO         0x944u /* struct dyld_aot_cache_uuid_info */
 #define STACKSHOT_KCTYPE_SHAREDCACHE_ID              0x945u /* uint32_t in task: if we aren't attached to Primary, which one */
 #define STACKSHOT_KCTYPE_CODESIGNING_INFO            0x946u /* struct stackshot_task_codesigning_info */
-
+#define STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO    0x948u /* struct thread_exclaves_info */
+#define STACKSHOT_KCCONTAINER_EXCLAVES               0x949u /* exclave threads info */
+#define STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT       0x94au /* exclave thread container for one scid */
+#define STACKSHOT_KCTYPE_EXCLAVE_SCRESULT_INFO       0x94bu /* struct exclave_scresult_info */
+#define STACKSHOT_KCCONTAINER_EXCLAVE_IPCSTACKENTRY  0x94cu /* container for one chunk of exclave IPC chain */
+#define STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_INFO  0x94du /* struct exclave_ipcstackentry_info */
+#define STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK 0x94eu /* exclave_ecstackentry_addr_t */
+#define STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE   0x94fu /* exclave address space container */
+#define STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INFO   0x950u /* struct exclave_addressspace_info */
+#define STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME   0x951u /* exclave component name */
+#define STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT     0x952u /* exclave text layout container */
+#define STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO     0x953u /* struct exclave_textlayout_info */
+#define STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS 0x954u /* struct exclave_textlayout_segment */
+#define STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO 0x955u /* struct thread_crash_exclaves_info */
 
 struct stack_snapshot_frame32 {
 	uint32_t lr;
@@ -698,19 +708,19 @@ enum task_transition_type {
 enum thread_snapshot_flags {
 	/* k{User,Kernel}64_p (values 0x1 and 0x2) are defined in generic_snapshot_flags */
 	kHasDispatchSerial      = 0x4,
-	kStacksPCOnly           = 0x8,    /* Stack traces have no frame pointers. */
-	kThreadDarwinBG         = 0x10,   /* Thread is darwinbg */
-	kThreadIOPassive        = 0x20,   /* Thread uses passive IO */
-	kThreadSuspended        = 0x40,   /* Thread is suspended */
-	kThreadTruncatedBT      = 0x80,   /* Unmapped pages caused truncated backtrace */
-	kGlobalForcedIdle       = 0x100,  /* Thread performs global forced idle */
-	kThreadFaultedBT        = 0x200,  /* Some thread stack pages were faulted in as part of BT */
-	kThreadTriedFaultBT     = 0x400,  /* We tried to fault in thread stack pages as part of BT */
-	kThreadOnCore           = 0x800,  /* Thread was on-core when we entered debugger context */
-	kThreadIdleWorker       = 0x1000, /* Thread is an idle libpthread worker thread */
-	kThreadMain             = 0x2000, /* Thread is the main thread */
-	kThreadTruncKernBT      = 0x4000, /* Unmapped pages caused truncated kernel BT */
-	kThreadTruncUserBT      = 0x8000, /* Unmapped pages caused truncated user BT */
+	kStacksPCOnly           = 0x8,     /* Stack traces have no frame pointers. */
+	kThreadDarwinBG         = 0x10,    /* Thread is darwinbg */
+	kThreadIOPassive        = 0x20,    /* Thread uses passive IO */
+	kThreadSuspended        = 0x40,    /* Thread is suspended */
+	kThreadTruncatedBT      = 0x80,    /* Unmapped pages caused truncated backtrace */
+	kGlobalForcedIdle       = 0x100,   /* Thread performs global forced idle */
+	kThreadFaultedBT        = 0x200,   /* Some thread stack pages were faulted in as part of BT */
+	kThreadTriedFaultBT     = 0x400,   /* We tried to fault in thread stack pages as part of BT */
+	kThreadOnCore           = 0x800,   /* Thread was on-core when we entered debugger context */
+	kThreadIdleWorker       = 0x1000,  /* Thread is an idle libpthread worker thread */
+	kThreadMain             = 0x2000,  /* Thread is the main thread */
+	kThreadTruncKernBT      = 0x4000,  /* Unmapped pages caused truncated kernel BT */
+	kThreadTruncUserBT      = 0x8000,  /* Unmapped pages caused truncated user BT */
 	kThreadTruncUserAsyncBT = 0x10000, /* Unmapped pages caused truncated user async BT */
 }; // Note: Add any new flags to kcdata.py (ths_ss_flags)
 
@@ -1130,6 +1140,75 @@ struct stackshot_suspension_source {
 	uint64_t tss_tid;      /* tid of suspending thread */
 	int tss_pid;           /* pid of suspending task */
 	char tss_procname[65]; /* name of suspending task */
+} __attribute__((packed));
+
+/**************** definitions for exclaves *********************/
+
+enum thread_exclaves_flags : uint32_t {
+	kExclaveRPCActive = 0x1,          /* Thread is handling RPC call in secure world */
+	kExclaveUpcallActive = 0x2,       /* Thread has upcalled back into xnu while handling RPC */
+	kExclaveSchedulerRequest = 0x4,   /* Thread is handling scheduler request */
+};
+
+struct thread_exclaves_info {
+	uint64_t tei_scid;              /* Scheduling context for exclave IPC stack */
+	uint32_t tei_thread_offset;     /* # frames from top of stack exclave frames should be inserted */
+	uint32_t tei_flags;             /* A combination of enum thread_exclaves_flags values */
+} __attribute__((packed));
+
+struct thread_crash_exclaves_info {
+	uint64_t tcei_scid;              /* Scheduling context for exclave IPC stack */
+	uint64_t tcei_thread_id;         /* Corresponding xnu thread id */
+	uint32_t tcei_flags;             /* A combination of enum thread_exclaves_flags values */
+} __attribute__((packed));
+
+enum exclave_scresult_flags : uint64_t {
+	kExclaveScresultHaveIPCStack = 0x1,
+};
+
+struct exclave_scresult_info {
+	uint64_t esc_id;
+	uint64_t esc_flags;             /* A combination of enum exclave_scresult_flags values */
+} __attribute__((packed));
+
+enum exclave_ipcstackentry_flags : uint64_t {
+	kExclaveIpcStackEntryHaveInvocationID = 0x1,
+	kExclaveIpcStackEntryHaveStack = 0x2,
+};
+
+struct exclave_ipcstackentry_info {
+	uint64_t eise_asid;                     /* ASID */
+	uint64_t eise_tnid;                     /* Thread numeric ID, may be UINT64_MAX if ommitted */
+	uint64_t eise_invocationid;             /* Invocation ID, may be UINT64_MAX if ommitted */
+	uint64_t eise_flags;                    /* A combination of enum exclave_ipcstackentry_flags values */
+} __attribute__((packed));
+
+typedef uint64_t exclave_ecstackentry_addr_t;
+
+enum exclave_addressspace_flags : uint64_t {
+	kExclaveAddressSpaceHaveSlide = 0x1,    /* slide info provided */
+};
+
+struct exclave_addressspace_info {
+	uint64_t eas_id;                        /* ASID */
+	uint64_t eas_flags;                     /* A combination of enum exclave_addressspace_flags values */
+	uint64_t eas_layoutid;                  /* textLayout for this address space */
+	uint64_t eas_slide;                     /* slide to apply to textlayout, or UINT64_MAX if omitted */
+} __attribute__((packed));
+
+enum exclave_textlayout_flags : uint64_t {
+	kExclaveTextLayoutLoadAddressesSynthetic = 0x1, /* Load Addresses are synthetic */
+	kExclaveTextLayoutLoadAddressesUnslid = 0x2, /* Load Addresses are accurate and unslid */
+};
+
+struct exclave_textlayout_info {
+	uint64_t layout_id;
+	uint64_t etl_flags;                     /* A combination of enum exclave_textlayout_flags values */
+} __attribute__((packed));
+
+struct exclave_textlayout_segment {
+	uuid_t layoutSegment_uuid;
+	uint64_t layoutSegment_loadAddress;     /* Load Address, either synthetic or unslid */
 } __attribute__((packed));
 
 /**************** definitions for crashinfo *********************/

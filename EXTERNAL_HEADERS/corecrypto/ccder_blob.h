@@ -1,4 +1,4 @@
-/* Copyright (c) (2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -48,7 +48,7 @@ bool ccder_blob_encode_len(ccder_blob *into, size_t len);
 CC_NONNULL((1)) CC_NODISCARD
 bool ccder_blob_encode_tl(ccder_blob *into, ccder_tag tag, size_t len);
 
-CC_NONNULL((1, 3)) CC_NODISCARD
+CC_NONNULL((1)) CC_NODISCARD
 bool ccder_blob_encode_body(ccder_blob *into, size_t size, const uint8_t *cc_sized_by(size) body);
 
 CC_NONNULL((1, 4)) CC_NODISCARD

@@ -108,6 +108,7 @@
 #include <netinet6/ip6protosw.h>
 
 #include <net/net_osdep.h>
+#include <net/sockaddr_utils.h>
 
 #ifndef __APPLE__
 #include <sys/kernel.h>
@@ -152,11 +153,11 @@ encap4_input(struct mbuf *m, int off)
 	proto = ip->ip_p;
 #endif
 
-	bzero(&s, sizeof(s));
+	SOCKADDR_ZERO(&s, sizeof(s));
 	s.sin_family = AF_INET;
 	s.sin_len = sizeof(struct sockaddr_in);
 	s.sin_addr = ip->ip_src;
-	bzero(&d, sizeof(d));
+	SOCKADDR_ZERO(&d, sizeof(d));
 	d.sin_family = AF_INET;
 	d.sin_len = sizeof(struct sockaddr_in);
 	d.sin_addr = ip->ip_dst;
@@ -179,8 +180,7 @@ encap4_input(struct mbuf *m, int off)
 			 * it's inbound traffic, we need to match in reverse
 			 * order
 			 */
-			prio = mask_match(ep, (struct sockaddr *)&d,
-			    (struct sockaddr *)&s);
+			prio = mask_match(ep, SA(&d), SA(&s));
 		}
 
 		/*
@@ -244,11 +244,11 @@ encap6_input(struct mbuf **mp, int *offp, int proto)
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
 	ip6 = mtod(m, struct ip6_hdr *);
-	bzero(&s, sizeof(s));
+	SOCKADDR_ZERO(&s, sizeof(s));
 	s.sin6_family = AF_INET6;
 	s.sin6_len = sizeof(struct sockaddr_in6);
 	s.sin6_addr = ip6->ip6_src;
-	bzero(&d, sizeof(d));
+	SOCKADDR_ZERO(&d, sizeof(d));
 	d.sin6_family = AF_INET6;
 	d.sin6_len = sizeof(struct sockaddr_in6);
 	d.sin6_addr = ip6->ip6_dst;
@@ -271,8 +271,7 @@ encap6_input(struct mbuf **mp, int *offp, int proto)
 			 * it's inbound traffic, we need to match in reverse
 			 * order
 			 */
-			prio = mask_match(ep, (struct sockaddr *)&d,
-			    (struct sockaddr *)&s);
+			prio = mask_match(ep, SA(&d), SA(&s));
 		}
 
 		/* see encap4_input() for issues here */
@@ -350,13 +349,13 @@ encap_attach(int af, int proto, const struct sockaddr *sp,
 			continue;
 		}
 		if (ep->src.ss_len != sp->sa_len ||
-		    bcmp(&ep->src, sp, sp->sa_len) != 0 ||
-		    bcmp(&ep->srcmask, sm, sp->sa_len) != 0) {
+		    SOCKADDR_CMP(&ep->src, sp, sp->sa_len) != 0 ||
+		    SOCKADDR_CMP(&ep->srcmask, sm, sp->sa_len) != 0) {
 			continue;
 		}
 		if (ep->dst.ss_len != dp->sa_len ||
-		    bcmp(&ep->dst, dp, dp->sa_len) != 0 ||
-		    bcmp(&ep->dstmask, dm, dp->sa_len) != 0) {
+		    SOCKADDR_CMP(&ep->dst, dp, dp->sa_len) != 0 ||
+		    SOCKADDR_CMP(&ep->dstmask, dm, dp->sa_len) != 0) {
 			continue;
 		}
 
@@ -366,10 +365,10 @@ encap_attach(int af, int proto, const struct sockaddr *sp,
 
 	new_ep->af = af;
 	new_ep->proto = proto;
-	bcopy(sp, &new_ep->src, sp->sa_len);
-	bcopy(sm, &new_ep->srcmask, sp->sa_len);
-	bcopy(dp, &new_ep->dst, dp->sa_len);
-	bcopy(dm, &new_ep->dstmask, dp->sa_len);
+	SOCKADDR_COPY(sp, &new_ep->src, sp->sa_len);
+	SOCKADDR_COPY(sm, &new_ep->srcmask, sp->sa_len);
+	SOCKADDR_COPY(dp, &new_ep->dst, dp->sa_len);
+	SOCKADDR_COPY(dm, &new_ep->dstmask, dp->sa_len);
 	new_ep->psw = psw;
 	new_ep->arg = arg;
 

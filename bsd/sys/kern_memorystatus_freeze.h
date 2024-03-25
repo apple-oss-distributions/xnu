@@ -71,12 +71,20 @@ extern int  memorystatus_freeze_process_sync(proc_t p);
 #ifdef CONFIG_FREEZE
 extern int memorystatus_entitled_max_task_footprint_mb;
 
+#if XNU_TARGET_OS_WATCH
+#define FREEZE_PAGES_MIN   ( 2 * 1024 * 1024 / PAGE_SIZE)
+#else
 #define FREEZE_PAGES_MIN   ( 8 * 1024 * 1024 / PAGE_SIZE)
+#endif
 #define FREEZE_PAGES_MAX   (max_task_footprint_mb == 0 ? INT_MAX : (max_task_footprint_mb << (20 - PAGE_SHIFT)))
 #define FREEZE_PAGES_MAX_SWAP_ENABLED \
     (memorystatus_entitled_max_task_footprint_mb == 0 ? INT_MAX : (memorystatus_entitled_max_task_footprint_mb << (20 - PAGE_SHIFT)))
 
+#if XNU_TARGET_OS_WATCH
+#define FREEZE_SUSPENDED_THRESHOLD_DEFAULT 0
+#else
 #define FREEZE_SUSPENDED_THRESHOLD_DEFAULT 4
+#endif
 
 #define FREEZE_DAILY_MB_MAX_DEFAULT       1024
 #define FREEZE_DEGRADATION_BUDGET_THRESHOLD     25 //degraded perf. when the daily budget left falls below this threshold percentage
@@ -85,8 +93,19 @@ extern int memorystatus_entitled_max_task_footprint_mb;
 #define MAX_FROZEN_PROCESS_DEMOTIONS 2
 #define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED 4
 #define MIN_THAW_DEMOTION_THRESHOLD  5
+
+#if XNU_TARGET_OS_WATCH
+#define MIN_THAW_REFREEZE_THRESHOLD  0
+#else
 #define MIN_THAW_REFREEZE_THRESHOLD  3
+#endif
+
+#if XNU_TARGET_OS_WATCH
+#define FREEZE_MAX_CANDIDATE_BAND JETSAM_PRIORITY_ELEVATED_INACTIVE
+#else
 #define FREEZE_MAX_CANDIDATE_BAND JETSAM_PRIORITY_AGING_BAND2
+#endif
+
 
 typedef struct throttle_interval_t {
 	uint32_t mins;
@@ -96,7 +115,7 @@ typedef struct throttle_interval_t {
 	mach_timespec_t ts;
 } throttle_interval_t;
 
-extern boolean_t memorystatus_freeze_enabled;
+extern bool memorystatus_freeze_enabled;
 extern int memorystatus_freeze_wakeup;
 
 /* Thresholds */
@@ -116,8 +135,6 @@ extern unsigned int memorystatus_min_thaw_refreeze_threshold;
 #define FREEZER_CONTROL_GET_STATUS      (1)
 #endif /* DEVELOPMENT || DEBUG */
 
-extern boolean_t memorystatus_freeze_enabled;
-extern int memorystatus_freeze_wakeup;
 extern int memorystatus_freeze_jetsam_band; /* the jetsam band which will contain P_MEMSTAT_FROZEN processes */
 
 bool memorystatus_freeze_thread_should_run(void);
@@ -250,7 +267,8 @@ void memorystatus_freezer_mark_ui_transition(proc_t p);
 #define FREEZER_CONTROL_GET_PROCS_MAX_COUNT (FREEZE_PROCESSES_MAX * 2)
 
 typedef struct _global_frozen_procs {
-	size_t gfp_num_frozen;
+	uint64_t gfp_num_frozen;
+
 	struct {
 		pid_t fp_pid;
 		proc_name_t fp_name;

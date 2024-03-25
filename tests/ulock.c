@@ -49,6 +49,38 @@ test_waiter(void *arg __unused)
 	return NULL;
 }
 
+static mach_timebase_info_data_t timebase_info;
+
+static uint64_t
+nanos_to_abs(uint64_t nanos)
+{
+	return nanos * timebase_info.denom / timebase_info.numer;
+}
+
+static void *
+test_waiter_with_timeout(void *arg)
+{
+	uint64_t deadline = (uint64_t) arg;
+
+	for (;;) {
+		uint32_t test_ulock_owner = atomic_load_explicit(&test_ulock,
+		    memory_order_relaxed);
+		int rc = __ulock_wait2(UL_UNFAIR_LOCK | ULF_NO_ERRNO | ULF_DEADLINE, &test_ulock,
+		    test_ulock_owner, deadline, 0);
+		if (rc == -EINTR || rc == -EFAULT) {
+			continue;
+		}
+		T_ASSERT_EQ(rc, -ETIMEDOUT, "__ulock_wait");
+		break;
+	}
+
+	T_ASSERT_GE(mach_absolute_time(), deadline, "Current time is past the deadline specified");
+
+	T_PASS("Waiter woke");
+
+	return NULL;
+}
+
 static void *
 test_waker(void *arg __unused)
 {
@@ -89,4 +121,28 @@ T_DECL(ulock_non_owner_wake, "ulock_wake respects non-owner wakes",
 
 	// won't ever actually join
 	pthread_join(waiter, NULL);
+}
+
+T_DECL(ulock_wait_deadline, "ulock_wait2 with deadline", T_META_CHECK_LEAKS(false))
+{
+	kern_return_t kr = mach_timebase_info(&timebase_info);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_timebase_info");
+
+	// Take the lock as self
+	atomic_store_explicit(&test_ulock, _os_get_self() & ~0x3u, memory_order_relaxed);
+
+	pthread_t waiter;
+
+	// Deadline in the past
+	uint64_t deadline = mach_absolute_time() - nanos_to_abs(3 * NSEC_PER_SEC);
+	T_ASSERT_POSIX_ZERO(pthread_create(&waiter, NULL, test_waiter_with_timeout, (void *) deadline), "create waiter");
+
+	pthread_join(waiter, NULL);
+
+	// Deadline in the future
+	deadline = mach_absolute_time() + nanos_to_abs(3 * NSEC_PER_SEC);
+	T_ASSERT_POSIX_ZERO(pthread_create(&waiter, NULL, test_waiter_with_timeout, (void *) deadline), "create waiter");
+
+	pthread_join(waiter, NULL);
+	T_END;
 }

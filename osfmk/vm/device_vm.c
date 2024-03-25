@@ -162,7 +162,7 @@ device_pager_setup(
 
 	assert(object != VM_OBJECT_NULL);
 	vm_object_lock(object);
-	object->true_share = TRUE;
+	VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 	if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 	}
@@ -270,12 +270,12 @@ device_pager_init(
 
 	vm_object = (vm_object_t)memory_object_control_to_vm_object(control);
 	vm_object_lock(vm_object);
-	vm_object->private = TRUE;
+	VM_OBJECT_SET_PRIVATE(vm_object, TRUE);
 	if (device_object->flags & DEVICE_PAGER_CONTIGUOUS) {
-		vm_object->phys_contiguous = TRUE;
+		VM_OBJECT_SET_PHYS_CONTIGUOUS(vm_object, TRUE);
 	}
 	if (device_object->flags & DEVICE_PAGER_NOPHYSCACHE) {
-		vm_object->nophyscache = TRUE;
+		VM_OBJECT_SET_NOPHYSCACHE(vm_object, TRUE);
 	}
 
 	vm_object->wimg_bits = device_object->flags & VM_WIMG_MASK;
@@ -300,6 +300,35 @@ device_pager_init(
 	return KERN_SUCCESS;
 }
 
+static kern_return_t
+device_pager_data_action(
+	memory_object_t                 mem_obj,
+	memory_object_offset_t          offset,
+	memory_object_cluster_size_t    length,
+	vm_prot_t                       protection)
+{
+	device_pager_t  device_object;
+	memory_object_offset_t end_offset;
+	kern_return_t kr;
+
+	device_object = device_pager_lookup(mem_obj);
+
+	if (device_object == DEVICE_PAGER_NULL) {
+		panic("%s: lookup failed", __func__);
+	}
+
+	if (offset >= device_object->size ||
+	    os_add_overflow(offset, length, &end_offset) ||
+	    end_offset > device_object->size) {
+		return KERN_INVALID_VALUE;
+	}
+
+	__IGNORE_WCASTALIGN(kr = device_data_action(device_object->device_handle,
+	    (ipc_port_t) device_object, protection, offset, length));
+
+	return kr;
+}
+
 /*
  *
  */
@@ -315,17 +344,8 @@ device_pager_data_return(
 	__unused boolean_t              kernel_copy,
 	__unused int                    upl_flags)
 {
-	device_pager_t  device_object;
-
-	device_object = device_pager_lookup(mem_obj);
-	if (device_object == DEVICE_PAGER_NULL) {
-		panic("device_pager_data_return: lookup failed");
-	}
-
-	__IGNORE_WCASTALIGN(return device_data_action(device_object->device_handle,
-	    (ipc_port_t) device_object,
-	    VM_PROT_READ | VM_PROT_WRITE,
-	    offset, data_cnt));
+	return device_pager_data_action(mem_obj, offset, data_cnt,
+	           VM_PROT_READ | VM_PROT_WRITE);
 }
 
 /*
@@ -339,18 +359,7 @@ device_pager_data_request(
 	__unused vm_prot_t      protection_required,
 	__unused memory_object_fault_info_t     fault_info)
 {
-	device_pager_t  device_object;
-
-	device_object = device_pager_lookup(mem_obj);
-
-	if (device_object == DEVICE_PAGER_NULL) {
-		panic("device_pager_data_request: lookup failed");
-	}
-
-	__IGNORE_WCASTALIGN(device_data_action(device_object->device_handle,
-	    (ipc_port_t) device_object,
-	    VM_PROT_READ, offset, length));
-	return KERN_SUCCESS;
+	return device_pager_data_action(mem_obj, offset, length, VM_PROT_READ);
 }
 
 /*
@@ -404,7 +413,7 @@ device_pager_deallocate(
 			device_object->device_handle = (device_port_t) NULL;
 		}
 		device_control = device_object->dev_pgr_hdr.mo_control;
-		memory_object_destroy(device_control, 0);
+		memory_object_destroy(device_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 	} else if (ref_count == 0) {
 		/*
 		 * No more references: free the pager.

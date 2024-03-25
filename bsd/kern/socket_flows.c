@@ -130,8 +130,8 @@ do {                                                                            
 #define SOFLOW_HASH_SIZE 16
 #define SOFLOW_HASH(laddr, faddr, lport, fport) ((faddr) ^ ((laddr) >> 16) ^ (fport) ^ (lport))
 
-#define SOFLOW_IS_UDP(so) (so && so->so_proto && so->so_proto->pr_type == SOCK_DGRAM && so->so_proto->pr_protocol == IPPROTO_UDP)
-#define SOFLOW_GET_SO_PROTO(so) ((so && so->so_proto) ? so->so_proto->pr_protocol : IPPROTO_MAX)
+#define SOFLOW_IS_UDP(so) (so && SOCK_CHECK_TYPE(so, SOCK_DGRAM) && SOCK_CHECK_PROTO(so, IPPROTO_UDP))
+#define SOFLOW_GET_SO_PROTO(so) (so ? SOCK_PROTO(so) : IPPROTO_MAX)
 
 #define SOFLOW_SOCKET_PID(so) ((so->so_flags & SOF_DELEGATED) ? so->e_pid : so->last_pid)
 

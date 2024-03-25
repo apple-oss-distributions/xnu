@@ -263,15 +263,35 @@ trace_pc_guard_counter(struct ksancov_dev *dev, uint32_t *guardp)
 void
 kcov_ksancov_trace_guard(uint32_t *guardp, void *caller)
 {
-	uintptr_t pc = (uintptr_t)(VM_KERNEL_UNSLIDE(caller) - 1);
+	/*
+	 * Return as early as possible if we haven't had a chance to
+	 * create the edge map yet.
+	 *
+	 * Note: this will also protect us from performing unnecessary
+	 * operations (especially during early boot) which may result
+	 * in increased maintenance burden for the instrumentation (see
+	 * the comment about VM_KERNEL_UNSLIDE below).
+	 */
+	if (__probable(ksancov_edgemap == NULL)) {
+		return;
+	}
 
 	if (guardp == NULL) {
 		return;
 	}
 
-	if (__probable(ksancov_edgemap == NULL)) {
-		return;
-	}
+	/*
+	 * Since this code was originally introduced, VM_KERNEL_UNSLIDE
+	 * evolved significantly, and it now expands to a series of
+	 * function calls that check whether the address is slid, mask
+	 * off tags and ultimately unslide the pointer.
+	 *
+	 * Therefore we need to make sure that we do not instrument any function
+	 * in the closure of VM_KERNEL_UNSLIDE: this would cause a loop where the
+	 * instrumentation callbacks end up calling into instrumented code.
+	 *
+	 */
+	uintptr_t pc = (uintptr_t)(VM_KERNEL_UNSLIDE(caller) - 1);
 
 	uint32_t gd = *guardp;
 	if (__improbable(gd && !(gd & GUARD_SEEN))) {

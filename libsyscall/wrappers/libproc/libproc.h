@@ -129,6 +129,8 @@ int proc_clear_dirty(pid_t pid, uint32_t flags);
 
 int proc_terminate(pid_t pid, int *sig);
 int proc_terminate_all_rsr(int sig);
+int proc_signal_with_audittoken(audit_token_t *audittoken, int sig);
+int proc_terminate_with_audittoken(audit_token_t *audittoken, int *sig);
 
 /*
  * NO_SMT means that on an SMT CPU, this thread must be scheduled alone,

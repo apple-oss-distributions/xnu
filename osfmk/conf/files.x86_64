@@ -108,9 +108,8 @@ osfmk/kern/hv_io_notifier.c			optional hypervisor
 #osfmk/OPTIONS/hi_res_clock	optional hi_res_clock
 
 # Kernel performance monitoring
-osfmk/x86_64/kpc_x86.c              optional kpc
-
-osfmk/x86_64/monotonic_x86_64.c optional monotonic
+osfmk/x86_64/kpc_x86.c              optional config_cpu_counters
+osfmk/x86_64/monotonic_x86_64.c     optional config_cpu_counters
 
 osfmk/x86_64/idt64.s		standard
 

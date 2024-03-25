@@ -35,16 +35,23 @@
 #endif /* __has_feature(ptrauth_calls) */
 
 #include "log_encode.h"
+#include "log_internal.h"
 #include "log_mem.h"
 
 #define LOG_FMT_MAX_PRECISION (1024)
 #define log_context_cursor(ctx) &(ctx)->ctx_hdr->hdr_data[(ctx)->ctx_content_off]
+#define TRACEPOINT_BUF_MAX_SIZE (64)
 
-extern boolean_t doprnt_hide_pointers;
+typedef struct {
+	uint8_t *tp_buf;
+	size_t  tp_size;
+} tracepoint_buf_t;
 
 SCALABLE_COUNTER_DEFINE(oslog_p_fmt_invalid_msgcount);
 SCALABLE_COUNTER_DEFINE(oslog_p_fmt_max_args_msgcount);
 SCALABLE_COUNTER_DEFINE(oslog_p_truncated_msgcount);
+
+extern boolean_t doprnt_hide_pointers;
 
 static bool
 is_digit(char ch)
@@ -478,25 +485,33 @@ log_encode_fmt(os_log_context_t ctx, const char *format, va_list args)
 	return 0;
 }
 
-static inline size_t
-write_address_location(uint8_t buf[static sizeof(uint64_t)], uintptr_t loc, size_t loc_size)
+OS_ALWAYS_INLINE
+static inline void
+tracepoint_buf_add(tracepoint_buf_t *tp, const void *data, size_t size)
+{
+	assert((tp->tp_size + size) <= TRACEPOINT_BUF_MAX_SIZE);
+	memcpy(&tp->tp_buf[tp->tp_size], data, size);
+	tp->tp_size += size;
+}
+
+static void
+tracepoint_buf_location(tracepoint_buf_t *tpb, uintptr_t loc, size_t loc_size)
 {
 	if (loc_size == sizeof(uintptr_t)) {
 #if __LP64__
 		loc_size = 6; // 48 bits are enough
 #endif
-		memcpy(buf, (uintptr_t[]){ loc }, loc_size);
+		tracepoint_buf_add(tpb, (uintptr_t[]){ loc }, loc_size);
 	} else {
 		assert(loc_size == sizeof(uint32_t));
-		memcpy(buf, (uint32_t[]){ (uint32_t)loc }, loc_size);
+		tracepoint_buf_add(tpb, (uint32_t[]){ (uint32_t)loc }, loc_size);
 	}
-	return loc_size;
 }
 
 static void
-os_log_encode_location(os_log_context_t ctx, uintptr_t loc, size_t loc_size)
+os_log_context_prepare_header(os_log_context_t ctx, size_t hdr_size)
 {
-	const size_t hdr_size = write_address_location(ctx->ctx_buffer, loc, loc_size);
+	assert(hdr_size > 0 && hdr_size <= TRACEPOINT_BUF_MAX_SIZE);
 	ctx->ctx_hdr = (os_log_fmt_hdr_t)&ctx->ctx_buffer[hdr_size];
 	bzero(ctx->ctx_hdr, sizeof(*ctx->ctx_hdr));
 	ctx->ctx_content_sz = (uint16_t)(ctx->ctx_buffer_sz - hdr_size - sizeof(*ctx->ctx_hdr));
@@ -510,9 +525,18 @@ os_log_encode_location(os_log_context_t ctx, uintptr_t loc, size_t loc_size)
  */
 bool
 os_log_context_encode(os_log_context_t ctx, const char *fmt, va_list args,
-    uintptr_t loc, size_t loc_size)
+    uintptr_t loc, size_t loc_size, uint16_t subsystem_id)
 {
-	os_log_encode_location(ctx, loc, loc_size);
+	tracepoint_buf_t tpb = {
+		.tp_buf     = ctx->ctx_buffer,
+		.tp_size    = 0
+	};
+
+	tracepoint_buf_location(&tpb, loc, loc_size);
+	if (os_log_subsystem_id_valid(subsystem_id)) {
+		tracepoint_buf_add(&tpb, &subsystem_id, sizeof(subsystem_id));
+	}
+	os_log_context_prepare_header(ctx, tpb.tp_size);
 
 	va_list args_copy;
 	va_copy(args_copy, args);

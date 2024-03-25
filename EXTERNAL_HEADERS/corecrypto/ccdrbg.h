@@ -1,11 +1,11 @@
-/* Copyright (c) (2010,2011,2012,2014,2015,2016,2017,2018,2019) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2014-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -21,6 +21,7 @@
 
 #include <corecrypto/cc.h>
 #include <corecrypto/ccdrbg_impl.h>
+#include <corecrypto/ccdrbg_df.h>
 
 /*
  * The maximum length of the entropy_input,  additional_input (max_additional_input_length) , personalization string
@@ -43,45 +44,44 @@
  * see below or NIST  800-90A for the definition of security strength
  */
 
-CC_INLINE int ccdrbg_init(const struct ccdrbg_info *info,
-			struct ccdrbg_state *drbg,
-            size_t entropyLength, const void* entropy,
-            size_t nonceLength, const void* nonce,
-            size_t psLength, const void* ps)
-{
-	return info->init(info, drbg, entropyLength, entropy, nonceLength, nonce, psLength, ps);
-}
+int ccdrbg_init(const struct ccdrbg_info *info,
+                struct ccdrbg_state *drbg,
+                size_t entropyLength, const void* entropy,
+                size_t nonceLength, const void* nonce,
+                size_t psLength, const void* ps);
 
 /*
  *  The entropyLength is forced to be greater or equal than the security strength.
  */
-CC_INLINE int ccdrbg_reseed(const struct ccdrbg_info *info,
-       struct ccdrbg_state *drbg,
-       size_t entropyLength, const void *entropy,
-       size_t additionalLength, const void *additional)
-{
-    return info->reseed(drbg, entropyLength, entropy, additionalLength, additional);
-}
+int ccdrbg_reseed(const struct ccdrbg_info *info,
+                  struct ccdrbg_state *drbg,
+                  size_t entropyLength, const void *entropy,
+                  size_t additionalLength, const void *additional);
 
 
-CC_INLINE int ccdrbg_generate(const struct ccdrbg_info *info,
-         struct ccdrbg_state *drbg,
-         size_t dataOutLength, void *dataOut,
-         size_t additionalLength, const void *additional)
-{
-    return info->generate(drbg, dataOutLength, dataOut, additionalLength, additional);
-}
+int ccdrbg_generate(const struct ccdrbg_info *info,
+                    struct ccdrbg_state *drbg,
+                    size_t dataOutLength, void *dataOut,
+                    size_t additionalLength, const void *additional);
 
-CC_INLINE void ccdrbg_done(const struct ccdrbg_info *info,
-		struct ccdrbg_state *drbg)
-{
-	info->done(drbg);
-}
+void ccdrbg_done(const struct ccdrbg_info *info,
+                 struct ccdrbg_state *drbg);
 
-CC_INLINE size_t ccdrbg_context_size(const struct ccdrbg_info *info)
-{
-    return info->size;
-}
+size_t ccdrbg_context_size(const struct ccdrbg_info *info);
+
+/*!
+  @function ccdrbg_must_reseed
+  @abstract Whether the DRBG requires a reseed to continue generation
+  @param info The DRBG implementation descriptor
+  @param drbg The DRBG state
+  @return true if the DRBG requires reseed; false otherwise
+
+  @discussion In strict FIPS mode, this returns true after a count of
+  requests exceeding the DRBG reseed interval of 2^48. When strict
+  FIPS mode is disabled, this function always returns false.
+*/
+bool ccdrbg_must_reseed(const struct ccdrbg_info *info,
+                        const struct ccdrbg_state *drbg);
 
 
 /*
@@ -92,7 +92,7 @@ struct ccdrbg_nistctr_custom {
     const struct ccmode_ctr *ctr_info;
     size_t keylen;
     int strictFIPS;
-    int use_df;
+    const ccdrbg_df_ctx_t *df_ctx;
 };
 
 void ccdrbg_factory_nistctr(struct ccdrbg_info *info, const struct ccdrbg_nistctr_custom *custom);

@@ -2450,7 +2450,7 @@ sched_clutch_thread_remove(
 #endif /* CONFIG_SCHED_EDGE */
 	sched_clutch_t clutch = sched_clutch_for_thread(thread);
 	assert(thread->thread_group == clutch->sc_tg);
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 
 	sched_clutch_bucket_group_t clutch_bucket_group = &(clutch->sc_clutch_groups[thread->th_sched_bucket]);
 	sched_clutch_bucket_t clutch_bucket = &(clutch_bucket_group->scbg_clutch_buckets[root_clutch->scr_cluster_id]);
@@ -2461,9 +2461,14 @@ sched_clutch_thread_remove(
 	/* Remove thread from the clutch_bucket */
 	priority_queue_remove(&clutch_bucket->scb_thread_runq, &thread->th_clutch_runq_link);
 	remqueue(&thread->th_clutch_timeshare_link);
-	thread->runq = PROCESSOR_NULL;
 
 	priority_queue_remove(&clutch_bucket->scb_clutchpri_prioq, &thread->th_clutch_pri_link);
+
+	/*
+	 * Warning: After this point, the thread's scheduling fields may be
+	 * modified by other cores that acquire the thread lock.
+	 */
+	thread_clear_runq(thread);
 
 	/* Update counts at various levels of the hierarchy */
 	os_atomic_dec(&clutch->sc_thr_count, relaxed);
@@ -2900,7 +2905,7 @@ sched_clutch_processor_enqueue(
 {
 	boolean_t       result;
 
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 	if (SCHED_CLUTCH_THREAD_ELIGIBLE(thread)) {
 		sched_clutch_root_t pset_clutch_root = sched_clutch_processor_root_clutch(processor);
 		result = sched_clutch_thread_insert(pset_clutch_root, thread, options);
@@ -3030,12 +3035,11 @@ sched_clutch_processor_queue_remove(
 	processor_t processor,
 	thread_t    thread)
 {
-	run_queue_t             rq;
 	processor_set_t         pset = processor->processor_set;
 
 	pset_lock(pset);
 
-	if (processor == thread->runq) {
+	if (processor == thread_get_runq_locked(thread)) {
 		/*
 		 * Thread is on a run queue and we have a lock on
 		 * that run queue.
@@ -3044,7 +3048,7 @@ sched_clutch_processor_queue_remove(
 			sched_clutch_root_t pset_clutch_root = sched_clutch_processor_root_clutch(processor);
 			sched_clutch_thread_remove(pset_clutch_root, thread, mach_absolute_time(), SCHED_CLUTCH_BUCKET_OPTIONS_NONE);
 		} else {
-			rq = sched_clutch_thread_bound_runq(processor, thread);
+			run_queue_t rq = sched_clutch_thread_bound_runq(processor, thread);
 			run_queue_remove(rq, thread);
 		}
 	} else {
@@ -3052,7 +3056,7 @@ sched_clutch_processor_queue_remove(
 		 * The thread left the run queue before we could
 		 * lock the run queue.
 		 */
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 		processor = PROCESSOR_NULL;
 	}
 
@@ -3236,7 +3240,7 @@ void
 sched_clutch_update_thread_bucket(thread_t thread)
 {
 	sched_bucket_t old_bucket = thread->th_sched_bucket;
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 	int pri = (sched_thread_sched_pri_promoted(thread)) ? thread->sched_pri : thread->base_pri;
 	sched_bucket_t new_bucket = sched_clutch_thread_bucket_map(thread, pri);
 
@@ -4083,12 +4087,14 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 
 	/*
 	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
-	 * A migration is only recommended if there's a preferred core in this cluster that's idle.
+	 * A migration is only recommended if there's also an idle core available that needn't be avoided.
 	 */
 	if (reason & AST_QUANTUM) {
-		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id) &&
-		    (processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->perfcontrol_cpu_preferred_bitmask) != 0) {
-			return true;
+		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id)) {
+			uint64_t non_avoided_idle_primary_map = processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->recommended_bitmask & ~processor->processor_set->perfcontrol_cpu_migration_bitmask;
+			if (non_avoided_idle_primary_map != 0) {
+				return true;
+			}
 		}
 	}
 

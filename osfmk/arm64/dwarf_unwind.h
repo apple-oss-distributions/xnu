@@ -166,5 +166,20 @@
 .cfi_escape DW_CFA_expression, DWARF_ARM64_PC, DW_FORM_LEN_TWO_BYTE_SLEB, DW_OP_breg21, DWARF_ARM64_PC_OFFSET %%\
 .cfi_escape DW_CFA_expression, DWARF_ARM64_CPSR, DW_FORM_LEN_TWO_BYTE_SLEB, DW_OP_breg21, DWARF_ARM64_CPSR_OFFSET %%\
 
+#if CONFIG_SPTM
+/**
+ * These offsets are SLEB128 encodings of the offsets of the FP, LR, SP, and PC
+ * members of the SPTM dispatch_panic_state_t structure defined in sptm/dispatch/dispatch.h
+ *
+ * If the offsets of these members are changed in SPTM data structures, they should be
+ * changed here to match accordingly.
+ */
+#define SPTM_UNWIND_DIRECTIVES \
+.cfi_escape DW_CFA_expression, DWARF_ARM64_FP, DW_FORM_LEN_ONE_BYTE_SLEB, DW_OP_breg21, 0 %%\
+.cfi_escape DW_CFA_expression, DWARF_ARM64_LR, DW_FORM_LEN_ONE_BYTE_SLEB, DW_OP_breg21, 8 %%\
+.cfi_escape DW_CFA_expression, DWARF_ARM64_SP, DW_FORM_LEN_ONE_BYTE_SLEB, DW_OP_breg21, 16 %%\
+.cfi_escape DW_CFA_expression, DWARF_ARM64_PC, DW_FORM_LEN_ONE_BYTE_SLEB, DW_OP_breg21, 24 %%\
+
+#endif /* CONFIG_SPTM */
 
 #endif /* _ARM64_DWARF_UNWIND_H_ */

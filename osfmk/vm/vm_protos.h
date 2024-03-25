@@ -904,6 +904,14 @@ extern const char *debug4k_category_name[];
 #endif /* MACH_ASSERT */
 
 
+__enum_decl(vm_object_destroy_reason_t, uint8_t, {
+	VM_OBJECT_DESTROY_UNKNOWN_REASON = 0,
+	VM_OBJECT_DESTROY_FORCED_UNMOUNT = 1,
+	VM_OBJECT_DESTROY_UNGRAFT = 2,
+	VM_OBJECT_DESTROY_MAX = 2,
+});
+_Static_assert(VM_OBJECT_DESTROY_MAX < 4, "Need to fit in `no_pager_reason`'s number of bits");
+
 #endif  /* _VM_VM_PROTOS_H_ */
 
 #endif  /* XNU_KERNEL_PRIVATE */

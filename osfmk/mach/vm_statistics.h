@@ -821,8 +821,9 @@ typedef struct {
 #define VM_KERN_MEMORY_KALLOC_TYPE      31
 #define VM_KERN_MEMORY_TRIAGE           32
 #define VM_KERN_MEMORY_RECOUNT          33
+#define VM_KERN_MEMORY_EXCLAVES         35
 /* add new tags here and adjust first-dynamic value */
-#define VM_KERN_MEMORY_FIRST_DYNAMIC    34
+#define VM_KERN_MEMORY_FIRST_DYNAMIC    36
 
 /* out of tags: */
 #define VM_KERN_MEMORY_ANY              255

@@ -7,6 +7,9 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 
+EXPINC_SUBDIRS_ARM64 += \
+	sptm
+
 ARM_HEADER_FILES = \
 	machine_cpuid.h		\
 	machine_machdep.h	\
@@ -39,7 +42,6 @@ EXPORT_MD_LIST = \
 	machine_kpc.h \
 	machine_remote_time.h \
 	monotonic.h \
-	perfmon_arm64_regs.h \
 	proc_reg.h \
 	asm.h \
 	tlb.h \

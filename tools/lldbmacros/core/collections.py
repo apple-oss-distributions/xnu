@@ -1,13 +1,9 @@
 """
 XNU Collection iterators
 """
-from __future__ import absolute_import
-
-from builtins import object
 from .cvalue import gettype
 from .standard import xnu_format
 
-from six import add_metaclass
 from abc import ABCMeta, abstractmethod, abstractproperty
 
 
@@ -529,8 +525,7 @@ def iter_smr_queue(head_value, elt_type, field_name_or_path):
         head_value, '.next.__smr_ptr', '.first.__smr_ptr'
     ))
 
-@add_metaclass(ABCMeta)
-class _Hash(object):
+class _Hash(object, metaclass=ABCMeta):
     @abstractproperty
     def buckets(self):
         """
@@ -635,7 +630,7 @@ class SMRHash(_Hash):
 
     def iter(self, detailed=False):
         obj_null = self.traits_value.chkGetChildMemberWithName('smrht_obj_type')
-        obj_ty   = obj_null.GetType().GetPointeeType()
+        obj_ty   = obj_null.GetType().GetArrayElementType().GetPointeeType()
         lnk_offs = self.traits_value.xGetScalarByPath('.smrht.link_offset')
         hash_arr = self.hash_value.xGetScalarByName('smrh_array')
         hash_sz  = 1 << (64 - ((hash_arr >> 48) & 0xffff))

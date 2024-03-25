@@ -704,6 +704,8 @@ extern bool smr_entered(smr_t smr) __result_use_check;
  * (entering it recursively is undefined and will panic on development kernels)
  *
  * @c smr_leave() must be called to end this section.
+ *
+ * This function can'be be used in interrupt context.
  */
 extern void smr_enter(smr_t smr);
 
@@ -731,6 +733,8 @@ extern void smr_leave(smr_t smr);
  *
  * This function gives no guarantee of forward progress,
  * unless the magic SMR_CALL_EXPEDITE size is passed to @c smr_call().
+ *
+ * This function can'be be used in interrupt context.
  */
 extern void smr_call(smr_t smr, smr_node_t node, vm_size_t size, smr_cb_t cb);
 
@@ -1081,6 +1085,22 @@ extern struct smr smr_system_sleepable;
 #define smr_iokit_call(n, sz, cb)       smr_call(&smr_iokit, n, sz, cb)
 #define smr_iokit_synchronize()         smr_synchronize(&smr_iokit)
 #define smr_iokit_barrier()             smr_barrier(&smr_iokit)
+
+
+/*!
+ * @macro smr_oslog
+ *
+ * @brief
+ * The SMR domain for kernel OSLog handles.
+ */
+#define smr_oslog                       smr_system
+#define smr_oslog_entered()             smr_entered(&smr_oslog)
+#define smr_oslog_enter()               smr_enter(&smr_oslog)
+#define smr_oslog_leave()               smr_leave(&smr_oslog)
+
+#define smr_oslog_call(n, sz, cb)       smr_call(&smr_oslog, n, sz, cb)
+#define smr_oslog_synchronize()         smr_synchronize(&smr_oslog)
+#define smr_oslog_barrier()             smr_barrier(&smr_oslog)
 
 
 #pragma mark XNU only: implementation details

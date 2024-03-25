@@ -54,6 +54,8 @@
 #include <kdp/kdp_serial.h>
 #endif
 
+#include <kdp/sk_core.h>
+
 #include <vm/vm_map.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_kern.h> /* kernel_map */
@@ -2259,6 +2261,10 @@ kdp_init(void)
 	// Figure out the initial packet size
 	kdp_setup_packet_size();
 	kdp_core_init();
+
+#if EXCLAVES_COREDUMP
+	sk_core_init();
+#endif /* EXCLAVES_COREDUMP */
 
 #if CONFIG_SERIAL_KDP
 	char kdpname[80];

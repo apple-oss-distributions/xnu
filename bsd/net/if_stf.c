@@ -146,6 +146,8 @@
 
 #include <net/bpf.h>
 
+#include <net/sockaddr_utils.h>
+
 #define GET_V4(x) ((const struct in_addr *)(const void *)(&(x)->s6_addr16[1]))
 
 static LCK_GRP_DECLARE(stf_mtx_grp, "stf");
@@ -415,7 +417,7 @@ stf_encapcheck(
 	if (bcmp(GET_V4(&ia6->ia_addr.sin6_addr), &ip.ip_dst,
 	    sizeof(ip.ip_dst)) != 0) {
 		IFA_UNLOCK(&ia6->ia_ifa);
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return 0;
 	}
 	/*
@@ -431,12 +433,12 @@ stf_encapcheck(
 	b.s_addr &= GET_V4(&ia6->ia_prefixmask.sin6_addr)->s_addr;
 	if (a.s_addr != b.s_addr) {
 		IFA_UNLOCK(&ia6->ia_ifa);
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return 0;
 	}
 	/* stf interface makes single side match only */
 	IFA_UNLOCK(&ia6->ia_ifa);
-	IFA_REMREF(&ia6->ia_ifa);
+	ifa_remref(&ia6->ia_ifa);
 	return 32;
 }
 
@@ -459,7 +461,7 @@ stf_getsrcifa6(struct ifnet *ifp)
 			IFA_UNLOCK(ia);
 			continue;
 		}
-		sin6 = (struct sockaddr_in6 *)(void *)ia->ifa_addr;
+		sin6 = SIN6(ia->ifa_addr);
 		if (!IN6_IS_ADDR_6TO4(&sin6->sin6_addr)) {
 			IFA_UNLOCK(ia);
 			continue;
@@ -482,7 +484,7 @@ stf_getsrcifa6(struct ifnet *ifp)
 			continue;
 		}
 
-		IFA_ADDREF(ia);         /* for caller */
+		ifa_addref(ia);         /* for caller */
 		ifnet_lock_done(ifp);
 		return (struct in6_ifaddr *)ia;
 	}
@@ -520,7 +522,7 @@ stf_pre_output(
 	ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
 
 	sc = ifnet_softc(ifp);
-	dst6 = (const struct sockaddr_in6 *)(const void *)dst;
+	dst6 = SIN6(dst);
 
 	/* just in case */
 	if ((ifnet_flags(ifp) & IFF_UP) == 0) {
@@ -542,7 +544,7 @@ stf_pre_output(
 		m = m_pullup(m, sizeof(*ip6));
 		if (!m) {
 			*m0 = NULL; /* makes sure this won't be double freed */
-			IFA_REMREF(&ia6->ia_ifa);
+			ifa_remref(&ia6->ia_ifa);
 			return ENOBUFS;
 		}
 		*m0 = m;
@@ -559,7 +561,7 @@ stf_pre_output(
 	} else if (IN6_IS_ADDR_6TO4(&dst6->sin6_addr)) {
 		in4 = GET_V4(&dst6->sin6_addr);
 	} else {
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return ENETUNREACH;
 	}
 
@@ -576,7 +578,7 @@ stf_pre_output(
 	}
 	if (m == NULL) {
 		*m0 = NULL;
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 		return ENOBUFS;
 	}
 
@@ -586,7 +588,7 @@ stf_pre_output(
 	bzero(ip, sizeof(*ip));
 
 	IFA_LOCK_SPIN(&ia6->ia_ifa);
-	bcopy(GET_V4(&((struct sockaddr_in6 *)&ia6->ia_addr)->sin6_addr),
+	bcopy(GET_V4(&(SIN6(&ia6->ia_addr))->sin6_addr),
 	    &ip->ip_src, sizeof(ip->ip_src));
 	IFA_UNLOCK(&ia6->ia_ifa);
 	bcopy(in4, &ip->ip_dst, sizeof(ip->ip_dst));
@@ -600,7 +602,7 @@ stf_pre_output(
 	}
 
 	lck_mtx_lock(&sc->sc_ro_mtx);
-	dst4 = (struct sockaddr_in *)(void *)&sc->sc_ro.ro_dst;
+	dst4 = SIN(&sc->sc_ro.ro_dst);
 	if (ROUTE_UNUSABLE(&sc->sc_ro) || dst4->sin_family != AF_INET ||
 	    bcmp(&dst4->sin_addr, &ip->ip_dst, sizeof(ip->ip_dst)) != 0) {
 		ROUTE_RELEASE(&sc->sc_ro);
@@ -619,7 +621,7 @@ stf_pre_output(
 		result = EJUSTRETURN;
 	}
 	*m0 = NULL;
-	IFA_REMREF(&ia6->ia_ifa);
+	ifa_remref(&ia6->ia_ifa);
 	return result;
 }
 static errno_t
@@ -681,11 +683,11 @@ stf_checkaddr4(
 		struct sockaddr_in sin;
 		struct rtentry *rt;
 
-		bzero(&sin, sizeof(sin));
+		SOCKADDR_ZERO(&sin, sizeof(sin));
 		sin.sin_family = AF_INET;
 		sin.sin_len = sizeof(struct sockaddr_in);
 		sin.sin_addr = *in;
-		rt = rtalloc1((struct sockaddr *)&sin, 0, 0);
+		rt = rtalloc1(SA(&sin), 0, 0);
 		if (rt != NULL) {
 			RT_LOCK(rt);
 		}
@@ -777,7 +779,10 @@ in_stf_input(
 	}
 
 	otos = ip->ip_tos;
-	mbuf_copydata(m, off, sizeof(ip6), &ip6);
+	if (mbuf_copydata(m, off, sizeof(ip6), &ip6)) {
+		m_freem(m);
+		return;
+	}
 
 	/*
 	 * perform sanity check against inner src/dst.
@@ -860,7 +865,7 @@ stf_ioctl(
 			error = EAFNOSUPPORT;
 			break;
 		}
-		sin6 = (struct sockaddr_in6 *)(void *)ifa->ifa_addr;
+		sin6 = SIN6(ifa->ifa_addr);
 		if (IN6_IS_ADDR_6TO4(&sin6->sin6_addr)) {
 			if (!(ifnet_flags( ifp ) & IFF_UP)) {
 				/* do this only if the interface is not already up */

@@ -64,7 +64,6 @@ _IONetworkNamePrefixMatching
 _IOPageableMapForAddress
 _IOPause
 _IOPrintPlane
-_IORPCMessageFromMach
 _IORWLockAlloc
 _IORWLockFree
 _IORWLockGetMachLock
@@ -1995,3 +1994,5 @@ __ZN6IOPMGR10superClassE
 __ZN9IOService22CoreAnalyticsSendEventEyP8OSStringP12OSDictionaryPFiP15OSMetaClassBase5IORPCE
 __ZN18IOMemoryDescriptor16getMapperOptionsEv
 __ZN18IOMemoryDescriptor16setMapperOptionsEt
+
+__ZN14IOPMrootDomain20copyWakeReasonStringEPcm

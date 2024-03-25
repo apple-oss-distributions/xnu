@@ -529,7 +529,7 @@ fhopen(proc_t p __no_nfs_server_unused,
 	 */
 
 	// starting here... error paths should call vn_close/vnode_put
-	if ((error = falloc(p, &nfp, &indx, ctx)) != 0) {
+	if ((error = falloc(p, &nfp, &indx)) != 0) {
 		vn_close(vp, fmode & FMASK, ctx);
 		goto bad;
 	}
@@ -717,7 +717,7 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	}
 
 	/* Set socket buffer sizes for UDP/TCP */
-	sobufsize = MIN(sb_max_adj, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
+	sobufsize = (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF;
 	error = sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &sobufsize, sizeof(sobufsize));
 	if (error) {
 		log(LOG_INFO, "nfssvc_addsock: socket buffer setting SO_SNDBUF to %llu error(s) %d\n", sobufsize, error);

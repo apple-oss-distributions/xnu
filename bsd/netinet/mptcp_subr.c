@@ -69,6 +69,7 @@
 #include <netinet6/in6_pcb.h>
 #include <netinet6/ip6protosw.h>
 #include <dev/random/randomdev.h>
+#include <net/sockaddr_utils.h>
 
 /*
  * Notes on MPTCP implementation.
@@ -306,22 +307,22 @@ struct sockaddr *
 mptcp_get_session_dst(struct mptses *mpte, boolean_t ipv6, boolean_t ipv4)
 {
 	if (ipv6 && mpte->mpte_sub_dst_v6.sin6_family == AF_INET6) {
-		return (struct sockaddr *)&mpte->mpte_sub_dst_v6;
+		return SA(&mpte->mpte_sub_dst_v6);
 	}
 
 	if (ipv4 && mpte->mpte_sub_dst_v4.sin_family == AF_INET) {
-		return (struct sockaddr *)&mpte->mpte_sub_dst_v4;
+		return SA(&mpte->mpte_sub_dst_v4);
 	}
 
 	/* The interface has neither IPv4 nor IPv6 routes. Give our best guess,
 	 * meaning we prefer IPv6 over IPv4.
 	 */
 	if (mpte->mpte_sub_dst_v6.sin6_family == AF_INET6) {
-		return (struct sockaddr *)&mpte->mpte_sub_dst_v6;
+		return SA(&mpte->mpte_sub_dst_v6);
 	}
 
 	if (mpte->mpte_sub_dst_v4.sin_family == AF_INET) {
-		return (struct sockaddr *)&mpte->mpte_sub_dst_v4;
+		return SA(&mpte->mpte_sub_dst_v4);
 	}
 
 	/* We don't yet have a unicast IP */
@@ -837,7 +838,7 @@ mptcp_check_subflows_and_add(struct mptses *mpte)
 			struct ipv6_prefix nat64prefixes[NAT64_MAX_NUM_PREFIXES];
 			int error, j;
 
-			bzero(&nat64pre, sizeof(struct sockaddr_in6));
+			SOCKADDR_ZERO(&nat64pre, sizeof(struct sockaddr_in6));
 
 			error = ifnet_get_nat64prefix(ifp, nat64prefixes);
 			if (error) {
@@ -856,7 +857,7 @@ mptcp_check_subflows_and_add(struct mptses *mpte)
 
 			error = mptcp_synthesize_nat64(&nat64prefixes[j].ipv6_prefix,
 			    nat64prefixes[j].prefix_len,
-			    &((struct sockaddr_in *)(void *)dst)->sin_addr);
+			    &SIN(dst)->sin_addr);
 			if (error != 0) {
 				os_log_error(mptcp_log_handle, "%s - %lx: cannot synthesize this addr\n",
 				    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));
@@ -868,11 +869,11 @@ mptcp_check_subflows_and_add(struct mptses *mpte)
 			    sizeof(nat64pre.sin6_addr));
 			nat64pre.sin6_len = sizeof(struct sockaddr_in6);
 			nat64pre.sin6_family = AF_INET6;
-			nat64pre.sin6_port = ((struct sockaddr_in *)(void *)dst)->sin_port;
+			nat64pre.sin6_port = SIN(dst)->sin_port;
 			nat64pre.sin6_flowinfo = 0;
 			nat64pre.sin6_scope_id = 0;
 
-			dst = (struct sockaddr *)&nat64pre;
+			dst = SA(&nat64pre);
 		}
 
 		if (dst->sa_family == AF_INET && !info->has_v4_conn) {
@@ -1189,7 +1190,8 @@ mptcp_create_subflows(__unused void *arg)
 		struct mptses *mpte = mpp->mpp_pcbe;
 
 		socket_lock(mp_so, 1);
-		if (!(mpp->mpp_flags & MPP_CREATE_SUBFLOWS)) {
+		if (!(mpp->mpp_flags & MPP_CREATE_SUBFLOWS) ||
+		    !(mpte->mpte_flags & MPTE_ITFINFO_INIT)) {
 			socket_unlock(mp_so, 1);
 			continue;
 		}
@@ -2532,10 +2534,9 @@ mptcp_subflow_add(struct mptses *mpte, struct sockaddr *src,
 			goto out_err;
 		}
 
-		mpts->mpts_src = (struct sockaddr *)alloc_sockaddr(src->sa_len,
-		    Z_WAITOK | Z_NOFAIL);
+		mpts->mpts_src = SA(alloc_sockaddr(src->sa_len, Z_WAITOK | Z_NOFAIL));
 
-		bcopy(src, mpts->mpts_src, src->sa_len);
+		SOCKADDR_COPY(src, mpts->mpts_src, src->sa_len);
 	}
 
 	if (dst->sa_family != AF_INET && dst->sa_family != AF_INET6) {
@@ -2555,7 +2556,7 @@ mptcp_subflow_add(struct mptses *mpte, struct sockaddr *src,
 		goto out_err;
 	}
 
-	memcpy(&mpts->mpts_u_dst, dst, dst->sa_len);
+	SOCKADDR_COPY(dst, &mpts->mpts_dst, dst->sa_len);
 
 	af = mpts->mpts_dst.sa_family;
 
@@ -3239,7 +3240,7 @@ dont_reinject:
 			goto next;
 		}
 
-		m = m_copym_mode(mpt_mbuf, (int)off, mlen, M_DONTWAIT,
+		m = m_copym_mode(mpt_mbuf, (int)off, mlen, M_DONTWAIT, NULL, NULL,
 		    M_COPYM_MUST_COPY_HDR);
 		if (m == NULL) {
 			os_log_error(mptcp_log_handle, "%s - %lx: m_copym_mode failed\n", __func__,
@@ -3504,7 +3505,7 @@ mptcp_copy_mbuf_list(struct mptses *mpte, struct mbuf *m, int len)
 
 		VERIFY((m->m_flags & M_PKTHDR) && (m->m_pkthdr.pkt_flags & PKTF_MPTCP));
 
-		n = m_copym_mode(m, 0, m->m_len, M_DONTWAIT, M_COPYM_MUST_COPY_HDR);
+		n = m_copym_mode(m, 0, m->m_len, M_DONTWAIT, NULL, NULL, M_COPYM_MUST_COPY_HDR);
 		if (n == NULL) {
 			os_log_error(mptcp_log_handle, "%s - %lx: m_copym_mode returned NULL\n",
 			    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte));
@@ -3941,14 +3942,13 @@ mptcp_try_alternate_port(struct mptses *mpte, struct mptsub *mpts)
 	if (mpte->mpte_alternate_port &&
 	    inp->inp_fport != mpte->mpte_alternate_port) {
 		union sockaddr_in_4_6 dst;
-		struct sockaddr_in *dst_in = (struct sockaddr_in *)&dst;
+		struct sockaddr_in *dst_in = SIN(&dst);
 
-		memcpy(&dst, &mpts->mpts_dst, mpts->mpts_dst.sa_len);
+		SOCKADDR_COPY(&mpts->mpts_dst, &dst, mpts->mpts_dst.sa_len);
 
 		dst_in->sin_port = mpte->mpte_alternate_port;
 
-		mptcp_subflow_add(mpte, NULL, (struct sockaddr *)&dst,
-		    mpts->mpts_ifscope, NULL);
+		mptcp_subflow_add(mpte, NULL, SA(&dst), mpts->mpts_ifscope, NULL);
 	} else { /* Else, we tried all we could, mark this interface as non-MPTCP */
 		unsigned int i;
 
@@ -5835,7 +5835,6 @@ mptcp_sbrcv_grow(struct mptcb *mp_tp)
 	 */
 	if (tcp_do_autorcvbuf == 0 ||
 	    (sbrcv->sb_flags & SB_AUTOSIZE) == 0 ||
-	    tcp_cansbgrow(sbrcv) == 0 ||
 	    sbrcv->sb_hiwat >= tcp_autorcvbuf_max ||
 	    (mp_so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ||
 	    !LIST_EMPTY(&mp_tp->mpt_segq)) {
@@ -5883,7 +5882,6 @@ mptcp_sbrcv_grow_rwin(struct mptcb *mp_tp, struct sockbuf *sb)
 	}
 
 	if (tcp_do_autorcvbuf == 1 &&
-	    tcp_cansbgrow(sb) &&
 	    /* Diff to tcp_sbrcv_grow_rwin */
 	    (mp_so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) == 0 &&
 	    (rcvbuf - sb->sb_cc) < rcvbufinc &&

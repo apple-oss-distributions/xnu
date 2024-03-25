@@ -178,6 +178,7 @@
 #include <vm/WKdm_new.h>
 #elif defined(__arm64__)
 #include <arm64/amcc_rorgn.h>
+#include <kern/ecc.h>
 #endif /* defined(__i386__) || defined(__x86_64__) */
 #include <san/kasan.h>
 
@@ -447,6 +448,9 @@ IOHibernateSystemSleep(void)
 
 	gIOHibernateState = kIOHibernateStateInactive;
 
+#if defined(__arm64__)
+#endif /* __arm64__ */
+
 	gIOHibernateDebugFlags = 0;
 	if (kIOLogHibernate & gIOKitDebug) {
 		gIOHibernateDebugFlags |= kIOHibernateDebugRestoreLogs;
@@ -639,15 +643,15 @@ IOHibernateSystemSleep(void)
 #if defined(__i386__) || defined(__x86_64__)
 		if (vars->volumeCryptKeySize &&
 		    (kOSBooleanTrue != IOService::getPMRootDomain()->getProperty(kIOPMDestroyFVKeyOnStandbyKey))) {
-			uintptr_t smcVars[2];
-			smcVars[0] = vars->volumeCryptKeySize;
-			smcVars[1] = (uintptr_t)(void *) &gIOHibernateVars.volumeCryptKey[0];
-
-			IOService::getPMRootDomain()->setProperty(kIOHibernateSMCVariablesKey, smcVars, sizeof(smcVars));
-			bzero(smcVars, sizeof(smcVars));
+			OSData * smcData;
+			smcData = OSData::withBytesNoCopy(&gIOHibernateVars.volumeCryptKey[0], (unsigned int)vars->volumeCryptKeySize);
+			if (smcData) {
+				smcData->setSerializable(false);
+				IOService::getPMRootDomain()->setProperty(kIOHibernateSMCVariablesKey, smcData);
+				smcData->release();
+			}
 		}
-#endif
-
+#endif /* defined(__i386__) || defined(__x86_64__) */
 
 		if (encryptedswap || vars->volumeCryptKeySize) {
 			gIOHibernateMode ^= kIOHibernateModeEncrypt;
@@ -819,14 +823,15 @@ IOHibernateSystemSleep(void)
 		gIOHibernateState = kIOHibernateStateHibernating;
 
 #if DEBUG || DEVELOPMENT
+#if defined(__i386__) || defined(__x86_64__)
 		if (kIOLogHibernate & gIOKitDebug) {
 			OSData * data = OSDynamicCast(OSData, IOService::getPMRootDomain()->getProperty(kIOHibernateSMCVariablesKey));
 			if (data) {
-				uintptr_t * smcVars = (typeof(smcVars))data->getBytesNoCopy();
 				IOKitKernelLogBuffer("H> smc:",
-				    (const void *)smcVars[1], smcVars[0], &kprintf);
+				    data->getBytesNoCopy(), data->getLength(), &kprintf);
 			}
 		}
+#endif /* defined(__i386__) || defined(__x86_64__) */
 #endif /* DEBUG || DEVELOPMENT */
 	} else {
 		IOPolledFileIOVars * fileVars = vars->fileVars;
@@ -2712,12 +2717,12 @@ IOHibernateSetWakeCapabilities(uint32_t capability)
 void
 IOHibernateSystemRestart(void)
 {
+#if defined(__i386__) || defined(__x86_64__)
 	static uint8_t    noteStore[32] __attribute__((aligned(32)));
 	IORegistryEntry * regEntry;
 	const OSSymbol *  sym;
 	OSData *          noteProp;
 	OSData *          data;
-	uintptr_t *       smcVars;
 	uint8_t *         smcBytes;
 	size_t            len;
 	addr64_t          element;
@@ -2727,9 +2732,8 @@ IOHibernateSystemRestart(void)
 		return;
 	}
 
-	smcVars = (typeof(smcVars))data->getBytesNoCopy();
-	smcBytes = (typeof(smcBytes))smcVars[1];
-	len = smcVars[0];
+	smcBytes = (typeof(smcBytes))data->getBytesNoCopy();
+	len = data->getLength();
 	if (len > sizeof(noteStore)) {
 		len = sizeof(noteStore);
 	}
@@ -2765,4 +2769,5 @@ IOHibernateSystemRestart(void)
 	if (sym) {
 		sym->release();
 	}
+#endif /* defined(__i386__) || defined(__x86_64__) */
 }

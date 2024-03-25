@@ -1,8 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import hex, range
-from future.utils import raise_
-import six
 from xnu import *
 from utils import *
 from process import *
@@ -903,7 +898,7 @@ def ParanoidIterateLinkageChain(queue_head, element_type, field_name, field_ofst
                 print thread.thread_id
     """
 
-    if isinstance(element_type, six.string_types):
+    if isinstance(element_type, str):
         element_type = gettype(element_type)
 
     # Some ways of constructing a queue head seem to end up with the
@@ -976,13 +971,12 @@ def ParanoidIterateLinkageChain(queue_head, element_type, field_name, field_ofst
             if circleQueue and unsigned(queue_head) == unsigned(link):
                 break;
     except:
-        exc_info = sys.exc_info()
         try:
             print("Exception while iterating queue: {:>#18x} link: {:>#18x} addr: {:>#18x} obj: {:>#18x} last link: {:>#18x}".format(queue_head, link, addr, obj, last_link))
         except:
             import traceback
             traceback.print_exc()
-        raise_(exc_info[0], exc_info[1], exc_info[2])
+        raise
 
 ParanoidIterateLinkageChain.enable_paranoia = True
 ParanoidIterateLinkageChain.enable_debug = False

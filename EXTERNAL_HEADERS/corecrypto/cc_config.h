@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2023) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -50,8 +50,16 @@
     #define __has_feature(FEATURE) 0
 #endif
 
+#if !defined(__has_extension)
+    #define __has_extension(EXT) 0
+#endif
+
 #if !defined(__has_attribute)
     #define __has_attribute(ATTR) 0
+#endif
+
+#ifndef __cc_printflike
+ #define __cc_printflike(fmtarg, firstvararg) __attribute__((format(printf, fmtarg, firstvararg)))
 #endif
 
 //Do not set this macros to 1, unless you are developing/testing for Linux under macOS
@@ -80,6 +88,21 @@
 // at the intended location
 #define CORECRYPTO_DEBUG_ENABLE_CC_REQUIRE_PRINTS 0
 
+#ifndef CC_TXM
+ #if defined(TXM) && (TXM)
+  #define CC_TXM 1
+ #else
+  #define CC_TXM 0
+ #endif
+#endif
+
+#ifndef CC_SPTM
+ #if defined(SPTM) && (SPTM)
+  #define CC_SPTM 1
+ #else
+  #define CC_SPTM 0
+ #endif
+#endif
 
 #if defined(KERNEL) && (KERNEL)
  #define CC_KERNEL 1 // KEXT, XNU repo or kernel components such as AppleKeyStore
@@ -160,6 +183,72 @@
  #define CC_BRIDGE 0
 #endif
 
+// TARGET_OS_EXCLAVECORE && TARGET_OS_EXCLAVEKIT
+#if defined(TARGET_OS_EXCLAVECORE) && TARGET_OS_EXCLAVECORE
+ #define CC_EXCLAVE 1
+ #define CC_EXCLAVECORE 1
+ #define CC_EXCLAVEKIT 0
+#elif defined(TARGET_OS_EXCLAVEKIT) && TARGET_OS_EXCLAVEKIT
+ #define CC_EXCLAVE 1
+ #define CC_EXCLAVECORE 0
+ #define CC_EXCLAVEKIT 1
+#else
+ #define CC_EXCLAVE 0
+ #define CC_EXCLAVECORE 0
+ #define CC_EXCLAVEKIT 0
+#endif
+
+// ARMv6-M
+#if defined(__arm__) && (defined(__ARM_ARCH_6M__) || defined(__TARGET_ARCH_6S_M) || defined (__armv6m__))
+ #define CC_ARM_ARCH_6M 1
+#else
+ #define CC_ARM_ARCH_6M 0
+#endif
+
+// ARMv7
+#if defined(__arm__) && (defined (__ARM_ARCH_7A__) || defined (__ARM_ARCH_7S__) || defined (__ARM_ARCH_7F__) || defined (__ARM_ARCH_7K__) || defined(__ARM_ARCH_7EM__))
+    #define CC_ARM_ARCH_7 1
+#else
+    #define CC_ARM_ARCH_7 0
+#endif
+
+// DSP is only available on aarch32
+#if CC_ARM_ARCH_7 && defined(__ARM_FEATURE_DSP) && __ARM_FEATURE_DSP
+    #define CC_ARM_ARCH_7_DSP 1
+#else
+    #define CC_ARM_ARCH_7_DSP 0
+#endif
+
+#if defined(__ARM_NEON) && __ARM_NEON
+    #define CC_ARM_NEON 1
+#else
+    #define CC_ARM_NEON 0
+#endif
+
+#if defined(__ARM_FEATURE_AES) && __ARM_FEATURE_AES
+    #define CC_ARM_FEATURE_AES 1
+#else
+    #define CC_ARM_FEATURE_AES 0
+#endif
+
+#if defined(__ARM_FEATURE_SHA2) && __ARM_FEATURE_SHA2
+    #define CC_ARM_FEATURE_SHA2 1
+#else
+    #define CC_ARM_FEATURE_SHA2 0
+#endif
+
+#if defined(__ARM_FEATURE_SHA512) && __ARM_FEATURE_SHA512
+    #define CC_ARM_FEATURE_SHA512 1
+#else
+    #define CC_ARM_FEATURE_SHA512 0
+#endif
+
+#if defined(__ARM_FEATURE_SHA3) && __ARM_FEATURE_SHA3
+    #define CC_ARM_FEATURE_SHA3 1
+#else
+    #define CC_ARM_FEATURE_SHA3 0
+#endif
+
 // Check for open source builds
 
 // Defined by the XNU build scripts
@@ -170,7 +259,7 @@
  #define CC_XNU_KERNEL_PRIVATE 0
 #endif
 
-// handle unaligned data, if the cpu cannot. Currently for gladman AES and the C version of the SHA256
+// Handle unaligned data, if the CPU cannot. (For Gladman AES.)
 #define CC_HANDLE_UNALIGNED_DATA CC_BASEBAND
 
 // BaseBand configuration
@@ -190,9 +279,6 @@
 // -- Architecture
  #define CCN_UNIT_SIZE  4 // 32 bits
 #endif
-
-// -- External function
- #define assert ASSERT   // sanity
 
 // -- Warnings
 // Ignore irrelevant warnings after verification
@@ -217,7 +303,11 @@
 #ifndef CC_DARWIN
  //CC_DARWIN indicates the availability of XNU kernel functions,
  //like what we have on OSX, iOS, tvOS, Watch OS
- #if (CC_USE_L4 || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_EFI || CC_LINUX || defined(_WIN32) || CC_BASEBAND || CC_SGX)
+ #if (CC_USE_L4 || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_EFI || CC_LINUX || defined(_WIN32) || CC_BASEBAND || CC_SGX || CC_ARM_ARCH_6M)
+  #define CC_DARWIN 0
+ #elif CC_TXM
+  #define CC_DARWIN 0
+ #elif CC_SPTM
   #define CC_DARWIN 0
  #else
   #define CC_DARWIN 1
@@ -275,28 +365,8 @@
     #endif
 #endif
 
-#if defined(__arm__) && (defined (__ARM_ARCH_7A__) || defined (__ARM_ARCH_7S__) || defined (__ARM_ARCH_7F__) || defined (__ARM_ARCH_7K__) || defined(__ARM_ARCH_7EM__))
-    #define CC_ARM_ARCH_7 1
-#else
-    #define CC_ARM_ARCH_7 0
-#endif
-
-// DSP is only available on aarch32
-#if CC_ARM_ARCH_7 && defined(__ARM_FEATURE_DSP) && __ARM_FEATURE_DSP
-    #define CC_ARM_ARCH_7_DSP 1
-#else
-    #define CC_ARM_ARCH_7_DSP 0
-#endif
-
-#if defined(__arm__)
- //This is copied from <arm/arch.h>, because <arm/arch.h> is not available on SEPROM environment
- #if defined(__ARM_ARCH_6M__) || defined(__TARGET_ARCH_6S_M) || defined (__armv6m__)
-  #define _ARM_ARCH_6M
- #endif
-#endif
-
 #if !defined(CC_USE_HEAP_FOR_WORKSPACE)
- #if CC_USE_SEPROM || CC_RTKITROM
+ #if CC_USE_SEPROM || CC_RTKITROM || CC_EFI
   #define CC_USE_HEAP_FOR_WORKSPACE 0
  #else
   #define CC_USE_HEAP_FOR_WORKSPACE 1
@@ -323,23 +393,13 @@
  #define CC_HAS_EXPLICIT_BZERO 0
 #endif
 
-// Disable RSA Keygen on iBridge
-#if CC_BRIDGE && CC_KERNEL
-#define CC_DISABLE_RSAKEYGEN 1 /* for iBridge */
-#else
-#define CC_DISABLE_RSAKEYGEN 0 /* default */
-#endif
-
-#if (CCN_UNIT_SIZE == 8) && !( defined(_MSC_VER) && defined(__clang__))
-#define CCEC25519_CURVE25519_64BIT 1
-#else
-#define CCEC25519_CURVE25519_64BIT 0
-#endif
-
-//- functions implemented in assembly ------------------------------------------
-//this the list of corecrypto clients that use assembly and the clang compiler
-#if !(CC_DARWIN || CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM) && !defined(_WIN32) && CORECRYPTO_DEBUG
- #warning "You are using the default corecrypto configuration, assembly optimizations may not be available for your platform"
+// Disable RSA keygen on iBridge.
+#if !defined(CC_DISABLE_RSAKEYGEN)
+ #if CC_BRIDGE && CC_KERNEL
+  #define CC_DISABLE_RSAKEYGEN 1
+ #else
+  #define CC_DISABLE_RSAKEYGEN 0
+ #endif
 #endif
 
 // Enable assembler in Linux if CC_LINUX_ASM is defined
@@ -358,18 +418,29 @@
 #endif
 
 #ifndef CC_LOG
-#define CC_LOG (CC_DARWIN && !CC_KERNEL && !CC_IBOOT && !CC_DRIVERKIT)
+#define CC_LOG (CC_DARWIN && !CC_KERNEL && !CC_IBOOT && !CC_DRIVERKIT && !CC_EXCLAVE)
 #endif
 
 #ifndef CC_EXTERN_MALLOC
+ #if CC_TXM
+  #define CC_EXTERN_MALLOC 1
+ #else
   #define CC_EXTERN_MALLOC 0
+ #endif
+#endif
+
+#ifndef CC_MALLOC_ABORT
+ #if CC_SPTM
+  #define CC_MALLOC_ABORT 1
+ #else
+  #define CC_MALLOC_ABORT 0
+ #endif
 #endif
 
 #define CC_CACHE_DESCRIPTORS CC_KERNEL
 
 //-(1) ARM V7
 #if CC_ARM_ARCH_7 && defined(__clang__) && CC_USE_ASM
- #define CCN_MUL_KARATSUBA      0 // no performance improvement
  #define CCN_ADD_ASM            1
  #define CCN_SUB_ASM            1
  #define CCN_MUL_ASM            0
@@ -388,15 +459,24 @@
  #endif
  #define CCN_MULMOD_224_ASM     CC_ARM_ARCH_7_DSP
  #define CCN_MULMOD_256_ASM     CC_ARM_ARCH_7_DSP
- #define CCAES_ARM_ASM          1
- #define CCAES_INTEL_ASM        0
- #if CC_KERNEL || CC_USE_L4 || CC_IBOOT || CC_RTKIT || CC_RTKITROM || CC_USE_SEPROM || CC_DRIVERKIT
-  #define CCAES_MUX             0
+ #define CCN_MULMOD_384_ASM     CC_ARM_ARCH_7_DSP
+ #define CCN_MULMOD_25519_ASM   0
+ #define CCN_MULMOD_448_ASM     0
+
+ // Clang cross-compiling for ARMv7/Linux can't handle the indirect symbol
+ // directives we use to reference AES tables. Skip AES assembly for now.
+ #if CC_LINUX && CC_BUILT_FOR_TESTING
+  #define CCAES_ARM_ASM         0
  #else
-  #define CCAES_MUX             1
+  #define CCAES_ARM_ASM         1
  #endif
+
+ #define CCAES_INTEL_ASM        0
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
+ #define CCSHA3_VNG_INTEL       0
+ #define CCSHA3_VNG_ARM         0
+ #define CCSHA256_ARMV6M_ASM    0
 
  #if defined(__ARM_NEON__) || CC_KERNEL
   #define CCSHA1_VNG_ARM        1
@@ -408,32 +488,38 @@
 
 //-(2) ARM 64
 #elif defined(__arm64__) && defined(__clang__) && CC_USE_ASM
- #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
  #define CCN_ADD_ASM            1
  #define CCN_SUB_ASM            1
  #define CCN_MUL_ASM            1
  #define CCN_ADDMUL1_ASM        1
  #define CCN_MUL1_ASM           1
  #define CCN_CMP_ASM            1
- #define CCN_ADD1_ASM           0
+ #define CCN_ADD1_ASM           1
  #define CCN_SUB1_ASM           0
  #define CCN_N_ASM              1
  #define CCN_SET_ASM            0
- #define CCN_SHIFT_RIGHT_ASM    1
- #define CCN_SHIFT_LEFT_ASM     1
+ #define CCN_SHIFT_RIGHT_ASM    CC_ARM_NEON
+ #define CCN_SHIFT_LEFT_ASM     CC_ARM_NEON
  #define CCN_MULMOD_224_ASM     1
  #define CCN_MULMOD_256_ASM     1
- #define CCAES_ARM_ASM          1
+ #define CCN_MULMOD_384_ASM     1
+ #define CCN_MULMOD_25519_ASM   1
+ #define CCN_MULMOD_448_ASM     1
+ #define CCAES_ARM_ASM          (CC_ARM_NEON && CC_ARM_FEATURE_AES)
  #define CCAES_INTEL_ASM        0
- #define CCAES_MUX              0        // On 64bit SoC, asm is much faster than HW
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
+ #define CCSHA3_VNG_INTEL       0
  #define CCSHA1_VNG_ARM         1
- #define CCSHA2_VNG_ARM         1
-
+ #define CCSHA2_VNG_ARM         (CC_ARM_NEON && CC_ARM_FEATURE_SHA2)
+ #define CCSHA256_ARMV6M_ASM    0
+ #if CC_USE_L4 || CC_KERNEL
+  #define CCSHA3_VNG_ARM        0
+ #else
+  #define CCSHA3_VNG_ARM        1
+ #endif
 //-(3) Intel 32/64
 #elif (defined(__x86_64__) || defined(__i386__)) && defined(__clang__) && CC_USE_ASM
- #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
  /* These assembly routines only work for a single CCN_UNIT_SIZE. */
  #if (defined(__x86_64__) && CCN_UNIT_SIZE == 8) || (defined(__i386__) && CCN_UNIT_SIZE == 4)
   #define CCN_ADD_ASM            1
@@ -457,13 +543,18 @@
   #define CCN_SHIFT_LEFT_ASM     0
  #endif
 
- #define CCN_MULMOD_224_ASM     0
+ #define CCN_MULMOD_384_ASM     0
+ #define CCN_MULMOD_448_ASM     0
  #if defined(__x86_64__) && CCN_UNIT_SIZE == 8 && !CC_SGX
+  #define CCN_MULMOD_224_ASM    1
   #define CCN_MULMOD_256_ASM    1
+  #define CCN_MULMOD_25519_ASM  1
   #define CCN_ADDMUL1_ASM       1
   #define CCN_MUL1_ASM          1
  #else
+  #define CCN_MULMOD_224_ASM    0
   #define CCN_MULMOD_256_ASM    0
+  #define CCN_MULMOD_25519_ASM  0
   #define CCN_ADDMUL1_ASM       0
   #define CCN_MUL1_ASM          0
  #endif
@@ -472,15 +563,15 @@
  #define CCN_SET_ASM            0
  #define CCAES_ARM_ASM          0
  #define CCAES_INTEL_ASM        1
- #define CCAES_MUX              0
  #define CCSHA1_VNG_INTEL       1
  #define CCSHA2_VNG_INTEL       1
+ #define CCSHA3_VNG_INTEL       1
  #define CCSHA1_VNG_ARM         0
  #define CCSHA2_VNG_ARM         0
-
-//-(4) disable assembly
-#else
- #define CCN_MUL_KARATSUBA      0 // 4*n CCN_UNIT extra memory required.
+ #define CCSHA3_VNG_ARM         0
+ #define CCSHA256_ARMV6M_ASM    0
+//-(4) ARMv6-M
+#elif CC_ARM_ARCH_6M
  #define CCN_ADD_ASM            0
  #define CCN_SUB_ASM            0
  #define CCN_MUL_ASM            0
@@ -495,14 +586,46 @@
  #define CCN_SHIFT_LEFT_ASM     0
  #define CCN_MULMOD_224_ASM     0
  #define CCN_MULMOD_256_ASM     0
+ #define CCN_MULMOD_384_ASM     0
+ #define CCN_MULMOD_25519_ASM   0
+ #define CCN_MULMOD_448_ASM     0
  #define CCAES_ARM_ASM          0
  #define CCAES_INTEL_ASM        0
- #define CCAES_MUX              0
  #define CCSHA1_VNG_INTEL       0
  #define CCSHA2_VNG_INTEL       0
+ #define CCSHA3_VNG_INTEL       0
  #define CCSHA1_VNG_ARM         0
  #define CCSHA2_VNG_ARM         0
-
+ #define CCSHA3_VNG_ARM         0
+ #define CCSHA256_ARMV6M_ASM    1
+//-(5) disable assembly
+#else
+ #define CCN_ADD_ASM            0
+ #define CCN_SUB_ASM            0
+ #define CCN_MUL_ASM            0
+ #define CCN_ADDMUL1_ASM        0
+ #define CCN_MUL1_ASM           0
+ #define CCN_CMP_ASM            0
+ #define CCN_ADD1_ASM           0
+ #define CCN_SUB1_ASM           0
+ #define CCN_N_ASM              0
+ #define CCN_SET_ASM            0
+ #define CCN_SHIFT_RIGHT_ASM    0
+ #define CCN_SHIFT_LEFT_ASM     0
+ #define CCN_MULMOD_224_ASM     0
+ #define CCN_MULMOD_256_ASM     0
+ #define CCN_MULMOD_384_ASM     0
+ #define CCN_MULMOD_25519_ASM   0
+ #define CCN_MULMOD_448_ASM     0
+ #define CCAES_ARM_ASM          0
+ #define CCAES_INTEL_ASM        0
+ #define CCSHA1_VNG_INTEL       0
+ #define CCSHA2_VNG_INTEL       0
+ #define CCSHA3_VNG_INTEL       0
+ #define CCSHA1_VNG_ARM         0
+ #define CCSHA2_VNG_ARM         0
+ #define CCSHA3_VNG_ARM         0
+ #define CCSHA256_ARMV6M_ASM    0
 #endif
 
 #define CC_INLINE static inline
@@ -566,7 +689,7 @@
 // Use CC_WEAK_IF_SMALL_CODE to mark symbols as weak when compiling with
 // CC_SMALL_CODE=1. This allows replacing faster but bigger code with smaller
 // versions at link time.
-#if CC_SMALL_CODE
+#if CC_SMALL_CODE && !CC_BUILT_FOR_TESTING
  #define CC_WEAK_IF_SMALL_CODE CC_WEAK
 #else
  #define CC_WEAK_IF_SMALL_CODE
@@ -576,6 +699,7 @@
 #if CC_LINUX || CC_SGX
 #define CC_ASM_SECTION_CONST .rodata
 #define CC_ASM_PRIVATE_EXTERN .hidden
+#define CC_ASM_SUBSECTIONS_VIA_SYMBOLS
 #if CC_LINUX
 // We need to be sure that assembler can access relocated C
 // symbols. Sad but this is the quickest way to do that, at least with
@@ -588,6 +712,7 @@
 #else /* !CC_LINUX && !CC_SGX */
 #define CC_ASM_SECTION_CONST .const
 #define CC_ASM_PRIVATE_EXTERN .private_extern
+#define CC_ASM_SUBSECTIONS_VIA_SYMBOLS .subsections_via_symbols
 #define CC_C_LABEL(_sym) _##_sym
 #define _IMM(x) $$(x)
 #endif /* !CC_LINUX && !CC_SGX */
@@ -607,6 +732,18 @@
 #else
 #define CC_INTERNAL_SDK 0
 #endif
+#endif
+
+#if __has_feature(address_sanitizer)
+ #define CC_ASAN 1
+#else
+ #define CC_ASAN 0
+#endif
+
+#ifdef CORECRYPTO_COVERAGE
+#define CC_COVERAGE 1
+#else
+#define CC_COVERAGE 0
 #endif
 
 // Currently thread sanitizer is only supported in local builds.
@@ -634,6 +771,7 @@
     #define cc_cstring                    cc_unsafe_indexable
     #define CC_WIDE_NULL                  ((void *cc_bidi_indexable)NULL)
     #define cc_ended_by(x)                __attribute__((ended_by(x)))
+    #define cc_ptrcheck_unavailable_r(r)  __ptrcheck_unavailable_r(r)
 #else
     #define CC_PTRCHECK                  0
     #define CC_PTRCHECK_CAPABLE_HEADER()
@@ -648,6 +786,7 @@
     #define cc_cstring
     #define CC_WIDE_NULL NULL
     #define cc_ended_by(x)
+    #define cc_ptrcheck_unavailable_r(r)
 #endif // __has_feature(bounds_attributes)
 
 // Define endianess for GCC, if needed and applicable.
@@ -670,10 +809,12 @@
  #define CC_WORKSPACE_OVERRIDE(f, o)
 #endif
 
-#if defined(__ARM_ARCH_8_4__) && !CC_KERNEL && !CC_USE_L4 && !CC_USE_SEPROM
- #define CC_DIT_SUPPORTED 1
-#else
- #define CC_DIT_SUPPORTED 0
+#ifndef CC_DIT_MAYBE_SUPPORTED
+ #if defined(__arm64__) && !CC_USE_L4 && !CC_USE_SEPROM && !CC_IBOOT
+  #define CC_DIT_MAYBE_SUPPORTED 1
+ #else
+  #define CC_DIT_MAYBE_SUPPORTED 0
+ #endif
 #endif
 
 #endif /* _CORECRYPTO_CC_CONFIG_H_ */

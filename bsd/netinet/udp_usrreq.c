@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -125,6 +125,8 @@ extern int esp_udp_encap_port;
 #if SKYWALK
 #include <skywalk/core/skywalk_var.h>
 #endif /* SKYWALK */
+
+#include <net/sockaddr_utils.h>
 
 #define DBG_LAYER_IN_BEG        NETDBG_CODE(DBG_NETUDP, 0)
 #define DBG_LAYER_IN_END        NETDBG_CODE(DBG_NETUDP, 2)
@@ -287,12 +289,15 @@ udp_input(struct mbuf *m, int iphlen)
 	struct mbuf *opts = NULL;
 	int len, isbroadcast;
 	struct ip save_ip;
-	struct sockaddr *append_sa;
+	struct sockaddr *append_sa = NULL;
+	struct sockaddr *append_da = NULL;
 	struct inpcbinfo *pcbinfo = &udbinfo;
 	struct sockaddr_in udp_in;
+	struct sockaddr_in udp_dst;
 	struct ip_moptions *imo = NULL;
 	int foundmembership = 0, ret = 0;
 	struct udp_in6 udp_in6;
+	struct udp_in6 udp_dst6;
 	struct udp_ip6 udp_ip6;
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
 	boolean_t cell = IFNET_IS_CELLULAR(ifp);
@@ -300,8 +305,9 @@ udp_input(struct mbuf *m, int iphlen)
 	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 	u_int16_t pf_tag = 0;
 	boolean_t is_wake_pkt = false;
+	boolean_t check_cfil = cfil_filter_present();
 
-	bzero(&udp_in, sizeof(udp_in));
+	SOCKADDR_ZERO(&udp_in, sizeof(udp_in));
 	udp_in.sin_len = sizeof(struct sockaddr_in);
 	udp_in.sin_family = AF_INET;
 	bzero(&udp_in6, sizeof(udp_in6));
@@ -496,7 +502,7 @@ udp_input(struct mbuf *m, int iphlen)
 				}
 				IMO_LOCK(imo);
 
-				bzero(&group, sizeof(struct sockaddr_in));
+				SOCKADDR_ZERO(&group, sizeof(struct sockaddr_in));
 				group.sin_len = sizeof(struct sockaddr_in);
 				group.sin_family = AF_INET;
 				group.sin_addr = ip->ip_dst;
@@ -756,15 +762,36 @@ udp_input(struct mbuf *m, int iphlen)
 
 	if (inp->inp_vflag & INP_IPV6) {
 		in6_sin_2_v4mapsin6(&udp_in, &udp_in6.uin6_sin);
-		append_sa = (struct sockaddr *)&udp_in6.uin6_sin;
+		append_sa = SA(&udp_in6.uin6_sin);
 	} else {
-		append_sa = (struct sockaddr *)&udp_in;
+		append_sa = SA(&udp_in);
 	}
 	if (nstat_collect) {
 		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
 		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, m->m_pkthdr.len);
 		inp_set_activity_bitmap(inp);
 	}
+#if CONTENT_FILTER && NECP
+	if (check_cfil && inp != NULL && inp->inp_policyresult.results.filter_control_unit == 0) {
+		if (inp->inp_vflag & INP_IPV6) {
+			bzero(&udp_dst6, sizeof(udp_dst6));
+			udp_dst6.uin6_sin.sin6_len = sizeof(struct sockaddr_in6);
+			udp_dst6.uin6_sin.sin6_family = AF_INET6;
+			in6_sin_2_v4mapsin6(&udp_dst, &udp_dst6.uin6_sin);
+			append_da = SA(&udp_dst6.uin6_sin);
+		} else {
+			SOCKADDR_ZERO(&udp_dst, sizeof(udp_dst));
+			udp_dst.sin_len = sizeof(struct sockaddr_in);
+			udp_dst.sin_family = AF_INET;
+			udp_dst.sin_port = uh->uh_dport;
+			udp_dst.sin_addr = ip->ip_dst;
+			append_da = SA(&udp_dst);
+		}
+		// Override the dst input here so NECP can pick up the policy
+		// and CFIL can find an existing control socket.
+		necp_socket_find_policy_match(inp, append_da, append_sa, 0);
+	}
+#endif /* CONTENT_FILTER and NECP */
 	so_recv_data_stat(inp->inp_socket, m, 0);
 	if (sbappendaddr(&inp->inp_socket->so_rcv, append_sa,
 	    m, opts, NULL) == 0) {
@@ -850,9 +877,9 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 			in6_sin_2_v4mapsin6(pudp_in, &pudp_in6->uin6_sin);
 			pudp_in6->uin6_init_done = 1;
 		}
-		append_sa = (struct sockaddr *)&pudp_in6->uin6_sin;
+		append_sa = SA(&pudp_in6->uin6_sin);
 	} else {
-		append_sa = (struct sockaddr *)pudp_in;
+		append_sa = SA(pudp_in);
 	}
 	if (nstat_collect) {
 		INP_ADD_STAT(last, cell, wifi, wired, rxpackets, 1);
@@ -910,7 +937,7 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 		off = 0;
 	}
 
-	faddr = ((struct sockaddr_in *)(void *)sa)->sin_addr;
+	faddr = SIN(sa)->sin_addr;
 	if (sa->sa_family != AF_INET || faddr.s_addr == INADDR_ANY) {
 		return;
 	}
@@ -933,7 +960,7 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 			return;
 		}
 
-		bcopy(m->m_data + off, &uh, sizeof(uh));
+		bcopy(m_mtod_current(m) + off, &uh, sizeof(uh));
 		inp = in_pcblookup_hash(&udbinfo, faddr, uh.uh_dport,
 		    ip->ip_src, uh.uh_sport, 0, NULL);
 
@@ -975,7 +1002,7 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 			sock_laddr.sin.sin_addr = ip->ip_src;
 
 			protoctl_event_enqueue_nwk_wq_entry(ifp,
-			    (struct sockaddr *)&sock_laddr, sa,
+			    SA(&sock_laddr), sa,
 			    uh.uh_sport, uh.uh_dport, IPPROTO_UDP,
 			    cmd, &prctl_ev_val);
 		}
@@ -1545,13 +1572,13 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	if (CFIL_DGRAM_FILTERED(so) && !addr) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, NULL);
 		if (cfil_tag) {
-			sin = (struct sockaddr_in *)(void *)cfil_faddr;
+			sin = SIN(cfil_faddr);
 			if (inp && inp->inp_faddr.s_addr == INADDR_ANY) {
 				/*
 				 * Socket is unconnected, simply use the saved faddr as 'addr' to go through
 				 * the connect/disconnect logic.
 				 */
-				addr = (struct sockaddr *)cfil_faddr;
+				addr = SA(cfil_faddr);
 			} else if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
 			    (inp->inp_fport != sin->sin_port ||
 			    inp->inp_faddr.s_addr != sin->sin_addr.s_addr)) {
@@ -1681,7 +1708,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 			}
 		}
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 	}
 
@@ -1710,15 +1737,15 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 
 #if CONTENT_FILTER
 	if (cfil_faddr_use) {
-		faddr = ((struct sockaddr_in *)(void *)cfil_faddr)->sin_addr;
-		fport = ((struct sockaddr_in *)(void *)cfil_faddr)->sin_port;
+		faddr = SIN(cfil_faddr)->sin_addr;
+		fport = SIN(cfil_faddr)->sin_port;
 	}
 #endif
 	inp->inp_sndinprog_cnt++;
 	sndinprog_cnt_used = true;
 
 	if (addr) {
-		sin = (struct sockaddr_in *)(void *)addr;
+		sin = SIN(addr);
 		if (faddr.s_addr != INADDR_ANY) {
 			error = EISCONN;
 			goto release;
@@ -1894,25 +1921,24 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 
 			ROUTE_RELEASE(&inp->inp_route);
 
-			bzero(&from, sizeof(struct sockaddr_in));
+			SOCKADDR_ZERO(&from, sizeof(struct sockaddr_in));
 			from.sin_family = AF_INET;
 			from.sin_len = sizeof(struct sockaddr_in);
 			from.sin_addr = laddr;
 
-			bzero(&to, sizeof(struct sockaddr_in));
+			SOCKADDR_ZERO(&to, sizeof(struct sockaddr_in));
 			to.sin_family = AF_INET;
 			to.sin_len = sizeof(struct sockaddr_in);
 			to.sin_addr = faddr;
 
 			inp->inp_route.ro_dst.sa_family = AF_INET;
 			inp->inp_route.ro_dst.sa_len = sizeof(struct sockaddr_in);
-			((struct sockaddr_in *)(void *)&inp->inp_route.ro_dst)->sin_addr =
-			    faddr;
+			SIN(&inp->inp_route.ro_dst)->sin_addr = faddr;
 
 			rtalloc_scoped(&inp->inp_route, ipoa.ipoa_boundif);
 
-			inp_update_necp_policy(inp, (struct sockaddr *)&from,
-			    (struct sockaddr *)&to, ipoa.ipoa_boundif);
+			inp_update_necp_policy(inp, SA(&from),
+			    SA(&to), ipoa.ipoa_boundif);
 			inp->inp_policyresult.results.qos_marking_gencount = 0;
 		}
 
@@ -2050,6 +2076,14 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	/* Synchronize PCB cached route */
 	inp_route_copyin(inp, &ro);
 
+	if (inp->inp_route.ro_rt != NULL) {
+		if (IS_LOCALNET_ROUTE(inp->inp_route.ro_rt)) {
+			inp->inp_flags2 |= INP2_LAST_ROUTE_LOCAL;
+		} else {
+			inp->inp_flags2 &= ~INP2_LAST_ROUTE_LOCAL;
+		}
+	}
+
 abort:
 	if (udp_dodisconnect) {
 		/* Always discard the cached route for unconnected socket */
@@ -2163,7 +2197,6 @@ sysctl_udp_sospace(struct sysctl_oid *oidp, void *arg1, int arg2,
 #pragma unused(arg1, arg2)
 	u_int32_t new_value = 0, *space_p = NULL;
 	int changed = 0, error = 0;
-	u_quad_t sb_effective_max = (sb_max / (SB_MSIZE_ADJ + MCLBYTES)) * MCLBYTES;
 
 	switch (oidp->oid_number) {
 	case UDPCTL_RECVSPACE:
@@ -2178,7 +2211,7 @@ sysctl_udp_sospace(struct sysctl_oid *oidp, void *arg1, int arg2,
 	error = sysctl_io_number(req, *space_p, sizeof(u_int32_t),
 	    &new_value, &changed);
 	if (changed) {
-		if (new_value > 0 && new_value <= sb_effective_max) {
+		if (new_value > 0 && new_value <= sb_max) {
 			*space_p = new_value;
 		} else {
 			error = ERANGE;
@@ -2300,6 +2333,8 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		}
 		UDP_LOG_CONNECT(inp, error);
 		return error;
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
@@ -2526,6 +2561,8 @@ udp_send(struct socket *so, int flags, struct mbuf *m,
 		/* Implicit connect */
 		return flow_divert_implicit_data_out(so, flags, m, addr,
 		           control, p);
+	} else {
+		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
@@ -3008,7 +3045,7 @@ udp_fill_keepalive_offload_frames(ifnet_t ifp,
 			}
 			m->m_pkthdr.pkt_proto = IPPROTO_UDP;
 			in_delayed_cksum(m);
-			bcopy(m->m_data, frame->data + frame_data_offset,
+			bcopy(m_mtod_current(m), frame->data + frame_data_offset,
 			    m->m_len);
 		} else {
 			struct ip6_hdr *ip6;
@@ -3082,8 +3119,7 @@ udp_fill_keepalive_offload_frames(ifnet_t ifp,
 			}
 			m->m_pkthdr.pkt_proto = IPPROTO_UDP;
 			in6_delayed_cksum(m);
-			bcopy(m->m_data, frame->data + frame_data_offset,
-			    m->m_len);
+			bcopy(m_mtod_current(m), frame->data + frame_data_offset, m->m_len);
 		}
 		if (m != NULL) {
 			m_freem(m);

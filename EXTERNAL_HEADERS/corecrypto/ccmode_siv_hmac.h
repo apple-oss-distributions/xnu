@@ -1,4 +1,4 @@
-/* Copyright (c) (2019-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2019-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -9,8 +9,8 @@
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
-#ifndef ccmode_siv_hmac_h
-#define ccmode_siv_hmac_h
+#ifndef _CORECRYPTO_CCMODE_SIV_HMAC_H
+#define _CORECRYPTO_CCMODE_SIV_HMAC_H
 
 #include <corecrypto/cc.h>
 #include <corecrypto/ccmode.h>
@@ -18,32 +18,6 @@
 #include <corecrypto/ccdigest.h>
 #include <corecrypto/cchmac.h>
 #include <corecrypto/ccsha2.h>
-
-/* This provides an implementation of SIV using AES CTR mode with HMAC as the MAC,
- allowing for a tagging mechanism with collision resistant tags. This is a modification of the
- standard specified in https://tools.ietf.org/html/rfc5297
- also in http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/siv/siv.pdf
- Counter Mode where IV is based on HMAC.
- */
-
-cc_aligned_struct(16) ccsiv_hmac_ctx;
-
-struct ccmode_siv_hmac {
-    size_t size; /* first argument to ccsiv_hmac_ctx_decl(). */
-    size_t block_size;
-    
-    int (*CC_SPTR(ccmode_siv_hmac, init))(const struct ccmode_siv_hmac *sivhmac,
-                ccsiv_hmac_ctx *ctx,
-                size_t key_len,
-                const uint8_t *key,
-                const size_t tag_size);
-    int (*CC_SPTR(ccmode_siv_hmac, set_nonce))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in);
-    int (*CC_SPTR(ccmode_siv_hmac, auth))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in);
-    int (*CC_SPTR(ccmode_siv_hmac, crypt))(ccsiv_hmac_ctx *ctx, size_t nbytes, const uint8_t *in, uint8_t *out);
-    int (*CC_SPTR(ccmode_siv_hmac, reset))(ccsiv_hmac_ctx *ctx);
-    const struct ccdigest_info *hmac_digest; // Digest to be used in HMAC;
-    const struct ccmode_ctr *ctr;
-};
 
 #define ccsiv_hmac_ctx_decl(_size_, _name_) cc_ctx_decl_vla(ccsiv_hmac_ctx, _size_, _name_)
 #define ccsiv_hmac_ctx_clear(_size_, _name_) cc_clear(_size_, _name_)
@@ -54,10 +28,7 @@ struct ccmode_siv_hmac {
  
  @param      mode       Descriptor for the mode
  */
-CC_INLINE size_t ccsiv_hmac_context_size(const struct ccmode_siv_hmac *mode)
-{
-    return mode->size;
-}
+size_t ccsiv_hmac_context_size(const struct ccmode_siv_hmac *mode);
 
 /*!
  @function   ccsiv_hmac_block_size
@@ -65,10 +36,7 @@ CC_INLINE size_t ccsiv_hmac_context_size(const struct ccmode_siv_hmac *mode)
  
  @param      mode       Descriptor for the mode
  */
-CC_INLINE size_t ccsiv_hmac_block_size(const struct ccmode_siv_hmac *mode)
-{
-    return mode->block_size;
-}
+size_t ccsiv_hmac_block_size(const struct ccmode_siv_hmac *mode);
 
 /*!
  @function   ccsiv_hmac_ciphertext_size
@@ -197,15 +165,15 @@ int ccsiv_hmac_reset(const struct ccmode_siv_hmac *mode, ccsiv_hmac_ctx *ctx);
 
 // One shot AEAD with only one input for adata, and a nonce.
 int ccsiv_hmac_one_shot(const struct ccmode_siv_hmac *mode,
-                                  size_t key_len,
-                                  const uint8_t *key,
-                                  size_t tag_length,
-                                  unsigned nonce_nbytes,
-                                  const uint8_t *nonce,
-                                  unsigned adata_nbytes,
-                                  const uint8_t *adata,
-                                  size_t in_nbytes,
-                                  const uint8_t *in,
+                        size_t key_len,
+                        const uint8_t *key,
+                        size_t tag_length,
+                        unsigned nonce_nbytes,
+                        const uint8_t *nonce,
+                        unsigned adata_nbytes,
+                        const uint8_t *adata,
+                        size_t in_nbytes,
+                        const uint8_t *in,
                         uint8_t *out);
 
-#endif /* ccmode_siv_hmac_h */
+#endif /* _CORECRYPTO_CCMODE_SIV_HMAC_H */

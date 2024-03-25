@@ -26,6 +26,10 @@
 #include <sys/cdefs.h>
 __BEGIN_DECLS
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnullability-completeness"
+#pragma GCC diagnostic ignored "-Wnullability-completeness-on-arrays"
+
 typedef uint32_t code_signing_monitor_type_t;
 enum {
 	CS_MONITOR_TYPE_NONE = 0,
@@ -58,6 +62,22 @@ enum {
 #include <mach/kern_return.h>
 #include <img4/firmware.h>
 
+#if !XNU_KERNEL_PRIVATE
+/*
+ * This header file is shared across the SDK and the KDK. When we're compiling code
+ * for the kernel, but not for XNU, such as a kernel extension, the code signing
+ * traps information is found through <image4/cs/traps.h>. When we're within XNU
+ * proper, this header shouldn't be directory included and instead we should include
+ * <libkern/image4/dlxk.h> instead, which is what we do within XNU_KERNEL_PRIVATE
+ * down below.
+ */
+#if __has_include(<image4/cs/traps.h>)
+#include <image4/cs/traps.h>
+#else
+typedef uint64_t image4_cs_trap_t;
+#endif /* __has_include(<image4/cs/traps.h>) */
+#endif /* !XNU_KERNEL_PRIVATE */
+
 /* Availability macros for KPI functions */
 #define XNU_SUPPORTS_CSM_TYPE 1
 #define XNU_SUPPORTS_CSM_APPLE_IMAGE4 1
@@ -66,6 +86,7 @@ enum {
 #define XNU_SUPPORTS_LOCAL_SIGNING 1
 #define XNU_SUPPORTS_CE_ACCELERATION 1
 #define XNU_SUPPORTS_DISABLE_CODE_SIGNING_FEATURE 1
+#define XNU_SUPPORTS_IMAGE4_MONITOR_TRAP 1
 
 /* Local signing public key size */
 #define XNU_LOCAL_SIGNING_KEY_SIZE 97
@@ -74,6 +95,7 @@ enum {
 
 #include <sys/code_signing_internal.h>
 #include <libkern/img4/interface.h>
+#include <libkern/image4/dlxk.h>
 
 #if PMAP_CS_INCLUDE_CODE_SIGNING
 #if XNU_LOCAL_SIGNING_KEY_SIZE != PMAP_CS_LOCAL_SIGNING_KEY_SIZE
@@ -83,6 +105,23 @@ enum {
 
 /* Common developer mode state variable */
 extern bool *developer_mode_enabled;
+
+/**
+ * This function is used to allocate code signing data which in some cases needs to
+ * align to a page length. This is a frequent operation, and as a result, a common
+ * helper is very useful.
+ */
+vm_address_t
+code_signing_allocate(
+	size_t alloc_size);
+
+/**
+ * This function is used to deallocate data received from code_signing_allocate.
+ */
+void
+code_signing_deallocate(
+	vm_address_t *alloc_addr,
+	size_t alloc_size);
 
 /**
  * AppleImage4 does not provide an API to convert an object specification index to an
@@ -296,6 +335,19 @@ kernel_image4_set_bnch_shadow(
 	const img4_nonce_domain_index_t ndi);
 
 /**
+ * AppleImage4 uses this API to trap into the code signing monitor on the platform for
+ * the image4 dispatch routines. A single entry point is multiplexed into a whole dispatch
+ * table.
+ */
+errno_t
+kernel_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size,
+	void *output_data,
+	size_t *output_size);
+
+/**
  * AMFI uses this API to obtain the OSEntitlements object which is associated with the
  * main binary mapped in for a process.
  *
@@ -339,6 +391,24 @@ address_space_debugged(
  */
 bool
 csm_enabled(void);
+
+/**
+ * Check and inform the code signing monitor that the system is entering lockdown mode.
+ * The code signing monitor then enforces policy based on this state. As part of this,
+ * we also update the code signing configuration of the system.
+ */
+void
+csm_check_lockdown_mode(void);
+
+/**
+ * When a task incurs an unresolvable page fault with execute permissions, and is not
+ * being debugged, the task should receive a SIGKILL. This should only happen if the
+ * task isn't actively being debugged. This function abstracts all these details.
+ */
+void
+csm_code_signing_violation(
+	proc_t proc,
+	vm_offset_t addr);
 
 /**
  * This function is used to initialize the state of the locks for managing provisioning
@@ -578,6 +648,8 @@ cs_associate_blob_with_mapping(
 #endif /* CODE_SIGNING_MONITOR */
 
 #endif /* KERNEL_PRIVATE */
+
+#pragma GCC diagnostic pop
 
 __END_DECLS
 #endif /* _SYS_CODE_SIGNING_H_ */

@@ -146,6 +146,7 @@ alloc_exception_port(void)
 
 T_DECL(mach_exc_port_substitute, "test read port substition back to control port"
     " for in process exception handler when dev mode is off",
+    T_META_IGNORECRASHES(".*mach_exc_port_substitute.*"),
     T_META_BOOTARGS_SET("amfi_dev_mode_policy=1"))     /* Turn off Developer Mode */
 {
 	pthread_t s_exc_thread;
@@ -173,7 +174,8 @@ T_DECL(mach_exc_port_substitute, "test read port substition back to control port
 T_DECL(mach_exc_port_substitute_oop, "test out of process exception with read port"
     " when dev mode is off",
     T_META_ENABLED(TARGET_OS_IOS),     /* Just run on iOS. Some platforms do not have dev mode */
-    T_META_BOOTARGS_SET("amfi_dev_mode_policy=1"))     /* Turn off Developer Mode */
+    T_META_IGNORECRASHES(".*mach_exc_port_substitute.*"),
+    T_META_BOOTARGS_SET("amfi_dev_mode_policy=1"))         /* Turn off Developer Mode */
 {
 	pthread_t s_exc_thread;
 	mach_port_t exc_port;

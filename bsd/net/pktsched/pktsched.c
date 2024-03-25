@@ -607,8 +607,8 @@ pktsched_mbuf_mark_ecn(struct mbuf* m)
 	hdr = m->m_pkthdr.pkt_hdr;
 	/* verify that hdr is within the mbuf data */
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
-		if (((caddr_t)hdr >= m0->m_data) &&
-		    ((caddr_t)hdr < m0->m_data + m0->m_len)) {
+		if (((caddr_t)hdr >= m_mtod_current(m0)) &&
+		    ((caddr_t)hdr < m_mtod_current(m0) + m0->m_len)) {
 			break;
 		}
 	}

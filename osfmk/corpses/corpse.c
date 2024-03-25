@@ -396,7 +396,7 @@ task_purge_all_corpses(void)
  * Routine: find_corpse_task_by_uniqueid_grp
  * params: task_uniqueid - uniqueid of the corpse
  *         target - target task [Out Param]
- *                 grp - task reference group
+ *         grp - task reference group
  * returns:
  *         KERN_SUCCESS if a matching corpse if found, gives a ref.
  *         KERN_FAILURE corpse with given uniqueid is not found.
@@ -413,8 +413,8 @@ find_corpse_task_by_uniqueid_grp(
 
 	queue_iterate(&corpse_tasks, task, task_t, corpse_tasks) {
 		if (task->task_uniqueid == task_uniqueid) {
-			lck_mtx_unlock(&tasks_corpse_lock);
 			task_reference_grp(task, grp);
+			lck_mtx_unlock(&tasks_corpse_lock);
 			*target = task;
 			return KERN_SUCCESS;
 		}

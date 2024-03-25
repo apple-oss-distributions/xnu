@@ -100,7 +100,7 @@ fsw_classq_kpkt_to_mbuf(struct nx_flowswitch *fsw, struct __kern_packet *pkt)
 
 	SK_DF(SK_VERB_TX | SK_VERB_DUMP, "%s(%d) %s",
 	    sk_proc_name_address(current_proc()), sk_proc_pid(current_proc()),
-	    sk_dump("buf", m->m_data, m->m_pkthdr.len, 128, NULL, 0));
+	    sk_dump("buf", m_mtod_current(m), m->m_pkthdr.len, 128, NULL, 0));
 
 	if (__improbable((error != 0))) {
 		if (m != NULL) {

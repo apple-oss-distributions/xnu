@@ -102,6 +102,8 @@
 #include <security/mac_framework.h>
 #endif
 
+#include <net/sockaddr_utils.h>
+
 /* Local function declarations */
 extern void *kdp_get_interface(void);
 extern void kdp_set_ip_and_mac_addresses(struct in_addr *ipaddr,
@@ -139,14 +141,14 @@ ether_inet_arp_input(struct ifnet *ifp, struct mbuf *m)
 		return;
 	}
 
-	bzero(&sender_ip, sizeof(sender_ip));
+	SOCKADDR_ZERO(&sender_ip, sizeof(sender_ip));
 	sender_ip.sin_len = sizeof(sender_ip);
 	sender_ip.sin_family = AF_INET;
 	_ip_copy(&sender_ip.sin_addr, ea->arp_spa);
 	target_ip = sender_ip;
 	_ip_copy(&target_ip.sin_addr, ea->arp_tpa);
 
-	bzero(&sender_hw, sizeof(sender_hw));
+	SOCKADDR_ZERO(&sender_hw, sizeof(sender_hw));
 	sender_hw.sdl_len = sizeof(sender_hw);
 	sender_hw.sdl_family = AF_LINK;
 	sender_hw.sdl_type = IFT_ETHER;
@@ -174,6 +176,8 @@ ether_inet_input(ifnet_t ifp, protocol_family_t protocol_family,
 	mbuf_t  m;
 	mbuf_t  *tailptr = &m_list;
 	mbuf_t  nextpkt;
+	bool is_cache_valid = false;
+	u_char cached_shost[ETHER_ADDR_LEN] = {};
 
 	/* Strip ARP and non-IP packets out of the list */
 	for (m = m_list; m; m = nextpkt) {
@@ -191,13 +195,17 @@ ether_inet_input(ifnet_t ifp, protocol_family_t protocol_family,
 
 		nextpkt = m->m_nextpkt;
 
-		if (eh->ether_type == htons(ETHERTYPE_IP)) {
+		if (__probable(eh->ether_type == htons(ETHERTYPE_IP))) {
 			/*
 			 * Update L2 reachability record, if present
 			 * (and if not a broadcast sender).
+			 * Note that M_BCAST will be already set by ether_demux()
 			 */
-			if (bcmp(eh->ether_shost, etherbroadcastaddr,
-			    ETHER_ADDR_LEN) != 0) {
+			if (__improbable((m->m_flags & M_BCAST) == 0 && (is_cache_valid == false ||
+			    memcmp(eh->ether_shost, cached_shost, ETHER_ADDR_LEN) != 0))) {
+				memcpy(eh->ether_shost, cached_shost, ETHER_ADDR_LEN);
+				is_cache_valid = true;
+
 				arp_llreach_set_reachable(mifp, eh->ether_shost,
 				    ETHER_ADDR_LEN);
 			}
@@ -249,7 +257,7 @@ ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 		struct sockaddr_dl ll_dest = {};
 
 		result = arp_lookup_ip(ifp,
-		    (const struct sockaddr_in *)(uintptr_t)(size_t)dst_netaddr,
+		    SIN(dst_netaddr),
 		    &ll_dest, sizeof(ll_dest), (route_t)route, *m0);
 		if (result == 0) {
 			u_int16_t ethertype_ip = htons(ETHERTYPE_IP);
@@ -286,8 +294,7 @@ ether_inet_resolve_multi(ifnet_t ifp, const struct sockaddr *proto_addr,
 {
 	static const size_t minsize =
 	    offsetof(struct sockaddr_dl, sdl_data[0]) + ETHER_ADDR_LEN;
-	const struct sockaddr_in *sin =
-	    (const struct sockaddr_in *)(uintptr_t)(size_t)proto_addr;
+	const struct sockaddr_in *sin = SIN(proto_addr);
 
 	if (proto_addr->sa_family != AF_INET) {
 		return EAFNOSUPPORT;
@@ -301,7 +308,7 @@ ether_inet_resolve_multi(ifnet_t ifp, const struct sockaddr *proto_addr,
 		return EMSGSIZE;
 	}
 
-	bzero(out_ll, minsize);
+	SOCKADDR_ZERO(out_ll, minsize);
 	out_ll->sdl_len = minsize;
 	out_ll->sdl_family = AF_LINK;
 	out_ll->sdl_index = ifp->if_index;
@@ -413,9 +420,9 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	struct ether_header *eh;
 	struct ether_arp *ea;
 	const struct sockaddr_in *sender_ip =
-	    (const struct sockaddr_in *)(uintptr_t)(size_t)sender_proto;
+	    SIN(sender_proto);
 	const struct sockaddr_inarp *target_ip =
-	    (const struct sockaddr_inarp *)(uintptr_t)(size_t)target_proto;
+	    __SA_UTILS_CONV_TO_SOCKADDR_INARP(target_proto);
 	char *datap;
 
 	if (target_ip == NULL) {
@@ -482,8 +489,7 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 			IFA_LOCK(ifa);
 			if (ifa->ifa_addr != NULL &&
 			    ifa->ifa_addr->sa_family == AF_INET) {
-				bcopy(&((struct sockaddr_in *)(void *)
-				    ifa->ifa_addr)->sin_addr, ea->arp_spa,
+				bcopy(&(SIN(ifa->ifa_addr))->sin_addr, ea->arp_spa,
 				    sizeof(ea->arp_spa));
 				IFA_UNLOCK(ifa);
 				break;

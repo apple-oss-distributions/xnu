@@ -125,7 +125,6 @@ extern dtrace_id_t dtrace_probeid_error;
 
 #define	FASTTRAP_INT3		0xcc
 #define	FASTTRAP_INT		0xcd
-#define	T_DTRACE_RET		0x7f
 
 #define	FASTTRAP_2_BYTE_OP	0x0f
 #define	FASTTRAP_GROUP5_OP	0xff

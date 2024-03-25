@@ -78,6 +78,8 @@
 #include <mach/mig_errors.h>
 #include <mach/port.h>
 
+#include <vm/vm_protos.h>
+
 __BEGIN_DECLS
 #pragma GCC visibility push(hidden)
 
@@ -98,8 +100,8 @@ extern kern_return_t memory_object_lock_request(
 	vm_prot_t lock_value);
 
 extern kern_return_t memory_object_destroy(
-	memory_object_control_t memory_control,
-	kern_return_t reason);
+	memory_object_control_t                         memory_control,
+	vm_object_destroy_reason_t   reason);
 
 extern kern_return_t memory_object_upl_request(
 	memory_object_control_t memory_control,

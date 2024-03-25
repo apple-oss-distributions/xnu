@@ -174,6 +174,8 @@
 #include <skywalk/nexus/netif/nx_netif.h>
 #endif /* SKYWALK */
 
+#include <net/sockaddr_utils.h>
+
 #include <os/log.h>
 
 /*
@@ -1162,7 +1164,6 @@ SYSCTL_PROC(_net_link_bridge, OID_AUTO, tso_reduce_mss_tx,
     0, 0, bridge_tso_reduce_mss_tx_sysctl, "IU",
     "Bridge tso reduce mss on transmit");
 
-
 #if DEBUG || DEVELOPMENT
 #define BRIDGE_FORCE_ONE        0x00000001
 #define BRIDGE_FORCE_TWO        0x00000002
@@ -1183,8 +1184,18 @@ bridge_error_is_forced(u_int32_t flags)
 	                BRIDGE_LOG(LOG_NOTICE, 0, "0x%x forced", __flags); \
 	        }                                                       \
 	} while (0)
-#endif /* DEBUG || DEVELOPMENT */
 
+/*
+ * net.link.bridge.reduce_tso_mtu
+ * - when non-zero, the bridge overrides the interface TSO MTU to a lower
+ *   value (i.e. 16K) to enable testing the "use GSO instead" path
+ */
+static int if_bridge_reduce_tso_mtu = 0;
+SYSCTL_INT(_net_link_bridge, OID_AUTO, reduce_tso_mtu,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_bridge_reduce_tso_mtu, 0, "Bridge interface reduce TSO MTU");
+
+#endif /* DEBUG || DEVELOPMENT */
 
 static void brlog_ether_header(struct ether_header *);
 static void brlog_mbuf_data(mbuf_t, size_t, size_t);
@@ -1399,9 +1410,9 @@ static void
 brlog_link(struct bridge_softc * sc)
 {
 	int i;
-	uint32_t sdl_buffer[offsetof(struct sockaddr_dl, sdl_data) +
-	IFNAMSIZ + ETHER_ADDR_LEN];
-	struct sockaddr_dl *sdl = (struct sockaddr_dl *)sdl_buffer;
+	uint32_t sdl_buffer[(offsetof(struct sockaddr_dl, sdl_data) +
+	IFNAMSIZ + ETHER_ADDR_LEN)];
+	struct sockaddr_dl *sdl = SDL((uint8_t*)&sdl_buffer); /* SDL requires byte pointer */
 	const u_char * lladdr;
 	char lladdr_str[48];
 
@@ -4994,6 +5005,25 @@ bridge_send_tso(struct ifnet *dst_ifp, struct mbuf *m, bool is_ipv4)
 	return error;
 }
 
+static uint32_t
+get_if_tso_mtu(struct ifnet * ifp, bool is_ipv4)
+{
+	uint32_t tso_mtu;
+
+	tso_mtu = is_ipv4 ? ifp->if_tso_v4_mtu : ifp->if_tso_v6_mtu;
+	if (tso_mtu == 0) {
+		tso_mtu = IP_MAXPACKET;
+	}
+
+#if DEBUG || DEVELOPMENT
+#define REDUCED_TSO_MTU         (16 * 1024)
+	if (if_bridge_reduce_tso_mtu != 0 && tso_mtu > REDUCED_TSO_MTU) {
+		tso_mtu = REDUCED_TSO_MTU;
+	}
+#endif /* DEBUG || DEVELOPMENT */
+	return tso_mtu;
+}
+
 /*
  * tso_hwassist:
  * - determine whether the destination interface supports TSO offload
@@ -5043,8 +5073,10 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 		uint32_t                csum_flags;
 		ip_packet_info          info;
 		int                     mss;
+		uint32_t                pkt_mtu;
 		struct bripstats        stats;
 		struct tcphdr *         tcp;
+		uint32_t                tso_mtu;
 
 		error = bridge_get_tcp_header(mp, mac_hlen, is_ipv4,
 		    &info, &stats);
@@ -5052,13 +5084,13 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 			/* bad packet */
 			goto done;
 		}
-		if ((info.ip_hlen + info.ip_pay_len + info.ip_opt_len) <=
-		    ifp->if_mtu) {
-			/* not actually a large packet */
-			goto done;
-		}
 		if (info.ip_proto_hdr == NULL) {
 			/* not a TCP packet */
+			goto done;
+		}
+		pkt_mtu = info.ip_hlen + info.ip_pay_len + info.ip_opt_len;
+		if (pkt_mtu <= ifp->if_mtu) {
+			/* not actually a large packet */
 			goto done;
 		}
 		if ((ifp->if_hwassist & if_tso) == 0) {
@@ -5066,6 +5098,13 @@ tso_hwassist(struct mbuf **mp, bool is_ipv4, struct ifnet * ifp, u_int mac_hlen,
 			*need_sw_tso = if_bridge_segmentation != 0;
 			goto done;
 		}
+		tso_mtu = get_if_tso_mtu(ifp, is_ipv4);
+		if (pkt_mtu > tso_mtu) {
+			/* hardware can't segment this, enable sw tso */
+			*need_sw_tso = if_bridge_segmentation != 0;
+			goto done;
+		}
+
 		/* use hardware TSO */
 		(*mp)->m_pkthdr.pkt_proto = IPPROTO_TCP;
 		tcp = (struct tcphdr *)info.ip_proto_hdr;
@@ -8379,7 +8418,7 @@ bridge_mac_nat_ip_output(struct bridge_softc *sc,
 		    eh->ether_shost);
 	}
 	if (mnr != NULL) {
-		if (iphdr->ip_p == IPPROTO_UDP) {
+		if (ip.s_addr == 0 && iphdr->ip_p == IPPROTO_UDP) {
 			/* handle DHCP must broadcast */
 			bridge_mac_nat_udp_output(sc, bif, *data,
 			    ip_header_len, mnr);

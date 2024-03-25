@@ -175,8 +175,8 @@ SECURITY_READ_ONLY_LATE(int) mach_kobj_count; /* count of total number of kobjec
 ZONE_DEFINE_TYPE(ipc_kobject_label_zone, "ipc kobject labels",
     struct ipc_kobject_label, ZC_ZFREE_CLEARMEM);
 
-__startup_data
-static const struct mig_kern_subsystem *mig_e[] = {
+__startup_const
+static struct mig_kern_subsystem *mig_e[] = {
 	(const struct mig_kern_subsystem *)&mach_vm_subsystem,
 	(const struct mig_kern_subsystem *)&mach_port_subsystem,
 	(const struct mig_kern_subsystem *)&mach_host_subsystem,
@@ -1323,6 +1323,24 @@ ipc_kobject_make_send_nsrequest(
 			assert(kr != KERN_FAILURE);
 		}
 		ip_mq_unlock(port);
+	}
+
+	return kr;
+}
+
+kern_return_t
+ipc_kobject_make_send_nsrequest_locked(
+	ipc_port_t              port,
+	ipc_kobject_t           kobject,
+	ipc_kobject_type_t      kotype)
+{
+	kern_return_t kr = KERN_INVALID_RIGHT;
+
+	if (ip_active(port)) {
+		ipc_kobject_require(port, kobject, kotype);
+		ipc_port_make_send_any_locked(port);
+		kr = ipc_kobject_nsrequest_locked(port, 0);
+		assert(kr != KERN_FAILURE);
 	}
 
 	return kr;

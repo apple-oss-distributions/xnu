@@ -78,9 +78,11 @@ struct route_old {
 #ifdef BSD_KERNEL_PRIVATE
 #include <kern/locks.h>
 #include <net/radix.h>
-#include <net/if_llatbl.h>
 #include <sys/eventhandler.h>
 #include <net/if_dl.h>
+#include <netinet/in_private.h>
+
+#include <sys/constrained_ctypes.h>
 
 extern boolean_t trigger_v6_defrtr_select;
 /*
@@ -108,29 +110,12 @@ struct route {
 	 * to a 'struct route *'.
 	 */
 	struct rtentry        *ro_rt;
-	struct llentry        *ro_lle;
-
 	struct ifaddr         *ro_srcia;
 	uint32_t              ro_flags;       /* route flags (see below) */
-#if __has_ptrcheck
-	struct sockaddr_in    ro_dst;
-#else
 	struct sockaddr       ro_dst;
-#endif
 };
 
 #define ROF_SRCIF_SELECTED      0x0001  /* source interface was selected */
-#if 0
-/* XXX These will be used in the changes coming in later */
-#define        ROF_NORTREF             0x0002  /* doesn't hold reference on ro_rt */
-#define        ROF_L2_ME               0x0004  /* dst L2 addr is our address */
-#define        ROF_MAY_LOOP            0x0008  /* dst may require loop copy */
-#define        ROF_HAS_HEADER          0x0010  /* mbuf already have its header prepended */
-#define        ROF_REJECT              0x0020  /* Destination is reject */
-#define        ROF_BLACKHOLE           0x0040  /* Destination is blackhole */
-#define        ROF_HAS_GW              0x0080  /* Destination has GW  */
-#endif
-#define ROF_LLE_CACHE   0x0100  /* Cache link layer  */
 
 #define ROUTE_UNUSABLE(_ro)                                             \
 	((_ro)->ro_rt == NULL ||                                        \
@@ -147,14 +132,9 @@ struct route {
 	        (_ro)->ro_rt = NULL;                                    \
 	}                                                               \
 	if ((_ro)->ro_srcia != NULL) {                                  \
-	        IFA_REMREF((_ro)->ro_srcia);                            \
+	        ifa_remref((_ro)->ro_srcia);                            \
 	        (_ro)->ro_srcia = NULL;                                 \
 	        (_ro)->ro_flags &= ~ROF_SRCIF_SELECTED;                 \
-	}                                                               \
-	if ((_ro)->ro_lle != NULL) {                                    \
-	        LLE_REMREF((_ro)->ro_lle);                              \
-	        (_ro)->ro_lle = NULL;                                   \
-	        (_ro)->ro_flags &= ~ROF_LLE_CACHE;                      \
 	}                                                               \
 } while (0)
 
@@ -176,8 +156,8 @@ struct route {
  */
 struct rtentry {
 	struct  radix_node rt_nodes[2]; /* tree glue, and other values */
-#define rt_key(r)       (SA((r)->rt_nodes->rn_key))
-#define rt_mask(r)      (SA((r)->rt_nodes->rn_mask))
+#define rt_key(r)       (SA(rn_get_key(&((r)->rt_nodes[0]))))
+#define rt_mask(r)      (SA(rn_get_mask(&((r)->rt_nodes[0]))))
 	/*
 	 * See bsd/net/route.c for synchronization notes.
 	 */
@@ -216,9 +196,11 @@ struct rtentry {
 	struct eventhandler_lists_ctxt rt_evhdlr_ctxt;
 };
 
-#define rt_key_free(r) ({ \
-	void *__r = rt_key(r); \
-	kheap_free_addr(KHEAP_DATA_BUFFERS, __r); \
+__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct rtentry, rtentry);
+
+#define rt_key_free(r) ({                                               \
+	void *__r __single = rt_key(r);                         \
+	kheap_free_addr(KHEAP_DATA_BUFFERS, __r);       \
 })
 
 enum {
@@ -460,7 +442,7 @@ extern unsigned int sin6_get_ifscope(struct sockaddr *);
 extern void rt_lock(struct rtentry *, boolean_t);
 extern void rt_unlock(struct rtentry *);
 extern struct sockaddr *rtm_scrub(int, int, struct sockaddr *,
-    struct sockaddr *, void *, uint32_t, kauth_cred_t *);
+    struct sockaddr *, void *buf __sized_by(buflen), uint32_t buflen, kauth_cred_t *);
 extern boolean_t rt_validate(struct rtentry *);
 extern void rt_set_proxy(struct rtentry *, boolean_t);
 extern void rt_set_gwroute(struct rtentry *, struct sockaddr *,

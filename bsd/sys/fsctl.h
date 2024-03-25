@@ -319,6 +319,17 @@ typedef struct fsioc_auth_fs {
 
 #endif /* KERNEL */
 
+/* exclave fs filesystem tags */
+typedef enum {
+	EFT_EXCLAVE,
+	EFT_SYSTEM,
+	EFT_FS_NUM_TAGS,
+} exclave_fs_tag_t;
+
+typedef struct fsioc_exclave_fs_register {
+	uint32_t fs_tag;
+} fsioc_exclave_fs_register_t;
+
 #define FSCTL_SYNC_FULLSYNC     (1<<0)  /* Flush the data fully to disk, if supported by the filesystem */
 #define FSCTL_SYNC_WAIT         (1<<1)  /* Wait for the sync to complete */
 
@@ -379,6 +390,60 @@ typedef struct fsioc_auth_fs {
 #define FSIOC_AUTH_FS _IOW('A', 24, fsioc_auth_fs_t)
 
 #endif /* KERNEL */
+
+/* Register an exclave fs base directory */
+#define FSIOC_EXCLAVE_FS_REGISTER _IOW('A', 25, fsioc_exclave_fs_register_t)
+
+/* Unregister an exclave fs base directory (pass zero for the extra arg)  */
+#define FSIOC_EXCLAVE_FS_UNREGISTER _IOW('A', 26, uint32_t)
+
+typedef struct {
+	uint32_t fs_tag;       // exclave fs tag associated with base directory
+	fsid_t fsid;           // fsid of volume which contains base directory
+	uint64_t base_dir;     // inode number of base directory
+	uint64_t graft_file;   // inode number of graft file (0 if not a graft)
+} exclave_fs_base_dir_t;
+
+typedef struct {
+	uint32_t count;       // input: number of records that can be written to output buffer
+	                      // output: if output buffer is null, number of registered base dirs
+	                      //         if non-null, number of entries written to base_dirs buffer
+	exclave_fs_base_dir_t *base_dirs; // output buffer (base directory entries)
+} exclave_fs_get_base_dirs_t;
+
+#define EXCLAVE_FS_GET_BASE_DIRS_MAX_COUNT (10 * 1024)
+
+#define FSIOC_EXCLAVE_FS_GET_BASE_DIRS _IOWR('A', 27, exclave_fs_get_base_dirs_t)
+
+typedef struct {
+	uint64_t        gi_graft_file;            // inode number of graft file
+	uint64_t        gi_graft_dir;             // inode number of graft directory
+	uint64_t        gi_inum_base;             // base of inode range allocated to graft
+	uint64_t        gi_inum_len:56;           // length of inode range allocated to graft
+	uint64_t        gi_graft_lut_reduction:8; // reduction in lut size when switching to metadata based (in percents)
+	uint64_t        gi_graft_flags;           // FSCTL_GRAFT_* flags from bsd/sys/fsctl.h
+} fsioc_graft_info_t;
+
+typedef struct {
+	uint16_t        ggi_count;       // input: number of records that can be written to output buffer
+	                                 // output: if output buffer is null, number of grafts in volume
+	                                 // if non-null, number of records written to buffer
+	uint16_t        ggi_graft_index; // output: if inode is in a graft and buffer is not null,
+	                                 //         the index of the graft which contains this inode, 0 otherwise
+	uint8_t         ggi_is_in_graft; // output: 1 if inode in a graft, 0 otherwise
+	uint8_t         ggi_padding[3];  // padding, should be zero
+#ifdef KERNEL
+	user64_addr_t   ggi_buffer;      // graft info records buffer
+#else
+	void            *ggi_buffer;
+#if __SIZEOF_POINTER__ == 4
+	uint32_t        padding;
+#endif
+#endif
+} fsioc_get_graft_info_t;
+
+/* This used to be defined in APFS, we keep the group as 'J' for backward compatability */
+#define FSIOC_GET_GRAFT_INFO _IOWR('J', 102, fsioc_get_graft_info_t)
 
 //
 // Spotlight and fseventsd use these fsctl()'s to find out

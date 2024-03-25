@@ -363,7 +363,7 @@ sched_traditional_choose_thread_from_runq(
 			    thread->bound_processor == processor) {
 				circle_dequeue(queue, &thread->runq_links);
 
-				thread->runq = PROCESSOR_NULL;
+				thread_clear_runq(thread);
 				SCHED_STATS_RUNQ_CHANGE(&rq->runq_stats, rq->count);
 				rq->count--;
 				if (SCHED(priority_is_urgent)(pri)) {
@@ -415,7 +415,7 @@ sched_traditional_processor_enqueue(processor_t   processor,
 	boolean_t       result;
 
 	result = run_queue_enqueue(rq, thread, options);
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 	runq_consider_incr_bound_count(processor, thread);
 
 	return result;
@@ -545,7 +545,7 @@ sched_traditional_processor_queue_shutdown(processor_t processor)
 			if (thread->bound_processor == PROCESSOR_NULL) {
 				circle_dequeue(queue, &thread->runq_links);
 
-				thread->runq = PROCESSOR_NULL;
+				thread_clear_runq(thread);
 				SCHED_STATS_RUNQ_CHANGE(&rq->runq_stats, rq->count);
 				runq_consider_decr_bound_count(processor, thread);
 				rq->count--;
@@ -576,37 +576,6 @@ sched_traditional_processor_queue_shutdown(processor_t processor)
 	}
 }
 
-#if 0
-static void
-run_queue_check(
-	run_queue_t     rq,
-	thread_t        thread)
-{
-	queue_t         q;
-	queue_entry_t   qe;
-
-	if (rq != thread->runq) {
-		panic("run_queue_check: thread runq");
-	}
-
-	if (thread->sched_pri > MAXPRI || thread->sched_pri < MINPRI) {
-		panic("run_queue_check: thread sched_pri");
-	}
-
-	q = &rq->queues[thread->sched_pri];
-	qe = queue_first(q);
-	while (!queue_end(q, qe)) {
-		if (qe == (queue_entry_t)thread) {
-			return;
-		}
-
-		qe = queue_next(qe);
-	}
-
-	panic("run_queue_check: end");
-}
-#endif /* 0 */
-
 /*
  * Locks the runqueue itself.
  *
@@ -624,7 +593,7 @@ sched_traditional_processor_queue_remove(processor_t processor,
 
 	rq = runq_for_processor(processor);
 
-	if (processor == thread->runq) {
+	if (processor == thread_get_runq_locked(thread)) {
 		/*
 		 * Thread is on a run queue and we have a lock on
 		 * that run queue.
@@ -636,7 +605,7 @@ sched_traditional_processor_queue_remove(processor_t processor,
 		 * The thread left the run queue before we could
 		 * lock the run queue.
 		 */
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 		processor = PROCESSOR_NULL;
 	}
 
@@ -668,7 +637,7 @@ sched_traditional_steal_processor_thread(processor_t processor)
 			if (thread->bound_processor == PROCESSOR_NULL) {
 				circle_dequeue(queue, &thread->runq_links);
 
-				thread->runq = PROCESSOR_NULL;
+				thread_clear_runq(thread);
 				SCHED_STATS_RUNQ_CHANGE(&rq->runq_stats, rq->count);
 				runq_consider_decr_bound_count(processor, thread);
 				rq->count--;

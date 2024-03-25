@@ -2,11 +2,6 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import hex
-from builtins import range
-
 from xnu import *
 from utils import *
 
@@ -162,7 +157,7 @@ def MbufDecode(cmd_args=None, cmd_options={}):
     """Decode an mbuf using scapy.
         Usage: mbuf_decode <mbuf address>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print("usage: mbuf_decode <address> [decode_as]")
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
@@ -179,7 +174,7 @@ def MbufDumpData(cmd_args=None, cmd_options={}):
     """Dump the mbuf data
         Usage: mbuf_dumpdata  <mbuf address> [-C <count>]
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         print(MbufDumpData.__doc__)
         return
     mp = kern.GetValueFromAddress(cmd_args[0], 'mbuf *')
@@ -758,7 +753,7 @@ def GetMbufPktCrumbs(m):
             mhflags = m.M_hdr_common.M_hdr.mh_flags
         if (mhflags & M_PKTHDR) != 0:
             if kern.globals.mb_uses_mcache == 1:
-                pktcrumbs = m.m_hdr.pkt_crumbs
+                pktcrumbs = m.M_dat.MH.MH_pkthdr.pkt_crumbs
             else:
                 pktcrumbs = m.M_hdr_common.M_pkthdr.pkt_crumbs
             out_string += "pkt_crumbs: 0x{0:x}".format(pktcrumbs)

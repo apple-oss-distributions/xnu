@@ -2,11 +2,6 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, print_function
-
-from builtins import hex
-from builtins import range
-
 from xnu import *
 from utils import *
 from string import *
@@ -593,7 +588,7 @@ def GetSocket(socket) :
 def ShowSocket(cmd_args=None) :
     """ Show the contents of a socket
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     so = kern.GetValueFromAddress(cmd_args[0], 'socket *')
@@ -895,7 +890,7 @@ def ShowRtInet6(cmd_args=None):
 def ShowRtEntryDebug(cmd_args=None):
     """ Print the debug information of a route entry
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -988,144 +983,12 @@ def ShowRtEntryDebug(cmd_args=None):
     print(out_string)
 # EndMacro: rtentry_showdbg
 
-# Macro: inifa_showdbg
-@lldb_command('inifa_showdbg')
-def InIfaShowDebug(cmd_args=None):
-    """ Print the debug information of an IPv4 interface address
-    """
-    if (cmd_args == None or len(cmd_args) == 0):
-            print("Missing argument 0 in user function.")
-            return
-    out_string = ""
-    cnt = 0
-    inifa = kern.GetValueFromAddress(cmd_args[0], 'in_ifaddr_dbg *')
-    in_ifaddr_summary_format_string = "{0:s} {1:d}"
-    out_string += in_ifaddr_summary_format_string.format("Total holds : ", inifa.inifa_refhold_cnt) + "\n"
-    out_string += in_ifaddr_summary_format_string.format("Total releases : ", inifa.inifa_refrele_cnt) + "\n"
-
-    ix = 0
-    while (ix < CTRACE_STACK_SIZE):
-        kgm_pc = inifa.inifa_alloc.pc[ix]
-        if (kgm_pc != 0):
-            if (ix == 0):
-                out_string += "\nAlloc: (thread " + hex(inifa.inifa_alloc.th) + "):\n"
-            out_string += str(int(ix + 1)) + ": "
-            out_string += GetSourceInformationForAddress(kgm_pc)
-            out_string += "\n"
-        ix += 1
-
-    ix = 0
-    while (ix < CTRACE_STACK_SIZE):
-        kgm_pc = inifa.inifa_free.pc[ix]
-        if (kgm_pc != 0):
-            if (ix == 0):
-                out_string += "\nFree: (thread " + hex(inifa.inifa_free.th) + "):\n"
-            out_string += str(int(ix + 1)) + ": "
-            out_string += GetSourceInformationForAddress(kgm_pc)
-            out_string += "\n"
-        ix += 1
-
-    while (cnt < INIFA_TRACE_HIST_SIZE):
-        ix = 0
-        while (ix < CTRACE_STACK_SIZE):
-            kgm_pc = inifa.inifa_refhold[cnt].pc[ix]
-            if (kgm_pc != 0):
-                if (ix == 0):
-                    out_string += "\nHold [" + str(int(cnt)) + "] (thread " + hex(inifa.inifa_refhold[cnt].th) + "):\n"
-                out_string += str(int(ix + 1)) + ": "
-                out_string += GetSourceInformationForAddress(kgm_pc)
-                out_string += "\n"
-            ix += 1
-        cnt += 1
-    cnt = 0
-
-    while (cnt < INIFA_TRACE_HIST_SIZE):
-        ix = 0
-        while (ix < CTRACE_STACK_SIZE):
-            kgm_pc = inifa.inifa_refrele[cnt].pc[ix]
-            if (kgm_pc != 0):
-                if (ix == 0):
-                    out_string += "\nRelease [" + str(int(cnt)) + "] (thread " + hex(inifa.inifa_refrele[cnt].th) + "):\n"
-                out_string += str(int(ix + 1)) + ": "
-                out_string += GetSourceInformationForAddress(kgm_pc)
-                out_string += "\n"
-            ix += 1
-        cnt += 1
-    print(out_string)
-# EndMacro: inifa_showdbg
-
-# Macro: in6ifa_showdbg
-@lldb_command('in6ifa_showdbg')
-def In6IfaShowDebug(cmd_args=None):
-    """ Print the debug information of an IPv6 interface address
-    """
-    if (cmd_args == None or len(cmd_args) == 0):
-            print("Missing argument 0 in user function.")
-            return
-    out_string = ""
-    cnt = 0
-    in6ifa = kern.GetValueFromAddress(cmd_args[0], 'in6_ifaddr_dbg *')
-    in6_ifaddr_summary_format_string = "{0:s} {1:d}"
-    print(in6_ifaddr_summary_format_string.format("Total holds : ", in6ifa.in6ifa_refhold_cnt))
-    print(in6_ifaddr_summary_format_string.format("Total releases : ", in6ifa.in6ifa_refrele_cnt))
-
-    ix = 0
-    while (ix < CTRACE_STACK_SIZE):
-        kgm_pc = in6ifa.in6ifa_alloc.pc[ix]
-        if (kgm_pc != 0):
-            if (ix == 0):
-                out_string += "\nAlloc: (thread " + hex(in6ifa.in6ifa_alloc.th) + "):\n"
-            out_string += str(int(ix + 1)) + ": "
-            out_string += GetSourceInformationForAddress(kgm_pc)
-            out_string += "\n"
-        ix += 1
-
-    ix = 0
-    while (ix < CTRACE_STACK_SIZE):
-        kgm_pc = in6ifa.in6ifa_free.pc[ix]
-        if (kgm_pc != 0):
-            if (ix == 0):
-                out_string += "\nFree: (thread " + hex(in6ifa.in6ifa_free.th) + "):\n"
-            out_string += str(int(ix + 1)) + ": "
-            out_string += GetSourceInformationForAddress(kgm_pc)
-            out_string += "\n"
-        ix += 1
-
-    while (cnt < IN6IFA_TRACE_HIST_SIZE):
-        ix = 0
-        while (ix < CTRACE_STACK_SIZE):
-            kgm_pc = in6ifa.in6ifa_refhold[cnt].pc[ix]
-            if (kgm_pc != 0):
-                if (ix == 0):
-                    out_string += "\nHold [" + str(int(cnt)) + "] (thread " + hex(in6ifa.in6ifa_refhold[cnt].th) + "):\n"
-                out_string += str(int(ix + 1)) + ": "
-                out_string += GetSourceInformationForAddress(kgm_pc)
-                out_string += "\n"
-            ix += 1
-        cnt += 1
-    cnt = 0
-
-    while (cnt < IN6IFA_TRACE_HIST_SIZE):
-        ix = 0
-        while (ix < CTRACE_STACK_SIZE):
-            kgm_pc = in6ifa.in6ifa_refrele[cnt].pc[ix]
-            if (kgm_pc != 0):
-                if (ix == 0):
-                    out_string += "\nRelease [" + str(int(cnt)) + "] (thread " + hex(in6ifa.in6ifa_refrele[cnt].th) + "):\n"
-                out_string += str(int(ix + 1)) + ": "
-                out_string += GetSourceInformationForAddress(kgm_pc)
-                out_string += "\n"
-            ix += 1
-        cnt += 1
-    print(out_string)
-# EndMacro: in6ifa_showdbg
-
 # Macro: inm_showdbg
 @lldb_command('inm_showdbg')
 def InmShowDebug(cmd_args=None):
     """ Print the debug information of an IPv4 multicast address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1168,7 +1031,7 @@ def InmShowDebug(cmd_args=None):
 def IfmaShowDebug(cmd_args=None):
     """ Print the debug information of a link multicast address
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1211,7 +1074,7 @@ def IfmaShowDebug(cmd_args=None):
 def IfpRefShowDebug(cmd_args=None):
     """ Print the debug information of an interface ref count
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1254,7 +1117,7 @@ def IfpRefShowDebug(cmd_args=None):
 def ndprShowDebug(cmd_args=None):
     """ Print the debug information of a nd_prefix structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1297,7 +1160,7 @@ def ndprShowDebug(cmd_args=None):
 def nddrShowDebug(cmd_args=None):
     """ Print the debug information of a nd_defrouter structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1340,7 +1203,7 @@ def nddrShowDebug(cmd_args=None):
 def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip_moptions structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1383,7 +1246,7 @@ def IpmOptions(cmd_args=None):
 def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip6_moptions structure
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     out_string = ""
@@ -1721,7 +1584,7 @@ def CalcMbufInList(mpkt, pkt_cnt, buf_byte_cnt, mbuf_cnt, mbuf_cluster_cnt):
     while (mpkt != 0):
         mp = mpkt
         if kern.globals.mb_uses_mcache == 1:
-            mpkt = mp.m_hdr.mh_nextpktpkt
+            mpkt = mp.m_hdr.mh_nextpkt
         else:
             mpkt = mp.M_hdr_common.M_hdr.mh_nextpkt
         pkt_cnt[0] +=1
@@ -1734,7 +1597,6 @@ def CalcMbufInList(mpkt, pkt_cnt, buf_byte_cnt, mbuf_cnt, mbuf_cluster_cnt):
                 mnext = mp.M_hdr_common.M_hdr.mh_next
                 mflags = mp.M_hdr_common.M_hdr.mh_flags
                 mtype = mp.M_hdr_common.M_hdr.mh_type
-            print(" mp: 0x{:x} mh_next: 0x{:x}".format(mp, mnext))
             mbuf_cnt[0] += 1
             buf_byte_cnt[int(mtype)] += 256
             buf_byte_cnt[Mbuf_Type.MT_LAST] += 256
@@ -1761,7 +1623,7 @@ def CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_recor
 def ShowSocketSbMbufUsage(cmd_args=None):
     """ Display for a socket the mbuf usage of the send and receive socket buffers
     """
-    if (cmd_args == None or len(cmd_args) == 0):
+    if cmd_args is None or len(cmd_args) == 0:
             print("Missing argument 0 in user function.")
             return
     so = kern.GetValueFromAddress(cmd_args[0], 'socket *')

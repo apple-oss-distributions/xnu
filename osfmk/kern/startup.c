@@ -96,6 +96,7 @@
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
 #endif
+#include <kern/kpc.h>
 #include <kern/zalloc.h>
 #include <kern/locks.h>
 #include <kern/debug.h>
@@ -160,10 +161,6 @@ extern void mbuf_tag_init(void);
 #if CONFIG_VNGUARD
 extern void vnguard_policy_init(void);
 #endif
-#endif
-
-#if KPC
-#include <kern/kpc.h>
 #endif
 
 #if HYPERVISOR
@@ -429,6 +426,8 @@ kernel_bootstrap(void)
 	thread_t        thread;
 	char            namep[16];
 
+	code_signing_config_t cs_config;
+
 	printf("%s\n", version); /* log kernel version */
 
 	scale_setup();
@@ -527,7 +526,12 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("code_signing_init");
 	code_signing_init();
-	code_signing_configuration(NULL, NULL);
+	code_signing_configuration(NULL, &cs_config);
+#if XNU_TARGET_OS_OSX && (DEVELOPMENT || DEBUG)
+	if (cs_config & CS_CONFIG_GET_OUT_OF_MY_WAY) {
+		AMFI_bootarg_disable_mach_hardening = true;
+	}
+#endif /* XNU_TARGET_OS_OSX && (DEVELOPMENT || DEBUG) */
 
 	kernel_bootstrap_log("task_init");
 	task_init();
@@ -730,6 +734,16 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_log("dtrace_early_init");
 	dtrace_early_init();
 	sdt_early_init();
+#endif
+
+#if CODE_SIGNING_MONITOR
+	/*
+	 * Lockdown mode is initialized as a startup function within the early boot
+	 * category, which means it has been initialized by now. Query the state and
+	 * pass it to the code-signing-monitor if required.
+	 */
+	kernel_bootstrap_log("code-signing-monitor lockdown mode");
+	csm_check_lockdown_mode();
 #endif
 
 #if CODE_SIGNING_MONITOR
@@ -952,8 +966,7 @@ load_context(
 	struct recount_snap snap = { 0 };
 	recount_snapshot(&snap);
 	processor->last_dispatch = snap.rsn_time_mach;
-	recount_processor_run(&processor->pr_recount, &snap);
-	recount_update_snap(&snap);
+	recount_processor_online(processor, &snap);
 
 	smr_cpu_join(processor, processor->last_dispatch);
 

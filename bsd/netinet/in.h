@@ -592,6 +592,7 @@ struct __msfilterreq64 {
 	struct sockaddr_storage  msfr_group;    /* group address */
 	user64_addr_t            msfr_srcs;
 };
+
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* __MSFILTERREQ_DEFINED */
 

@@ -98,12 +98,16 @@ get_current_slide_address(bool reslide)
 	return (void *)addr;
 }
 
+#define TEST_FAULT_BASE         (0x00)
+#define TEST_FAULT_TBI          (0x01)
+#define TEST_FAULT_WRITE        (0x02)
+
 /*
  * build_faulting_shared_cache_address creates a pointer to an address that is
  * within the shared_cache range but that is guaranteed to not be mapped.
  */
 static char *
-build_faulting_shared_cache_address(bool tbi)
+build_faulting_shared_cache_address(uint8_t flags)
 {
 	uintptr_t fault_address;
 
@@ -123,27 +127,38 @@ build_faulting_shared_cache_address(bool tbi)
 	const struct mach_header *mh = info.dli_fbase;
 	uintptr_t slide = (uintptr_t)_dyld_get_image_slide(mh);
 
-	if (slide == 0) {
+	if (flags & TEST_FAULT_WRITE) {
+		fault_address = (uintptr_t)shared_cache_location;
+	} else if (slide == 0) {
 		fault_address = (uintptr_t)shared_cache_location + shared_cache_len + PAGE_SIZE;
 	} else {
 		fault_address = (uintptr_t)shared_cache_location - PAGE_SIZE;
 	}
 
-	if (tbi) {
+	if (flags & TEST_FAULT_TBI) {
 		fault_address |= 0x2000000000000000;
 	}
 
 	return (char *)fault_address;
 }
 
+#define INDUCE_CRASH_READ       (0x01)
+#define INDUCE_CRASH_WRITE      (0x02)
+
 static void
-induce_crash(volatile char *ptr)
+induce_crash(volatile char *ptr, uint8_t how_to_crash)
 {
 	pid_t child = fork();
 	T_ASSERT_POSIX_SUCCESS(child, "fork");
 
 	if (child == 0) {
-		ptr[1];
+		if (how_to_crash == INDUCE_CRASH_READ) {
+			ptr[1];
+		} else if (how_to_crash == INDUCE_CRASH_WRITE) {
+			ptr[1] = 'a';
+		} else {
+			exit(1);
+		}
 	} else {
 		sleep(1);
 		struct proc_exitreasonbasicinfo exit_reason = {0};
@@ -159,7 +174,14 @@ induce_crash(volatile char *ptr)
 		T_ASSERT_EQ(exit_reason.beri_namespace, OS_REASON_SIGNAL, "child should have exited with a signal");
 
 		if (ptr) {
-			T_ASSERT_EQ_ULLONG(exit_reason.beri_code, (unsigned long long)SIGSEGV, "child should have received SIGSEGV");
+			if (how_to_crash == INDUCE_CRASH_READ) {
+				T_ASSERT_EQ_ULLONG(exit_reason.beri_code, (unsigned long long)SIGSEGV, "child should have received SIGSEGV");
+			}
+
+			if (how_to_crash == INDUCE_CRASH_WRITE) {
+				T_ASSERT_EQ_ULLONG(exit_reason.beri_code, (unsigned long long)SIGBUS, "child should have received SIGBUS");
+			}
+
 			T_ASSERT_NE((int)(exit_reason.beri_flags & OS_REASON_FLAG_SHAREDREGION_FAULT), 0, "should detect shared cache fault");
 		} else {
 			T_ASSERT_EQ((int)(exit_reason.beri_flags & OS_REASON_FLAG_SHAREDREGION_FAULT), 0, "should not detect shared cache fault");
@@ -206,9 +228,9 @@ T_DECL(reslide_sharedcache, "crash induced reslide of the shared cache",
 	T_ASSERT_EQ_PTR(reslide_address, confirm_address, "reslide and another reslide (no crash) shouldn't diverge %p %p", reslide_address, confirm_address);
 
 	/* Crash into the shared cache area */
-	ptr = build_faulting_shared_cache_address(false);
+	ptr = build_faulting_shared_cache_address(TEST_FAULT_BASE);
 	T_ASSERT_NOTNULL(ptr, "faulting on %p in the shared region", (void *)ptr);
-	induce_crash(ptr);
+	induce_crash(ptr, INDUCE_CRASH_READ);
 	reslide_address = get_current_slide_address(true);
 	T_ASSERT_NE_PTR(system_address, reslide_address, "system and reslide should diverge (after crash) %p %p", system_address, reslide_address);
 	T_ASSERT_NE_PTR(confirm_address, reslide_address, "reslide and another reslide should diverge (after crash) %p %p", confirm_address, reslide_address);
@@ -218,7 +240,7 @@ T_DECL(reslide_sharedcache, "crash induced reslide of the shared cache",
 
 	/* Crash somewhere else */
 	ptr = NULL;
-	induce_crash(ptr);
+	induce_crash(ptr, INDUCE_CRASH_READ);
 	confirm_address = get_current_slide_address(true);
 	T_ASSERT_EQ_PTR(reslide_address, confirm_address, "reslide and another reslide after a non-tracked crash shouldn't diverge %p %p", reslide_address, confirm_address);
 
@@ -227,13 +249,23 @@ T_DECL(reslide_sharedcache, "crash induced reslide of the shared cache",
 	T_ASSERT_EQ_PTR(system_address, confirm_address, "system address and new process without resliding shouldn't diverge %p %p", system_address, confirm_address);
 
 	/* Ensure we detect a crash into the shared area with a TBI tagged address */
-	ptr = build_faulting_shared_cache_address(true);
+	ptr = build_faulting_shared_cache_address(TEST_FAULT_TBI);
 	T_ASSERT_NOTNULL(ptr, "faulting on %p in the shared region", (void *)ptr);
 	confirm_address = get_current_slide_address(true);
-	induce_crash(ptr);
+	induce_crash(ptr, INDUCE_CRASH_READ);
 	reslide_address = get_current_slide_address(true);
 	T_ASSERT_NE_PTR(system_address, reslide_address, "system and reslide should diverge (after crash, TBI test) %p %p", system_address, reslide_address);
 	T_ASSERT_NE_PTR(confirm_address, reslide_address, "reslide and another reslide should diverge (after crash, TBI test) %p %p", confirm_address, reslide_address);
+
+	/* Ensure we detect a crash into the shared area with a WRITE access */
+	ptr = build_faulting_shared_cache_address(TEST_FAULT_WRITE);
+	T_ASSERT_NOTNULL(ptr, "faulting on write on %p in the shared region", (void *)ptr);
+	confirm_address = get_current_slide_address(true);
+	induce_crash(ptr, INDUCE_CRASH_WRITE);
+	reslide_address = get_current_slide_address(true);
+	T_ASSERT_NE_PTR(system_address, reslide_address, "system and reslide should diverge (after crash, WRITE test) %p %p", system_address, reslide_address);
+	T_ASSERT_NE_PTR(confirm_address, reslide_address, "reslide and another reslide should diverge (after crash, WRITE_TEST) %p %p", confirm_address, reslide_address);
+
 #else   /* __arm64e__ && (TARGET_OS_IOS || TARGET_OS_OSX) */
 	T_SKIP("shared cache reslide is currently only supported on arm64e iPhones and Apple Silicon Macs");
 #endif /* __arm64e__ && (TARGET_OS_IOS || TARGET_OS_OSX) */

@@ -29,3 +29,61 @@
 #include <arm64/asm.h>
 #include <pexpert/arm64/board_config.h>
 
+
+#if CONFIG_SPTM
+	.text
+	.align 2
+	.globl EXT(arm64_panic_lockdown_test_load)
+LEXT(arm64_panic_lockdown_test_load)
+	ldr		x0, [x0]
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_gdbtrap)
+LEXT(arm64_panic_lockdown_test_gdbtrap)
+	.long 0xe7ffdefe
+	ret
+
+#if __has_feature(ptrauth_calls)
+	.globl EXT(arm64_panic_lockdown_test_pac_brk_c470)
+LEXT(arm64_panic_lockdown_test_pac_brk_c470)
+	brk		0xC470
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_pac_brk_c471)
+LEXT(arm64_panic_lockdown_test_pac_brk_c471)
+	brk		0xC471
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_pac_brk_c472)
+LEXT(arm64_panic_lockdown_test_pac_brk_c472)
+	brk		0xC472
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_pac_brk_c473)
+LEXT(arm64_panic_lockdown_test_pac_brk_c473)
+	brk		0xC473
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_telemetry_brk_ff00)
+LEXT(arm64_panic_lockdown_test_telemetry_brk_ff00)
+	brk		0xFF00
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_br_auth_fail)
+LEXT(arm64_panic_lockdown_test_br_auth_fail)
+	braaz	x0
+	ret
+
+	.globl EXT(arm64_panic_lockdown_test_ldr_auth_fail)
+LEXT(arm64_panic_lockdown_test_ldr_auth_fail)
+	ldraa	x0, [x0]
+	ret
+#endif /* ptrauth_calls  */
+
+#if __ARM_ARCH_8_6__
+	.globl EXT(arm64_panic_lockdown_test_fpac)
+LEXT(arm64_panic_lockdown_test_fpac)
+	autiza	x0
+	ret
+#endif /* __ARM_ARCH_8_6__ */
+#endif /* CONFIG_SPTM */

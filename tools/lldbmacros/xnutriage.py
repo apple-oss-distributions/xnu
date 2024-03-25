@@ -1,8 +1,6 @@
 """
     XNU Triage commands
 """
-from __future__ import absolute_import, print_function
-
 from xnu import *
 import sys, shlex
 from utils import *

@@ -50,7 +50,7 @@
 #  LIBKERN_RELEASE =[ LIBKERN_BASE ]
 #  LIBKERN_DEV =    [ LIBKERN_BASE iotracking ]
 #  LIBKERN_DEBUG =  [ LIBKERN_BASE iotracking ]
-#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf kpc ]
+#  PERF_DBG_BASE =  [ mach_kdp config_serial_kdp kperf config_cpu_counters ]
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
 #  PERF_DBG_DEV =   [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]
 #  PERF_DBG_DEBUG = [ PERF_DBG_BASE config_dtrace zleaks kdp_interactive_debugging sched_hygiene_debug ]

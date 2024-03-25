@@ -118,7 +118,12 @@
  */
 #ifdef KERNEL_PRIVATE
 struct selinfo {
-	struct  waitq si_waitq;         /* waitq for wait/wakeup */
+	union {
+		struct  waitq si_waitq; /* waitq for wait/wakeup */
+		uint8_t si_waitq_storage[WQ_OPAQUE_SIZE]; /* Opaque and "real" versions of waitq has different sizes
+		                                           * defined in Mach and BSD layers,
+		                                           * allocating extra storage to mitigate that */
+	};
 	struct  klist si_note;          /* JMM - temporary separation */
 	u_int   si_flags;               /* see below */
 };

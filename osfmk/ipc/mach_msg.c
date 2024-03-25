@@ -391,14 +391,17 @@ void
 mach_msg_receive_continue(void)
 {
 	mach_msg_return_t mr;
-	thread_t self = current_thread();
 
 	ipc_port_thread_group_unblocked();
-	if (self->ith_state == MACH_PEEK_READY) {
-		mr = MACH_PEEK_READY;
-	} else {
-		mr = mach_msg_receive_results();
+
+#if MACH_FLIPC
+	if (current_thread()->ith_state == MACH_PEEK_READY) {
+		thread_syscall_return(MACH_PEEK_READY);
+		__builtin_unreachable();
 	}
+#endif /* MACH_FLIPC */
+
+	mr = mach_msg_receive_results();
 	thread_syscall_return(mr);
 }
 
@@ -625,8 +628,8 @@ mach_msg_legacy_allowed(mach_msg_user_header_t *header)
 		return true;
 	}
 #endif
-	if (task_get_platform_binary(task)) {
-		/* Platform binaries must use mach_msg2_trap() */
+	if (task_is_hardened_binary(task)) {
+		/* Hardened binaries must use mach_msg2_trap() */
 		return false;
 	}
 
@@ -1317,8 +1320,10 @@ mach_msg_receive_results_complete(ipc_object_t object)
 	if (!((self->ith_state == MACH_RCV_TOO_LARGE && self->ith_option & MACH_RCV_LARGE) ||         //msg was too large and the next receive will get it
 	    self->ith_state == MACH_RCV_INTERRUPTED ||
 	    self->ith_state == MACH_RCV_TIMED_OUT ||
-	    self->ith_state == MACH_RCV_PORT_CHANGED ||
-	    self->ith_state == MACH_PEEK_READY)) {
+#if MACH_FLIPC
+	    self->ith_state == MACH_PEEK_READY ||
+#endif /* MACH_FLIPC */
+	    self->ith_state == MACH_RCV_PORT_CHANGED)) {
 		flags |= IPC_PORT_ADJUST_SR_RECEIVED_MSG;
 	}
 

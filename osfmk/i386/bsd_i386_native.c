@@ -57,7 +57,7 @@
 #include <i386/mp_desc.h>
 #include <i386/misc_protos.h>
 #include <i386/thread.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/seg.h>
 #include <mach/i386/syscall_sw.h>
 #include <sys/syscall.h>
@@ -116,32 +116,6 @@ machine_thread_dup(
 #endif
 
 	return KERN_SUCCESS;
-}
-
-void thread_set_parent(thread_t parent, int pid);
-
-void
-thread_set_parent(thread_t parent, int pid)
-{
-	pal_register_cache_state(parent, DIRTY);
-
-	if (thread_is_64bit_addr(parent)) {
-		x86_saved_state64_t     *iss64;
-
-		iss64 = USER_REGS64(parent);
-
-		iss64->rax = pid;
-		iss64->rdx = 0;
-		iss64->isf.rflags &= ~EFL_CF;
-	} else {
-		x86_saved_state32_t     *iss32;
-
-		iss32 = USER_REGS32(parent);
-
-		iss32->eax = pid;
-		iss32->edx = 0;
-		iss32->efl &= ~EFL_CF;
-	}
 }
 
 /*

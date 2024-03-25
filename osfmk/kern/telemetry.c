@@ -186,10 +186,8 @@ LCK_MTX_DECLARE(telemetry_macf_mtx, &telemetry_lck_grp);
 #define TELEMETRY_MACF_LOCK() do { lck_mtx_lock(&telemetry_macf_mtx); } while (0)
 #define TELEMETRY_MACF_UNLOCK() do { lck_mtx_unlock(&telemetry_macf_mtx); } while (0)
 
-#define TELEMETRY_BT_FRAMES                       (5)
-#define BACKTRACE_FRAMES_BUF                      (((TELEMETRY_BT_FRAMES) * 17) + 1)
+#define TELEMETRY_BT_FRAMES  (5)
 
-_Static_assert(BACKTRACE_FRAMES_BUF == CA_UBSANBUF_LEN, "Telemetry buffer size should match.");
 /*
  * Telemetry reporting is unsafe in interrupt context, since the CA framework
  * relies on being able to successfully zalloc some memory for the event.
@@ -401,18 +399,18 @@ telemetry_timer_event(__unused uint64_t deadline, __unused uint64_t interval, __
 	return 0;
 }
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 static void
 telemetry_pmi_handler(bool user_mode, __unused void *ctx)
 {
 	telemetry_mark_curthread(user_mode, TRUE);
 }
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 int
 telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 {
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	static bool sample_all_tasks_aside = false;
 	static uint32_t active_tasks_aside = false;
 	int error = 0;
@@ -467,10 +465,10 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 out:
 	TELEMETRY_PMI_UNLOCK();
 	return error;
-#else /* MONOTONIC */
+#else /* CONFIG_CPU_COUNTERS */
 #pragma unused(pmi_ctr, period)
 	return 1;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_CPU_COUNTERS */
 }
 
 /*
@@ -998,13 +996,11 @@ copytobuffer:
 	coalition_t rsrc_coal = task->coalition[COALITION_TYPE_RESOURCE];
 	tsnap->p_start_sec = rsrc_coal ? coalition_id(rsrc_coal) : 0;
 	/*
-	 * ... and the process this thread is doing work on behalf of.
+	 * ... and the processes this thread is doing work on behalf of.
 	 */
-	pid_t origin_pid = -1;
-	if (thread_get_voucher_origin_pid(thread, &origin_pid) != KERN_SUCCESS) {
-		origin_pid = -1;
-	}
-	tsnap->p_start_usec = origin_pid;
+	pid_t origin_pid = -1, proximate_pid = -1;
+	(void)thread_get_voucher_origin_proximate_pid(thread, &origin_pid, &proximate_pid);
+	tsnap->p_start_usec = ((uint64_t)proximate_pid << 32) | (uint32_t)origin_pid;
 #endif /* CONFIG_COALITIONS */
 
 	if (task->t_flags & TF_TELEMETRY) {
@@ -1454,6 +1450,28 @@ telemetry_stash_ca_event(
 	thread_call_enter(telemetry_ca_send_callout);
 }
 
+static int
+telemetry_backtrace_add_kernel(
+	char        *buf,
+	size_t       buflen)
+{
+	int rc = 0;
+#if defined(__arm__) || defined(__arm64__)
+	extern vm_offset_t   segTEXTEXECB;
+	extern unsigned long segSizeTEXTEXEC;
+	vm_address_t unslid = segTEXTEXECB - vm_kernel_stext;
+
+	rc += scnprintf(buf, buflen, "%s@%lx:%lx\n",
+	    kernel_uuid_string, unslid, unslid + segSizeTEXTEXEC - 1);
+#elif defined(__x86_64__)
+	rc += scnprintf(buf, buflen, "%s@0:%lx\n",
+	    kernel_uuid_string, vm_kernel_etext - vm_kernel_stext);
+#else
+#pragma unused(buf, buflen)
+#endif
+	return rc;
+}
+
 static void
 telemetry_backtrace_to_string(
 	char        *buf,
@@ -1464,8 +1482,11 @@ telemetry_backtrace_to_string(
 	size_t l = 0;
 
 	for (uint32_t i = 0; i < tot; i++) {
-		l += scnprintf(buf + l, buflen - l, "%lx\n", VM_KERNEL_UNSLIDE(frames[i]));
+		l += scnprintf(buf + l, buflen - l, "%lx\n",
+		    frames[i] - vm_kernel_stext);
 	}
+	l += telemetry_backtrace_add_kernel(buf + l, buflen - l);
+	telemetry_backtrace_add_kexts(buf + l, buflen - l, frames, tot);
 }
 
 static void
@@ -1498,6 +1519,28 @@ telemetry_flush_ca_events(
 	*in_handler = false;
 	lck_spin_unlock(&ca_entries_lck);
 
+	/*
+	 * All addresses (faulting_address and backtrace) are relative to the
+	 * vm_kernel_stext which means that all offsets will be typically <=
+	 * 50M which uses 7 hex digits.
+	 *
+	 * We allow up to TELEMETRY_BT_FRAMES (5) entries,
+	 * and be formatted like this:
+	 *
+	 *     <OFFSET1>\n
+	 *     <OFFSET2>\n
+	 *     ...
+	 *     <UUID_a>@<TEXT_EXEC_BASE_OFFSET>:<TEXT_EXEC_END_OFFSET>\n
+	 *     <UUID_b>@<TEXT_EXEC_BASE_OFFSET>:<TEXT_EXEC_END_OFFSET>\n
+	 *     ...
+	 *
+	 * In general this backtrace takes 8 bytes per "frame",
+	 * with an extra 52 bytes per unique UUID referenced.
+	 *
+	 * The buffer we have is CA_UBSANBUF_LEN (256 bytes) long, which
+	 * accomodates for 4 full unique UUIDs which should be sufficient.
+	 */
+
 	/* Send the events */
 	for (uint8_t i = 0; i < entry_cnt; i++) {
 		ca_event_t ca_event = CA_EVENT_ALLOCATE(kernel_breakpoint_event);
@@ -1507,8 +1550,10 @@ telemetry_flush_ca_events(
 		event->brk_code = local_entries[i].code;
 		event->faulting_address = local_entries[i].faulting_address;
 
-		telemetry_backtrace_to_string(event->backtrace, BACKTRACE_FRAMES_BUF,
-		    local_entries[i].num_frames, local_entries[i].frames);
+		telemetry_backtrace_to_string(event->backtrace,
+		    sizeof(event->backtrace),
+		    local_entries[i].num_frames,
+		    local_entries[i].frames);
 		strlcpy(event->uuid, kernel_uuid_string, CA_UUID_LEN);
 
 		CA_EVENT_SEND(ca_event);
@@ -1553,7 +1598,7 @@ telemetry_kernel_brk(
 		uint32_t total_frames = backtrace(frames, TELEMETRY_BT_FRAMES, &ctl, NULL);
 
 		telemetry_stash_ca_event(type, comment, total_frames,
-		    frames, VM_KERNEL_UNSLIDE(faulting_address));
+		    frames, faulting_address - vm_kernel_stext);
 	}
 }
 

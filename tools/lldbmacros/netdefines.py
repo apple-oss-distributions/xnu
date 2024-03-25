@@ -1,4 +1,3 @@
-from __future__ import absolute_import
 
 dlil_if_flags_strings = ["DLIF_INUSE",
                          "DLIF_REUSE",
@@ -90,7 +89,10 @@ if_xflags_strings = ["WAKE_ON_MAGIC_PACKET",
                      "MPK_LOG",
                      "CONSTRAINED",
                      "LOW_LATENCY",
-                     "MARK_WAKE_PKT"
+                     "MARK_WAKE_PKT",
+                     "FAST_PACKET_DELIVERY",
+                     "NO_TRAFFIC_SHAPING",
+                     "MANAGEMENT"
                      ]
 
 AF_INET = 2

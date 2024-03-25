@@ -8,6 +8,11 @@ src:./san/coverage/kcov.c
 src:./san/coverage/kcov_ksancov.c
 src:./san/coverage/kcov_stksz.c
 
+# Exclude KASan runtime
+src:./san/memory/*
+
+src:./osfmk/kern/debug.c
+
 # Calls from sanitizer hook back to kernel.
 fun:_disable_preemption
 fun:_enable_preemption
@@ -20,3 +25,8 @@ fun:cpu_number
 fun:get_cpu_number
 fun:pmap_in_ppl
 fun:get_preemption_level
+
+# Closure of VM_KERNEL_UNSLIDE
+fun:vm_memtag_add_ptr_tag
+fun:ml_static_unslide
+fun:vm_is_addr_slid

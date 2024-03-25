@@ -79,25 +79,6 @@
 /* For arm platforms, create one pset per cluster */
 #define MAX_PSETS MAX_CPU_CLUSTERS
 
-/*
- * The clutch scheduler is enabled only on non-AMP platforms for now.
- */
-#if CONFIG_CLUTCH
-
-#if __ARM_AMP__
-
-/* Enable the Edge scheduler for all AS Mac platforms */
-#if XNU_TARGET_OS_OSX
-#define CONFIG_SCHED_CLUTCH 1
-#define CONFIG_SCHED_EDGE   1
-#endif /* XNU_TARGET_OS_OSX */
-
-
-#else /* __ARM_AMP__ */
-#define CONFIG_SCHED_CLUTCH 1
-#endif /* __ARM_AMP__ */
-
-#endif /* CONFIG_CLUTCH */
 
 /* Thread groups are enabled on all ARM platforms (irrespective of scheduler) */
 #define CONFIG_THREAD_GROUPS 1
@@ -204,6 +185,14 @@
 #define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
 
 /* D-Cache, 160KB for Firestorm, 8-way. 64KB for Icestorm, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEAVALANCHE)
+
+/* I-Cache, 192KB for Avalanche, 128KB for Blizzard, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Avalanche, 8-way. 64KB for Blizzard, 8-way. */
 #define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
 
 #elif defined (BCM2837) /* Raspberry Pi 3 */
@@ -507,6 +496,8 @@
 #define PSR64_MODE_EL2          (0x2 << PSR64_MODE_EL_SHIFT)
 #define PSR64_MODE_EL1          (0x1 << PSR64_MODE_EL_SHIFT)
 #define PSR64_MODE_EL0          0
+
+#define PSR64_MODE_EL_KERNEL    (PSR64_MODE_EL1)
 
 #define PSR64_MODE_SPX          0x1
 #define PSR64_MODE_SP0          0
@@ -1772,9 +1763,12 @@
 
 #ifdef __ASSEMBLER__
 /* Define only the classes we need to test in the exception vectors. */
+#define ESR_EC_UNCATEGORIZED   0x00
+#define ESR_EC_PAC_FAIL        0x1C
 #define ESR_EC_IABORT_EL1      0x21
 #define ESR_EC_DABORT_EL1      0x25
 #define ESR_EC_SP_ALIGN        0x26
+#define ESR_EC_BRK_AARCH64     0x3C
 #else
 typedef enum {
 	ESR_EC_UNCATEGORIZED       = 0x00,
@@ -1877,15 +1871,19 @@ typedef enum {
 
 /*
  * Instruction Abort ISS (EL1)
- *  24           10 9      5    0
- * +---------------+--+---+------+
- * |000000000000000|EA|000| IFSC |
- * +---------------+--+---+------+
+ *  24              10  9     5    0
+ * +--------------+---+--+---+------+
+ * |00000000000000|FnV|EA|000| IFSC |
+ * +--------------+---+--+---+------+
  *
  * where:
+ *   FnV:  FAR not Valid
  *   EA:   External Abort type
  *   IFSC: Instruction Fault Status Code
  */
+
+#define ISS_IA_FNV_SHIFT 10
+#define ISS_IA_FNV      (0x1 << ISS_IA_FNV_SHIFT)
 
 #define ISS_IA_EA_SHIFT 9
 #define ISS_IA_EA       (0x1 << ISS_IA_EA_SHIFT)
@@ -1897,18 +1895,22 @@ typedef enum {
 /*
  * Data Abort ISS (EL1)
  *
- *  24              9  8  7  6  5  0
- * +---------------+--+--+-+---+----+
- * |000000000000000|EA|CM|S1PTW|WnR|DFSC|
- * +---------------+--+--+-+---+----+
+ *  24              10  9  8   7    6  5  0
+ * +--------------+---+--+--+-----+---+----+
+ * |00000000000000|FnV|EA|CM|S1PTW|WnR|DFSC|
+ * +--------------+---+--+--+-----+---+----+
  *
  * where:
+ *   FnV:   FAR not Valid
  *   EA:    External Abort type
  *   CM:    Cache Maintenance operation
  *   WnR:   Write not Read
  *   S1PTW: Stage 2 exception on Stage 1 page table walk
  *   DFSC:  Data Fault Status Code
  */
+#define ISS_DA_FNV_SHIFT 10
+#define ISS_DA_FNV      (0x1 << ISS_DA_FNV_SHIFT)
+
 #define ISS_DA_EA_SHIFT  9
 #define ISS_DA_EA        (0x1 << ISS_DA_EA_SHIFT)
 
@@ -1974,6 +1976,21 @@ typedef enum {
  */
 #define ISS_BRK_COMMENT_MASK    0xFFFF
 #define ISS_BRK_COMMENT(x)      (x & ISS_BRK_COMMENT_MASK)
+
+
+/*
+ * SError Interrupt, IDS=1
+ *   24 23                     0
+ * +---+------------------------+
+ * |IDS| IMPLEMENTATION DEFINED |
+ * +---+------------------------+
+ *
+ * where:
+ *   IDS: Implementation-defined syndrome (1)
+ */
+
+#define ISS_SEI_IDS_SHIFT  24
+#define ISS_SEI_IDS        (0x1 << ISS_SEI_IDS_SHIFT)
 
 
 #if HAS_UCNORMAL_MEM
@@ -2062,6 +2079,10 @@ typedef enum {
 #define MIDR_JADE_DIE_FIRESTORM         (0x029 << MIDR_EL1_PNUM_SHIFT)
 #endif
 
+#ifdef APPLEAVALANCHE
+#define MIDR_ELLIS_BLIZZARD             (0x030 << MIDR_EL1_PNUM_SHIFT)
+#define MIDR_ELLIS_AVALANCHE            (0x031 << MIDR_EL1_PNUM_SHIFT)
+#endif
 
 
 
@@ -2313,6 +2334,7 @@ typedef enum {
 
 
 
+
 #define APSTATE_G_SHIFT  (0)
 #define APSTATE_P_SHIFT  (1)
 #define APSTATE_A_SHIFT  (2)
@@ -2330,9 +2352,8 @@ typedef enum {
 #define ACTLR_EL1_USAT_MASK      (1ULL << ACTLR_EL1_USAT_OFFSET)
 #define ACTLR_EL1_USAT           ACTLR_EL1_USAT_MASK
 #endif
-#define ACTLR_EL1_DisHWP_OFFSET  3
-#define ACTLR_EL1_DisHWP_MASK    (1ULL << ACTLR_EL1_DisHWP_OFFSET)
-#define ACTLR_EL1_DisHWP         ACTLR_EL1_DisHWP_MASK
+
+
 
 
 
@@ -2691,6 +2712,7 @@ nop
 nop
 #endif /* !__ARM_SB_AVAILABLE__ */
 .endmacro
+
 
 #endif /* __ASSEMBLER__ */
 

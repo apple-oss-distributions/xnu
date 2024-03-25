@@ -167,6 +167,50 @@ bpf_arp_filter(int fd, int type_offset, int type, u_int pkt_size)
 	return ioctl(fd, BIOCSETF, &prog);
 }
 
+PRIVATE_EXTERN int
+bpf_set_write_size_max(int fd, u_int value)
+{
+#ifdef BIOCSWRITEMAX
+	return ioctl(fd, BIOCSWRITEMAX, &value);
+#else
+#pragma unused(fd, value)
+	return ENOTSUP;
+#endif
+}
+
+PRIVATE_EXTERN int
+bpf_get_write_size_max(int fd, u_int *value)
+{
+#ifdef BIOCGWRITEMAX
+	return ioctl(fd, BIOCGWRITEMAX, value);
+#else
+#pragma unused(fd, value)
+	return ENOTSUP;
+#endif
+}
+
+PRIVATE_EXTERN int
+bpf_set_batch_write(int fd, u_int value)
+{
+#ifdef BIOCSBATCHWRITE
+	return ioctl(fd, BIOCSBATCHWRITE, &value);
+#else
+#pragma unused(fd, value)
+	return ENOTSUP;
+#endif
+}
+
+PRIVATE_EXTERN int
+bpf_get_batch_write(int fd, u_int *value)
+{
+#ifdef BIOCGBATCHWRITE
+	return ioctl(fd, BIOCGBATCHWRITE, value);
+#else
+#pragma unused(fd, value)
+	return ENOTSUP;
+#endif
+}
+
 #ifdef TESTING
 #include <net/if_arp.h>
 #include <net/ethernet.h>

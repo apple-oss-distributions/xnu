@@ -312,7 +312,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 
 	if (__improbable(report_phy_read_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
-		sabs = mach_absolute_time();
+		sabs = ml_get_timebase();
 		timeread = true;
 	}
 #ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
@@ -370,7 +370,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timeread)) {
-		eabs = mach_absolute_time();
+		eabs = ml_get_timebase();
 
 		iotrace(IOTRACE_PHYS_READ, 0, addr, size, result, sabs, eabs - sabs);
 
@@ -539,7 +539,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 
 	if (__improbable(report_phy_write_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
-		sabs = mach_absolute_time();
+		sabs = ml_get_timebase();
 		timewrite = true;
 	}
 #ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
@@ -592,7 +592,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timewrite)) {
-		eabs = mach_absolute_time();
+		eabs = ml_get_timebase();
 
 		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
 

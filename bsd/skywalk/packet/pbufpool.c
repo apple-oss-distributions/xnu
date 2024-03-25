@@ -601,11 +601,11 @@ pp_metadata_construct(struct __kern_quantum *kqum, struct __user_quantum *uqum,
 				goto fail;
 			}
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 			/* Checking to ensure the object address is tagged */
 			ASSERT((vm_offset_t)kbuf !=
 			    vm_memtag_canonicalize_address((vm_offset_t)kbuf));
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 			blistn = (*blist)->mo_next;
 			(*blist)->mo_next = NULL;
@@ -1976,11 +1976,11 @@ pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 		/* Checking to ensure the object address is tagged */
 		ASSERT((vm_offset_t)kqum !=
 		    vm_memtag_canonicalize_address((vm_offset_t)kqum));
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		if (tagged) {
 			*array = SK_PTR_ENCODE(kqum, METADATA_TYPE(kqum),
@@ -2091,11 +2091,11 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 			break;
 		}
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 		/* Checking to ensure the object address is tagged */
 		ASSERT((vm_offset_t)kpkt !=
 		    vm_memtag_canonicalize_address((vm_offset_t)kpkt));
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		KPKTQ_ENQUEUE(pktq, kpkt);
 
@@ -2461,11 +2461,11 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
 		list->mo_next = NULL;
 		kbft = (kern_buflet_t)(void *)list;
 
-#if CONFIG_KERNEL_TAGGING
+#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
 		/* Checking to ensure the object address is tagged */
 		ASSERT((vm_offset_t)kbft !=
 		    vm_memtag_canonicalize_address((vm_offset_t)kbft));
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		KBUF_EXT_INIT(kbft, pp);
 		*array = (uint64_t)kbft;

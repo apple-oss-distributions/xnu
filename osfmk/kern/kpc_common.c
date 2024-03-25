@@ -33,13 +33,8 @@
 #include <sys/errno.h>
 #include <sys/vm.h>
 #include <kperf/buffer.h>
-#if MONOTONIC
 #include <kern/monotonic.h>
-#endif /* MONOTONIC */
 #include <kern/thread.h>
-#if defined(__arm64__)
-#include <arm/cpu_data_internal.h>
-#endif
 
 #include <kern/kpc.h>
 
@@ -47,6 +42,8 @@
 #include <kperf/sample.h>
 #include <kperf/context.h>
 #include <kperf/action.h>
+
+#if CONFIG_CPU_COUNTERS
 
 uint32_t kpc_actionid[KPC_MAX_COUNTERS];
 
@@ -186,9 +183,9 @@ kpc_force_all_ctrs(task_t task, int val)
 		return 0;
 	}
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_ownership_change(new_state);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	/* notify the power manager */
 	if (kpc_pm_handler) {
@@ -332,7 +329,7 @@ kpc_get_curcpu_counters(uint32_t classes, int *curcpu, uint64_t *buf)
 	return offset;
 }
 
-/* generic counter reading function, public api */
+/* generic counter reading function */
 int
 kpc_get_cpu_counters(boolean_t all_cpus, uint32_t classes,
     int *curcpu, uint64_t *buf)
@@ -485,13 +482,14 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 	return 0;
 }
 
-int
-kpc_set_config(uint32_t classes, kpc_config_t *configv)
+static int
+_kpc_set_config_internal(uint32_t classes, kpc_config_t *configv, bool allow_list)
 {
 	int ret = 0;
 	struct kpc_config_remote mp_config = {
 		.classes = classes, .configv = configv,
-		.pmc_mask = kpc_get_configurable_pmc_mask(classes)
+		.pmc_mask = kpc_get_configurable_pmc_mask(classes),
+		.allow_list = allow_list,
 	};
 
 	assert(configv);
@@ -520,6 +518,19 @@ kpc_set_config(uint32_t classes, kpc_config_t *configv)
 	lck_mtx_unlock(&kpc_config_lock);
 
 	return ret;
+}
+
+int
+kpc_set_config_kernel(uint32_t classes, kpc_config_t * configv)
+{
+	return _kpc_set_config_internal(classes, configv, true);
+}
+
+int kpc_set_config_external(uint32_t classes, kpc_config_t *configv);
+int
+kpc_set_config_external(uint32_t classes, kpc_config_t *configv)
+{
+	return _kpc_set_config_internal(classes, configv, false);
 }
 
 uint32_t
@@ -875,3 +886,92 @@ exit:
 
 	return cfg_mask | pwr_mask;
 }
+
+#else // CONFIG_CPU_COUNTERS
+
+/*
+ * Ensure there are stubs available for kexts, even if xnu isn't built to
+ * support CPU counters.
+ */
+
+void
+kpc_pm_acknowledge(boolean_t __unused available_to_pm)
+{
+}
+
+boolean_t
+kpc_register_pm_handler(kpc_pm_handler_t __unused handler)
+{
+	return FALSE;
+}
+
+boolean_t
+kpc_reserve_pm_counters(
+	uint64_t __unused pmc_mask,
+	kpc_pm_handler_t __unused handler,
+	boolean_t __unused custom_config)
+{
+	return TRUE;
+}
+
+void
+kpc_release_pm_counters(void)
+{
+}
+
+int
+kpc_get_force_all_ctrs(void)
+{
+	return 0;
+}
+
+int
+kpc_get_cpu_counters(
+	boolean_t __unused all_cpus,
+	uint32_t __unused classes,
+	int * __unused curcpu,
+	uint64_t * __unused buf)
+{
+	return ENOTSUP;
+}
+
+int
+kpc_get_shadow_counters(
+	boolean_t __unused all_cpus,
+	uint32_t __unused classes,
+	int * __unused curcpu,
+	uint64_t * __unused buf)
+{
+	return ENOTSUP;
+}
+
+uint32_t
+kpc_get_running(void)
+{
+	return 0;
+}
+
+int
+kpc_set_running(uint32_t __unused classes)
+{
+	return ENOTSUP;
+}
+
+int
+kpc_get_config(
+	uint32_t __unused classes,
+	kpc_config_t * __unused current_config)
+{
+	return ENOTSUP;
+}
+
+int kpc_set_config_external(uint32_t classes, kpc_config_t *configv);
+int
+kpc_set_config_external(
+	uint32_t __unused classes,
+	kpc_config_t * __unused configv)
+{
+	return ENOTSUP;
+}
+
+#endif // !CONFIG_CPU_COUNTERS

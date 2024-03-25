@@ -446,6 +446,43 @@ kperf_ucallstack_log(struct kp_ucallstack *cs)
 	    cs->kpuc_async_index, cs->kpuc_async_nframes);
 }
 
+#if CONFIG_EXCLAVES
+void
+kperf_excallstack_log(const stackshot_ipcstackentry_s *ipcstack)
+{
+	__block unsigned int nframes = 0;
+	__block unsigned int flags = CALLSTACK_VALID;
+	uint64_t frames[MAX_EXCALLSTACK_FRAMES] = {};
+	uint64_t *frames_block = frames;
+
+	BUF_DATA(PERF_CS_EXSTACK, ipcstack->asid);
+
+	if (ipcstack->stacktrace.has_value) {
+		address__v_visit(&ipcstack->stacktrace.value, ^(size_t i, const stackshot_address_s item) {
+			if (i >= MAX_EXCALLSTACK_FRAMES) {
+				flags |= CALLSTACK_TRUNCATED;
+				return;
+			}
+			frames_block[i] = item;
+			nframes += 1;
+		});
+		callstack_log(PERF_CS_EXHDR, PERF_CS_EXDATA, frames, nframes, flags, 0, 0);
+	}
+}
+
+bool
+kperf_exclave_callstack_pend(struct kperf_context *context, unsigned int actionid)
+{
+	if ((context->cur_thread->th_exclaves_state & TH_EXCLAVES_RPC)
+	    && (os_atomic_load(&context->cur_thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_NOINSPECT) == 0) {
+		os_atomic_or(&context->cur_thread->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_KPERF, relaxed);
+		context->cur_thread->kperf_exclaves_ast |= T_KPERF_SET_ACTIONID(actionid);
+		return true;
+	}
+	return false;
+}
+#endif /* CONFIG_EXCLAVES */
+
 int
 kperf_ucallstack_pend(struct kperf_context * context, uint32_t depth,
     unsigned int actionid)

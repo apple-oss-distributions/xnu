@@ -82,8 +82,13 @@ __options_decl(copyio_flags_t, uint32_t, {
 	COPYIO_ATOMIC                   = 0x0010,
 });
 
+typedef enum {
+	USER_ACCESS_READ,
+	USER_ACCESS_WRITE
+} user_access_direction_t;
+
 static inline void
-user_access_enable(void)
+user_access_enable(__unused user_access_direction_t user_access_direction)
 {
 #if __ARM_PAN_AVAILABLE__
 	assert(__builtin_arm_rsr("pan") != 0);
@@ -93,7 +98,7 @@ user_access_enable(void)
 }
 
 static inline void
-user_access_disable(void)
+user_access_disable(__unused user_access_direction_t user_access_direction)
 {
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
@@ -131,14 +136,16 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 
 	user_addr_t user_addr_last;
 	uintptr_t kernel_addr_last;
+	user_addr_t canonicalized_user_addr = user_addr;
+
 
 	if (__improbable(nbytes > copysize_limit_panic)) {
 		panic("%s(%p, %p, %lu) - transfer too large", __func__,
 		    (void *)user_addr, (void *)kernel_addr, nbytes);
 	}
 
-	if (__improbable((user_addr < vm_map_min(self->map)) ||
-	    os_add_overflow(user_addr, nbytes, &user_addr_last) ||
+	if (__improbable((canonicalized_user_addr < vm_map_min(self->map)) ||
+	    os_add_overflow(canonicalized_user_addr, nbytes, &user_addr_last) ||
 	    (user_addr_last > vm_map_max(self->map)))) {
 		return EFAULT;
 	}
@@ -173,7 +180,7 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 		return EXDEV;
 	}
 
-	if (__improbable(user_addr & ARM_TBI_USER_MASK)) {
+	if (__improbable(canonicalized_user_addr & ARM_TBI_USER_MASK)) {
 		return EINVAL;
 	}
 
@@ -225,9 +232,9 @@ copyin(const user_addr_t user_addr, void *kernel_addr, vm_size_t nbytes)
 		return result;
 	}
 
-	user_access_enable();
+	user_access_enable(USER_ACCESS_READ);
 	result = _bcopyin((const char *)user_addr, kernel_addr, nbytes);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_READ);
 	return result;
 }
 
@@ -244,9 +251,9 @@ copyin_atomic32(const user_addr_t user_addr, uint32_t *kernel_addr)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_READ);
 	result = _copyin_atomic32((const char *)user_addr, kernel_addr);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_READ);
 	return result;
 }
 
@@ -258,9 +265,9 @@ copyin_atomic32_wait_if_equals(const user_addr_t user_addr, uint32_t value)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_READ);
 	result = _copyin_atomic32_wait_if_equals((const char *)user_addr, value);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_READ);
 	return result;
 }
 
@@ -272,9 +279,9 @@ copyin_atomic64(const user_addr_t user_addr, uint64_t *kernel_addr)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_READ);
 	result = _copyin_atomic64((const char *)user_addr, kernel_addr);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_READ);
 	return result;
 }
 
@@ -286,9 +293,9 @@ copyout_atomic32(uint32_t value, user_addr_t user_addr)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_WRITE);
 	result = _copyout_atomic32(value, (const char *)user_addr);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_WRITE);
 	return result;
 }
 
@@ -300,9 +307,9 @@ copyout_atomic64(uint64_t value, user_addr_t user_addr)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_WRITE);
 	result = _copyout_atomic64(value, (const char *)user_addr);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_WRITE);
 	return result;
 }
 
@@ -321,10 +328,10 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_READ);
 	result = _bcopyinstr((const char *)user_addr, kernel_addr, nbytes,
 	    &bytes_copied);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_READ);
 	if (result != EFAULT) {
 		*lencopied = bytes_copied;
 	}
@@ -348,9 +355,9 @@ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 	if (__improbable(result)) {
 		return result;
 	}
-	user_access_enable();
+	user_access_enable(USER_ACCESS_WRITE);
 	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
-	user_access_disable();
+	user_access_disable(USER_ACCESS_WRITE);
 	return result;
 }
 

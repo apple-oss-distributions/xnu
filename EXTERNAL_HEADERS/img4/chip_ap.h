@@ -9,7 +9,9 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @const IMG4_CHIP_AP_SHA1
@@ -205,6 +207,8 @@ const img4_chip_t _img4_chip_ap_vma2_clone;
 #define IMG4_CHIP_AP_VMA2_CLONE (img4if->i4if_v13.chip_ap_vma2_clone)
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_CHIP_AP_H

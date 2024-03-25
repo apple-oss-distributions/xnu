@@ -28,7 +28,6 @@
 
 #include <kern/monotonic.h>
 #include <kern/recount.h>
-#include <kern/perfmon.h>
 #include <machine/machine_routines.h>
 #include <machine/monotonic.h>
 #include <pexpert/pexpert.h>
@@ -42,6 +41,7 @@
 #include <sys/systm.h>
 #include <sys/types.h>
 #include <sys/monotonic.h>
+#include <kern/cpc.h>
 
 static int mt_cdev_open(dev_t dev, int flags, int devtype, proc_t p);
 static int mt_cdev_close(dev_t dev, int flags, int devtype, proc_t p);
@@ -140,7 +140,7 @@ mt_cdev_open(dev_t devnum, __unused int flags, __unused int devtype,
 	if (!dev) {
 		return ENODEV;
 	}
-	if (!perfmon_acquire(perfmon_upmu, "monotonic")) {
+	if (!cpc_hw_acquire(CPC_HW_UPMU, "monotonic")) {
 		return EBUSY;
 	}
 	mt_device_lock(dev);
@@ -155,7 +155,7 @@ mt_cdev_open(dev_t devnum, __unused int flags, __unused int devtype,
 	mt_device_unlock(dev);
 
 	if (error != 0) {
-		perfmon_release(perfmon_upmu, "monotonic");
+		cpc_hw_release(CPC_HW_UPMU, "monotonic");
 	}
 	return error;
 }
@@ -169,7 +169,7 @@ mt_cdev_close(dev_t devnum, __unused int flags, __unused int devtype,
 		return ENODEV;
 	}
 
-	perfmon_release(perfmon_upmu, "monotonic");
+	cpc_hw_release(CPC_HW_UPMU, "monotonic");
 
 	mt_device_lock(dev);
 	mt_device_assert_inuse(dev);
@@ -326,8 +326,8 @@ static void
 _convert_usage_to_counts(struct recount_usage *usage, uint64_t *counts)
 {
 #if CONFIG_PERVASIVE_CPI
-	counts[MT_CORE_INSTRS] = usage->ru_instructions;
-	counts[MT_CORE_CYCLES] = usage->ru_cycles;
+	counts[MT_CORE_INSTRS] = usage->ru_metrics[RCT_LVL_KERNEL].rm_instructions;
+	counts[MT_CORE_CYCLES] = usage->ru_metrics[RCT_LVL_KERNEL].rm_cycles;
 #else /* CONFIG_PERVASIVE_CPI */
 #pragma unused(usage, counts)
 #endif /* !CONFIG_PERVASIVE_CPI */
@@ -391,7 +391,6 @@ mt_sysctl SYSCTL_HANDLER_ARGS
 		mt_fixed_counts(start);
 		mt_fixed_counts(end);
 		ml_set_interrupts_enabled(intrs_en);
-
 		goto copyout_counts;
 	}
 	case MT_FIX_THREAD_PERF: {

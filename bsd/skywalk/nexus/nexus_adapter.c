@@ -549,9 +549,6 @@ na_bind_channel(struct nexus_adapter *na, struct kern_channel *ch,
 	/* update our work timestamp */
 	na->na_work_ts = net_uptime();
 
-	/* update our work timestamp */
-	na->na_work_ts = net_uptime();
-
 	na->na_channels++;
 
 	/*

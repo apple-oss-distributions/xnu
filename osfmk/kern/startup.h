@@ -144,18 +144,21 @@ __enum_decl(startup_rank_t, uint32_t, {
  * so for KASAN leave things in regular __TEXT/__DATA segments
  */
 #define STARTUP_CODE_SEGSECT "__TEXT,__text"
+#define STARTUP_CONST_SEGSECT "__DATA_CONST,__init"
 #define STARTUP_DATA_SEGSECT "__DATA,__init"
 #define STARTUP_HOOK_SEGMENT "__DATA"
 #define STARTUP_HOOK_SECTION "__init_entry_set"
 #elif defined(__x86_64__)
 /* Intel doesn't have a __BOOTDATA but doesn't protect __KLD */
 #define STARTUP_CODE_SEGSECT "__TEXT,__text"
+#define STARTUP_CONST_SEGSECT "__KLDDATA,__const"
 #define STARTUP_DATA_SEGSECT "__KLDDATA,__init"
 #define STARTUP_HOOK_SEGMENT "__KLDDATA"
 #define STARTUP_HOOK_SECTION "__init_entry_set"
 #else
 /* arm protects __KLD early, so use __BOOTDATA for data */
 #define STARTUP_CODE_SEGSECT "__TEXT,__text"
+#define STARTUP_CONST_SEGSECT "__KLDDATA,__const"
 #define STARTUP_DATA_SEGSECT "__BOOTDATA,__init"
 #define STARTUP_HOOK_SEGMENT "__BOOTDATA"
 #define STARTUP_HOOK_SECTION "__init_entry_set"
@@ -185,6 +188,22 @@ __enum_decl(startup_rank_t, uint32_t, {
  */
 #define __startup_data \
 	__PLACE_IN_SECTION(STARTUP_DATA_SEGSECT)
+
+/*!
+ * @macro __startup_const
+ *
+ * @abstract
+ * Attribute to place on global constants used during the kernel startup phase.
+ *
+ * @description
+ * Data marked with this attribute will be unmapped after kernel lockdown.
+ *
+ * __startup_const implies const. Be mindful that for pointers, the `const`
+ * will end up on the wrong side of the star if you put __startup_const at the
+ * start of the declaration.
+ */
+#define __startup_const \
+	__PLACE_IN_SECTION(STARTUP_CONST_SEGSECT) const
 
 /*!
  * @macro STARTUP
@@ -681,8 +700,8 @@ struct __startup_tunable <bool>{
 __BEGIN_DECLS
 
 #define __TUNABLE(type_t, var, key) \
-	static __startup_data char __startup_TUNABLES_name_ ## var[] = key; \
-	static __startup_data struct startup_tunable_spec \
+	static __startup_const char __startup_TUNABLES_name_ ## var[] = key; \
+	static __startup_const struct startup_tunable_spec \
 	__startup_TUNABLES_spec_ ## var = { \
 	        .name = __startup_TUNABLES_name_ ## var, \
 	        .var_addr = (void *)&var, \
@@ -693,8 +712,8 @@ __BEGIN_DECLS
 	    kernel_startup_tunable_init, &__startup_TUNABLES_spec_ ## var)
 
 #define __TUNABLE_STR(var, key) \
-	static __startup_data char __startup_TUNABLES_name_ ## var[] = key; \
-	static __startup_data struct startup_tunable_spec \
+	static __startup_const char __startup_TUNABLES_name_ ## var[] = key; \
+	static __startup_const struct startup_tunable_spec \
 	__startup_TUNABLES_spec_ ## var = { \
 	        .name = __startup_TUNABLES_name_ ## var, \
 	        .var_addr = (void *)&var, \
@@ -705,10 +724,10 @@ __BEGIN_DECLS
 	    kernel_startup_tunable_init, &__startup_TUNABLES_spec_ ## var)
 
 #define __TUNABLE_DT(type_t, var, dt_base_key, dt_name_key, boot_arg_key, flags) \
-	static __startup_data char __startup_TUNABLES_dt_base_ ## var[] = dt_base_key; \
-	static __startup_data char __startup_TUNABLES_dt_name_ ## var[] = dt_name_key; \
-	static __startup_data char __startup_TUNABLES_name_ ## var[] = boot_arg_key; \
-	static __startup_data struct startup_tunable_dt_spec \
+	static __startup_const char __startup_TUNABLES_dt_base_ ## var[] = dt_base_key; \
+	static __startup_const char __startup_TUNABLES_dt_name_ ## var[] = dt_name_key; \
+	static __startup_const char __startup_TUNABLES_name_ ## var[] = boot_arg_key; \
+	static __startup_const struct startup_tunable_dt_spec \
 	__startup_TUNABLES_DT_spec_ ## var = { \
 	        .dt_base = __startup_TUNABLES_dt_base_ ## var, \
 	        .dt_name = __startup_TUNABLES_dt_name_ ## var, \

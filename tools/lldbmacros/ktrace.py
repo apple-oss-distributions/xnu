@@ -1,9 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
-from builtins import map
-from builtins import range
-from builtins import object
-
 from xnu import *
 from utils import *
 from core.lazytarget import *
@@ -11,7 +5,6 @@ from misc import *
 from scheduler import *
 from kcdata import kcdata_item_iterator, KCObject, GetTypeForName, KCCompressedBufferObject
 from collections import namedtuple
-from future.utils import PY2
 import heapq
 import os
 import plistlib
@@ -641,27 +634,11 @@ def ShowKdebugTrace(cmd_args=None, cmd_options={}, O=None):
 
 
 def binary_plist(o):
-    if PY2:
-        # Python 2 lacks a convenient binary plist writer.
-        with tempfile.NamedTemporaryFile(delete=False) as f:
-            plistlib.writePlist(o, f)
-            name = f.name
-
-        subprocess.check_output(['plutil', '-convert', 'binary1', name])
-        with open(name, mode='rb') as f:
-            plist = f.read()
-
-        os.unlink(name)
-        return plist
-    else:
-        return plistlib.dumps(o, fmt=plistlib.FMT_BINARY)
+    return plistlib.dumps(o, fmt=plistlib.FMT_BINARY)
 
 
 def plist_data(d):
-    if PY2:
-        return plistlib.Data(d)
-    else:
-        return d
+    return d
 
 
 def align_next_chunk(f, offset, verbose):

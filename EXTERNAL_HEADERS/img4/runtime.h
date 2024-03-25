@@ -9,7 +9,9 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
+__BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @typedef img4_identifier_t
@@ -824,7 +826,7 @@ typedef errno_t (*img4_runtime_copy_nonce_t)(
  */
 struct _img4_buff {
 	img4_struct_version_t i4b_version;
-	uint8_t *i4b_bytes;
+	uint8_t *__counted_by(i4b_len) i4b_bytes;
 	size_t i4b_len;
 	img4_runtime_dealloc_t _Nullable i4b_dealloc;
 } IMG4_API_AVAILABLE_20200508;
@@ -1181,6 +1183,8 @@ img4_runtime_copy_object(const img4_runtime_t *rt,
 		(img4if->i4if_v11.runtime_copy_object(__VA_ARGS__))
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
+__END_DECLS
 
 #endif // __IMG4_RUNTIME_H

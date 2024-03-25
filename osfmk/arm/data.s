@@ -91,8 +91,15 @@ LEXT(vfptrash_data)
 #if __arm64__
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#if CONFIG_SPTM
+        .section __DATA_SPTM, __const
+        .align 14
+        /* reserve a page for xnu-CTRR covered SPTM data */
+        .space 16*1024,0
+#else
         .section __DATA, __const
         .align 14
+#endif /* CONFIG_SPTM */
 /* reserve space for read only page tables */
 LEXT(ropagetable_begin)
 #if XNU_TARGET_OS_OSX

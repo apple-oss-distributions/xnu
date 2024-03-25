@@ -468,9 +468,9 @@ machine_switch_context(
 	}
 #endif
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	kpc_off_cpu(old);
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	/*
 	 *	Save FP registers if in use.

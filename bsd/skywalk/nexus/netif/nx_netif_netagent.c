@@ -30,6 +30,7 @@
 #include <skywalk/nexus/netif/nx_netif.h>
 #include <sys/random.h>
 #include <sys/sdt.h>
+#include <net/sockaddr_utils.h>
 
 #define NETIF_AGENT_FLOW_MAX            16
 
@@ -765,7 +766,7 @@ nx_netif_netagent_handle_ipv6_ula_flow_add(struct nx_netif *nif,
 		return err;
 	}
 	bzero(&local_endpoint, sizeof(local_endpoint));
-	bcopy(&nfr.nfr_saddr.sin6, &local_endpoint.u.sin6,
+	SOCKADDR_COPY(&nfr.nfr_saddr.sin6, &local_endpoint.u.sin6,
 	    sizeof(local_endpoint.u.sin6));
 
 	if (cparams->is_listener) {
@@ -778,7 +779,7 @@ nx_netif_netagent_handle_ipv6_ula_flow_add(struct nx_netif *nif,
 			&nfr.nfr_etheraddr, 0, NULL, &len);
 	} else {
 		bzero(&remote_endpoint, sizeof(remote_endpoint));
-		bcopy(&nfr.nfr_daddr.sin6, &remote_endpoint.u.sin6,
+		SOCKADDR_COPY(&nfr.nfr_daddr.sin6, &remote_endpoint.u.sin6,
 		    sizeof(remote_endpoint.u.sin6));
 
 		message = necp_create_nexus_assign_message(

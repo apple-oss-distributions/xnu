@@ -62,7 +62,7 @@
 
 #include <types.h>
 #include <i386/eflags.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/pmap.h>
 #include <i386/fpu.h>
 #include <i386/panic_notify.h>

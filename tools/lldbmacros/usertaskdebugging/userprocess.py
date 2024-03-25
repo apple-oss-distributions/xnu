@@ -1,8 +1,3 @@
-from __future__ import absolute_import, division
-
-from builtins import hex
-
-from builtins import object
 import logging
 from . import target
 import struct

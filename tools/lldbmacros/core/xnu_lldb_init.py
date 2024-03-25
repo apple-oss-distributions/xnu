@@ -1,5 +1,3 @@
-from __future__ import absolute_import, print_function
-
 import os
 import re
 
@@ -84,12 +82,6 @@ def CheckMissingLibs(debugger):
         print(cmd_fmt.format(mod="macholib"))
         return False
 
-    try:
-        from future import standard_library
-    except:
-        print(cmd_fmt.format(mod="future"))
-        return False
-
     return True
 
 def __lldb_init_module(debugger, internal_dict):
@@ -156,7 +148,7 @@ def __lldb_init_module(debugger, internal_dict):
             kexts = os.listdir(builtinkexts_path)
             if len(kexts) > 0:
                 print("\nBuiltin kexts: %s\n" % kexts)
-                if load_kexts == False:
+                if not load_kexts:
                     print("XNU_LLDBMACROS_NOBUILTINKEXTS is set, not loading:\n")
                 for kextdir in kexts:
                     # Python does not handle well modules that contain '-' in their names.

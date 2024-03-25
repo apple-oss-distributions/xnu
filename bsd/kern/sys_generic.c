@@ -148,6 +148,8 @@
 #include <os/log.h>
 #include <sys/log_data.h>
 
+#include <machine/monotonic.h>
+
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
@@ -155,10 +157,6 @@
 #ifdef CONFIG_KDP_INTERACTIVE_DEBUGGING
 #include <mach_debug/mach_debug_types.h>
 #endif
-
-#if MONOTONIC
-#include <machine/monotonic.h>
-#endif /* MONOTONIC */
 
 /* for entitlement check */
 #include <IOKit/IOBSD.h>
@@ -268,7 +266,7 @@ fp_readv(vfs_context_t ctx, struct fileproc *fp, uio_t uio, int flags,
 	int error;
 	user_ssize_t count;
 
-	if ((error = uio_calculateresid(uio))) {
+	if ((error = uio_calculateresid_user(uio))) {
 		*retval = 0;
 		return error;
 	}
@@ -452,7 +450,7 @@ readv_uio(struct proc *p, int fd,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	    UIO_READ);
 
-	iovp = uio_iovsaddr(uio);
+	iovp = uio_iovsaddr_user(uio);
 	if (iovp == NULL) {
 		error = ENOMEM;
 		goto out;
@@ -584,7 +582,7 @@ fp_writev(vfs_context_t ctx, struct fileproc *fp, uio_t uio, int flags,
 	int error;
 	user_ssize_t count;
 
-	if ((error = uio_calculateresid(uio))) {
+	if ((error = uio_calculateresid_user(uio))) {
 		*retval = 0;
 		return error;
 	}
@@ -771,7 +769,7 @@ writev_uio(struct proc *p, int fd,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	    UIO_WRITE);
 
-	iovp = uio_iovsaddr(uio);
+	iovp = uio_iovsaddr_user(uio);
 	if (iovp == NULL) {
 		error = ENOMEM;
 		goto out;
@@ -2456,8 +2454,6 @@ log_data(__unused struct proc *p, struct log_data_args *args, int *retval)
 
 	/* truncate to OS_LOG_DATA_MAX_SIZE */
 	if (size > OS_LOG_DATA_MAX_SIZE) {
-		printf("%s: WARNING msg is going to be truncated from %u to %u\n",
-		    __func__, size, OS_LOG_DATA_MAX_SIZE);
 		size = OS_LOG_DATA_MAX_SIZE;
 	}
 
@@ -2656,7 +2652,7 @@ sysctl_kern_sched_thread_bind_cpu SYSCTL_HANDLER_ARGS
 
 	int32_t new_value;
 	int changed;
-	int error = sysctl_io_number(req, cpuid, sizeof cpuid, &new_value, &changed);
+	int error = sysctl_io_number(req, cpuid, sizeof(cpuid), &new_value, &changed);
 	if (error) {
 		return error;
 	}
@@ -2702,7 +2698,15 @@ sysctl_kern_sched_thread_bind_cluster_type SYSCTL_HANDLER_ARGS
 		goto out;
 	}
 
+	if (cluster_type != 'E' &&
+	    cluster_type != 'e' &&
+	    cluster_type != 'P' &&
+	    cluster_type != 'p') {
+		return EINVAL;
+	}
+
 	sysctl_thread_bind_cluster_type(cluster_type);
+
 out:
 	cluster_type = sysctl_get_bound_cluster_type();
 	buff[0] = cluster_type;
@@ -2735,6 +2739,13 @@ sysctl_kern_sched_task_set_cluster_type SYSCTL_HANDLER_ARGS
 		goto out;
 	}
 
+	if (cluster_type != 'E' &&
+	    cluster_type != 'e' &&
+	    cluster_type != 'P' &&
+	    cluster_type != 'p') {
+		return EINVAL;
+	}
+
 	sysctl_task_set_cluster_type(cluster_type);
 out:
 	cluster_type = sysctl_get_task_cluster_type();
@@ -2757,21 +2768,30 @@ sysctl_kern_sched_thread_bind_cluster_id SYSCTL_HANDLER_ARGS
 	}
 
 	thread_t self = current_thread();
-	uint32_t old_value = thread_bound_cluster_id(self);
-	uint32_t new_value;
-
-	int error = SYSCTL_IN(req, &new_value, sizeof(new_value));
+	int32_t cluster_id = thread_bound_cluster_id(self);
+	int32_t new_value;
+	int changed;
+	int error = sysctl_io_number(req, cluster_id, sizeof(cluster_id), &new_value, &changed);
 	if (error) {
 		return error;
 	}
-	if (new_value != old_value) {
+
+	if (changed) {
 		/*
-		 * This sysctl binds the thread to the cluster without any flags,
-		 * which means it will be hard bound and not check eligibility.
+		 * This sysctl binds the thread to the cluster without any flags, which
+		 * means it will be hard bound and not check eligibility.
 		 */
-		thread_bind_cluster_id(self, new_value, 0);
+		kern_return_t kr = thread_bind_cluster_id(self, new_value, 0);
+		if (kr == KERN_INVALID_VALUE) {
+			return ERANGE;
+		}
+
+		if (kr != KERN_SUCCESS) {
+			return EINVAL;
+		}
 	}
-	return SYSCTL_OUT(req, &old_value, sizeof(old_value));
+
+	return error;
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cluster_id, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -2808,31 +2828,21 @@ SYSCTL_INT(_kern, OID_AUTO, sched_preemption_disable_debug_mode, CTLFLAG_RW | CT
     &sched_preemption_disable_debug_mode, 0,
     "Enable preemption disablement tracing or panic (0: off, 1: trace, 2: panic)");
 
-PERCPU_DECL(uint64_t _Atomic, preemption_disable_max_mt);
-
 static int
 sysctl_sched_preemption_disable_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
+	extern unsigned int preemption_disable_get_max_durations(uint64_t *durations, size_t count);
+	extern void preemption_disable_reset_max_durations(void);
+
 	uint64_t stats[MAX_CPUS]; // maximum per CPU
 
-	/*
-	 * No synchronization here. The individual values are pretty much
-	 * independent, and reading/writing them is atomic.
-	 */
-
-	int cpu = 0;
-	percpu_foreach(max_stat, preemption_disable_max_mt) {
-		stats[cpu++] = os_atomic_load(max_stat, relaxed);
-	}
-
+	unsigned int ncpus = preemption_disable_get_max_durations(stats, MAX_CPUS);
 	if (req->newlen > 0) {
-		// writing just resets all stats.
-		percpu_foreach(max_stat, preemption_disable_max_mt) {
-			os_atomic_store(max_stat, 0, relaxed);
-		}
+		/* Reset when attempting to write to the sysctl. */
+		preemption_disable_reset_max_durations();
 	}
 
-	return sysctl_io_opaque(req, stats, cpu * sizeof(uint64_t), NULL);
+	return sysctl_io_opaque(req, stats, ncpus * sizeof(uint64_t), NULL);
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, sched_preemption_disable_stats,

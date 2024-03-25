@@ -1215,10 +1215,6 @@ vm_compressor_init(void)
 		vm_compressor_is_active = 1;
 	}
 
-#if CONFIG_FREEZE
-	memorystatus_freeze_enabled = TRUE;
-#endif /* CONFIG_FREEZE */
-
 	vm_compressor_available = 1;
 
 	vm_page_reactivate_all_throttled();

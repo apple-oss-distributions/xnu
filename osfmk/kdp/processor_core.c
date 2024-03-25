@@ -30,9 +30,7 @@
 #include <kdp/processor_core.h>
 #include <kdp/core_notes.h>
 #include <kern/assert.h>
-#if MONOTONIC
 #include <kern/monotonic.h>
-#endif // MONOTONIC
 #include <kern/zalloc.h>
 #include <libkern/kernel_mach_header.h>
 #include <libkern/OSAtomic.h>
@@ -59,6 +57,7 @@ __enum_closed_decl(kern_coredump_type_t, uint8_t, {
 	XNU_COREDUMP,
 	USERSPACE_COREDUMP,
 	COPROCESSOR_COREDUMP,
+	SECURE_COREDUMP,
 	NUM_COREDUMP_TYPES,
 });
 
@@ -66,6 +65,7 @@ static uint32_t bin_spec_map[NUM_COREDUMP_TYPES] = {
 	[XNU_COREDUMP] = MAIN_BIN_SPEC_TYPE_KERNEL,
 	[USERSPACE_COREDUMP] = MAIN_BIN_SPEC_TYPE_USER,
 	[COPROCESSOR_COREDUMP] = MAIN_BIN_SPEC_TYPE_STANDALONE,
+	[SECURE_COREDUMP] = MAIN_BIN_SPEC_TYPE_STANDALONE
 };
 
 /*
@@ -131,6 +131,7 @@ typedef kern_return_t (*legacy_sw_vers_registered_cb)(void *refcon, core_save_sw
 uint32_t coredump_registered_count = 0;
 
 struct kern_coredump_core *kernel_helper = NULL;
+struct kern_coredump_core *sk_helper = NULL;
 
 static struct kern_coredump_core *
 kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern_coredump_callback_config *kc_callbacks,
@@ -196,7 +197,7 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 	core_helper = zalloc_permanent_type(struct kern_coredump_core);
 	core_helper->kcc_next = NULL;
 	core_helper->kcc_refcon = refcon;
-	if (type == XNU_COREDUMP || type == USERSPACE_COREDUMP) {
+	if (type == XNU_COREDUMP || type == USERSPACE_COREDUMP || type == SECURE_COREDUMP) {
 		snprintf((char *)&core_helper->kcc_corename, MACH_CORE_FILEHEADER_NAMELEN, "%s", core_description);
 	} else {
 		assert(type == COPROCESSOR_COREDUMP);
@@ -230,6 +231,9 @@ kern_register_coredump_helper_internal(int kern_coredump_config_vers, const kern
 	if (type == XNU_COREDUMP) {
 		assert(kernel_helper == NULL);
 		kernel_helper = core_helper;
+	} else if (type == SECURE_COREDUMP) {
+		assert(sk_helper == NULL);
+		sk_helper = core_helper;
 	} else if (type == USERSPACE_COREDUMP) {
 		lck_mtx_lock(&kern_userspace_coredump_core_list_lock);
 		core_helper->kcc_next = kern_userspace_coredump_core_list;
@@ -276,6 +280,18 @@ kern_register_xnu_coredump_helper(kern_coredump_callback_config *kc_callbacks)
 
 	if (kern_register_coredump_helper_internal(KERN_COREDUMP_CONFIG_VERSION, kc_callbacks, NULL, "kernel", XNU_COREDUMP, is64bit,
 	    _mh_execute_header.magic, _mh_execute_header.cputype, _mh_execute_header.cpusubtype) == NULL) {
+		return KERN_FAILURE;
+	}
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+kern_register_sk_coredump_helper(kern_coredump_callback_config *sk_callbacks, void *refcon)
+{
+	if (kern_register_coredump_helper_internal(KERN_COREDUMP_CONFIG_VERSION, sk_callbacks,
+	    refcon, "secure-kernel", SECURE_COREDUMP, TRUE, _mh_execute_header.magic,
+	    _mh_execute_header.cputype, _mh_execute_header.cpusubtype) == NULL) {
 		return KERN_FAILURE;
 	}
 
@@ -401,8 +417,13 @@ coredump_save_summary(uint64_t core_segment_count, uint64_t core_byte_count,
 	bool should_skip = false;
 	int ret = 0;
 
-	if (!core_segment_count || !core_byte_count || !thread_count || !thread_state_size
+	if (!core_segment_count || !core_byte_count
 	    || (thread_state_size > KERN_COREDUMP_THREADSIZE_MAX)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* secure coredumps may not contain any thread state. */
+	if (core_context->core_type != SECURE_COREDUMP && (!thread_count || !thread_state_size)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -808,18 +829,18 @@ coredump_save_sw_vers(uint64_t address, uuid_t uuid, uint32_t log2_pagesize, voi
 static kern_return_t
 kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_core, uint64_t core_begin_offset, uint64_t *core_file_length, boolean_t *header_update_failed, kern_coredump_type_t type, uint64_t details_flags)
 {
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	uint64_t start_cycles;
 	uint64_t end_cycles;
-#endif // MONOTONIC
+#endif // CONFIG_CPU_COUNTERS
 	kern_return_t ret;
 	processor_core_context context = { };
 	*core_file_length = 0;
 	*header_update_failed = FALSE;
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	start_cycles = mt_cur_cpu_cycles();
-#endif // MONOTONIC
+#endif // CONFIG_CPU_COUNTERS
 
 	/* Setup the coredump context */
 	context.core_outvars = core_outvars;
@@ -1000,10 +1021,10 @@ kern_coredump_routine(void *core_outvars, struct kern_coredump_core *current_cor
 	    current_core->kcc_corename, context.core_segment_count, context.core_segment_byte_total, context.core_thread_count,
 	    (context.core_thread_count * context.core_thread_state_size), context.core_file_length);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	end_cycles = mt_cur_cpu_cycles();
 	kern_coredump_log(&context, "\nCore dump took %llu cycles\n", end_cycles - start_cycles);
-#endif // MONOTONIC
+#endif // CONFIG_CPU_COUNTERS
 
 	if (core_begin_offset) {
 		/* If we're writing to disk (we have a begin offset), we need to update the header */
@@ -1100,6 +1121,29 @@ kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_
 
 	if (kernel_only) {
 		return ret;
+	}
+
+	/* Dump secure kernel if allowed */
+	if (sk_helper) {
+		/* Seek to the beginning of next file. */
+		cur_ret = kern_dump_seek_to_next_file(core_outvars, *last_file_offset);
+		if (cur_ret != KERN_SUCCESS) {
+			kern_coredump_log(NULL, "secure_core: Unable to seek to the start of file: %d\n", cur_ret);
+			return KERN_FAILURE;
+		}
+
+		/* Dump the secure core to disk. */
+		cur_ret = kern_coredump_routine(core_outvars, sk_helper, *last_file_offset, &prev_core_length, &header_update_failed, SECURE_COREDUMP, details_flags);
+		if (cur_ret != KERN_SUCCESS) {
+			if (header_update_failed) {
+				return KERN_FAILURE;
+			} else {
+				prev_core_length = 0;
+				ret = KERN_FAILURE;
+			}
+		}
+
+		*last_file_offset = roundup(((*last_file_offset) + prev_core_length), KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
 	}
 
 	// Collect coprocessor coredumps first, in case userspace coredumps fail

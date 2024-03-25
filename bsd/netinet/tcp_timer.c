@@ -106,6 +106,7 @@
 #include <mach/sdt.h>
 #include <netinet/mptcp_var.h>
 #include <net/content_filter.h>
+#include <net/sockaddr_utils.h>
 
 /* Max number of times a stretch ack can be delayed on a connection */
 #define TCP_STRETCHACK_DELAY_THRESHOLD  5
@@ -2529,13 +2530,13 @@ tcp_report_stats(void)
 	bzero(&data, sizeof(data));
 	data.flags = NSTAT_SYSINFO_TCP_STATS;
 
-	bzero(&dst, sizeof(dst));
+	SOCKADDR_ZERO(&dst, sizeof(dst));
 	dst.sin_len = sizeof(dst);
 	dst.sin_family = AF_INET;
 
 	/* ipv4 avg rtt */
 	lck_mtx_lock(rnh_lock);
-	rt =  rt_lookup(TRUE, (struct sockaddr *)&dst, NULL,
+	rt =  rt_lookup(TRUE, SA(&dst), NULL,
 	    rt_tables[AF_INET], IFSCOPE_NONE);
 	lck_mtx_unlock(rnh_lock);
 	if (rt != NULL) {
@@ -2550,12 +2551,12 @@ tcp_report_stats(void)
 	}
 
 	/* ipv6 avg rtt */
-	bzero(&dst6, sizeof(dst6));
+	SOCKADDR_ZERO(&dst6, sizeof(dst6));
 	dst6.sin6_len = sizeof(dst6);
 	dst6.sin6_family = AF_INET6;
 
 	lck_mtx_lock(rnh_lock);
-	rt = rt_lookup(TRUE, (struct sockaddr *)&dst6, NULL,
+	rt = rt_lookup(TRUE, SA(&dst6), NULL,
 	    rt_tables[AF_INET6], IFSCOPE_NONE);
 	lck_mtx_unlock(rnh_lock);
 	if (rt != NULL) {

@@ -873,7 +873,7 @@ do {                                                                    \
 	    _ifa = _ifa->ifa_list.tqe_next) {                           \
 	        IFA_LOCK(_ifa);                                         \
 	        if (_ifa->ifa_addr->sa_family == AF_INET6) {            \
-	                IFA_ADDREF_LOCKED(_ifa);                        \
+	                ifa_addref(_ifa);                        \
 	                IFA_UNLOCK(_ifa);                               \
 	                break;                                          \
 	        }                                                       \
@@ -930,7 +930,6 @@ struct in6_multi_mship {
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <netinet6/nd6_var.h>
-#include <net/if_llatbl.h>
 
 /*
  * Per-interface IPv6 structures.
@@ -943,10 +942,8 @@ struct in6_ifextra {
 	uint32_t                netsig_len;
 	u_int8_t                netsig[IFNET_SIGNATURELEN];
 	struct ipv6_prefix      nat64_prefixes[NAT64_MAX_NUM_PREFIXES];
-	struct lltable          *ii_llt;        /* NDP state */
 };
 #define IN6_IFEXTRA(_ifp)       (_ifp->if_inet6data)
-#define LLTABLE6(ifp)           ((IN6_IFEXTRA(ifp) == NULL) ? NULL : IN6_IFEXTRA(ifp)->ii_llt)
 #endif /* BSD_KERNEL_PRIVATE */
 
 struct mld_ifinfo;
@@ -986,6 +983,7 @@ struct in6_multi {
 	struct  ifmultiaddr *in6m_ifma; /* back pointer to ifmultiaddr */
 	u_int   in6m_state;             /* state of the membership */
 	u_int   in6m_timer;             /* MLD6 listener report timer */
+	bool    in6m_in_nrele;          /* if in nrele list */
 
 	/* New fields for MLDv2 follow. */
 	struct mld_ifinfo       *in6m_mli;      /* MLD info */
@@ -1156,7 +1154,6 @@ extern int ip6_setmoptions(struct inpcb *, struct sockopt *);
 extern struct in6_multi_mship *in6_joingroup(struct ifnet *,
     struct in6_addr *, int *, int);
 extern int in6_leavegroup(struct in6_multi_mship *);
-extern void in6_multi_init(void);
 extern void in6m_addref(struct in6_multi *, int);
 extern void in6m_remref(struct in6_multi *, int);
 extern int in6_multi_detach(struct in6_multi *);

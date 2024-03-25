@@ -89,11 +89,15 @@
 #include <kern/ext_paniclog.h>
 #endif
 
+#if CONFIG_EXCLAVES
+#include <kern/exclaves_panic.h>
+#endif
+
 #if     MACH_KDP
 void    kdp_trap(unsigned int, struct arm_saved_state *);
 #endif
 
-extern kern_return_t    do_stackshot(void *);
+extern kern_return_t    do_panic_stackshot(void *);
 extern void                    kdp_snapshot_preflight(int pid, void * tracebuf,
     uint32_t tracebuf_size, uint64_t flags,
     kcdata_descriptor_t data_p,
@@ -331,6 +335,10 @@ panic_display_hung_cpus_help(void)
 		unsigned i, retry;
 
 		for (i = 0; i < info->num_cpus; i++) {
+			if (!PE_cpu_power_check_kdp(i)) {
+				paniclog_append_noflush("CORE %u is offline, skipping\n", i);
+				continue;
+			}
 			if (info->cpus[i].cpu_UTTDBG_regs) {
 				volatile uint64_t *pcsr = (volatile uint64_t*)(info->cpus[i].cpu_UTTDBG_regs + pcsr_offset);
 				volatile uint32_t *pcsrTrigger = (volatile uint32_t*)pcsr;
@@ -456,6 +464,10 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	    ('\0' != macosversion[0]) ? macosversion : "Not set");
 #endif
 	paniclog_append_noflush("Kernel version: %.512s\n", version);
+
+#if CONFIG_EXCLAVES
+	exclaves_panic_append_info();
+#endif
 
 	if (kernelcache_uuid_valid) {
 		if (filesetKC) {
@@ -702,7 +714,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 
 			kdp_snapshot_preflight(-1, stackshot_begin_loc, bytes_remaining - end_marker_bytes,
 			    stackshot_flags, &kc_panic_data, 0, 0);
-			err = do_stackshot(NULL);
+			err = do_panic_stackshot(NULL);
 			bytes_traced = kdp_stack_snapshot_bytes_traced();
 			if (bytes_traced > 0 && !err) {
 				debug_buf_ptr += bytes_traced;

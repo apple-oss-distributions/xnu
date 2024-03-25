@@ -45,11 +45,7 @@
 #include <arm64/proc_reg.h>
 #include <arm/thread.h>
 #include <arm/pmap.h>
-
-#if MONOTONIC
 #include <machine/monotonic.h>
-#endif /* MONOTONIC */
-
 #include <san/kcov_data.h>
 
 #define NSEC_PER_HZ     (NSEC_PER_SEC / 100)
@@ -59,7 +55,9 @@ typedef struct reset_handler_data {
 	vm_offset_t     cpu_data_entries;                       /* CpuDataEntries phys address */
 } reset_handler_data_t;
 
+#if !CONFIG_SPTM
 extern  reset_handler_data_t    ResetHandlerData;
+#endif
 
 /* Put the static check for cpumap_t here as it's defined in <kern/processor.h> */
 static_assert(sizeof(cpumap_t) * CHAR_BIT >= MAX_CPUS, "cpumap_t bitvector is too small for current MAX_CPUS value");
@@ -97,9 +95,9 @@ typedef struct {
 	uint64_t ipi_cnt;
 	uint64_t ipi_cnt_wake;
 	uint64_t timer_cnt;
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	uint64_t pmi_cnt_wake;
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	uint64_t undef_ex_cnt;
 	uint64_t unaligned_cnt;
 	uint64_t vfp_cnt;
@@ -220,16 +218,17 @@ typedef struct cpu_data {
 #endif /* defined(HAS_APPLE_PAC) */
 
 	/* large structs with large alignment requirements */
-#if KPC
+
 	/* double-buffered performance counter data */
 	uint64_t                        *cpu_kpc_buf[2];
 	/* PMC shadow and reload value buffers */
 	uint64_t                        *cpu_kpc_shadow;
 	uint64_t                        *cpu_kpc_reload;
-#endif
-#if MONOTONIC
+
+#if CONFIG_CPU_COUNTERS
 	struct mt_cpu                   cpu_monotonic;
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
+
 	cpu_stat_t                      cpu_stat;
 #if !XNU_MONITOR
 	struct pmap_cpu_data            cpu_pmap_cpu_data;
@@ -255,6 +254,7 @@ typedef struct cpu_data {
 	/* Encoded data to store in TPIDR_EL0 on context switch */
 	uint64_t                        cpu_tpidr_el0;
 #endif
+
 } cpu_data_t;
 
 /*

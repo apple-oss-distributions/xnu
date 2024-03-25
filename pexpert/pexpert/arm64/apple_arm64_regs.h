@@ -95,6 +95,9 @@
  */
 #define CORE_THRTL_CFG2_OFFSET               (0x218)
 
+#define CORE_THRTL_CFG2_c1pptThrtlRate_shift (56)
+#define CORE_THRTL_CFG2_c1pptThrtlRate_mask  (0xFFULL << CORE_THRTL_CFG2_c1pptThrtlRate_shift)
+
 
 
 

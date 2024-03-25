@@ -103,6 +103,8 @@
 #include <netinet6/scope6_var.h>
 #include <netinet/icmp6.h>
 
+#include <net/sockaddr_utils.h>
+
 #include <os/log.h>
 
 #include "loop.h"
@@ -1413,7 +1415,7 @@ nd6_handle_duplicated_ip6_addr(struct in6_ifaddr *ia6)
 		VERIFY(pr->ndpr_addrcnt != 0);
 		NDPR_UNLOCK(pr);
 		IFA_UNLOCK(&new_ia6->ia_ifa);
-		IFA_REMREF(&new_ia6->ia_ifa);
+		ifa_remref(&new_ia6->ia_ifa);
 	} else {
 		log(LOG_ERR, "%s: in6_pfx_newpersistaddr failed %d\n",
 		    __func__, error);
@@ -1458,7 +1460,7 @@ addrloop:
 		 * otherwise it protects the address from going
 		 * away since we drop in6_ifaddr_rwlock below.
 		 */
-		IFA_ADDREF_LOCKED(&ia6->ia_ifa);
+		ifa_addref(&ia6->ia_ifa);
 
 		/*
 		 * Check for duplicated secured address
@@ -1479,7 +1481,7 @@ addrloop:
 			 * Still need to release extra reference on
 			 * ia6->ia_ifa taken above.
 			 */
-			IFA_REMREF(&ia6->ia_ifa);
+			ifa_remref(&ia6->ia_ifa);
 			goto addrloop;
 		}
 
@@ -1529,7 +1531,7 @@ addrloop:
 				    0);
 			}
 			/* Release extra reference taken above */
-			IFA_REMREF(&ia6->ia_ifa);
+			ifa_remref(&ia6->ia_ifa);
 			goto addrloop;
 		}
 		/*
@@ -1588,7 +1590,7 @@ addrloop:
 					 * significantly reduce performance??
 					 */
 					/* Release extra reference */
-					IFA_REMREF(&ia6->ia_ifa);
+					ifa_remref(&ia6->ia_ifa);
 					goto addrloop;
 				}
 				lck_rw_lock_exclusive(&in6_ifaddr_rwlock);
@@ -1610,7 +1612,7 @@ addrloop:
 		}
 		LCK_RW_ASSERT(&in6_ifaddr_rwlock, LCK_RW_ASSERT_EXCLUSIVE);
 		/* Release extra reference taken above */
-		IFA_REMREF(&ia6->ia_ifa);
+		ifa_remref(&ia6->ia_ifa);
 	}
 	lck_rw_done(&in6_ifaddr_rwlock);
 }
@@ -1910,7 +1912,7 @@ nd6_post_msg(u_int32_t code, struct nd_prefix_list *prefix_list,
 	}
 
 	while (itr != NULL && nd6_ra_msg_data.list_index < list_length) {
-		bcopy(&itr->pr.ndpr_prefix, &nd6_ra_msg_data.prefix.prefix,
+		SOCKADDR_COPY(&itr->pr.ndpr_prefix, &nd6_ra_msg_data.prefix.prefix,
 		    sizeof(nd6_ra_msg_data.prefix.prefix));
 		nd6_ra_msg_data.prefix.raflags = itr->pr.ndpr_raf;
 		nd6_ra_msg_data.prefix.prefixlen = itr->pr.ndpr_plen;
@@ -1979,7 +1981,7 @@ regen_tmpaddr(struct in6_ifaddr *ia6)
 		    !IFA6_IS_DEPRECATED(it6, timenow)) {
 			IFA_UNLOCK(ifa);
 			if (public_ifa6 != NULL) {
-				IFA_REMREF(&public_ifa6->ia_ifa);
+				ifa_remref(&public_ifa6->ia_ifa);
 			}
 			public_ifa6 = NULL;
 			break;
@@ -1992,10 +1994,10 @@ regen_tmpaddr(struct in6_ifaddr *ia6)
 		 * address with the prefix.
 		 */
 		if (!IFA6_IS_DEPRECATED(it6, timenow)) {
-			IFA_ADDREF_LOCKED(ifa); /* for public_ifa6 */
+			ifa_addref(ifa); /* for public_ifa6 */
 			IFA_UNLOCK(ifa);
 			if (public_ifa6 != NULL) {
-				IFA_REMREF(&public_ifa6->ia_ifa);
+				ifa_remref(&public_ifa6->ia_ifa);
 			}
 			public_ifa6 = it6;
 		} else {
@@ -2010,10 +2012,10 @@ regen_tmpaddr(struct in6_ifaddr *ia6)
 		if ((e = in6_tmpifadd(public_ifa6, 0)) != 0) {
 			log(LOG_NOTICE, "regen_tmpaddr: failed to create a new"
 			    " tmp addr,errno=%d\n", e);
-			IFA_REMREF(&public_ifa6->ia_ifa);
+			ifa_remref(&public_ifa6->ia_ifa);
 			return -1;
 		}
-		IFA_REMREF(&public_ifa6->ia_ifa);
+		ifa_remref(&public_ifa6->ia_ifa);
 		return 0;
 	}
 
@@ -2317,11 +2319,11 @@ nd6_purge(struct ifnet *ifp)
 struct rtentry *
 nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp, int rt_locked)
 {
-	struct rtentry *rt;
+	struct rtentry *rt __single;
 	struct sockaddr_in6 sin6;
 	unsigned int ifscope;
 
-	bzero(&sin6, sizeof(sin6));
+	SOCKADDR_ZERO(&sin6, sizeof(sin6));
 	sin6.sin6_len = sizeof(struct sockaddr_in6);
 	sin6.sin6_family = AF_INET6;
 	sin6.sin6_addr = *addr6;
@@ -2384,10 +2386,9 @@ nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp, int rt_locked)
 			IFA_LOCK_SPIN(ifa);
 			ifa_flags = ifa->ifa_flags;
 			IFA_UNLOCK(ifa);
-			if ((e = rtrequest_scoped_locked(RTM_ADD,
-			    SA(&sin6), ifa->ifa_addr, SA(&all1_sa),
-			    (ifa_flags | RTF_HOST | RTF_LLINFO) &
-			    ~RTF_CLONING, &rt, ifscope)) != 0) {
+			e = rtrequest_scoped_locked(RTM_ADD, SA(&sin6), ifa->ifa_addr, SA(&all1_sa),
+			    (ifa_flags | RTF_HOST | RTF_LLINFO) & ~RTF_CLONING, &rt, ifscope);
+			if (e != 0) {
 				if (e != EEXIST) {
 					log(LOG_ERR, "%s: failed to add route "
 					    "for a neighbor(%s), errno=%d\n",
@@ -2397,7 +2398,7 @@ nd6_lookup(struct in6_addr *addr6, int create, struct ifnet *ifp, int rt_locked)
 			if (!rt_locked) {
 				lck_mtx_unlock(rnh_lock);
 			}
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 			if (rt == NULL) {
 				return NULL;
 			}
@@ -2548,10 +2549,10 @@ nd6_is_new_addr_neighbor(struct sockaddr_in6 *addr, struct ifnet *ifp)
 	dstaddr = ifa_ifwithdstaddr(SA(addr));
 	if (dstaddr != NULL) {
 		if (dstaddr->ifa_ifp == ifp) {
-			IFA_REMREF(dstaddr);
+			ifa_remref(dstaddr);
 			return 1;
 		}
-		IFA_REMREF(dstaddr);
+		ifa_remref(dstaddr);
 		dstaddr = NULL;
 	}
 
@@ -2999,7 +3000,7 @@ nd6_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 					rtsetifa(rt, ifa);
 				}
 			}
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 		} else if (rt->rt_flags & RTF_ANNOUNCE) {
 			ln_setexpire(ln, 0);
 			ND6_CACHE_STATE_TRANSITION(ln, ND6_LLINFO_REACHABLE);
@@ -3443,12 +3444,12 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 					}
 
 					if (ia->ia6_ndpr == pr) {
-						IFA_ADDREF_LOCKED(&ia->ia_ifa);
+						ifa_addref(&ia->ia_ifa);
 						IFA_UNLOCK(&ia->ia_ifa);
 						lck_rw_done(&in6_ifaddr_rwlock);
 						lck_mtx_unlock(nd6_mutex);
 						in6_purgeaddr(&ia->ia_ifa);
-						IFA_REMREF(&ia->ia_ifa);
+						ifa_remref(&ia->ia_ifa);
 						lck_mtx_lock(nd6_mutex);
 						lck_rw_lock_exclusive(
 							&in6_ifaddr_rwlock);
@@ -4179,7 +4180,7 @@ nd6_output_list(struct ifnet *ifp, struct ifnet *origifp, struct mbuf *m0,
 				 * XXX: we may need a more generic rule here.
 				 */
 				if (ia6 != NULL) {
-					IFA_REMREF(&ia6->ia_ifa);
+					ifa_remref(&ia6->ia_ifa);
 				}
 				if ((ifp->if_flags & IFF_POINTOPOINT) == 0) {
 					senderr(EHOSTUNREACH);
@@ -4704,7 +4705,7 @@ nd6_lookup_ipv6(ifnet_t  ifp, const struct sockaddr_in6 *ip6_dest,
     struct sockaddr_dl *ll_dest, size_t ll_dest_len, route_t hint,
     mbuf_t packet)
 {
-	route_t route = hint;
+	route_t route __single = hint;
 	errno_t result = 0;
 	struct sockaddr_dl *sdl = NULL;
 	size_t  copy_len;
@@ -4726,8 +4727,7 @@ nd6_lookup_ipv6(ifnet_t  ifp, const struct sockaddr_in6 *ip6_dest,
 		 * Callee holds a reference on the route and returns
 		 * with the route entry locked, upon success.
 		 */
-		result = route_to_gwroute((const struct sockaddr *)ip6_dest,
-		    hint, &route);
+		result = route_to_gwroute(SA(ip6_dest), hint, &route);
 		if (result != 0) {
 			return result;
 		}
@@ -4742,9 +4742,7 @@ nd6_lookup_ipv6(ifnet_t  ifp, const struct sockaddr_in6 *ip6_dest,
 		if (route != NULL) {
 			RT_UNLOCK(route);
 		}
-		result = dlil_resolve_multi(ifp,
-		    (const struct sockaddr *)ip6_dest,
-		    SA(ll_dest), ll_dest_len);
+		result = dlil_resolve_multi(ifp, SA(ip6_dest), SA(ll_dest), ll_dest_len);
 		if (route != NULL) {
 			RT_LOCK(route);
 		}
@@ -4794,7 +4792,7 @@ nd6_lookup_ipv6(ifnet_t  ifp, const struct sockaddr_in6 *ip6_dest,
 	}
 
 	copy_len = sdl->sdl_len <= ll_dest_len ? sdl->sdl_len : ll_dest_len;
-	bcopy(sdl, ll_dest, copy_len);
+	SOCKADDR_COPY(sdl, ll_dest, copy_len);
 
 release:
 	if (route != NULL) {
@@ -5029,7 +5027,7 @@ nd6_sysctl_prlist SYSCTL_HANDLER_ARGS
 		return EPERM;
 	}
 
-	bzero(&s6, sizeof(s6));
+	SOCKADDR_ZERO(&s6, sizeof(s6));
 	s6.sin6_family = AF_INET6;
 	s6.sin6_len = sizeof(s6);
 

@@ -31,6 +31,7 @@
 
 #define MAX_KCALLSTACK_FRAMES (128)
 #define MAX_UCALLSTACK_FRAMES (256)
+#define MAX_EXCALLSTACK_FRAMES (128)
 
 /* the callstack contains valid data */
 #define CALLSTACK_VALID        (1U << 0)
@@ -81,5 +82,11 @@ void kperf_ucallstack_sample(struct kp_ucallstack *cs, struct kperf_context *);
 int kperf_ucallstack_pend(struct kperf_context *, uint32_t depth,
     unsigned int actionid);
 void kperf_ucallstack_log(struct kp_ucallstack *cs);
+
+#if CONFIG_EXCLAVES
+#include <kern/exclaves.tightbeam.h>
+void kperf_excallstack_log(const stackshot_ipcstackentry_s *ipcstack);
+bool kperf_exclave_callstack_pend(struct kperf_context *context, unsigned int actionid);
+#endif /* CONFIG_EXCLAVES */
 
 #endif /* !defined(KPERF_CALLSTACK_H) */

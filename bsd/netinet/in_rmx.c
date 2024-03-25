@@ -88,6 +88,8 @@
 #include <netinet/ip6.h>
 #include <netinet6/nd6.h>
 
+#include <net/sockaddr_utils.h>
+
 extern int tvtohz(struct timeval *);
 
 static int in_rtqtimo_run;              /* in_rtqtimo is scheduled to run */
@@ -114,11 +116,11 @@ in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
     struct radix_node *treenodes)
 {
 	struct rtentry *rt = (struct rtentry *)treenodes;
-	struct sockaddr_in *sin = (struct sockaddr_in *)(void *)rt_key(rt);
+	struct sockaddr_in *sin = SIN(rt_key(rt));
 	struct radix_node *ret;
 	char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
 	uint32_t flags = rt->rt_flags;
-	boolean_t verbose = (rt_verbose > 1);
+	boolean_t verbose = (rt_verbose > 0);
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
@@ -203,16 +205,16 @@ in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 			    rt2->rt_gateway->sa_family == AF_LINK) {
 				if (verbose) {
 					os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert "
-					    "route to %s;%s, flags=%b, due to "
+					    "route to %s;%s, flags=0x%x, due to "
 					    "existing ARP route %s->%s "
-					    "flags=%b, attempting to delete\n",
+					    "flags=0x%x, attempting to delete\n",
 					    __func__, dbuf,
 					    (rt->rt_ifp != NULL) ?
 					    rt->rt_ifp->if_xname : "",
-					    rt->rt_flags, RTF_BITS, dbufc,
+					    rt->rt_flags, dbufc,
 					    (rt2->rt_ifp != NULL) ?
 					    rt2->rt_ifp->if_xname : "",
-					    rt2->rt_flags, RTF_BITS);
+					    rt2->rt_flags);
 				}
 				/*
 				 * Safe to drop rt_lock and use rt_key,
@@ -240,21 +242,21 @@ in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	if (ret != NULL) {
 		if (flags != rt->rt_flags) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
-			    "oflags=%b, flags=%b\n", __func__,
+			    "oflags=0x%x, flags=0x%x\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
-			    rt->rt_ifp->if_xname : "", flags, RTF_BITS,
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_ifp->if_xname : "", flags,
+			    rt->rt_flags);
 		} else {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 	} else {
 		os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert route to %s->%s->%s, "
-		    "flags=%b, already exists\n", __func__, dbuf, gbuf,
+		    "flags=0x%x, already exists\n", __func__, dbuf, gbuf,
 		    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-		    rt->rt_flags, RTF_BITS);
+		    rt->rt_flags);
 	}
 done:
 	return ret;
@@ -268,15 +270,15 @@ in_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 
 	rn = rn_delete(v_arg, netmask_arg, head);
-	if (rt_verbose > 1 && rn != NULL) {
+	if (rt_verbose > 0 && rn != NULL) {
 		char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
 		struct rtentry *rt = (struct rtentry *)rn;
 
 		RT_LOCK(rt);
 		rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 		os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s deleted, "
-		    "flags=%b\n", __func__, dbuf, gbuf, (rt->rt_ifp != NULL) ?
-		    rt->rt_ifp->if_xname : "", rt->rt_flags, RTF_BITS);
+		    "flags=0x%x\n", __func__, dbuf, gbuf, (rt->rt_ifp != NULL) ?
+		    rt->rt_ifp->if_xname : "", rt->rt_flags);
 		RT_UNLOCK(rt);
 	}
 	return rn;
@@ -299,9 +301,9 @@ in_validate(struct radix_node *rn)
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s validated, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 
 		/*
@@ -407,9 +409,9 @@ in_clsroute(struct radix_node *rn, struct radix_node_head *head)
 
 		if (verbose) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to %s->%s->%s, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
 		/*
 		 * Delete the route from the radix tree but since we are
@@ -429,15 +431,12 @@ in_clsroute(struct radix_node *rn, struct radix_node_head *head)
 			RT_REMREF_LOCKED(rt);
 		} else {
 			RT_LOCK(rt);
-			if (!verbose) {
-				rt_str(rt, dbuf, sizeof(dbuf),
-				    gbuf, sizeof(gbuf));
-			}
+			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 			os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
-			    "%s->%s->%s, flags=%b, err=%d\n", __func__,
+			    "%s->%s->%s, flags=0x%x, err=%d\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 			    rt->rt_ifp->if_xname : "", rt->rt_flags,
-			    RTF_BITS, err);
+			    err);
 		}
 	} else {
 		uint64_t timenow;
@@ -446,11 +445,11 @@ in_clsroute(struct radix_node *rn, struct radix_node_head *head)
 		rt->rt_flags |= RTPRF_OURS;
 		rt_setexpire(rt, timenow + rtq_reallyold);
 
-		if (verbose) {
+		if (rt_verbose > 1) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s invalidated, "
-			    "flags=%b, expire=T+%u\n", __func__, dbuf, gbuf,
+			    "flags=0x%x, expire=T+%u\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS, rt->rt_expire - timenow);
+			    rt->rt_flags, rt->rt_expire - timenow);
 		}
 
 		/* We have at least one entry; arm the timer if not already */
@@ -505,10 +504,10 @@ in_rtqkill(struct radix_node *rn, void *rock)
 
 			if (verbose) {
 				os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to "
-				    "%s->%s->%s, flags=%b, draining=%d\n",
+				    "%s->%s->%s, flags=0x%x, draining=%d\n",
 				    __func__, dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
-				    RTF_BITS, ap->draining);
+				    ap->draining);
 			}
 			RT_ADDREF_LOCKED(rt);   /* for us to free below */
 			/*
@@ -530,10 +529,10 @@ in_rtqkill(struct radix_node *rn, void *rock)
 					    gbuf, sizeof(gbuf));
 				}
 				os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
-				    "%s->%s->%s, flags=%b, err=%d\n", __func__,
+				    "%s->%s->%s, flags=0x%x, err=%d\n", __func__,
 				    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
-				    RTF_BITS, err);
+				    err);
 				RT_UNLOCK(rt);
 			} else {
 				ap->killed++;
@@ -546,12 +545,12 @@ in_rtqkill(struct radix_node *rn, void *rock)
 				rt_setexpire(rt, timenow + rtq_reallyold);
 				if (verbose) {
 					os_log_debug(OS_LOG_DEFAULT, "%s: route to "
-					    "%s->%s->%s, flags=%b, adjusted "
+					    "%s->%s->%s, flags=0x%x, adjusted "
 					    "expire=T+%u (was T+%u)\n",
 					    __func__, dbuf, gbuf,
 					    (rt->rt_ifp != NULL) ?
 					    rt->rt_ifp->if_xname : "",
-					    rt->rt_flags, RTF_BITS,
+					    rt->rt_flags,
 					    (rt->rt_expire - timenow), expire);
 				}
 			}
@@ -734,7 +733,7 @@ in_ifadownkill(struct radix_node *rn, void *xap)
 	char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
 	struct in_ifadown_arg *ap = xap;
 	struct rtentry *rt = (struct rtentry *)rn;
-	boolean_t verbose = (rt_verbose != 0);
+	boolean_t verbose = (rt_verbose > 1);
 	int err;
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
@@ -745,10 +744,11 @@ in_ifadownkill(struct radix_node *rn, void *xap)
 		rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 		if (verbose) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to %s->%s->%s, "
-			    "flags=%b\n", __func__, dbuf, gbuf,
+			    "flags=0x%x\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
-			    rt->rt_flags, RTF_BITS);
+			    rt->rt_flags);
 		}
+
 		RT_ADDREF_LOCKED(rt);   /* for us to free below */
 		/*
 		 * We need to disable the automatic prune that happens
@@ -772,10 +772,10 @@ in_ifadownkill(struct radix_node *rn, void *xap)
 				    gbuf, sizeof(gbuf));
 			}
 			os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
-			    "%s->%s->%s, flags=%b, err=%d\n", __func__,
+			    "%s->%s->%s, flags=0x%x, err=%d\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 			    rt->rt_ifp->if_xname : "", rt->rt_flags,
-			    RTF_BITS, err);
+			    err);
 			RT_UNLOCK(rt);
 		}
 		rtfree_locked(rt);

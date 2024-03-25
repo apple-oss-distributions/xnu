@@ -679,7 +679,6 @@ struct ifnet {
 	u_int64_t               if_start_delay_swin;
 	u_int32_t               if_start_delay_cnt;
 	u_int32_t               if_start_delay_timeout; /* nanoseconds */
-	uint64_t                if_start_pacemaker_time; /* nanoseconds */
 	struct timespec         if_start_cycle;  /* restart interval */
 	struct thread           *if_start_thread;
 
@@ -1098,7 +1097,7 @@ struct if_clone {
  */
 struct ifaddr {
 	decl_lck_mtx_data(, ifa_lock);  /* lock for ifaddr */
-	uint32_t        ifa_refcnt;     /* ref count, use IFA_{ADD,REM}REF */
+	os_ref_atomic_t ifa_refcnt;     /* ref count, use IFA_{ADD,REM}REF */
 	uint32_t        ifa_debug;      /* debug flags */
 	struct sockaddr *ifa_addr;      /* address of interface */
 	struct sockaddr *ifa_dstaddr;   /* other end of p-to-p link */
@@ -1111,10 +1110,6 @@ struct ifaddr {
 	uint32_t        ifa_flags;      /* mostly rt_flags for cloning */
 	int32_t         ifa_metric;     /* cost of going out this interface */
 	void (*ifa_free)(struct ifaddr *); /* callback fn for freeing */
-	void (*ifa_trace)               /* callback fn for tracing refs */
-	(struct ifaddr *, int);
-	void (*ifa_attached)(struct ifaddr *); /* callback fn for attaching */
-	void (*ifa_detached)(struct ifaddr *); /* callback fn for detaching */
 	void *ifa_del_wc;               /* Wait channel to avoid address deletion races */
 	int ifa_del_waiters;            /* Threads in wait to delete the address */
 };
@@ -1156,18 +1151,24 @@ struct ifaddr {
 #define IFA_UNLOCK(_ifa)                                                \
     lck_mtx_unlock(&(_ifa)->ifa_lock)
 
-#define IFA_ADDREF(_ifa)                                                \
-    ifa_addref(_ifa, 0)
+os_refgrp_decl(static, ifa_refgrp, "ifa refcounts", NULL);
 
-#define IFA_ADDREF_LOCKED(_ifa)                                         \
-    ifa_addref(_ifa, 1)
+static inline void
+ifa_addref(struct ifaddr *ifa)
+{
+	os_ref_retain_raw(&ifa->ifa_refcnt, &ifa_refgrp);
+}
 
-#define IFA_REMREF(_ifa) do {                                           \
-    (void) ifa_remref(_ifa, 0);                                         \
-} while (0)
+__private_extern__ void ifa_deallocated(struct ifaddr *ifa);
 
-#define IFA_REMREF_LOCKED(_ifa)                                         \
-    ifa_remref(_ifa, 1)
+static inline void
+ifa_remref(struct ifaddr *ifa)
+{
+	/* We can use _relaxed, because if we hit 0 we make sure the lock is held */
+	if (os_ref_release_raw_relaxed(&ifa->ifa_refcnt, &ifa_refgrp) == 0) {
+		ifa_deallocated(ifa);
+	}
+}
 
 /*
  * Multicast address structure.  This is analogous to the ifaddr
@@ -1368,12 +1369,13 @@ struct ifmultiaddr {
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_REDIRECT)
 
 extern int if_index;
+extern uint32_t ifindex2ifnetcount;
 extern struct ifnethead ifnet_head;
 extern struct ifnethead ifnet_ordered_head;
-extern struct ifnet **__counted_by(if_index) ifindex2ifnet;
+extern struct ifnet **__counted_by(ifindex2ifnetcount) ifindex2ifnet;
 extern u_int32_t if_sndq_maxlen;
 extern u_int32_t if_rcvq_maxlen;
-extern struct ifaddr **ifnet_addrs;
+extern struct ifaddr **__counted_by(if_index) ifnet_addrs;
 extern lck_attr_t ifa_mtx_attr;
 extern lck_grp_t ifa_mtx_grp;
 extern lck_grp_t ifnet_lock_group;
@@ -1493,8 +1495,7 @@ extern struct ifaddr *ifa_ifwithroute_scoped_locked(int,
 extern struct ifaddr *ifaof_ifpforaddr_select(const struct sockaddr *, struct ifnet *);
 extern struct ifaddr *ifaof_ifpforaddr(const struct sockaddr *, struct ifnet *);
 __private_extern__ struct ifaddr *ifa_ifpgetprimary(struct ifnet *, int);
-extern void ifa_addref(struct ifaddr *, int);
-extern struct ifaddr *ifa_remref(struct ifaddr *, int);
+extern void ifa_initref(struct ifaddr *);
 extern void ifa_lock_init(struct ifaddr *);
 extern void ifa_lock_destroy(struct ifaddr *);
 extern void ifma_addref(struct ifmultiaddr *, int);
@@ -1518,156 +1519,6 @@ extern int ifnet_get_log(struct ifnet *, int32_t *, uint32_t *, int32_t *,
     int32_t *);
 extern int ifnet_notify_address(struct ifnet *, int);
 extern void ifnet_notify_data_threshold(struct ifnet *);
-
-#define IF_AFDATA_RLOCK         if_afdata_rlock
-#define IF_AFDATA_RUNLOCK       if_afdata_unlock
-#define IF_AFDATA_WLOCK         if_afdata_wlock
-#define IF_AFDATA_WUNLOCK       if_afdata_unlock
-#define IF_AFDATA_WLOCK_ASSERT  if_afdata_wlock_assert
-#define IF_AFDATA_LOCK_ASSERT   if_afdata_lock_assert
-#define IF_AFDATA_UNLOCK_ASSERT if_afdata_unlock_assert
-
-static inline void
-if_afdata_rlock(struct ifnet *ifp, int af)
-{
-	switch (af) {
-#if INET
-	case AF_INET:
-		lck_rw_lock_shared(&ifp->if_inetdata_lock);
-		break;
-#endif
-	case AF_INET6:
-		lck_rw_lock_shared(&ifp->if_inet6data_lock);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_runlock(struct ifnet *ifp, int af)
-{
-	switch (af) {
-#if INET
-	case AF_INET:
-		lck_rw_done(&ifp->if_inetdata_lock);
-		break;
-#endif
-	case AF_INET6:
-		lck_rw_done(&ifp->if_inet6data_lock);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_wlock(struct ifnet *ifp, int af)
-{
-	switch (af) {
-#if INET
-	case AF_INET:
-		lck_rw_lock_exclusive(&ifp->if_inetdata_lock);
-		break;
-#endif
-	case AF_INET6:
-		lck_rw_lock_exclusive(&ifp->if_inet6data_lock);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_unlock(struct ifnet *ifp, int af)
-{
-	switch (af) {
-#if INET
-	case AF_INET:
-		lck_rw_done(&ifp->if_inetdata_lock);
-		break;
-#endif
-	case AF_INET6:
-		lck_rw_done(&ifp->if_inet6data_lock);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_wlock_assert(struct ifnet *ifp, int af)
-{
-#if !MACH_ASSERT
-#pragma unused(ifp)
-#endif
-	switch (af) {
-#if INET
-	case AF_INET:
-		LCK_RW_ASSERT(&ifp->if_inetdata_lock, LCK_RW_ASSERT_EXCLUSIVE);
-		break;
-#endif
-	case AF_INET6:
-		LCK_RW_ASSERT(&ifp->if_inet6data_lock, LCK_RW_ASSERT_EXCLUSIVE);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_unlock_assert(struct ifnet *ifp, int af)
-{
-#if !MACH_ASSERT
-#pragma unused(ifp)
-#endif
-	switch (af) {
-#if INET
-	case AF_INET:
-		LCK_RW_ASSERT(&ifp->if_inetdata_lock, LCK_RW_ASSERT_NOTHELD);
-		break;
-#endif
-	case AF_INET6:
-		LCK_RW_ASSERT(&ifp->if_inet6data_lock, LCK_RW_ASSERT_NOTHELD);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
-
-static inline void
-if_afdata_lock_assert(struct ifnet *ifp, int af)
-{
-#if !MACH_ASSERT
-#pragma unused(ifp)
-#endif
-	switch (af) {
-#if INET
-	case AF_INET:
-		LCK_RW_ASSERT(&ifp->if_inetdata_lock, LCK_RW_ASSERT_HELD);
-		break;
-#endif
-	case AF_INET6:
-		LCK_RW_ASSERT(&ifp->if_inet6data_lock, LCK_RW_ASSERT_HELD);
-		break;
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-	}
-	return;
-}
 
 struct in6_addr;
 __private_extern__ struct in6_ifaddr *ifa_foraddr6(struct in6_addr *);

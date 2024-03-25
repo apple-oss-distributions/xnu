@@ -62,15 +62,6 @@ around such process state manipulations.
 """
 
 # Private Routines and objects
-from __future__ import absolute_import
-
-from builtins import (
-    dict,
-    hash,
-    list,
-    object,
-    tuple,
-)
 from collections import namedtuple
 
 import functools
@@ -81,7 +72,6 @@ import weakref
 
 import lldb
 
-from .compat import valueint
 from .configuration import config
 from . import lldbwrap
 
@@ -354,7 +344,7 @@ class _HashedSeq(list):
 
     @classmethod
     def make_key(cls, args, kwds, kwd_mark = (object(),),
-        fasttypes = {valueint, int, str}, tuple=tuple, type=type, len=len):
+        fasttypes = {int, str}, tuple=tuple, type=type, len=len):
 
         """ Inspired from python3's cache implementation """
 

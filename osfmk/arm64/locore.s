@@ -42,7 +42,7 @@
 #include <arm/pmap.h>
 #endif
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 /*
  * CHECK_EXCEPTION_RETURN_DISPATCH_PPL
  *
@@ -63,7 +63,66 @@
 .endmacro
 
 
-#endif /* XNU_MONITOR */
+#endif /* XNU_MONITOR && !CONFIG_SPTM */
+
+#if CONFIG_SPTM
+#include <sptm/sptm_xnu.h>
+#include <sptm/sptm_common.h>
+/*
+ * Panic lockdown is a security enhancement which makes certain types of
+ * exceptions (generally, PAC failures and sync exceptions taken with async
+ * exceptions masked) and panics fatal against attackers with kernel R/W. It
+ * does this through a trapdoor panic bit protected by the SPTM. 
+ * When this bit is set, TXM will refuse to authorize new code mappings which, 
+ * ideally, renders the system unusable even if the attacker gains control over
+ * XNU. Additionally, when this bit is set XNU will refuse to handle any sync
+ * exceptions originating from user space. This makes implementing further stages
+ * of an exploit challenging as it prevents user space from driving the kernel.
+ */
+
+/*
+ * Inform the SPTM that XNU has (or, rather, must) panic. This is provided as a
+ * macro rather than a function since it's just one instruction on release and 
+ * it avoids the need to spill a return addresses unless the macro caller
+ * explicitly needs to preserve LR.
+ * 
+ * This macro preserves callee saved registers but clobbers all others.
+ */
+.macro BEGIN_PANIC_LOCKDOWN
+#if CONFIG_XNUPOST
+	mrs		x8, TPIDR_EL1
+	/* 
+	 * If hitting this with a null TPIDR, it's likely that this was an unexpected
+	 * exception in early boot rather than an expected one as a part of a test.
+	 * Trigger lockdown.
+	 */
+	cbz		x8, 0f
+	ldr		x8, [x8, TH_EXPECTED_FAULT_HANDLER]
+	cbnz 	x8, 1f
+0:
+#endif /* CONFIG_XNUPOST */
+	/*
+	 * The sptm_xnu_panic_begin routine is guaranteed to unavoidably lead to
+	 * the panic bit being set. 
+	 */
+	bl EXT(sptm_xnu_panic_begin)
+#if CONFIG_XNUPOST
+	b		2f
+1:
+	/* 
+	 * We hit lockdown while an exception handler was installed. 
+	 * This was likely an expected exception. Skip setting the panic bit (since 
+	 * this will kill the system) and instead set a bit in the test handler.
+	 */
+	mov		w9, #1
+	adrp	x8, EXT(xnu_post_panic_lockdown_did_fire)@page
+	add		x8, x8, EXT(xnu_post_panic_lockdown_did_fire)@pageoff
+	strb	w9, [x8]
+	mov		lr, xzr // trash LR to ensure callers don't rely on it
+2:
+#endif /* CONFIG_XNUPOST */
+.endmacro
+#endif /* CONFIG_SPTM */
 
 /*
  * MAP_KERNEL
@@ -180,7 +239,7 @@ Lcorrupt_stack_\@:
 	mov		x0, sp								// Copy exception frame pointer to x0
 	adrp	x1, fleh_invalid_stack@page			// Load address for fleh
 	add		x1, x1, fleh_invalid_stack@pageoff	// fleh_dispatch64 will save register state before we get there
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 Lvalid_stack_\@:
 	ldp		x2, x3, [sp], #16			// Restore {x2-x3}
 .endmacro
@@ -369,26 +428,25 @@ Lel1_sp1_synchronous_vector_continue:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_synchronous_sp1@page
 	add		x1, x1, fleh_synchronous_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_irq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_irq_sp1@page
 	add		x1, x1, fleh_irq_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_fiq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_fiq_sp1@page
 	add		x1, x1, fleh_fiq_sp1@pageoff
-	b		fleh_dispatch64
+	b		fleh_dispatch64_noreturn
 
 el1_sp1_serror_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_serror_sp1@page
 	add		x1, x1, fleh_serror_sp1@pageoff
-	b		fleh_dispatch64
-
+	b		fleh_dispatch64_noreturn
 
 
 .macro EL0_64_VECTOR guest_label
@@ -469,17 +527,28 @@ check_exception_stack:
 	mrs		x18, TPIDR_EL1					// Get thread pointer
 	cbz		x18, Lvalid_exception_stack			// Thread context may not be set early in boot
 	ldr		x18, [x18, ACT_CPUDATAP]
-	cbz		x18, .						// If thread context is set, cpu data should be too
+	cbz		x18, Lcheck_exception_stack_fail	// If thread context is set, cpu data should be too
 	ldr		x18, [x18, CPU_EXCEPSTACK_TOP]
 	cmp		sp, x18
-	b.gt		.						// Hang if above exception stack top
+	b.gt	Lcheck_exception_stack_fail	// Hang if above exception stack top
 	sub		x18, x18, EXCEPSTACK_SIZE_NUM			// Find bottom of exception stack
 	cmp		sp, x18
-	b.lt		.						// Hang if below exception stack bottom
+	b.lt	Lcheck_exception_stack_fail	// Hang if below exception stack bottom
 Lvalid_exception_stack:
 	mov		x18, #0
 	b		Lel1_sp1_synchronous_valid_stack
 
+Lcheck_exception_stack_fail:
+#if CONFIG_SPTM
+	/*
+	 * To prevent exceptions delivered on SP1 from being delayed indefinitely, 
+	 * make recieving an exception on an invalid exception stack fatal.
+	 */
+	BEGIN_PANIC_LOCKDOWN
+#endif /* CONFIG_SPTM */
+1:  
+	wfi
+	b		1b		// Spin for debugger/watchdog
 
 #if defined(KERNEL_INTEGRITY_KTRR)
 	.text
@@ -516,6 +585,31 @@ check_ktrr_sctlr_trap:
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
 /* 64-bit first level exception handler dispatcher.
+ * Completes register context saving and branches to a non-returning FLEH.
+ * FLEH can inspect the spilled thread state, but it contains an invalid
+ * thread signature.
+ *
+ * Expects:
+ *  {x0, x1, sp} - saved
+ *  x0 - arm_context_t
+ *  x1 - address of FLEH
+ *  fp - previous stack frame if EL1
+ *  lr - unused
+ *  sp - kernel stack
+ */
+	.text
+	.align 2
+fleh_dispatch64_noreturn:
+#if HAS_APPLE_PAC
+	pacia	x1, sp
+	/* Save arm_saved_state64 with invalid signature */
+	SPILL_REGISTERS KERNEL_MODE, POISON_THREAD_SIGNATURE
+	b	fleh_dispatch64_common
+#else
+	// Fall through to fleh_dispatch64
+#endif
+
+/* 64-bit first level exception handler dispatcher.
  * Completes register context saving and branches to FLEH.
  * Expects:
  *  {x0, x1, sp} - saved
@@ -535,6 +629,7 @@ fleh_dispatch64:
 	/* Save arm_saved_state64 */
 	SPILL_REGISTERS KERNEL_MODE
 
+fleh_dispatch64_common:
 	/* If exception is from userspace, zero unused registers */
 	and		x23, x23, #(PSR64_MODE_EL_MASK)
 	cmp		x23, #(PSR64_MODE_EL0)
@@ -583,11 +678,11 @@ fleh_dispatch64:
 #endif
 
 #if PRECISE_USER_KERNEL_TIME
-	tst		x23, PSR64_MODE_EL_MASK				// If any EL MODE bits are set, we're coming from
-	b.ne	1f									// kernel mode, so skip precise time update
+	tst		x23, PSR64_MODE_EL_KERNEL			// If interrupting this kernel, skip
+	b.ne	1f                                  // precise time update.
 	PUSH_FRAME
 	bl		EXT(recount_leave_user)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	mov		x0, x21								// Reload arm_context_t pointer
 1:
 #endif /* PRECISE_USER_KERNEL_TIME */
@@ -618,18 +713,38 @@ UNWIND_DIRECTIVES
 	 * exception if we put it in our stack frame, so we load the LR from the
 	 * exception saved state instead.
 	 */
-	and		w3, w1, #(ESR_EC_MASK)
-	lsr		w3, w3, #(ESR_EC_SHIFT)
+	and		w6, w1, #(ESR_EC_MASK)
+	lsr		w6, w6, #(ESR_EC_SHIFT)
 	mov		w4, #(ESR_EC_IABORT_EL1)
-	cmp		w3, w4
+	cmp		w6, w4
 	b.eq	Lfleh_sync_load_lr
 Lvalid_link_register:
 
+#if CONFIG_SPTM
+	/* 
+	 * Sync exceptions in the kernel are rare, so check that first.
+	 * This check should be trivially predicted NT. We also take 
+	 * the check out of line so, on the hot path, we don't add a 
+	 * frontend redirect. 
+	 */
+	mov		x3, #0 // by default, do not signal panic lockdown to sleh
+	mrs		x4, SPSR_EL1
+	tst		x4, #(PSR64_MODE_EL_MASK)
+	b.ne	Lfleh_synchronous_ool_check_exception_el1 /* Run ELn checks if we're EL!=0 (!Z) */
+	/* EL0 -- check if we're blocking sync exceptions due to lockdown */
+	adrp	x4, EXT(sptm_xnu_triggered_panic_ptr)@page
+	ldr		x4, [x4, EXT(sptm_xnu_triggered_panic_ptr)@pageoff]
+	ldrb	w4, [x4]
+	cbnz	w4, Lblocked_user_sync_exception
+
+Lfleh_synchronous_continue:
+#endif /* CONFIG_SPTM */
+
 	PUSH_FRAME
 	bl		EXT(sleh_synchronous)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 	CHECK_EXCEPTION_RETURN_DISPATCH_PPL
 #endif
 
@@ -639,7 +754,238 @@ Lvalid_link_register:
 Lfleh_sync_load_lr:
 	ldr		lr, [x0, SS64_LR]
 	b Lvalid_link_register
+
+#if CONFIG_SPTM
+Lfleh_synchronous_ool_check_exception_el1:
+	/* 
+	 * We're in the kernel!
+	 * 
+	 * An SP0 sync exception is forced to be fatal if:
+	 * (AND
+	 * 	(SPSR.M[3:2] > 0) // Originates from kernel
+	 * 	(OR
+	 * 		(ESR.EC == ESR_EC_PAC_FAIL)    // FPAC failure
+	 * 		(AND  // PAC BRK instruction (compiler generated traps)
+	 * 			ESR.EC == ESR_EC_BRK_AARCH64
+	 * 			ESR.ISS is in PTRAUTH_TRAPS
+	 * 		)
+	 *		(AND // Potential dPAC failure (poisoned VA)
+	 *			(ESR.EC == ESR_EC_DABORT_EL1)
+	 *			(XPACD(FAR) != FAR)
+	 *			(NAND //outside copyio region
+	 *				ELR >= copyio_fault_region_begin
+	 *				ELR < copyio_fault_region_end
+	 * 			)
+	 *		)
+	 *		(ESR.EC == ESR_EC_IABORT_EL1)  // Potential iPAC failure (poisoned PC)
+	 * 		(AND 
+	 * 			(AND SPSR.A SPSR.I SPSR.F) // Async exceptions were masked 
+	 * 			(ESR.EC != ESR_EC_UNCATEGORIZED) // Not an undefined instruction (GDBTRAP for stackshots, etc.)
+	 *			(NAND // brks other than PAC traps are permitted for non-fatal telemetry
+	 *				(ESR.EC == ESR_EC_BRK_AARCH64)
+	 *				(ESR.ISS is in PTRAUTH_TRAPS)
+	 *			)
+	 * 			(startup_phase < STARTUP_SUB_LOCKDOWN) // Not in early-boot
+	 * 			(OR !CONFIG_XNUPOST (saved_expected_fault_handler == NULL)) // Not an expected, test exception
+	 *			(NAND // copyio data aborts are permitted while exceptions are masked
+	 *				ESR.EC == ESR_EC_DABORT_EL1
+	 *				ELR >= copyio_fault_region_begin
+	 *				ELR < copyio_fault_region_end
+	 *			)
+	 * 		)     
+	 * 	)
+	 * ) 
+	 */
+
+	/*
+	 * Pre-compute some sub-expressions which will be used later
+	 */
+	mrs		x10, ELR_EL1
+	adrp	x11, EXT(copyio_fault_region_begin)@page
+	add		x11, x11, EXT(copyio_fault_region_begin)@pageoff
+	adrp	x12, EXT(copyio_fault_region_end)@page
+	add		x12, x12, EXT(copyio_fault_region_end)@pageoff
+
+	/* in-copyio-region sub-expression */
+	/* Are we after the start of the copyio region? */
+	cmp		x10, x11
+	/*
+	 * If after the start (HS), test upper bounds.
+	 * Otherwise (LO), fail forward (HS)
+	 */
+	ccmp	x10, x12, #0b0010 /* C/HS */, HS
+	/*
+	 * Spill "in-copyio-region" flag for later reuse
+	 * x10=1 if ELR was in copyio region, 0 otherwise
+	 */
+	cset	x10, LO
+
+#if __has_feature(ptrauth_calls)
+	/* is-dPAC-poisoned-DABORT sub-expression */
+	mrs		x5, FAR_EL1
+	/*
+	 * Is XPACD(FAR) == FAR?
+	 * XPAC converts an arbitrary pointer like value into the canonical form
+	 * that would be produced if the pointer were to successfully pass AUTx.
+	 * If the pointer is canonical, this has no effect.
+	 * If the pointer is non-canonical (such as due to PAC poisoning), the value
+	 * will not match FAR.
+	 */
+	mov		x11, x5
+	xpacd	x11
+	/*
+	 * If we're outside the copyio region (HS), set flags for whether FAR is
+	 * clean (EQ) or has PAC poisoning (NE).
+	 * Otherwise (LO), set EQ
+	 */
+	ccmp    x5, x11, #0b0100 /* Z/EQ */, HS
+	/*
+	 * If we were poisoned (NE), was this a data abort?
+	 * Otherwise (EQ), pass NE
+	 */
+	mov		w5, #(ESR_EC_DABORT_EL1)
+	ccmp	w6, w5, #0b0000 /* !Z/NE */, NE
+	/* x11=1 when we had a DABORT with a poisoned VA outside the copyio region */
+	cset	x11, EQ
+#endif /* ptrauth_calls */
+
+	/*
+	 * Now let's check the rare but fast conditions that apply only to kernel
+	 * sync exceptions.
+	 */
+
+	/*
+	 * if ((ESR.EC == ESR_EC_BRK_AARCH64 && IS_PTRAUTH(ESR.ISS)) ||
+	 * 		ESR.EC == ESR_EC_PAC_FAIL ||
+	 *		ESR.EC == ESR_IABORT_EL1 ||
+	 *		poisoned_dabort)
+	 * 	goto Lfleh_synchronous_panic_lockdown
+	 */
+	cmp		w6, #(ESR_EC_BRK_AARCH64) // eq if this is a BRK instruction
+	/* 
+	 * Is this a PAC breakpoint? ESR.ISS in [0xC470, 0xC473], which is true when
+	 * {ESR.ISS[24:2], 2'b00} == 0xC470
+	 */
+	mov		w5, #(0xC470)
+	and		w7, w1, #0xfffc
+	/*
+	 * If we're not BRK, NE
+	 * If we're BRK, set flags for ISS=PAC breakpoint
+	 */
+	ccmp	w7, w5, #0, EQ
+
+	/* 
+	 * If we aren't a PAC BRK (NE), set flags for ESR.EC==PAC_FAIL
+	 * If we are a PAC BRK (EQ), pass EQ through.
+	*/
+	ccmp	w6, #(ESR_EC_PAC_FAIL), #0b0100 /* Z */, NE
+
+	/*
+	 * If !(PAC BRK || EC == PAC_FAIL) (NE), set flags for ESR.EC==IABORT
+	 * If (PAC BRK || EC == PAC_FAIL) (EQ), pass lockdown request (EQ)
+	 */
+	mov		w5, #(ESR_EC_IABORT_EL1)
+	ccmp	w6, w5, #0b0100 /* Z/EQ */, NE
+
+#if __has_feature(ptrauth_calls)
+	/*
+	 * If !(PAC BRK || EC == PAC_FAIL || EC == IABORT) (NE), set flags for
+	 * whether this was a posioned DABORT (previously computed in x11).
+	 * If (PAC BRK || EC == PAC_FAIL || EC == IABORT) (EQ), pass lockdown
+	 * request (EQ)
+	 */
+	ccmp	x11, #1, #0b0100 /* Z/EQ */, NE
+#endif /* ptrauth_calls */
+
+	b.eq	Lfleh_synchronous_panic_lockdown
+	
+	/*
+	 * Most kernel exceptions won't be taken with exceptions masked but if they
+	 * are they'll be stackshot traps or telemetry breakpoints. Check these
+	 * first since they're cheap.
+	 *
+	 * if (!((PSTATE & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE
+	 * 		&& ESR.EC != ESR_EC_UNCATEGORIZED
+	 * 		&& ESR.EC != ESR_EC_BRK_AARCH64))
+	 * 		goto Lfleh_synchronous_continue
+	 */
+	mov		w5, #(DAIF_STANDARD_DISABLE)
+	bics	wzr, w5, w4 // (DAIF_STANDARD_DISABLE & (~PSTATE)). If !Z/NE, AIF wasn't (fully) masked.
+	/*
+	 * If AIF was masked (EQ), test EC =? fasttrap
+	 * If AIF wasn't masked (NE), pass lockdown skip (EQ)
+	 */
+	ccmp	w6, #(ESR_EC_UNCATEGORIZED), #0b0100 /* Z/EQ */, EQ
+	/*
+	 * If AIF was masked AND EC != fasttrap (NE), test EC =? BRK
+	 * If AIF wasn't masked OR EC == fasttrap (EQ), pass lockdown skip (EQ)
+	 */
+	mov		w5, #(ESR_EC_BRK_AARCH64)
+	ccmp	w6, w5, #0b0100 /* Z/EQ */, NE
+	/*
+	 * AIF was masked AND EC != fasttrap AND EC != BRK (NE)
+	 * AIF wasn't masked OR EC == fasttrap OR EC == BRK (EQ) -> skip lockdown!
+	 */
+	b.eq	Lfleh_synchronous_continue
+	
+	/* 
+	 * Non-PAC/BRK/fasttrap exception taken with exceptions disabled.
+	 * We're going down if the system IS NOT:
+	 * 1) in early boot OR
+	 * 2) handling an expected XNUPOST exception (handled in lockdown macro)
+	 * 3) taking a copyio data abort
+	 */
+	adrp	x7, EXT(startup_phase)@page
+	add		x7, x7, EXT(startup_phase)@pageoff
+	ldr		w7, [x7]
+	cmp		w7, #-1 // STARTUP_SUB_LOCKDOWN
+	b.lo	Lfleh_synchronous_continue
+
+	/* Was this a copyio data abort taken while exceptions were masked? */
+	cmp		w6, #ESR_EC_DABORT_EL1
+	/* x10=1 when ELR was in copyio range */
+	ccmp	x10, #1, #0b0000 /* !Z/NE */, EQ
+	b.eq	Lfleh_synchronous_continue
+
+	/* FALLTHROUGH */
+Lfleh_synchronous_panic_lockdown:
+	/* Save off arguments for sleh as SPTM may clobber */
+	mov x26, x0
+	mov x27, x1
+	mov x28, x2
+	BEGIN_PANIC_LOCKDOWN
+	mov x0, x26
+	mov x1, x27
+	mov x2, x28
+	/* 
+	 * A captain goes down with her ship; system is sunk but for telemetry 
+	 * try to handle the crash normally.
+	 */
+	mov		x3, #1 // signal to sleh that we completed panic lockdown 
+	b		Lfleh_synchronous_continue
+#endif /* CONFIG_SPTM */
 UNWIND_EPILOGUE
+
+#if CONFIG_SPTM
+	.text
+	.align 2
+	/* Make a global symbol so it's easier to pick out in backtraces */
+	.global EXT(blocked_user_sync_exception)
+LEXT(blocked_user_sync_exception)
+Lblocked_user_sync_exception:
+	UNWIND_PROLOGUE
+	UNWIND_DIRECTIVES
+	/*
+	 * User space took a sync exception after panic lockdown had been initiated.
+	 * The system is going to panic soon, so let's just re-enable FIQs and wait
+	 * for debugger sync.
+	 */
+	msr		DAIFClr, #DAIFSC_FIQF
+0:
+	wfi
+	b		0b
+	UNWIND_EPILOGUE
+#endif /* CONFIG_SPTM */
 	
 /* Shared prologue code for fleh_irq and fleh_fiq.
  * Does any interrupt booking we may want to do
@@ -706,10 +1052,10 @@ UNWIND_DIRECTIVES
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_irq)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	END_INTERRUPT_HANDLER
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 	CHECK_EXCEPTION_RETURN_DISPATCH_PPL
 #endif
 
@@ -732,10 +1078,10 @@ UNWIND_DIRECTIVES
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_fiq)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	END_INTERRUPT_HANDLER
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 	CHECK_EXCEPTION_RETURN_DISPATCH_PPL
 #endif
 
@@ -754,9 +1100,9 @@ UNWIND_DIRECTIVES
 
 	PUSH_FRAME
 	bl		EXT(sleh_serror)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 	CHECK_EXCEPTION_RETURN_DISPATCH_PPL
 #endif
 
@@ -770,6 +1116,16 @@ UNWIND_EPILOGUE
 	.text
 	.align 2
 fleh_invalid_stack:
+#if CONFIG_SPTM
+	/*
+	 * Taking a data abort with an invalid kernel stack pointer is unrecoverable.
+	 * Initiate lockdown.
+	 */
+	/* Save off x0 as SPTM may clobber */
+	mov		x26, x0
+	BEGIN_PANIC_LOCKDOWN
+	mov		x0, x26
+#endif /* CONFIG_SPTM */
 	mrs		x1, ESR_EL1							// Load exception syndrome
 	str		x1, [x0, SS64_ESR]
 	mrs		x2, FAR_EL1							// Load fault address
@@ -785,6 +1141,30 @@ fleh_synchronous_sp1:
 	str		x1, [x0, SS64_ESR]
 	mrs		x2, FAR_EL1							// Load fault address
 	str		x2, [x0, SS64_FAR]
+
+#if CONFIG_SPTM
+	/*
+	 * Without debugger intervention, all exceptions on SP1 (including debug
+	 * trap instructions) are intended to be fatal. In order to not break
+	 * self-hosted kernel debug, do not trigger lockdown for debug traps
+	 * (unknown instructions/uncategorized exceptions). On release kernels, we
+	 * don't support self-hosted kernel debug so unconditionally lockdown.
+	 */
+#if (DEVELOPMENT || DEBUG)
+	tst		w1, #(ESR_EC_MASK)
+	b.eq	Lfleh_synchronous_sp1_skip_panic_lockdown // ESR_EC_UNCATEGORIZED is 0, so skip lockdown if Z
+#endif /* DEVELOPMENT || DEBUG */
+	/* Save off arguments for sleh as SPTM may clobber */
+	mov x26, x0
+	mov x27, x1
+	mov x28, x2
+	BEGIN_PANIC_LOCKDOWN
+	mov x0, x26
+	mov x1, x27
+	mov x2, x28
+Lfleh_synchronous_sp1_skip_panic_lockdown:
+#endif /* CONFIG_SPTM */
+
 	PUSH_FRAME
 	bl		EXT(sleh_synchronous_sp1)
 	b 		.
@@ -824,6 +1204,54 @@ exception_return_dispatch:
 	b.ne		EXT(return_to_kernel) // return to kernel if M[3:2] > 0
 	b		return_to_user
 
+#if CONFIG_SPTM
+/**
+ * XNU returns to this symbol whenever handling an interrupt that occurred
+ * during SPTM, TXM or SK runtime. This code determines which domain the
+ * XNU thread was executing in when the interrupt occurred and tells SPTM
+ * which domain to resume.
+ */
+	.text
+	.align 2
+	.global EXT(xnu_return_to_gl2)
+LEXT(xnu_return_to_gl2)
+	/**
+	 * If thread->txm_thread_stack is set, we need to tell SPTM dispatch to 
+	 * resume the TXM thread in x0.
+	 */
+	mrs		x8, TPIDR_EL1
+	ldr		x8, [x8, TH_TXM_THREAD_STACK]
+	cbz		x8, 1f
+	mov		x0, x8
+	b		EXT(txm_resume)
+	/* Unreachable */
+	b .
+
+#if CONFIG_EXCLAVES
+	/**
+	 * If thread->th_exclaves_intstate flag TH_EXCLAVES_EXECUTION is set
+	 * we need to tell SPTM dispatch to resume the SK thread.
+	 */
+1:
+	mrs		x8, TPIDR_EL1
+	ldr		x9, [x8, TH_EXCLAVES_INTSTATE]
+	and		x9, x9, TH_EXCLAVES_EXECUTION
+	cbz		x9, 1f
+	b		EXT(sk_resume)
+	/* Unreachable */
+	b .
+#endif /* CONFIG_EXCLAVES */
+
+	/**
+	 * If neither the above checks succeeded, this must be a thread
+	 * that was interrupted while running in SPTM. Tell SPTM to resume
+	 * the interrupted SPTM call.
+	 */
+1:
+	b		EXT(sptm_resume_from_exception)
+	/* Unreachable */
+	b .
+#endif /* CONFIG_SPTM */
 
 	.text
 	.align 2
@@ -841,7 +1269,7 @@ LEXT(return_to_kernel)
 	mov		sp, x21                                 // Switch to thread stack for preemption
 	PUSH_FRAME
 	bl		EXT(ast_taken_kernel)                   // Handle AST_URGENT
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	b		exception_return
 
 	.text
@@ -853,7 +1281,7 @@ LEXT(thread_bootstrap_return)
 #if KASAN_TBI
 	PUSH_FRAME
 	bl		EXT(__asan_handle_no_return)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 #endif /* KASAN_TBI */
 	b		EXT(arm64_thread_exception_return)
 
@@ -877,7 +1305,7 @@ check_user_asts:
 #if KASAN_TBI
 	PUSH_FRAME
 	bl		EXT(__asan_handle_no_return)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 #endif /* KASAN_TBI */
 	mrs		x3, TPIDR_EL1					// Load thread pointer
 
@@ -927,7 +1355,7 @@ no_asts:
 	mov		x19, x3						// Preserve thread pointer across function call
 	PUSH_FRAME
 	bl		EXT(recount_enter_user)
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	mov		x3, x19
 #endif /* PRECISE_USER_KERNEL_TIME */
 
@@ -966,10 +1394,12 @@ no_asts:
 
 	PUSH_FRAME
 	bl		EXT(arm_debug_set)					// Establish thread debug state in live regs
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	mrs		x3, TPIDR_EL1						// Reload thread pointer
 	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
 L_skip_user_set_debug_state:
+
+
 	ldrsh	x0, [x4, CPU_TPIDR_EL0]
 	msr		TPIDR_EL0, x0
 
@@ -1122,7 +1552,7 @@ Lskip_ttbr1_switch:
 user_take_ast:
 	PUSH_FRAME
 	bl		EXT(ast_taken_user)							// Handle all ASTs, may return via continuation
-	POP_FRAME
+	POP_FRAME_WITHOUT_LR
 	b		check_user_asts								// Now try again
 
 	.text
@@ -1164,7 +1594,7 @@ L_preempt_count_notzero_str:
 LEXT(ExceptionVectorsEnd)
 #endif /* __ARM_KERNEL_PROTECT__ */
 
-#if XNU_MONITOR
+#if XNU_MONITOR && !CONFIG_SPTM
 
 /*
  * Functions to preflight the fleh handlers when the PPL has taken an exception;
@@ -1618,14 +2048,165 @@ Lnot_in_ppl_dispatch:
 	.data
 Lppl_bad_call_panic_str:
 	.asciz "ppl_dispatch: failed due to bad arguments/state"
-#else /* XNU_MONITOR */
+#else /* XNU_MONITOR && !CONFIG_SPTM */
 	.text
 	.align 2
 	.globl EXT(ml_panic_trap_to_debugger)
 LEXT(ml_panic_trap_to_debugger)
 	ret
-#endif /* XNU_MONITOR */
+#endif /* XNU_MONITOR && !CONFIG_SPTM */
 
+#if CONFIG_SPTM
+	.text
+	.align 2
+
+	.globl EXT(_sptm_pre_entry_hook)
+LEXT(_sptm_pre_entry_hook)
+	/* Push a frame. */
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+	stp		x20, x21, [sp, #-0x10]!
+
+	/* Increase the preemption count. */
+	mrs		x9, TPIDR_EL1
+	cbz		x9, Lskip_preemption_check_sptmhook
+	ldr		w10, [x9, ACT_PREEMPT_CNT]
+	add		w10, w10, #1
+	str		w10, [x9, ACT_PREEMPT_CNT]
+
+#if SCHED_HYGIENE_DEBUG
+	/* Prepare preemption disable measurement, if necessary. */
+
+	/* Only prepare if we actually disabled preemption. */
+	cmp		w10, #1
+	b.ne	Lskip_prepare_measurement_sptmhook
+
+	/* Don't prepare if measuring is off completely. */
+	adrp	x10, _sched_preemption_disable_debug_mode@page
+	add		x10, x10, _sched_preemption_disable_debug_mode@pageoff
+	ldr		w10, [x10]
+	cmp		w10, #0
+	b.eq	Lskip_prepare_measurement_sptmhook
+
+	/* Save arguments to SPTM function and SPTM function id. */
+	mov		x20, x16
+	stp		x0, x1, [sp, #-0x40]!
+	stp		x2, x3, [sp, #0x10]
+	stp		x4, x5, [sp, #0x20]
+	stp		x6, x7, [sp, #0x30]
+
+	/* Call prepare function with thread pointer as first arg. */
+	bl		EXT(_prepare_preemption_disable_measurement)
+
+	/* Restore arguments to SPTM function and SPTM function id. */
+	ldp		x6, x7, [sp, #0x30]
+	ldp		x4, x5, [sp, #0x20]
+	ldp		x2, x3, [sp, #0x10]
+	ldp		x0, x1, [sp]
+	add		sp, sp, #0x40
+	mov		x16, x20
+
+Lskip_prepare_measurement_sptmhook:
+#endif /* SCHED_HYGIENE_DEBUG */
+Lskip_preemption_check_sptmhook:
+	/* assert we're not calling from guarded mode */
+	mrs		x14, CurrentG
+	cmp		x14, #0
+	b.ne	.
+
+	ldp		x20, x21, [sp], #0x10
+	POP_FRAME
+	ARM64_STACK_EPILOG
+
+	.align 2
+	.globl EXT(_sptm_post_exit_hook)
+LEXT(_sptm_post_exit_hook)
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+	stp		x20, x21, [sp, #-0x10]!
+
+	/* Save SPTM return value(s) */
+	stp		x0, x1, [sp, #-0x40]!
+	stp		x2, x3, [sp, #0x10]
+	stp		x4, x5, [sp, #0x20]
+	stp		x6, x7, [sp, #0x30]
+
+	/* Load the preemption count. */
+	mrs		x0, TPIDR_EL1
+	cbz		x0, Lsptm_skip_ast_taken_sptmhook
+	ldr		w12, [x0, ACT_PREEMPT_CNT]
+
+	/* Detect underflow */
+	cbnz	w12, Lno_preempt_underflow_sptmhook
+	/* No need to clean up the stack, as preempt_underflow calls panic */
+	b		preempt_underflow
+Lno_preempt_underflow_sptmhook:
+
+	/* Lower the preemption count. */
+	sub		w12, w12, #1
+
+#if SCHED_HYGIENE_DEBUG
+	/* Collect preemption disable measurement if necessary. */
+
+	/*
+	 * Only collect measurement if this reenabled preemption,
+	 * and SCHED_HYGIENE_MARKER is set.
+	 */
+	mov		x20, #SCHED_HYGIENE_MARKER
+	cmp		w12, w20
+	b.ne	Lskip_collect_measurement_sptmhook
+
+	/* Collect measurement. */
+	bl		EXT(_collect_preemption_disable_measurement)
+
+	/* Restore w12, which is now 0. */
+	mov		w12, #0
+
+	/* Restore x0 as the thread pointer */
+	mrs		x0, TPIDR_EL1
+
+Lskip_collect_measurement_sptmhook:
+#endif /* SCHED_HYGIENE_DEBUG */
+
+	/* Save the lowered preemption count. */
+	str		w12, [x0, ACT_PREEMPT_CNT]
+
+	/* Skip ASTs if the preemption count is not zero. */
+	cbnz	w12, Lsptm_skip_ast_taken_sptmhook
+
+	/**
+	 * Skip the AST check if interrupts were originally disabled. The original
+	 * DAIF value needs to be placed into a callee-saved register so that the
+	 * value is preserved across the ast_taken_kernel() call.
+	 */
+	mrs		x20, DAIF
+	tbnz	x20, #(DAIF_IRQF_SHIFT), Lsptm_skip_ast_taken_sptmhook
+
+	/* IF there is no urgent AST, skip the AST. */
+	ldr		x12, [x0, ACT_CPUDATAP]
+	ldr		x14, [x12, CPU_PENDING_AST]
+	tst		x14, AST_URGENT
+	b.eq	Lsptm_skip_ast_taken_sptmhook
+
+	/* Handle the AST. This call requires interrupts to be disabled. */
+	msr		DAIFSet, #(DAIFSC_ALL)
+	bl		EXT(ast_taken_kernel)
+	msr		DAIF, x20
+
+Lsptm_skip_ast_taken_sptmhook:
+
+	/* Restore SPTM return value(s) */
+	ldp		x6, x7, [sp, #0x30]
+	ldp		x4, x5, [sp, #0x20]
+	ldp		x2, x3, [sp, #0x10]
+	ldp		x0, x1, [sp]
+	add		sp, sp, #0x40
+
+	/* Return. */
+	ldp		x20, x21, [sp], 0x10
+	POP_FRAME
+	ARM64_STACK_EPILOG
+#endif /* CONFIG_SPTM */
 
 /* ARM64_TODO Is globals_asm.h needed? */
 //#include	"globals_asm.h"

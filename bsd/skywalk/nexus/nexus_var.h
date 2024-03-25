@@ -636,8 +636,8 @@ nx_tx_doorbell(struct __kern_channel_ring *kring, boolean_t async)
 
 __attribute__((always_inline))
 static inline int
-nx_rx_sync_packets(struct __kern_channel_ring *kring, uint64_t packets[],
-    uint32_t *count)
+nx_rx_sync_packets(struct __kern_channel_ring *kring,
+    uint64_t *__counted_by(*count)packets, uint32_t *count)
 {
 	struct kern_nexus_provider *nxprov = NX_PROV(KRNA(kring)->na_nx);
 

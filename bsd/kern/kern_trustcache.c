@@ -46,7 +46,226 @@
 static bool boot_os_tc_loaded = false;
 static bool boot_app_tc_loaded = false;
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+/*
+ * We have the TrustedExecutionMonitor environment available. All of our artifacts
+ * need to be page-aligned, and transferred to the appropriate TXM type before we
+ * call into TXM to load the trust cache.
+ *
+ * The trust cache runtime is managed independently by TXM. All initialization work
+ * is done by the TXM bootstrap and there is nothing more we need to do here.
+ */
+#include <sys/trusted_execution_monitor.h>
+
+LCK_GRP_DECLARE(txm_trust_cache_lck_grp, "txm_trust_cache_lck_grp");
+decl_lck_rw_data(, txm_trust_cache_lck);
+
+/* Immutable part of the runtime */
+SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t*) trust_cache_rt = NULL;
+
+/* Mutable part of the runtime */
+SECURITY_READ_ONLY_LATE(TrustCacheMutableRuntime_t*) trust_cache_mut_rt = NULL;
+
+/* Static trust cache information collected from TXM */
+SECURITY_READ_ONLY_LATE(uint32_t) num_static_trust_caches = 0;
+SECURITY_READ_ONLY_LATE(TCCapabilities_t) static_trust_cache_capabilities0 = 0;
+SECURITY_READ_ONLY_LATE(TCCapabilities_t) static_trust_cache_capabilities1 = 0;
+
+static void
+get_trust_cache_info(void)
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorGetTrustCacheInfo,
+		.failure_fatal = true,
+		.num_output_args = 4
+	};
+	txm_kernel_call(&txm_call);
+
+	/*
+	 * The monitor returns the libTrustCache runtime it uses within the first
+	 * returned word. The kernel doesn't currently have a use-case for this, so
+	 * we don't use it. But we continue to return this value from the monitor
+	 * in case it ever comes in use later down the line.
+	 */
+
+	num_static_trust_caches = (uint32_t)txm_call.return_words[1];
+	static_trust_cache_capabilities0 = (TCCapabilities_t)txm_call.return_words[2];
+	static_trust_cache_capabilities1 = (TCCapabilities_t)txm_call.return_words[3];
+}
+
+void
+trust_cache_runtime_init(void)
+{
+	/* Image4 interface needs to be available */
+	if (img4if == NULL) {
+		panic("image4 interface not available");
+	}
+
+	/* AMFI interface needs to be available */
+	if (amfi == NULL) {
+		panic("amfi interface not available");
+	} else if (amfi->TrustCache.version < 2) {
+		panic("amfi interface is stale: %u", amfi->TrustCache.version);
+	}
+
+	/* Initialize the TXM trust cache read-write lock */
+	lck_rw_init(&txm_trust_cache_lck, &txm_trust_cache_lck_grp, 0);
+
+	/* Acquire trust cache information from the monitor */
+	get_trust_cache_info();
+}
+
+static kern_return_t
+txm_load_trust_cache(
+	TCType_t type,
+	const uint8_t *img4_payload, const size_t img4_payload_len,
+	const uint8_t *img4_manifest, const size_t img4_manifest_len,
+	const uint8_t *img4_aux_manifest, const size_t img4_aux_manifest_len)
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorLoadTrustCache,
+		.num_input_args = 7
+	};
+	vm_address_t payload_addr = 0;
+	vm_address_t manifest_addr = 0;
+	kern_return_t ret = KERN_DENIED;
+
+	/* We don't support the auxiliary manifest for now */
+	(void)img4_aux_manifest;
+	(void)img4_aux_manifest_len;
+
+	ret = kmem_alloc(kernel_map, &payload_addr, img4_payload_len,
+	    KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_SECURITY);
+	if (ret != KERN_SUCCESS) {
+		printf("unable to allocate memory for image4 payload: %d\n", ret);
+		goto out;
+	}
+	memcpy((void*)payload_addr, img4_payload, img4_payload_len);
+
+	ret = kmem_alloc(kernel_map, &manifest_addr, img4_manifest_len,
+	    KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_SECURITY);
+	if (ret != KERN_SUCCESS) {
+		printf("unable to allocate memory for image4 manifest: %d\n", ret);
+		goto out;
+	}
+	memcpy((void*)manifest_addr, img4_manifest, img4_manifest_len);
+
+	/* Transfer both regions to be TXM owned */
+	txm_transfer_region(payload_addr, img4_payload_len);
+	txm_transfer_region(manifest_addr, img4_manifest_len);
+
+	/* Take the trust cache lock exclusively */
+	lck_rw_lock_exclusive(&txm_trust_cache_lck);
+
+	/* TXM will round-up to page length itself */
+	ret = txm_kernel_call(
+		&txm_call,
+		type,
+		payload_addr, img4_payload_len,
+		manifest_addr, img4_manifest_len,
+		0, 0);
+
+	/* Release the trust cache lock */
+	lck_rw_unlock_exclusive(&txm_trust_cache_lck);
+
+	/* Check for duplicate trust cache error */
+	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
+		if (txm_call.txm_ret.tcRet.error == kTCReturnDuplicate) {
+			ret = KERN_ALREADY_IN_SET;
+		}
+	}
+
+out:
+	if (manifest_addr != 0) {
+		/* Reclaim the manifest region */
+		txm_reclaim_region(manifest_addr, img4_manifest_len);
+
+		/* Free the manifest region */
+		kmem_free(kernel_map, manifest_addr, img4_manifest_len);
+		manifest_addr = 0;
+	}
+
+	if ((ret != KERN_SUCCESS) && (payload_addr != 0)) {
+		/* Reclaim the payload region */
+		txm_reclaim_region(payload_addr, img4_payload_len);
+
+		/* Free the payload region */
+		kmem_free(kernel_map, payload_addr, img4_payload_len);
+		payload_addr = 0;
+	}
+
+	return ret;
+}
+
+static kern_return_t
+txm_load_legacy_trust_cache(
+	__unused const uint8_t *module_data, __unused const size_t module_size)
+{
+	panic("legacy trust caches are not supported on this platform");
+}
+
+static kern_return_t
+txm_query_trust_cache(
+	TCQueryType_t query_type,
+	const uint8_t cdhash[kTCEntryHashSize],
+	TrustCacheQueryToken_t *query_token)
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorQueryTrustCache,
+		.failure_silent = true,
+		.num_input_args = 2,
+		.num_output_args = 2,
+	};
+	kern_return_t ret = KERN_NOT_FOUND;
+
+	lck_rw_lock_shared(&txm_trust_cache_lck);
+	ret = txm_kernel_call(&txm_call, query_type, cdhash);
+	lck_rw_unlock_shared(&txm_trust_cache_lck);
+
+	if (ret == KERN_SUCCESS) {
+		if (query_token) {
+			query_token->trustCache = (const TrustCache_t*)txm_call.return_words[0];
+			query_token->trustCacheEntry = (const void*)txm_call.return_words[1];
+		}
+		return KERN_SUCCESS;
+	}
+
+	/* Check for not-found trust cache error */
+	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
+		if (txm_call.txm_ret.tcRet.error == kTCReturnNotFound) {
+			ret = KERN_NOT_FOUND;
+		}
+	}
+
+	return ret;
+}
+
+static kern_return_t
+txm_check_trust_cache_runtime_for_uuid(
+	const uint8_t check_uuid[kUUIDSize])
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorCheckTrustCacheRuntimeForUUID,
+		.failure_silent = true,
+		.num_input_args = 1
+	};
+	kern_return_t ret = KERN_DENIED;
+
+	lck_rw_lock_shared(&txm_trust_cache_lck);
+	ret = txm_kernel_call(&txm_call, check_uuid);
+	lck_rw_unlock_shared(&txm_trust_cache_lck);
+
+	/* Check for not-found trust cache error */
+	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
+		if (txm_call.txm_ret.tcRet.error == kTCReturnNotFound) {
+			ret = KERN_NOT_FOUND;
+		}
+	}
+
+	return ret;
+}
+
+#elif PMAP_CS_PPL_MONITOR
 /*
  * We have the Page Protection Layer environment available. All of our artifacts
  * need to be page-aligned. The PPL will lockdown the artifacts before it begins
@@ -466,7 +685,7 @@ xnu_check_trust_cache_runtime_for_uuid(
 	return ret;
 }
 
-#endif /* */
+#endif /* CONFIG_SPTM */
 
 kern_return_t
 check_trust_cache_runtime_for_uuid(
@@ -478,7 +697,9 @@ check_trust_cache_runtime_for_uuid(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+	ret = txm_check_trust_cache_runtime_for_uuid(check_uuid);
+#elif PMAP_CS_PPL_MONITOR
 	ret = ppl_check_trust_cache_runtime_for_uuid(check_uuid);
 #else
 	ret = xnu_check_trust_cache_runtime_for_uuid(check_uuid);
@@ -625,7 +846,13 @@ load_trust_cache_with_type(
 		return KERN_DENIED;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+	ret = txm_load_trust_cache(
+		type,
+		img4_payload, img4_payload_len,
+		img4_manifest, img4_manifest_len,
+		img4_aux_manifest, img4_aux_manifest_len);
+#elif PMAP_CS_PPL_MONITOR
 	ret = ppl_load_trust_cache(
 		type,
 		img4_payload, img4_payload_len,
@@ -668,7 +895,9 @@ load_legacy_trust_cache(
 		panic("overflow on the module: %p | %lu", module_data, module_size);
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+	ret = txm_load_legacy_trust_cache(module_data, module_size);
+#elif PMAP_CS_PPL_MONITOR
 	ret = ppl_load_legacy_trust_cache(module_data, module_size);
 #else
 	ret = xnu_load_legacy_trust_cache(module_data, module_size);
@@ -696,7 +925,9 @@ query_trust_cache(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+	ret = txm_query_trust_cache(query_type, cdhash, query_token);
+#elif PMAP_CS_PPL_MONITOR
 	ret = ppl_query_trust_cache(query_type, cdhash, query_token);
 #else
 	ret = xnu_query_trust_cache(query_type, cdhash, query_token);
@@ -909,6 +1140,17 @@ static_trust_cache_capabilities(
 		panic("attempted to query static trust cache capabilities without init");
 	}
 
+#if CONFIG_SPTM
+	if (num_static_trust_caches > 0) {
+		/* Copy in the data received from TrustedExecutionMonitor */
+		*num_static_trust_caches_ret = num_static_trust_caches;
+		*capabilities0_ret = static_trust_cache_capabilities0;
+		*capabilities1_ret = static_trust_cache_capabilities1;
+
+		/* Return successfully */
+		return KERN_SUCCESS;
+	}
+#endif
 
 	if (amfi->TrustCache.version < 2) {
 		/* AMFI change hasn't landed in the build */

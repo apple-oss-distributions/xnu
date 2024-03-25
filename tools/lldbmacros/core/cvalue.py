@@ -10,23 +10,16 @@ wrapper to extract information from C based constructs.
 
 Use the member function GetSBValue() to access the base Scripting Bridge value.
 """
-from __future__ import absolute_import, division, print_function
 
 # The value class is designed to be Python 2/3 compatible. Pulling in more
 # builtins classes may break it.
-from builtins import range
 import numbers
 
-# Override int with valueint so we get the desired behavior.
-from .compat import valueint as int
-
-from past.utils import old_div
 import lldb
 import re
 from .caching import (
     cache_statically,
 )
-import six
 from .pointer import PointerPolicy
 
 _CSTRING_REX = re.compile(r"((?:\s*|const\s+)\s*char(?:\s+\*|\s+[A-Za-z_0-9]*\s*\[|)\s*)", re.MULTILINE | re.DOTALL)
@@ -214,12 +207,6 @@ class value(object):
 
     def __or__(self, other):
         return int(self) | int(other)
-
-    def __div__(self, other):
-        return old_div(int(self), int(other))
-
-    def __rdiv__(self, other):
-        return old_div(int(other), int(self))
 
     def __truediv__(self, other):
         return int(self) / int(other)
@@ -486,7 +473,7 @@ def sizeof(t):
     """
     if type(t) is value:
         return t.GetSBValue().GetByteSize()
-    if isinstance(t, six.string_types):
+    if isinstance(t, str):
         return gettype(t).GetByteSize()
     raise ValueError("Cannot get sizeof. Invalid argument")
 
@@ -543,7 +530,7 @@ def cast(obj, target_type):
                         - lldb.SBType :
     """
     dest_type = target_type
-    if isinstance(target_type, six.string_types):
+    if isinstance(target_type, str):
         dest_type = gettype(target_type)
     elif type(target_type) is value:
         dest_type = target_type.GetSBValue().GetType()

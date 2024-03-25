@@ -1,8 +1,4 @@
-from __future__ import absolute_import, division, print_function
-
-from six import add_metaclass
 from abc import ABCMeta, abstractmethod
-from builtins import range
 from collections import namedtuple
 import itertools
 
@@ -17,8 +13,7 @@ class LookupError(Exception):
 ShadowMapEntry = namedtuple('ShadowMapEntry', ['addr', 'shaddr', 'value'])
 
 
-@add_metaclass(ABCMeta)
-class AbstractShadowMap(object):
+class AbstractShadowMap(object, metaclass=ABCMeta):
     """ An abstract class serving as a template for KASan variant specific
         shadow map implementations.
     """
@@ -481,8 +476,7 @@ class ClassicMemObjectProvider(object):
                 "Unknown redzone combination: {:#x}, {:#x}".format(left_rz, right_rz))
 
 
-@add_metaclass(ABCMeta)
-class AbstractKasan(object):
+class AbstractKasan(object, metaclass=ABCMeta):
     """ KASan abstract class serving as a template for respective KASan implementations. """
     CTLTYPE = 0xf
     CTLTYPE_NODE = 0x1

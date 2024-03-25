@@ -32,7 +32,6 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	core/__init__.py \
 	core/caching.py \
 	core/collections.py \
-	core/compat.py \
 	core/configuration.py \
 	core/cvalue.py \
 	core/io.py \
@@ -96,7 +95,10 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	refgrp.py \
 	workload.py \
 	log.py \
-	kext.py
+	kext.py \
+	nvram.py \
+	taskinfo.py \
+	exclaves.py
 
 ifneq ($(PLATFORM),MacOSX)
 	LLDBMACROS_PYTHON_FILES+= \

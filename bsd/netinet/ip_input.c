@@ -131,6 +131,8 @@
 #include <netkey/key.h>
 #endif /* IPSEC */
 
+#include <net/sockaddr_utils.h>
+
 #include <os/log.h>
 
 #define DBG_LAYER_BEG           NETDBG_CODE(DBG_NETIP, 0)
@@ -396,14 +398,14 @@ static inline u_short ip_cksum(struct mbuf *, int);
 
 /*
  * On platforms which require strict alignment (currently for anything but
- * i386 or x86_64), check if the IP header pointer is 32-bit aligned; if not,
+ * i386 or x86_64 or arm64), check if the IP header pointer is 32-bit aligned; if not,
  * copy the contents of the mbuf chain into a new chain, and free the original
  * one.  Create some head room in the first mbuf of the new chain, in case
  * it's needed later on.
  */
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 #define IP_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do { } while (0)
-#else /* !__i386__ && !__x86_64__ */
+#else /* !__i386__ && !__x86_64__ && !__arm64__ */
 #define IP_HDR_ALIGNMENT_FIXUP(_m, _ifp, _action) do {                  \
 	if (!IP_HDR_ALIGNED_P(mtod(_m, caddr_t))) {                     \
 	        struct mbuf *_n;                                        \
@@ -424,7 +426,7 @@ static inline u_short ip_cksum(struct mbuf *, int);
 	        }                                                       \
 	}                                                               \
 } while (0)
-#endif /* !__i386__ && !__x86_64__ */
+#endif /* !__i386__ && !__x86_64__ && !__arm64__ */
 
 
 typedef enum ip_check_if_result {
@@ -450,7 +452,7 @@ ip_init_delayed(void)
 
 	bzero(&ifr, sizeof(ifr));
 	strlcpy(ifr.ifr_name, "lo0", sizeof(ifr.ifr_name));
-	sin = (struct sockaddr_in *)(void *)&ifr.ifr_addr;
+	sin = SIN(&ifr.ifr_addr);
 	sin->sin_len = sizeof(struct sockaddr_in);
 	sin->sin_family = AF_INET;
 	sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -486,8 +488,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 		return;
 	}
 	ip_initialized = 1;
-
-	in_ifaddr_init();
 
 	TAILQ_INIT(&in_ifaddrhead);
 	in_ifaddrhashtbl_init();
@@ -1262,7 +1262,7 @@ pass:
 	}
 
 	return retval;
-#if !defined(__i386__) && !defined(__x86_64__)
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(__arm64__)
 bad:
 	m_freem(m);
 	return IPINPUT_FREED;
@@ -2331,7 +2331,7 @@ found:
 		/* Clear the flag in case packet comes from loopback */
 		m->m_flags &= ~M_FRAG;
 	}
-	ip->ip_off <<= 3;
+	ip->ip_off = (u_short)(ip->ip_off << 3);
 
 	m->m_pkthdr.pkt_hdr = ip;
 
@@ -2845,7 +2845,7 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 				 */
 				break;
 			} else {
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 				ia = NULL;
 			}
 			off--;                  /* 0 origin */
@@ -2914,7 +2914,7 @@ nosourcerouting:
 			(void) memcpy(cp + off, &(IA_SIN(ia)->sin_addr),
 			    sizeof(struct in_addr));
 			IFA_UNLOCK(&ia->ia_ifa);
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 			ia = NULL;
 			cp[IPOPT_OFFSET] += sizeof(struct in_addr);
 			/*
@@ -2956,7 +2956,7 @@ nosourcerouting:
 			(void) memcpy(cp + off, &(IA_SIN(ia)->sin_addr),
 			    sizeof(struct in_addr));
 			IFA_UNLOCK(&ia->ia_ifa);
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 			ia = NULL;
 			cp[IPOPT_OFFSET] += sizeof(struct in_addr);
 			break;
@@ -3006,7 +3006,7 @@ nosourcerouting:
 				    sizeof(struct in_addr));
 				IFA_UNLOCK(&ia->ia_ifa);
 				ipt->ipt_ptr += sizeof(struct in_addr);
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 				ia = NULL;
 				break;
 
@@ -3023,7 +3023,7 @@ nosourcerouting:
 					    SA(&ipaddr))) == NULL) {
 					continue;
 				}
-				IFA_REMREF(&ia->ia_ifa);
+				ifa_remref(&ia->ia_ifa);
 				ia = NULL;
 				ipt->ipt_ptr += sizeof(struct in_addr);
 				break;
@@ -3140,7 +3140,7 @@ ip_rtaddr(struct in_addr dst)
 
 	RT_LOCK(ro.ro_rt);
 	if ((rt_ifa = ro.ro_rt->rt_ifa) != NULL) {
-		IFA_ADDREF(rt_ifa);
+		ifa_addref(rt_ifa);
 	}
 	RT_UNLOCK(ro.ro_rt);
 	ROUTE_RELEASE(&ro);
@@ -3219,7 +3219,7 @@ ip_srcroute(void)
 	 */
 	ip_srcrt.nop = IPOPT_NOP;
 	ip_srcrt.srcopt[IPOPT_OFFSET] = IPOPT_MINOFF;
-	(void) memcpy(mtod(m, caddr_t) + sizeof(struct in_addr),
+	(void) __nochk_memcpy(mtod(m, caddr_t) + sizeof(struct in_addr),
 	    &ip_srcrt.nop, OPTSIZ);
 	q = (struct in_addr *)(void *)(mtod(m, caddr_t) +
 	    sizeof(struct in_addr) + OPTSIZ);
@@ -3825,7 +3825,7 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 	if (inp->inp_flags & INP_RECVIF) {
 		struct ifnet *ifp;
 		uint8_t sdlbuf[SOCK_MAXADDRLEN + 1];
-		struct sockaddr_dl *sdl2 = SDL(&sdlbuf);
+		struct sockaddr_dl *sdl2 = SDL(sdlbuf);
 
 		/*
 		 * Make sure to accomodate the largest possible
@@ -3835,7 +3835,7 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 
 		ifnet_head_lock_shared();
 		if ((ifp = m->m_pkthdr.rcvif) != NULL &&
-		    ifp->if_index && (ifp->if_index <= if_index)) {
+		    ifp->if_index && IF_INDEX_IN_RANGE(ifp->if_index)) {
 			struct ifaddr *ifa = ifnet_addrs[ifp->if_index - 1];
 			struct sockaddr_dl *sdp;
 
@@ -3853,7 +3853,7 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 				goto makedummy;
 			}
 			/* the above _CASSERT ensures sdl_len fits in sdlbuf */
-			bcopy(sdp, sdl2, sdp->sdl_len);
+			SOCKADDR_COPY(sdp, sdl2, sdp->sdl_len);
 			IFA_UNLOCK(ifa);
 		} else {
 makedummy:

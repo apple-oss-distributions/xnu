@@ -375,7 +375,6 @@ mac_proc_check_remote_thread_create(struct task *task, int flavor, thread_state_
 {
 	proc_t curp = current_proc();
 	proc_t proc;
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -393,9 +392,8 @@ mac_proc_check_remote_thread_create(struct task *task, int flavor, thread_state_
 		return ESRCH;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_remote_thread_create, cred, proc, flavor, new_state, new_state_count);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_remote_thread_create, current_cached_proc_cred(curp),
+	    proc, flavor, new_state, new_state_count);
 	proc_rele(proc);
 
 	return error;
@@ -404,16 +402,13 @@ mac_proc_check_remote_thread_create(struct task *task, int flavor, thread_state_
 void
 mac_proc_notify_service_port_derive(struct mach_service_port_info *sp_info)
 {
-	proc_t curp = current_proc();
-	kauth_cred_t cred = kauth_cred_proc_ref(curp);
-	MAC_PERFORM(proc_notify_service_port_derive, cred, sp_info);
-	kauth_cred_unref(&cred);
+	MAC_PERFORM(proc_notify_service_port_derive,
+	    current_cached_proc_cred(PROC_NULL), sp_info);
 }
 
 int
 mac_proc_check_fork(proc_t curp)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -426,9 +421,7 @@ mac_proc_check_fork(proc_t curp)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_fork, cred, curp);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_fork, current_cached_proc_cred(curp), curp);
 
 	return error;
 }
@@ -479,10 +472,9 @@ mac_proc_check_inherit_ipc_ports(
  * files, so cannot use the typedef itself.
  */
 int
-mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
+mac_proc_check_map_anon(proc_t proc, kauth_cred_t cred, user_addr_t u_addr,
     user_size_t u_size, int prot, int flags, int *maxprot)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -495,9 +487,7 @@ mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(proc);
 	MAC_CHECK(proc_check_map_anon, proc, cred, u_addr, u_size, prot, flags, maxprot);
-	kauth_cred_unref(&cred);
 
 	return error;
 }
@@ -506,7 +496,6 @@ mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
 int
 mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -519,9 +508,8 @@ mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(proc);
-	MAC_CHECK(proc_check_memorystatus_control, cred, command, pid);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_memorystatus_control, current_cached_proc_cred(proc),
+	    command, pid);
 
 	return error;
 }
@@ -530,7 +518,6 @@ int
 mac_proc_check_mprotect(proc_t proc,
     user_addr_t addr, user_size_t size, int prot)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -543,9 +530,8 @@ mac_proc_check_mprotect(proc_t proc,
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(proc);
-	MAC_CHECK(proc_check_mprotect, cred, proc, addr, size, prot);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_mprotect, current_cached_proc_cred(proc),
+	    proc, addr, size, prot);
 
 	return error;
 }
@@ -576,7 +562,6 @@ mac_proc_notify_cs_invalidated(proc_t proc)
 int
 mac_proc_check_sched(proc_t curp, struct proc *proc)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -589,9 +574,7 @@ mac_proc_check_sched(proc_t curp, struct proc *proc)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_sched, cred, proc);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_sched, current_cached_proc_cred(curp), proc);
 
 	return error;
 }
@@ -599,7 +582,6 @@ mac_proc_check_sched(proc_t curp, struct proc *proc)
 int
 mac_proc_check_signal(proc_t curp, struct proc *proc, int signum)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -612,9 +594,7 @@ mac_proc_check_signal(proc_t curp, struct proc *proc, int signum)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_signal, cred, proc, signum);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_signal, current_cached_proc_cred(curp), proc, signum);
 
 	return error;
 }
@@ -642,7 +622,6 @@ mac_proc_check_syscall_unix(proc_t curp, int scnum)
 int
 mac_proc_check_wait(proc_t curp, struct proc *proc)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -655,9 +634,7 @@ mac_proc_check_wait(proc_t curp, struct proc *proc)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_wait, cred, proc);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_wait, current_cached_proc_cred(curp), proc);
 
 	return error;
 }
@@ -671,7 +648,7 @@ mac_proc_notify_exit(struct proc *proc)
 int
 mac_proc_check_suspend_resume(proc_t proc, int sr)
 {
-	kauth_cred_t cred;
+	proc_t curp = current_proc();
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -680,13 +657,12 @@ mac_proc_check_suspend_resume(proc_t proc, int sr)
 		return 0;
 	}
 #endif
-	if (!mac_proc_check_enforce(current_proc())) {
+	if (!mac_proc_check_enforce(curp)) {
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(current_proc());
-	MAC_CHECK(proc_check_suspend_resume, cred, proc, sr);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_suspend_resume, current_cached_proc_cred(curp),
+	    proc, sr);
 
 	return error;
 }
@@ -694,7 +670,6 @@ mac_proc_check_suspend_resume(proc_t proc, int sr)
 int
 mac_proc_check_ledger(proc_t curp, proc_t proc, int ledger_op)
 {
-	kauth_cred_t cred;
 	int error = 0;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -707,9 +682,8 @@ mac_proc_check_ledger(proc_t curp, proc_t proc, int ledger_op)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_ledger, cred, proc, ledger_op);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_ledger, current_cached_proc_cred(curp),
+	    proc, ledger_op);
 
 	return error;
 }
@@ -717,7 +691,6 @@ mac_proc_check_ledger(proc_t curp, proc_t proc, int ledger_op)
 int
 mac_proc_check_proc_info(proc_t curp, proc_t target, int callnum, int flavor)
 {
-	kauth_cred_t cred;
 	int error = 0;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -730,9 +703,8 @@ mac_proc_check_proc_info(proc_t curp, proc_t target, int callnum, int flavor)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_proc_info, cred, target, callnum, flavor);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_proc_info, current_cached_proc_cred(curp),
+	    target, callnum, flavor);
 
 	return error;
 }
@@ -740,7 +712,6 @@ mac_proc_check_proc_info(proc_t curp, proc_t target, int callnum, int flavor)
 int
 mac_proc_check_get_cs_info(proc_t curp, proc_t target, unsigned int op)
 {
-	kauth_cred_t cred;
 	int error = 0;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -753,9 +724,8 @@ mac_proc_check_get_cs_info(proc_t curp, proc_t target, unsigned int op)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_get_cs_info, cred, target, op);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_get_cs_info, current_cached_proc_cred(curp),
+	    target, op);
 
 	return error;
 }
@@ -763,7 +733,6 @@ mac_proc_check_get_cs_info(proc_t curp, proc_t target, unsigned int op)
 int
 mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op)
 {
-	kauth_cred_t cred;
 	int error = 0;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -776,9 +745,8 @@ mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(curp);
-	MAC_CHECK(proc_check_set_cs_info, cred, target, op);
-	kauth_cred_unref(&cred);
+	MAC_CHECK(proc_check_set_cs_info, current_cached_proc_cred(curp),
+	    target, op);
 
 	return error;
 }
@@ -906,7 +874,6 @@ mac_proc_check_setregid(proc_t curp, kauth_cred_t cred, gid_t rgid, gid_t egid)
 int
 mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid)
 {
-	kauth_cred_t pcred, tcred;
 	int error = 0;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -919,11 +886,8 @@ mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid)
 		return 0;
 	}
 
-	pcred = kauth_cred_proc_ref(curp);
-	tcred = kauth_cred_get_with_ref();
-	MAC_CHECK(proc_check_settid, pcred, tcred, uid, gid);
-	kauth_cred_unref(&tcred);
-	kauth_cred_unref(&pcred);
+	MAC_CHECK(proc_check_settid, current_cached_proc_cred(curp),
+	    kauth_cred_get(), uid, gid);
 
 	return error;
 }

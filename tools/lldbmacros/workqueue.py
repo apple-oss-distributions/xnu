@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 from xnu import *
 from process import GetBSDThread, GetMachThread
 from scheduler import GetRecentTimestamp

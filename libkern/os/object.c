@@ -23,21 +23,19 @@
 #include <os/object.h>
 #include <kern/assert.h>
 
-
-/* XXX temporary until full vtable and refcount support */
-extern struct os_log_s _os_log_default;
+/*
+ * Lifecycle of OSLog handles, tracked by os_retain() and os_release(), is that
+ * they are allocated and then never freed. Therefore, there is no need for
+ * reference counting.
+ */
 
 void*
 os_retain(void *obj)
 {
-	/* XXX temporary nop */
-	assert(obj == &_os_log_default);
 	return obj;
 }
 
 void
 os_release(void *obj __unused)
 {
-	/* XXX temporary nop */
-	assert(obj == &_os_log_default);
 }

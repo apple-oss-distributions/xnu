@@ -133,8 +133,19 @@
  * Random device subroutines and stubs.
  */
 
+#if KERNEL
+
+#if defined (__i386__) || defined (__x86_64__)
+#include "i386/string.h"
+#elif defined (__arm__) || defined (__arm64__)
+#include "arm/string.h"
+#else
+#error architecture not supported
+#endif
+
 #include <vm/vm_kern.h>
 #include <kern/misc_protos.h>
+#include <kern/telemetry.h>
 #include <libsa/stdlib.h>
 #include <sys/malloc.h>
 #include <libkern/section_keywords.h>
@@ -157,7 +168,10 @@
 static_assert(__arch_bcopy, "architecture must provide bcopy");
 static_assert(__arch_bzero, "architecture must provide bzero");
 static_assert(__arch_memcpy, "architecture must provide memcpy");
+static_assert(__arch_memmove, "architecture must provide memmove");
 static_assert(__arch_memset, "architecture must provide memset");
+
+#endif /* KERNEL */
 
 #ifndef __arch_bcmp
 int
@@ -182,7 +196,7 @@ bcmp_impl(const void *pa, const void *pb, size_t len)
 	 * as more than zero/non-zero
 	 */
 	if ((len & 0xFFFFFFFF00000000ULL) && !(len & 0x00000000FFFFFFFFULL)) {
-		return 0xFFFFFFFFL;
+		return ~0;
 	} else {
 		return (int)len;
 	}
@@ -209,12 +223,13 @@ memcmp_impl(const void *s1, const void *s2, size_t n)
 
 #ifndef __arch_memcmp_zero_ptr_aligned
 unsigned long
-memcmp_zero_ptr_aligned(const void *addr, size_t size)
+memcmp_zero_ptr_aligned_impl(const void *addr, size_t size)
 {
 	const uint64_t *p = (const uint64_t *)addr;
 	uint64_t a = p[0];
 
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
+	static_assert(sizeof(unsigned long) == sizeof(uint64_t),
+	    "uint64_t is not the same size as unsigned long");
 
 	if (size < 4 * sizeof(uint64_t)) {
 		if (size > 1 * sizeof(uint64_t)) {
@@ -248,16 +263,6 @@ memcmp_zero_ptr_aligned(const void *addr, size_t size)
 }
 #endif /* __arch_memcmp_zero_ptr_aligned */
 
-#ifndef __arch_memmove
-/* memcpy is provided as a linker alias */
-void *
-memmove_impl(void *dst, const void *src, size_t ulen)
-{
-	bcopy_impl(src, dst, ulen);
-	return dst;
-}
-#endif /* __arch_memmove */
-
 /*
  * Abstract:
  * strlen returns the number of characters in "string" preceeding
@@ -272,7 +277,7 @@ strlen_impl(const char *string)
 	while (*string++ != '\0') {
 		continue;
 	}
-	return string - 1 - ret;
+	return (size_t)(string - 1 - ret);
 }
 #endif /* __arch_strlen */
 
@@ -296,7 +301,7 @@ strnlen_impl(const char *s, size_t max)
 		p++;
 	}
 
-	return p - s;
+	return (size_t)(p - s);
 }
 #endif /* __arch_strlen */
 
@@ -317,7 +322,7 @@ strnlen_impl(const char *s, size_t max)
 int
 strcmp_impl(const char *s1, const char *s2)
 {
-	unsigned int a, b;
+	int a, b;
 
 	do {
 		a = *s1++;
@@ -344,31 +349,61 @@ strcmp_impl(const char *s1, const char *s2)
 int
 strncmp_impl(const char *s1, const char *s2, size_t n)
 {
-	unsigned int a, b;
-
-	while (n != 0) {
-		a = *s1++;
-		b = *s2++;
-		if (a != b) {
-			return a - b;     /* includes case when
-			                   *  'a' is zero and 'b' is not zero
-			                   *  or vice versa */
-		}
-		if (a == '\0') {
-			return 0;       /* both are zero */
-		}
-		n--;
-	}
-
-	return 0;
+	return strbufcmp_impl(s1, n, s2, n);
 }
 #endif /* __arch_strncmp */
 
+#ifndef __arch_strlcmp
+int
+strlcmp_impl(const char *s1, const char *s2, size_t n)
+{
+	return strbufcmp_impl(s1, n, s2, strlen(s2));
+}
+#endif
+
+#ifndef __arch_strbufcmp
+int
+strbufcmp_impl(
+	const char *__counted_by(alen)a,
+	size_t alen,
+	const char *__counted_by(blen)b,
+	size_t blen)
+{
+	int ca, cb;
+	size_t i, len;
+
+	len = alen < blen ? alen : blen;
+	for (i = 0; i < len; ++i) {
+		ca = a[i];
+		cb = b[i];
+		if (ca != cb) {
+			return ca - cb;   /* includes case when
+			                   *  'a' is zero and 'b' is not zero
+			                   *  or vice versa */
+		}
+		if (ca == '\0') {
+			return 0;       /* both are zero */
+		}
+	}
+
+	/* if either string is not NUL-terminated, pretend the next character is a
+	 * NUL */
+	if (alen < blen) {
+		return 0 - b[len];
+	}
+	if (blen < alen) {
+		return a[len] - 0;
+	}
+	return 0;
+}
+#endif /* __arch_strbufcmp */
+
+#ifndef __arch_strprefix
 /*
  * Return TRUE(1) if string 2 is a prefix of string 1.
  */
 int
-strprefix(const char *s1, const char *s2)
+strprefix_impl(const char *s1, const char *s2)
 {
 	int c;
 
@@ -379,13 +414,14 @@ strprefix(const char *s1, const char *s2)
 	}
 	return 1;
 }
+#endif /* __arch_strprefix */
 
 
 //
 // Lame implementation just for use by strcasecmp/strncasecmp
 //
 __header_always_inline int
-tolower(unsigned char ch)
+tolower(int ch)
 {
 	if (ch >= 'A' && ch <= 'Z') {
 		ch = 'a' + (ch - 'A');
@@ -414,22 +450,54 @@ strcasecmp_impl(const char *s1, const char *s2)
 int
 strncasecmp_impl(const char *s1, const char *s2, size_t n)
 {
-	if (n != 0) {
-		const unsigned char *us1 = (const u_char *)s1,
-		    *us2 = (const u_char *)s2;
+	return strbufcasecmp_impl(s1, n, s2, n);
+}
+#endif /* __arch_strncasecmp */
 
-		do {
-			if (tolower(*us1) != tolower(*us2++)) {
-				return tolower(*us1) - tolower(*--us2);
-			}
-			if (*us1++ == '\0') {
-				break;
-			}
-		} while (--n != 0);
+#ifndef __arch_strlcasecmp
+int
+strlcasecmp_impl(const char *s1, const char *s2, size_t n)
+{
+	return strbufcasecmp_impl(s1, n, s2, strlen(s2));
+}
+#endif
+
+#ifndef __arch_strbufcasecmp
+int
+strbufcasecmp_impl(
+	const char *__counted_by(alen)a,
+	size_t alen,
+	const char *__counted_by(blen)b,
+	size_t blen)
+{
+	int ca, cb;
+	size_t i, len;
+
+	len = alen < blen ? alen : blen;
+	for (i = 0; i < len; ++i) {
+		ca = tolower(a[i]);
+		cb = tolower(b[i]);
+		if (ca != cb) {
+			return ca - cb; /* includes case when
+			                 *  'a' is zero and 'b' is not zero
+			                 *  or vice versa */
+		}
+		if (ca == '\0') {
+			return 0;       /* both are zero */
+		}
+	}
+
+	/* if either string is not NUL-terminated, pretend the next character is a
+	 * NUL */
+	if (alen < blen) {
+		return 0 - tolower(b[len]);
+	}
+	if (blen < alen) {
+		return tolower(a[len]) - 0;
 	}
 	return 0;
 }
-#endif /* __arch_strncasecmp */
+#endif /* __arch_strbufcasecmp */
 
 #ifndef __arch_strchr
 char *
@@ -603,13 +671,13 @@ strlcat_impl(char *dst, const char *src, size_t siz)
 	char *d = dst;
 	const char *s = src;
 	size_t n = siz;
-	size_t dlen = strlen_impl(dst);
+	size_t dlen;
 
 	/* Find the end of dst and adjust bytes left but don't go past end */
 	while (n-- != 0 && *d != '\0') {
 		d++;
 	}
-	dlen = d - dst;
+	dlen = (size_t)(d - dst);
 	n = siz - dlen;
 
 	if (n == 0) {
@@ -624,9 +692,39 @@ strlcat_impl(char *dst, const char *src, size_t siz)
 	}
 	*d = '\0';
 
-	return dlen + (s - src);       /* count does not include NUL */
+	return dlen + (size_t)(s - src);       /* count does not include NUL */
 }
 #endif /* __arch_strlcat */
+
+/*
+ * Append src string to dst. The operation stops once *any* of the following
+ * conditions is met:
+ *  * when `dst` is filled with `dstsz` characters;
+ *  * when `srcsz` characters have been copied;
+ *  * when a NUL character has been copied from `src` to `dst`.
+ * `dst` is always NUL-terminated, truncating `src` as needed.
+ * If `dstsz` is 0, the function returns NULL. Otherwise, it returns `dst`,
+ * regardless of whether there was free space in dst to append any characters.
+ * This function is most useful to concatenate a fixed-size string to another.
+ */
+#ifndef __arch_strbufcat
+const char *__null_terminated
+strbufcat_impl(
+	char *__counted_by(dstsz)dst,
+	size_t dstsz,
+	const char *__counted_by(srcsz)src,
+	size_t srcsz)
+{
+	size_t len;
+	if (dstsz == 0) {
+		return NULL;
+	}
+
+	len = strnlen_impl(dst, dstsz);
+	strbufcpy_impl(dst + len, dstsz - len, src, srcsz);
+	return dst;
+}
+#endif /* __arch_strbufcat */
 
 /*
  * Copy src to string dst of size siz.  At most siz-1 characters
@@ -647,6 +745,43 @@ strlcpy_impl(char * dst, const char * src, size_t maxlen)
 	return srclen;
 }
 #endif /* __arch_strlcpy */
+
+/*
+ * Copy src string to dst. The copy stops once *any* of the following conditions
+ * is met:
+ *  * when `dstsz` characters have been copied;
+ *  * when `srcsz` characters have been copied;
+ *  * when a NUL character has been copied from `src` to `dst`.
+ * `dst` is always NUL-terminated, truncating `src` as needed.
+ * If `dstsz` is 0, the function returns NULL. Otherwise, it returns `dst`.
+ * This function is most useful to copy a fixed-size string from one buffer to
+ * another.
+ */
+#ifndef __arch_strbufcpy
+const char *__null_terminated
+strbufcpy_impl(
+	char *__counted_by(dstsz)dst,
+	size_t dstsz,
+	const char *__counted_by(srcsz)src,
+	size_t srcsz)
+{
+	size_t copymax;
+
+	if (dstsz == 0) {
+		return NULL;
+	}
+
+	copymax = strnlen_impl(src, srcsz);
+	if (copymax < dstsz) {
+		memmove_impl(dst, src, copymax);
+		dst[copymax] = 0;
+	} else {
+		memmove_impl(dst, src, dstsz);
+		dst[dstsz - 1] = 0;
+	}
+	return __unsafe_forge_null_terminated(const char *__null_terminated, dst);
+}
+#endif /* __arch_strbufcpy */
 
 #ifndef __arch_strncat
 char *
@@ -708,7 +843,6 @@ char * __strncat_chk(char *restrict dst, const char *restrict src, size_t len, s
 char * __strcpy_chk(char *restrict dst, const char *restrict src, size_t chk_size);
 char * __strcat_chk(char *restrict dst, const char *restrict src, size_t chk_size);
 
-MARK_AS_HIBERNATE_TEXT
 void *
 __memcpy_chk(void *dst, void const *src, size_t s, size_t chk_size)
 {
@@ -727,7 +861,6 @@ __memmove_chk(void *dst, void const *src, size_t s, size_t chk_size)
 	return memmove_impl(dst, src, s);
 }
 
-MARK_AS_HIBERNATE_TEXT
 void *
 __memset_chk(void *dst, int c, size_t s, size_t chk_size)
 {

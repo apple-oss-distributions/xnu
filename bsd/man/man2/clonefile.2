@@ -33,6 +33,11 @@
 .
 .Fn fclonefileat "int srcfd" "int dst_dirfd" "const char * dst" "int flags"
 .
+.Sh LIMITATIONS
+Cloning directories with these functions is strongly discouraged.  Use
+.Xr copyfile 3
+to clone directories instead.
+.
 .Sh DESCRIPTION
 The
 .Fn clonefile
@@ -80,9 +85,10 @@ allocate new storage for data blocks, it is possible for a subsequent overwrite 
 return ENOSPC.  If
 .Fa src
 names a directory, the directory hierarchy is cloned as if each item was cloned individually.  However, the use of
+.Xr clonefile 2
+to clone directory hierarchies is strongly discouraged.  Use
 .Xr copyfile 3
-is more appropriate for copying large directory hierarchies instead of
-.Xr clonefile 2 .
+instead for copying directories.
 .Pp
 The
 .Fn clonefileat

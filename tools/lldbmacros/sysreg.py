@@ -9,12 +9,9 @@
     3. Populate _SUPPORTED_SYSREGS list with target register
     
 """
-from __future__ import absolute_import, print_function
-
 from xnu import *
 import os
 import sys
-import six
 import xml.etree.ElementTree as ET
 
 GREEN = '\033[0;32m'
@@ -109,13 +106,13 @@ def _GetParaChildrenStr(elem):
     """
 
     if elem.tag == 'binarynumber':
-        return six.ensure_str(elem.text)
+        return elem.text
     if elem.tag == 'arm-defined-word':
-        return six.ensure_str(elem.text)
+        return elem.text
     elif elem.tag == 'xref':
-        return six.ensure_str(elem.attrib['browsertext'])
+        return elem.attrib['browsertext']
     elif elem.tag == 'register_link':
-        return six.ensure_str(elem.text)
+        return elem.text
     else:
         return _Colorify(VT.Red, '*unsupported text*')
 

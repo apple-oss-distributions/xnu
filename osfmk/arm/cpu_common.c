@@ -157,9 +157,9 @@ cpu_info(processor_flavor_t flavor, int slot_num, processor_info_t info,
 		cpu_stat->vfp_shortv_cnt = 0;
 		cpu_stat->data_ex_cnt = cpu_data_ptr->cpu_stat.data_ex_cnt;
 		cpu_stat->instr_ex_cnt = cpu_data_ptr->cpu_stat.instr_ex_cnt;
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		cpu_stat->pmi_cnt = cpu_data_ptr->cpu_monotonic.mtc_npmis;
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 		*count = PROCESSOR_CPU_STAT64_COUNT;
 
@@ -653,7 +653,18 @@ cpu_exit_wait(int cpu_id)
 		while ((*cpu_sts & CPU_PIO_CPU_STS_cpuRunSt_mask) != 0x00) {
 			__builtin_arm_dsb(DSB_ISH);
 			if (mach_absolute_time() > start + interval) {
+#if NO_CPU_OVRD
+				// On platforms where CPU_OVRD is unavailable, a core can get stuck
+				// in a loop where it tries to enter WFI but is constantly woken up
+				// by an IRQ or FIQ.  This condition persists until the cluster-wide
+				// deep sleep bits are set.
+				//
+				// Making this a fatal condition would be a poor UX, but it's good to
+				// print a warning so we know how often it happens.
+				kprintf("CPU%d failed to shut down\n", cpu_id);
+#else
 				panic("CPU%d failed to shut down", cpu_id);
+#endif
 			}
 		}
 		return;
@@ -828,7 +839,7 @@ current_percpu_base(void)
 vm_offset_t
 other_percpu_base(int cpu)
 {
-	return (vm_offset_t)cpu_datap(cpu) - __PERCPU_ADDR(cpu_data);
+	return (char *)cpu_datap(cpu) - __PERCPU_ADDR(cpu_data);
 }
 
 uint64_t

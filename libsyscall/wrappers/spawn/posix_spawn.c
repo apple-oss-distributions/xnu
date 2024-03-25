@@ -181,6 +181,10 @@ __posix_spawnattr_init(struct _posix_spawnattr *psattrp)
 	psattrp->psa_filedesc_soft_limit = 0;
 	psattrp->psa_filedesc_hard_limit = 0;
 
+	/* Default is no kqworkloop limit */
+	psattrp->psa_kqworkloop_soft_limit = 0;
+	psattrp->psa_kqworkloop_hard_limit = 0;
+
 	psattrp->psa_crash_behavior = 0;
 	psattrp->psa_crash_behavior_deadline = 0;
 	psattrp->psa_launch_type = 0;
@@ -912,6 +916,26 @@ posix_spawnattr_setdataless_iopolicy_np(posix_spawnattr_t * __restrict attr,
 	psattr->psa_options |= PSA_OPTION_DATALESS_IOPOLICY;
 	psattr->psa_dataless_iopolicy = policy;
 
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_use_sec_transition_shims_np
+ * Description: Set flag to enable security shims on the spawned process.
+ */
+int
+posix_spawnattr_set_use_sec_transition_shims_np(posix_spawnattr_t *attr, uint32_t flags)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_options |= PSA_OPTION_USE_SEC_TRANSITION_SHIMS;
+	(void)flags;
 	return 0;
 }
 
@@ -2196,10 +2220,18 @@ posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 }
 
 int
-posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr __unused,
-    mach_port_t port __unused)
+posix_spawnattr_set_ptrauth_task_port_np(posix_spawnattr_t * __restrict attr,
+    mach_port_t port)
 {
-	return 0;
+	int err = 0;
+
+	_ps_port_action_t action = {
+		.port_type = PSPA_PTRAUTH_TASK_PORT,
+		.new_port = port,
+	};
+
+	err = posix_spawn_appendportaction_np(attr, &action);
+	return err;
 }
 
 static
@@ -2771,6 +2803,24 @@ posix_spawnattr_set_filedesclimit_ext(posix_spawnattr_t * __restrict attr,
 
 	psattr->psa_filedesc_soft_limit = filedesc_soft_limit;
 	psattr->psa_filedesc_hard_limit = filedesc_hard_limit;
+
+	return 0;
+}
+
+int
+posix_spawnattr_set_kqworklooplimit_ext(posix_spawnattr_t * __restrict attr,
+    uint32_t kqworkloop_soft_limit, uint32_t kqworkloop_hard_limit)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_kqworkloop_soft_limit = kqworkloop_soft_limit;
+	psattr->psa_kqworkloop_hard_limit = kqworkloop_hard_limit;
 
 	return 0;
 }

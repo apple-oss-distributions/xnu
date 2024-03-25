@@ -669,7 +669,7 @@ ifeq ($(CREATE_BRANCH_PATCH),)
 installsrc:
 	@echo INSTALLSRC $(SRCROOT)
 	$(_v)$(MKDIR) $(SRCROOT)
-	$(_v)$(FIND) -x . \! \( \( -name BUILD -o -name .svn -o -name .git -o -name cscope.\* -o -name \*~ \) -prune \) -print0 | $(PAX) -rw -p a -d0 $(SRCROOT)
+	$(_v)$(FIND) -x . \! \( \( -name BUILD -o -name .svn -o -name .git -o -name cscope.\* -o -name compile_commands.json -o -name \*~ \) -prune \) -print0 | $(PAX) -rw -p a -d0 $(SRCROOT)
 	$(_v)$(CHMOD) -R go+rX $(SRCROOT)
 endif
 
@@ -779,5 +779,6 @@ $(eval $(generated_top_level_print_exports))
 .PHONY: print_exports_first_build_config
 
 print_exports_first_build_config: print_exports_bootstrap
+
 
 # vim: set ft=make:

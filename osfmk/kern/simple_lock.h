@@ -321,6 +321,7 @@ extern void                     usimple_unlock(
 
 typedef uint32_t hw_lock_bit_t;
 
+extern const struct hw_spin_policy hw_lock_bit_policy;
 #if __arm64__
 extern const struct hw_spin_policy hw_lock_bit_policy_2s;
 #endif
@@ -341,7 +342,7 @@ extern void     hw_lock_bit_nopreempt(
 	LCK_GRP_ARG(lck_grp_t*));
 
 
-extern unsigned int hw_lock_bit_try(
+extern bool hw_lock_bit_try(
 	hw_lock_bit_t *,
 	unsigned int
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
@@ -351,6 +352,13 @@ extern unsigned int hw_lock_bit_to(
 	unsigned int,
 	hw_spin_policy_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
+
+extern hw_lock_status_t hw_lock_bit_to_b(
+	hw_lock_bit_t *,
+	unsigned int,
+	hw_spin_policy_t,
+	bool (^lock_pause)(void)
+	LCK_GRP_ARG(lck_grp_t*));
 
 extern void     hw_unlock_bit(
 	hw_lock_bit_t *,
@@ -376,6 +384,9 @@ extern void     hw_unlock_bit_nopreempt(
 
 #define hw_lock_bit_to(lck, bit, spec, grp) \
 	hw_lock_bit_to(lck, bit, spec)
+
+#define hw_lock_bit_to_b(lck, bit, spec, pause, grp) \
+	hw_lock_bit_to_b(lck, bit, spec, pause)
 
 #endif /* !LCK_GRP_USE_ARG */
 #endif  /* MACH_KERNEL_PRIVATE */

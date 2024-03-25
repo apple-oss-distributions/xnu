@@ -42,15 +42,12 @@
 #include <kern/policy_internal.h>
 #include <kern/sched_hygiene.h>
 #include <kern/startup.h>
+#include <kern/monotonic.h>
 #include <machine/config.h>
 #include <machine/atomic.h>
+#include <machine/monotonic.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
-
-#if MONOTONIC
-#include <kern/monotonic.h>
-#include <machine/monotonic.h>
-#endif /* MONOTONIC */
 
 #include <mach/machine.h>
 #include <mach/machine/sdt.h>
@@ -323,19 +320,19 @@ machine_switch_populate_perfcontrol_thread_data(struct perfcontrol_thread_data *
 static void
 machine_switch_populate_perfcontrol_cpu_counters(struct perfcontrol_cpu_counters *cpu_counters)
 {
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	mt_perfcontrol(&cpu_counters->instructions, &cpu_counters->cycles);
-#else /* MONOTONIC */
+#else /* CONFIG_CPU_COUNTERS */
 	cpu_counters->instructions = 0;
 	cpu_counters->cycles = 0;
-#endif /* !MONOTONIC */
+#endif /* !CONFIG_CPU_COUNTERS */
 }
 
 int perfcontrol_callout_stats_enabled = 0;
 static _Atomic uint64_t perfcontrol_callout_stats[PERFCONTROL_CALLOUT_MAX][PERFCONTROL_STAT_MAX];
 static _Atomic uint64_t perfcontrol_callout_count[PERFCONTROL_CALLOUT_MAX];
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 static inline
 bool
 perfcontrol_callout_counters_begin(uint64_t *counters)
@@ -360,7 +357,7 @@ perfcontrol_callout_counters_end(uint64_t *start_counters,
 	    end_counters[MT_CORE_INSTRS] - start_counters[MT_CORE_INSTRS], relaxed);
 	os_atomic_inc(&perfcontrol_callout_count[type], relaxed);
 }
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 uint64_t
 perfcontrol_callout_stat_avg(perfcontrol_callout_type_t type,
@@ -436,17 +433,17 @@ machine_switch_perfcontrol_context(perfcontrol_event event,
 		    new_thread_same_pri_latency);
 		machine_switch_populate_perfcontrol_cpu_counters(&cpu_counters);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		uint64_t counters[MT_CORE_NFIXED];
 		bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 		sched_perfcontrol_csw(event, cpu_id, timestamp, flags,
 		    &offcore, &oncore, &cpu_counters, NULL);
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		if (ctrs_enabled) {
 			perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_CONTEXT);
 		}
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 		recount_add_energy(old, get_threadtask(old),
 		    offcore.energy_estimate_nj);
@@ -473,17 +470,17 @@ machine_switch_perfcontrol_state_update(perfcontrol_event event,
 	struct perfcontrol_thread_data data;
 	machine_switch_populate_perfcontrol_thread_data(&data, thread, 0);
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	uint64_t counters[MT_CORE_NFIXED];
 	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_state_update(event, cpu_id, timestamp, flags,
 	    &data, NULL);
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
 		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_STATE_UPDATE);
 	}
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if CONFIG_PERVASIVE_ENERGY
 	recount_add_energy(thread, get_threadtask(thread), data.energy_estimate_nj);
@@ -526,16 +523,16 @@ machine_thread_going_on_core(thread_t   new_thread,
 	on_core.start_time = timestamp;
 	on_core.scheduling_latency_at_same_basepri = same_pri_latency;
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	uint64_t counters[MT_CORE_NFIXED];
 	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_oncore(state, &on_core);
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
 		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_ON_CORE);
 	}
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 }
 
 void
@@ -557,16 +554,16 @@ machine_thread_going_off_core(thread_t old_thread, boolean_t thread_terminating,
 	off_core.thread_group_data = thread_group_get_machine_data(tg);
 #endif
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	uint64_t counters[MT_CORE_NFIXED];
 	bool ctrs_enabled = perfcontrol_callout_counters_begin(counters);
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 	sched_perfcontrol_offcore(state, &off_core, thread_terminating);
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	if (ctrs_enabled) {
 		perfcontrol_callout_counters_end(counters, PERFCONTROL_CALLOUT_OFF_CORE);
 	}
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 }
 
 #if CONFIG_THREAD_GROUPS
@@ -811,9 +808,9 @@ ml_spin_debug_clear_self(void)
 /*
  * Get a character representing the provided thread's kind of CPU.
  */
-#if !MONOTONIC
+#if !CONFIG_CPU_COUNTERS
 __unused
-#endif // !MONOTONIC
+#endif // !CONFIG_CPU_COUNTERS
 static char
 __ml_interrupts_disabled_cpu_kind(thread_t thread)
 {
@@ -854,11 +851,11 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t start, uint64_
 
 	uint64_t current_cycles = 0, current_instrs = 0;
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 	if (sched_hygiene_debug_pmc) {
 		mt_cur_cpu_cycles_instrs_speculative(&current_cycles, &current_instrs);
 	}
-#endif // MONOTONIC
+#endif // CONFIG_CPU_COUNTERS
 
 	const uint64_t cycles_elapsed = current_cycles - thread->machine.intmask_cycles;
 	const uint64_t instrs_elapsed = current_instrs - thread->machine.intmask_instr;
@@ -866,7 +863,7 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t start, uint64_
 	if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
 		const uint64_t timeout_ns = ((timeout * debug_cpu_performance_degradation_factor) * timebase.numer) / timebase.denom;
 		char extra_info_string[EXTRA_INFO_STRING_SIZE] = { '\0' };
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 		if (sched_hygiene_debug_pmc) {
 			const uint64_t time_elapsed_us = time_elapsed_ns / 1000;
 			const uint64_t average_freq_mhz = cycles_elapsed / time_elapsed_us;
@@ -885,7 +882,7 @@ __ml_trigger_interrupts_disabled_handle(thread_t thread, uint64_t start, uint64_
 			    average_cpi_fractional,
 			    core_kind);
 		}
-#endif // MONOTONIC
+#endif // CONFIG_CPU_COUNTERS
 
 		if (is_int_handler) {
 			panic("Processing of an interrupt (type = %u, handler address = %p, vector = %p) "
@@ -941,9 +938,6 @@ __ml_handle_interrupts_disabled_duration(thread_t thread, uint64_t timeout, bool
 
 		if (is_int_handler) {
 			uint64_t const duration = now - start;
-#if SCHED_HYGIENE_DEBUG
-			ml_adjust_preemption_disable_time(thread, duration);
-#endif /* SCHED_HYGIENE_DEBUG */
 			/*
 			 * No need for an atomic add, the only thread modifying
 			 * this is ourselves. Other threads querying will just see
@@ -978,20 +972,6 @@ ml_handle_interrupt_handler_duration(thread_t thread)
 {
 	__ml_handle_interrupts_disabled_duration(thread, os_atomic_load(&interrupt_masked_timeout, relaxed), INT_MASK_FROM_HANDLER);
 }
-
-#if SCHED_HYGIENE_DEBUG
-void
-ml_adjust_preemption_disable_time(thread_t thread, int64_t duration)
-{
-	/* We don't want to count interrupt handler duration in preemption disable time. */
-	if (thread->machine.preemption_disable_mt != 0) {
-		/* We don't care *when* preemption was disabled, just for how
-		 * long.  So to exclude interrupt handling intervals, we
-		 * adjust the start time forward. */
-		thread->machine.preemption_disable_adjust += duration;
-	}
-}
-#endif /* SCHED_HYGIENE_DEBUG */
 
 void
 ml_irq_debug_start(uintptr_t handler, uintptr_t vector)

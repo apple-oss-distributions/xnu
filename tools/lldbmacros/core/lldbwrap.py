@@ -1,8 +1,3 @@
-from __future__ import absolute_import
-
-from builtins import bytes
-from builtins import range
-
 import functools
 import inspect
 import numbers
@@ -10,9 +5,6 @@ import struct
 import sys
 
 import lldb
-import six
-
-from .compat import valueint as int
 
 __all__ = []
 
@@ -213,8 +205,7 @@ class LLDBWrapMetaclass(type):
         return type.__new__(cls, name, bases, attr)
 
 
-@six.add_metaclass(LLDBWrapMetaclass)
-class SBProcess(lldb.SBProcess):
+class SBProcess(lldb.SBProcess, metaclass=LLDBWrapMetaclass):
 
     #
     # Manually written checked wrappers
@@ -266,8 +257,7 @@ class SBProcess(lldb.SBProcess):
             self, addr)
 
 
-@six.add_metaclass(LLDBWrapMetaclass)
-class SBTarget(lldb.SBTarget):
+class SBTarget(lldb.SBTarget, metaclass=LLDBWrapMetaclass):
 
     #
     # Manually written checked wrappers
@@ -527,8 +517,7 @@ class SBTarget(lldb.SBTarget):
         lldbwrap_raise(ValueError, self.CreateValueFromAddress, None, name)
 
 
-@six.add_metaclass(LLDBWrapMetaclass)
-class SBType(lldb.SBType):
+class SBType(lldb.SBType, metaclass=LLDBWrapMetaclass):
 
     #
     # Extensions
@@ -619,8 +608,7 @@ class SBType(lldb.SBType):
         return self.xContainerOfTransform(path_or_name)(value)
 
 
-@six.add_metaclass(LLDBWrapMetaclass)
-class SBValue(lldb.SBValue):
+class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
 
     if QUIRK_100103405:
         @classmethod
@@ -958,9 +946,6 @@ class SBValue(lldb.SBValue):
                         res = int(str_value[str_value.rfind(' '):], 0)
                 except:
                     pass
-
-        if six.PY2 and (flags & (lldb.eTypeIsFloat | lldb.eTypeIsComplex)) == 0:
-            res = int(res)
 
         if res or err.Success():
             return res

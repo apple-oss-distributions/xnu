@@ -489,14 +489,19 @@ fdrelse(struct proc * p, int fd)
  *		has not been subsequently changed out from under it.
  */
 static int
-finishdup(proc_t p, struct filedesc *fdp, int old, int new,
-    fileproc_flags_t fp_flags, int32_t *retval)
+finishdup(
+	proc_t                  p,
+	kauth_cred_t            p_cred,
+	int                     old,
+	int                     new,
+	fileproc_flags_t        fp_flags,
+	int32_t                *retval)
 {
+	struct filedesc *fdp = &p->p_fd;
 	struct fileproc *nfp;
 	struct fileproc *ofp;
 #if CONFIG_MACF
 	int error;
-	kauth_cred_t cred;
 #endif
 
 #if DIAGNOSTIC
@@ -509,14 +514,14 @@ finishdup(proc_t p, struct filedesc *fdp, int old, int new,
 	}
 
 #if CONFIG_MACF
-	cred = kauth_cred_proc_ref(p);
-	error = mac_file_check_dup(cred, ofp->fp_glob, new);
-	kauth_cred_unref(&cred);
+	error = mac_file_check_dup(p_cred, ofp->fp_glob, new);
 
 	if (error) {
 		fdrelse(p, new);
 		return error;
 	}
+#else
+	(void)p_cred;
 #endif
 
 	fg_ref(p, ofp->fp_glob);
@@ -720,7 +725,7 @@ fdt_destroy(proc_t p)
 }
 
 void
-fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec)
+fdt_exec(proc_t p, kauth_cred_t p_cred, short posix_spawn_flags, thread_t thread, bool in_exec)
 {
 	struct filedesc *fdp = &p->p_fd;
 	thread_t self = current_thread();
@@ -780,7 +785,7 @@ fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec)
 			 */
 			inherit_file = false;
 #if CONFIG_MACF
-		} else if (mac_file_check_inherit(proc_ucred_unsafe(p), fp->fp_glob)) {
+		} else if (mac_file_check_inherit(p_cred, fp->fp_glob)) {
 			inherit_file = false;
 #endif
 		}
@@ -788,7 +793,7 @@ fdt_exec(proc_t p, short posix_spawn_flags, thread_t thread, bool in_exec)
 		*flagp = 0; /* clear UF_INHERIT */
 
 		if (!inherit_file) {
-			fp_close_and_unlock(p, i, fp, 0);
+			fp_close_and_unlock(p, p_cred, i, fp, 0);
 			proc_fdlock(p);
 		} else if (in_exec) {
 			/* Transfer F_POSIX style lock to new proc */
@@ -831,6 +836,9 @@ fdt_fork(struct filedesc *newfdp, proc_t p, vnode_t uth_cdir, bool in_exec)
 #if CONFIG_PROC_RESOURCE_LIMITS
 	newfdp->fd_nfiles_soft_limit = fdp->fd_nfiles_soft_limit;
 	newfdp->fd_nfiles_hard_limit = fdp->fd_nfiles_hard_limit;
+
+	newfdp->kqwl_dyn_soft_limit = fdp->kqwl_dyn_soft_limit;
+	newfdp->kqwl_dyn_hard_limit = fdp->kqwl_dyn_hard_limit;
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
 	/*
@@ -983,6 +991,7 @@ fdt_invalidate(proc_t p)
 {
 	struct filedesc *fdp = &p->p_fd;
 	struct fileproc *fp, **ofiles;
+	kauth_cred_t p_cred;
 	char *ofileflags;
 	struct kqworkq *kqwq = NULL;
 	vnode_t vn1 = NULL, vn2 = NULL;
@@ -1006,6 +1015,9 @@ fdt_invalidate(proc_t p)
 
 	proc_fdlock(p);
 
+	/* proc_ucred_unsafe() is ok: process is terminating */
+	p_cred = proc_ucred_unsafe(p);
+
 	/* close file descriptors */
 	if (fdp->fd_nfiles > 0 && fdp->fd_ofiles) {
 		for (int i = fdp->fd_afterlast; i-- > 0;) {
@@ -1013,7 +1025,8 @@ fdt_invalidate(proc_t p)
 				if (fdp->fd_ofileflags[i] & UF_RESERVED) {
 					panic("fdfree: found fp with UF_RESERVED");
 				}
-				fp_close_and_unlock(p, i, fp, 0);
+				/* proc_ucred_unsafe() is ok: process is terminating */
+				fp_close_and_unlock(p, p_cred, i, fp, 0);
 				proc_fdlock(p);
 			}
 		}
@@ -1113,11 +1126,12 @@ fd_check_limit_exceeded(struct filedesc *fdp)
 #if DIAGNOSTIC
 	proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
 #endif
-	if (!fd_above_soft_limit_notify(fdp) && fdp->fd_nfiles_soft_limit &&
+
+	if (!fd_above_soft_limit_notified(fdp) && fdp->fd_nfiles_soft_limit &&
 	    (fdp->fd_nfiles_open > fdp->fd_nfiles_soft_limit)) {
 		fd_above_soft_limit_send_notification(fdp);
 		act_set_astproc_resource(current_thread());
-	} else if (!fd_above_hard_limit_notify(fdp) && fdp->fd_nfiles_hard_limit &&
+	} else if (!fd_above_hard_limit_notified(fdp) && fdp->fd_nfiles_hard_limit &&
 	    (fdp->fd_nfiles_open > fdp->fd_nfiles_hard_limit)) {
 		fd_above_hard_limit_send_notification(fdp);
 		act_set_astproc_resource(current_thread());
@@ -1286,15 +1300,18 @@ fileproc_get_vflags(struct fileproc *fp)
  *		neither, and use the vfs_context_current() routine internally.
  */
 int
-falloc_withinit(proc_t p, struct fileproc **resultfp, int *resultfd,
-    vfs_context_t ctx, fp_initfn_t fp_init, void *initarg)
+falloc_withinit(
+	proc_t                  p,
+	struct ucred           *p_cred,
+	struct vfs_context     *ctx,
+	struct fileproc       **resultfp,
+	int                    *resultfd,
+	fp_initfn_t             fp_init,
+	void                   *initarg)
 {
 	struct fileproc *fp;
 	struct fileglob *fg;
 	int error, nfd;
-#if CONFIG_MACF
-	kauth_cred_t cred;
-#endif
 
 	/* Make sure we don't go beyond the system-wide limit */
 	if (nfiles >= maxfiles) {
@@ -1311,13 +1328,13 @@ falloc_withinit(proc_t p, struct fileproc **resultfp, int *resultfd,
 	}
 
 #if CONFIG_MACF
-	cred = kauth_cred_proc_ref(p);
-	error = mac_file_check_create(cred);
-	kauth_cred_unref(&cred);
+	error = mac_file_check_create(p_cred);
 	if (error) {
 		proc_fdunlock(p);
 		return error;
 	}
+#else
+	(void)p_cred;
 #endif
 
 	/*
@@ -1362,13 +1379,6 @@ falloc_withinit(proc_t p, struct fileproc **resultfp, int *resultfd,
 
 	return 0;
 }
-
-int
-falloc(proc_t p, struct fileproc **resultfp, int *resultfd, vfs_context_t ctx)
-{
-	return falloc_withinit(p, resultfp, resultfd, ctx, NULL, NULL);
-}
-
 
 /*
  * fp_free
@@ -1666,13 +1676,10 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 
 int
-fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
+fp_close_and_unlock(proc_t p, kauth_cred_t cred, int fd, struct fileproc *fp, int flags)
 {
 	struct filedesc *fdp = &p->p_fd;
 	struct fileglob *fg = fp->fp_glob;
-#if CONFIG_MACF
-	kauth_cred_t cred;
-#endif
 
 #if DIAGNOSTIC
 	proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
@@ -1720,9 +1727,9 @@ fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
 			 * Ignore result of kauth_authorize_fileop call.
 			 */
 #if CONFIG_MACF
-			cred = kauth_cred_proc_ref(p);
 			mac_file_notify_close(cred, fp->fp_glob);
-			kauth_cred_unref(&cred);
+#else
+			(void)cred;
 #endif
 
 			if (kauth_authorize_fileop_has_listeners() &&
@@ -2361,10 +2368,10 @@ check_file_seek_range(struct flock *fl, off_t cur_file_offset)
 int
 sys_dup(proc_t p, struct dup_args *uap, int32_t *retval)
 {
-	struct filedesc *fdp = &p->p_fd;
 	int old = uap->fd;
 	int new, error;
 	struct fileproc *fp;
+	kauth_cred_t p_cred;
 
 	proc_fdlock(p);
 	if ((error = fp_lookup(p, old, &fp, 1))) {
@@ -2382,7 +2389,8 @@ sys_dup(proc_t p, struct dup_args *uap, int32_t *retval)
 		proc_fdunlock(p);
 		return error;
 	}
-	error = finishdup(p, fdp, old, new, 0, retval);
+	p_cred = current_cached_proc_cred(p);
+	error = finishdup(p, p_cred, old, new, 0, retval);
 
 	if (ENTR_SHOULDTRACE && FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
 		KERNEL_ENERGYTRACE(kEnTrActKernSocket, DBG_FUNC_START,
@@ -2414,11 +2422,13 @@ sys_dup(proc_t p, struct dup_args *uap, int32_t *retval)
 int
 sys_dup2(proc_t p, struct dup2_args *uap, int32_t *retval)
 {
-	return dup2(p, uap->from, uap->to, retval);
+	kauth_cred_t p_cred = current_cached_proc_cred(p);
+
+	return dup2(p, p_cred, uap->from, uap->to, retval);
 }
 
 int
-dup2(proc_t p, int old, int new, int *retval)
+dup2(proc_t p, kauth_cred_t p_cred, int old, int new, int *retval)
 {
 	struct filedesc *fdp = &p->p_fd;
 	struct fileproc *fp, *nfp;
@@ -2477,7 +2487,7 @@ closeit:
 				proc_fdunlock(p);
 				return error;
 			}
-			(void)fp_close_and_unlock(p, new, nfp, FD_DUP2RESV);
+			(void)fp_close_and_unlock(p, p_cred, new, nfp, FD_DUP2RESV);
 			proc_fdlock(p);
 			assert(fdp->fd_ofileflags[new] & UF_RESERVED);
 		} else {
@@ -2497,7 +2507,7 @@ closeit:
 		panic("dup2: unreserved fileflags with new %d", new);
 	}
 #endif
-	error = finishdup(p, fdp, old, new, 0, retval);
+	error = finishdup(p, p_cred, old, new, 0, retval);
 	fp_drop(p, old, fp, 1);
 	proc_fdunlock(p);
 
@@ -2735,7 +2745,6 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 {
 	int fd = uap->fd;
 	int cmd = uap->cmd;
-	struct filedesc *fdp = &p->p_fd;
 	struct fileproc *fp;
 	struct vnode *vp = NULLVP;      /* for AUDIT_ARG() at end */
 	unsigned int oflags, nflags;
@@ -2750,6 +2759,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 	user_addr_t argp;
 	boolean_t is64bit;
 	int has_entitlement = 0;
+	kauth_cred_t p_cred;
 
 	AUDIT_ARG(fd, uap->fd);
 	AUDIT_ARG(cmd, uap->cmd);
@@ -2801,7 +2811,8 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		if ((error = fdalloc(p, newmin, &i))) {
 			goto out;
 		}
-		error = finishdup(p, fdp, fd, i,
+		p_cred = current_cached_proc_cred(p);
+		error = finishdup(p, p_cred, fd, i,
 		    cmd == F_DUPFD_CLOEXEC ? FP_CLOEXEC : 0, retval);
 		goto out;
 
@@ -5304,18 +5315,22 @@ out:
 int
 sys_close(proc_t p, struct close_args *uap, __unused int32_t *retval)
 {
+	kauth_cred_t p_cred = current_cached_proc_cred(p);
+
 	__pthread_testcancel(1);
-	return close_nocancel(p, uap->fd);
+	return close_nocancel(p, p_cred, uap->fd);
 }
 
 int
 sys_close_nocancel(proc_t p, struct close_nocancel_args *uap, __unused int32_t *retval)
 {
-	return close_nocancel(p, uap->fd);
+	kauth_cred_t p_cred = current_cached_proc_cred(p);
+
+	return close_nocancel(p, p_cred, uap->fd);
 }
 
 int
-close_nocancel(proc_t p, int fd)
+close_nocancel(proc_t p, kauth_cred_t p_cred, int fd)
 {
 	struct fileproc *fp;
 
@@ -5333,7 +5348,7 @@ close_nocancel(proc_t p, int fd)
 		return error;
 	}
 
-	return fp_close_and_unlock(p, fd, fp, 0);
+	return fp_close_and_unlock(p, p_cred, fd, fp, 0);
 }
 
 

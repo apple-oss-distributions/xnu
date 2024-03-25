@@ -1,4 +1,4 @@
-/* Copyright (c) (2014-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2014-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -34,7 +34,6 @@
  */
 
 #include "cc_internal.h"
-#include <stdbool.h>
 
 #include <corecrypto/cc_priv.h>
 #include <corecrypto/ccdrbg.h>
@@ -53,14 +52,14 @@
 // - 10.1.2 HMAC_DRBG
 // - B.2 HMAC_DRBGExample
 
-#define NISTHMAC_MAX_OUTPUT_SIZE MAX_DIGEST_OUTPUT_SIZE
+#define DRBG_HMAC_MAX_OUTPUT_SIZE MAX_DIGEST_OUTPUT_SIZE
 
 #define MIN_REQ_ENTROPY(di) ((di)->output_size / 2)
 
 struct ccdrbg_nisthmac_state {
 	const struct ccdrbg_nisthmac_custom *custom;
-	uint8_t key[NISTHMAC_MAX_OUTPUT_SIZE];
-	uint8_t V[NISTHMAC_MAX_OUTPUT_SIZE];
+	uint8_t key[DRBG_HMAC_MAX_OUTPUT_SIZE];
+	uint8_t V[DRBG_HMAC_MAX_OUTPUT_SIZE];
 	uint64_t reseed_counter;
 };
 
@@ -83,7 +82,10 @@ dump_state(const char *label, struct ccdrbg_nisthmac_state *drbg_ctx)
 static void
 done(struct ccdrbg_state *ctx)
 {
-	cc_clear(sizeof(struct ccdrbg_nisthmac_state), ctx);
+	struct ccdrbg_nisthmac_state *drbg_ctx = (struct ccdrbg_nisthmac_state *)ctx;
+	cc_clear(sizeof(drbg_ctx->key), drbg_ctx->key);
+	cc_clear(sizeof(drbg_ctx->V), drbg_ctx->V);
+	drbg_ctx->reseed_counter = UINT64_MAX;
 }
 
 // See NIST SP 800-90A, Rev. 1, 10.1.2.2
@@ -153,7 +155,7 @@ init(const struct ccdrbg_info *info,
 	size_t outlen = digest_info->output_size;
 
 	int status = CCDRBG_STATUS_PARAM_ERROR;
-	cc_require(outlen <= NISTHMAC_MAX_OUTPUT_SIZE, out);
+	cc_require(outlen <= DRBG_HMAC_MAX_OUTPUT_SIZE, out);
 	cc_require(entropy_isvalid(entropy_nbytes, digest_info), out);
 	cc_require(ps_nbytes <= CCDRBG_MAX_PSINPUT_SIZE, out);
 
@@ -197,6 +199,15 @@ out:
 	return status;
 }
 
+static bool
+must_reseed(const struct ccdrbg_state *ctx)
+{
+	const struct ccdrbg_nisthmac_state *drbg_ctx = (const struct ccdrbg_nisthmac_state *)ctx;
+
+	return drbg_ctx->custom->strictFIPS &&
+	       (drbg_ctx->reseed_counter > CCDRBG_RESEED_INTERVAL);
+}
+
 // See NIST SP 800-90A, Rev. 1, 9.3 and 10.1.2.5
 static int
 generate(struct ccdrbg_state *ctx, size_t out_nbytes, void *out, size_t add_nbytes, const void *add)
@@ -210,7 +221,7 @@ generate(struct ccdrbg_state *ctx, size_t out_nbytes, void *out, size_t add_nbyt
 	cc_require(add_isvalid(add_nbytes), out);
 
 	status = CCDRBG_STATUS_NEED_RESEED;
-	cc_require(drbg_ctx->reseed_counter <= CCDRBG_RESEED_INTERVAL || !drbg_ctx->custom->strictFIPS, out);
+	cc_require(!must_reseed(ctx), out);
 
 	status = CCDRBG_STATUS_OK;
 
@@ -219,7 +230,7 @@ generate(struct ccdrbg_state *ctx, size_t out_nbytes, void *out, size_t add_nbyt
 	}
 
 	uint8_t *out_bytes = out;
-	uint8_t Vprev[NISTHMAC_MAX_OUTPUT_SIZE];
+	uint8_t Vprev[DRBG_HMAC_MAX_OUTPUT_SIZE];
 
 	while (out_nbytes > 0) {
 		cc_memcpy(Vprev, drbg_ctx->V, outlen);
@@ -260,4 +271,5 @@ ccdrbg_factory_nisthmac(struct ccdrbg_info *info, const struct ccdrbg_nisthmac_c
 	info->reseed = reseed;
 	info->done = done;
 	info->custom = custom;
+	info->must_reseed = must_reseed;
 };

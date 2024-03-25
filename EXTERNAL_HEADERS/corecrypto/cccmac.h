@@ -1,4 +1,4 @@
-/* Copyright (c) (2013-2017,2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2013-2017,2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -9,8 +9,8 @@
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
-#ifndef _CORECRYPTO_cccmac_H_
-#define _CORECRYPTO_cccmac_H_
+#ifndef _CORECRYPTO_CCCMAC_H_
+#define _CORECRYPTO_CCCMAC_H_
 
 #include <corecrypto/cc.h>
 #include <corecrypto/ccmode.h>
@@ -33,7 +33,6 @@ struct cccmac_ctx {
 typedef struct cccmac_ctx* cccmac_ctx_t;
 
 #define cccmac_hdr_size sizeof(struct cccmac_ctx)
-
 
 #define cccmac_iv_size(_mode_)  ((_mode_)->block_size)
 #define cccmac_cbc_size(_mode_) ((_mode_)->size)
@@ -180,4 +179,4 @@ int cccmac_final_generate(cccmac_ctx_t ctx,
 int cccmac_final_verify(cccmac_ctx_t ctx,
                         size_t expected_mac_nbytes, const void *cc_sized_by(expected_mac_nbytes) expected_mac);
 
-#endif /* _CORECRYPTO_cccmac_H_ */
+#endif // _CORECRYPTO_CCCMAC_H_

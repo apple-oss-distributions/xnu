@@ -64,8 +64,11 @@
 #include <sys/types.h>
 #include <sys/codesign.h>
 #include <libkern/section_keywords.h>
+#include <IOKit/IOBSD.h>
 
 #include <os/refcnt.h>
+
+#include <CodeSignature/Entitlements.h>
 
 #if SKYWALK
 #include <skywalk/os_skywalk_private.h>
@@ -431,7 +434,7 @@ struct necp_client_flow {
 	} u;
 	uint32_t interface_index;
 	u_short  delegated_interface_index;
-	uint16_t interface_flags;
+	uint32_t interface_flags;
 	uint32_t necp_flow_flags;
 	struct necp_client_flow_protoctl_event protoctl_event;
 	union necp_sockaddr_union local_addr;
@@ -496,6 +499,7 @@ struct necp_client {
 	u_int8_t result[NECP_BASE_CLIENT_RESULT_SIZE];
 
 	necp_policy_id policy_id;
+	necp_policy_id skip_policy_id;
 
 	u_int8_t ip_protocol;
 	int proc_pid;
@@ -1090,12 +1094,12 @@ necpop_kqfilter(struct fileproc *fp, struct knote *kn,
 }
 
 #define INTERFACE_FLAGS_SHIFT   32
-#define INTERFACE_FLAGS_MASK    0xffff
+#define INTERFACE_FLAGS_MASK    0xffffffff
 #define INTERFACE_INDEX_SHIFT   0
 #define INTERFACE_INDEX_MASK    0xffffffff
 
 static uint64_t
-combine_interface_details(uint32_t interface_index, uint16_t interface_flags)
+combine_interface_details(uint32_t interface_index, uint32_t interface_flags)
 {
 	return ((uint64_t)interface_flags & INTERFACE_FLAGS_MASK) << INTERFACE_FLAGS_SHIFT |
 	       ((uint64_t)interface_index & INTERFACE_INDEX_MASK) << INTERFACE_INDEX_SHIFT;
@@ -1104,7 +1108,7 @@ combine_interface_details(uint32_t interface_index, uint16_t interface_flags)
 #if SKYWALK
 
 static void
-split_interface_details(uint64_t combined_details, uint32_t *interface_index, uint16_t *interface_flags)
+split_interface_details(uint64_t combined_details, uint32_t *interface_index, uint32_t *interface_flags)
 {
 	*interface_index = (combined_details >> INTERFACE_INDEX_SHIFT) & INTERFACE_INDEX_MASK;
 	*interface_flags = (combined_details >> INTERFACE_FLAGS_SHIFT) & INTERFACE_FLAGS_MASK;
@@ -1903,7 +1907,7 @@ static void
 necp_client_add_nexus_flow(struct necp_client_flow_registration *flow_registration,
     uuid_t nexus_agent,
     uint32_t interface_index,
-    uint16_t interface_flags)
+    uint32_t interface_flags)
 {
 	struct necp_client_flow *new_flow = kalloc_type(struct necp_client_flow, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
@@ -1937,7 +1941,7 @@ necp_client_add_nexus_flow_if_needed(struct necp_client_flow_registration *flow_
 		}
 	}
 
-	uint16_t interface_flags = 0;
+	uint32_t interface_flags = 0;
 	ifnet_t ifp = NULL;
 	ifnet_head_lock_shared();
 	if (interface_index != IFSCOPE_NONE && interface_index <= (u_int32_t)if_index) {
@@ -4485,6 +4489,7 @@ necp_update_client_result(proc_t proc,
 
 	// Save the last policy id on the client
 	client->policy_id = result.policy_id;
+	client->skip_policy_id = result.skip_policy_id;
 	uuid_copy(client->override_euuid, override_euuid);
 
 	if ((parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_MULTIPATH) ||
@@ -4723,17 +4728,29 @@ necp_update_client_result(proc_t proc,
 			necp_client_add_interface_option_if_needed(client, direct_interface->if_index,
 			    ifnet_get_generation(direct_interface), NULL, false);
 		}
-		// Get other multipath interface options from ordered list
-		struct ifnet *multi_interface = NULL;
-		TAILQ_FOREACH(multi_interface, &ifnet_ordered_head, if_ordered_link) {
-			if (multi_interface != direct_interface &&
-			    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
-				// Add nexus agents for multipath
-				necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
+		if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_INBOUND) {
+			// For inbound multipath, add from the global list (like a listener)
+			struct ifnet *multi_interface = NULL;
+			TAILQ_FOREACH(multi_interface, &ifnet_head, if_link) {
+				if ((multi_interface->if_flags & (IFF_UP | IFF_RUNNING)) &&
+				    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
+					// Add nexus agents for inbound multipath
+					necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
+				}
+			}
+		} else {
+			// Get other multipath interface options from ordered list
+			struct ifnet *multi_interface = NULL;
+			TAILQ_FOREACH(multi_interface, &ifnet_ordered_head, if_ordered_link) {
+				if (multi_interface != direct_interface &&
+				    necp_ifnet_matches_parameters(multi_interface, parsed_parameters, 0, NULL, true, false)) {
+					// Add nexus agents for multipath
+					necp_client_add_agent_interface_options(client, parsed_parameters, multi_interface);
 
-				// Add multipath interface flows for kernel MPTCP
-				necp_client_add_interface_option_if_needed(client, multi_interface->if_index,
-				    ifnet_get_generation(multi_interface), NULL, false);
+					// Add multipath interface flows for kernel MPTCP
+					necp_client_add_interface_option_if_needed(client, multi_interface->if_index,
+					    ifnet_get_generation(multi_interface), NULL, false);
+				}
 			}
 		}
 	} else if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_LISTENER) {
@@ -6183,6 +6200,7 @@ necp_find_netstat_data(struct necp_client *client,
     u_int32_t *traffic_class,
     u_int8_t *fallback_mode)
 {
+	bool have_set_euuid = false;
 	size_t offset = 0;
 	u_int8_t *parameters;
 	u_int32_t parameters_size;
@@ -6245,6 +6263,7 @@ necp_find_netstat_data(struct necp_client *client,
 						memcpy(uid, &application_id->uid, sizeof(uid_t));
 						uuid_copy(euuid, application_id->effective_uuid);
 						memcpy(persona_id, &application_id->persona_id, sizeof(uid_t));
+						have_set_euuid = true;
 					}
 					break;
 				}
@@ -6255,6 +6274,18 @@ necp_find_netstat_data(struct necp_client *client,
 			}
 		}
 		offset += sizeof(struct necp_tlv_header) + length;
+	}
+
+	if (!have_set_euuid) {
+		proc_t proc = proc_find(client->proc_pid);
+		if (proc != PROC_NULL) {
+			uuid_t responsible_uuid = { 0 };
+			proc_getresponsibleuuid(proc, responsible_uuid, sizeof(responsible_uuid));
+			proc_rele(proc);
+			if (!uuid_is_null(responsible_uuid)) {
+				uuid_copy(euuid, responsible_uuid);
+			}
+		}
 	}
 }
 
@@ -6305,7 +6336,7 @@ necp_find_netstat_initial_properties(struct necp_client *client)
 // It is a responsibility of NetworkStatistics to have previously zeroed any supplied memory.
 static bool
 necp_request_tcp_netstats(userland_stats_provider_context *ctx,
-    u_int16_t *ifflagsp,
+    u_int32_t *ifflagsp,
     nstat_progress_digest *digestp,
     nstat_counts *countsp,
     void *metadatap)
@@ -6320,11 +6351,11 @@ necp_request_tcp_netstats(userland_stats_provider_context *ctx,
 	struct necp_tcp_stats *tcpstats = (struct necp_tcp_stats *)ustats_kaddr;
 	ASSERT(tcpstats != NULL);
 
-	u_int16_t nstat_diagnostic_flags = 0;
+	u_int32_t nstat_diagnostic_flags = 0;
 
 	// Retrieve details from the last time the assigned flows were updated
 	u_int32_t route_ifindex = IFSCOPE_NONE;
-	u_int16_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+	u_int32_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 	u_int64_t combined_interface_details = 0;
 
 	combined_interface_details = os_atomic_load(&flow_registration->last_interface_details, relaxed);
@@ -6479,7 +6510,7 @@ necp_request_tcp_netstats(userland_stats_provider_context *ctx,
 // Called from NetworkStatistics when it wishes to collect latest information for a UDP flow.
 static bool
 necp_request_udp_netstats(userland_stats_provider_context *ctx,
-    u_int16_t *ifflagsp,
+    u_int32_t *ifflagsp,
     nstat_progress_digest *digestp,
     nstat_counts *countsp,
     void *metadatap)
@@ -6496,11 +6527,11 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 	struct necp_udp_stats *udpstats = (struct necp_udp_stats *)ustats_kaddr;
 	ASSERT(udpstats != NULL);
 
-	u_int16_t nstat_diagnostic_flags = 0;
+	u_int32_t nstat_diagnostic_flags = 0;
 
 	// Retrieve details from the last time the assigned flows were updated
 	u_int32_t route_ifindex = IFSCOPE_NONE;
-	u_int16_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+	u_int32_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 	u_int64_t combined_interface_details = 0;
 
 	combined_interface_details = os_atomic_load(&flow_registration->last_interface_details, relaxed);
@@ -6581,6 +6612,7 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 		// Metadata from the route
 		desc->ifindex = route_ifindex;
 		desc->ifnet_properties = route_ifflags | nstat_diagnostic_flags;
+		desc->ifnet_properties |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 
 		// Basic metadata is all that is required for UDP
 		desc->rcvbufsize = udpstats->necp_udp_basic.rcvbufsize;
@@ -6606,7 +6638,7 @@ necp_request_udp_netstats(userland_stats_provider_context *ctx,
 // it would be good to refactor this logic at some point.
 static bool
 necp_request_quic_netstats(userland_stats_provider_context *ctx,
-    u_int16_t *ifflagsp,
+    u_int32_t *ifflagsp,
     nstat_progress_digest *digestp,
     nstat_counts *countsp,
     void *metadatap)
@@ -6621,11 +6653,11 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 	struct necp_quic_stats *quicstats = (struct necp_quic_stats *)ustats_kaddr;
 	ASSERT(quicstats != NULL);
 
-	u_int16_t nstat_diagnostic_flags = 0;
+	u_int32_t nstat_diagnostic_flags = 0;
 
 	// Retrieve details from the last time the assigned flows were updated
 	u_int32_t route_ifindex = IFSCOPE_NONE;
-	u_int16_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+	u_int32_t route_ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
 	u_int64_t combined_interface_details = 0;
 
 	combined_interface_details = os_atomic_load(&flow_registration->last_interface_details, relaxed);
@@ -6730,6 +6762,7 @@ necp_request_quic_netstats(userland_stats_provider_context *ctx,
 		// Metadata from the route
 		desc->ifindex = route_ifindex;
 		desc->ifnet_properties = route_ifflags | nstat_diagnostic_flags;
+		desc->ifnet_properties |= (sf->sf_flags & SFLOWF_ONLINK) ? NSTAT_IFNET_IS_LOCAL : NSTAT_IFNET_IS_NON_LOCAL;
 
 		// Basic metadata from userland
 		desc->rcvbufsize = quicstats->necp_quic_basic.rcvbufsize;
@@ -6956,7 +6989,7 @@ necp_open(struct proc *p, struct necp_open_args *uap, int *retval)
 	}
 #endif /* MACF */
 
-	error = falloc(p, &fp, &fd, vfs_context_current());
+	error = falloc(p, &fp, &fd);
 	if (error != 0) {
 		goto done;
 	}
@@ -7240,7 +7273,7 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 				    parsed_parameters.ip_protocol);
 				break;
 			}
-			if (parsed_parameters.ip_protocol != parent_parameters.transport_protocol) {
+			if (parsed_parameters.ip_protocol != parent_parameters.ip_protocol) {
 				NECPLOG0(LOG_INFO, "necp_client_add, parent/child ip protocol mismatch");
 				break;
 			}
@@ -8174,6 +8207,7 @@ necp_client_copy_parameters_locked(struct necp_client *client,
 	parameters->is_interpose = (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_INTERPOSE) ? 1 : 0;
 	parameters->is_custom_ether = (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_CUSTOM_ETHER) ? 1 : 0;
 	parameters->policy_id = client->policy_id;
+	parameters->skip_policy_id = client->skip_policy_id;
 
 	// parse client result flag
 	u_int32_t client_result_flags = 0;
@@ -10402,6 +10436,142 @@ done:
 	return error;
 }
 
+static NECP_CLIENT_ACTION_FUNCTION int
+necp_client_get_signed_client_id(__unused struct necp_fd_data *fd_data, struct necp_client_action_args *uap, int *retval)
+{
+	int error = 0;
+	*retval = 0;
+	u_int32_t request_type = 0;
+	struct necp_client_signed_client_id_uuid client_id = { 0 };
+	const size_t buffer_size = uap->buffer_size;
+	u_int8_t tag[NECP_CLIENT_ACTION_SIGN_TAG_LENGTH] = {};
+	size_t tag_size = sizeof(tag);
+
+	// Only allow entitled processes to get the client ID.
+	proc_t proc = current_proc();
+	task_t __single task = proc_task(proc);
+	bool has_delegation_entitlement = task != NULL && IOTaskHasEntitlement(task, kCSWebBrowserNetworkEntitlement);
+	if (!has_delegation_entitlement) {
+		has_delegation_entitlement = (priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, 0) == 0);
+	}
+	if (!has_delegation_entitlement) {
+		NECPLOG0(LOG_ERR, "necp_client_get_signed_client_id client lacks the necessary entitlement");
+		error = EAUTH;
+		goto done;
+	}
+
+	if (uap->client_id == 0 || uap->client_id_len != sizeof(u_int32_t) ||
+	    buffer_size < sizeof(struct necp_client_signed_client_id_uuid) ||
+	    uap->buffer == 0) {
+		NECPLOG0(LOG_ERR, "necp_client_get_signed_client_id bad input");
+		error = EINVAL;
+		goto done;
+	}
+
+	error = copyin(uap->client_id, &request_type, sizeof(u_int32_t));
+	if (error) {
+		NECPLOG(LOG_ERR, "necp_client_get_signed_client_id copyin request_type error (%d)", error);
+		goto done;
+	}
+
+	if (request_type != NECP_CLIENT_SIGNED_CLIENT_ID_TYPE_UUID) {
+		error = ENOENT;
+		NECPLOG(LOG_ERR, "necp_client_get_signed_client_id bad request_type (%d)", request_type);
+		goto done;
+	}
+
+	uuid_t application_uuid;
+	uuid_clear(application_uuid);
+	proc_getexecutableuuid(proc, application_uuid, sizeof(application_uuid));
+
+	error = necp_sign_application_id(application_uuid,
+	    NECP_CLIENT_SIGNED_CLIENT_ID_TYPE_UUID,
+	    tag, &tag_size);
+	if (tag_size != sizeof(tag)) {
+		NECPLOG(LOG_ERR, "necp_client_get_signed_client_id unexpected tag size %zu", tag_size);
+		error = EINVAL;
+		goto done;
+	}
+	uuid_copy(client_id.client_id, application_uuid);
+	client_id.signature_length = tag_size;
+	memcpy(client_id.signature_data, tag, tag_size);
+
+	error = copyout(&client_id, uap->buffer, sizeof(client_id));
+	if (error != 0) {
+		NECPLOG(LOG_ERR, "necp_client_get_signed_client_id copyout error (%d)", error);
+		goto done;
+	}
+
+done:
+	*retval = error;
+	return error;
+}
+
+static NECP_CLIENT_ACTION_FUNCTION int
+necp_client_set_signed_client_id(__unused struct necp_fd_data *fd_data, struct necp_client_action_args *uap, int *retval)
+{
+	int error = 0;
+	*retval = 0;
+	u_int32_t request_type = 0;
+	struct necp_client_signed_client_id_uuid client_id = { 0 };
+	const size_t buffer_size = uap->buffer_size;
+
+	// Only allow entitled processes to set the client ID.
+	proc_t proc = current_proc();
+	task_t __single task = proc_task(proc);
+	bool has_delegation_entitlement = task != NULL && IOTaskHasEntitlement(task, kCSWebBrowserNetworkEntitlement);
+	if (!has_delegation_entitlement) {
+		has_delegation_entitlement = (priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, 0) == 0);
+	}
+	if (!has_delegation_entitlement) {
+		NECPLOG0(LOG_ERR, "necp_client_set_signed_client_id client lacks the necessary entitlement");
+		error = EAUTH;
+		goto done;
+	}
+
+	if (uap->client_id == 0 || uap->client_id_len != sizeof(u_int32_t) ||
+	    buffer_size < sizeof(struct necp_client_signed_client_id_uuid) ||
+	    uap->buffer == 0) {
+		NECPLOG0(LOG_ERR, "necp_client_set_signed_client_id bad input");
+		error = EINVAL;
+		goto done;
+	}
+
+	error = copyin(uap->client_id, &request_type, sizeof(u_int32_t));
+	if (error) {
+		NECPLOG(LOG_ERR, "necp_client_set_signed_client_id copyin request_type error (%d)", error);
+		goto done;
+	}
+
+	if (request_type != NECP_CLIENT_SIGNED_CLIENT_ID_TYPE_UUID) {
+		error = ENOENT;
+		NECPLOG(LOG_ERR, "necp_client_set_signed_client_id bad request_type (%d)", request_type);
+		goto done;
+	}
+
+	error = copyin(uap->buffer, &client_id, sizeof(struct necp_client_signed_client_id_uuid));
+	if (error) {
+		NECPLOG(LOG_ERR, "necp_client_set_signed_client_id copyin request error (%d)", error);
+		goto done;
+	}
+
+	const bool validated = necp_validate_application_id(client_id.client_id,
+	    NECP_CLIENT_SIGNED_CLIENT_ID_TYPE_UUID,
+	    client_id.signature_data, sizeof(client_id.signature_data));
+	if (!validated) {
+		// Return EAUTH to indicate that the signature failed
+		error = EAUTH;
+		NECPLOG(LOG_ERR, "necp_client_set_signed_client_id signature validation failed (%d)", error);
+		goto done;
+	}
+
+	proc_setresponsibleuuid(proc, client_id.client_id, sizeof(client_id.client_id));
+
+done:
+	*retval = error;
+	return error;
+}
+
 int
 necp_client_action(struct proc *p, struct necp_client_action_args *uap, int *retval)
 {
@@ -10515,6 +10685,14 @@ necp_client_action(struct proc *p, struct necp_client_action_args *uap, int *ret
 	}
 	case NECP_CLIENT_ACTION_VALIDATE: {
 		return_value = necp_client_validate(fd_data, uap, retval);
+		break;
+	}
+	case NECP_CLIENT_ACTION_GET_SIGNED_CLIENT_ID: {
+		return_value = necp_client_get_signed_client_id(fd_data, uap, retval);
+		break;
+	}
+	case NECP_CLIENT_ACTION_SET_SIGNED_CLIENT_ID: {
+		return_value = necp_client_set_signed_client_id(fd_data, uap, retval);
 		break;
 	}
 	default: {

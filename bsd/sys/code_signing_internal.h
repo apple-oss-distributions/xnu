@@ -26,6 +26,10 @@
 #include <sys/cdefs.h>
 __BEGIN_DECLS
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnullability-completeness"
+#pragma GCC diagnostic ignored "-Wnullability-completeness-on-arrays"
+
 #ifdef XNU_KERNEL_PRIVATE
 
 #include <mach/boolean.h>
@@ -34,8 +38,14 @@ __BEGIN_DECLS
 #include <vm/pmap.h>
 #include <vm/pmap_cs.h>
 #include <img4/firmware.h>
+#include <libkern/image4/dlxk.h>
 
-#if   PMAP_CS_PPL_MONITOR
+#if CONFIG_SPTM
+/* TrustedExecutionMonitor */
+#define CODE_SIGNING_MONITOR 1
+#define CODE_SIGNING_MONITOR_PREFIX txm
+
+#elif PMAP_CS_PPL_MONITOR
 /* Page Protection Layer -- PMAP_CS */
 #define CODE_SIGNING_MONITOR 1
 #define CODE_SIGNING_MONITOR_PREFIX ppl
@@ -45,7 +55,7 @@ __BEGIN_DECLS
 #define CODE_SIGNING_MONITOR 0
 #define CODE_SIGNING_MONITOR_PREFIX xnu
 
-#endif /* */
+#endif /* CONFIG_SPTM */
 
 /**
  * This macro can be used by code which is abstracting out the concept of the code
@@ -101,10 +111,27 @@ errno_t CSM_PREFIX(image4_set_release_type)(
 errno_t CSM_PREFIX(image4_set_bnch_shadow)(
 	const img4_nonce_domain_index_t ndi);
 
+kern_return_t CSM_PREFIX(image4_transfer_region)(
+	image4_cs_trap_t selector,
+	vm_address_t region_addr,
+	vm_size_t region_size);
+
+kern_return_t CSM_PREFIX(image4_reclaim_region)(
+	image4_cs_trap_t selector,
+	vm_address_t region_addr,
+	vm_size_t region_size);
+
+errno_t CSM_PREFIX(image4_monitor_trap)(
+	image4_cs_trap_t selector,
+	const void *input_data,
+	size_t input_size);
+
 #if CODE_SIGNING_MONITOR
 /* Function prototypes needed only when we have a monitor environment */
 
 bool CSM_PREFIX(code_signing_enabled)(void);
+
+void CSM_PREFIX(enter_lockdown_mode)(void);
 
 vm_size_t CSM_PREFIX(managed_code_signature_size)(void);
 
@@ -201,6 +228,8 @@ kern_return_t CSM_PREFIX(accelerate_entitlements)(
 #endif /* CODE_SIGNING_MONITOR */
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+#pragma GCC diagnostic pop
 
 __END_DECLS
 #endif /* _SYS_CODE_SIGNING_INTERNAL_H_ */

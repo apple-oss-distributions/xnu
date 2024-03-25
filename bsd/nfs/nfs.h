@@ -212,6 +212,9 @@ extern int nfs_ticks;
 #define NFS_MATTR_LOCAL_MOUNT_PORT      30      /* Unix domain socket for MOUNT protocol */
 #define NFS_MATTR_SET_MOUNT_OWNER       31      /* Set owner of mount point */
 #define NFS_MATTR_READLINK_NOCACHE      32      /* Readlink nocache mode */
+#define NFS_MATTR_ATTRCACHE_ROOTDIR_MIN 33      /* minimum attribute cache time for root dir */
+#define NFS_MATTR_ATTRCACHE_ROOTDIR_MAX 34      /* maximum attribute cache time for root dir */
+#define NFS_MATTR_ACCESS_CACHE          35      /* Access cache size */
 
 /* NFS mount flags */
 #define NFS_MFLAG_SOFT                  0       /* soft mount (requests fail if unresponsive) */
@@ -233,6 +236,7 @@ extern int nfs_ticks;
 #define NFS_MFLAG_MNTUDP                16      /* MOUNT protocol should use UDP */
 #define NFS_MFLAG_MNTQUICK              17      /* use short timeouts while mounting */
 #define NFS_MFLAG_NOOPAQUE_AUTH         19      /* don't make the mount AUTH_OPAQUE. Used by V3 */
+#define NFS_MFLAG_SKIP_RENEW            20      /* don't send OP_RENEW when no files are opened. Used by V4 */
 
 /* Macros for packing and unpacking packed versions */
 #define PVER2MAJOR(M) ((uint32_t)(((M) >> 16) & 0xffff))

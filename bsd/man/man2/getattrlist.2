@@ -1582,6 +1582,12 @@ identifier information.
 .It VOL_CAP_FMT_SEALED
 If this bit is set, the volume is cryptographically sealed and any modifications
 may render the volume unusable.
+.It VOL_CAP_FMT_CLONE_MAPPING
+If this bit is set, the volume format supports full clone tracking.
+See ATTR_CMNEXT_CLONE_REFCNT and ATTR_CMNEXT_CLONEID for more details.
+Other features like extended directory statistics, for fast directory sizing,
+and attribution tags may be supported as well.
+See VOL_CAP_INT_ATTRIBUTION_TAG for more details related to tagging.
 .
 .
 .El
@@ -1728,6 +1734,11 @@ of a directory if one of its descendents is open.
 See
 .Xr rename 2
 for more details.
+.
+.It VOL_CAP_INT_ATTRIBUTION_TAG
+If this bit is set, the file system supports establishing an owner relationship between
+a file (excluding small files) and a process on the first read/write/truncate/clone operation.
+See ATTR_CMNEXT_ATTRIBUTION_TAG for more details.
 .
 .El
 .Pp

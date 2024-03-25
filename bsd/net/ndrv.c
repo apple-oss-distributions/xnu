@@ -192,7 +192,7 @@ ndrv_input(
 	if (m == NULL) {
 		return EJUSTRETURN;
 	}
-	bcopy(frame_header, m->m_data, ifnet_hdrlen(ifp));
+	bcopy(frame_header, m_mtod_current(m), ifnet_hdrlen(ifp));
 
 	/*
 	 * We need to take the domain mutex before the list RW lock

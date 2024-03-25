@@ -717,8 +717,7 @@ mptcp_output(struct mptses *mpte)
 		 *	2. send buffer is filled to 7/8th with data (so we actually
 		 *	   have data to make use of it);
 		 */
-		if ((mp_so->so_snd.sb_flags & (SB_AUTOSIZE | SB_TRIM)) == SB_AUTOSIZE &&
-		    tcp_cansbgrow(&mp_so->so_snd)) {
+		if ((mp_so->so_snd.sb_flags & (SB_AUTOSIZE | SB_TRIM)) == SB_AUTOSIZE) {
 			if ((mp_tp->mpt_sndwnd / 4 * 5) >= mp_so->so_snd.sb_hiwat &&
 			    mp_so->so_snd.sb_cc >= (mp_so->so_snd.sb_hiwat / 8 * 7)) {
 				if (sbreserve(&mp_so->so_snd,
@@ -1349,6 +1348,10 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 	 */
 	if (low_power) {
 		action = NECP_CLIENT_CBACTION_NONVIABLE;
+	}
+
+	if (action == NECP_CLIENT_CBACTION_INITIAL) {
+		mpte->mpte_flags |= MPTE_ITFINFO_INIT;
 	}
 
 	if (action == NECP_CLIENT_CBACTION_NONVIABLE) {

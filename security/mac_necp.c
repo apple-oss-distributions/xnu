@@ -35,7 +35,6 @@
 int
 mac_necp_check_open(proc_t proc, int flags)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -49,17 +48,13 @@ mac_necp_check_open(proc_t proc, int flags)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(proc);
-	MAC_CHECK(necp_check_open, cred, flags);
-	kauth_cred_unref(&cred);
-
+	MAC_CHECK(necp_check_open, current_cached_proc_cred(proc), flags);
 	return error;
 }
 
 int
 mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action)
 {
-	kauth_cred_t cred;
 	int error;
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -73,9 +68,6 @@ mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action)
 		return 0;
 	}
 
-	cred = kauth_cred_proc_ref(proc);
-	MAC_CHECK(necp_check_client_action, cred, fg, action);
-	kauth_cred_unref(&cred);
-
+	MAC_CHECK(necp_check_client_action, current_cached_proc_cred(proc), fg, action);
 	return error;
 }

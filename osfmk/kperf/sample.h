@@ -64,9 +64,9 @@ struct kperf_sample {
 
 	struct kperf_usample usample;
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 	struct kpcdata    kpcdata;
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #if DEVELOPMENT || DEBUG
 	uint64_t sample_time;

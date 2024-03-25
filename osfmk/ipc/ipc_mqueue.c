@@ -109,10 +109,13 @@ int ipc_mqueue_rcv;             /* address is event for message arrival */
 
 /* forward declarations */
 static void ipc_mqueue_receive_results(wait_result_t result);
+
+#if MACH_FLIPC
 static void ipc_mqueue_peek_on_thread_locked(
 	ipc_mqueue_t        port_mq,
 	mach_msg_option64_t option,
 	thread_t            thread);
+#endif /* MACH_FLIPC */
 
 /* Deliver message to message queue or waiting receiver */
 static void ipc_mqueue_post(
@@ -203,6 +206,7 @@ ipc_mqueue_add_locked(
 		 * go look for another thread that can.
 		 */
 		if (th->ith_state != MACH_RCV_IN_PROGRESS) {
+#if MACH_FLIPC
 			if (th->ith_state == MACH_PEEK_IN_PROGRESS) {
 				/*
 				 * wakeup the peeking thread, but
@@ -211,9 +215,9 @@ ipc_mqueue_add_locked(
 				 * if there are any actual receivers
 				 */
 				ipc_mqueue_peek_on_thread_locked(port_mqueue,
-				    th->ith_option,
-				    th);
+				    th->ith_option, th);
 			}
+#endif /* MACH_FLIPC */
 
 			waitq_resume_identified_thread(wqset, th,
 			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
@@ -673,6 +677,7 @@ ipc_mqueue_post(
 			break;
 		}
 
+#if MACH_FLIPC
 		/*
 		 * If a thread is attempting a "peek" into the message queue
 		 * (MACH_PEEK_IN_PROGRESS), then we enqueue the message and set the
@@ -690,6 +695,7 @@ ipc_mqueue_post(
 			    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 			break; /* Message was posted, so break out of loop */
 		}
+#endif /* MACH_FLIPC */
 
 		/*
 		 * If the receiver waited with a facility not directly related
@@ -819,8 +825,10 @@ ipc_mqueue_receive_results(wait_result_t saved_wait_result)
 			return;
 		case MACH_MSG_SUCCESS:
 			return;
+#if MACH_FLIPC
 		case MACH_PEEK_READY:
 			return;
+#endif /* MACH_FLIPC */
 
 		default:
 			panic("ipc_mqueue_receive_results: strange ith_state %d", self->ith_state);
@@ -925,6 +933,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 
 	if (waitq_type(waitq) == WQT_PORT_SET) {
 		ipc_pset_t pset = ips_object_to_pset(object);
+		wqs_prepost_flags_t wqs_flags = WQS_PREPOST_LOCK;
 		struct waitq *port_wq;
 
 		/*
@@ -933,8 +942,12 @@ ipc_mqueue_receive_on_thread_and_unlock(
 		 *
 		 * Might drop the pset lock temporarily.
 		 */
-		port_wq = waitq_set_first_prepost(&pset->ips_wqset, WQS_PREPOST_LOCK |
-		    ((option64 & MACH64_PEEK_MSG) ? WQS_PREPOST_PEEK: 0));
+#if MACH_FLIPC
+		if (option64 & MACH64_PEEK_MSG) {
+			wqs_flags |= WQS_PREPOST_PEEK;
+		}
+#endif /* MACH_FLIPC */
+		port_wq = waitq_set_first_prepost(&pset->ips_wqset, wqs_flags);
 
 		/* Returns with port locked */
 
@@ -961,10 +974,13 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	}
 
 	if (port) {
+#if MACH_FLIPC
 		if (option64 & MACH64_PEEK_MSG) {
 			ipc_mqueue_peek_on_thread_locked(&port->ip_messages,
 			    option64, thread);
-		} else {
+		} else
+#endif /* MACH_FLIPC */
+		{
 			ipc_mqueue_select_on_thread_locked(&port->ip_messages,
 			    option64, max_msg_size, max_aux_size, thread);
 		}
@@ -1001,11 +1017,12 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	thread->ith_max_asize = max_aux_size;
 	thread->ith_asize = 0;
 
+	thread->ith_state = MACH_RCV_IN_PROGRESS;
+#if MACH_FLIPC
 	if (option64 & MACH64_PEEK_MSG) {
 		thread->ith_state = MACH_PEEK_IN_PROGRESS;
-	} else {
-		thread->ith_state = MACH_RCV_IN_PROGRESS;
 	}
+#endif /* MACH_FLIPC */
 
 	if (option64 & MACH_RCV_TIMEOUT) {
 		clock_interval_to_deadline(rcv_timeout, 1000 * NSEC_PER_USEC, &deadline);
@@ -1081,7 +1098,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 	return wresult;
 }
 
-
+#if MACH_FLIPC
 /*
  *	Routine:	ipc_mqueue_peek_on_thread_locked
  *	Purpose:
@@ -1113,6 +1130,7 @@ ipc_mqueue_peek_on_thread_locked(
 	thread->ith_peekq = port_mq;
 	thread->ith_state = MACH_PEEK_READY;
 }
+#endif /* MACH_FLIPC */
 
 /*
  *	Routine:	ipc_mqueue_select_on_thread_locked
@@ -1163,6 +1181,7 @@ ipc_mqueue_select_on_thread_locked(
 	    max_msg_size, max_aux_size, thread)) {
 		mr = MACH_RCV_TOO_LARGE;
 		if (option64 & MACH_RCV_LARGE) {
+			ipc_kmsg_validate_partial_sig(kmsg);
 			thread->ith_receiver_name = port_mq->imq_receiver_name;
 			thread->ith_kmsg = IKM_NULL;
 			thread->ith_msize = msize;
@@ -1240,7 +1259,6 @@ ipc_mqueue_peek_locked(ipc_mqueue_t mq,
 		goto out;
 	}
 
-#if __has_feature(ptrauth_calls)
 	/*
 	 * Validate kmsg signature before doing anything with it. Since we are holding
 	 * the mqueue lock here, and only header + trailer will be peeked on, just
@@ -1248,8 +1266,7 @@ ipc_mqueue_peek_locked(ipc_mqueue_t mq,
 	 *
 	 * Partial kmsg signature is only supported on PAC devices.
 	 */
-	ipc_kmsg_validate_sig(kmsg, true);
-#endif
+	ipc_kmsg_validate_partial_sig(kmsg);
 
 	hdr = ikm_header(kmsg);
 	/* found one - return the requested info */

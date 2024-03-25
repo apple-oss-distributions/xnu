@@ -199,7 +199,8 @@ INSTALL_MI_LIST	= \
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
 EXCLAVES_DATAFILES = \
-	exclaves.h
+	exclaves.h \
+	exclaves_l4.h
 
 # installed into System.framework's PrivateHeaders/mach subdirectory
 PRIVATE_DATAFILES = $(sort \
@@ -246,7 +247,16 @@ PRIVATE_DATAFILES = $(sort \
 PRIVATE_MODULEMAPFILES = \
 	mach_private.modulemap
 
-INSTALL_MI_LCL_LIST = $(sort coalition.h mach_time_private.h mk_timer.h resource_monitors.h task_policy_private.h thread_policy_private.h ${EXCLAVES_DATAFILES} ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort \
+	coalition.h \
+	mach_time_private.h \
+	mk_timer.h \
+	resource_monitors.h \
+	task_policy_private.h \
+	thread_policy_private.h \
+	vm_reclaim.h \
+	${EXCLAVES_DATAFILES} \
+	${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

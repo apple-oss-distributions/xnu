@@ -143,6 +143,9 @@ __enum_decl(ipc_kotype_t, natural_t, {
 	IKOT_TASK_FATAL               = 51,
 #endif
 	IKOT_KCDATA                   = 52,
+#if CONFIG_EXCLAVES
+	IKOT_EXCLAVES_RESOURCE        = 53,
+#endif
 	/* magic catch-all; should be the last entry */
 	IKOT_UNKNOWN,
 });
@@ -353,6 +356,11 @@ extern ipc_port_t ipc_kobject_make_send(
  * - KERN_INVALID_RIGHT:     the port is dead
  */
 extern kern_return_t ipc_kobject_make_send_nsrequest(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          kotype) __result_use_check;
+
+extern kern_return_t ipc_kobject_make_send_nsrequest_locked(
 	ipc_port_t                  port,
 	ipc_kobject_t               kobject,
 	ipc_kobject_type_t          kotype) __result_use_check;

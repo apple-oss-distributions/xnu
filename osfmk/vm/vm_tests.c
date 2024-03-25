@@ -1040,8 +1040,10 @@ vm_test_per_mapping_internal_accounting(void)
 	assertf(balance == 0, "balance=0x%llx", balance);
 	device_object = vm_object_allocate(PAGE_SIZE);
 	assert(device_object);
-	device_object->private = TRUE;
-	device_object->phys_contiguous = TRUE;
+	vm_object_lock(device_object);
+	VM_OBJECT_SET_PRIVATE(device_object, TRUE);
+	VM_OBJECT_SET_PHYS_CONTIGUOUS(device_object, TRUE);
+	vm_object_unlock(device_object);
 	kr = vm_object_populate_with_private(device_object, 0,
 	    ppnum, PAGE_SIZE);
 	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
@@ -1328,9 +1330,13 @@ vm_tests(void)
 #if MACH_ASSERT
 	vm_test_map_copy_adjust_to_target();
 #endif /* MACH_ASSERT */
+#if CONFIG_SPTM
+/* SPTM TODO: 4K Mappings not supported */
+#else
 #if PMAP_CREATE_FORCE_4K_PAGES && MACH_ASSERT
 	vm_test_4k();
 #endif /* PMAP_CREATE_FORCE_4K_PAGES && MACH_ASSERT */
+#endif
 #if __arm64__ && !KASAN
 	vm_test_per_mapping_internal_accounting();
 #endif /* __arm64__ && !KASAN */

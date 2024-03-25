@@ -239,13 +239,6 @@ vnode_recycled:
 		cnp->cn_pnbuf = ndp->ni_pathbuf;
 		cnp->cn_pnlen = PATHBUFLEN;
 	}
-#if LP64_DEBUG
-	if ((UIO_SEG_IS_USER_SPACE(ndp->ni_segflg) == 0)
-	    && (ndp->ni_segflg != UIO_SYSSPACE)
-	    && (ndp->ni_segflg != UIO_SYSSPACE32)) {
-		panic("invalid ni_segflg");
-	}
-#endif /* LP64_DEBUG */
 
 retry_copy:
 	if (UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
@@ -355,14 +348,18 @@ retry_copy:
 	proc_dirs_lock_shared(p);
 	lck_rw_lock_shared(&rootvnode_rw_lock);
 
-	if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
-		ndp->ni_rootdir = p->p_fd.fd_rdir;
-	} else {
-		ndp->ni_rootdir = rootvnode;
+	if (!(ndp->ni_flag & NAMEI_ROOTDIR)) {
+		if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
+			ndp->ni_rootdir = p->p_fd.fd_rdir;
+		} else {
+			ndp->ni_rootdir = rootvnode;
+		}
 	}
 
 	if (!ndp->ni_rootdir) {
-		if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
+		if (ndp->ni_flag & NAMEI_ROOTDIR) {
+			panic("NAMEI_ROOTDIR is set but ni_rootdir is not\n");
+		} else if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
 			/* This should be a panic */
 			printf("p->p_fd.fd_rdir is not set\n");
 		} else {

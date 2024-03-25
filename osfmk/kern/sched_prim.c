@@ -90,9 +90,7 @@
 #include <kern/macro_help.h>
 #include <kern/machine.h>
 #include <kern/misc_protos.h>
-#if MONOTONIC
 #include <kern/monotonic.h>
-#endif /* MONOTONIC */
 #include <kern/processor.h>
 #include <kern/queue.h>
 #include <kern/recount.h>
@@ -1448,7 +1446,7 @@ thread_isoncpu(thread_t thread)
 
 	/* Waiting on a runqueue, not currently running */
 	/* TODO: This is invalid - it can get dequeued without thread lock, but not context switched. */
-	if (thread->runq != PROCESSOR_NULL) {
+	if (thread_get_runq(thread) != PROCESSOR_NULL) {
 		return FALSE;
 	}
 
@@ -1927,7 +1925,7 @@ thread_bind_internal(
 	/* <rdar://problem/15102234> */
 	assert(thread->sched_pri < BASEPRI_RTQUEUES);
 	/* A thread can't be bound if it's sitting on a (potentially incorrect) runqueue */
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_THREAD_BIND),
 	    thread_tid(thread), processor ? processor->cpu_id : ~0ul, 0, 0, 0);
@@ -2013,9 +2011,9 @@ sched_vm_group_maintenance(void)
 		assert(thread != THREAD_NULL);
 		thread_lock(thread);
 		if ((thread->state & (TH_RUN | TH_WAIT)) == TH_RUN) {
-			if (thread->runq != PROCESSOR_NULL && thread->last_made_runnable_time < longtime) {
+			if (thread_get_runq(thread) != PROCESSOR_NULL && thread->last_made_runnable_time < longtime) {
 				high_latency_observed = TRUE;
-			} else if (thread->runq == PROCESSOR_NULL) {
+			} else if (thread_get_runq(thread) == PROCESSOR_NULL) {
 				/* There are some cases where a thread be transitiong that also fall into this case */
 				runnable_and_not_on_runq_observed = TRUE;
 			}
@@ -3030,7 +3028,7 @@ thread_invoke(
 
 	assert_thread_magic(self);
 	assert(self == current_thread());
-	assert(self->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(self);
 	assert((self->state & (TH_RUN | TH_TERMINATE2)) == TH_RUN);
 
 	thread_lock(thread);
@@ -3038,7 +3036,7 @@ thread_invoke(
 	assert_thread_magic(thread);
 	assert((thread->state & (TH_RUN | TH_WAIT | TH_UNINT | TH_TERMINATE | TH_TERMINATE2)) == TH_RUN);
 	assert(thread->bound_processor == PROCESSOR_NULL || thread->bound_processor == current_processor());
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 
 	/* Update SFI class based on other factors */
 	thread->sfi_class = sfi_thread_classify(thread);
@@ -3829,6 +3827,13 @@ thread_dispatch(
 
 	assert(self->block_hint == kThreadWaitNone);
 	self->computation_epoch = processor->last_dispatch;
+	/*
+	 * This relies on the interrupt time being tallied up to the thread in the
+	 * exception handler epilogue, which is before AST context where preemption
+	 * is considered (and the scheduler is potentially invoked to
+	 * context switch, here).
+	 */
+	self->computation_interrupt_epoch = recount_current_thread_interrupt_time_mach();
 	self->reason = AST_NONE;
 	processor->starting_pri = self->sched_pri;
 
@@ -4127,7 +4132,7 @@ run_queue_dequeue(
 	assert(thread != THREAD_NULL);
 	assert_thread_magic(thread);
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(thread);
 	SCHED_STATS_RUNQ_CHANGE(&rq->runq_stats, rq->count);
 	rq->count--;
 	if (SCHED(priority_is_urgent)(rq->highq)) {
@@ -4198,7 +4203,7 @@ run_queue_remove(
 {
 	circle_queue_t  queue = &rq->queues[thread->sched_pri];
 
-	assert(thread->runq != PROCESSOR_NULL);
+	thread_assert_runq_nonnull(thread);
 	assert_thread_magic(thread);
 
 	circle_dequeue(queue, &thread->runq_links);
@@ -4214,7 +4219,7 @@ run_queue_remove(
 		rq->highq = bitmap_first(rq->bitmap, NRQS);
 	}
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(thread);
 }
 
 /*
@@ -4293,7 +4298,7 @@ rt_runq_enqueue(rt_queue_t rt_run_queue, thread_t thread, processor_t processor)
 	rt_runq->pri_count++;
 	os_atomic_inc(&rt_run_queue->count, relaxed);
 
-	thread->runq = processor;
+	thread_set_runq_locked(thread, processor);
 
 	CHECK_RT_RUNQ_CONSISTENCY(rt_run_queue, thread);
 
@@ -4357,7 +4362,7 @@ rt_runq_dequeue(rt_queue_t rt_run_queue)
 	os_atomic_store(&rt_run_queue->ed_index, ed_index, relaxed);
 	os_atomic_dec(&rt_run_queue->count, relaxed);
 
-	new_thread->runq = PROCESSOR_NULL;
+	thread_clear_runq(new_thread);
 
 	CHECK_RT_RUNQ_CONSISTENCY(rt_run_queue, THREAD_NULL);
 
@@ -4419,7 +4424,7 @@ rt_runq_remove(rt_queue_t rt_run_queue, thread_t thread)
 	os_atomic_store(&rt_run_queue->ed_index, ed_index, relaxed);
 	os_atomic_dec(&rt_run_queue->count, relaxed);
 
-	thread->runq = PROCESSOR_NULL;
+	thread_clear_runq_locked(thread);
 
 	CHECK_RT_RUNQ_CONSISTENCY(rt_run_queue, THREAD_NULL);
 }
@@ -5159,19 +5164,12 @@ choose_processor(
 				 */
 				if ((thread->sched_pri < BASEPRI_RTQUEUES) || processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
 					uint64_t idle_primary_map = (pset->cpu_state_map[PROCESSOR_IDLE] & pset->primary_map & pset->recommended_bitmask);
-					uint64_t preferred_idle_primary_map = idle_primary_map & pset->perfcontrol_cpu_preferred_bitmask;
+					uint64_t non_avoided_idle_primary_map = idle_primary_map & ~pset->perfcontrol_cpu_migration_bitmask;
 					/*
-					 * Only 1 idle core, choose it.
+					 * If the rotation bitmask to force a migration is set for this core and there's an idle core that
+					 * that needn't be avoided, don't continue running on the same core.
 					 */
-					if (bit_count(idle_primary_map) == 1) {
-						return processor;
-					}
-
-					/*
-					 * If the rotation bitmask to force a migration is set for this core and one of the preferred cores
-					 * is idle, don't continue running on the same core.
-					 */
-					if (!(bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id) && preferred_idle_primary_map != 0)) {
+					if (!(bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id) && non_avoided_idle_primary_map != 0)) {
 						return processor;
 					}
 				}
@@ -5347,7 +5345,23 @@ no_available_cpus:
 		}
 
 		/*
-		 * Fall back to all idle cores if none of the preferred ones are available.
+		 * Look at the cores that don't need to be avoided next.
+		 */
+		if (pset->perfcontrol_cpu_migration_bitmask != 0) {
+			uint64_t non_avoided_idle_primary_map = idle_primary_map & ~pset->perfcontrol_cpu_migration_bitmask;
+			cpuid = lsb_next(non_avoided_idle_primary_map, pset->cpu_preferred_last_chosen);
+			if (cpuid < 0) {
+				cpuid = lsb_first(non_avoided_idle_primary_map);
+			}
+			if (cpuid >= 0) {
+				processor = processor_array[cpuid];
+				pset->cpu_preferred_last_chosen = cpuid;
+				return processor;
+			}
+		}
+
+		/*
+		 * Fall back to any remaining idle cores if none of the preferred ones and non-avoided ones are available.
 		 */
 		cpuid = lsb_first(idle_primary_map);
 		if (cpuid >= 0) {
@@ -5726,7 +5740,7 @@ thread_setrun(
 	processor_set_t         pset;
 
 	assert((thread->state & (TH_RUN | TH_WAIT | TH_UNINT | TH_TERMINATE | TH_TERMINATE2)) == TH_RUN);
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 
 #if CONFIG_PREADOPT_TG
 	/* We know that the thread is not in the runq by virtue of being in this
@@ -6181,7 +6195,7 @@ set_sched_pri(
 
 	if (is_current_thread) {
 		assert(thread->state & TH_RUN);
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 	} else {
 		removed_from_runq = thread_run_queue_remove(thread);
 	}
@@ -6381,14 +6395,14 @@ thread_run_queue_remove(
 	thread_t        thread)
 {
 	boolean_t removed = FALSE;
-	processor_t processor = thread->runq;
 
 	if ((thread->state & (TH_RUN | TH_WAIT)) == TH_WAIT) {
 		/* Thread isn't runnable */
-		assert(thread->runq == PROCESSOR_NULL);
+		thread_assert_runq_null(thread);
 		return FALSE;
 	}
 
+	processor_t processor = thread_get_runq(thread);
 	if (processor == PROCESSOR_NULL) {
 		/*
 		 * The thread is either not on the runq,
@@ -6411,7 +6425,11 @@ thread_run_queue_remove(
 
 	pset_lock(pset);
 
-	if (thread->runq != PROCESSOR_NULL) {
+	/*
+	 * Must re-read the thread runq after acquiring the pset lock, in
+	 * case another core swooped in before us to dequeue the thread.
+	 */
+	if (thread_get_runq_locked(thread) != PROCESSOR_NULL) {
 		/*
 		 *	Thread is on the RT run queue and we have a lock on
 		 *	that run queue.
@@ -6437,7 +6455,7 @@ thread_run_queue_remove(
 void
 thread_run_queue_reinsert(thread_t thread, sched_options_t options)
 {
-	assert(thread->runq == PROCESSOR_NULL);
+	thread_assert_runq_null(thread);
 	assert(thread->state & (TH_RUN));
 
 	thread_setrun(thread, options);
@@ -7704,7 +7722,7 @@ sched_consider_recommended_cores(uint64_t ctime, thread_t cur_thread)
 	/* It looks bad, take the lock to be sure */
 	thread_lock(m_thread);
 
-	if (m_thread->runq == PROCESSOR_NULL ||
+	if (thread_get_runq(m_thread) == PROCESSOR_NULL ||
 	    (m_thread->state & (TH_RUN | TH_WAIT)) != TH_RUN ||
 	    m_thread->last_made_runnable_time >= too_long_ago) {
 		/*
@@ -8103,6 +8121,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 	}
 
 	/* First set powered cores */
+	cpumap_t started_cores = 0ull;
 	for (pset_node_t node = &pset_node0; node != NULL; node = node->node_list) {
 		for (int pset_id = lsb_first(node->pset_map); pset_id >= 0; pset_id = lsb_next(node->pset_map, pset_id)) {
 			processor_set_t pset = pset_array[pset_id];
@@ -8110,7 +8129,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 			spl_t s = splsched();
 			pset_lock(pset);
 			cpumap_t pset_requested_powered_cores = requested_powered_cores & pset->cpu_bitmask;
-			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
+			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_START] | pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
 			cpumap_t requested_changes = pset_requested_powered_cores ^ powered_cores;
 			pset_unlock(pset);
 			splx(s);
@@ -8134,17 +8153,17 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 				continue;
 			}
 
-			int last_start_cpu_id = bit_first(cpu_map);
-
 			for (int cpu_id = lsb_first(cpu_map); cpu_id >= 0; cpu_id = lsb_next(cpu_map, cpu_id)) {
 				processor_t processor = processor_array[cpu_id];
-
-				if ((flags & WAIT_FOR_LAST_START) && (cpu_id == last_start_cpu_id)) {
-					processor_start_reason(processor, reason, flags | WAIT_FOR_START);
-				} else {
-					processor_start_reason(processor, reason, flags);
-				}
+				processor_start_reason(processor, reason, flags);
+				bit_set(started_cores, cpu_id);
 			}
+		}
+	}
+	if (flags & WAIT_FOR_LAST_START) {
+		for (int cpu_id = lsb_first(started_cores); cpu_id >= 0; cpu_id = lsb_next(started_cores, cpu_id)) {
+			processor_t processor = processor_array[cpu_id];
+			processor_wait_for_start(processor);
 		}
 	}
 
@@ -8155,7 +8174,7 @@ sched_update_powered_cores(uint64_t requested_powered_cores, processor_reason_t 
 
 			spl_t s = splsched();
 			pset_lock(pset);
-			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
+			cpumap_t powered_cores = (pset->cpu_state_map[PROCESSOR_START] | pset->cpu_state_map[PROCESSOR_IDLE] | pset->cpu_state_map[PROCESSOR_DISPATCHING] | pset->cpu_state_map[PROCESSOR_RUNNING]);
 			cpumap_t requested_changes = (requested_powered_cores & pset->cpu_bitmask) ^ powered_cores;
 			pset_unlock(pset);
 			splx(s);
@@ -8960,30 +8979,30 @@ thread_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_
 #if __AMP__
 
 	processor_set_t pset = NULL;
-	if (options & (THREAD_BIND_SOFT | THREAD_BIND_ELIGIBLE_ONLY)) {
+
+	/* Treat binding to THREAD_BOUND_CLUSTER_NONE as a request to unbind. */
+	if ((options & THREAD_UNBIND) || cluster_id == THREAD_BOUND_CLUSTER_NONE) {
+		/* If the thread was actually not bound to some cluster, nothing to do here */
+		if (thread_bound_cluster_id(thread) == THREAD_BOUND_CLUSTER_NONE) {
+			return KERN_SUCCESS;
+		}
+	} else {
 		/* Validate the inputs for the bind case */
 		int max_clusters = ml_get_cluster_count();
 		if (cluster_id >= max_clusters) {
 			/* Invalid cluster id */
-			return KERN_INVALID_ARGUMENT;
+			return KERN_INVALID_VALUE;
 		}
 		pset = pset_array[cluster_id];
 		if (pset == NULL) {
 			/* Cluster has not been initialized yet */
-			return KERN_INVALID_ARGUMENT;
+			return KERN_INVALID_VALUE;
 		}
 		if (options & THREAD_BIND_ELIGIBLE_ONLY) {
 			if (SCHED(thread_eligible_for_pset(thread, pset)) == false) {
 				/* Thread is not recommended for the cluster type */
 				return KERN_INVALID_POLICY;
 			}
-		}
-	}
-
-	if (options & THREAD_UNBIND) {
-		/* If the thread was actually not bound to some cluster, nothing to do here */
-		if (thread_bound_cluster_id(thread) == THREAD_BOUND_CLUSTER_NONE) {
-			return KERN_SUCCESS;
 		}
 	}
 

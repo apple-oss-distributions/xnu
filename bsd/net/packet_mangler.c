@@ -56,6 +56,8 @@
 #include <string.h>
 #include <libkern/libkern.h>
 
+#include <net/sockaddr_utils.h>
+
 #define MAX_PACKET_MANGLER                      1
 
 #define PKT_MNGLR_FLG_IPFILTER_ATTACHED         0x00000001
@@ -726,14 +728,14 @@ pktmnglr_ipfilter_output(void *cookie, mbuf_t *data, ipf_pktopts_t options)
 	}
 
 	if (p_pkt_mnglr->lsaddr.ss_family == AF_INET) {
-		struct sockaddr_in laddr = *(struct sockaddr_in *)(&(p_pkt_mnglr->lsaddr));
+		struct sockaddr_in laddr = *SIN(&p_pkt_mnglr->lsaddr);
 		if (ip.ip_src.s_addr != laddr.sin_addr.s_addr) {
 			goto output_done;
 		}
 	}
 
 	if (p_pkt_mnglr->rsaddr.ss_family == AF_INET) {
-		struct sockaddr_in raddr = *(struct sockaddr_in *)(&(p_pkt_mnglr->rsaddr));
+		struct sockaddr_in raddr = *SIN(&p_pkt_mnglr->rsaddr);
 		if (ip.ip_dst.s_addr != raddr.sin_addr.s_addr) {
 			goto output_done;
 		}
@@ -810,19 +812,19 @@ pktmnglr_ipfilter_input(void *cookie, mbuf_t *data, int offset, u_int8_t protoco
 	}
 
 	if (p_pkt_mnglr->lsaddr.ss_family == AF_INET) {
-		struct sockaddr_in laddr = *(struct sockaddr_in *)(&(p_pkt_mnglr->lsaddr));
+		struct sockaddr_in laddr = *SIN(&p_pkt_mnglr->lsaddr);
 		if (ip.ip_dst.s_addr != laddr.sin_addr.s_addr) {
 			goto input_done;
 		}
 	} else if (p_pkt_mnglr->lsaddr.ss_family == AF_INET6) {
-		struct sockaddr_in6 laddr = *(struct sockaddr_in6 *)(&(p_pkt_mnglr->lsaddr));
+		struct sockaddr_in6 laddr = *SIN6(&p_pkt_mnglr->lsaddr);
 		if (!IN6_ARE_ADDR_EQUAL(&ip6.ip6_dst, &laddr.sin6_addr)) {
 			goto input_done;
 		}
 	}
 
 	if (p_pkt_mnglr->rsaddr.ss_family == AF_INET) {
-		struct sockaddr_in raddr = *(struct sockaddr_in *)(&(p_pkt_mnglr->rsaddr));
+		struct sockaddr_in raddr = *SIN(&p_pkt_mnglr->rsaddr);
 		if (ip.ip_src.s_addr != raddr.sin_addr.s_addr) {
 			goto input_done;
 		}
@@ -830,7 +832,7 @@ pktmnglr_ipfilter_input(void *cookie, mbuf_t *data, int offset, u_int8_t protoco
 		    raddr.sin_addr.s_addr,
 		    ip.ip_src.s_addr);
 	} else if (p_pkt_mnglr->rsaddr.ss_family == AF_INET6) {
-		struct sockaddr_in6 raddr = *(struct sockaddr_in6 *)(&(p_pkt_mnglr->rsaddr));
+		struct sockaddr_in6 raddr = *SIN6(&p_pkt_mnglr->rsaddr);
 		if (!IN6_ARE_ADDR_EQUAL(&ip6.ip6_src, &raddr.sin6_addr)) {
 			goto input_done;
 		}

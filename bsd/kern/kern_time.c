@@ -945,21 +945,10 @@ ppsratecheck(struct timeval *lasttime, int *curpps, int maxpps)
 		rv = 0;
 	}
 
-#if 1 /* DIAGNOSTIC? */
 	/* be careful about wrap-around */
-	if (*curpps + 1 > 0) {
+	if (*curpps < INT_MAX) {
 		*curpps = *curpps + 1;
 	}
-#else
-	/*
-	 * assume that there's not too many calls to this function.
-	 * not sure if the assumption holds, as it depends on *caller's*
-	 * behavior, not the behavior of this function.
-	 * IMHO it is wrong to make assumption on the caller's behavior,
-	 * so the above #if is #if 1, not #ifdef DIAGNOSTIC.
-	 */
-	*curpps = *curpps + 1;
-#endif
 
 	return rv;
 }

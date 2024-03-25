@@ -87,9 +87,10 @@
 #include <arm64/amcc_rorgn.h>
 #endif // defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 
+#include <arm64/machine_machdep.h>
+
 kern_return_t arm64_lock_test(void);
 kern_return_t arm64_munger_test(void);
-kern_return_t ex_cb_test(void);
 kern_return_t arm64_pan_test(void);
 kern_return_t arm64_late_pan_test(void);
 #if defined(HAS_APPLE_PAC)
@@ -109,6 +110,10 @@ vm_offset_t pan_ro_addr = 0;
 volatile int pan_exception_level = 0;
 volatile char pan_fault_value = 0;
 #endif
+
+#if CONFIG_SPTM
+kern_return_t arm64_panic_lockdown_test(void);
+#endif /* CONFIG_SPTM */
 
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
@@ -1026,6 +1031,7 @@ struct munger_test {
 	{MT_FUNC(munge_wl), 3, 2, {MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwl), 4, 3, {MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwlll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
+	{MT_FUNC(munge_wwlllll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlw), 4, 3, {MT_W_VAL, MT_L_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wlwwwll), 10, 7, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlwwwllw), 11, 8, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_W_VAL}},
@@ -1101,73 +1107,6 @@ mt_test_mungers()
 			T_PASS(test->mt_name);
 		}
 	}
-}
-
-/* Exception Callback Test */
-static ex_cb_action_t
-excb_test_action(
-	ex_cb_class_t           cb_class,
-	void                            *refcon,
-	const ex_cb_state_t     *state
-	)
-{
-	ex_cb_state_t *context = (ex_cb_state_t *)refcon;
-
-	if ((NULL == refcon) || (NULL == state)) {
-		return EXCB_ACTION_TEST_FAIL;
-	}
-
-	context->far = state->far;
-
-	switch (cb_class) {
-	case EXCB_CLASS_TEST1:
-		return EXCB_ACTION_RERUN;
-	case EXCB_CLASS_TEST2:
-		return EXCB_ACTION_NONE;
-	default:
-		return EXCB_ACTION_TEST_FAIL;
-	}
-}
-
-
-kern_return_t
-ex_cb_test()
-{
-	const vm_offset_t far1 = 0xdead0001;
-	const vm_offset_t far2 = 0xdead0002;
-	kern_return_t kr;
-	ex_cb_state_t test_context_1 = {0xdeadbeef};
-	ex_cb_state_t test_context_2 = {0xdeadbeef};
-	ex_cb_action_t action;
-
-	T_LOG("Testing Exception Callback.");
-
-	T_LOG("Running registration test.");
-
-	kr = ex_cb_register(EXCB_CLASS_TEST1, &excb_test_action, &test_context_1);
-	T_ASSERT(KERN_SUCCESS == kr, "First registration of TEST1 exception callback");
-	kr = ex_cb_register(EXCB_CLASS_TEST2, &excb_test_action, &test_context_2);
-	T_ASSERT(KERN_SUCCESS == kr, "First registration of TEST2 exception callback");
-
-	kr = ex_cb_register(EXCB_CLASS_TEST2, &excb_test_action, &test_context_2);
-	T_ASSERT(KERN_SUCCESS != kr, "Second registration of TEST2 exception callback");
-	kr = ex_cb_register(EXCB_CLASS_TEST1, &excb_test_action, &test_context_1);
-	T_ASSERT(KERN_SUCCESS != kr, "Second registration of TEST1 exception callback");
-
-	T_LOG("Running invocation test.");
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST1, far1);
-	T_ASSERT(EXCB_ACTION_RERUN == action, NULL);
-	T_ASSERT(far1 == test_context_1.far, NULL);
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST2, far2);
-	T_ASSERT(EXCB_ACTION_NONE == action, NULL);
-	T_ASSERT(far2 == test_context_2.far, NULL);
-
-	action = ex_cb_invoke(EXCB_CLASS_TEST3, 0);
-	T_ASSERT(EXCB_ACTION_NONE == action, NULL);
-
-	return KERN_SUCCESS;
 }
 
 #if defined(HAS_APPLE_PAC)
@@ -1374,7 +1313,7 @@ arm64_pan_test()
 
 	// Map the page in the user address space at some, non-zero address
 	pan_test_addr = PAGE_SIZE;
-	pmap_enter(pmap, pan_test_addr, pn, VM_PROT_READ, VM_PROT_READ, 0, true);
+	pmap_enter(pmap, pan_test_addr, pn, VM_PROT_READ, VM_PROT_READ, 0, true, PMAP_MAPPING_TYPE_INFER);
 
 	// Context-switch with PAN disabled is prohibited; prevent test logging from
 	// triggering a voluntary context switch.
@@ -1542,8 +1481,15 @@ ctrr_test_cpu(void)
 
 	/* ctrr read only region = [rorgn_begin_va, rorgn_end_va) */
 
-	vm_offset_t rorgn_begin_va = phystokv(__builtin_arm_rsr64("S3_4_C15_C2_3"));
-	vm_offset_t rorgn_end_va = phystokv(__builtin_arm_rsr64("S3_4_C15_C2_4")) + 1;
+#if (KERNEL_CTRR_VERSION == 3)
+	const uint64_t rorgn_lwr = __builtin_arm_rsr64("S3_0_C11_C0_2");
+	const uint64_t rorgn_upr = __builtin_arm_rsr64("S3_0_C11_C0_3");
+#else /* (KERNEL_CTRR_VERSION == 3) */
+	const uint64_t rorgn_lwr = __builtin_arm_rsr64("S3_4_C15_C2_3");
+	const uint64_t rorgn_upr = __builtin_arm_rsr64("S3_4_C15_C2_4");
+#endif /* (KERNEL_CTRR_VERSION == 3) */
+	vm_offset_t rorgn_begin_va = phystokv(rorgn_lwr);
+	vm_offset_t rorgn_end_va = phystokv(rorgn_upr) + 0x1000;
 	vm_offset_t ro_test_va = (vm_offset_t)&ctrr_ro_test;
 	vm_offset_t nx_test_va = (vm_offset_t)&ctrr_nx_test;
 
@@ -1562,7 +1508,7 @@ ctrr_test_cpu(void)
 
 	T_LOG("Read only region test mapping virtual page %p to CTRR RO page number %d", ctrr_test_page, ro_pn);
 	kr = pmap_enter(kernel_pmap, ctrr_test_page, ro_pn,
-	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RW mapping to succeed");
 
 	// assert entire mmu prot path (Hierarchical protection model) is NOT RO
@@ -1594,7 +1540,7 @@ ctrr_test_cpu(void)
 	T_LOG("No execute test mapping virtual page %p to CTRR PXN page number %d", ctrr_test_page, nx_pn);
 
 	kr = pmap_enter(kernel_pmap, ctrr_test_page, nx_pn,
-	    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_MAPPING_TYPE_INFER);
 	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RX mapping to succeed");
 
 	// assert entire mmu prot path (Hierarchical protection model) is NOT XN
@@ -1634,3 +1580,285 @@ ctrr_test_cpu(void)
 }
 #endif /* defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST) */
 
+
+
+#if CONFIG_SPTM
+volatile uint8_t xnu_post_panic_lockdown_did_fire = false;
+typedef uint64_t (panic_lockdown_helper_fcn_t)(uint64_t raw);
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_load;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_gdbtrap;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_pac_brk_c470;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_pac_brk_c471;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_pac_brk_c472;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_pac_brk_c473;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_telemetry_brk_ff00;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_br_auth_fail;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_ldr_auth_fail;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_fpac;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_copyio;
+
+typedef struct arm64_panic_lockdown_test_case {
+	const char *func_str;
+	panic_lockdown_helper_fcn_t *func;
+	uint64_t arg;
+	esr_exception_class_t expected_ec;
+	bool expect_lockdown_exceptions_masked;
+	bool expect_lockdown_exceptions_unmasked;
+	bool override_expected_fault_pc_valid;
+	uint64_t override_expected_fault_pc;
+} arm64_panic_lockdown_test_case_s;
+
+static arm64_panic_lockdown_test_case_s *arm64_panic_lockdown_active_test;
+static volatile bool arm64_panic_lockdown_caught_exception;
+
+static bool
+arm64_panic_lockdown_test_exception_handler(arm_saved_state_t * state)
+{
+	uint32_t esr = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+
+	if (!arm64_panic_lockdown_active_test ||
+	    class != arm64_panic_lockdown_active_test->expected_ec) {
+		return false;
+	}
+
+	/* We got the expected exception, recover by forging an early return */
+	set_saved_state_pc(state, get_saved_state_lr(state));
+	arm64_panic_lockdown_caught_exception = true;
+	return true;
+}
+
+static void
+panic_lockdown_expect_test(const char *treatment,
+    arm64_panic_lockdown_test_case_s *test,
+    bool expect_lockdown,
+    bool mask_interrupts)
+{
+	int ints = 0;
+
+	arm64_panic_lockdown_active_test = test;
+	xnu_post_panic_lockdown_did_fire = false;
+	arm64_panic_lockdown_caught_exception = false;
+
+	uintptr_t fault_pc;
+	if (test->override_expected_fault_pc_valid) {
+		fault_pc = (uintptr_t)test->override_expected_fault_pc;
+	} else {
+		fault_pc = (uintptr_t)test->func;
+	}
+	ml_expect_fault_pc_begin(
+		arm64_panic_lockdown_test_exception_handler,
+		fault_pc);
+
+	if (mask_interrupts) {
+		ints = ml_set_interrupts_enabled(FALSE);
+	}
+
+	(void)test->func(test->arg);
+
+	if (mask_interrupts) {
+		(void)ml_set_interrupts_enabled(ints);
+	}
+
+	ml_expect_fault_end();
+
+	if (expect_lockdown == xnu_post_panic_lockdown_did_fire &&
+	    arm64_panic_lockdown_caught_exception) {
+		T_PASS("%s + %s OK\n", test->func_str, treatment);
+	} else {
+		T_FAIL(
+			"%s + %s FAIL (expected lockdown: %d, did lockdown: %d, caught exception: %d)\n",
+			test->func_str, treatment,
+			expect_lockdown, xnu_post_panic_lockdown_did_fire,
+			arm64_panic_lockdown_caught_exception);
+	}
+}
+
+/**
+ * Returns a pointer which is guranteed to be invalid under IA with the zero
+ * discriminator.
+ *
+ * This is somewhat over complicating it since it's exceedingly likely that a
+ * any given pointer will have a zero PAC (and thus break the test), but it's
+ * easy enough to avoid the problem.
+ */
+static uint64_t
+panic_lockdown_pacia_get_invalid_ptr()
+{
+	char *unsigned_ptr = (char *)0xFFFFFFFFAABBCC00;
+	char *signed_ptr = NULL;
+	do {
+		unsigned_ptr += 4 /* avoid alignment exceptions */;
+		signed_ptr = ptrauth_sign_unauthenticated(
+			unsigned_ptr,
+			ptrauth_key_asia,
+			0);
+	} while ((uint64_t)unsigned_ptr == (uint64_t)signed_ptr);
+
+	return (uint64_t)unsigned_ptr;
+}
+
+/**
+ * Returns a pointer which is guranteed to be invalid under DA with the zero
+ * discriminator.
+ */
+static uint64_t
+panic_lockdown_pacda_get_invalid_ptr(void)
+{
+	char *unsigned_ptr = (char *)0xFFFFFFFFAABBCC00;
+	char *signed_ptr = NULL;
+	do {
+		unsigned_ptr += 8 /* avoid alignment exceptions */;
+		signed_ptr = ptrauth_sign_unauthenticated(
+			unsigned_ptr,
+			ptrauth_key_asda,
+			0);
+	} while ((uint64_t)unsigned_ptr == (uint64_t)signed_ptr);
+
+	return (uint64_t)unsigned_ptr;
+}
+
+kern_return_t
+arm64_panic_lockdown_test(void)
+{
+#if __has_feature(ptrauth_calls)
+	uint64_t ia_invalid = panic_lockdown_pacia_get_invalid_ptr();
+#endif /* ptrauth_calls */
+	arm64_panic_lockdown_test_case_s tests[] = {
+		{
+			.func_str = "arm64_panic_lockdown_test_load",
+			.func = &arm64_panic_lockdown_test_load,
+			/* Trigger a null deref */
+			.arg = (uint64_t)NULL,
+			.expected_ec = ESR_EC_DABORT_EL1,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = false,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_gdbtrap",
+			.func = &arm64_panic_lockdown_test_gdbtrap,
+			.arg = 0,
+			.expected_ec = ESR_EC_UNCATEGORIZED,
+			/* GDBTRAP instructions should be allowed everywhere */
+			.expect_lockdown_exceptions_masked = false,
+			.expect_lockdown_exceptions_unmasked = false,
+		},
+#if __has_feature(ptrauth_calls)
+		{
+			.func_str = "arm64_panic_lockdown_test_pac_brk_c470",
+			.func = &arm64_panic_lockdown_test_pac_brk_c470,
+			.arg = 0,
+			.expected_ec = ESR_EC_BRK_AARCH64,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_pac_brk_c471",
+			.func = &arm64_panic_lockdown_test_pac_brk_c471,
+			.arg = 0,
+			.expected_ec = ESR_EC_BRK_AARCH64,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_pac_brk_c472",
+			.func = &arm64_panic_lockdown_test_pac_brk_c472,
+			.arg = 0,
+			.expected_ec = ESR_EC_BRK_AARCH64,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_pac_brk_c473",
+			.func = &arm64_panic_lockdown_test_pac_brk_c473,
+			.arg = 0,
+			.expected_ec = ESR_EC_BRK_AARCH64,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_telemetry_brk_ff00",
+			.func = &arm64_panic_lockdown_test_telemetry_brk_ff00,
+			.arg = 0,
+			.expected_ec = ESR_EC_BRK_AARCH64,
+			/*
+			 * PAC breakpoints are not the only breakpoints, ensure that other
+			 * BRKs (like those used for telemetry) do not trigger lockdowns.
+			 * This is necessary to avoid conflicts with features like UBSan
+			 * telemetry (which could fire at any time in C code).
+			 */
+			.expect_lockdown_exceptions_masked = false,
+			.expect_lockdown_exceptions_unmasked = false,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_br_auth_fail",
+			.func = &arm64_panic_lockdown_test_br_auth_fail,
+			.arg = ia_invalid,
+			.expected_ec = ESR_EC_IABORT_EL1,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+			/*
+			 * Pre-FEAT_FPACCOMBINED, BRAx branches to a poisoned PC so we
+			 * expect to fault on the branch target rather than the branch
+			 * itself. The exact ELR will likely be different from ia_invalid,
+			 * but since the expect logic in sleh only matches on low bits (i.e.
+			 * not bits which will be poisoned), this is fine.
+			 */
+			.override_expected_fault_pc_valid = true,
+			.override_expected_fault_pc = ia_invalid
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_ldr_auth_fail",
+			.func = &arm64_panic_lockdown_test_ldr_auth_fail,
+			.arg = panic_lockdown_pacda_get_invalid_ptr(),
+			.expected_ec = ESR_EC_DABORT_EL1,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+		{
+			.func_str = "arm64_panic_lockdown_test_copyio_poison",
+			.func = arm64_panic_lockdown_test_copyio,
+			/* fake a poisoned kernel pointer by flipping the bottom PAC bit */
+			.arg = ((uint64_t)-1) ^ (1LLU << (64 - T1SZ_BOOT)),
+			.expected_ec = ESR_EC_DABORT_EL1,
+			.expect_lockdown_exceptions_masked = false,
+			.expect_lockdown_exceptions_unmasked = false,
+		},
+#if __ARM_ARCH_8_6__
+		{
+			.func_str = "arm64_panic_lockdown_test_fpac",
+			.func = &arm64_panic_lockdown_test_fpac,
+			.arg = ia_invalid,
+			.expected_ec = ESR_EC_PAC_FAIL,
+			.expect_lockdown_exceptions_masked = true,
+			.expect_lockdown_exceptions_unmasked = true,
+		},
+#endif /* __ARM_ARCH_8_6__ */
+#endif /* ptrauth_calls */
+		{
+			.func_str = "arm64_panic_lockdown_test_copyio",
+			.func = arm64_panic_lockdown_test_copyio,
+			.arg = 0x0 /* load from NULL */,
+			.expected_ec = ESR_EC_DABORT_EL1,
+			.expect_lockdown_exceptions_masked = false,
+			.expect_lockdown_exceptions_unmasked = false,
+		},
+	};
+
+	size_t test_count = sizeof(tests) / sizeof(*tests);
+	for (size_t i = 0; i < test_count; i++) {
+		panic_lockdown_expect_test(
+			"Exceptions unmasked",
+			&tests[i],
+			tests[i].expect_lockdown_exceptions_unmasked,
+			/* mask_interrupts */ false);
+
+		panic_lockdown_expect_test(
+			"Exceptions masked",
+			&tests[i],
+			tests[i].expect_lockdown_exceptions_masked,
+			/* mask_interrupts */ true);
+	}
+	return KERN_SUCCESS;
+}
+#endif /* CONFIG_SPTM */

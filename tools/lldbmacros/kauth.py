@@ -1,10 +1,6 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, print_function
-
-from builtins import range
-
 from xnu import *
 from utils import *
 

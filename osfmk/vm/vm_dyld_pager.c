@@ -577,6 +577,77 @@ fixupPageAuth64(
 	} while (delta != 0);
 	return KERN_SUCCESS;
 }
+
+/*
+ * Apply fixups to a page used by a 64 bit process using pointer authentication.
+ */
+static kern_return_t
+fixupCachePageAuth64(
+	uint64_t                              userVA,
+	vm_offset_t                           contents,
+	vm_offset_t                           end_contents,
+	dyld_pager_t                          pager,
+	struct dyld_chained_starts_in_segment *segInfo,
+	uint32_t                              pageIndex)
+{
+	void                 *link_info = pager->dyld_link_info;
+	uint32_t             link_info_size = pager->dyld_link_info_size;
+	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
+
+	/*
+	 * range check against link_info, note +1 to include data we'll dereference
+	 */
+	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
+		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		return KERN_FAILURE;
+	}
+	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
+
+	/*
+	 * All done if no fixups on the page
+	 */
+	if (firstStartOffset == DYLD_CHAINED_PTR_START_NONE) {
+		return KERN_SUCCESS;
+	}
+
+	/*
+	 * Walk the chain of offsets to fix up
+	 */
+	uint64_t *chain = (uint64_t *)(contents + firstStartOffset);
+	uint64_t delta = 0;
+	do {
+		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+			    (long long)chain, (long long)contents, (long long)end_contents);
+			return KERN_FAILURE;
+		}
+		uint64_t value = *chain;
+		delta = (value >> 52) & 0x7FF;
+		bool isAuth = (value & 0x8000000000000000ULL);
+		if (isAuth) {
+			bool        addrDiv = ((value & (1ULL << 50)) != 0);
+			bool        keyIsData = ((value & (1ULL << 51)) != 0);
+			// the key is always A, and the bit tells us if its IA or ID
+			ptrauth_key key = keyIsData ? ptrauth_key_asda : ptrauth_key_asia;
+			uint16_t    diversity = (uint16_t)((value >> 34) & 0xFFFF);
+			uintptr_t   uVA = userVA + ((uintptr_t)chain - contents);
+			// target is always a 34-bit runtime offset, never a vmaddr
+			uint64_t target = (value & 0x3FFFFFFFFULL) + hdr->mwli_image_address;
+			if (signPointer(target, (void *)uVA, addrDiv, diversity, key, pager, chain) != KERN_SUCCESS) {
+				return KERN_FAILURE;
+			}
+		} else {
+			// target is always a 34-bit runtime offset, never a vmaddr
+			uint64_t target = (value & 0x3FFFFFFFFULL) + hdr->mwli_image_address;
+			uint64_t high8  = (value << 22) & 0xFF00000000000000ULL;
+			*chain = target + high8;
+		}
+		chain += delta;
+	} while (delta != 0);
+	return KERN_SUCCESS;
+}
 #endif /* defined(HAS_APPLE_PAC) */
 
 
@@ -676,6 +747,9 @@ fixup_page(
 	case DYLD_CHAINED_PTR_ARM64E_USERLAND:
 	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
 		fixupPageAuth64(userVA, contents, end_contents, pager, segInfo, pageIndex, true);
+		break;
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+		fixupCachePageAuth64(userVA, contents, end_contents, pager, segInfo, pageIndex);
 		break;
 #endif /* defined(HAS_APPLE_PAC) */
 	case DYLD_CHAINED_PTR_64:
@@ -1029,7 +1103,7 @@ dyld_pager_terminate_internal(
 		pager->dyld_backing_object = VM_OBJECT_NULL;
 	}
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->dyld_header.mo_control, 0);
+	memory_object_destroy(pager->dyld_header.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
 }
 
 /*

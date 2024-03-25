@@ -122,7 +122,7 @@ SYSCTL_NODE(_net_link_generic_system, OID_AUTO, get_ports_used,
     CTLFLAG_RD | CTLFLAG_LOCKED,
     sysctl_get_ports_used, "");
 
-static int if_ports_used_verbose = 0;
+int if_ports_used_verbose = 0;
 SYSCTL_INT(_net_link_generic_system_port_used, OID_AUTO, verbose,
     CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_ports_used_verbose, 0, "");
@@ -940,6 +940,9 @@ net_port_info_log_npi(const char *s, const struct net_port_info *npi)
 	    npi->npi_effective_pid);
 }
 
+/*
+ * net_port_info_match_npi() returns true for an exact match that does not have "no wake" set
+ */
 #define NPI_MATCH_IPV4 (NPIF_IPV4 | NPIF_TCP | NPIF_UDP)
 #define NPI_MATCH_IPV6 (NPIF_IPV6 | NPIF_TCP | NPIF_UDP)
 
@@ -967,6 +970,7 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 	    (npe->npe_npi.npi_flags & NPI_MATCH_IPV6) != (in_npi->npi_flags & NPI_MATCH_IPV6))) {
 		return false;
 	}
+
 	/*
 	 * Search stops on an exact match
 	 */
@@ -974,6 +978,15 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 		if ((npe->npe_npi.npi_flags & NPIF_IPV4) && (npe->npe_npi.npi_flags & NPIF_IPV4)) {
 			if (in_npi->npi_local_addr_in.s_addr == npe->npe_npi.npi_local_addr_in.s_addr &&
 			    in_npi->npi_foreign_addr_in.s_addr == npe->npe_npi.npi_foreign_addr_in.s_addr) {
+				if (npe->npe_npi.npi_flags & NPIF_NOWAKE) {
+					/*
+					 * Do not overwrite an existing match when "no wake" is set
+					 */
+					if (*best_match == NULL) {
+						*best_match = npe;
+					}
+					return false;
+				}
 				*best_match = npe;
 				return true;
 			}
@@ -983,6 +996,15 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 			    sizeof(union in_addr_4_6)) == 0 &&
 			    memcmp(&npe->npe_npi.npi_foreign_addr_, &in_npi->npi_foreign_addr_,
 			    sizeof(union in_addr_4_6)) == 0) {
+				if (npe->npe_npi.npi_flags & NPIF_NOWAKE) {
+					/*
+					 * Do not overwrite an existing match when "no wake" is set
+					 */
+					if (*best_match == NULL) {
+						*best_match = npe;
+					}
+					return false;
+				}
 				*best_match = npe;
 				return true;
 			}
@@ -996,6 +1018,12 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 		return false;
 	}
 	/*
+	 * Do not overwrite an existing match when "no wake" is set
+	 */
+	if (*best_match != NULL && (npe->npe_npi.npi_flags & NPIF_NOWAKE) != 0) {
+		return false;
+	}
+	/*
 	 * The local address matches: this is our 2nd best match
 	 */
 	if (memcmp(&npe->npe_npi.npi_local_addr_, &in_npi->npi_local_addr_,
@@ -1003,6 +1031,7 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 		*best_match = npe;
 		return false;
 	}
+
 	/*
 	 * Only the local port matches, do not override a match
 	 * on the local address
@@ -1012,6 +1041,8 @@ net_port_info_match_npi(struct net_port_entry *npe, const struct net_port_info *
 	}
 	return false;
 }
+#undef NPI_MATCH_IPV4
+#undef NPI_MATCH_IPV6
 
 /*
  *
@@ -1027,6 +1058,9 @@ net_port_info_find_match(struct net_port_info *in_npi)
 	uint32_t count = 0;
 	TAILQ_FOREACH(npe, NPE_HASH_HEAD(in_npi->npi_local_port), npe_hash_next) {
 		count += 1;
+		/*
+		 * Search stop on an exact match
+		 */
 		if (net_port_info_match_npi(npe, in_npi, &best_match)) {
 			break;
 		}
@@ -1034,6 +1068,9 @@ net_port_info_find_match(struct net_port_info *in_npi)
 
 	if (best_match != NULL) {
 		best_match->npe_npi.npi_flags |= NPIF_WAKEPKT;
+		if (best_match->npe_npi.npi_flags & NPIF_NOWAKE) {
+			in_npi->npi_flags |= NPIF_NOWAKE;
+		}
 		in_npi->npi_owner_pid = best_match->npe_npi.npi_owner_pid;
 		in_npi->npi_effective_pid = best_match->npe_npi.npi_effective_pid;
 		strlcpy(in_npi->npi_owner_pname, best_match->npe_npi.npi_owner_pname,
@@ -1282,6 +1319,9 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	event_data.wake_pkt_total_len = pkt_total_len;
 	event_data.wake_pkt_data_len = pkt_data_len;
 	event_data.wake_pkt_control_flags = pkt_control_flags;
+	if (npi->npi_flags & NPIF_NOWAKE) {
+		event_data.wake_pkt_control_flags |= NPICF_NOWAKE;
+	}
 
 	ev_msg.dv[0].data_ptr = &event_data;
 	ev_msg.dv[0].data_length = sizeof(event_data);
@@ -1305,8 +1345,11 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 
 	lck_mtx_unlock(&net_port_entry_head_lock);
 
-	if_ports_used_stats.ifpu_wake_pkt_event += 1;
-
+	if (npi->npi_flags & NPIF_NOWAKE) {
+		if_ports_used_stats.ifpu_spurious_wake_event += 1;
+	} else {
+		if_ports_used_stats.ifpu_wake_pkt_event += 1;
+	}
 
 	int result = kev_post_msg(&ev_msg);
 	if (result != 0) {

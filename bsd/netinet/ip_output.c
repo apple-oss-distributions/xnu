@@ -137,6 +137,7 @@
 #include <net/pfvar.h>
 #endif /* PF */
 
+#include <net/sockaddr_utils.h>
 
 u_short ip_id;
 
@@ -394,7 +395,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 		ro = &saved_route;
 
 		imo = NULL;
-		bcopy(&dn_tag->dn_dst, &dst_buf, sizeof(dst_buf));
+		SOCKADDR_COPY(&dn_tag->dn_dst, &dst_buf, sizeof(dst_buf));
 		dst = &dst_buf;
 		ifp = dn_tag->dn_ifp;
 		flags = dn_tag->dn_flags;
@@ -505,7 +506,7 @@ ipfw_tags_done:
 			if (ia) {
 				/* Become a regular mutex */
 				RT_CONVERT_LOCK(ro->ro_rt);
-				IFA_ADDREF(&ia->ia_ifa);
+				ifa_addref(&ia->ia_ifa);
 			}
 			RT_UNLOCK(ro->ro_rt);
 		}
@@ -605,7 +606,7 @@ loopit:
 				error = EADDRNOTAVAIL;
 				goto bad;
 			}
-			IFA_REMREF(&src_ia->ia_ifa);
+			ifa_remref(&src_ia->ia_ifa);
 			src_ia = NULL;
 		}
 		/*
@@ -630,7 +631,7 @@ loopit:
 		}
 	}
 	if (ro->ro_rt == NULL) {
-		bzero(dst, sizeof(*dst));
+		SOCKADDR_ZERO(dst, sizeof(*dst));
 		dst->sin_family = AF_INET;
 		dst->sin_len = sizeof(*dst);
 		dst->sin_addr = pkt_dst;
@@ -641,7 +642,7 @@ loopit:
 	 */
 	if (flags & IP_ROUTETOIF) {
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 		if ((ia = ifatoia(ifa_ifwithdstaddr(sintosa(dst)))) == NULL) {
 			ia = ifatoia(ifa_ifwithnet(sintosa(dst)));
@@ -673,7 +674,7 @@ loopit:
 		 */
 		ipobf.isbroadcast = FALSE;
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 
 		/* Macro takes reference on ia */
@@ -703,7 +704,7 @@ loopit:
 			 */
 			if (ia0 != NULL &&
 			    IP_CHECK_RESTRICTIONS(ia0->ifa_ifp, ipobf)) {
-				IFA_REMREF(ia0);
+				ifa_remref(ia0);
 				ia0 = NULL;
 				error = EHOSTUNREACH;
 				if (flags & IP_OUTARGS) {
@@ -822,21 +823,21 @@ loopit:
 			OSAddAtomic(1, &ipstat.ips_noroute);
 			error = EHOSTUNREACH;
 			if (ia0 != NULL) {
-				IFA_REMREF(ia0);
+				ifa_remref(ia0);
 				ia0 = NULL;
 			}
 			goto bad;
 		}
 
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 		RT_LOCK_SPIN(ro->ro_rt);
 		ia = ifatoia(ro->ro_rt->rt_ifa);
 		if (ia != NULL) {
 			/* Become a regular mutex */
 			RT_CONVERT_LOCK(ro->ro_rt);
-			IFA_ADDREF(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 		}
 		/*
 		 * Note: ia_ifp may not be the same as rt_ifp; the latter
@@ -885,7 +886,7 @@ loopit:
 		}
 		RT_UNLOCK(ro->ro_rt);
 		if (ia0 != NULL) {
-			IFA_REMREF(ia0);
+			ifa_remref(ia0);
 			ia0 = NULL;
 		}
 	}
@@ -1445,7 +1446,7 @@ sendit:
 			goto bad;
 		}
 		if (src_ia != NULL) {
-			IFA_REMREF(&src_ia->ia_ifa);
+			ifa_remref(&src_ia->ia_ifa);
 			src_ia = NULL;
 		}
 	}
@@ -1461,14 +1462,14 @@ sendit:
 		}
 	} else {
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 		RT_LOCK_SPIN(ro->ro_rt);
 		ia = ifatoia(ro->ro_rt->rt_ifa);
 		if (ia != NULL) {
 			/* Become a regular mutex */
 			RT_CONVERT_LOCK(ro->ro_rt);
-			IFA_ADDREF(&ia->ia_ifa);
+			ifa_addref(&ia->ia_ifa);
 		}
 		ifp = ro->ro_rt->rt_ifp;
 		RT_UNLOCK(ro->ro_rt);
@@ -1554,7 +1555,7 @@ skip_ipsec:
 		    ipoa->ipoa_sotc, ipoa->ipoa_netsvctype, &dscp);
 		if (error == 0) {
 			ip->ip_tos &= IPTOS_ECN_MASK;
-			ip->ip_tos |= dscp << IPTOS_DSCP_SHIFT;
+			ip->ip_tos |= (u_char)(dscp << IPTOS_DSCP_SHIFT);
 		} else {
 			printf("%s if_dscp_for_mbuf() error %d\n", __func__, error);
 			error = 0;
@@ -1771,7 +1772,7 @@ sendchain:
 
 done:
 	if (ia != NULL) {
-		IFA_REMREF(&ia->ia_ifa);
+		ifa_remref(&ia->ia_ifa);
 		ia = NULL;
 	}
 #if IPSEC
@@ -2165,7 +2166,7 @@ ip_insertoptions(struct mbuf *m, struct mbuf *opt, int *phlen)
 	if (p->ipopt_dst.s_addr) {
 		ip->ip_dst = p->ipopt_dst;
 	}
-	if (m->m_flags & M_EXT || m->m_data - optlen < m->m_pktdat) {
+	if (m->m_flags & M_EXT || m_mtod_current(m) - optlen < m->m_pktdat) {
 		MGETHDR(n, M_DONTWAIT, MT_HEADER);      /* MAC-OK */
 		if (n == NULL) {
 			return m;
@@ -2734,7 +2735,7 @@ ip_pcbopts(int optname, struct mbuf **pcbopt, struct mbuf *m)
 	 * actual options; move other options back
 	 * and clear it when none present.
 	 */
-	if (m->m_data + m->m_len + sizeof(struct in_addr) >= &m->m_dat[MLEN]) {
+	if (m_mtod_upper_bound(m) - m_mtod_end(m) < sizeof(struct in_addr)) {
 		goto bad;
 	}
 	cnt = m->m_len;
@@ -2941,7 +2942,7 @@ ip_mloopback(struct ifnet *srcifp, struct ifnet *origifp, struct mbuf *m,
 	 * is in an mbuf cluster, so that we can safely override the IP
 	 * header portion later.
 	 */
-	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, M_COPYM_COPY_HDR);
+	copym = m_copym_mode(m, 0, M_COPYALL, M_DONTWAIT, NULL, NULL, M_COPYM_COPY_HDR);
 	if (copym != NULL && ((copym->m_flags & M_EXT) || copym->m_len < hlen)) {
 		copym = m_pullup(copym, hlen);
 	}
@@ -3088,7 +3089,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 			 */
 			ifa = (struct ifaddr *)ifa_foraddr(src.s_addr);
 			if (ifa != NULL) {
-				IFA_REMREF(ifa);
+				ifa_remref(ifa);
 				ifa = NULL;
 				ifscope = IFSCOPE_NONE;
 			}
@@ -3132,7 +3133,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 			struct sockaddr_in sin;
 			struct ifaddr *oifa = NULL;
 
-			bzero(&sin, sizeof(sin));
+			SOCKADDR_ZERO(&sin, sizeof(sin));
 			sin.sin_family = AF_INET;
 			sin.sin_len = sizeof(sin);
 			sin.sin_addr = dst;
@@ -3150,7 +3151,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 				if (ifa->ifa_ifp != rt->rt_ifp) {
 					oifa = ifa;
 					ifa = rt->rt_ifa;
-					IFA_ADDREF(ifa);
+					ifa_addref(ifa);
 					RT_UNLOCK(rt);
 				} else {
 					RT_UNLOCK(rt);
@@ -3176,8 +3177,8 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 					 * as well as the route interface
 					 * address, and use this instead.
 					 */
-					IFA_REMREF(oifa);
-					IFA_REMREF(ifa);
+					ifa_remref(oifa);
+					ifa_remref(ifa);
 					ifa = iifa;
 				} else if (!ipforwarding ||
 				    (rt->rt_flags & RTF_GATEWAY)) {
@@ -3188,7 +3189,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 					 * original one, and let the caller
 					 * do a scoped route lookup.
 					 */
-					IFA_REMREF(ifa);
+					ifa_remref(ifa);
 					ifa = oifa;
 				} else {
 					/*
@@ -3201,7 +3202,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 					 * the original one and use the route
 					 * interface address instead.
 					 */
-					IFA_REMREF(oifa);
+					ifa_remref(oifa);
 				}
 			}
 		} else if (ifa != NULL && ro->ro_rt != NULL &&
@@ -3213,9 +3214,9 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 			 * as the interface used by the known route; drop the
 			 * original one and use the route interface address.
 			 */
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 			ifa = ro->ro_rt->rt_ifa;
-			IFA_ADDREF(ifa);
+			ifa_addref(ifa);
 		}
 
 		if (ip_select_srcif_debug && ifa != NULL) {
@@ -3264,7 +3265,7 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 		 */
 		if (IN_LINKLOCAL(ntohl(dst.s_addr)) &&
 		    !IN_LINKLOCAL(ntohl(src.s_addr)) && ifa != NULL) {
-			IFA_REMREF(ifa);
+			ifa_remref(ifa);
 			ifa = NULL;
 		}
 	}
@@ -3286,10 +3287,10 @@ in_selectsrcif(struct ip *ip, struct route *ro, unsigned int ifscope)
 	    (ro->ro_rt->rt_gateway->sa_family == AF_LINK &&
 	    SDL(ro->ro_rt->rt_gateway)->sdl_alen != 0))) {
 		if (ifa != NULL) {
-			IFA_ADDREF(ifa);        /* for route */
+			ifa_addref(ifa);        /* for route */
 		}
 		if (ro->ro_srcia != NULL) {
-			IFA_REMREF(ro->ro_srcia);
+			ifa_remref(ro->ro_srcia);
 		}
 		ro->ro_srcia = ifa;
 		ro->ro_flags |= ROF_SRCIF_SELECTED;

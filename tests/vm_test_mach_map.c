@@ -557,6 +557,24 @@ T_DECL(purgeable_empty_to_volatile, "test task physical footprint when \
 	}
 }
 
+kern_return_t
+get_reusable_size(uint64_t *reusable)
+{
+	task_vm_info_data_t     ti;
+	mach_msg_type_number_t  ti_count = TASK_VM_INFO_COUNT;
+	kern_return_t kr;
+
+	kr = task_info(mach_task_self(),
+	    TASK_VM_INFO,
+	    (task_info_t) &ti,
+	    &ti_count);
+	T_QUIET;
+	T_EXPECT_MACH_SUCCESS(kr, "task_info()");
+	T_QUIET;
+	*reusable = ti.reusable;
+	return kr;
+}
+
 T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
     rethink needs madvise(MADV_FREE_HARDER)",
     T_META_RUN_CONCURRENTLY(false),
@@ -568,16 +586,22 @@ T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
 	char                    *cp;
 	vm_prot_t               curprot, maxprot;
 	int                     ret;
-	task_vm_info_data_t     ti;
-	mach_msg_type_number_t  ti_count;
 	int                     vmflags;
 	uint64_t                footprint_before, footprint_after;
+	uint64_t                reusable_before, reusable_after, reusable_expected;
+
 
 	vmsize1 = 64 * 1024; /* 64KB to madvise() */
 	vmsize2 = 32 * 1024; /* 32KB to mlock() */
 	vmsize = vmsize1 + vmsize2;
 	vmflags = VM_FLAGS_ANYWHERE;
 	VM_SET_FLAGS_ALIAS(vmflags, VM_MEMORY_MALLOC);
+
+	kr = get_reusable_size(&reusable_before);
+	if (kr) {
+		goto done;
+	}
+
 	kr = vm_allocate(mach_task_self(),
 	    &vmaddr,
 	    vmsize,
@@ -658,20 +682,13 @@ T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
 	footprint_after = task_footprint();
 	T_ASSERT_EQ(footprint_after, footprint_before - 2 * vmsize1, NULL);
 
-	ti_count = TASK_VM_INFO_COUNT;
-	kr = task_info(mach_task_self(),
-	    TASK_VM_INFO,
-	    (task_info_t) &ti,
-	    &ti_count);
-	T_QUIET;
-	T_EXPECT_MACH_SUCCESS(kr, "task_info()");
-	if (T_RESULT == T_RESULT_FAIL) {
+	kr = get_reusable_size(&reusable_after);
+	if (kr) {
 		goto done;
 	}
-
-	T_QUIET;
-	T_EXPECT_EQ(ti.reusable, 2ULL * vmsize1, "ti.reusable=%lld expected %lld",
-	    ti.reusable, (uint64_t)(2 * vmsize1));
+	reusable_expected = 2ULL * vmsize1 + reusable_before;
+	T_EXPECT_EQ(reusable_after, reusable_expected, "actual=%lld expected %lld",
+	    reusable_after, reusable_expected);
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
 	}
@@ -727,6 +744,108 @@ T_DECL(madvise_purgeable_can_reuse, "test madvise purgeable can reuse for \
 	    MADV_CAN_REUSE);
 	T_QUIET;
 	T_EXPECT_TRUE(((ret == -1) && (errno == EINVAL)), "madvise(): purgeable vm can't be adviced to reuse");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+done:
+	if (vmaddr != 0) {
+		vm_deallocate(mach_task_self(), vmaddr, vmsize);
+		vmaddr = 0;
+	}
+}
+
+static bool
+validate_memory_is_zero(
+	vm_address_t            start,
+	vm_size_t               vmsize,
+	vm_address_t           *non_zero_addr)
+{
+	for (vm_size_t sz = 0; sz < vmsize; sz += sizeof(uint64_t)) {
+		vm_address_t addr = start + sz;
+
+		if (*(uint64_t *)(addr) != 0) {
+			*non_zero_addr = addr;
+			return false;
+		}
+	}
+	return true;
+}
+
+T_DECL(madvise_zero, "test madvise zero")
+{
+	vm_address_t            vmaddr = 0;
+	vm_size_t               vmsize = PAGE_SIZE * 3;
+	vm_address_t            non_zero_addr = 0;
+	kern_return_t           kr;
+	int                     ret;
+	unsigned char           vec;
+
+	kr = vm_allocate(mach_task_self(),
+	    &vmaddr,
+	    vmsize,
+	    (VM_FLAGS_ANYWHERE |
+	    VM_MAKE_TAG(VM_MEMORY_MALLOC)));
+	T_QUIET;
+	T_EXPECT_MACH_SUCCESS(kr, "vm_allocate()");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+	memset((void *)vmaddr, 'A', vmsize);
+	ret = madvise(vmaddr, vmsize, MADV_FREE_REUSABLE);
+	T_QUIET;
+	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE_REUSABLE)");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+	memset((void *)vmaddr, 'B', PAGE_SIZE);
+	ret = madvise(vmaddr, vmsize, MADV_ZERO);
+	T_QUIET;
+	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_ZERO)");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+	T_QUIET;
+	T_EXPECT_EQ(validate_memory_is_zero(vmaddr, vmsize, &non_zero_addr), true,
+	    "madvise(%p, %llu, MADV_ZERO) returned non zero mem at %p",
+	    (void *)vmaddr, vmsize, (void *)non_zero_addr);
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+	memset((void *)vmaddr, 'C', PAGE_SIZE);
+	ret = madvise(vmaddr, vmsize, MADV_PAGEOUT);
+	T_QUIET;
+	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+
+	/* wait for the pages to be (asynchronously) compressed */
+	T_QUIET; T_LOG("waiting for first page to be paged out");
+	do {
+		ret = mincore(vmaddr, 1, &vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore(1st)");
+	} while (vec & MINCORE_INCORE);
+	T_QUIET; T_LOG("waiting for last page to be paged out");
+	do {
+		ret = mincore((vmaddr + vmsize - 1), 1, (char *)&vec);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore(last)");
+	} while (vec & MINCORE_INCORE);
+
+	ret = madvise(vmaddr, vmsize, MADV_ZERO);
+	T_QUIET;
+	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_ZERO)");
+	if (T_RESULT == T_RESULT_FAIL) {
+		goto done;
+	}
+	T_QUIET;
+	T_EXPECT_EQ(validate_memory_is_zero(vmaddr, vmsize, &non_zero_addr), true,
+	    "madvise(%p, %llu, MADV_ZERO) returned non zero mem at %p",
+	    (void *)vmaddr, vmsize, (void *)non_zero_addr);
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
 	}

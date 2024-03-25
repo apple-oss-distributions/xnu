@@ -1,4 +1,4 @@
-// Copyright 2021-2022 (c) Apple Inc.  All rights reserved.
+// Copyright 2021-2023 (c) Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
 #include <darwintest_utils.h>
@@ -16,7 +16,7 @@
 
 T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("RM"),
+	T_META_RADAR_COMPONENT_VERSION("cpu counters"),
     T_META_OWNER("mwidmann"),
     T_META_CHECK_LEAKS(false));
 
@@ -308,11 +308,16 @@ T_DECL(thread_selfusage_sanity, "ensure thread_selfusage times are sane")
 T_DECL(proc_pid_rusage_perf_levels,
 		"ensure proc_pid_rusage fills in per-perf level information",
 		REQUIRE_RECOUNT_PMCS,
-		REQUIRE_MULTIPLE_PERF_LEVELS,
+    	// REQUIRE_MULTIPLE_PERF_LEVELS, disabled due to rdar://111297938
 		SET_THREAD_BIND_BOOTARG)
 {
 	struct rusage_info_v6 before = { 0 };
 	struct rusage_info_v6 after = { 0 };
+
+	// Until rdar://111297938, manually skip the test if there aren't multiple perf levels.
+	if (perf_level_count() < 2) {
+		T_SKIP("device is not eligible for checking perf levels because it is SMP");
+	}
 
 	_get_proc_pid_rusage(getpid(), &before);
 	run_on_all_perf_levels();
@@ -340,6 +345,51 @@ T_DECL(proc_pid_rusage_perf_levels,
 		T_EXPECT_GE(after.ri_penergy_nj, before.ri_penergy_nj,
 				"penergy_nj increasing");
 	}
+}
+
+T_DECL(proc_pid_rusage_secure_perf_levels,
+		"ensure proc_pid_rusage fills in per-perf level information",
+		REQUIRE_RECOUNT_PMCS,
+		REQUIRE_MULTIPLE_PERF_LEVELS,
+		REQUIRE_EXCLAVES,
+		SET_THREAD_BIND_BOOTARG)
+{
+	int status = 0;
+	size_t status_size = sizeof(status);
+	(void)sysctlbyname("kern.exclaves_status", &status, &status_size, NULL, 0);
+	if (status != 1) {
+		T_SKIP("exclaves must be supported");
+	}
+
+	struct rusage_info_v6 before = { 0 };
+	struct rusage_info_v6 after = { 0 };
+
+	_get_proc_pid_rusage(getpid(), &before);
+	run_in_exclaves_on_all_perf_levels();
+	_get_proc_pid_rusage(getpid(), &after);
+
+	T_EXPECT_GT(after.ri_secure_time_in_system, 0ULL,
+			"secure time after running in exclaves is non-zero");
+	T_EXPECT_GT(after.ri_secure_time_in_system, 0ULL,
+			"secure time on P-cores after running in exclaves is non-zero");
+
+	T_EXPECT_GT(after.ri_secure_time_in_system, before.ri_secure_time_in_system,
+			"secure time in system increasing");
+	T_EXPECT_GT(after.ri_secure_ptime_in_system,
+			before.ri_secure_ptime_in_system,
+			"secure time in system on P-cores increasing");
+
+	uint64_t system_time_delta = after.ri_system_time - before.ri_system_time;
+	uint64_t secure_time_delta = after.ri_secure_time_in_system -
+			before.ri_secure_time_in_system;
+	T_EXPECT_LE(secure_time_delta, system_time_delta,
+			"secure time is less than system time");
+	uint64_t system_ptime_delta = after.ri_system_ptime -
+			before.ri_system_ptime;
+	uint64_t secure_ptime_delta = after.ri_secure_ptime_in_system -
+			before.ri_secure_ptime_in_system;
+	T_EXPECT_LE(secure_ptime_delta, system_ptime_delta,
+			"secure time is less than system time on P-cores");
 }
 
 static void

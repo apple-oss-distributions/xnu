@@ -271,10 +271,10 @@ __END_DECLS
 #define EJUSTRETURN     (-2)            /* don't modify regs, just return */
 
 #ifdef KERNEL_PRIVATE
-#define ERECYCLE    (-5)                /* restart lookup under heavy vnode pressure/recycling */
+#define ERECYCLE        (-5)            /* restart lookup under heavy vnode pressure/recycling */
+#define EREDRIVEOPEN    (-6)            /* redrive open */
 #endif
 #ifdef BSD_KERNEL_PRIVATE
-#define EREDRIVEOPEN    (-6)
 #define EKEEPLOOKING    (-7)
 #define EDATALESS       (-8)
 /* used for cvwait error returns to Libc */

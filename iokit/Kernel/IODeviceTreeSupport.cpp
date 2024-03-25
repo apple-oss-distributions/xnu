@@ -462,9 +462,13 @@ MakeReferenceTable( DTEntry dtEntry, bool copy )
 			}
 			assert( nameKey && data );
 
+#if DEVELOPMENT || DEBUG
+#pragma unused(kernelOnly)
+#else
 			if (kernelOnly) {
 				data->setSerializable(false);
 			}
+#endif
 
 			propTable->setObject( nameKey, data);
 			data->release();

@@ -600,17 +600,6 @@ skywalk_priv_check_cred(proc_t p, kauth_cred_t cred, int priv)
 	return sk_priv_chk(p, cred, priv);
 }
 
-int
-skywalk_priv_check_proc_cred(proc_t p, int priv)
-{
-	int ret;
-	kauth_cred_t cred = kauth_cred_proc_ref(p);
-	ret = sk_priv_chk(p, cred, priv);
-	kauth_cred_unref(&cred);
-
-	return ret;
-}
-
 #if CONFIG_MACF
 int
 skywalk_mac_system_check_proc_cred(proc_t p, const char *info_type)

@@ -46,6 +46,34 @@
 #define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
 #endif  /* ARM64_BOARD_CONFIG_T6000 */
 
+#ifdef ARM64_BOARD_CONFIG_T6020
+#include <pexpert/arm64/H14.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       24
+#define MAX_CPU_CLUSTERS               6
+#define MAX_CPU_CLUSTER_PHY_ID         10
+#define HAS_IOA                        1
+
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#define XNU_MONITOR_NVME_PPL           1 /* NVMe PPL plugin for secure pmap runtime */
+#define XNU_MONITOR_ANS2_SART          1 /* ANS2 SART plugin for secure pmap runtime */
+#define XNU_MONITOR_UAT_PPL            1 /* UAT PPL plugin for secure pmap runtime */
+#if HIBERNATION
+#define XNU_MONITOR_PPL_HIB            1 /* HMAC SHA driver exposed as a PPL plugin */
+#endif /* HIBERNATION */
+#define XNU_MONITOR_T6000_DART         1
+#define XNU_MONITOR_T8110_DART         1 /* T8110 DART plugin for secure pmap runtime */
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define XNU_CLUSTER_POWER_DOWN         1 /* Enable xnu cluster power down by default */
+#define RHODES_CLUSTER_POWERDOWN_WORKAROUND 1 /* Workaround for rdar://89107373 (Rhodes cluster power down: cannot manually power down and up a core multiple times without powering down the cluster) */
+#define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
+#define XNU_HANDLE_ECC                 1 /* This platform may support ECC error recovery */
+#define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+#endif  /* ARM64_BOARD_CONFIG_T6020 */
 
 
 
@@ -79,6 +107,18 @@
 #endif  /* ARM64_BOARD_CONFIG_T8103 */
 
 
+#ifdef ARM64_BOARD_CONFIG_T8112
+#include <pexpert/arm64/H14.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       8 /* Actually has 6 CPUs, see doc/xnu_build_consolidation.md for more info */
+#define MAX_CPU_CLUSTERS               2
+
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#define USE_APPLEARMSMP                1
+#endif  /* ARM64_BOARD_CONFIG_T8112 */
 
 
 
@@ -151,5 +191,13 @@
 #else /* CONFIG_SKIP_PRECISE_USER_KERNEL_TIME */
 #define PRECISE_USER_KERNEL_TIME 1
 #endif /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME */
+
+/**
+ * On supported hardware, debuggable builds make the HID bits read-only
+ * without locking them.  This lets people manually modify HID bits while
+ * debugging, since they can use a debugging tool to first reset the HID
+ * bits back to read/write.  However it will still catch xnu changes that
+ * accidentally write to HID bits after they've been made read-only.
+ */
 
 #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

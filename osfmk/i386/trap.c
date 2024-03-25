@@ -65,7 +65,7 @@
 
 #include <types.h>
 #include <i386/eflags.h>
-#include <i386/trap.h>
+#include <i386/trap_internal.h>
 #include <i386/pmap.h>
 #include <i386/fpu.h>
 #include <i386/panic_notify.h>
@@ -514,33 +514,40 @@ unsigned kdp_has_active_watchpoints = 0;
 static uint32_t bound_chk_violations_event;
 
 static void
-telemetry_handle_brk_trap(
+xnu_soft_trap_handle_breakpoint(
 	__unused void     *tstate,
 	uint16_t          comment)
 {
-	if (comment == CLANG_BOUND_CHK_SOFT_TRAP) {
+	if (comment == CLANG_SOFT_TRAP_BOUND_CHK) {
 		os_atomic_inc(&bound_chk_violations_event, relaxed);
 	}
 }
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
     .type                = KERNEL_BRK_TYPE_CLANG,
-    .base                = CLANG_TRAPS_X86_START,
-    .max                 = CLANG_TRAPS_X86_END,
+    .base                = CLANG_X86_TRAP_START,
+    .max                 = CLANG_X86_TRAP_END,
     .options             = KERNEL_BRK_UNRECOVERABLE,
     .handle_breakpoint   = NULL);
 
-KERNEL_BRK_DESCRIPTOR_DEFINE(telemetry_desc,
+KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_soft_traps_desc,
     .type                = KERNEL_BRK_TYPE_TELEMETRY,
-    .base                = TELEMETRY_TRAPS_START,
-    .max                 = TELEMETRY_TRAPS_END,
+    .base                = XNU_SOFT_TRAP_START,
+    .max                 = XNU_SOFT_TRAP_END,
     .options             = KERNEL_BRK_RECOVERABLE | KERNEL_BRK_CORE_ANALYTICS,
-    .handle_breakpoint   = telemetry_handle_brk_trap);
+    .handle_breakpoint   = xnu_soft_trap_handle_breakpoint);
 
 KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
     .type                = KERNEL_BRK_TYPE_LIBCXX,
-    .base                = LIBCXX_TRAPS_START,
-    .max                 = LIBCXX_TRAPS_END,
+    .base                = LIBCXX_TRAP_START,
+    .max                 = LIBCXX_TRAP_END,
+    .options             = KERNEL_BRK_UNRECOVERABLE,
+    .handle_breakpoint   = NULL);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_hard_traps_desc,
+    .type                = KERNEL_BRK_TYPE_XNU,
+    .base                = XNU_HARD_TRAP_START,
+    .max                 = XNU_HARD_TRAP_END,
     .options             = KERNEL_BRK_UNRECOVERABLE,
     .handle_breakpoint   = NULL);
 

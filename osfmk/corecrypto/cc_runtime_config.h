@@ -1,4 +1,4 @@
-/* Copyright (c) (2012,2014,2015,2016,2017,2018,2019,2020) Apple Inc. All rights reserved.
+/* Copyright (c) (2012,2014-2023) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to
@@ -37,8 +37,11 @@
 #define CORECRYPTO_CC_RUNTIME_CONFIG_H_
 
 #include <corecrypto/cc_config.h>
+#include <corecrypto/cc.h>
 
 #if defined(__x86_64__) || defined(__i386__)
+
+#define CC_HAS_DIT() (0)
 
 #if CC_KERNEL
     #include <i386/cpuid.h>
@@ -110,10 +113,9 @@ _cpu_supports(uint64_t leaf, uint64_t subleaf, uint8_t cpuid_register, uint8_t b
     #define CC_HAS_BMI2() __builtin_cpu_supports("bmi2")
 #if CC_LINUX || !CC_INTERNAL_SDK
     #include <cpuid.h>
-    #include <stdbool.h>
 
 CC_INLINE bool
-_cpu_supports_rdrand()
+_cpu_supports_rdrand(void)
 {
 	unsigned int eax, ebx, ecx, edx;
 	__cpuid(1, eax, ebx, ecx, edx);
@@ -121,7 +123,7 @@ _cpu_supports_rdrand()
 }
 
 CC_INLINE bool
-_cpu_supports_adx()
+_cpu_supports_adx(void)
 {
 	unsigned int eax, ebx, ecx, edx;
 	__cpuid_count(7, 0, eax, ebx, ecx, edx);
@@ -141,13 +143,38 @@ _cpu_supports_adx()
 
 #if defined(__arm64__)
 
-#if CC_DARWIN && CC_INTERNAL_SDK
-    #include <System/arm/cpu_capabilities.h>
-    #define CC_HAS_SHA512() (_get_cpu_capabilities() & kHasARMv82SHA512)
-    #define CC_HAS_SHA3() (_get_cpu_capabilities() & kHasARMv82SHA3)
-#else
-    #define CC_HAS_SHA512() (0)
+#if CC_TXM
+
+    #define CC_HAS_SHA512() (CC_ARM_FEATURE_SHA512)
     #define CC_HAS_SHA3() (0)
+
+extern bool cc_dit_supported(void);
+    #define CC_HAS_DIT() (cc_dit_supported())
+
+#elif CC_DARWIN && CC_INTERNAL_SDK
+    #include <System/arm/cpu_capabilities.h>
+
+#if __has_feature(address_sanitizer)
+ #define CC_COMMPAGE_CPU_CAPABILITIES \
+	(*((volatile __attribute__((address_space(1))) uint64_t *)_COMM_PAGE_CPU_CAPABILITIES64))
+#else
+ #define CC_COMMPAGE_CPU_CAPABILITIES \
+	(*((volatile uint64_t *)_COMM_PAGE_CPU_CAPABILITIES64))
+#endif
+
+CC_INLINE bool
+_cpu_supports(uint64_t flag)
+{
+	return CC_COMMPAGE_CPU_CAPABILITIES & flag;
+}
+
+    #define CC_HAS_SHA512() _cpu_supports(kHasARMv82SHA512)
+    #define CC_HAS_SHA3() _cpu_supports(kHasARMv82SHA3)
+    #define CC_HAS_DIT() _cpu_supports(kHasFeatDIT)
+#else
+    #define CC_HAS_SHA512() (CC_ARM_FEATURE_SHA512)
+    #define CC_HAS_SHA3() (0)
+    #define CC_HAS_DIT() (0)
 #endif
 
 #endif // defined(__arm64__)

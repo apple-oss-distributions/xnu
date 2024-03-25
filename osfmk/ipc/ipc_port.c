@@ -324,6 +324,8 @@ ipc_port_request_alloc(
  *	Returns:
  *		KERN_SUCCESS		A request index was found.
  *		KERN_NO_SPACE		No index allocated.
+ *		KERN_INVALID_CAPABILITY A host notify registration already
+ *		                        existed
  */
 
 kern_return_t
@@ -344,6 +346,9 @@ ipc_port_request_hnotify_alloc(
 	}
 
 	base  = ipc_port_request_table_base(table);
+	if (base->ipr_hn_slot) {
+		return KERN_INVALID_CAPABILITY;
+	}
 	index = base->ipr_next;
 	if (index == 0) {
 		return KERN_NO_SPACE;
@@ -352,9 +357,10 @@ ipc_port_request_hnotify_alloc(
 	ipr = ipc_port_request_table_get(table, index);
 	assert(ipr->ipr_soright == IP_NULL);
 
+	base->ipr_hn_slot = ipr;
 	base->ipr_next = ipr->ipr_next;
-	ipr->ipr_name = IPR_HOST_NOTIFY;
 	ipr->ipr_hnotify = hnotify;
+	ipr->ipr_name = IPR_HOST_NOTIFY;
 
 	*indexp = index;
 
@@ -428,9 +434,23 @@ ipc_port_request_grow(
 		/* copy old table to new table */
 
 		if (otable != NULL) {
-			memcpy(ipc_port_request_table_base(ntable),
-			    ipc_port_request_table_base(otable),
-			    osize);
+			ipc_port_request_t obase, nbase, ohn, nhn;
+
+			obase = ipc_port_request_table_base(otable);
+			nbase = ipc_port_request_table_base(ntable);
+			memcpy(nbase, obase, osize);
+
+			/*
+			 * if there is a host-notify registration,
+			 * fixup dPAC for the registration's ipr_hnotify field,
+			 * and the ipr_hn_slot sentinel.
+			 */
+			ohn = obase->ipr_hn_slot;
+			if (ohn) {
+				nhn = nbase + (ohn - obase);
+				nhn->ipr_hnotify = ohn->ipr_hnotify;
+				nbase->ipr_hn_slot = nhn;
+			}
 		} else {
 			ocount = 1;
 			free   = 0;
@@ -596,6 +616,9 @@ ipc_port_request_cancel(
 	/* return ipr to the free list inside the table */
 	ipr->ipr_next = base->ipr_next;
 	ipr->ipr_soright = IP_NULL;
+	if (base->ipr_hn_slot == ipr) {
+		base->ipr_hn_slot = NULL;
+	}
 	base->ipr_next = index;
 
 	return request;
@@ -727,6 +750,30 @@ ipc_port_clear_receiver(
 	return reap_messages;
 }
 
+
+/*
+ *	Routine:	ipc_port_init_validate_flags
+ *	Purpose:
+ *		Validates the flag arguments for ipc_port_init
+ *		so that overlapping flags are not accidentally used together
+ */
+
+static kern_return_t
+ipc_port_init_validate_flags(ipc_port_init_flags_t flags)
+{
+	uint32_t at_most_one_flags = flags & (IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS |
+	    IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS |
+	    IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT |
+	    IPC_PORT_INIT_PROVISIONAL_REPLY);
+
+	if (at_most_one_flags & (at_most_one_flags - 1)) {
+		/* at most one of the listed flags can be set */
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_SUCCESS;
+}
+
+
 /*
  *	Routine:	ipc_port_init
  *	Purpose:
@@ -766,7 +813,7 @@ ipc_port_init(
 		task = current_task_early();
 
 		/* Strict enforcement of reply port semantics are disabled for 3p - rdar://97441265. */
-		if (task && task_get_platform_binary(task)) {
+		if (task && task_is_hardened_binary(task)) {
 			port->ip_immovable_receive = true;
 			ip_mark_reply_port(port);
 		} else {
@@ -785,6 +832,7 @@ ipc_port_init(
 
 	if (flags & IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT) {
 		ip_mark_id_prot_opt_out(port);
+		port->ip_immovable_receive = true;
 	}
 
 	port->ip_kernel_qos_override = THREAD_QOS_UNSPECIFIED;
@@ -831,6 +879,11 @@ ipc_port_alloc(
 	kern_return_t kr;
 	mach_port_type_t type = MACH_PORT_TYPE_RECEIVE;
 	mach_port_urefs_t urefs = 0;
+
+	kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 
 	if (flags & IPC_PORT_INIT_MAKE_SEND_RIGHT) {
 		type |= MACH_PORT_TYPE_SEND;
@@ -881,6 +934,11 @@ ipc_port_alloc_name(
 {
 	mach_port_type_t type = MACH_PORT_TYPE_RECEIVE;
 	mach_port_urefs_t urefs = 0;
+
+	kern_return_t kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 
 	if (flags & IPC_PORT_INIT_MAKE_SEND_RIGHT) {
 		type |= MACH_PORT_TYPE_SEND;
@@ -992,7 +1050,9 @@ ipc_port_dnnotify(
 
 	assert(!ip_active(port));
 	if (requests != NULL) {
-		ipc_port_request_t ipr = ipc_port_request_table_base(requests);
+		ipc_port_request_t ipr, base;
+
+		base = ipr = ipc_port_request_table_base(requests);
 
 		while ((ipr = ipc_port_request_table_next_elem(requests, ipr))) {
 			mach_port_name_t name = ipr->ipr_name;
@@ -1003,6 +1063,7 @@ ipc_port_dnnotify(
 			case MACH_PORT_NULL:
 				break;
 			case IPR_HOST_NOTIFY:
+				assert(base->ipr_hn_slot == ipr);
 				host_notify_cancel(ipr->ipr_hnotify);
 				break;
 			default:
@@ -2716,6 +2777,9 @@ ipc_port_importance_delta(
 	dropped = ipc_port_importance_delta_internal(port, options, &delta, &imp_task);
 
 	if (IIT_NULL == imp_task || delta == 0) {
+		if (imp_task) {
+			ipc_importance_task_release(imp_task);
+		}
 		return dropped;
 	}
 
@@ -3105,6 +3169,11 @@ ipc_port_alloc_special(
 {
 	ipc_port_t port;
 
+	kern_return_t kr = ipc_port_init_validate_flags(flags);
+	if (kr != KERN_SUCCESS) {
+		return IP_NULL;
+	}
+
 	port = ip_object_to_port(io_alloc(IOT_PORT, Z_WAITOK | Z_ZERO));
 	if (port == IP_NULL) {
 		return IP_NULL;
@@ -3453,7 +3522,7 @@ __ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port
 		return FALSE;
 	}
 
-	if (task_get_platform_binary(current_task())) {
+	if (task_is_hardened_binary(current_task())) {
 		return TRUE;
 	}
 	if (!ip_is_provisional_reply_port(reply_port)) {

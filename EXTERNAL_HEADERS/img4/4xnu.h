@@ -13,6 +13,7 @@
 
 __BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
+OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @function img4_get_manifest
@@ -37,7 +38,8 @@ OS_ASSUME_NONNULL_BEGIN
 IMG4_API_AVAILABLE_20211105
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL3
 const img4_buff_t *
-img4_get_manifest(const void *buff, size_t len, img4_buff_t *buff_storage);
+img4_get_manifest(const void *__sized_by(len) buff, size_t len,
+		img4_buff_t *buff_storage);
 #else
 #define img4_get_manifest(...) \
 		(img4if->i4if_v15.get_manifest(__VA_ARGS__))
@@ -66,12 +68,14 @@ img4_get_manifest(const void *buff, size_t len, img4_buff_t *buff_storage);
 IMG4_API_AVAILABLE_20211105
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL3
 const img4_buff_t *
-img4_get_payload(const void *buff, size_t len, img4_buff_t *buff_storage);
+img4_get_payload(const void *__sized_by(len) buff, size_t len,
+		img4_buff_t *buff_storage);
 #else
 #define img4_get_payload(...) \
 		(img4if->i4if_v15.get_payload(__VA_ARGS__))
 #endif
 
+OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END
 __END_DECLS
 

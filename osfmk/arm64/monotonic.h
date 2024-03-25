@@ -31,7 +31,7 @@
 #include <stdbool.h>
 #include <sys/cdefs.h>
 
-#if MONOTONIC
+#if CONFIG_CPU_COUNTERS
 
 #include <pexpert/arm64/board_config.h>
 
@@ -41,9 +41,9 @@ __BEGIN_DECLS
 
 extern const bool mt_core_supported;
 
-#if MONOTONIC && !CPMU_AIC_PMI
+#if !CPMU_AIC_PMI
 #define MONOTONIC_FIQ 1
-#endif /* MONOTONIC && !CPMU_AIC_PMI */
+#endif /* !CPMU_AIC_PMI */
 
 #include <stdint.h>
 
@@ -118,6 +118,6 @@ __END_DECLS
 
 #endif /* MACH_KERNEL_PRIVATE */
 
-#endif /* MONOTONIC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 #endif /* !defined(ARM64_MONOTONIC_H) */

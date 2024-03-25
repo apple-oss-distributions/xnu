@@ -95,7 +95,7 @@
 extern unsigned int vm_pageout_cleaned_fault_reactivated;
 
 #if CONFIG_FREEZE
-extern boolean_t memorystatus_freeze_enabled;
+extern bool memorystatus_freeze_enabled;
 
 struct freezer_context {
 	/*

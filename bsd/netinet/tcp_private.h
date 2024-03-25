@@ -315,6 +315,10 @@ struct tcp_info {
 	uint64_t       tcpi_ecn_capable_packets_acked;  /* Packets sent with ECT that were ACKed */
 	uint64_t       tcpi_ecn_capable_packets_marked; /* Packets sent with ECT that were marked */
 	uint64_t       tcpi_ecn_capable_packets_lost;   /* Packets sent with ECT that were lost */
+
+#define TCPINFO_HAS_LIMITED_TIME 1
+	uint64_t       tcpi_flow_control_total_time;
+	uint64_t       tcpi_rcvwnd_limited_total_time;
 };
 
 struct tcp_measure_bw_burst {

@@ -37,6 +37,34 @@ T_DECL(TestRandomGuid, "Test random guid")
 	ReleaseOptionsRef(optionsRef);
 }
 
+// Test NVRAM delete with return key works
+T_DECL(TestDelWRet, "Test NVRAM delete with return key")
+{
+	char * varToTest = "testDelWRet";
+
+	optionsRef = CreateOptionsRef();
+
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_DEL_RET, varToTest, NULL, KERN_SUCCESS, optionsRef);
+	TestVarOp(OP_GET, varToTest, NULL, KERN_FAILURE, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
+}
+
+// Test NVRAM Sync
+T_DECL(TestNVRAMSync, "Test NVRAM Sync")
+{
+	optionsRef = CreateOptionsRef();
+
+	// NVRAM sync using kIONVRAMSyncNowPropertyKey have a 15min rate limit.
+	// However, we do not return an error for that not being able to sync due to the rate limit
+	TestVarOp(OP_SYN, kIONVRAMSyncNowPropertyKey, NULL, KERN_SUCCESS, optionsRef);
+	// kIONVRAMForceSyncNowPropertyKey bypasses the rate limit
+	TestVarOp(OP_SYN, kIONVRAMForceSyncNowPropertyKey, NULL, KERN_SUCCESS, optionsRef);
+
+	ReleaseOptionsRef(optionsRef);
+}
+
 #if !(__x86_64__)
 #if (TARGET_OS_OSX)
 // Test that writing of system variables without system entitlement should fail

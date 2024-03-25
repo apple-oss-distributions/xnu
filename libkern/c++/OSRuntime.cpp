@@ -55,6 +55,9 @@ __BEGIN_DECLS
 #include <san/kasan.h>
 #endif
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
 
 #if PRAGMA_MARK
 #pragma mark Constants &c.
@@ -109,6 +112,9 @@ __pure_virtual( void )
 
 extern lck_grp_t * IOLockGroup;
 extern kmod_info_t g_kernel_kmod_info;
+#if CONFIG_SPTM
+extern kmod_info_t g_sptm_kmod_info, g_txm_kmod_info;
+#endif /* CONFIG_SPTM */
 
 enum {
 	kOSSectionNamesDefault     = 0,
@@ -134,6 +140,10 @@ OSlibkernInit(void)
 	OSMetaClassBase::initialize();
 
 	g_kernel_kmod_info.address = (vm_address_t) &_mh_execute_header;
+#if CONFIG_SPTM
+	g_sptm_kmod_info.address = (vm_offset_t)SPTMArgs->debug_header->image[DEBUG_HEADER_ENTRY_SPTM];
+	g_txm_kmod_info.address = (vm_offset_t)SPTMArgs->debug_header->image[DEBUG_HEADER_ENTRY_TXM];
+#endif /* CONFIG_SPTM */
 
 	if (kOSReturnSuccess != OSRuntimeInitializeCPP(NULL)) {
 		// &g_kernel_kmod_info, gOSSectionNamesStandard, 0, 0)) {

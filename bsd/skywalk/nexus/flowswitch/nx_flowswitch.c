@@ -774,6 +774,7 @@ nx_fsw_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 	    nxdom_prov->nxdom_prov_dom->nxdom_type &&
 	    nx->nx_prov->nxprov_params->nxp_type == NEXUS_TYPE_FLOW_SWITCH);
 	ASSERT(!(ch->ch_flags & CHANF_HOST));
+	ASSERT(!(ch->ch_flags & CHANF_KERNEL));
 
 	if (port != NEXUS_PORT_ANY && port >= NXDOM_MAX(NX_DOM(nx), ports)) {
 		err = EDOM;
@@ -781,29 +782,11 @@ nx_fsw_dom_connect(struct kern_nexus_domain_provider *nxdom_prov,
 	}
 
 	chr->cr_real_endpoint = chr->cr_endpoint = CH_ENDPOINT_FLOW_SWITCH;
-	if (ch->ch_flags & CHANF_KERNEL) {
-		uuid_string_t uuidstr;
-		ASSERT(!uuid_is_null(chr->cr_spec_uuid));
-		(void) snprintf(chr->cr_name, sizeof(chr->cr_name),
-		    "%s_%llu:%s", NX_FSW_NAME, nx->nx_id,
-		    sk_uuid_unparse(chr->cr_spec_uuid, uuidstr));
-		chr->cr_ring_set = RING_SET_DEFAULT;
-		if (chr->cr_mode & CHMODE_HOST) {
-			os_atomic_or(&ch->ch_flags, CHANF_HOST, relaxed);
-		}
-		err = na_connect_spec(nx, ch, chr, p);
-	} else {
-		ASSERT(port != NEXUS_PORT_ANY);
-		if (chr->cr_mode & CHMODE_HOST) {
-			/* not allowed unless kernel (special) channel */
-			err = EINVAL;
-			goto done;
-		}
-		(void) snprintf(chr->cr_name, sizeof(chr->cr_name),
-		    "%s_%llu:%u", NX_FSW_NAME, nx->nx_id, port);
-		chr->cr_ring_set = RING_SET_DEFAULT;
-		err = na_connect(nx, ch, chr, ch0, nxb, p);
-	}
+	ASSERT(port != NEXUS_PORT_ANY);
+	(void) snprintf(chr->cr_name, sizeof(chr->cr_name),
+	    "%s_%llu:%u", NX_FSW_NAME, nx->nx_id, port);
+	chr->cr_ring_set = RING_SET_DEFAULT;
+	err = na_connect(nx, ch, chr, ch0, nxb, p);
 
 done:
 	return err;

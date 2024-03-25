@@ -632,6 +632,8 @@ __smr_enter(smr_t smr, smr_pcpu_t pcpu, smr_seq_t sleepable)
 	smr_seq_t  s_wr_seq;
 	smr_seq_t  old_seq;
 
+	assert(!ml_at_interrupt_context());
+
 	/*
 	 * It is possible to have a long delay between loading the s_wr_seq
 	 * and storing it to the percpu copy of it.
@@ -663,6 +665,7 @@ __attribute__((always_inline))
 static void
 __smr_leave(smr_pcpu_t pcpu)
 {
+	assert(!ml_at_interrupt_context());
 	/* [R2] */
 	os_atomic_store(&pcpu->c_rd_seq, SMR_SEQ_INVALID, release);
 }
@@ -1253,6 +1256,7 @@ smr_synchronize(smr_t smr)
 	smr_clock_t clk;
 
 	assert(!smr_entered(smr));
+	assert(!ml_at_interrupt_context());
 	if (smr->smr_flags & SMR_SLEEPABLE) {
 		assert(get_preemption_level() == 0);
 	}
@@ -1451,6 +1455,7 @@ smr_call(smr_t smr, smr_node_t node, vm_size_t size, smr_cb_t cb)
 	}
 
 	lock_disable_preemption_for_thread(current_thread());
+	assert(!ml_at_interrupt_context());
 
 	smrw = PERCPU_GET(smr_worker);
 	__smr_cpu_lazy_up_if_needed(smrw);

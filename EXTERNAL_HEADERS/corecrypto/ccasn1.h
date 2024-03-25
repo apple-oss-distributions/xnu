@@ -1,4 +1,4 @@
-/* Copyright (c) (2010-2012,2015-2019,2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2010-2012,2015-2019,2021,2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
  * is contained in the License.txt file distributed with corecrypto) and only to 
@@ -13,8 +13,6 @@
 #define _CORECRYPTO_CCASN1_H_
 
 #include <corecrypto/cc.h>
-#include <stdbool.h>
-#include <string.h>
 
 CC_PTRCHECK_CAPABLE_HEADER()
 
@@ -76,15 +74,11 @@ typedef const unsigned char * cc_unsafe_indexable ccoid_t;
 #define CCOID(oid) (oid)
 
 /* Returns the size of an oid including its tag and length. */
-CC_INLINE CC_PURE CC_NONNULL((1))
-size_t ccoid_size(ccoid_t oid) {
-    return 2 + CCOID(oid)[1];
-}
+CC_PURE CC_NONNULL((1))
+size_t ccoid_size(ccoid_t oid);
 
-CC_INLINE CC_PURE CC_NONNULL((1))
-const unsigned char *cc_indexable ccoid_payload(ccoid_t oid) {
-    return cc_unsafe_forge_bidi_indexable(CCOID(oid), ccoid_size(oid));
-}
+CC_PURE CC_NONNULL((1))
+const unsigned char *cc_indexable ccoid_payload(ccoid_t oid);
 
 CC_PURE
 bool ccoid_equal(ccoid_t oid1, ccoid_t oid2);

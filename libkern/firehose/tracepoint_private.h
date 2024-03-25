@@ -171,11 +171,9 @@ firehose_tracepoint_time(firehose_activity_flags_t flags)
 }
 
 #ifdef KERNEL
-__OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
-__TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
-void
-firehose_trace_metadata(firehose_stream_t stream, firehose_tracepoint_id_u ftid,
-    uint64_t stamp, const void *pubdata, size_t publen);
+bool
+os_log_encoded_metadata(firehose_tracepoint_id_u ftid, uint64_t stamp,
+    const void *pubdata, size_t publen);
 #endif
 __END_DECLS
 

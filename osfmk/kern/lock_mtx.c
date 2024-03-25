@@ -841,7 +841,7 @@ lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, lck_mtx_mode_t mode)
 		 *	(we can't take the mutex directly because we need
 		 *	the interlock to do turnstile operations on the way out).
 		 */
-		if ((state.val & ~LCK_MTX_PROFILE) == 0) {
+		if ((state.val & ~(uint64_t)LCK_MTX_PROFILE) == 0) {
 			if (!os_atomic_cmpxchgv(&lock->lck_mtx.val,
 			    state.val, state.val | LCK_MTX_ILOCK,
 			    &state.val, acquire)) {

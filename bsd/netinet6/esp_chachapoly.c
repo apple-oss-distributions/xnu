@@ -142,7 +142,7 @@ esp_chachapoly_schedule(__unused const struct esp_algorithm *algo,
 	}
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 	esp_ccp_ctx->ccp_implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 
 	if (sav->ivlen != (esp_ccp_ctx->ccp_implicit_iv ? 0 : ESP_CHACHAPOLY_IV_LEN)) {
@@ -179,7 +179,7 @@ esp_chachapoly_ivlen(const struct esp_algorithm *algo,
 	ESP_CHECK_ARG(algo);
 
 	if (sav != NULL &&
-	    ((sav->sched != NULL && ((esp_chachapoly_ctx_t)sav->sched)->ccp_implicit_iv) ||
+	    ((sav->sched_enc != NULL && ((esp_chachapoly_ctx_t)sav->sched_enc)->ccp_implicit_iv) ||
 	    ((sav->flags & SADB_X_EXT_IIV) != 0))) {
 		return 0;
 	} else {
@@ -204,7 +204,7 @@ esp_chachapoly_encrypt_finalize(struct secasvar *sav,
 		return EINVAL;
 	}
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 	rc = chacha20poly1305_finalize(&esp_ccp_ctx->ccp_ctx, tag);
 	if (rc != 0) {
 		esp_log_err("ChaChaPoly chacha20poly1305_finalize failed %d, SPI 0x%08x",
@@ -230,7 +230,7 @@ esp_chachapoly_decrypt_finalize(struct secasvar *sav,
 		return EINVAL;
 	}
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 	rc = chacha20poly1305_verify(&esp_ccp_ctx->ccp_ctx, tag);
 	if (rc != 0) {
 		esp_packet_log_err("ChaChaPoly chacha20poly1305_verify failed %d, SPI 0x%08x",
@@ -267,7 +267,7 @@ esp_chachapoly_encrypt(struct mbuf *m, // head of mbuf chain
 	ESP_CHECK_ARG(m);
 	ESP_CHECK_ARG(sav);
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 
 	if (ivlen != (esp_ccp_ctx->ccp_implicit_iv ? 0 : ESP_CHACHAPOLY_IV_LEN)) {
 		esp_log_err("ChaChaPoly Invalid ivlen %u, SPI 0x%08x",
@@ -410,7 +410,7 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 	ESP_CHECK_ARG(m);
 	ESP_CHECK_ARG(sav);
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 
 	if (ivlen != (esp_ccp_ctx->ccp_implicit_iv ? 0 : ESP_CHACHAPOLY_IV_LEN)) {
 		esp_log_err("ChaChaPoly Invalid ivlen %u, SPI 0x%08x",
@@ -540,7 +540,7 @@ esp_chachapoly_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 	VERIFY(input_data_len != 0);
 	VERIFY(output_data_len >= input_data_len);
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 	ESP_CHECK_ARG(esp_ccp_ctx);
 
 	rc = chacha20poly1305_reset(&esp_ccp_ctx->ccp_ctx);
@@ -629,7 +629,7 @@ esp_chachapoly_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 	VERIFY(input_data_len > 0);
 	VERIFY(output_data_len >= input_data_len);
 
-	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched;
+	esp_ccp_ctx = (esp_chachapoly_ctx_t)sav->sched_enc;
 
 	rc = chacha20poly1305_reset(&esp_ccp_ctx->ccp_ctx);
 	if (rc != 0) {

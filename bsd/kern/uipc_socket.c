@@ -634,9 +634,7 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	struct protosw *prp;
 	struct socket *so;
 	int error = 0;
-#if defined(XNU_TARGET_OS_OSX)
 	pid_t rpid = -1;
-#endif
 
 #if TCPDEBUG
 	extern int tcpconsdebug;
@@ -717,39 +715,33 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	TAILQ_INIT(&so->so_incomp);
 	TAILQ_INIT(&so->so_comp);
 	so->so_type = (short)type;
+	so->so_family = prp->pr_domain->dom_family;
+	so->so_protocol = prp->pr_protocol;
 	so->last_upid = proc_uniqueid(p);
 	so->last_pid = proc_pid(p);
 	proc_getexecutableuuid(p, so->last_uuid, sizeof(so->last_uuid));
 	proc_pidoriginatoruuid(so->so_vuuid, sizeof(so->so_vuuid));
+
+	so->so_rpid = -1;
+	uuid_clear(so->so_ruuid);
 
 	if (ep != PROC_NULL && ep != p) {
 		so->e_upid = proc_uniqueid(ep);
 		so->e_pid = proc_pid(ep);
 		proc_getexecutableuuid(ep, so->e_uuid, sizeof(so->e_uuid));
 		so->so_flags |= SOF_DELEGATED;
-#if defined(XNU_TARGET_OS_OSX)
 		if (ep->p_responsible_pid != so->e_pid) {
 			rpid = ep->p_responsible_pid;
+			so->so_rpid = rpid;
+			proc_getresponsibleuuid(ep, so->so_ruuid, sizeof(so->so_ruuid));
 		}
-#endif
 	}
 
-#if defined(XNU_TARGET_OS_OSX)
 	if (rpid < 0 && p->p_responsible_pid != so->last_pid) {
 		rpid = p->p_responsible_pid;
+		so->so_rpid = rpid;
+		proc_getresponsibleuuid(p, so->so_ruuid, sizeof(so->so_ruuid));
 	}
-
-	so->so_rpid = -1;
-	uuid_clear(so->so_ruuid);
-	if (rpid >= 0) {
-		proc_t rp = proc_find(rpid);
-		if (rp != PROC_NULL) {
-			proc_getexecutableuuid(rp, so->so_ruuid, sizeof(so->so_ruuid));
-			so->so_rpid = rpid;
-			proc_rele(rp);
-		}
-	}
-#endif
 
 	so->so_cred = kauth_cred_proc_ref(p);
 	if (!suser(kauth_cred_get(), NULL)) {
@@ -1841,7 +1833,7 @@ soconnectxlocked(struct socket *so, struct sockaddr *src,
 		 * For TCP, check if destination address is a tracker and mark the socket accordingly
 		 * (only if it hasn't been marked yet).
 		 */
-		if (so->so_proto && so->so_proto->pr_type == SOCK_STREAM && so->so_proto->pr_protocol == IPPROTO_TCP &&
+		if (SOCK_CHECK_TYPE(so, SOCK_STREAM) && SOCK_CHECK_PROTO(so, IPPROTO_TCP) &&
 		    !(so->so_flags1 & SOF1_KNOWN_TRACKER)) {
 			if (tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, dst, &metadata) == 0) {
 				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER) {
@@ -3714,8 +3706,7 @@ dontblock:
 			break;
 		}
 
-		if (m->m_type != MT_OOBDATA && m->m_type != MT_DATA &&
-		    m->m_type != MT_HEADER) {
+		if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 			break;
 		}
 		/*
@@ -4310,8 +4301,7 @@ dontblock:
 	 * Link the packet to the list
 	 */
 	if (m != NULL) {
-		if (m->m_type != MT_OOBDATA && m->m_type != MT_DATA &&
-		    m->m_type != MT_HEADER) {
+		if (!m_has_mtype(m, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 			panic("%s: m %p m_type %d != MT_DATA", __func__, m, m->m_type);
 		}
 		m->m_nextpkt = NULL;
@@ -4407,10 +4397,10 @@ so_statistics_event_to_nstat_event(int64_t *input_options,
 	case SO_STATISTICS_EVENT_EXIT_CELLFALLBACK:
 		*nstat_event = NSTAT_EVENT_SRC_EXIT_CELLFALLBACK;
 		break;
-#if (DEBUG || DEVELOPMENT)
-	case SO_STATISTICS_EVENT_RESERVED_1:
-		*nstat_event = NSTAT_EVENT_SRC_RESERVED_1;
+	case SO_STATISTICS_EVENT_ATTRIBUTION_CHANGE:
+		*nstat_event = NSTAT_EVENT_SRC_ATTRIBUTION_CHANGE;
 		break;
+#if (DEBUG || DEVELOPMENT)
 	case SO_STATISTICS_EVENT_RESERVED_2:
 		*nstat_event = NSTAT_EVENT_SRC_RESERVED_2;
 		break;
@@ -5919,9 +5909,7 @@ integer:
 				pkt_total = 0;
 				m1 = so->so_rcv.sb_mb;
 				while (m1 != NULL) {
-					if (m1->m_type == MT_DATA ||
-					    m1->m_type == MT_HEADER ||
-					    m1->m_type == MT_OOBDATA) {
+					if (m_has_mtype(m1, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 						pkt_total += m1->m_len;
 					}
 					m1 = m1->m_next;

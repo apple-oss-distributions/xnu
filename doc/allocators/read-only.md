@@ -1,5 +1,7 @@
 # The Read-Only Allocator
 
+Allocating read-only data in xnu.
+
 ## Introduction
 
 The Read-Only Allocator is an extension of the zone allocator that facilitates

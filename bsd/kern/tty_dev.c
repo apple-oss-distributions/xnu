@@ -531,6 +531,8 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 	struct tty_dev_t *driver;
 	struct ptmx_ioctl *pti = pty_get_ioctl(dev, 0, &driver);
 	struct tty *tp;
+	struct tty *constty = NULL;
+	struct tty *freetp = NULL;
 
 	if (!pti) {
 		return ENXIO;
@@ -539,8 +541,19 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 	tp = pti->pt_tty;
 	tty_lock(tp);
 
+	constty = copy_constty();
+
 	if (constty == tp) {
-		constty = NULL;
+		freetp = set_constty(NULL);
+		if (freetp != NULL) {
+			if (freetp == tp) {
+				ttyfree_locked(freetp);
+			} else {
+				ttyfree(freetp);
+			}
+			freetp = NULL;
+		}
+
 
 
 		/*
@@ -549,6 +562,15 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 		 */
 		(*cdevsw[major(tp->t_dev)].d_ioctl)
 		(tp->t_dev, KMIOCDISABLCONS, NULL, 0, current_proc());
+	}
+
+	if (constty != NULL) {
+		if (constty == tp) {
+			ttyfree_locked(constty);
+		} else {
+			ttyfree(constty);
+		}
+		constty = NULL;
 	}
 
 	/*

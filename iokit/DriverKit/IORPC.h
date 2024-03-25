@@ -190,6 +190,8 @@ struct IORPCMessage {
 #pragma pack(pop)
 typedef struct IORPCMessage IORPCMessage;
 
+#ifndef KERNEL
+
 #if defined(__cplusplus)
 extern "C"
 #else
@@ -197,6 +199,8 @@ extern
 #endif
 IORPCMessage *
 IORPCMessageFromMach(IORPCMessageMach * msg, bool reply);
+
+#endif /* KERNEL */
 
 struct IORPCMessageErrorReturnContent {
 	IORPCMessage  hdr;
@@ -224,6 +228,9 @@ struct IORPC {
 	IORPCMessageMach * reply;
 	uint32_t           sendSize;
 	uint32_t           replySize;
+#ifdef KERNEL
+	IORPCMessage     * kernelContent;
+#endif /* KERNEL */
 };
 typedef struct IORPC IORPC;
 

@@ -367,7 +367,7 @@ shm_open(proc_t p, struct shm_open_args *uap, int32_t *retval)
 	 * Attempt to allocate a new fp. If unsuccessful, the fp will be
 	 * left unmodified (NULL).
 	 */
-	error = falloc(p, &fp, &indx, vfs_context_current());
+	error = falloc(p, &fp, &indx);
 	if (error) {
 		goto bad;
 	}

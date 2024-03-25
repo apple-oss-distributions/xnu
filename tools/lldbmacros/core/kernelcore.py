@@ -2,13 +2,7 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, division
-
-from builtins import range
-from builtins import object
-
 from .cvalue import value
-from .compat import valueint as int
 from . import collections as ccol
 from .caching import (
     LazyTarget,
@@ -19,7 +13,6 @@ from .caching import (
 from utils import *
 
 import lldb
-import six
 
 class UnsupportedArchitectureError(RuntimeError):
     def __init__(self, arch, msg="Unsupported architecture"):
@@ -116,7 +109,7 @@ def IterateLinkageChain(queue_head, element_type, field_name):
                 print GetCoalitionInfo(coal)
     """
 
-    if isinstance(element_type, six.string_types):
+    if isinstance(element_type, str):
         element_type = gettype(element_type)
 
     head = queue_head.GetSBValue()
@@ -139,7 +132,7 @@ def IterateCircleQueue(queue_head, element_type, field_name):
             SBValue  : an object thats of type (element_type) queue_head->next. Always a pointer object
     """
 
-    if isinstance(element_type, six.string_types):
+    if isinstance(element_type, str):
         element_type = gettype(element_type)
 
     head = queue_head.GetSBValue()
@@ -168,7 +161,7 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name, backwards=Fal
                 print page_meta
     """
 
-    if isinstance(element_ptr_type, six.string_types):
+    if isinstance(element_ptr_type, str):
         element_ptr_type = gettype(element_ptr_type)
 
     head = queue_head.GetSBValue()
@@ -204,7 +197,7 @@ def IterateSchedPriorityQueue(root, element_type, field_name):
             value  : an object thats of type (element_type). Always a pointer object
     """
 
-    if isinstance(element_type, six.string_types):
+    if isinstance(element_type, str):
         element_type = gettype(element_type)
 
     root = root.GetSBValue()
@@ -225,7 +218,7 @@ def IterateMPSCQueue(root, element_type, field_name):
             A generator does not return. It is used for iterating
             value  : an object thats of type (element_type). Always a pointer object
     """
-    if isinstance(element_type, six.string_types):
+    if isinstance(element_type, str):
         element_type = gettype(element_type)
 
     return (value(e.AddressOf()) for e in ccol.iter_mpsc_queue(
@@ -463,6 +456,7 @@ class KernelTarget(object):
 
     PAGE_PROTECTION_TYPE_NONE = 0
     PAGE_PROTECTION_TYPE_PPL = 1
+    PAGE_PROTECTION_TYPE_SPTM = 2
 
     def PhysToKVARM64(self, addr):
         if self.globals.page_protection_type <= self.PAGE_PROTECTION_TYPE_PPL:
@@ -471,6 +465,11 @@ class KernelTarget(object):
                 if (addr >= int(unsigned(ptov_table[i].pa))) and (addr < (int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].len)))):
                     return (addr - int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].va)))
         else:
+            papt_table = self.globals.libsptm_papt_ranges
+            page_size = self.globals.page_size
+            for i in range(0, self.globals.libsptm_n_papt_ranges):
+                if (addr >= int(unsigned(papt_table[i].paddr_start))) and (addr < (int(unsigned(papt_table[i].paddr_start)) + int(unsigned(papt_table[i].num_mappings) * page_size))):
+                    return (addr - int(unsigned(papt_table[i].paddr_start)) + int(unsigned(papt_table[i].papt_start)))
             raise ValueError("PA {:#x} not found in physical region lookup table".format(addr))
         return (addr - unsigned(self.globals.gPhysBase) + unsigned(self.globals.gVirtBase))
 

@@ -342,7 +342,7 @@ int     vm_debug_events = 0;
 LCK_GRP_DECLARE(vm_pageout_lck_grp, "vm_pageout");
 
 #if CONFIG_MEMORYSTATUS
-extern boolean_t memorystatus_kill_on_VM_page_shortage(void);
+extern void memorystatus_kill_on_vps_starvation(void);
 
 uint32_t vm_pageout_memorystatus_fb_factor_nr = 5;
 uint32_t vm_pageout_memorystatus_fb_factor_dr = 2;
@@ -2812,7 +2812,7 @@ vps_switch_object(vm_page_t m, vm_object_t m_object, vm_object_t *object, int pa
  */
 static void
 vps_deal_with_throttled_queues(vm_page_t m, vm_object_t *object, uint32_t *vm_pageout_inactive_external_forced_reactivate_limit,
-    int *delayed_unlock, boolean_t *force_anonymous, __unused boolean_t is_page_from_bg_q)
+    boolean_t *force_anonymous, __unused boolean_t is_page_from_bg_q)
 {
 	struct  vm_pageout_queue *eq;
 	vm_object_t cur_object = VM_OBJECT_NULL;
@@ -2869,38 +2869,13 @@ vps_deal_with_throttled_queues(vm_page_t m, vm_object_t *object, uint32_t *vm_pa
 			/*
 			 * Possible deadlock scenario so request jetsam action
 			 */
-
-			assert(cur_object);
-			vm_object_unlock(cur_object);
-
-			cur_object = VM_OBJECT_NULL;
-
-			/*
-			 * VM pageout scan needs to know we have dropped this lock and so set the
-			 * object variable we got passed in to NULL.
-			 */
-			*object = VM_OBJECT_NULL;
-
-			vm_page_unlock_queues();
-
-			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_START,
+			memorystatus_kill_on_vps_starvation();
+			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_NONE,
 			    vm_page_active_count, vm_page_inactive_count, vm_page_free_count, vm_page_free_count);
-
-			/* Kill first suitable process. If this call returned FALSE, we might have simply purged a process instead. */
-			if (memorystatus_kill_on_VM_page_shortage() == TRUE) {
-				VM_PAGEOUT_DEBUG(vm_pageout_inactive_external_forced_jetsam_count, 1);
-			}
-
-			VM_DEBUG_CONSTANT_EVENT(vm_pageout_jetsam, VM_PAGEOUT_JETSAM, DBG_FUNC_END,
-			    vm_page_active_count, vm_page_inactive_count, vm_page_free_count, vm_page_free_count);
-
-			vm_page_lock_queues();
-			*delayed_unlock = 1;
 		}
 #else /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
 
 #pragma unused(vm_pageout_inactive_external_forced_reactivate_limit)
-#pragma unused(delayed_unlock)
 
 		*force_anonymous = TRUE;
 #endif /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
@@ -3691,7 +3666,7 @@ throttle_inactive:
 		}
 		if (inactive_throttled == TRUE) {
 			vps_deal_with_throttled_queues(m, &object, &vm_pageout_inactive_external_forced_reactivate_limit,
-			    &delayed_unlock, &force_anonymous, page_from_bg_q);
+			    &force_anonymous, page_from_bg_q);
 
 			inactive_burst_count = 0;
 
@@ -5804,6 +5779,7 @@ vm_object_upl_request(
 	vm_page_t               alias_page = NULL;
 	int                     refmod_state = 0;
 	vm_object_t             last_copy_object;
+	uint32_t                last_copy_version;
 	struct  vm_page_delayed_work    dw_array;
 	struct  vm_page_delayed_work    *dwp, *dwp_start;
 	bool                    dwp_finish_ctx = TRUE;
@@ -5895,19 +5871,21 @@ vm_object_upl_request(
 		upl->map_object = object;
 	} else {
 		upl->map_object = vm_object_allocate(size);
+		vm_object_lock(upl->map_object);
 		/*
 		 * No neeed to lock the new object: nobody else knows
 		 * about it yet, so it's all ours so far.
 		 */
 		upl->map_object->shadow = object;
-		upl->map_object->pageout = TRUE;
-		upl->map_object->can_persist = FALSE;
+		VM_OBJECT_SET_PAGEOUT(upl->map_object, TRUE);
+		VM_OBJECT_SET_CAN_PERSIST(upl->map_object, FALSE);
 		upl->map_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 		upl->map_object->vo_shadow_offset = offset;
 		upl->map_object->wimg_bits = object->wimg_bits;
 		assertf(page_aligned(upl->map_object->vo_shadow_offset),
 		    "object %p shadow_offset 0x%llx",
 		    upl->map_object, upl->map_object->vo_shadow_offset);
+		vm_object_unlock(upl->map_object);
 
 		alias_page = vm_page_grab_fictitious(TRUE);
 
@@ -5965,6 +5943,7 @@ vm_object_upl_request(
 	 * remember which copy object we synchronized with
 	 */
 	last_copy_object = object->vo_copy;
+	last_copy_version = object->vo_copy_version;
 	entry = 0;
 
 	xfer_size = size;
@@ -6194,7 +6173,9 @@ check_busy:
 				}
 			}
 		} else {
-			if ((cntrl_flags & UPL_WILL_MODIFY) && object->vo_copy != last_copy_object) {
+			if ((cntrl_flags & UPL_WILL_MODIFY) &&
+			    (object->vo_copy != last_copy_object ||
+			    object->vo_copy_version != last_copy_version)) {
 				/*
 				 * Honor copy-on-write obligations
 				 *
@@ -6234,6 +6215,7 @@ check_busy:
 				 * remember the copy object we synced with
 				 */
 				last_copy_object = object->vo_copy;
+				last_copy_version = object->vo_copy_version;
 			}
 			dst_page = vm_page_lookup(object, dst_offset);
 
@@ -6681,6 +6663,7 @@ vm_map_create_upl(
 	vm_object_offset_t      local_entry_offset;
 	vm_object_offset_t      offset_in_mapped_page;
 	boolean_t               release_map = FALSE;
+
 
 start_with_map:
 
@@ -7137,7 +7120,7 @@ REDISCOVER_ENTRY:
 			    btref_get(__builtin_frame_address(0), 0));
 		}
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
-		local_object->true_share = TRUE;
+		VM_OBJECT_SET_TRUE_SHARE(local_object, TRUE);
 		if (local_object->copy_strategy ==
 		    MEMORY_OBJECT_COPY_SYMMETRIC) {
 			local_object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
@@ -7285,8 +7268,8 @@ process_upl_to_enter:
 		vm_object_lock(upl->map_object);
 
 		upl->map_object->shadow = object;
-		upl->map_object->pageout = TRUE;
-		upl->map_object->can_persist = FALSE;
+		VM_OBJECT_SET_PAGEOUT(upl->map_object, TRUE);
+		VM_OBJECT_SET_CAN_PERSIST(upl->map_object, FALSE);
 		upl->map_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 		upl->map_object->vo_shadow_offset = upl_adjusted_offset(upl, PAGE_MASK) - object->paging_offset;
 		assertf(page_aligned(upl->map_object->vo_shadow_offset),
@@ -9401,7 +9384,7 @@ vm_object_iopl_request(
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 
 		vm_object_lock_assert_exclusive(object);
-		object->true_share = TRUE;
+		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 
 		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 			object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;

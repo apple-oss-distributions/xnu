@@ -123,10 +123,13 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_LIBIGNITION 35
 #define OS_REASON_BOOTMOUNT 36
 
+
+#define OS_REASON_REALITYKIT 38
+
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_BOOTMOUNT
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_REALITYKIT
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 
@@ -267,6 +270,8 @@ int terminate_with_payload(int pid, uint32_t reason_namespace, uint64_t reason_c
 #define GUARD_REASON_VNODE       1
 #define GUARD_REASON_VIRT_MEMORY 2
 #define GUARD_REASON_MACH_PORT   3
+#define GUARD_REASON_EXCLAVES    4
+#define GUARD_REASON_JIT         5
 
 __END_DECLS
 

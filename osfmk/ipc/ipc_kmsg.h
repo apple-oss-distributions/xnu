@@ -178,7 +178,6 @@ typedef struct {
  *	The size of the kernel message buffers that will be cached.
  *	IKM_SAVED_KMSG_SIZE includes overhead; IKM_SAVED_MSG_SIZE doesn't.
  */
-extern zone_t ipc_kmsg_zone;
 #define IKM_SAVED_KMSG_SIZE     256
 #define IKM_SAVED_MSG_SIZE      (IKM_SAVED_KMSG_SIZE - sizeof(struct ipc_kmsg))
 
@@ -443,9 +442,8 @@ extern ipc_port_t ipc_kmsg_get_voucher_port(
 extern void ipc_kmsg_clear_voucher_port(
 	ipc_kmsg_t              kmsg);
 
-extern void ipc_kmsg_validate_sig(
-	ipc_kmsg_t              kmsg,
-	bool                    partial);
+extern void ipc_kmsg_validate_partial_sig(
+	ipc_kmsg_t              kmsg);
 
 #define moved_provisional_reply_port(port_type, port) \
 	(port_type == MACH_MSG_TYPE_MOVE_RECEIVE && IP_VALID(port) && ip_is_provisional_reply_port(port)) \

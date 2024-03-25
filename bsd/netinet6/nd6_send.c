@@ -86,9 +86,6 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 	int error;
 	char *buffer;
 	u_int16_t u16;
-#if CONFIG_MACF
-	kauth_cred_t cred;
-#endif
 
 	namelen = arg2;
 	if (namelen != 0) {
@@ -104,9 +101,8 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 	}
 
 #if CONFIG_MACF
-	cred = kauth_cred_proc_ref(current_proc());
-	error = mac_system_check_info(cred, "net.inet6.send.cga_parameters");
-	kauth_cred_unref(&cred);
+	error = mac_system_check_info(current_cached_proc_cred(req->p),
+	    "net.inet6.send.cga_parameters");
 	if (error != 0) {
 		log(LOG_ERR, "%s: mac_system_check_info denied.\n", __func__);
 		return EPERM;

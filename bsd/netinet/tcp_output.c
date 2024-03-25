@@ -885,11 +885,11 @@ again:
 			}
 		}
 		if (ia != NULL) {
-			IFA_REMREF(&ia->ia_ifa);
+			ifa_remref(&ia->ia_ifa);
 		}
 
 		if (ia6 != NULL) {
-			IFA_REMREF(&ia6->ia_ifa);
+			ifa_remref(&ia6->ia_ifa);
 		}
 
 		/*
@@ -1263,8 +1263,7 @@ after_sack_rexmit:
 	 *	   larger than sent but unacknowledged data in send buffer.
 	 */
 	if (!INP_WAIT_FOR_IF_FEEDBACK(inp) && !IN_FASTRECOVERY(tp) &&
-	    (so->so_snd.sb_flags & (SB_AUTOSIZE | SB_TRIM)) == SB_AUTOSIZE &&
-	    tcp_cansbgrow(&so->so_snd)) {
+	    (so->so_snd.sb_flags & (SB_AUTOSIZE | SB_TRIM)) == SB_AUTOSIZE) {
 		if ((tp->snd_wnd / 4 * 5) >= so->so_snd.sb_hiwat &&
 		    so->so_snd.sb_cc >= (so->so_snd.sb_hiwat / 8 * 7) &&
 		    sendwin >= (so->so_snd.sb_cc - (tp->snd_nxt - tp->snd_una))) {
@@ -1503,6 +1502,24 @@ after_sack_rexmit:
 		 */
 		if (!INP_WAIT_FOR_IF_FEEDBACK(inp) ||
 		    tp->t_state != TCPS_ESTABLISHED) {
+			if (off + len == tp->snd_wnd) {
+				/* We are limited by the receiver's window... */
+				if (tp->t_rcvwnd_limited_start_time == 0) {
+					tp->t_rcvwnd_limited_start_time = net_uptime_us();
+				}
+			} else {
+				/* We are no more limited by the receiver's window... */
+				if (tp->t_rcvwnd_limited_start_time != 0) {
+					uint64_t now = net_uptime_us();
+
+					ASSERT(now >= tp->t_rcvwnd_limited_start_time);
+
+					tp->t_rcvwnd_limited_total_time += (now - tp->t_rcvwnd_limited_start_time);
+
+					tp->t_rcvwnd_limited_start_time = 0;
+				}
+			}
+
 			if (len >= tp->t_maxseg) {
 				goto send;
 			}
@@ -2404,8 +2421,21 @@ send:
 			}
 #endif /* MPTCP */
 			if (m != NULL) {
-				m->m_next = m_copym_mode(so->so_snd.sb_mb,
-				    off, (int)len, M_DONTWAIT, copymode);
+				if (so->so_snd.sb_flags & SB_SENDHEAD) {
+					VERIFY(so->so_snd.sb_flags & SB_SENDHEAD);
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+
+					m->m_next = m_copym_mode(so->so_snd.sb_mb,
+					    off, (int)len, M_DONTWAIT,
+					    &so->so_snd.sb_sendhead,
+					    &so->so_snd.sb_sendoff, copymode);
+
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+				} else {
+					m->m_next = m_copym_mode(so->so_snd.sb_mb,
+					    off, (int)len, M_DONTWAIT,
+					    NULL, NULL, copymode);
+				}
 				if (m->m_next == NULL) {
 					(void) m_free(m);
 					error = ENOBUFS;
@@ -2427,9 +2457,21 @@ send:
 				 * it acted on to fullfill the current request,
 				 * whether a valid 'hint' was passed in or not.
 				 */
-				if ((m = m_copym_with_hdrs(so->so_snd.sb_mb,
-				    off, len, M_DONTWAIT, NULL, NULL,
-				    copymode)) == NULL) {
+				if (so->so_snd.sb_flags & SB_SENDHEAD) {
+					VERIFY(so->so_snd.sb_flags & SB_SENDHEAD);
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+
+					m = m_copym_with_hdrs(so->so_snd.sb_mb,
+					    off, len, M_DONTWAIT, &so->so_snd.sb_sendhead,
+					    &so->so_snd.sb_sendoff, copymode);
+
+					VERIFY(so->so_snd.sb_sendoff <= so->so_snd.sb_cc);
+				} else {
+					m = m_copym_with_hdrs(so->so_snd.sb_mb,
+					    off, len, M_DONTWAIT, NULL,
+					    NULL, copymode);
+				}
+				if (m == NULL) {
 					error = ENOBUFS;
 					goto out;
 				}
@@ -3016,7 +3058,6 @@ timer:
 	}
 
 	if (sendalot == 0 || (tp->t_state != TCPS_ESTABLISHED) ||
-	    (tp->snd_cwnd <= (tp->snd_wnd / 8)) ||
 	    (tp->t_flags & TF_ACKNOW) ||
 	    (tp->t_flagsext & TF_FORCE) ||
 	    tp->t_lastchain >= tcp_packet_chaining) {

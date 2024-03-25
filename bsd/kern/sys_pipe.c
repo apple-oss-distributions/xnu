@@ -405,7 +405,7 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 	 * this is what we've always supported..
 	 */
 
-	error = falloc(p, &rf, &retval[0], vfs_context_current());
+	error = falloc(p, &rf, &retval[0]);
 	if (error) {
 		goto freepipes;
 	}
@@ -413,7 +413,7 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 	rf->f_ops = &pipeops;
 	fp_set_data(rf, rpipe);
 
-	error = falloc(p, &wf, &retval[1], vfs_context_current());
+	error = falloc(p, &wf, &retval[1]);
 	if (error) {
 		fp_free(p, retval[0], rf);
 		goto freepipes;

@@ -42,6 +42,7 @@
 
 #include <kern/thread.h>
 #include <i386/thread.h>
+#include <i386/trap_internal.h>
 #include <vm/vm_map.h>
 #include <i386/pmap.h>
 

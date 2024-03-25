@@ -2,11 +2,6 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from __future__ import absolute_import, division, print_function
-
-from builtins import hex
-from builtins import range
-
 from xnu import *
 import sys, shlex
 from utils import *
@@ -1139,7 +1134,7 @@ def TaskForPmap(cmd_args=None):
         Syntax: (lldb) taskforpmap <pmap>
             Multiple -v's can be specified for increased verbosity
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to taskforpmap.")
     pmap = kern.GetValueFromAddress(cmd_args[0], 'pmap_t')
     task = TaskForPmapHelper(pmap)
@@ -1271,7 +1266,7 @@ def ShowProcRefs(cmd_args=None, cmd_options={}, O=None):
               there's no way to pair references with drop-refs in the current infrastructure.
         Usage: showprocrefs <proc>
     """
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
          raise ArgumentError("No arguments passed")
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
@@ -1396,7 +1391,7 @@ def SwitchToRegs(cmd_args=None):
         Note: This command ONLY works for ARM based kernel setup.
     """
     
-    if cmd_args == None or len(cmd_args) < 1:
+    if cmd_args is None or len(cmd_args) < 1:
         raise ArgumentError("No arguments passed")
 
     lldb_process = LazyTarget.GetProcess()
@@ -1482,8 +1477,8 @@ def GetFullBackTrace(frame_addr, verbosity = vHUMAN, prefix = ""):
     bt_count = 0
     frame_ptr = frame_addr
     previous_frame_ptr = 0
-    # <rdar://problem/12677290> lldb unable to find symbol for _mh_execute_header
-    mh_execute_addr = int(lldb_run_command('p/x (uintptr_t *)&_mh_execute_header').split('=')[-1].strip(), 16)
+    mh_execute_addr = kern.GetLoadAddressForSymbol('_mh_execute_header')
+
     while frame_ptr and frame_ptr != previous_frame_ptr and bt_count < 128:
         if (not kern.arch.startswith('arm') and frame_ptr < mh_execute_addr) or (kern.arch.startswith('arm') and frame_ptr > mh_execute_addr):
             break

@@ -362,7 +362,9 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	bool            task_locked = false;
 
 	if (current_proc() != core_proc) {
-		panic("coredump() called against proc that is not current_proc: %p", core_proc);
+		COREDUMPLOG("Skipping coredump (called against proc that is not current_proc: %p)", core_proc);
+		error = EFAULT;
+		goto out2;
 	}
 
 	if (do_coredump == 0 ||         /* Not dumping at all */

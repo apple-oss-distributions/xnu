@@ -1363,8 +1363,7 @@ mach_vm_remap_kernel_helper(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_kernel_flags_set_vmflags(&vmk_flags,
-	    flags | VM_FLAGS_RETURN_DATA_ADDR, tag);
+	vm_map_kernel_flags_set_vmflags(&vmk_flags, flags, tag);
 
 	static_assert(sizeof(mach_vm_offset_t) == sizeof(vm_map_address_t));
 
@@ -1798,6 +1797,7 @@ mach_vm_behavior_set(
 	case VM_BEHAVIOR_REUSABLE:
 	case VM_BEHAVIOR_REUSE:
 	case VM_BEHAVIOR_CAN_REUSE:
+	case VM_BEHAVIOR_ZERO:
 		/*
 		 * Align to the hardware page size, to allow
 		 * malloc() to maximize the amount of re-usability,
@@ -2650,7 +2650,7 @@ mach_make_memory_entry_internal(
 	}
 
 	if (__improbable(vm_map_range_overflows(target_map, offset, *size))) {
-		return KERN_INVALID_ADDRESS;
+		return KERN_INVALID_ARGUMENT;
 	}
 
 	original_protections = permission & VM_PROT_ALL;
@@ -2751,6 +2751,7 @@ mach_make_memory_entry_internal(
 
 		object = vm_object_allocate(map_size);
 		assert(object != VM_OBJECT_NULL);
+		vm_object_lock(object);
 
 		/*
 		 * XXX
@@ -2762,7 +2763,7 @@ mach_make_memory_entry_internal(
 		 * shadow objects either...
 		 */
 		object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-		object->true_share = TRUE;
+		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 
 		owner = current_task();
 		if ((permission & MAP_MEM_PURGABLE) ||
@@ -2778,13 +2779,14 @@ mach_make_memory_entry_internal(
 			if (permission & MAP_MEM_PURGABLE) {
 				if (!(permission & VM_PROT_WRITE)) {
 					/* if we can't write, we can't purge */
+					vm_object_unlock(object);
 					vm_object_deallocate(object);
 					kr = KERN_INVALID_ARGUMENT;
 					goto make_mem_done;
 				}
-				object->purgable = VM_PURGABLE_NONVOLATILE;
+				VM_OBJECT_SET_PURGABLE(object, VM_PURGABLE_NONVOLATILE);
 				if (permission & MAP_MEM_PURGABLE_KERNEL_ONLY) {
-					object->purgeable_only_by_kernel = TRUE;
+					VM_OBJECT_SET_PURGEABLE_ONLY_BY_KERNEL(object, TRUE);
 				}
 #if __arm64__
 				if (owner->task_legacy_footprint) {
@@ -2797,9 +2799,7 @@ mach_make_memory_entry_internal(
 					owner = kernel_task;
 				}
 #endif /* __arm64__ */
-				vm_object_lock(object);
 				vm_purgeable_nonvolatile_enqueue(object, owner);
-				vm_object_unlock(object);
 				/* all memory in this named entry is "owned" */
 				fully_owned = true;
 			}
@@ -2813,7 +2813,6 @@ mach_make_memory_entry_internal(
 			if (vmne_kflags.vmnekf_ledger_no_footprint) {
 				ledger_flags |= VM_LEDGER_FLAG_NO_FOOTPRINT;
 			}
-			vm_object_lock(object);
 			object->vo_ledger_tag = vmne_kflags.vmnekf_ledger_tag;
 			kr = vm_object_ownership_change(
 				object,
@@ -2821,8 +2820,8 @@ mach_make_memory_entry_internal(
 				owner, /* new owner */
 				ledger_flags,
 				FALSE); /* task_objq locked? */
-			vm_object_unlock(object);
 			if (kr != KERN_SUCCESS) {
+				vm_object_unlock(object);
 				vm_object_deallocate(object);
 				goto make_mem_done;
 			}
@@ -2848,6 +2847,8 @@ mach_make_memory_entry_internal(
 		if (access != MAP_MEM_NOOP) {
 			object->wimg_bits = wimg_mode;
 		}
+
+		vm_object_unlock(object);
 
 		/* the object has no pages, so no WIMG bits to update here */
 
@@ -3307,7 +3308,6 @@ mach_make_memory_entry_internal(
 	user_entry->data_offset = offset_in_page;
 	user_entry->is_sub_map = parent_entry->is_sub_map;
 	user_entry->is_copy = parent_entry->is_copy;
-	user_entry->internal = parent_entry->internal;
 	user_entry->protection = protections;
 
 	if (access != MAP_MEM_NOOP) {
@@ -3341,7 +3341,7 @@ mach_make_memory_entry_internal(
 		}
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 
-		object->true_share = TRUE;
+		VM_OBJECT_SET_TRUE_SHARE(object, TRUE);
 		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 			object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 		}
@@ -3685,10 +3685,6 @@ mach_memory_entry_ownership(
 	kern_return_t           kr;
 	vm_named_entry_t        mem_entry;
 	vm_object_t             object;
-#if DEVELOPMENT || DEBUG
-	int                     to_panic = 0;
-	static bool             init_bootarg = false;
-#endif
 
 	cur_task = current_task();
 	if (cur_task != kernel_task &&
@@ -3696,6 +3692,8 @@ mach_memory_entry_ownership(
 	    (ledger_flags & VM_LEDGER_FLAG_NO_FOOTPRINT) ||
 	    (ledger_flags & VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG) ||
 	    ledger_tag == VM_LEDGER_TAG_NETWORK)) {
+		bool transfer_ok = false;
+
 		/*
 		 * An entitlement is required to:
 		 * + tranfer memory ownership to someone else,
@@ -3708,35 +3706,65 @@ mach_memory_entry_ownership(
 		    IOCurrentTaskHasEntitlement("com.apple.private.memory.ownership_transfer")) {
 			cur_task->task_can_transfer_memory_ownership = TRUE;
 		}
-		if (!cur_task->task_can_transfer_memory_ownership) {
+		if (cur_task->task_can_transfer_memory_ownership) {
+			/* we're allowed to transfer ownership to any task */
+			transfer_ok = true;
+		}
 #if DEVELOPMENT || DEBUG
-			if ((ledger_tag == VM_LEDGER_TAG_DEFAULT) &&
-			    (ledger_flags & VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG) &&
-			    cur_task->task_no_footprint_for_debug) {
-				/*
-				 * Allow performance tools running on internal builds to hide memory usage from phys_footprint even
-				 * WITHOUT an entitlement. This can be enabled by per task sysctl vm.task_no_footprint_for_debug=1
-				 * with the ledger tag VM_LEDGER_TAG_DEFAULT and flag VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG.
-				 *
-				 * If the boot-arg "panic_on_no_footprint_for_debug" is set, the kernel will
-				 * panic here in order to detect any abuse of this feature, which is intended solely for
-				 * memory debugging purpose.
-				 */
-				if (!init_bootarg) {
-					PE_parse_boot_argn("panic_on_no_footprint_for_debug", &to_panic, sizeof(to_panic));
-					init_bootarg = true;
-				}
-				if (to_panic) {
-					panic("%s: panic_on_no_footprint_for_debug is triggered by pid %d procname %s", __func__, proc_selfpid(), get_bsdtask_info(cur_task)? proc_name_address(get_bsdtask_info(cur_task)) : "?");
-				}
+		if (!transfer_ok &&
+		    ledger_tag == VM_LEDGER_TAG_DEFAULT &&
+		    (ledger_flags & VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG) &&
+		    cur_task->task_no_footprint_for_debug) {
+			int         to_panic = 0;
+			static bool init_bootarg = false;
 
-				/*
-				 * Flushing out user space processes using this interface:
-				 * $ dtrace -n 'task_no_footprint_for_debug {printf("%d[%s]\n", pid, execname); stack(); ustack();}'
-				 */
-				DTRACE_VM(task_no_footprint_for_debug);
-			} else
+			/*
+			 * Allow performance tools running on internal builds to hide memory usage from phys_footprint even
+			 * WITHOUT an entitlement. This can be enabled by per task sysctl vm.task_no_footprint_for_debug=1
+			 * with the ledger tag VM_LEDGER_TAG_DEFAULT and flag VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG.
+			 *
+			 * If the boot-arg "panic_on_no_footprint_for_debug" is set, the kernel will
+			 * panic here in order to detect any abuse of this feature, which is intended solely for
+			 * memory debugging purpose.
+			 */
+			if (!init_bootarg) {
+				PE_parse_boot_argn("panic_on_no_footprint_for_debug", &to_panic, sizeof(to_panic));
+				init_bootarg = true;
+			}
+			if (to_panic) {
+				panic("%s: panic_on_no_footprint_for_debug is triggered by pid %d procname %s", __func__, proc_selfpid(), get_bsdtask_info(cur_task)? proc_name_address(get_bsdtask_info(cur_task)) : "?");
+			}
+
+			/*
+			 * Flushing out user space processes using this interface:
+			 * $ dtrace -n 'task_no_footprint_for_debug {printf("%d[%s]\n", pid, execname); stack(); ustack();}'
+			 */
+			DTRACE_VM(task_no_footprint_for_debug);
+			transfer_ok = true;
+		}
 #endif /* DEVELOPMENT || DEBUG */
+		if (!transfer_ok) {
+#define TRANSFER_ENTITLEMENT_MAX_LENGTH 1024 /* XXX ? */
+			const char *our_id, *their_id;
+			our_id = IOTaskGetEntitlement(current_task(), "com.apple.developer.memory.transfer-send");
+			their_id = IOTaskGetEntitlement(owner, "com.apple.developer.memory.transfer-accept");
+			if (our_id && their_id &&
+			    !strncmp(our_id, their_id, TRANSFER_ENTITLEMENT_MAX_LENGTH)) {
+				/* allow transfer between tasks that have matching entitlements */
+				if (strnlen(our_id, TRANSFER_ENTITLEMENT_MAX_LENGTH) < TRANSFER_ENTITLEMENT_MAX_LENGTH &&
+				    strnlen(their_id, TRANSFER_ENTITLEMENT_MAX_LENGTH) < TRANSFER_ENTITLEMENT_MAX_LENGTH) {
+					transfer_ok = true;
+				} else {
+					/* complain about entitlement(s) being too long... */
+					assertf((strlen(our_id) <= TRANSFER_ENTITLEMENT_MAX_LENGTH &&
+					    strlen(their_id) <= TRANSFER_ENTITLEMENT_MAX_LENGTH),
+					    "our_id:%lu their_id:%lu",
+					    strlen(our_id), strlen(their_id));
+				}
+			}
+		}
+		if (!transfer_ok) {
+			/* transfer denied */
 			return KERN_NO_ACCESS;
 		}
 
@@ -4471,11 +4499,10 @@ kern_return_t
 mach_vm_deferred_reclamation_buffer_init(
 	task_t task,
 	mach_vm_offset_t address,
-	mach_vm_size_t size,
-	mach_vm_address_t indices)
+	mach_vm_size_t size)
 {
 #if CONFIG_DEFERRED_RECLAIM
-	return vm_deferred_reclamation_buffer_init_internal(task, address, size, indices);
+	return vm_deferred_reclamation_buffer_init_internal(task, address, size);
 #else
 	(void) task;
 	(void) address;

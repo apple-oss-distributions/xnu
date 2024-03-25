@@ -72,8 +72,8 @@
 #define __ARM_GLOBAL_SLEEP_BIT__                1
 #define __ARM_PAN_AVAILABLE__                   1
 #define __ARM_SB_AVAILABLE__                    1
-#define __PLATFORM_WKDM_ALIGNMENT_MASK__        (0x3FULL)
-#define __PLATFORM_WKDM_ALIGNMENT_BOUNDARY__    (64)
+
+#define __HWP_CFG_BIT_VER__                     1
 
 /* Optional CPU features -- an SoC may #undef these */
 #define ARM_PARAMETERIZED_PMAP               1

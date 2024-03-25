@@ -11,6 +11,7 @@ INSTINC_SUBDIRS = \
     c++ \
     crypto \
     img4 \
+    image4 \
     coretrust \
     apple_encrypted_archive \
     amfi \

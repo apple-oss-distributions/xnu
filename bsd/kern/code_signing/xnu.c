@@ -320,4 +320,33 @@ xnu_image4_set_bnch_shadow(
 	return ENOTSUP;
 }
 
+#pragma mark Image4 - New
+
+kern_return_t
+xnu_image4_transfer_region(
+	image4_cs_trap_t selector,
+	__unused vm_address_t region_addr,
+	__unused vm_size_t region_size)
+{
+	panic("image4 dispatch: transfer without code signing monitor: %llu", selector);
+}
+
+kern_return_t
+xnu_image4_reclaim_region(
+	image4_cs_trap_t selector,
+	__unused vm_address_t region_addr,
+	__unused vm_size_t region_size)
+{
+	panic("image4 dispatch: reclaim without code signing monitor: %llu", selector);
+}
+
+errno_t
+xnu_image4_monitor_trap(
+	image4_cs_trap_t selector,
+	__unused const void *input_data,
+	__unused size_t input_size)
+{
+	panic("image4 dispatch: trap without code signing monitor: %llu", selector);
+}
+
 #endif /* !CODE_SIGNING_MONITOR */

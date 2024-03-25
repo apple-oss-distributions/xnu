@@ -167,7 +167,6 @@ extern void socket_post_kev_msg_closed(struct socket *);
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/if_llatbl.h>
 #include <kern/locks.h>
 #include <sys/tree.h>
 /*
@@ -229,7 +228,7 @@ extern  u_char  inetctlerrmap[];
 	    (ia) = TAILQ_NEXT((ia), ia_link))                           \
 	        continue;                                               \
 	if ((ia) != NULL)                                               \
-	        IFA_ADDREF(&(ia)->ia_ifa);                              \
+	        ifa_addref(&(ia)->ia_ifa);                              \
 	lck_rw_done(&in_ifaddr_rwlock);                                 \
 }
 
@@ -319,8 +318,8 @@ struct in_multi {
 	struct  ifnet *inm_ifp;         /* back pointer to ifnet */
 	struct  ifmultiaddr *inm_ifma;  /* back pointer to ifmultiaddr */
 	u_int   inm_timer;              /* IGMPv1/v2 group / v3 query timer  */
-	u_int   inm_state;              /*  state of the membership */
-	void *inm_rti;                  /* unused, legacy field */
+	u_int   inm_state;              /* state of the membership */
+	bool    inm_in_nrele;           /* if in nrele list */
 
 	/* New fields for IGMPv3 follow. */
 	struct igmp_ifinfo      *inm_igi;       /* IGMP info */
@@ -483,14 +482,11 @@ struct inpcb;
 struct in_ifextra {
 	uint32_t                netsig_len;
 	u_int8_t                netsig[IFNET_SIGNATURELEN];
-	struct lltable          *ii_llt;        /* ARP state */
 };
 #define IN_IFEXTRA(_ifp)        (_ifp->if_inetdata)
-#define LLTABLE(ifp)            ((IN_IFEXTRA(ifp) == NULL) ? NULL : IN_IFEXTRA(ifp)->ii_llt)
 
 extern u_int32_t ipv4_ll_arp_aware;
 
-extern void in_ifaddr_init(void);
 extern int imo_multi_filter(const struct ip_moptions *,
     const struct ifnet *, const struct sockaddr_in *,
     const struct sockaddr_in *);
@@ -500,7 +496,6 @@ extern void inm_clear_recorded(struct in_multi *);
 extern void inm_print(const struct in_multi *);
 extern int inm_record_source(struct in_multi *inm, const in_addr_t);
 extern void inm_release(struct in_multi *);
-extern void in_multi_init(void);
 extern struct in_multi *in_addmulti(struct in_addr *, struct ifnet *);
 extern void in_delmulti(struct in_multi *);
 extern int in_leavegroup(struct in_multi *, struct in_mfilter *);

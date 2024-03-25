@@ -3130,6 +3130,15 @@ vclean(vnode_t vp, int flags)
 	}
 #endif
 
+	vm_object_destroy_reason_t reason = VM_OBJECT_DESTROY_UNKNOWN_REASON;
+	bool forced_unmount = vnode_mount(vp) != NULL && (vnode_mount(vp)->mnt_lflag & MNT_LFORCE) != 0;
+	bool ungraft_heuristic = flags & REVOKEALL;
+	if (forced_unmount) {
+		reason = VM_OBJECT_DESTROY_FORCED_UNMOUNT;
+	} else if (ungraft_heuristic) {
+		reason = VM_OBJECT_DESTROY_UNGRAFT;
+	}
+
 	/*
 	 * Destroy ubc named reference
 	 * cluster_release is done on this path
@@ -3137,7 +3146,7 @@ vclean(vnode_t vp, int flags)
 	 * (and in the case of forced unmount of an mmap-ed file,
 	 * the ubc reference on the vnode is dropped here too).
 	 */
-	ubc_destroy_named(vp);
+	ubc_destroy_named(vp, reason);
 
 #if CONFIG_TRIGGERS
 	/*
@@ -4101,7 +4110,7 @@ restart:
 	if (vp->v_specflags & SI_ALIASED) {
 		for (vq = *vp->v_hashchain; vq; vq = vq->v_specnext) {
 			if (vq->v_rdev != vp->v_rdev ||
-			    vq->v_type != vp->v_type) {
+			    vq->v_type != vp->v_type || vq == vp) {
 				continue;
 			}
 			if (vq->v_specflags & SI_MOUNTING) {
@@ -6300,6 +6309,7 @@ retry:
 	}
 	vp->v_lflag &= ~VL_NEEDINACTIVE;
 
+	vnode_lock_convert(vp);
 	if ((vp->v_lflag & (VL_MARKTERM | VL_TERMINATE | VL_DEAD)) == VL_MARKTERM) {
 		if (from_pager) {
 			/*
@@ -6309,7 +6319,6 @@ retry:
 			 */
 			vnode_async_list_add(vp);
 		} else {
-			vnode_lock_convert(vp);
 			vnode_reclaim_internal(vp, 1, 1, 0);
 		}
 	}

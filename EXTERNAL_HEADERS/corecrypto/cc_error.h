@@ -1,11 +1,11 @@
-/* Copyright (c) (2017-2021) Apple Inc. All rights reserved.
+/* Copyright (c) (2017-2022) Apple Inc. All rights reserved.
  *
  * corecrypto is licensed under Apple Inc.’s Internal Use License Agreement (which
- * is contained in the License.txt file distributed with corecrypto) and only to 
- * people who accept that license. IMPORTANT:  Any license rights granted to you by 
- * Apple Inc. (if any) are limited to internal use within your organization only on 
- * devices and computers you own or control, for the sole purpose of verifying the 
- * security characteristics and correct functioning of the Apple Software.  You may 
+ * is contained in the License.txt file distributed with corecrypto) and only to
+ * people who accept that license. IMPORTANT:  Any license rights granted to you by
+ * Apple Inc. (if any) are limited to internal use within your organization only on
+ * devices and computers you own or control, for the sole purpose of verifying the
+ * security characteristics and correct functioning of the Apple Software.  You may
  * not, directly or indirectly, redistribute the Apple Software or any portions thereof.
  */
 
@@ -182,7 +182,7 @@ enum {
     CCDH_GP_Q_NOTPRIME = -167,
     CCDH_GP_NONSAFE_PRIME = -168,
 
-    CCELGAMAL_DECRYPTION_FAILED = -169,
+    // -169, // deprecated
 
     CCEC_POINT_CANNOT_BE_UNIT = CCEC_KEY_CANNOT_BE_UNIT,
     CCEC_UNCOMPRESSED_POINT_ENCODING_ERROR = -170,
@@ -191,7 +191,9 @@ enum {
 
     CCERR_NOT_SUPPORTED = -173,
     
-    CCEC_INVALID_BSGS_TABLE_VERSION = -174,
+    // Always add error codes above this line, and always keep
+    // their value greater than the value of CCERR_MIN.
+    CCERR_MIN = -255,
 };
 
 #define CCDRBG_STATUS_OK CCERR_OK

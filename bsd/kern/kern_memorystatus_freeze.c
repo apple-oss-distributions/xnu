@@ -120,7 +120,26 @@ unsigned int memorystatus_max_frozen_demotions_daily = 0;
 unsigned int memorystatus_thaw_count_demotion_threshold = 0;
 unsigned int memorystatus_min_thaw_refreeze_threshold;
 
-boolean_t memorystatus_freeze_enabled = FALSE;
+#if XNU_TARGET_OS_WATCH
+#define FREEZE_DYNAMIC_THREAD_DELAY_ENABLED_DEFAULT true
+#else
+#define FREEZE_DYNAMIC_THREAD_DELAY_ENABLED_DEFAULT false
+#endif
+boolean_t memorystatus_freeze_dynamic_thread_delay_enabled = FREEZE_DYNAMIC_THREAD_DELAY_ENABLED_DEFAULT;
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_freeze_dynamic_thread_delay_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_freeze_dynamic_thread_delay_enabled, 0, "");
+
+#define FREEZE_APPS_IDLE_DELAY_MULTIPLIER_FAST 1
+#define FREEZE_APPS_IDLE_DELAY_MULTIPLIER_SLOW 30
+#define FREEZE_APPS_IDLE_DELAY_MULTIPLIER_DEFAULT FREEZE_APPS_IDLE_DELAY_MULTIPLIER_FAST
+unsigned int memorystatus_freeze_apps_idle_delay_multiplier = FREEZE_APPS_IDLE_DELAY_MULTIPLIER_DEFAULT;
+
+#if (XNU_TARGET_OS_IOS && || XNU_TARGET_OS_WATCH
+#define FREEZE_ENABLED_DEFAULT true
+#else
+#define FREEZE_ENABLED_DEFAULT false
+#endif
+TUNABLE_WRITEABLE(bool, memorystatus_freeze_enabled, "freeze_enabled", FREEZE_ENABLED_DEFAULT);
+
 int memorystatus_freeze_wakeup = 0;
 int memorystatus_freeze_jetsam_band = 0; /* the jetsam band which will contain P_MEMSTAT_FROZEN processes */
 
@@ -132,7 +151,11 @@ unsigned int memorystatus_frozen_processes_max = 0;
 unsigned int memorystatus_frozen_shared_mb = 0;
 unsigned int memorystatus_frozen_shared_mb_max = 0;
 unsigned int memorystatus_freeze_shared_mb_per_process_max = 0; /* Max. MB allowed per process to be freezer-eligible. */
+#if XNU_TARGET_OS_WATCH
+unsigned int memorystatus_freeze_private_shared_pages_ratio = 1; /* Ratio of private:shared pages for a process to be freezer-eligible. */
+#else
 unsigned int memorystatus_freeze_private_shared_pages_ratio = 2; /* Ratio of private:shared pages for a process to be freezer-eligible. */
+#endif
 unsigned int memorystatus_thaw_count = 0; /* # of thaws in the current freezer interval */
 uint64_t memorystatus_thaw_count_since_boot = 0; /* The number of thaws since boot */
 unsigned int memorystatus_refreeze_eligible_count = 0; /* # of processes currently thawed i.e. have state on disk & in-memory */
@@ -183,7 +206,12 @@ struct memorystatus_freezer_candidate_list memorystatus_global_demote_list = {NU
  * When enabled, freeze candidates are chosen from the memorystatus_global_freeze_list
  * in order (as opposed to using the older LRU approach).
  */
-int memorystatus_freezer_use_ordered_list = 0;
+#if XNU_TARGET_OS_WATCH
+#define FREEZER_USE_ORDERED_LIST_DEFAULT 1
+#else
+#define FREEZER_USE_ORDERED_LIST_DEFAULT 0
+#endif
+int memorystatus_freezer_use_ordered_list = FREEZER_USE_ORDERED_LIST_DEFAULT;
 EXPERIMENT_FACTOR_UINT(_kern, memorystatus_freezer_use_ordered_list, &memorystatus_freezer_use_ordered_list, 0, 1, "");
 /*
  * When enabled, demotion candidates are chosen from memorystatus_global_demotion_list
@@ -520,7 +548,7 @@ sysctl_memorystatus_freeze SYSCTL_HANDLER_ARGS
 	}
 
 	lck_mtx_lock(&freezer_mutex);
-	if (memorystatus_freeze_enabled == FALSE) {
+	if (memorystatus_freeze_enabled == false) {
 		lck_mtx_unlock(&freezer_mutex);
 		memorystatus_log("sysctl_freeze: Freeze is DISABLED\n");
 		return ENOTSUP;
@@ -721,7 +749,7 @@ sysctl_memorystatus_available_pages_thaw SYSCTL_HANDLER_ARGS
 	int error, pid = 0;
 	proc_t p;
 
-	if (memorystatus_freeze_enabled == FALSE) {
+	if (memorystatus_freeze_enabled == false) {
 		return ENOTSUP;
 	}
 
@@ -818,11 +846,13 @@ memorystatus_freezer_get_status(user_addr_t buffer, size_t buffer_size, int32_t 
 	boolean_t            try_freeze = TRUE, xpc_skip_size_probability_check = FALSE;
 	int                error = 0, probability_of_use = 0;
 	pid_t              leader_pid = 0;
-
+	struct memorystatus_freeze_list_iterator iterator;
 
 	if (VM_CONFIG_FREEZER_SWAP_IS_ACTIVE == FALSE) {
 		return ENOTSUP;
 	}
+
+	bzero(&iterator, sizeof(struct memorystatus_freeze_list_iterator));
 
 	list_size = sizeof(global_freezable_status_t) + (sizeof(proc_freezable_status_t) * MAX_FREEZABLE_PROCESSES);
 
@@ -837,12 +867,17 @@ memorystatus_freezer_get_status(user_addr_t buffer, size_t buffer_size, int32_t 
 
 	list_size = sizeof(global_freezable_status_t);
 
+	lck_mtx_lock(&freezer_mutex);
 	proc_list_lock();
 
 	uint64_t curr_time = mach_absolute_time();
 
 	list_head->freeze_pages_threshold_crossed = (memorystatus_available_pages < memorystatus_freeze_threshold);
-	list_head->freeze_eligible_procs_available = ((memorystatus_suspended_count - memorystatus_frozen_count) > memorystatus_freeze_suspended_threshold);
+	if (memorystatus_freezer_use_ordered_list) {
+		list_head->freeze_eligible_procs_available = memorystatus_frozen_count < memorystatus_global_freeze_list.mfcl_length;
+	} else {
+		list_head->freeze_eligible_procs_available = ((memorystatus_suspended_count - memorystatus_frozen_count) > memorystatus_freeze_suspended_threshold);
+	}
 	list_head->freeze_scheduled_in_future = (curr_time < memorystatus_freezer_thread_next_run_ts);
 
 	list_entry_start = (proc_freezable_status_t*) ((uintptr_t)list_head + sizeof(global_freezable_status_t));
@@ -852,7 +887,20 @@ memorystatus_freezer_get_status(user_addr_t buffer, size_t buffer_size, int32_t 
 
 	entry_count = (memorystatus_global_probabilities_size / sizeof(memorystatus_internal_probabilities_t));
 
-	p = memorystatus_get_first_proc_locked(&band, FALSE);
+	if (memorystatus_freezer_use_ordered_list) {
+		while (iterator.global_freeze_list_index < memorystatus_global_freeze_list.mfcl_length) {
+			p = memorystatus_freezer_candidate_list_get_proc(
+				&memorystatus_global_freeze_list,
+				(iterator.global_freeze_list_index)++,
+				NULL);
+			if (p != PROC_NULL) {
+				break;
+			}
+		}
+	} else {
+		p = memorystatus_get_first_proc_locked(&band, FALSE);
+	}
+
 	proc_count++;
 
 	while ((proc_count <= MAX_FREEZABLE_PROCESSES) &&
@@ -998,11 +1046,26 @@ continue_eval:
 
 		list_size += sizeof(proc_freezable_status_t);
 
-		p = memorystatus_get_next_proc_locked(&band, p, FALSE);
+		if (memorystatus_freezer_use_ordered_list) {
+			p = PROC_NULL;
+			while (iterator.global_freeze_list_index < memorystatus_global_freeze_list.mfcl_length) {
+				p = memorystatus_freezer_candidate_list_get_proc(
+					&memorystatus_global_freeze_list,
+					(iterator.global_freeze_list_index)++,
+					NULL);
+				if (p != PROC_NULL) {
+					break;
+				}
+			}
+		} else {
+			p = memorystatus_get_next_proc_locked(&band, p, FALSE);
+		}
+
 		proc_count++;
 	}
 
 	proc_list_unlock();
+	lck_mtx_unlock(&freezer_mutex);
 
 	list_entry = list_entry_start;
 
@@ -1299,7 +1362,7 @@ kill_all_frozen_processes(uint64_t max_band, bool suspended_only, os_reason_t je
 		 * Note that they may still be exiting (represented by skips).
 		 */
 		if (memorystatus_frozen_count - skips > 0) {
-			assert(memorystatus_freeze_enabled == FALSE);
+			assert(memorystatus_freeze_enabled == false);
 
 			panic("memorystatus_disable_freeze: Failed to kill all frozen processes, memorystatus_frozen_count = %d",
 			    memorystatus_frozen_count);
@@ -1338,7 +1401,7 @@ memorystatus_disable_freeze(void)
 	 * ensures that no new processes will be frozen once we release the mutex.
 	 *
 	 */
-	memorystatus_freeze_enabled = FALSE;
+	memorystatus_freeze_enabled = false;
 
 	/*
 	 * Move dirty pages out from the throttle to the active queue since we're not freezing anymore.
@@ -1993,7 +2056,7 @@ memorystatus_freeze_process_sync(proc_t p)
 		goto exit;
 	}
 
-	if (memorystatus_freeze_enabled == FALSE) {
+	if (memorystatus_freeze_enabled == false) {
 		memorystatus_log_error("memorystatus_freeze_process_sync: Freezing is DISABLED\n");
 		goto exit;
 	}
@@ -2057,7 +2120,9 @@ memorystatus_freezer_candidate_list_get_proc(
 		p = memorystatus_get_first_proc_locked(&band, TRUE);
 		while (p != NULL && band <= memorystatus_freeze_max_candidate_band) {
 			if (strncmp(entry->proc_name, p->p_name, sizeof(proc_name_t)) == 0) {
-				(*pid_mismatch_counter)++;
+				if (pid_mismatch_counter != NULL) {
+					(*pid_mismatch_counter)++;
+				}
 				/* Stash the pid for faster lookup next time. */
 				entry->pid = proc_getpid(p);
 				return p;
@@ -2399,7 +2464,7 @@ memorystatus_demote_frozen_processes(bool urgent_mode)
 {
 	unsigned int demoted_proc_count = 0;
 
-	if (memorystatus_freeze_enabled == FALSE) {
+	if (memorystatus_freeze_enabled == false) {
 		/*
 		 * Freeze has been disabled likely to
 		 * reclaim swap space. So don't change
@@ -2855,6 +2920,8 @@ memorystatus_freeze_update_throttle(uint64_t *budget_pages_allowed)
 		interval->pageouts, interval->max_pageouts, interval->mins, (interval->ts.tv_sec - now_ts.tv_sec) / 60);
 }
 
+SYSCTL_UINT(_kern, OID_AUTO, memorystatus_freeze_apps_idle_delay_multiplier, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_freeze_apps_idle_delay_multiplier, 0, "");
+
 bool memorystatus_freeze_thread_init = false;
 static void
 memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
@@ -2901,7 +2968,14 @@ memorystatus_freeze_thread(void *param __unused, wait_result_t wr __unused)
 	 * Give applications currently in the aging band a chance to age out into the idle band before
 	 * running the freezer again.
 	 */
-	memorystatus_freezer_thread_next_run_ts = mach_absolute_time() + memorystatus_apps_idle_delay_time;
+	if (memorystatus_freeze_dynamic_thread_delay_enabled) {
+		if ((num_frozen > 0) || (memorystatus_frozen_count == 0)) {
+			memorystatus_freeze_apps_idle_delay_multiplier = FREEZE_APPS_IDLE_DELAY_MULTIPLIER_FAST;
+		} else {
+			memorystatus_freeze_apps_idle_delay_multiplier = FREEZE_APPS_IDLE_DELAY_MULTIPLIER_SLOW;
+		}
+	}
+	memorystatus_freezer_thread_next_run_ts = mach_absolute_time() + (memorystatus_apps_idle_delay_time * memorystatus_freeze_apps_idle_delay_multiplier);
 
 	assert_wait((event_t) &memorystatus_freeze_wakeup, THREAD_UNINT);
 	lck_mtx_unlock(&freezer_mutex);
@@ -3051,7 +3125,7 @@ sysctl_memorystatus_do_fastwake_warmup_all  SYSCTL_HANDLER_ARGS
 		return EPERM;
 	}
 
-	if (memorystatus_freeze_enabled == FALSE) {
+	if (memorystatus_freeze_enabled == false) {
 		return ENOTSUP;
 	}
 

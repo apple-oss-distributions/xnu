@@ -412,6 +412,17 @@ PE_cpu_power_disable(int cpu_id)
 	gPMGR->disableCPUCluster(target_cluster_id);
 }
 
+bool
+PE_cpu_power_check_kdp(int cpu_id)
+{
+	if (!cluster_power_supported) {
+		return true;
+	}
+
+	unsigned int cluster_id = topology_info->cpus[cpu_id].cluster_id;
+	return bit_test(online_clusters_mask, cluster_id);
+}
+
 void
 PE_cpu_power_enable(int cpu_id)
 {

@@ -33,7 +33,7 @@
 
 __attribute__((noinline))
 static int
-check_for_cookie(const char *str, size_t len)
+check_for_cookie(size_t len)
 {
 	long buf[4];
 	long *search = (long *)(void *)&buf[0];
@@ -44,7 +44,7 @@ check_for_cookie(const char *str, size_t len)
 	assert(((uintptr_t)search & (sizeof(long) - 1)) == 0);
 
 	/* force compiler to insert stack cookie check: */
-	memcpy(buf, str, len);
+	memset_s(buf, len, 0, len);
 
 	/* 32 x sizeof(long) should be plenty to find the cookie: */
 	for (n = 0; n < 32; ++n) {
@@ -68,7 +68,7 @@ sysctl_run_stack_chk_tests SYSCTL_HANDLER_ARGS
 		return error;
 	}
 
-	kr = check_for_cookie("foo", 3);
+	kr = check_for_cookie(3);
 	return kr;
 }
 

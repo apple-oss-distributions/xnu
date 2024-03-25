@@ -46,6 +46,8 @@
 #include <sys/malloc.h>
 #include <net/if_dl.h>
 
+#include <net/sockaddr_utils.h>
+
 __private_extern__ void
 multicast_list_init(struct multicast_list * mc_list)
 {
@@ -124,14 +126,14 @@ multicast_list_program(struct multicast_list * mc_list,
 	}
 	for (i = 0; source_multicast_list[i] != NULL; i++) {
 		if (ifmaddr_address(source_multicast_list[i],
-		    (struct sockaddr *)&source_sdl,
+		    SA(&source_sdl),
 		    sizeof(source_sdl)) != 0
 		    || source_sdl.sdl_family != AF_LINK) {
 			continue;
 		}
 		mc = kalloc_type(struct multicast_entry, Z_WAITOK | Z_NOFAIL);
 		bcopy(LLADDR(&source_sdl), LLADDR(&target_sdl), alen);
-		error = ifnet_add_multicast(target_ifp, (struct sockaddr *)&target_sdl,
+		error = ifnet_add_multicast(target_ifp, SA(&target_sdl),
 		    &mc->mc_ifma);
 		if (error != 0) {
 			kfree_type(struct multicast_entry, mc);

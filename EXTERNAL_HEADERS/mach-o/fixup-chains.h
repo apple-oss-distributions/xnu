@@ -23,7 +23,7 @@
  */
 
 #ifndef __MACH_O_FIXUP_CHAINS__
-#define __MACH_O_FIXUP_CHAINS__ 5
+#define __MACH_O_FIXUP_CHAINS__ 6
 
 
 #include <stdint.h>
@@ -101,6 +101,7 @@ enum {
     DYLD_CHAINED_PTR_ARM64E_FIRMWARE        = 10,    // stride 4, unauth target is vmaddr
     DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE    = 11,    // stride 1, x86_64 kernel caches
     DYLD_CHAINED_PTR_ARM64E_USERLAND24      = 12,    // stride 8, unauth target is vm offset, 24-bit bind
+    DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE    = 13,    // stride 8, regular/auth targets both vm offsets.  Only A keys supported
 };
 
 
@@ -160,6 +161,32 @@ struct dyld_chained_ptr_64_rebase
                 bind      :  1;    // == 0
 };
 
+
+// DYLD_CHAINED_PTR_ARM64E_USERLAND24
+struct dyld_chained_ptr_arm64e_bind24
+{
+    uint64_t    ordinal   : 24,
+                zero      :  8,
+                addend    : 19,    // +/-256K
+                next      : 11,    // 8-byte stide
+                bind      :  1,    // == 1
+                auth      :  1;    // == 0
+};
+
+// DYLD_CHAINED_PTR_ARM64E_USERLAND24
+struct dyld_chained_ptr_arm64e_auth_bind24
+{
+    uint64_t    ordinal   : 24,
+                zero      :  8,
+                diversity : 16,
+                addrDiv   :  1,
+                key       :  2,
+                next      : 11,    // 8-byte stide
+                bind      :  1,    // == 1
+                auth      :  1;    // == 1
+};
+
+
 // DYLD_CHAINED_PTR_64
 struct dyld_chained_ptr_64_bind
 {
@@ -218,6 +245,27 @@ struct dyld_chained_ptr_32_firmware_rebase
                 next     :  6;   // 4-byte stride
 };
 
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE
+struct dyld_chained_ptr_arm64e_shared_cache_rebase
+{
+    uint64_t    runtimeOffset   : 34,   // offset from the start of the shared cache
+                high8           :  8,
+                unused          : 10,
+                next            : 11,   // 8-byte stide
+                auth            :  1;   // == 0
+};
+
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE
+struct dyld_chained_ptr_arm64e_shared_cache_auth_rebase
+{
+    uint64_t    runtimeOffset   : 34,   // offset from the start of the shared cache
+                diversity       : 16,
+                addrDiv         :  1,
+                keyIsData       :  1,   // implicitly always the 'A' key.  0 -> IA.  1 -> DA
+                next            : 11,   // 8-byte stide
+                auth            :  1;   // == 1
+};
+
 
 
 // values for dyld_chained_fixups_header.imports_format
@@ -230,7 +278,7 @@ enum {
 // DYLD_CHAINED_IMPORT
 struct dyld_chained_import
 {
-    uint32_t    lib_ordinal :  8,
+    uint32_t    lib_ordinal :  8,   // -15 .. 240 (0xF1 .. 0xF0)
                 weak_import :  1,
                 name_offset : 23;
 };
@@ -238,7 +286,7 @@ struct dyld_chained_import
 // DYLD_CHAINED_IMPORT_ADDEND
 struct dyld_chained_import_addend
 {
-    uint32_t    lib_ordinal :  8,
+    uint32_t    lib_ordinal :  8,   // -15 .. 240 (0xF1 .. 0xF0)
                 weak_import :  1,
                 name_offset : 23;
     int32_t     addend;
@@ -247,7 +295,7 @@ struct dyld_chained_import_addend
 // DYLD_CHAINED_IMPORT_ADDEND64
 struct dyld_chained_import_addend64
 {
-    uint64_t    lib_ordinal : 16,
+    uint64_t    lib_ordinal : 16,   // -15 .. 65520 (0xFFF1 .. 0xFFF0)
                 weak_import :  1,
                 reserved    : 15,
                 name_offset : 32;

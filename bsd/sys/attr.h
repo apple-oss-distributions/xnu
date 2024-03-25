@@ -265,6 +265,12 @@ typedef struct vol_capabilities_attr {
  * VOL_CAP_FMT_SEALED: When set, this volume is cryptographically sealed.
  * Any modifications to volume data or metadata will be detected and may
  * render the volume unusable.
+ *
+ * VOL_CAP_FMT_CLONE_MAPPING: When set, this volume supports full clone tracking.
+ * See ATTR_CMNEXT_CLONE_REFCNT and ATTR_CMNEXT_CLONEID for more details.
+ * Other features like extended directory statistics, for fast directory sizing,
+ * and attribution tags may be supported as well.
+ * See VOL_CAP_INT_ATTRIBUTION_TAG for more details related to tagging.
  */
 #define VOL_CAP_FMT_PERSISTENTOBJECTIDS         0x00000001
 #define VOL_CAP_FMT_SYMBOLICLINKS               0x00000002
@@ -292,6 +298,7 @@ typedef struct vol_capabilities_attr {
 #define VOL_CAP_FMT_SHARED_SPACE                0x00800000
 #define VOL_CAP_FMT_VOL_GROUPS                  0x01000000
 #define VOL_CAP_FMT_SEALED                      0x02000000
+#define VOL_CAP_FMT_CLONE_MAPPING               0x04000000
 
 /*
  * VOL_CAP_INT_SEARCHFS: When set, the volume implements the
@@ -365,6 +372,10 @@ typedef struct vol_capabilities_attr {
  *
  * VOL_CAP_INT_RENAME_SECLUDE: When set, the volume supports a
  * seclude rename operation.
+ *
+ * VOL_CAP_INT_ATTRIBUTION_TAG: When set, the volume supports establishing
+ * an owner relationship between a file (excluding small files) and a process
+ * on the first read/write/truncate/clone operation.
  */
 #define VOL_CAP_INT_SEARCHFS                    0x00000001
 #define VOL_CAP_INT_ATTRLIST                    0x00000002
@@ -391,6 +402,7 @@ typedef struct vol_capabilities_attr {
 #define VOL_CAP_INT_RENAME_EXCL                 0x00080000
 #define VOL_CAP_INT_RENAME_OPENFAIL             0x00100000
 #define VOL_CAP_INT_RENAME_SECLUDE              0x00200000
+#define VOL_CAP_INT_ATTRIBUTION_TAG             0x00400000
 
 typedef struct vol_attributes_attr {
 	attribute_set_t validattr;

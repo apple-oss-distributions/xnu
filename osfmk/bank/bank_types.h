@@ -29,6 +29,7 @@
 #ifndef _BANK_BANK_TYPES_H_
 #define _BANK_BANK_TYPES_H_
 
+#include <os/base.h>
 #include <stdint.h>
 #include <mach/mach_types.h>
 
@@ -39,10 +40,12 @@
 #define MACH_VOUCHER_BANK_CONTENT_SIZE (500)
 
 typedef uint32_t bank_action_t;
-#define BANK_ORIGINATOR_PID     0x1
-#define BANK_PERSONA_TOKEN      0x2
-#define BANK_PERSONA_ID         0x3
-#define BANK_PERSONA_ADOPT_ANY  0x4
+#define BANK_ORIGINATOR_PID           0x1
+#define BANK_PERSONA_TOKEN            0x2
+#define BANK_PERSONA_ID               0x3
+#define BANK_PERSONA_ADOPT_ANY        0x4
+#define BANK_ORIGINATOR_PROXIMATE_PID 0x5
+
 
 #define PROC_PERSONA_INFO_FLAG_ADOPTION_ALLOWED 0x1
 

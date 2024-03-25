@@ -131,6 +131,8 @@ struct data_stats {
 struct socket {
 	int     so_zone;                /* zone we were allocated from */
 	short   so_type;                /* generic type, see socket.h */
+	uint16_t so_protocol;
+	int     so_family;
 	u_short so_error;               /* error affecting connection */
 	u_int32_t so_options;           /* from socket call, see socket.h */
 	short   so_linger;              /* time to linger while closing */
@@ -163,28 +165,30 @@ struct socket {
 	 * Variables for socket buffering.
 	 */
 	struct sockbuf {
-		u_int32_t       sb_cc;          /* actual chars in buffer */
-		u_int32_t       sb_hiwat;       /* max actual char count */
-		u_int32_t       sb_mbcnt;       /* chars of mbufs used */
-		u_int32_t       sb_mbmax;       /* max chars of mbufs to use */
-		u_int32_t       sb_ctl;         /* non-data chars in buffer */
-		u_int32_t       sb_lowat;       /* low water mark */
+		uint32_t       sb_cc;          /* actual chars in buffer */
+		uint32_t       sb_hiwat;       /* max actual char count */
+		uint32_t       sb_mbcnt;       /* chars of mbufs used */
+		uint32_t       sb_mbmax;       /* max chars of mbufs to use */
+		uint32_t       sb_ctl;         /* non-data chars in buffer */
+		uint32_t       sb_lowat;       /* low water mark */
 		struct mbuf     *sb_mb;         /* the mbuf chain */
 		struct mbuf     *sb_mbtail;     /* the last mbuf in the chain */
 		struct mbuf     *sb_lastrecord; /* first mbuf of last record */
 		struct socket   *sb_so;         /* socket back ptr for kexts */
 		struct selinfo  sb_sel;         /* process selecting rd/wr */
 		struct timeval  sb_timeo;       /* timeout for read/write */
-		u_int32_t       sb_flags;       /* flags, see below */
-		u_int32_t       sb_idealsize;   /* Ideal size for the sb based
-		                                 *  on bandwidth and delay */
+		uint32_t       sb_flags;       /* flags, see below */
+		uint32_t       sb_idealsize;   /* Ideal size for the sb based
+		                                *  on bandwidth and delay */
 		void    (*sb_upcall)(struct socket *, void *arg, int waitf);
 		void    *sb_upcallarg;          /* Arg for above */
-		u_int32_t       sb_wantlock;    /* # of SB_LOCK waiters */
-		u_int32_t       sb_waiters;     /* # of data/space waiters */
+		uint32_t       sb_wantlock;    /* # of SB_LOCK waiters */
+		uint32_t       sb_waiters;     /* # of data/space waiters */
 		thread_t        sb_cfil_thread; /* content filter thread */
-		u_int32_t       sb_cfil_refs;   /* # of nested calls */
-		u_int32_t       sb_preconn_hiwat; /* preconnect hiwat mark */
+		uint32_t       sb_cfil_refs;   /* # of nested calls */
+		uint32_t       sb_preconn_hiwat; /* preconnect hiwat mark */
+		struct mbuf   *sb_sendhead;
+		int            sb_sendoff;
 	} so_rcv, so_snd;
 #define SB_MAX          (8192*1024)     /* default for max chars in sockbuf */
 #define SB_MSIZE_ADJ    256             /* fixed adjustment for mbuf */
@@ -207,6 +211,7 @@ struct socket {
 #define SB_UPCALL_LOCK  0x4000          /* Keep socket locked when doing the upcall */
 #define SB_LIMITED      0x8000          /* Socket buffer size limited */
 #define SB_KCTL         0x10000         /* kernel control socket buffer */
+#define SB_SENDHEAD     0x20000
 	/* XXX Note that Unix domain socket's sb_flags is defined as short */
 	caddr_t so_tpcb;                /* Misc. protocol control block, used
 	                                 *  by some kexts */
@@ -328,16 +333,12 @@ struct socket {
 
 	pid_t           e_pid;          /* pid of the effective owner */
 	u_int64_t       e_upid;         /* upid of the effective owner */
-#if XNU_TARGET_OS_OSX
 	pid_t           so_rpid;        /* pid of the responsible process */
-#endif /* XNU_TARGET_OS_OSX */
 
 	uuid_t          last_uuid;      /* uuid of most recent accessor */
 	uuid_t          e_uuid;         /* uuid of effective owner */
 	uuid_t          so_vuuid;       /* UUID of the Voucher originator */
-#if XNU_TARGET_OS_OSX
 	uuid_t          so_ruuid;       /* UUID of the responsible process */
-#endif /* XNU_TARGET_OS_OSX */
 
 	uid_t           so_persona_id;  /* persona of effective owner */
 
@@ -356,8 +357,6 @@ struct socket {
 	uint8_t         so_mpkl_send_proto;
 	uuid_t          so_mpkl_send_uuid;
 };
-
-#define SB_MAX_ADJUST(_sz) ((((uint64_t)(_sz)) * MCLBYTES) / (SB_MSIZE_ADJ + MCLBYTES))
 
 /* Control message accessor in mbufs */
 
@@ -707,9 +706,9 @@ struct sf_buf {
 #define SOTCDB_NO_RECVTCPBG     0x20    /* Do not use throttling on receiver-side of TCP */
 #define SOTCDB_NO_PRIVILEGED    0x40    /* Do not set privileged traffic flag */
 
-#define SOCK_DOM(so)                    ((so)->so_proto->pr_domain->dom_family)
-#define SOCK_TYPE(so)                   ((so)->so_proto->pr_type)
-#define SOCK_PROTO(so)                  ((so)->so_proto->pr_protocol)
+#define SOCK_DOM(so)                    ((so)->so_family)
+#define SOCK_TYPE(so)                   ((so)->so_type)
+#define SOCK_PROTO(so)                  ((so)->so_protocol)
 
 #define SOCK_CHECK_DOM(so, dom)         (SOCK_DOM(so) == (dom))
 #define SOCK_CHECK_TYPE(so, type)       (SOCK_TYPE(so) == (type))
@@ -728,8 +727,7 @@ struct so_procinfo {
 	char            spi_e_proc_name[MAXCOMLEN + 1];
 };
 
-extern u_int32_t sb_max;
-extern uint64_t sb_max_adj;
+extern uint32_t sb_max;
 extern so_gen_t so_gencnt;
 extern int socket_debug;
 extern int sosendjcl;
@@ -864,7 +862,7 @@ extern struct mbuf **sbcreatecontrol_mbuf(caddr_t p, int size, int type,
 extern void sbdrop(struct sockbuf *sb, int len);
 extern void sbdroprecord(struct sockbuf *sb);
 extern void sbrelease(struct sockbuf *sb);
-extern int sbreserve(struct sockbuf *sb, u_int32_t cc);
+extern int sbreserve(struct sockbuf *sb, uint32_t cc);
 extern void sbtoxsockbuf(struct sockbuf *sb, struct xsockbuf *xsb);
 extern int sbwait(struct sockbuf *sb);
 extern void sbwakeup(struct sockbuf *sb);
@@ -872,10 +870,9 @@ extern void sb_empty_assert(struct sockbuf *, const char *);
 extern int sb_notify(struct sockbuf *sb);
 extern void sballoc(struct sockbuf *sb, struct mbuf *m);
 extern void sbfree(struct sockbuf *sb, struct mbuf *m);
-extern void sbfree_chunk(struct sockbuf *sb, struct mbuf *m);
 
 /* Note: zero out the buffer and set sa_len to size */
-extern void *alloc_sockaddr(size_t size, zalloc_flags_t flags);
+extern void * __header_indexable alloc_sockaddr(size_t size, zalloc_flags_t flags);
 
 #if XNU_TARGET_OS_OSX
 #define free_sockaddr(sa) do {                                  \
@@ -1002,9 +999,9 @@ extern int tracker_lookup(uuid_t app_uuid, struct sockaddr *, tracker_metadata_t
  * Socket flow management
  */
 
-#define IS_INET(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_domain != NULL && (so->so_proto->pr_domain->dom_family == AF_INET || so->so_proto->pr_domain->dom_family == AF_INET6))
-#define IS_TCP(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_type == SOCK_STREAM && so->so_proto->pr_protocol == IPPROTO_TCP)
-#define IS_UDP(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_type == SOCK_DGRAM && so->so_proto->pr_protocol == IPPROTO_UDP)
+#define IS_INET(so) (so != NULL && (SOCK_CHECK_DOM(so, AF_INET) || SOCK_CHECK_DOM(so, AF_INET6)))
+#define IS_TCP(so) (so != NULL && SOCK_CHECK_TYPE(so, SOCK_STREAM) && SOCK_CHECK_PROTO(so, IPPROTO_TCP))
+#define IS_UDP(so) (so != NULL && SOCK_CHECK_TYPE(so, SOCK_DGRAM) && SOCK_CHECK_PROTO(so, IPPROTO_UDP))
 
 // For iOS, keep track of flows for UDP sockets only.
 // For OSX, keep track of flows for all datagram sockets.
@@ -1035,7 +1032,6 @@ extern int so_tc_from_control(struct mbuf *, int *);
 extern mbuf_svc_class_t so_tc2msc(int);
 extern int so_svc2tc(mbuf_svc_class_t);
 
-extern u_int8_t tcp_cansbgrow(struct sockbuf *sb);
 extern void set_tcp_stream_priority(struct socket *so);
 
 extern int so_set_net_service_type(struct socket *, int);
@@ -1073,7 +1069,6 @@ extern void netpolicy_post_msg(uint32_t, struct netpolicy_event_data *,
 
 extern int tcp_notsent_lowat_check(struct socket *so);
 
-extern user_ssize_t uio_array_resid(struct uio ** __counted_by(count), u_int count);
 extern user_ssize_t recv_msg_array_resid(struct recv_msg_elem * __counted_by(count), u_int count);
 
 void sotoxsocket_n(struct socket *, struct xsocket_n *);

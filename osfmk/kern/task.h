@@ -105,6 +105,9 @@
 #include <kern/queue.h>
 #include <kern/recount.h>
 #include <sys/kern_sysctl.h>
+#if CONFIG_EXCLAVES
+#include <mach/exclaves.h>
+#endif /* CONFIG_EXCLAVES */
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef  MACH_KERNEL_PRIVATE
@@ -308,9 +311,18 @@ struct task {
 #define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
 
 /*
+ * WARNING: These TF_ and TFRO_ flags are NOT automatically inherited by a child of fork
+ * If you believe something should be inherited, you must manually inherit the flags in `task_create_internal`
+ */
+
+/*
  * RO-protected flags:
  */
 #define TFRO_CORPSE                     0x00000020                      /* task is a corpse */
+#define TFRO_HARDENED                   0x00000100                      /* task is a hardened runtime binary */
+#if XNU_TARGET_OS_OSX
+#define TFRO_MACH_HARDENING_OPT_OUT     0x00000200                      /* task might load third party plugins on macOS and should be opted out of mach hardening */
+#endif /* XNU_TARGET_OS_OSX */
 #define TFRO_PLATFORM                   0x00000400                      /* task is a platform binary */
 #define TFRO_FILTER_MSG                 0x00004000                      /* task calls into message filter callback before sending a message */
 #define TFRO_PAC_EXC_FATAL              0x00010000                      /* task is marked a corpse if a PAC exception occurs */
@@ -392,10 +404,10 @@ struct task {
 	mach_vm_address_t       all_image_info_addr; /* dyld __all_image_info     */
 	mach_vm_size_t          all_image_info_size; /* section location and size */
 
-#if KPC
+#if CONFIG_CPU_COUNTERS
 #define TASK_KPC_FORCED_ALL_CTRS        0x2     /* Bit in "t_kpc" signifying this task forced all counters */
 	uint32_t t_kpc; /* kpc flags */
-#endif /* KPC */
+#endif /* CONFIG_CPU_COUNTERS */
 
 	bool pidsuspended; /* pid_suspend called; no threads can execute */
 	bool frozen;       /* frozen; private resident pages committed to swap */
@@ -416,6 +428,13 @@ struct task {
 #define TRW_LRETURNWAIT          0x01           /* task is waiting for fork/posix_spawn/exec to complete */
 #define TRW_LRETURNWAITER        0x02           /* task is waiting for TRW_LRETURNWAIT to get cleared */
 #define TRW_LEXEC_COMPLETE       0x04           /* thread should call exec complete */
+
+#if CONFIG_EXCLAVES
+	uint8_t                  t_exclave_state;
+#define TES_NONE                 0
+#define TES_CONCLAVE_TAINTED     0x01           /* Task has talked to conclave, xnu has tainted the process */
+#define TES_CONCLAVE_UNTAINTABLE 0x02           /* Task can not be tainted by xnu when it talks to conclave */
+#endif /* CONFIG_EXCLAVES */
 
 #if __has_feature(ptrauth_calls)
 	bool                            shared_region_auth_remapped;    /* authenticated sections ready for use */
@@ -548,6 +567,12 @@ struct task {
 #if CONFIG_DEFERRED_RECLAIM
 	vm_deferred_reclamation_metadata_t deferred_reclamation_metadata; /* Protected by the task lock */
 #endif /* CONFIG_DEFERRED_RECLAIM */
+
+#if CONFIG_EXCLAVES
+	void *conclave;
+	void *exclave_crash_info;
+	uint32_t exclave_crash_info_length;
+#endif /* CONFIG_EXCLAVES */
 };
 
 ZONE_DECLARE_ID(ZONE_ID_PROC_TASK, void *);
@@ -739,14 +764,9 @@ extern bool task_is_alien(task_t task);
 
 #ifdef  XNU_KERNEL_PRIVATE
 
-/* Hold all threads in a task */
-extern kern_return_t    task_hold(
+/* Hold all threads in a task, Wait for task to stop running, just to get off CPU */
+extern kern_return_t task_hold_and_wait(
 	task_t          task);
-
-/* Wait for task to stop running, either just to get off CPU or to cease being runnable */
-extern kern_return_t    task_wait(
-	task_t          task,
-	boolean_t       until_not_runnable);
 
 /* Release hold on all threads in a task */
 extern kern_return_t    task_release(
@@ -786,7 +806,7 @@ extern kern_return_t
 
 extern kern_return_t    task_disconnect_page_mappings(
 	task_t          task);
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
 extern void                     tasks_system_suspend(boolean_t suspend);
 
@@ -878,6 +898,8 @@ struct task_power_info_extra {
 	uint64_t runnable_time;
 	uint64_t energy;
 	uint64_t penergy;
+	uint64_t secure_time;
+	uint64_t secure_ptime;
 };
 
 void task_power_info_locked(
@@ -927,10 +949,35 @@ extern void     task_set_platform_binary(
 	task_t task,
 	boolean_t is_platform);
 
+#if XNU_TARGET_OS_OSX
+#if DEVELOPMENT || DEBUG
+/* Disables task identity security hardening (*_set_exception_ports policy)
+ * for all tasks if amfi_get_out_of_my_way is set. */
+extern bool AMFI_bootarg_disable_mach_hardening;
+#endif /* DEVELOPMENT || DEBUG */
+extern void             task_disable_mach_hardening(
+	task_t task);
+
+extern bool     task_opted_out_mach_hardening(
+	task_t task);
+#endif /* XNU_TARGET_OS_OSX */
+
 extern boolean_t task_get_platform_binary(
 	task_t task);
 
+extern void
+task_set_hardened_runtime(
+	task_t task,
+	bool is_hardened);
+
+extern boolean_t
+task_is_hardened_binary(
+	task_t task);
+
 extern boolean_t task_is_a_corpse(
+	task_t task);
+
+extern boolean_t task_is_ipc_active(
 	task_t task);
 
 extern void task_set_corpse(
@@ -1271,6 +1318,27 @@ extern kern_return_t task_get_exception_ports(
 	exception_behavior_array_t      behaviors,
 	thread_state_flavor_array_t     flavors);
 
+#if CONFIG_EXCLAVES
+int task_add_conclave(task_t task, const char *task_conclave_id);
+kern_return_t task_start_conclave_and_lookup_resources(mach_port_name_t port,
+    bool conclave_start, struct exclaves_resource_user *resource_user,
+    int resource_count);
+kern_return_t task_inherit_conclave(task_t old_task, task_t new_task);
+void task_clear_conclave(task_t task);
+void task_stop_conclave(task_t task, bool gather_crash_bt);
+kern_return_t task_stop_conclave_upcall(void);
+kern_return_t task_suspend_conclave_upcall(uint64_t *, size_t);
+struct xnuupcalls_conclavesharedbuffer_s;
+kern_return_t task_crash_info_conclave_upcall(task_t task,
+    const struct xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
+typedef struct exclaves_resource exclaves_resource_t;
+exclaves_resource_t *task_get_conclave(task_t task);
+void task_set_conclave_untaintable(task_t task);
+void task_add_conclave_crash_info(task_t task, void *crash_info_ptr);
+//Changing this would also warrant a change in ConclaveSharedBuffer
+#define CONCLAVE_CRASH_BUFFER_PAGECOUNT 2
+
+#endif /* CONFIG_EXCLAVES */
 
 #endif  /* XNU_KERNEL_PRIVATE */
 #ifdef  KERNEL_PRIVATE
@@ -1409,6 +1477,7 @@ extern kern_return_t task_get_suspend_sources_kdp(task_t task, task_suspend_sour
 #if CONFIG_ROSETTA
 extern bool task_is_translated(task_t task);
 #endif
+
 
 
 #ifdef MACH_KERNEL_PRIVATE

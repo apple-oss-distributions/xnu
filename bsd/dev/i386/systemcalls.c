@@ -109,7 +109,7 @@ unix_syscall(x86_saved_state_t *state)
 #endif
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
-	p = current_proc();
+	p = get_thread_ro(thread)->tro_proc;
 
 	uthread_reset_proc_refcount(uthread);
 
@@ -167,11 +167,7 @@ unix_syscall(x86_saved_state_t *state)
 		KDBG_RELEASE(BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_START);
 	}
 
-	/*
-	 * Delayed binding of thread credential to process credential, if we
-	 * are not running with an explicitly set thread credential.
-	 */
-	kauth_cred_thread_update(thread, p);
+	current_cached_proc_cred_update();
 
 	uthread->uu_rval[0] = 0;
 	uthread->uu_rval[1] = 0;
@@ -364,11 +360,7 @@ unix_syscall64(x86_saved_state_t *state)
 		KDBG_RELEASE(BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_START);
 	}
 
-	/*
-	 * Delayed binding of thread credential to process credential, if we
-	 * are not running with an explicitly set thread credential.
-	 */
-	kauth_cred_thread_update(thread, p);
+	current_cached_proc_cred_update();
 
 	uthread->uu_rval[0] = 0;
 	uthread->uu_rval[1] = 0;

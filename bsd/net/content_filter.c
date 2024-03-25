@@ -355,6 +355,8 @@
 #include <kern/task.h>
 #include <mach/task_info.h>
 
+#include <net/sockaddr_utils.h>
+
 #define MAX_CONTENT_FILTER 8
 
 extern int tcp_msl;
@@ -556,12 +558,12 @@ TAILQ_HEAD(cfil_sock_head_stats, cfil_info) cfil_sock_head_stats;
 /*
  * UDP Socket Support
  */
-#define IS_ICMP(so) (so && so->so_proto && (so->so_proto->pr_type == SOCK_RAW || so->so_proto->pr_type == SOCK_DGRAM) && \
-	                                   (so->so_proto->pr_protocol == IPPROTO_ICMP || so->so_proto->pr_protocol == IPPROTO_ICMPV6))
-#define IS_RAW(so)  (so && so->so_proto && so->so_proto->pr_type == SOCK_RAW  && so->so_proto->pr_protocol == IPPROTO_RAW)
+#define IS_ICMP(so) (so && (SOCK_CHECK_TYPE(so, SOCK_RAW) || SOCK_CHECK_TYPE(so, SOCK_DGRAM)) && \
+	                                   (SOCK_CHECK_PROTO(so, IPPROTO_ICMP) || SOCK_CHECK_PROTO(so, IPPROTO_ICMPV6)))
+#define IS_RAW(so)  (so && SOCK_CHECK_TYPE(so, SOCK_RAW) && SOCK_CHECK_PROTO(so, IPPROTO_RAW))
 
 #define OPTIONAL_IP_HEADER(so) (!IS_TCP(so) && !IS_UDP(so))
-#define GET_SO_PROTOCOL(so) ((so && so->so_proto) ? so->so_proto->pr_protocol : IPPROTO_IP)
+#define GET_SO_PROTOCOL(so) (so ? SOCK_PROTO(so) : IPPROTO_IP)
 #define GET_SO_INP_PROTOCOL(so) ((so && sotoinpcb(so)) ? sotoinpcb(so)->inp_ip_p : IPPROTO_IP)
 #define GET_SO_PROTO(so) ((GET_SO_PROTOCOL(so) != IPPROTO_IP) ? GET_SO_PROTOCOL(so) : GET_SO_INP_PROTOCOL(so))
 #define IS_INP_V6(inp) (inp && (inp->inp_vflag & INP_IPV6))
@@ -577,10 +579,10 @@ TAILQ_HEAD(cfil_sock_head_stats, cfil_info) cfil_sock_head_stats;
 	                   (addr.sa.sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&addr.sin6.sin6_addr)))
 
 #define SKIP_FILTER_FOR_TCP_SOCKET(so) \
-    (so == NULL || so->so_proto == NULL || so->so_proto->pr_domain == NULL || \
-     (so->so_proto->pr_domain->dom_family != PF_INET && so->so_proto->pr_domain->dom_family != PF_INET6) || \
-      so->so_proto->pr_type != SOCK_STREAM || \
-      so->so_proto->pr_protocol != IPPROTO_TCP || \
+    (so == NULL || \
+     (!SOCK_CHECK_DOM(so, PF_INET) && !SOCK_CHECK_DOM(so, PF_INET6)) || \
+      !SOCK_CHECK_TYPE(so, SOCK_STREAM) || \
+      !SOCK_CHECK_PROTO(so, IPPROTO_TCP) || \
       (so->so_flags & SOF_MP_SUBFLOW) != 0 || \
       (so->so_flags1 & SOF1_CONTENT_FILTER_SKIP) != 0)
 
@@ -1097,9 +1099,7 @@ cfil_queue_verify(struct cfil_queue *cfq)
 			    &cfq->q_mq, m);
 		}
 		for (n = m; n != NULL; n = n->m_next) {
-			if (n->m_type != MT_DATA &&
-			    n->m_type != MT_HEADER &&
-			    n->m_type != MT_OOBDATA) {
+			if (!m_has_mtype(n, MTF_DATA | MTF_HEADER | MTF_OOBDATA)) {
 				panic("%s - %p unsupported type %u", __func__,
 				    n, n->m_type);
 			}
@@ -2244,8 +2244,8 @@ cfil_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 		}
 
 		// Fill out family, type, and protocol
-		sock_info->cfs_sock_family = sock->so_proto->pr_domain->dom_family;
-		sock_info->cfs_sock_type = sock->so_proto->pr_type;
+		sock_info->cfs_sock_family = SOCK_DOM(sock);
+		sock_info->cfs_sock_type = SOCK_TYPE(sock);
 		sock_info->cfs_sock_protocol = GET_SO_PROTO(sock);
 
 		// Source and destination addresses
@@ -3432,8 +3432,8 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 	msg_attached->cfs_msghdr.cfm_op = CFM_OP_SOCKET_ATTACHED;
 	msg_attached->cfs_msghdr.cfm_sock_id = entry->cfe_cfil_info->cfi_sock_id;
 
-	msg_attached->cfs_sock_family = so->so_proto->pr_domain->dom_family;
-	msg_attached->cfs_sock_type = so->so_proto->pr_type;
+	msg_attached->cfs_sock_family = SOCK_DOM(so);
+	msg_attached->cfs_sock_type = SOCK_TYPE(so);
 	msg_attached->cfs_sock_protocol = GET_SO_PROTO(so);
 	msg_attached->cfs_pid = so->last_pid;
 	memcpy(msg_attached->cfs_uuid, so->last_uuid, sizeof(uuid_t));
@@ -3899,7 +3899,7 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	}
 
 	/* Make a copy of the data to pass to kernel control socket */
-	copy = m_copym_mode(data, copyoffset, copylen, M_DONTWAIT,
+	copy = m_copym_mode(data, copyoffset, copylen, M_DONTWAIT, NULL, NULL,
 	    M_COPYM_NOOP_HDR);
 	if (copy == NULL) {
 		CFIL_LOG(LOG_ERR, "m_copym_mode() failed");
@@ -5692,9 +5692,9 @@ cfil_sock_data_space(struct sockbuf *sb)
 		if ((uint64_t)cfi_buf->cfi_pending_mbcnt > pending) {
 			pending = cfi_buf->cfi_pending_mbcnt;
 		}
-	}
 
-	VERIFY(pending < INT32_MAX);
+		VERIFY(pending < INT32_MAX);
+	}
 
 	return (int32_t)(pending);
 }
@@ -5862,8 +5862,8 @@ sysctl_cfil_sock_list(struct sysctl_oid *oidp, void *arg1, int arg2,
 				    sizeof(uuid_t));
 			}
 
-			stat.cfs_sock_family = so->so_proto->pr_domain->dom_family;
-			stat.cfs_sock_type = so->so_proto->pr_type;
+			stat.cfs_sock_family = SOCK_DOM(so);
+			stat.cfs_sock_type = SOCK_TYPE(so);
 			stat.cfs_sock_protocol = GET_SO_PROTO(so);
 		}
 
@@ -7058,7 +7058,7 @@ cfil_dgram_get_socket_state(struct mbuf *m, uint32_t *state_change_cnt, uint32_t
 			*options = ctag->cfil_so_options;
 		}
 		if (faddr) {
-			*faddr = (struct sockaddr *) &ctag->cfil_faddr;
+			*faddr = SA(&ctag->cfil_faddr);
 		}
 		if (inp_flags) {
 			*inp_flags = ctag->cfil_inp_flags;

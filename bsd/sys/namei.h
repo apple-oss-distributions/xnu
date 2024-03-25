@@ -102,9 +102,7 @@ struct nameidata {
 	 */
 	user_addr_t ni_dirp;            /* pathname pointer */
 	enum    uio_seg ni_segflg;      /* location of pathname */
-#if CONFIG_TRIGGERS
 	enum    path_operation ni_op;   /* intended operation, see enum path_operation in vnode.h */
-#endif /* CONFIG_TRIGGERS */
 	/*
 	 * Arguments to lookup.
 	 */
@@ -146,6 +144,7 @@ struct nameidata {
 #define NAMEI_COMPOUND_OP_MASK (NAMEI_COMPOUNDOPEN | NAMEI_COMPOUNDREMOVE | NAMEI_COMPOUNDMKDIR | NAMEI_COMPOUNDRMDIR | NAMEI_COMPOUNDRENAME)
 
 #define NAMEI_NOFOLLOW_ANY      0x1000  /* no symlinks allowed in the path */
+#define NAMEI_ROOTDIR           0x2000  /* Limit lookup to ni_rootdir (similar to chroot) */
 
 #ifdef KERNEL
 /*
@@ -200,9 +199,6 @@ struct nameidata {
  * Initialization of an nameidata structure.
  */
 
-#if CONFIG_TRIGGERS
-/* Note: vnode triggers require more precise path operation (ni_op) */
-
 #define NDINIT(ndp, op, pop, flags, segflg, namep, ctx) { \
 	(ndp)->ni_cnd.cn_nameiop = op; \
 	(ndp)->ni_op = pop; \
@@ -218,22 +214,6 @@ struct nameidata {
 	(ndp)->ni_flag = 0; \
 	(ndp)->ni_cnd.cn_ndp = (ndp); \
 }
-#else
-#define NDINIT(ndp, op, _unused_, flags, segflg, namep, ctx) { \
-	(ndp)->ni_cnd.cn_nameiop = op; \
-	(ndp)->ni_cnd.cn_flags = flags; \
-	if ((segflg) == UIO_USERSPACE) { \
-	        (ndp)->ni_segflg = (vfs_context_is64bit(ctx) ? UIO_USERSPACE64 : UIO_USERSPACE32); \
-	} \
-	else { \
-	        (ndp)->ni_segflg = segflg; \
-	} \
-	(ndp)->ni_dirp = namep; \
-	(ndp)->ni_cnd.cn_context = ctx; \
-	(ndp)->ni_flag = 0; \
-	(ndp)->ni_cnd.cn_ndp = (ndp); \
-}
-#endif /* CONFIG_TRIGGERS */
 
 #endif /* KERNEL */
 

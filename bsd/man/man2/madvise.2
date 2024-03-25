@@ -132,6 +132,14 @@ quits).
 This is used with
 .Fn madvise
 system call.
+.It Dv MADV_ZERO
+Indicates that the application would like this address range effectively
+zeroed without causing unnecessary memory accesses. This could return ENOTSUP
+in some situations, in which case the caller should fall back to zeroing the
+range themselves.
+This is used with
+.Fn madvise
+system call.
 .El
 .Pp
 The
@@ -166,6 +174,13 @@ The virtual address range specified by the
 and
 .Fa len
 are outside the range allowed for the address space.
+.\" ==========
+.It Bq Er EPERM
+The operation isn't allowed on a part (or whole) of the address range due to
+restrictions.
+.\" ==========
+.It Bq Er ENOTSUP
+The operation is not supported.
 .El
 .Sh LEGACY SYNOPSIS
 .Fd #include <sys/types.h>
