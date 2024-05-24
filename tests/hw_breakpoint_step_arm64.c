@@ -18,6 +18,7 @@
 #include <stdatomic.h>
 
 #include <excserver.h>
+#include <sys/ptrace.h>
 #include <sys/syslimits.h>
 
 #define SYNC_TIMEOUT dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)
@@ -172,6 +173,8 @@ T_DECL(hw_breakpoint_step, "Ensures that a process can be single-stepped using t
 	mach_port_name_t task;
 	kr = task_for_pid(mach_task_self(), pid, &task);
 	T_ASSERT_TRUE(kr == KERN_SUCCESS, "task_for_pid");
+
+	T_ASSERT_POSIX_SUCCESS(ptrace(PT_ATTACHEXC, pid, 0, 0), "ptrace");
 
 	kr = task_suspend(task);
 	T_QUIET; T_ASSERT_TRUE(kr == KERN_SUCCESS, "task_suspend");

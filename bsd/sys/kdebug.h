@@ -372,7 +372,9 @@ __BEGIN_DECLS
 #define MACH_EXCLAVES_SCHEDULER_SUSPENDED       0x5     /* Exclaves scheduler Suspended response */
 #define MACH_EXCLAVES_SCHEDULER_RESUMED         0x6     /* Exclaves scheduler Resumed response */
 #define MACH_EXCLAVES_SCHEDULER_INTERRUPTED     0x7     /* Exclaves scheduler Interrupted response */
-
+#define MACH_EXCLAVES_SCHEDULER_NOTHING_SCHEDULED 0x8   /* Exclaves scheduler NothingScheduled response */
+#define MACH_EXCLAVES_SCHEDULER_ALL_EXCLAVES_BOOTED 0x9 /* Exclaves scheduler AllExclavesBooted response */
+#define MACH_EXCLAVES_SCHEDULER_EARLY_ALLOC     0xa     /* Exclaves scheduler PmmEarlyAlloc response */
 
 /* Codes for thread groups (DBG_MACH_THREAD_GROUP) */
 #define MACH_THREAD_GROUP_NEW           0x0

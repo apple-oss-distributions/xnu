@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2439,6 +2439,18 @@ int vnode_getfromfd(vfs_context_t ctx, int fd, vnode_t *vpp);
 vnode_t vnode_parent(vnode_t vp);
 
 /*
+ * @function vnode_getparent_and_name
+ * @abstract Get an iocount on the parent of a vnode and the name of a vnode from the VFS namecache.
+ * @discussion Combined version of vnode_getparent() and vnode_getname() to acquire both vnode name and parent
+ * without releasing the name cache lock in interim. The parent is returned with an iocount which must
+ * subsequently be dropped with vnode_put(). callers must call vnode_putname() to release the name reference.
+ * @param vp The vnode whose parent and name to grab.
+ * @param out_pvp A pointer to the output vnode parent.
+ * @param out_name A pointer to the output vnode name.
+ */
+void vnode_getparent_and_name(vnode_t vp, vnode_t *out_pvp, const char **out_name);
+
+/*
  * @function vfs_context_thread
  * @abstract Return the Mach thread associated with a vfs_context_t.
  * @param ctx The context to use.
@@ -2579,6 +2591,9 @@ errno_t vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t opti
 errno_t vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options, struct vnode_attr *vap, void *fndesc, vfs_context_t ctx);
 
 #ifdef KERNEL_PRIVATE
+
+/* vnode manipulations for devices */
+int vnode_cmp_chrtoblk(vnode_t vp, vnode_t blk_vp);
 
 // Returns a value suitable, safe and consistent for tracing and logging
 vm_offset_t kdebug_vnode(vnode_t vp);

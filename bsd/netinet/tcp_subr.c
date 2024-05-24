@@ -1878,14 +1878,14 @@ get_tcp_inp_list(struct inpcb **inp_list, int n, inp_gen_t gencnt)
 static void
 tcpcb_to_otcpcb(struct tcpcb *tp, struct otcpcb *otp)
 {
-	otp->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	otp->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	otp->t_dupacks = tp->t_dupacks;
 	otp->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	otp->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
 	otp->t_timer[TCPT_KEEP_EXT] = tp->t_timer[TCPT_KEEP];
 	otp->t_timer[TCPT_2MSL_EXT] = tp->t_timer[TCPT_2MSL];
 	otp->t_inpcb =
-	    (_TCPCB_PTR(struct inpcb *))VM_KERNEL_ADDRPERM(tp->t_inpcb);
+	    (_TCPCB_PTR(struct inpcb *))VM_KERNEL_ADDRHASH(tp->t_inpcb);
 	otp->t_state = tp->t_state;
 	otp->t_flags = tp->t_flags;
 	otp->t_force = (tp->t_flagsext & TF_FORCE) ? 1 : 0;
@@ -2064,7 +2064,7 @@ SYSCTL_PROC(_net_inet_tcp, TCPCTL_PCBLIST, pcblist,
 static void
 tcpcb_to_xtcpcb64(struct tcpcb *tp, struct xtcpcb64 *otp)
 {
-	otp->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	otp->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	otp->t_dupacks = tp->t_dupacks;
 	otp->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	otp->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
@@ -2203,7 +2203,7 @@ tcp_pcblist64 SYSCTL_HANDLER_ARGS
 		xt.xt_len = sizeof(xt);
 		inpcb_to_xinpcb64(inp, &xt.xt_inpcb);
 		xt.xt_inpcb.inp_ppcb =
-		    (uint64_t)VM_KERNEL_ADDRPERM(inp->inp_ppcb);
+		    (uint64_t)VM_KERNEL_ADDRHASH(inp->inp_ppcb);
 		if (inp->inp_ppcb != NULL) {
 			tcpcb_to_xtcpcb64((struct tcpcb *)inp->inp_ppcb,
 			    &xt);

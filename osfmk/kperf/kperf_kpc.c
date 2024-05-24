@@ -38,14 +38,6 @@
 #include <kern/kpc.h> /* kpc_cswitch_context, kpc_threads_counting */
 
 void
-kperf_kpc_thread_ast(thread_t thread)
-{
-	kpc_thread_ast_handler(thread);
-	kperf_thread_ast_handler(thread);
-	thread->kperf_ast = 0;
-}
-
-void
 kperf_kpc_thread_sample(struct kpcdata *kpcd, int sample_config)
 {
 	BUF_INFO(PERF_KPC_THREAD_SAMPLE | DBG_FUNC_START, sample_config);

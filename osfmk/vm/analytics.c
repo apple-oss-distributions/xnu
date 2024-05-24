@@ -39,6 +39,9 @@
 #include <libkern/coreanalytics/coreanalytics.h>
 #include <os/log.h>
 #include <vm/vm_page.h>
+#if CONFIG_EXCLAVES
+#include <kern/exclaves_memory.h>
+#endif /* CONFIG_EXCLAVES */
 
 #include "vm_compressor_backing_store.h"
 
@@ -258,6 +261,9 @@ vm_analytics_tick(void *arg0, void *arg1)
 	report_compressor_age();
 #endif /* XNU_TARGET_OS_WATCH */
 	report_accounting_health();
+#if CONFIG_EXCLAVES
+	exclaves_memory_report_accounting();
+#endif /* CONFIG_EXCLAVES */
 	schedule_analytics_thread_call();
 }
 

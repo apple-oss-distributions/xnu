@@ -1226,12 +1226,9 @@ sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0, struct
 
 	if (asa != NULL) {
 		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
-#if _MSIZE <= UINT8_MAX
-		if (asa->sa_len > MLEN) {
+		if (MLEN <= UINT8_MAX && asa->sa_len > MLEN) {
 			return NULL;
 		}
-#endif
-		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
 		space += asa->sa_len;
 	}
 
@@ -2720,10 +2717,10 @@ soevent_ifdenied(struct socket *so)
 			uuid_string_t buf;
 
 			uuid_unparse(ev_ifdenied.ev_data.euuid, buf);
-			log(LOG_DEBUG, "%s[%d]: so 0x%llx [%d,%d] epid %llu "
+			log(LOG_DEBUG, "%s[%d]: so %llu [%d,%d] epid %llu "
 			    "euuid %s%s has %d redundant events supressed\n",
 			    __func__, so->last_pid,
-			    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+			    so->so_gencnt, SOCK_DOM(so),
 			    SOCK_TYPE(so), ev_ifdenied.ev_data.epid, buf,
 			    ((so->so_flags & SOF_DELEGATED) ?
 			    " [delegated]" : ""), so->so_ifdenied_notifies);
@@ -2733,9 +2730,9 @@ soevent_ifdenied(struct socket *so)
 			uuid_string_t buf;
 
 			uuid_unparse(ev_ifdenied.ev_data.euuid, buf);
-			log(LOG_DEBUG, "%s[%d]: so 0x%llx [%d,%d] epid %llu "
+			log(LOG_DEBUG, "%s[%d]: so %llu [%d,%d] epid %llu "
 			    "euuid %s%s event posted\n", __func__,
-			    so->last_pid, (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    so->last_pid, so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so),
 			    ev_ifdenied.ev_data.epid, buf,
 			    ((so->so_flags & SOF_DELEGATED) ?
@@ -2789,12 +2786,12 @@ void
 sotoxsocket(struct socket *so, struct xsocket *xso)
 {
 	xso->xso_len = sizeof(*xso);
-	xso->xso_so = (_XSOCKET_PTR(struct socket *))VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (_XSOCKET_PTR(struct socket *))VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = (short)(so->so_options & 0xffff);
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (_XSOCKET_PTR(caddr_t))VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (_XSOCKET_PTR(caddr_t))VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);
@@ -2820,12 +2817,12 @@ void
 sotoxsocket64(struct socket *so, struct xsocket64 *xso)
 {
 	xso->xso_len = sizeof(*xso);
-	xso->xso_so = (u_int64_t)VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (u_int64_t)VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = (short)(so->so_options & 0xffff);
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (u_int64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (u_int64_t)VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);

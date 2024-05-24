@@ -1481,6 +1481,7 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INF
         KCSubTypeElement.FromBasicCtype('eas_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
         KCSubTypeElement.FromBasicCtype('eas_layoutid', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
         KCSubTypeElement.FromBasicCtype('eas_slide', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+        KCSubTypeElement.FromBasicCtype('eas_asroot', KCSUBTYPE_TYPE.KC_ST_UINT64, 32),
     ), 'exclave_addressspace_info')
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME')] = KCSubTypeElement('exclave_addressspace_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
@@ -1578,7 +1579,7 @@ def format_uuid(elementValues):
         return elementValues
     return ''.join("%02x" % i for i in elementValues)
 
-kThreadWaitNone			= 0x00
+kThreadWaitNone                 = 0x00
 kThreadWaitKernelMutex          = 0x01
 kThreadWaitPortReceive          = 0x02
 kThreadWaitPortSetReceive       = 0x03
@@ -1825,6 +1826,143 @@ def formatWaitInfoWithTurnstiles(waitinfos, tsinfos, portlabels):
 
     return [formatWaitInfo(wi, False, portlabels) + formatTurnstileInfo(ti, wi.get('portlabel_id', 0), portlabels) for (wi, ti) in wis_tis]
 
+
+def FindTextLayout(text_layouts, text_layout_id):
+    for layout in text_layouts.values():
+        if layout['exclave_textlayout_info']['layout_id'] == text_layout_id:
+            return layout
+    return None
+
+
+def GetExclaveLibs(text_layouts, text_layout_id):
+    from operator import itemgetter
+    textlayout = FindTextLayout(text_layouts, text_layout_id)
+    exclave_libs = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
+    exclave_libs.sort(key=itemgetter(1))
+    return exclave_libs
+    
+
+# kcdata is json at path 'kcdata_stackshot/threads_exclave/0'
+def GetEASFrames(AllImageCatalog, kcdata, ipc_entry, notes, scid):
+    info = ipc_entry['exclave_ipcstackentry_info']
+    asid = info['eise_asid']
+
+    address_spaces = kcdata['exclave_addressspace']
+    as_info = address_spaces.get(str(asid))
+    if not as_info:
+        notes.warn("PID ${PID} TID ${TID} SCID %d Missing address space info for ASID 0x%x" % (scid, asid))
+        return []
+    text_layout_id = as_info['exclave_addressspace_info']['eas_layoutid']
+    addr_space_name = as_info['exclave_addressspace_name']
+    
+    exclave_libs = GetExclaveLibs(kcdata['exclave_textlayout'], text_layout_id)
+    
+    frames = []
+    stack = ipc_entry['secure_ecstack_entry']
+    for stack_item in stack:
+        lr = GetLongForAddress(stack_item['lr'])
+        # this is a buggy value of unknown origin
+        # rdar://123508690 (Some Exclave Stackshot frames ends with invalid value 0xFFFF000000000000)
+        if lr == 0xFFFF000000000000:
+            continue
+        frames.append(GetSymbolInfoForFrame(AllImageCatalog, exclave_libs, lr))
+
+    if frames:
+        frame_info = "frames %d to %d" % (notes.offset, notes.offset + len(frames) - 1)
+    else:
+        frame_info = "no frames"
+    notes.info("PID ${PID} TID ${TID} SCID %d ASID 0x%x has address space name '%s' (%s)" % (scid, asid, addr_space_name, frame_info))
+    notes.addToOffset(len(frames))
+    return frames
+    
+
+def GetExclavesFrames(AllImageCatalog, json, scid, notes):
+    kcdata = json['kcdata_stackshot']
+    threads_exclave = kcdata.get('threads_exclave')
+    if not threads_exclave:
+        notes.warn("PID ${PID} TID ${TID} no threads_exclave info found, skipping exclaves frames")
+        return []
+
+    exclaves_content = threads_exclave.get('0')
+    if not exclaves_content:
+        notes.warn("PID ${PID} TID ${TID} threads_exclave data not found, skipping exclaves frames")
+        return []
+
+    threads_info = exclaves_content.get('thread_exclave')
+    if not threads_info:
+        notes.warn("PID ${PID} TID ${TID} no thread_exclave info found, skipping exclaves frames")
+        return []
+
+    scid_info = threads_info.get(str(scid))
+    if not scid_info:
+        notes.warn("PID ${PID} TID ${TID} no exclaves info available for SCID %d, skipping exclaves frames" % scid)
+        return []
+
+    frames = []
+
+    ipc_stack = scid_info["exclave_ipcstackentry"]
+    notes.info("\nPID ${PID} TID ${TID} SCID %d has IPC chain with %d items:" % (scid, len(ipc_stack)))
+    for i in reversed(range(len(ipc_stack))):
+        ipc_entry = ipc_stack[str(i)]
+        entry_frames = GetEASFrames(AllImageCatalog, exclaves_content, ipc_entry, notes, scid)
+        frames.extend(entry_frames)
+
+    return frames
+    
+
+def InsertExclavesFrames(AllImageCatalog, json, thdata, notes, kernel_frames):
+    thread_info = thdata.get('exclaves_thread_info')
+    if not thread_info:
+        # this is not exclave thread
+        return
+
+    scid = thread_info["tei_scid"]
+    offset = thread_info["tei_thread_offset"]
+    notes.offset = offset
+
+    exclaves_frames = GetExclavesFrames(AllImageCatalog, json, scid, notes)
+    
+    # insert exclaves frames to offset
+    for i in range(len(exclaves_frames)):
+        kernel_frames.insert(offset + i, exclaves_frames[i])
+
+class NotesBuilder:
+    
+    notes = []
+    pid = None
+    tis = None
+    offset = 0
+
+    def __init__(self, pid, tid):
+        self.pid = pid
+        self.tid = tid
+        self.notes = []
+        self.offset = 0 # offset of next IPC stack in kernel stack
+
+    # Replace ${PID} with a PID and ${TID} with TID and add newline
+    def format(self, note):
+        note = note.replace('${PID}', str(self.pid))
+        note = note.replace('${TID}', str(self.tid))
+        return note + '\n'
+    
+    def warn(self, note):
+        note = self.format(note)
+        sys.stdout.write(note)
+        self.notes.append(note)
+
+    def info(self, note):
+        note = self.format(note)
+        self.notes.append(note)
+        
+    def isEmpty(self):
+        return len(self.notes) == 0
+
+    def text(self):
+        return ''.join(self.notes)
+
+    def addToOffset(self, frame_count):
+        self.offset += frame_count
+
 def SaveStackshotReport(j, outfile_name, incomplete):
     import time
     from operator import itemgetter, attrgetter
@@ -2022,6 +2160,10 @@ def SaveStackshotReport(j, outfile_name, incomplete):
                 kuserframes = []
                 for f in thdata["kernel_stack_frames"]:
                     kuserframes.append(GetSymbolInfoForFrame(AllImageCatalog, pr_libs, f['lr']))
+                notesBuilder = NotesBuilder(pid, tid)
+                InsertExclavesFrames(AllImageCatalog, j, thdata, notesBuilder, kuserframes)
+                if not notesBuilder.isEmpty():
+                    obj['notes'] += notesBuilder.text()
                 thsnap["kernelFrames"] = kuserframes
 
             if "user_stack_frames" in thdata:
@@ -2206,6 +2348,7 @@ PRETTIFY_FLAGS = {
         'disable_latency_info',
         'save_dyld_compactinfo',
         'include_driver_threads_in_kernel',
+        'exclaves',
     ],
     'system_state_flags': [
         'kUser64_p',

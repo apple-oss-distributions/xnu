@@ -60,6 +60,7 @@
 #include <machine/machine_routines.h>
 
 #include <sys/kdebug.h>
+#include <sys/random.h>
 
 #if CONFIG_ATM
 #include <atm/atm_internal.h>
@@ -104,10 +105,12 @@ extern int gARM_FEAT_JSCVT;
 extern int gARM_FEAT_PAuth;
 extern int gARM_FEAT_PAuth2;
 extern int gARM_FEAT_FPAC;
+extern int gARM_FEAT_FPACCOMBINE;
 extern int gARM_FEAT_DPB;
 extern int gARM_FEAT_DPB2;
 extern int gARM_FEAT_BF16;
 extern int gARM_FEAT_I8MM;
+extern int gARM_FEAT_RPRES;
 extern int gARM_FEAT_ECV;
 extern int gARM_FEAT_LSE2;
 extern int gARM_FEAT_CSV2;
@@ -119,6 +122,7 @@ extern int gARM_FEAT_FP16;
 extern int gARM_FEAT_SSBS;
 extern int gARM_FEAT_BTI;
 extern int gARM_FP_SyncExceptions;
+extern int gARM_FEAT_AFP;
 
 extern int      gUCNormalMem;
 
@@ -217,6 +221,42 @@ commpage_populate(void)
 	cpu_quiescent_set_storage((_Atomic uint64_t *)(_COMM_PAGE_CPU_QUIESCENT_COUNTER +
 	    _COMM_PAGE_RW_OFFSET));
 #endif /* CONFIG_QUIESCE_COUNTER */
+
+	/*
+	 * Set random values for targets in Apple Security Bounty
+	 * addr should be unmapped for userland processes
+	 * kaddr should be unmapped for kernel
+	 */
+	uint64_t asb_value, asb_addr, asb_kvalue, asb_kaddr;
+	uint64_t asb_rand_vals[] = {
+		0x93e78adcded4d3d5, 0xd16c5b76ad99bccf, 0x67dfbbd12c4a594e, 0x7365636e6f6f544f,
+		0x239a974c9811e04b, 0xbf60e7fa45741446, 0x8acf5210b466b05, 0x67dfbbd12c4a594e
+	};
+	const int nrandval = sizeof(asb_rand_vals) / sizeof(asb_rand_vals[0]);
+	uint8_t randidx;
+
+	read_random(&randidx, sizeof(uint8_t));
+	asb_value = asb_rand_vals[randidx++ % nrandval];
+	*((uint64_t*)(_COMM_PAGE_ASB_TARGET_VALUE + _COMM_PAGE_RW_OFFSET)) = asb_value;
+
+	// userspace faulting address should be > MACH_VM_MAX_ADDRESS
+	asb_addr = asb_rand_vals[randidx++ % nrandval];
+	uint64_t user_min = MACH_VM_MAX_ADDRESS;
+	uint64_t user_max = UINT64_MAX;
+	asb_addr %= (user_max - user_min);
+	asb_addr += user_min;
+	*((uint64_t*)(_COMM_PAGE_ASB_TARGET_ADDRESS + _COMM_PAGE_RW_OFFSET)) = asb_addr;
+
+	asb_kvalue = asb_rand_vals[randidx++ % nrandval];
+	*((uint64_t*)(_COMM_PAGE_ASB_TARGET_KERN_VALUE + _COMM_PAGE_RW_OFFSET)) = asb_kvalue;
+
+	// kernel faulting address should be < VM_MIN_KERNEL_ADDRESS
+	asb_kaddr = asb_rand_vals[randidx++ % nrandval];
+	uint64_t kernel_min = 0x0LL;
+	uint64_t kernel_max = VM_MIN_KERNEL_ADDRESS;
+	asb_kaddr %= (kernel_max - kernel_min);
+	asb_kaddr += kernel_min;
+	*((uint64_t*)(_COMM_PAGE_ASB_TARGET_KERN_ADDRESS + _COMM_PAGE_RW_OFFSET)) = asb_kaddr;
 }
 
 #define COMMPAGE_TEXT_SEGMENT "__TEXT_EXEC"
@@ -490,6 +530,9 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_FPAC_EN) {
 		gARM_FEAT_FPAC = 1;
 	}
+	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_FPACCOMBINE) {
+		gARM_FEAT_FPACCOMBINE = 1;
+	}
 	if ((isar1 & ID_AA64ISAR1_EL1_DPB_MASK) >= ID_AA64ISAR1_EL1_DPB_EN) {
 		gARM_FEAT_DPB = 1;
 		bits |= kHasFeatDPB;
@@ -506,6 +549,19 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 	}
 
 	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ISAR2_EL1
+ */
+static void
+commpage_init_arm_optional_features_isar2(void)
+{
+	uint64_t isar2 = __builtin_arm_rsr64("ID_AA64ISAR2_EL1");
+
+	if ((isar2 & ID_AA64ISAR2_EL1_RPRES_MASK) >= ID_AA64ISAR2_EL1_RPRES_EN) {
+		gARM_FEAT_RPRES = 1;
+	}
 }
 
 /**
@@ -598,6 +654,20 @@ commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits)
 }
 
 
+static void
+commpage_init_arm_optional_features_mmfr1(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	const uint64_t mmfr1 = __builtin_arm_rsr64("ID_AA64MMFR1_EL1");
+
+	if ((mmfr1 & ID_AA64MMFR1_EL1_AFP_MASK) == ID_AA64MMFR1_EL1_AFP_EN) {
+		gARM_FEAT_AFP = 1;
+		bits |= kHasFeatAFP;
+	}
+
+	*commpage_bits |= bits;
+}
+
 /**
  * Read the system register @name, attempt to set set bits of @mask if not
  * already, test if bits were actually set, reset the register to its
@@ -650,7 +720,9 @@ commpage_init_arm_optional_features(uint64_t *commpage_bits)
 {
 	commpage_init_arm_optional_features_isar0(commpage_bits);
 	commpage_init_arm_optional_features_isar1(commpage_bits);
+	commpage_init_arm_optional_features_isar2();
 	commpage_init_arm_optional_features_mmfr0(commpage_bits);
+	commpage_init_arm_optional_features_mmfr1(commpage_bits);
 	commpage_init_arm_optional_features_mmfr2(commpage_bits);
 	commpage_init_arm_optional_features_pfr0(commpage_bits);
 	commpage_init_arm_optional_features_pfr1(commpage_bits);

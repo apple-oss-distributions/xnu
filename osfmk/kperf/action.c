@@ -565,7 +565,7 @@ kperf_thread_exclaves_ast_handler(thread_t thread, const stackshot_stackshotentr
 			ipcstack_count += 1;
 		});
 
-		BUF_DATA(PERF_CS_EXSTACKHDR, ipcstack_count);
+		BUF_DATA(PERF_CS_EXSTACKHDR, ipcstack_count, thread->thread_id, entry->scid);
 
 		stackshot_ipcstackentry__v_visit(&entry->ipcstack.value, ^(size_t __unused j, const stackshot_ipcstackentry_s * _Nonnull ipcstack) {
 			kperf_excallstack_log(ipcstack);

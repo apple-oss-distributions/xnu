@@ -437,7 +437,7 @@ flush_tclass_for_proc(void)
  * Must be called with tclass_lock held
  */
 static struct tclass_for_proc *
-alloc_tclass_for_proc(pid_t pid, const char *pname)
+alloc_tclass_for_proc(pid_t pid, const char *pname, size_t pnamelen)
 {
 	struct tclass_for_proc *tfp;
 
@@ -458,7 +458,12 @@ alloc_tclass_for_proc(pid_t pid, const char *pname)
 	if (pid != -1) {
 		TAILQ_INSERT_HEAD(&tfp_head, tfp, tfp_link);
 	} else {
-		strlcpy(tfp->tfp_pname, pname, sizeof(tfp->tfp_pname));
+		if (pname != NULL) {
+			strncpy(tfp->tfp_pname, pname, pnamelen);
+			tfp->tfp_pname[sizeof(tfp->tfp_pname) - 1] = '\0';
+		} else {
+			tfp->tfp_pname[0] = '\0';
+		}
 		TAILQ_INSERT_TAIL(&tfp_head, tfp, tfp_link);
 	}
 
@@ -492,7 +497,7 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 
 	tfp = find_tfp_by_pid(pid);
 	if (tfp == NULL) {
-		tfp = alloc_tclass_for_proc(pid, NULL);
+		tfp = alloc_tclass_for_proc(pid, NULL, 0);
 		if (tfp == NULL) {
 			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
@@ -571,7 +576,8 @@ set_pname_tclass(struct so_tcdbg *so_tcdbg)
 
 	tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
 	if (tfp == NULL) {
-		tfp = alloc_tclass_for_proc(-1, so_tcdbg->so_tcdbg_pname);
+		tfp = alloc_tclass_for_proc(-1, so_tcdbg->so_tcdbg_pname,
+		    sizeof(so_tcdbg->so_tcdbg_pname));
 		if (tfp == NULL) {
 			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
@@ -829,9 +835,10 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 			} else {
 				ptr->so_tcdbg_cmd = SO_TCDBG_PNAME;
 				ptr->so_tcdbg_pid = -1;
-				strlcpy(ptr->so_tcdbg_pname,
+				strncpy(ptr->so_tcdbg_pname,
 				    tfp->tfp_pname,
 				    sizeof(ptr->so_tcdbg_pname));
+				ptr->so_tcdbg_pname[sizeof(ptr->so_tcdbg_pname) - 1] = '\0';
 			}
 			ptr->so_tcdbg_tclass = tfp->tfp_class;
 			ptr->so_tcbbg_qos_mode = tfp->tfp_qos_mode;

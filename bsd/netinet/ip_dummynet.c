@@ -283,6 +283,7 @@ cp_pipe_from_user_32( struct sockopt *sopt, struct dn_pipe *p )
 		p->numbytes = user_pipe_32.numbytes;
 		p->sched_time = user_pipe_32.sched_time;
 		bcopy( user_pipe_32.if_name, p->if_name, IFNAMSIZ);
+		p->if_name[IFNAMSIZ - 1] = '\0';
 		p->ready = user_pipe_32.ready;
 
 		p->fs.fs_nr = user_pipe_32.fs.fs_nr;
@@ -330,6 +331,7 @@ cp_pipe_from_user_64( struct sockopt *sopt, struct dn_pipe *p )
 		p->numbytes = user_pipe_64.numbytes;
 		p->sched_time = user_pipe_64.sched_time;
 		bcopy( user_pipe_64.if_name, p->if_name, IFNAMSIZ);
+		p->if_name[IFNAMSIZ - 1] = '\0';
 		p->ready = user_pipe_64.ready;
 
 		p->fs.fs_nr = user_pipe_64.fs.fs_nr;
@@ -382,7 +384,7 @@ cp_flow_set_to_32_user(struct dn_flow_set *set, struct dn_flow_set_32 *fs_bp)
 	fs_bp->c_2 = set->c_2;
 	fs_bp->c_3 = set->c_3;
 	fs_bp->c_4 = set->c_4;
-	fs_bp->w_q_lookup = CAST_DOWN_EXPLICIT(user32_addr_t, set->w_q_lookup);
+	fs_bp->w_q_lookup = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(set->w_q_lookup));
 	fs_bp->lookup_depth = set->lookup_depth;
 	fs_bp->lookup_step = set->lookup_step;
 	fs_bp->lookup_weight = set->lookup_weight;
@@ -412,7 +414,7 @@ cp_flow_set_to_64_user(struct dn_flow_set *set, struct dn_flow_set_64 *fs_bp)
 	fs_bp->c_2 = set->c_2;
 	fs_bp->c_3 = set->c_3;
 	fs_bp->c_4 = set->c_4;
-	fs_bp->w_q_lookup = CAST_DOWN(user64_addr_t, set->w_q_lookup);
+	fs_bp->w_q_lookup = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(set->w_q_lookup));
 	fs_bp->lookup_depth = set->lookup_depth;
 	fs_bp->lookup_step = set->lookup_step;
 	fs_bp->lookup_weight = set->lookup_weight;
@@ -474,17 +476,17 @@ cp_pipe_to_32_user(struct dn_pipe *p, struct dn_pipe_32 *pipe_bp)
 	pipe_bp->bandwidth = p->bandwidth;
 	pipe_bp->delay = p->delay;
 	bcopy( &(p->scheduler_heap), &(pipe_bp->scheduler_heap), sizeof(struct dn_heap_32));
-	pipe_bp->scheduler_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->scheduler_heap.p);
+	pipe_bp->scheduler_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->scheduler_heap.p));
 	bcopy( &(p->not_eligible_heap), &(pipe_bp->not_eligible_heap), sizeof(struct dn_heap_32));
-	pipe_bp->not_eligible_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->not_eligible_heap.p);
+	pipe_bp->not_eligible_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->not_eligible_heap.p));
 	bcopy( &(p->idle_heap), &(pipe_bp->idle_heap), sizeof(struct dn_heap_32));
-	pipe_bp->idle_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->idle_heap.p);
+	pipe_bp->idle_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->idle_heap.p));
 	pipe_bp->V = p->V;
 	pipe_bp->sum = p->sum;
 	pipe_bp->numbytes = p->numbytes;
 	pipe_bp->sched_time = p->sched_time;
 	bcopy( p->if_name, pipe_bp->if_name, IFNAMSIZ);
-	pipe_bp->ifp = CAST_DOWN_EXPLICIT(user32_addr_t, p->ifp);
+	pipe_bp->ifp = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(p->ifp));
 	pipe_bp->ready = p->ready;
 
 	cp_flow_set_to_32_user( &(p->fs), &(pipe_bp->fs));
@@ -516,17 +518,17 @@ cp_pipe_to_64_user(struct dn_pipe *p, struct dn_pipe_64 *pipe_bp)
 	pipe_bp->bandwidth = p->bandwidth;
 	pipe_bp->delay = p->delay;
 	bcopy( &(p->scheduler_heap), &(pipe_bp->scheduler_heap), sizeof(struct dn_heap_64));
-	pipe_bp->scheduler_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->scheduler_heap.p);
+	pipe_bp->scheduler_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->scheduler_heap.p));
 	bcopy( &(p->not_eligible_heap), &(pipe_bp->not_eligible_heap), sizeof(struct dn_heap_64));
-	pipe_bp->not_eligible_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->not_eligible_heap.p);
+	pipe_bp->not_eligible_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->not_eligible_heap.p));
 	bcopy( &(p->idle_heap), &(pipe_bp->idle_heap), sizeof(struct dn_heap_64));
-	pipe_bp->idle_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->idle_heap.p);
+	pipe_bp->idle_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->idle_heap.p));
 	pipe_bp->V = p->V;
 	pipe_bp->sum = p->sum;
 	pipe_bp->numbytes = p->numbytes;
 	pipe_bp->sched_time = p->sched_time;
 	bcopy( p->if_name, pipe_bp->if_name, IFNAMSIZ);
-	pipe_bp->ifp = CAST_DOWN(user64_addr_t, p->ifp);
+	pipe_bp->ifp = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(p->ifp));
 	pipe_bp->ready = p->ready;
 
 	cp_flow_set_to_64_user( &(p->fs), &(pipe_bp->fs));

@@ -1105,6 +1105,12 @@ extern size_t ml_get_vm_reserved_regions(
 	bool                    vm_is64bit,
 	const struct vm_reserved_region **regions);
 
+/**
+ * Explicitly preallocates a floating point save area. This function is defined
+ * in the machine-dependent machine_routines.c files.
+ */
+extern void ml_fp_save_area_prealloc(void);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 /* Create an empty map */
@@ -1840,7 +1846,7 @@ boolean_t        vm_map_entry_has_device_pager(vm_map_t, vm_map_offset_t vaddr);
  * a fake pointer based on the map's ledger and the index of the ledger being
  * reported.
  */
-#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((int*)((map)->pmap->ledger)+(ledger_id)))
+#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRHASH((int*)((map)->pmap->ledger)+(ledger_id)))
 
 #endif  /* KERNEL_PRIVATE */
 

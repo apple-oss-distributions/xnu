@@ -5324,6 +5324,7 @@ vm_object_coalesce(
 
 	if ((prev_object->ref_count > 1) ||
 	    prev_object->pager_created ||
+	    prev_object->phys_contiguous ||
 	    (prev_object->shadow != VM_OBJECT_NULL) ||
 	    (prev_object->vo_copy != VM_OBJECT_NULL) ||
 	    (prev_object->true_share != FALSE) ||
@@ -8239,15 +8240,17 @@ vm_object_ownership_change(
 	old_no_footprint = object->vo_no_footprint;
 	old_owner = VM_OBJECT_OWNER(object);
 
-	DTRACE_VM8(object_ownership_change,
-	    vm_object_t, object,
-	    task_t, old_owner,
-	    int, old_ledger_tag,
-	    int, old_no_footprint,
-	    task_t, new_owner,
-	    int, new_ledger_tag,
-	    int, new_no_footprint,
-	    int, VM_OBJECT_ID(object));
+	if (__improbable(vm_debug_events)) {
+		DTRACE_VM8(object_ownership_change,
+		    vm_object_t, object,
+		    task_t, old_owner,
+		    int, old_ledger_tag,
+		    int, old_no_footprint,
+		    task_t, new_owner,
+		    int, new_ledger_tag,
+		    int, new_no_footprint,
+		    int, VM_OBJECT_ID(object));
+	}
 
 	assert(object->internal);
 	resident_count = object->resident_page_count - object->wired_page_count;

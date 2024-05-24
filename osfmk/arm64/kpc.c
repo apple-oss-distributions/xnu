@@ -391,6 +391,9 @@ static void
 restore_control_regs(uint32_t classes)
 {
 	SREG_WRITE("PMCR1_EL1", saved_PMCR[1] | 0x30303);
+#if CONFIG_EXCLAVES
+	SREG_WRITE("PMCR1_EL12", saved_PMCR[1] | 0x30303);
+#endif
 	SREG_WRITE("PMESR0_EL1", saved_PMESR[0]);
 	SREG_WRITE("PMESR1_EL1", saved_PMESR[1]);
 

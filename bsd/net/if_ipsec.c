@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1829,7 +1829,7 @@ ipsec_netif_sync_rx_mbuf(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 					struct ip6_hdr *ip6 = mtod(data, struct ip6_hdr *);
 
 					int fragment_error = ip6_do_fragmentation(&data, 0, pcb->ipsec_ifp, sizeof(struct ip6_hdr),
-					    ip6, NULL, fragment_mtu, ip6->ip6_nxt, htonl(ip6_randomid()));
+					    ip6, NULL, fragment_mtu, ip6->ip6_nxt, htonl(ip6_randomid((uint64_t)data)));
 					if (fragment_error == 0 && data != NULL) {
 						fragment_chain = data;
 					} else {
@@ -2437,7 +2437,7 @@ ipsec_netif_sync_rx_packet(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 					struct ip6_hdr *ip6 = mtod(data, struct ip6_hdr *);
 
 					int fragment_error = ip6_do_fragmentation(&data, 0, pcb->ipsec_ifp, sizeof(struct ip6_hdr),
-					    ip6, NULL, fragment_mtu, ip6->ip6_nxt, htonl(ip6_randomid()));
+					    ip6, NULL, fragment_mtu, ip6->ip6_nxt, htonl(ip6_randomid((uint64_t)data)));
 					if (fragment_error == 0 && data != NULL) {
 						fragment_chain = data;
 					} else {

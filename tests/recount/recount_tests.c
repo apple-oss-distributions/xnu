@@ -572,6 +572,7 @@ T_DECL(proc_pidthreadcounts_sanity,
 
 T_DECL(proc_pidthreadcounts_invalid_tid,
 		"check that proc_pidthreadcounts returns ESRCH on invalid thread",
+		REQUIRE_RECOUNT_PMCS,
 		T_META_ASROOT(true))
 {
 	T_SETUPBEGIN;

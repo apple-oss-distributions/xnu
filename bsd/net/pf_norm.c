@@ -322,12 +322,12 @@ pf_purge_expired_fragments(void)
 		case AF_INET:
 			DPFPRINTF(("expiring IPv4 %d(0x%llx) from queue.\n",
 			    ntohs(frag->fr_id),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		case AF_INET6:
 			DPFPRINTF(("expiring IPv6 %d(0x%llx) from queue.\n",
 			    ntohl(frag->fr_id6),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		default:
 			VERIFY(0 && "only IPv4 and IPv6 supported");
@@ -346,12 +346,12 @@ pf_purge_expired_fragments(void)
 		case AF_INET:
 			DPFPRINTF(("expiring IPv4 %d(0x%llx) from cache.\n",
 			    ntohs(frag->fr_id),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		case AF_INET6:
 			DPFPRINTF(("expiring IPv6 %d(0x%llx) from cache.\n",
 			    ntohl(frag->fr_id6),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		default:
 			VERIFY(0 && "only IPv4 and IPv6 supported");
@@ -1440,7 +1440,7 @@ insert:
 	}
 
 	DPFPRINTF(("complete: 0x%llx ip6_plen %d m_pkthdr.len %d\n",
-	    (uint64_t)VM_KERNEL_ADDRPERM(m), ntohs(ip6->ip6_plen),
+	    (uint64_t)VM_KERNEL_ADDRHASH(m), ntohs(ip6->ip6_plen),
 	    m->m_pkthdr.len));
 
 	/* Add the reassembled tag */
@@ -1508,7 +1508,7 @@ pf_frag6cache(struct mbuf **m0, struct ip6_hdr *h, struct ip6_frag *fh,
 	fr_max = off + plen;
 
 	DPFPRINTF(("0x%llx plen %u off %u fr_max %u\n",
-	    (uint64_t)VM_KERNEL_ADDRPERM(m), plen, off, fr_max));
+	    (uint64_t)VM_KERNEL_ADDRHASH(m), plen, off, fr_max));
 
 	/* Create a new range queue for this packet */
 	if (*frag == NULL) {

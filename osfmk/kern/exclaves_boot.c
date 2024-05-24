@@ -45,6 +45,7 @@
 #include "exclaves_boot.h"
 #include "exclaves_debug.h"
 #include "exclaves_frame_mint.h"
+#include "exclaves_upcalls.h"
 
 extern lck_grp_t exclaves_lck_grp;
 
@@ -112,11 +113,18 @@ exclaves_boot_tasks(void)
 	qsort(boot_tasks, count, sizeof(boot_tasks[0]), ebt_cmp);
 
 	for (size_t i = 0; i < count; i++) {
+		exclaves_debug_printf(show_progress,
+		    "exclaves: boot task started, %s\n", boot_tasks[i].ebt_name);
+
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES,
 		    MACH_EXCLAVES_BOOT_TASK) | DBG_FUNC_START, i);
 		kern_return_t ret = boot_tasks[i].ebt_func();
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES,
 		    MACH_EXCLAVES_BOOT_TASK) | DBG_FUNC_END);
+
+		exclaves_debug_printf(show_progress,
+		    "exclaves: boot task done, %s\n", boot_tasks[i].ebt_name);
+
 		if (ret != KERN_SUCCESS) {
 			panic("exclaves: boot task failed: %s (%p)",
 			    boot_tasks[i].ebt_name, &boot_tasks[i]);
@@ -189,17 +197,18 @@ exclaves_boot_stage_2(void)
 		return KERN_NOT_SUPPORTED;
 	}
 
-	/* Should only be called from launchd. */
-	if (task_pid(current_task()) != 1) {
-		return KERN_DENIED;
-	}
-
 	/*
 	 * This should only ever happen if there's a userspace bug which causes
 	 * boot to be called twice and cause a race.
 	 */
 	if (status != EXCLAVES_BS_NOT_STARTED) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* Initialize xnu upcall server. */
+	kr = exclaves_upcall_early_init();
+	if (kr != KERN_SUCCESS) {
+		panic("Exclaves upcall early init failed");
 	}
 
 	/* Early boot. */

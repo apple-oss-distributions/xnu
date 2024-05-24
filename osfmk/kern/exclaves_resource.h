@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <kern/bits.h>
 #include <kern/locks.h>
 #include <kern/queue.h>
 #include <mach/exclaves.h>
@@ -93,13 +94,17 @@ typedef enum  {
 	CONCLAVE_S_STOPPED,
 } conclave_state_t;
 
+/* The maximum number of services available in any conclave. */
+#define CONCLAVE_SERVICE_MAX 128
+
 typedef struct {
 	conclave_state_t       c_state;
 	tb_client_connection_t c_control;
-	task_t                 c_task;
+	task_t XNU_PTRAUTH_SIGNED_PTR("conclave.task") c_task;
+	bitmap_t               c_service_bitmap[BITMAP_LEN(CONCLAVE_SERVICE_MAX)];
 } conclave_resource_t;
 
-#define EXCLAVES_SHARED_BUFFER_MAX_RANGES 64
+#define EXCLAVES_SHARED_BUFFER_MAX_RANGES 256
 
 typedef struct {
 	char *address;
@@ -530,6 +535,22 @@ extern kern_return_t
 exclaves_conclave_inherit(exclaves_resource_t *resource, task_t old_task,
     task_t new_task);
 
+
+/*!
+ * @function exclaves_conclave_is_attached
+ *
+ * @abstract
+ * Returns true if the conclave is in the ATTACHED state.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
+ * @return
+ * True if conclave is attached, false otherwise
+ */
+extern bool
+exclaves_conclave_is_attached(const exclaves_resource_t *resource);
+
 /*!
  * @function exclaves_conclave_launch
  *
@@ -543,7 +564,8 @@ exclaves_conclave_inherit(exclaves_resource_t *resource, task_t old_task,
  * @return
  * KERN_SUCCESS on success, error code otherwise.
  */
-extern kern_return_t exclaves_conclave_launch(exclaves_resource_t *resource);
+extern kern_return_t
+exclaves_conclave_launch(exclaves_resource_t *resource);
 
 /*!
  * @function exclaves_conclave_lookup_resources
@@ -564,7 +586,8 @@ extern kern_return_t exclaves_conclave_launch(exclaves_resource_t *resource);
  * @return
  * KERN_SUCCESS on success, error code otherwise.
  */
-extern kern_return_t exclaves_conclave_lookup_resources(exclaves_resource_t *resource,
+extern kern_return_t
+exclaves_conclave_lookup_resources(exclaves_resource_t *resource,
     struct exclaves_resource_user *conclave_resource_user, int resource_count);
 
 /*!
@@ -582,7 +605,8 @@ extern kern_return_t exclaves_conclave_lookup_resources(exclaves_resource_t *res
  * @return
  * KERN_SUCCESS on success, error code otherwise.
  */
-extern kern_return_t exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt);
+extern kern_return_t
+exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt);
 
 /*!
  * @function exclaves_conclave_stop_upcall
@@ -593,13 +617,65 @@ extern kern_return_t exclaves_conclave_stop(exclaves_resource_t *resource, bool 
  * @param resource
  * Conclave Manager resource.
  *
+ * @return
+ * KERN_SUCCESS on success, error code otherwise.
+ */
+extern kern_return_t
+exclaves_conclave_stop_upcall(exclaves_resource_t *resource);
+
+/*!
+ * @function exclaves_conclave_stop_upcall_complete
+ *
+ * @abstract
+ * Complete the Conclave stop once back in regular context.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
  * @param task
  * Conclave Host task
  *
  * @return
  * KERN_SUCCESS on success, error code otherwise.
  */
-extern kern_return_t exclaves_conclave_stop_upcall(exclaves_resource_t *resource, task_t task);
+extern kern_return_t
+exclaves_conclave_stop_upcall_complete(exclaves_resource_t *resource, task_t task);
+
+/*!
+ * @function exclaves_conclave_get_domain
+ *
+ * @abstract
+ * Return the domain associated with the specified conclave resource. Or the
+ * kernel domain if the conclave resource is NULL.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
+ * @return
+ * The domain of the conclave or the kernel domain.
+ */
+extern const char *
+exclaves_conclave_get_domain(exclaves_resource_t *resource);
+
+
+/*!
+ * @function exclaves_conclave_has_service
+ *
+ * @abstract
+ * Return true if the service ID is associated with the specified conclave
+ * resource.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
+ * @params id
+ * ID of a SERVICE resource.
+ *
+ * @return
+ * true if the ID is available to conclave, false otherwise
+ */
+extern bool
+exclaves_conclave_has_service(exclaves_resource_t *resource, uint64_t id);
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Sensors

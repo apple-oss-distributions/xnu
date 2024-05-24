@@ -552,17 +552,13 @@ vm32_make_memory_entry(
 kern_return_t
 vm32__task_wire(
 	vm_map_t        map,
-	boolean_t       must_wire)
+	boolean_t       must_wire __unused)
 {
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	vm_map_lock(map);
-	map->wiring_required = (must_wire == TRUE);
-	vm_map_unlock(map);
-
-	return KERN_SUCCESS;
+	return KERN_NOT_SUPPORTED;
 }
 
 kern_return_t

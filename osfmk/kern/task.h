@@ -326,7 +326,11 @@ struct task {
 #define TFRO_PLATFORM                   0x00000400                      /* task is a platform binary */
 #define TFRO_FILTER_MSG                 0x00004000                      /* task calls into message filter callback before sending a message */
 #define TFRO_PAC_EXC_FATAL              0x00010000                      /* task is marked a corpse if a PAC exception occurs */
+#define TFRO_JIT_EXC_FATAL              0x00020000                      /* kill the task on access violations from privileged JIT code */
 #define TFRO_PAC_ENFORCE_USER_STATE     0x01000000                      /* Enforce user and kernel signed thread state */
+#if CONFIG_EXCLAVES
+#define TFRO_HAS_KD_ACCESS              0x02000000                      /* Access to the kernel exclave resource domain  */
+#endif /* CONFIG_EXCLAVES */
 
 /*
  * Task is running within a 64-bit address space.
@@ -569,8 +573,8 @@ struct task {
 #endif /* CONFIG_DEFERRED_RECLAIM */
 
 #if CONFIG_EXCLAVES
-	void *conclave;
-	void *exclave_crash_info;
+	void * XNU_PTRAUTH_SIGNED_PTR("task.conclave") conclave;
+	void * XNU_PTRAUTH_SIGNED_PTR("task.exclave_crash_info") exclave_crash_info;
 	uint32_t exclave_crash_info_length;
 #endif /* CONFIG_EXCLAVES */
 };
@@ -1146,6 +1150,7 @@ struct _task_ledger_indices {
 	int tkm_shared;
 	int phys_mem;
 	int wired_mem;
+	int conclave_mem;
 	int internal;
 	int iokit_mapped;
 	int external;
@@ -1295,6 +1300,9 @@ extern bool task_is_pac_exception_fatal(task_t task);
 extern void task_set_pac_exception_fatal_flag(task_t task);
 #endif /*__has_feature(ptrauth_calls)*/
 
+extern bool task_is_jit_exception_fatal(task_t task);
+extern void task_set_jit_exception_fatal_flag(task_t task);
+
 extern bool task_needs_user_signed_thread_state(task_t task);
 extern void task_set_tecs(task_t task);
 extern void task_get_corpse_vmobject_list(task_t task, vmobject_list_output_t* list, size_t* list_size);
@@ -1319,14 +1327,13 @@ extern kern_return_t task_get_exception_ports(
 	thread_state_flavor_array_t     flavors);
 
 #if CONFIG_EXCLAVES
-int task_add_conclave(task_t task, const char *task_conclave_id);
-kern_return_t task_start_conclave_and_lookup_resources(mach_port_name_t port,
-    bool conclave_start, struct exclaves_resource_user *resource_user,
-    int resource_count);
-kern_return_t task_inherit_conclave(task_t old_task, task_t new_task);
+int task_add_conclave(task_t task, void *, int64_t, const char *task_conclave_id);
+kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnode, int64_t off);
+kern_return_t task_launch_conclave(mach_port_name_t port);
 void task_clear_conclave(task_t task);
 void task_stop_conclave(task_t task, bool gather_crash_bt);
 kern_return_t task_stop_conclave_upcall(void);
+kern_return_t task_stop_conclave_upcall_complete(void);
 kern_return_t task_suspend_conclave_upcall(uint64_t *, size_t);
 struct xnuupcalls_conclavesharedbuffer_s;
 kern_return_t task_crash_info_conclave_upcall(task_t task,

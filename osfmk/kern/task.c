@@ -141,6 +141,7 @@
 #endif /* CONFIG_PERVASIVE_CPI */
 
 #if CONFIG_EXCLAVES
+#include "exclaves_boot.h"
 #include "exclaves_resource.h"
 #include "exclaves_boot.h"
 #include "kern/exclaves.tightbeam.h"
@@ -224,8 +225,6 @@ kern_return_t task_crash_info_conclave_upcall(task_t task,
     const xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
 kern_return_t
 stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *_Nonnull result, void *kcdata_ptr);
-extern void *fake_crash_buffer;
-extern uint32_t fake_crash_buffer_length;
 #endif /* CONFIG_EXCLAVES */
 
 IPC_KOBJECT_DEFINE(IKOT_TASK_NAME);
@@ -359,7 +358,8 @@ SECURITY_READ_ONLY_LATE(struct _task_ledger_indices) task_ledgers __attribute__(
 #if CONFIG_MEMORYSTATUS
  .memorystatus_dirty_time = -1,
 #endif /* CONFIG_MEMORYSTATUS */
- .swapins = -1, };
+ .swapins = -1,
+ .conclave_mem = -1, };
 
 /* System sleep state */
 boolean_t tasks_suspend_state;
@@ -1230,6 +1230,8 @@ init_task_ledgers(void)
 	    "bytes");
 	task_ledgers.wired_mem = ledger_entry_add(t, "wired_mem", "physmem",
 	    "bytes");
+	task_ledgers.conclave_mem = ledger_entry_add_with_flags(t, "conclave_mem", "physmem", "count",
+	    LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE | LEDGER_ENTRY_ALLOW_DEBIT);
 	task_ledgers.internal = ledger_entry_add(t, "internal", "physmem",
 	    "bytes");
 	task_ledgers.iokit_mapped = ledger_entry_add_with_flags(t, "iokit_mapped", "mappings",
@@ -1338,6 +1340,7 @@ init_task_ledgers(void)
 	    (task_ledgers.tkm_shared < 0) ||
 	    (task_ledgers.phys_mem < 0) ||
 	    (task_ledgers.wired_mem < 0) ||
+	    (task_ledgers.conclave_mem < 0) ||
 	    (task_ledgers.internal < 0) ||
 	    (task_ledgers.external < 0) ||
 	    (task_ledgers.reusable < 0) ||
@@ -1407,6 +1410,7 @@ init_task_ledgers(void)
 #if MACH_ASSERT
 	if (pmap_ledgers_panic) {
 		ledger_panic_on_negative(t, task_ledgers.phys_footprint);
+		ledger_panic_on_negative(t, task_ledgers.conclave_mem);
 		ledger_panic_on_negative(t, task_ledgers.page_table);
 		ledger_panic_on_negative(t, task_ledgers.internal);
 		ledger_panic_on_negative(t, task_ledgers.iokit_mapped);
@@ -1593,7 +1597,7 @@ task_create_internal(
 		    TFRO_PAC_EXC_FATAL));
 #endif /* __has_feature(ptrauth_calls) */
 		/* Inherit the hardened binary flags from parent if in fork */
-		task_ro_data.t_flags_ro |= parent_t_flags_ro & (TFRO_HARDENED | TFRO_PLATFORM);
+		task_ro_data.t_flags_ro |= parent_t_flags_ro & (TFRO_HARDENED | TFRO_PLATFORM | TFRO_JIT_EXC_FATAL);
 #if XNU_TARGET_OS_OSX
 		task_ro_data.t_flags_ro |= parent_t_flags_ro & TFRO_MACH_HARDENING_OPT_OUT;
 #endif /* XNU_TARGET_OS_OSX */
@@ -3319,16 +3323,10 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 	if (should_mark_corpse) {
 		void *crash_info_ptr = task_get_corpseinfo(task);
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
-			if (crash_info_ptr != NULL && thread->th_exclaves_state & TH_EXCLAVES_RPC) {
+			if (crash_info_ptr != NULL && thread->th_exclaves_ipc_buffer != NULL) {
 				struct thread_crash_exclaves_info info = { 0 };
 
 				info.tcei_flags = kExclaveRPCActive;
-				if (thread->th_exclaves_state & TH_EXCLAVES_SCHEDULER_REQUEST) {
-					info.tcei_flags |= kExclaveSchedulerRequest;
-				}
-				if (thread->th_exclaves_state & TH_EXCLAVES_UPCALL) {
-					info.tcei_flags |= kExclaveUpcallActive;
-				}
 				info.tcei_scid = thread->th_exclaves_scheduling_context_id;
 				info.tcei_thread_id = thread->thread_id;
 
@@ -9382,6 +9380,13 @@ task_copy_vmobjects(task_t task, vm_object_query_t query, size_t len, size_t *nu
 	vm_object_t find_vmo;
 	size_t size = 0;
 
+	/*
+	 * Allocate a save area for FP state before taking task_objq lock,
+	 * if necessary, to ensure that VM_KERNEL_ADDRHASH() doesn't cause
+	 * an FP state allocation while holding VM locks.
+	 */
+	ml_fp_save_area_prealloc();
+
 	task_objq_lock(task);
 	if (query != NULL) {
 		queue_iterate(&task->task_objq, find_vmo, vm_object_t, task_objq)
@@ -9395,7 +9400,7 @@ task_copy_vmobjects(task_t task, vm_object_query_t query, size_t len, size_t *nu
 			}
 
 			bzero(p, sizeof(*p));
-			p->object_id = (vm_object_id_t) VM_KERNEL_ADDRPERM(find_vmo);
+			p->object_id = (vm_object_id_t) VM_KERNEL_ADDRHASH(find_vmo);
 			p->virtual_size = find_vmo->internal ? find_vmo->vo_size : 0;
 			p->resident_size = find_vmo->resident_page_count * PAGE_SIZE;
 			p->wired_size = find_vmo->wired_page_count * PAGE_SIZE;
@@ -9605,6 +9610,15 @@ task_set_pac_exception_fatal_flag(
 	uint32_t set_flags = 0;
 
 	/*
+	 * We must not apply this security policy on tasks which have opted out of mach hardening to
+	 * avoid regressions in third party plugins and third party apps when using AMFI boot-args
+	 */
+	bool platform_binary = task_get_platform_binary(task);
+#if XNU_TARGET_OS_OSX
+	platform_binary &= !task_opted_out_mach_hardening(task);
+#endif /* XNU_TARGET_OS_OSX */
+
+	/*
 	 * On non-FPAC hardware, we allow gating PAC exceptions behind
 	 * SKIP_PAC_EXCEPTION_ENTITLEMENT and the boot-arg.
 	 */
@@ -9620,7 +9634,7 @@ task_set_pac_exception_fatal_flag(
 
 	/* On non-FPAC hardware, gate the fatal property behind entitlements and boot-arg. */
 	if (pac_hardened_task ||
-	    ((enable_pac_exception || gARM_FEAT_FPAC) && task_get_platform_binary(task))) {
+	    ((enable_pac_exception || gARM_FEAT_FPAC) && platform_binary)) {
 		/* If debugging is configured, do not make PAC exception fatal. */
 		if (address_space_debugged(task_get_proc_raw(task)) != KERN_SUCCESS) {
 			set_flags |= TFRO_PAC_EXC_FATAL;
@@ -9640,6 +9654,40 @@ task_is_pac_exception_fatal(
 	return !!(task_ro_flags_get(task) & TFRO_PAC_EXC_FATAL);
 }
 #endif /* __has_feature(ptrauth_calls) */
+
+/*
+ * FATAL_EXCEPTION_ENTITLEMENT, if present, will contain a list of
+ * conditions for which access violations should deliver SIGKILL rather than
+ * SIGSEGV.  This is a hardening measure intended for use by applications
+ * that are able to handle the stricter error handling behavior.  Currently
+ * this supports FATAL_EXCEPTION_ENTITLEMENT_JIT, which is documented in
+ * user_fault_in_self_restrict_mode().
+ */
+#define FATAL_EXCEPTION_ENTITLEMENT "com.apple.security.fatal-exceptions"
+#define FATAL_EXCEPTION_ENTITLEMENT_JIT "jit"
+
+void
+task_set_jit_exception_fatal_flag(
+	task_t task)
+{
+	assert(task != TASK_NULL);
+	if (IOTaskHasStringEntitlement(task, FATAL_EXCEPTION_ENTITLEMENT, FATAL_EXCEPTION_ENTITLEMENT_JIT) &&
+	    address_space_debugged(task_get_proc_raw(task)) != KERN_SUCCESS) {
+		task_ro_flags_set(task, TFRO_JIT_EXC_FATAL);
+	}
+}
+
+bool
+task_is_jit_exception_fatal(
+	__unused task_t task)
+{
+#if !defined(XNU_PLATFORM_MacOSX)
+	return true;
+#else
+	assert(task != TASK_NULL);
+	return !!(task_ro_flags_get(task) & TFRO_JIT_EXC_FATAL);
+#endif
+}
 
 bool
 task_needs_user_signed_thread_state(
@@ -9919,8 +9967,26 @@ task_check_memorythreshold_is_valid(task_t task, uint64_t new_limit, bool is_dia
 
 #if CONFIG_EXCLAVES
 kern_return_t
-task_add_conclave(task_t task, const char *task_conclave_id)
+task_add_conclave(task_t task, void *vnode, int64_t off, const char *task_conclave_id)
 {
+	/*
+	 * Only launchd or properly entitled tasks can attach tasks to
+	 * conclaves.
+	 */
+	if (!exclaves_has_priv(current_task(), EXCLAVES_PRIV_CONCLAVE_SPAWN)) {
+		return KERN_DENIED;
+	}
+
+	/*
+	 * Only entitled tasks can have conclaves attached.
+	 * Allow tasks which have the SPAWN privilege to also host conclaves.
+	 * This allows xpc proxy to add a conclave before execing a daemon.
+	 */
+	if (!exclaves_has_priv_vnode(vnode, off, EXCLAVES_PRIV_CONCLAVE_HOST) &&
+	    !exclaves_has_priv_vnode(vnode, off, EXCLAVES_PRIV_CONCLAVE_SPAWN)) {
+		return KERN_DENIED;
+	}
+
 	/*
 	 * Make this EXCLAVES_BOOT_STAGE_2 until userspace is actually
 	 * triggering the EXCLAVESKIT boot stage.
@@ -9934,8 +10000,7 @@ task_add_conclave(task_t task, const char *task_conclave_id)
 }
 
 kern_return_t
-task_start_conclave_and_lookup_resources(mach_port_name_t port __unused, bool conclave_start,
-    struct exclaves_resource_user *conclave_resource_user, int resource_count)
+task_launch_conclave(mach_port_name_t port __unused)
 {
 	kern_return_t kr = KERN_FAILURE;
 	assert3u(port, ==, MACH_PORT_NULL);
@@ -9944,23 +10009,36 @@ task_start_conclave_and_lookup_resources(mach_port_name_t port __unused, bool co
 		return kr;
 	}
 
-	if (conclave_start) {
-		kr = exclaves_conclave_launch(conclave);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-		task_set_conclave_taint(current_task());
+	kr = exclaves_conclave_launch(conclave);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
+	task_set_conclave_taint(current_task());
 
-	kr = exclaves_conclave_lookup_resources(conclave, conclave_resource_user, resource_count);
-	return kr;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
-task_inherit_conclave(task_t old_task, task_t new_task)
+task_inherit_conclave(task_t old_task, task_t new_task, void *vnode, int64_t off)
 {
-	if (old_task->conclave == NULL) {
+	if (old_task->conclave == NULL ||
+	    !exclaves_conclave_is_attached(old_task->conclave)) {
 		return KERN_SUCCESS;
+	}
+
+	/*
+	 * Only launchd or properly entitled tasks can attach tasks to
+	 * conclaves.
+	 */
+	if (!exclaves_has_priv(current_task(), EXCLAVES_PRIV_CONCLAVE_SPAWN)) {
+		return KERN_DENIED;
+	}
+
+	/*
+	 * Only entitled tasks can have conclaves attached.
+	 */
+	if (!exclaves_has_priv_vnode(vnode, off, EXCLAVES_PRIV_CONCLAVE_HOST)) {
+		return KERN_DENIED;
 	}
 
 	return exclaves_conclave_inherit(old_task->conclave, old_task, new_task);
@@ -10022,7 +10100,22 @@ task_stop_conclave_upcall(void)
 		return KERN_INVALID_TASK;
 	}
 
-	return exclaves_conclave_stop_upcall(task->conclave, task);
+	return exclaves_conclave_stop_upcall(task->conclave);
+}
+
+kern_return_t
+task_stop_conclave_upcall_complete(void)
+{
+	task_t task = current_task();
+	thread_t thread = current_thread();
+
+	if (!(thread->th_exclaves_state & TH_EXCLAVES_STOP_UPCALL_PENDING)) {
+		return KERN_SUCCESS;
+	}
+
+	assert3p(task->conclave, !=, NULL);
+
+	return exclaves_conclave_stop_upcall_complete(task->conclave, task);
 }
 
 kern_return_t
@@ -10161,7 +10254,7 @@ task_add_conclave_crash_info(task_t task, void *crash_info_ptr)
 		return;
 	}
 
-	if (task->exclave_crash_info_length == 0 && fake_crash_buffer_length == 0) {
+	if (task->exclave_crash_info_length == 0) {
 		return;
 	}
 
@@ -10171,13 +10264,8 @@ task_add_conclave_crash_info(task_t task, void *crash_info_ptr)
 		return;
 	}
 
-	if (task->exclave_crash_info_length == 0) {
-		crash_info = fake_crash_buffer;
-		crash_info_length = fake_crash_buffer_length;
-	} else {
-		crash_info = task->exclave_crash_info;
-		crash_info_length = task->exclave_crash_info_length;
-	}
+	crash_info = task->exclave_crash_info;
+	crash_info_length = task->exclave_crash_info_length;
 
 	tberr = stackshot_stackshotresult__unmarshal(crash_info,
 	    (uint64_t)crash_info_length, ^(stackshot_stackshotresult_s result){

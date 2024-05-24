@@ -845,11 +845,16 @@ exclaves_thread_terminate(thread_t thread);
 extern bool
 exclaves_booted(void);
 
-extern exclaves_id_t
-exclaves_endpoint_lookup(const char *name);
-
 extern size_t
 exclaves_ipc_buffer_count(void);
+
+OS_ENUM(exclaves_clock_type, uint8_t,
+    EXCLAVES_CLOCK_ABSOLUTE = 0,
+    EXCLAVES_CLOCK_CONTINUOUS = 1,
+    );
+
+extern void
+exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset);
 
 #endif /* defined(MACH_KERNEL_PRIVATE) */
 
@@ -864,7 +869,7 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
     EXCLAVES_CTL_OP_NAMED_BUFFER_COPYOUT = 4,
     EXCLAVES_CTL_OP_BOOT = 5,
     EXCLAVES_CTL_OP_LAUNCH_CONCLAVE = 6,
-    EXCLAVES_CTL_OP_LOOKUP_RESOURCES = 7,
+    EXCLAVES_CTL_OP_LOOKUP_SERVICES = 7,
     EXCLAVES_CTL_OP_AUDIO_BUFFER_CREATE = 8,
     EXCLAVES_CTL_OP_AUDIO_BUFFER_COPYOUT = 9,
     EXCLAVES_CTL_OP_SENSOR_CREATE = 10,
@@ -889,12 +894,12 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
  * @brief
  * User representation of exclave resource
  */
-struct exclaves_resource_user {
+typedef struct exclaves_resource_user {
 	char                  r_name[MAXCONCLAVENAME];
 	uint64_t              r_type;
 	exclaves_id_t         r_id;
 	mach_port_name_t      r_port;
-};
+} exclaves_resouce_user_t;
 
 #if !defined(KERNEL)
 
@@ -943,6 +948,34 @@ exclaves_get_status(void);
  */
 exclaves_boot_stage_t
 exclaves_get_boot_stage(void);
+
+/*
+ * Identifies exclaves privilege checks.
+ */
+__options_closed_decl(exclaves_priv_t, unsigned int, {
+	EXCLAVES_PRIV_CONCLAVE_HOST  = 0x1,  /* Can host conclaves. */
+	EXCLAVES_PRIV_CONCLAVE_SPAWN = 0x2,  /* Can spawn conclaves. */
+	EXCLAVES_PRIV_KERNEL_DOMAIN  = 0x4,  /* Access to kernel resources. */
+	EXCLAVES_PRIV_BOOT           = 0x8,  /* Can boot exclaves. */
+});
+
+/*
+ * Check to see if the specified task has a privilege.
+ */
+extern bool
+exclaves_has_priv(task_t task, exclaves_priv_t priv);
+
+/*
+ * Check to see if the specified vnode has a privilege.
+ * Vnode argument is untyped as it's not available to osfmk.
+ */
+extern bool
+exclaves_has_priv_vnode(void *vnode, int64_t off, exclaves_priv_t priv);
+
+/* Return index of last xnu frame before secure world. Valid frame index is
+ * always in range <0, nframes-1>. When frame is not found, return nframes
+ * value. */
+uint32_t exclaves_stack_offset(uintptr_t * out_addr, size_t nframes, bool slid_addresses);
 
 #endif /* defined(XNU_KERNEL_PRIVATE) */
 

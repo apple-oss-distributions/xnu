@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1753,6 +1753,26 @@ done:
 	return error;
 }
 
+static boolean_t
+should_include_clat46(void)
+{
+#define CLAT46_ENTITLEMENT "com.apple.private.route.iflist.include-clat46"
+	return IOCurrentTaskHasEntitlement(CLAT46_ENTITLEMENT);
+}
+
+static boolean_t
+is_clat46_address(struct ifaddr *ifa)
+{
+	boolean_t       is_clat46 = FALSE;
+
+	if (ifa->ifa_addr->sa_family == AF_INET6) {
+		struct in6_ifaddr *ifa6 = ifatoia6(ifa);
+
+		is_clat46 = (ifa6->ia6_flags & IN6_IFF_CLAT46) != 0;
+	}
+	return is_clat46;
+}
+
 /*
  * rdar://9307819
  * To avoid to call copyout() while holding locks and to cause problems
@@ -1777,6 +1797,8 @@ sysctl_iflist(int af, struct walkarg *w)
 	size_t  len = 0, total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred __single;
+	boolean_t include_clat46 = FALSE;
+	boolean_t include_clat46_valid = FALSE;
 
 	cred = current_cached_proc_cred(PROC_NULL);
 
@@ -1842,16 +1864,24 @@ sysctl_iflist(int af, struct walkarg *w)
 				VERIFY(current_len <= total_len);
 			}
 			while ((ifa = ifa->ifa_link.tqe_next) != NULL) {
+				boolean_t is_clat46;
+
 				IFA_LOCK(ifa);
 				if (af && af != ifa->ifa_addr->sa_family) {
 					IFA_UNLOCK(ifa);
 					continue;
 				}
-				if (ifa->ifa_addr->sa_family == AF_INET6 &&
-				    (((struct in6_ifaddr *)ifa)->ia6_flags &
-				    IN6_IFF_CLAT46) != 0) {
-					IFA_UNLOCK(ifa);
-					continue;
+				is_clat46 = is_clat46_address(ifa);
+				if (is_clat46) {
+					if (!include_clat46_valid) {
+						include_clat46_valid = TRUE;
+						include_clat46 =
+						    should_include_clat46();
+					}
+					if (!include_clat46) {
+						IFA_UNLOCK(ifa);
+						continue;
+					}
 				}
 				info.rti_info[RTAX_IFA] = ifa->ifa_addr;
 				info.rti_info[RTAX_NETMASK] = ifa->ifa_netmask;
@@ -1948,6 +1978,8 @@ sysctl_iflist2(int af, struct walkarg *w)
 	size_t  len = 0, total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred __single;
+	boolean_t include_clat46 = FALSE;
+	boolean_t include_clat46_valid = FALSE;
 
 	cred = current_cached_proc_cred(PROC_NULL);
 
@@ -2020,18 +2052,25 @@ sysctl_iflist2(int af, struct walkarg *w)
 				VERIFY(current_len <= total_len);
 			}
 			while ((ifa = ifa->ifa_link.tqe_next) != NULL) {
+				boolean_t is_clat46;
+
 				IFA_LOCK(ifa);
 				if (af && af != ifa->ifa_addr->sa_family) {
 					IFA_UNLOCK(ifa);
 					continue;
 				}
-				if (ifa->ifa_addr->sa_family == AF_INET6 &&
-				    (((struct in6_ifaddr *)ifa)->ia6_flags &
-				    IN6_IFF_CLAT46) != 0) {
-					IFA_UNLOCK(ifa);
-					continue;
+				is_clat46 = is_clat46_address(ifa);
+				if (is_clat46) {
+					if (!include_clat46_valid) {
+						include_clat46_valid = TRUE;
+						include_clat46 =
+						    should_include_clat46();
+					}
+					if (!include_clat46) {
+						IFA_UNLOCK(ifa);
+						continue;
+					}
 				}
-
 				info.rti_info[RTAX_IFA] = ifa->ifa_addr;
 				info.rti_info[RTAX_NETMASK] = ifa->ifa_netmask;
 				info.rti_info[RTAX_BRD] = ifa->ifa_dstaddr;

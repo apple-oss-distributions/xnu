@@ -3919,7 +3919,7 @@ static void
 memorystatus_thread_init(jetsam_thread_state_t *jetsam_thread)
 {
 	char name[32];
-	thread_wire(host_priv_self(), current_thread(), TRUE);
+	thread_wire_internal(host_priv_self(), current_thread(), TRUE, NULL);
 	snprintf(name, 32, "VM_memorystatus_%d", jetsam_thread->index + 1);
 
 	/* Limit all but one thread to the lower jetsam bands, as that's where most of the victims are. */

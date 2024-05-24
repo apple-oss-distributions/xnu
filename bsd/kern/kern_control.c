@@ -511,11 +511,13 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	error = soreserve(so, kctl->sendbufsize, kctl->recvbufsize);
 	if (error) {
+#if (DEBUG || DEVELOPMENT)
 		if (ctl_debug) {
-			printf("%s - soreserve(%llx, %u, %u) error %d\n",
-			    __func__, (uint64_t)VM_KERNEL_ADDRPERM(so),
+			printf("%s - soreserve(%llu, %u, %u) error %d\n",
+			    __func__, so->so_gencnt,
 			    kctl->sendbufsize, kctl->recvbufsize, error);
 		}
+#endif /* (DEBUG || DEVELOPMENT) */
 		goto done;
 	}
 
@@ -1065,8 +1067,12 @@ ctl_enqueuembuf_list(void *kctlref, u_int32_t unit, struct mbuf *m_list,
 		nextpkt = m->m_nextpkt;
 
 		if (m->m_pkthdr.len == 0 && ctl_debug) {
-			printf("%s: %llx m_pkthdr.len is 0",
-			    __func__, (uint64_t)VM_KERNEL_ADDRPERM(m));
+			struct ctl_cb *kcb = (struct ctl_cb *)so->so_pcb;
+			struct kctl *kctl = kcb == NULL ? NULL : kcb->kctl;
+			uint32_t id = kctl == NULL ? -1 : kctl->id;
+
+			printf("%s: %u:%u m_pkthdr.len is 0",
+			    __func__, id, unit);
 		}
 
 		/*
@@ -1117,6 +1123,7 @@ done:
 	if (m_remain) {
 		*m_remain = m;
 
+#if (DEBUG || DEVELOPMENT)
 		if (m != NULL && socket_debug && so != NULL &&
 		    (so->so_options & SO_DEBUG)) {
 			struct mbuf *n;
@@ -1129,6 +1136,7 @@ done:
 				    (uint64_t) VM_KERNEL_ADDRPERM(n->m_next));
 			}
 		}
+#endif /* (DEBUG || DEVELOPMENT) */
 	} else {
 		if (m != NULL) {
 			m_freem_list(m);
@@ -1311,7 +1319,7 @@ ctl_ctloutput(struct socket *so, struct sockopt *sopt)
 		return EINVAL;
 	}
 
-	if (kcb == NULL) {      /* sanity check */
+	if (kcb == NULL) {         /* sanity check */
 		return ENOTCONN;
 	}
 
@@ -1626,7 +1634,7 @@ ctl_register(struct kern_ctl_reg *userkctl, kern_ctl_ref *kctlref)
 	int             is_extended = 0;
 	int             is_setup = 0;
 
-	if (userkctl == NULL) { /* sanity check */
+	if (userkctl == NULL) {         /* sanity check */
 		return EINVAL;
 	}
 	if (userkctl->ctl_connect == NULL) {
@@ -2271,8 +2279,8 @@ kctl_pcblist SYSCTL_HANDLER_ARGS
                         xk->xkp_len = sizeof(struct xkctlpcb);
                         xk->xkp_kind = XSO_KCB;
                         xk->xkp_unit = kcb->sac.sc_unit;
-                        xk->xkp_kctpcb = (uint64_t)VM_KERNEL_ADDRPERM(kcb);
-                        xk->xkp_kctlref = (uint64_t)VM_KERNEL_ADDRPERM(kctl);
+                        xk->xkp_kctpcb = (uint64_t)VM_KERNEL_ADDRHASH(kcb);
+                        xk->xkp_kctlref = (uint64_t)VM_KERNEL_ADDRHASH(kctl);
                         xk->xkp_kctlid = kctl->id;
                         strlcpy(xk->xkp_kctlname, kctl->name,
                             sizeof(xk->xkp_kctlname));

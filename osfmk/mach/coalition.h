@@ -141,6 +141,7 @@ struct coalition_resource_usage {
 	uint64_t pm_writes;
 	uint64_t cpu_pinstructions;
 	uint64_t cpu_pcycles;
+	uint64_t conclave_mem;
 };
 
 #ifdef PRIVATE

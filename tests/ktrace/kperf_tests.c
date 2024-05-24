@@ -20,6 +20,8 @@
 #include "ktrace_meta.h"
 #include "../drop_priv.h"
 
+
+
 #define MAX_CPUS    64
 #define MAX_THREADS 64
 
@@ -1332,3 +1334,4 @@ T_DECL(kperf_blessed_ownership, "check that a blessed child can access ktrace")
 	ret = kperf_bless_set(-1);
 	T_ASSERT_POSIX_SUCCESS(ret, "removed blessing from child");
 }
+

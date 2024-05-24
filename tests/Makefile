@@ -733,6 +733,8 @@ tcp_send_implied_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35243417: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35685803: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 icmp_fragmetned_payload: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+tcp_invalid_address: OTHER_CFLAGS += -Wno-int-conversion
+tcp_invalid_address: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
 net_tuntests: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
@@ -740,7 +742,7 @@ net_bridge: inet_transfer.c bpflib.c in_cksum.c net_test_lib.c
 net_bridge: OTHER_LDFLAGS += -ldarwintest_utils
 net_bridge: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
-if_generation_id: net_test_lib.c in_cksum.c 
+if_generation_id: net_test_lib.c in_cksum.c
 if_generation_id: OTHER_LDFLAGS += -ldarwintest_utils
 
 inet6_addr_mode: net_test_lib.c in_cksum.c

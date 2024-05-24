@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,38 +26,33 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#pragma once
+#include <darwintest.h>
+#include <pthread.h>
+#include <machine/cpu_capabilities.h>
+#include <sys/commpage.h>
+#include <sys/sysctl.h>
+#include <mach/vm_param.h>
+#include <stdint.h>
 
-#if CONFIG_EXCLAVES
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.arm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("arm"),
+	T_META_OWNER("jeffrey_crowell"),
+	T_META_RUN_CONCURRENTLY(true));
 
-#include <mach/kern_return.h>
-#include <xnuproxy/messages.h>
-#include <vm/pmap.h>
+T_DECL(asb_comm_page_sanity,
+    "Test that asb comm page values are sane.")
+{
+	int rv;
+	uint64_t max_userspace_address = MACH_VM_MAX_ADDRESS;
+	uint64_t target_address = COMM_PAGE_READ(uint64_t, ASB_TARGET_ADDRESS);
 
-__BEGIN_DECLS
+	uint64_t sysctl_min_kernel_address = 0;
+	size_t min_kernel_address_size = sizeof(sysctl_min_kernel_address);
+	rv = sysctlbyname("vm.vm_min_kernel_address", &sysctl_min_kernel_address, &min_kernel_address_size, NULL, 0);
+	uint64_t kern_target_address = COMM_PAGE_READ(uint64_t, ASB_TARGET_KERN_ADDRESS);
 
-/*
- * Fetch the exclave panic string.
- */
-extern kern_return_t
-exclaves_panic_get_string(char **string);
-
-/*
- * Append additional info and panic bactrace to the paniclog.
- */
-extern void
-exclaves_panic_append_info(void);
-
-extern void
-exclaves_panic_thread_wait(void);
-
-
-extern kern_return_t
-exclaves_panic_thread_setup(void);
-
-void
-handle_response_panic_buffer_address(pmap_paddr_t address);
-
-__END_DECLS
-
-#endif /* CONFIG_EXCLAVES */
+	T_QUIET; T_ASSERT_GT(target_address, max_userspace_address, "check that asb target addresses are as expected");
+	T_QUIET; T_ASSERT_LT(kern_target_address, sysctl_min_kernel_address, "check that asb target kernel addresses are as expected");
+}

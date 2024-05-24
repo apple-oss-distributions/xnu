@@ -280,6 +280,10 @@ __options_decl(stackshot_flags_t, uint64_t, {
 	STACKSHOT_DISABLE_LATENCY_INFO             = 0x40000000,
 	STACKSHOT_SAVE_DYLD_COMPACTINFO            = 0x80000000,
 	STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL = 0x100000000,
+	/* Include Exclave stacks in Stackshot - currently unused/on-by-default */
+	STACKSHOT_EXCLAVES                         = 0x200000000,
+	/* Skip Exclaves stack collection */
+	STACKSHOT_SKIP_EXCLAVES                    = 0x400000000,
 }); // Note: Add any new flags to kcdata.py (stackshot_in_flags)
 
 __options_decl(microstackshot_flags_t, uint32_t, {

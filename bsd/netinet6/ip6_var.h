@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -598,8 +598,8 @@ extern int dest6_input(struct mbuf **, int *, int);
 
 extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *, int);
 extern struct in6_addr * in6_selectsrc_core(struct sockaddr_in6 *,
-    uint32_t, struct ifnet *, int,
-    struct in6_addr *, struct ifnet **, int *, struct ifaddr **, struct route_in6 *);
+    uint32_t, struct ifnet *, int, struct in6_addr *,
+    struct ifnet **, int *, struct ifaddr **, struct route_in6 *, boolean_t);
 extern struct in6_addr *in6_selectsrc(struct sockaddr_in6 *,
     struct ip6_pktopts *, struct inpcb *, struct route_in6 *,
     struct ifnet **, struct in6_addr *, unsigned int, int *);
@@ -610,7 +610,7 @@ extern int in6_selectroute(struct sockaddr_in6 *, struct sockaddr_in6 *,
     struct ip6_out_args *);
 extern int ip6_setpktopts(struct mbuf *control, struct ip6_pktopts *opt,
     struct ip6_pktopts *stickyopt, int uproto);
-extern u_int32_t ip6_randomid(void);
-extern u_int32_t ip6_randomflowlabel(void);
+extern uint32_t ip6_randomid(uint64_t);
+extern uint32_t ip6_randomflowlabel(void);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* !_NETINET6_IP6_VAR_H_ */

@@ -189,8 +189,10 @@ extern void *act_thread_csave(void);
 extern void act_thread_catt(void *ctx);
 extern void act_thread_cfree(void *ctx);
 
+#if MACH_KERNEL_PRIVATE
 
 
+#endif /* MACH_KERNEL_PRIVATE */
 
 /*
  * Return address of the function that called current function, given

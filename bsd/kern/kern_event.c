@@ -8770,7 +8770,7 @@ kevt_pcblist SYSCTL_HANDLER_ARGS
 
 		xk->kep_len = sizeof(struct xkevtpcb);
 		xk->kep_kind = XSO_EVT;
-		xk->kep_evtpcb = (uint64_t)VM_KERNEL_ADDRPERM(ev_pcb);
+		xk->kep_evtpcb = (uint64_t)VM_KERNEL_ADDRHASH(ev_pcb);
 		xk->kep_vendor_code_filter = ev_pcb->evp_vendor_code_filter;
 		xk->kep_class_filter = ev_pcb->evp_class_filter;
 		xk->kep_subclass_filter = ev_pcb->evp_subclass_filter;

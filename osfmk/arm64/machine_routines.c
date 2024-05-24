@@ -2983,3 +2983,12 @@ ml_panic_on_invalid_new_cpsr(const arm_saved_state_t *ss, uint32_t cpsr)
 {
 	panic("attempt to set non-user CPSR %#010x on user saved-state %p", cpsr, ss);
 }
+
+/**
+ * Explicitly preallocates a floating point save area.
+ * This is a noop on ARM because preallocation isn't required at this time.
+ */
+void
+ml_fp_save_area_prealloc(void)
+{
+}

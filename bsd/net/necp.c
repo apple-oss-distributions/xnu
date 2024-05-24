@@ -8241,12 +8241,13 @@ necp_application_find_policy_match_internal(proc_t proc,
 
 	if (rt != NULL && rt->rt_ifp != NULL) {
 		const bool is_listener = ((client_flags & NECP_CLIENT_PARAMETER_FLAG_LISTENER) != 0);
+		const bool is_browser = ((client_flags & NECP_CLIENT_PARAMETER_FLAG_BROWSE) != 0);
 		const bool expensive_prohibited = ((client_flags & NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_EXPENSIVE) &&
 		    IFNET_IS_EXPENSIVE(rt->rt_ifp));
 		const bool constrained_prohibited = ((client_flags & NECP_CLIENT_PARAMETER_FLAG_PROHIBIT_CONSTRAINED) &&
 		    IFNET_IS_CONSTRAINED(rt->rt_ifp));
 		const bool interface_type_blocked = !necp_route_is_interface_type_allowed(rt, NULL, proc, NULL);
-		if (!is_listener) {
+		if (!is_listener && !is_browser) {
 			if (reason != NULL) {
 				if (expensive_prohibited) {
 					*reason = NECP_CLIENT_RESULT_REASON_EXPENSIVE_PROHIBITED;

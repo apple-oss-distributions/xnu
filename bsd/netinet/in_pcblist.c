@@ -118,12 +118,12 @@ sotoxsocket_n(struct socket *so, struct xsocket_n *xso)
 		return;
 	}
 
-	xso->xso_so = (uint64_t)VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (uint64_t)VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = so->so_options;
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (uint64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (uint64_t)VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);
@@ -207,10 +207,10 @@ inpcb_to_xinpcb_n(struct inpcb *inp, struct xinpcb_n *xinp)
 {
 	xinp->xi_len = sizeof(struct xinpcb_n);
 	xinp->xi_kind = XSO_INPCB;
-	xinp->xi_inpp = (uint64_t)VM_KERNEL_ADDRPERM(inp);
+	xinp->xi_inpp = (uint64_t)VM_KERNEL_ADDRHASH(inp);
 	xinp->inp_fport = inp->inp_fport;
 	xinp->inp_lport = inp->inp_lport;
-	xinp->inp_ppcb = (uint64_t)VM_KERNEL_ADDRPERM(inp->inp_ppcb);
+	xinp->inp_ppcb = (uint64_t)VM_KERNEL_ADDRHASH(inp->inp_ppcb);
 	xinp->inp_gencnt = inp->inp_gencnt;
 	xinp->inp_flags = inp->inp_flags;
 	xinp->inp_flow = inp->inp_flow;
@@ -234,7 +234,7 @@ tcpcb_to_xtcpcb_n(struct tcpcb *tp, struct xtcpcb_n *xt)
 	xt->xt_len = sizeof(struct xtcpcb_n);
 	xt->xt_kind = XSO_TCPCB;
 
-	xt->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	xt->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	xt->t_dupacks = tp->t_dupacks;
 	xt->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	xt->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
@@ -798,7 +798,7 @@ inpcb_count_opportunistic(unsigned int ifindex, struct inpcbinfo *pcbinfo,
 				}
 				SOTHROTTLELOG("throttle[%d]: so 0x%llx "
 				    "[%d,%d] %s\n", so->last_pid,
-				    (uint64_t)VM_KERNEL_ADDRPERM(so),
+				    (uint64_t)VM_KERNEL_ADDRHASH(so),
 				    SOCK_DOM(so), SOCK_TYPE(so),
 				    (so->so_flags & SOF_SUSPENDED) ?
 				    "SUSPENDED" : "RESUMED");

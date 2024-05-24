@@ -1392,3 +1392,12 @@ ml_addr_in_non_xnu_stack(__unused uintptr_t addr)
 	/* There are no non-XNU stacks on x86 systems. */
 	return false;
 }
+
+/**
+ * Explicitly preallocates a floating point save area.
+ */
+void
+ml_fp_save_area_prealloc(void)
+{
+	fpnoextflt();
+}

@@ -47,8 +47,9 @@
 
 #if __has_include(<Tightbeam/tightbeam.h>)
 
-#define EXCLAVES_ID_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloExclave"))
+#define EXCLAVES_ID_HELLO_EXCLAVE_EP                 \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.HelloExclave"))
 
 static int
 exclaves_hello_exclave_test(__unused int64_t in, int64_t *out)
@@ -123,7 +124,8 @@ exclaves_panic_exclave_test(__unused int64_t in, int64_t *out)
 	exclaves_tag_t tag = Exclaves_L4_MessageTag(0, 0, 0x9ul,
 	    Exclaves_L4_False);
 
-	printf("exclaves: exclaves_endpoint_call() sending tag 0x%llx, "
+	exclaves_debug_printf(show_test_output,
+	    "exclaves: exclaves_endpoint_call() sending tag 0x%llx, "
 	    "label 0x%lx\n", tag, Exclaves_L4_MessageTag_Label(tag));
 
 	exclaves_error_t error;
@@ -133,7 +135,8 @@ exclaves_panic_exclave_test(__unused int64_t in, int64_t *out)
 	/* Should never reach here */
 	assert(kr == KERN_SUCCESS);
 
-	printf("exclaves: exclaves_endpoint_call() returned tag 0x%llx, "
+	exclaves_debug_printf(show_test_output,
+	    "exclaves: exclaves_endpoint_call() returned tag 0x%llx, "
 	    "label 0x%lx, error 0x%llx\n", tag, Exclaves_L4_MessageTag_Label(tag),
 	    error);
 
@@ -143,15 +146,16 @@ exclaves_panic_exclave_test(__unused int64_t in, int64_t *out)
 	assert(kr == KERN_SUCCESS);
 
 	/* This should not be reachable. Hence, failed. */
-	printf("%s: FAILED\n", __func__);
+	exclaves_debug_printf(show_errors, "%s: FAILED\n", __func__);
 	*out = 1;
 
 	return 0;
 }
 SYSCTL_TEST_REGISTER(exclaves_panic_exclave_test, exclaves_panic_exclave_test);
 
-#define EXCLAVES_ID_SWIFT_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloTightbeam"))
+#define EXCLAVES_ID_SWIFT_HELLO_EXCLAVE_EP           \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.HelloTightbeam"))
 
 static int
 exclaves_hello_tightbeam_test(__unused int64_t in, int64_t *out)
@@ -198,7 +202,7 @@ exclaves_hello_tightbeam_test(__unused int64_t in, int64_t *out)
 		exclaves_debug_printf(show_test_output, "%c", (uint8_t)*c);
 		tb_message_encode_u8(message, (uint8_t)*c);
 	}
-	printf("\n");
+	exclaves_debug_printf(show_test_output, "\n");
 	tb_message_complete(message);
 	exclaves_debug_printf(show_test_output,
 	    "%s: Tightbeam message completed\n", __func__);
@@ -219,7 +223,7 @@ exclaves_hello_tightbeam_test(__unused int64_t in, int64_t *out)
 	uint8_t val = 0;
 	for (const char *c = goodbye; *c; c++) {
 		tb_message_decode_u8(response, &val);
-		printf("%c", val);
+		exclaves_debug_printf(show_test_output, "%c", val);
 		if (val != (uint8_t)*c) {
 			mismatch = true;
 		}
@@ -253,13 +257,14 @@ exclaves_sensor_kpi_test(int64_t in, int64_t *out)
 #pragma unused(in)
 #define SENSOR_TEST(x) \
     if (!(x)) { \
-	        printf("%s: FAILURE -- %s:%d\n", __func__, __FILE__, __LINE__); \
+	        exclaves_debug_printf(show_errors, \
+	            "%s: FAILURE -- %s:%d\n", __func__, __FILE__, __LINE__); \
 	success = false; \
 	goto out; \
     }
 
 	bool success = true;
-	printf("%s: STARTING\n", __func__);
+	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
 
 	exclaves_sensor_type_t sensors[] = {
 		EXCLAVES_SENSOR_CAM,
@@ -334,10 +339,11 @@ exclaves_sensor_kpi_test(int64_t in, int64_t *out)
 #undef SENSOR_TEST
 out:
 	if (success) {
-		printf("%s: SUCCESS\n", __func__);
+		exclaves_debug_printf(show_test_output,
+		    "%s: SUCCESS\n", __func__);
 		*out = 1;
 	} else {
-		printf("%s: FAILED\n", __func__);
+		exclaves_debug_printf(show_errors, "%s: FAILED\n", __func__);
 		*out = 0;
 	}
 	return 0;
@@ -359,7 +365,8 @@ exclaves_check_mem_usage_test(__unused int64_t in, int64_t *out)
 
 	kern_return_t r = exclaves_xnu_proxy_check_mem_usage();
 	if (r == KERN_FAILURE) {
-		printf("Exclave Check Memory Usage failed: Kernel Failure\n");
+		exclaves_debug_printf(show_errors,
+		    "Exclave Check Memory Usage failed: Kernel Failure\n");
 		return 0;
 	}
 

@@ -1597,6 +1597,8 @@ extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_ldr_auth_fail;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_fpac;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_copyio;
 
+extern int gARM_FEAT_FPACCOMBINE;
+
 typedef struct arm64_panic_lockdown_test_case {
 	const char *func_str;
 	panic_lockdown_helper_fcn_t *func;
@@ -1794,7 +1796,7 @@ arm64_panic_lockdown_test(void)
 			.func_str = "arm64_panic_lockdown_test_br_auth_fail",
 			.func = &arm64_panic_lockdown_test_br_auth_fail,
 			.arg = ia_invalid,
-			.expected_ec = ESR_EC_IABORT_EL1,
+			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_IABORT_EL1,
 			.expect_lockdown_exceptions_masked = true,
 			.expect_lockdown_exceptions_unmasked = true,
 			/*
@@ -1803,15 +1805,16 @@ arm64_panic_lockdown_test(void)
 			 * itself. The exact ELR will likely be different from ia_invalid,
 			 * but since the expect logic in sleh only matches on low bits (i.e.
 			 * not bits which will be poisoned), this is fine.
+			 * On FEAT_FPACCOMBINED devices, we will fault on the branch itself.
 			 */
-			.override_expected_fault_pc_valid = true,
+			.override_expected_fault_pc_valid = !gARM_FEAT_FPACCOMBINE,
 			.override_expected_fault_pc = ia_invalid
 		},
 		{
 			.func_str = "arm64_panic_lockdown_test_ldr_auth_fail",
 			.func = &arm64_panic_lockdown_test_ldr_auth_fail,
 			.arg = panic_lockdown_pacda_get_invalid_ptr(),
-			.expected_ec = ESR_EC_DABORT_EL1,
+			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_DABORT_EL1,
 			.expect_lockdown_exceptions_masked = true,
 			.expect_lockdown_exceptions_unmasked = true,
 		},

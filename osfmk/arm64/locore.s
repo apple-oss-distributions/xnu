@@ -2039,6 +2039,33 @@ LEXT(ml_panic_trap_to_debugger)
 	mov		w13, #PPL_STATE_PANIC
 	str		w13, [x11, PMAP_CPU_DATA_PPL_STATE]
 
+	/**
+	 * When we panic in PPL, we might have un-synced PTE updates. Shoot down
+	 * all the TLB entries.
+	 *
+	 * A check must be done here against CurrentEL because the alle1is flavor
+	 * of tlbi is not available to EL1, but the vmalle1is flavor is. When PPL
+	 * runs at GL2, we can issue an alle2is and an alle1is tlbi to kill all
+	 * the TLB entries. When PPL runs at GL1, as a guest or on an pre-H13
+	 * platform, we issue a vmalle1is tlbi instead.
+	 *
+	 * Note that we only do this after passing the `PPL_STATE_DISPATCH` check
+	 * because if we did this for every panic, including the ones triggered
+	 * by fabric problems we may be stuck at the DSB below and trigger an AP
+	 * watchdog.
+	 */
+	mrs		x12, CurrentEL
+	cmp		x12, PSR64_MODE_EL2
+	bne		Lnot_in_gl2
+	tlbi		alle2is
+	tlbi		alle1is
+	b		Ltlb_invalidate_all_done
+Lnot_in_gl2:
+	tlbi		vmalle1is
+Ltlb_invalidate_all_done:
+	dsb		ish
+	isb
+
 	/* Now we are ready to exit the PPL. */
 	b		ppl_return_to_kernel_mode
 Lnot_in_ppl_dispatch:

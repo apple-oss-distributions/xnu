@@ -352,7 +352,7 @@ generate_token(struct proc *p)
 
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
-	token_value = VM_KERNEL_ADDRPERM((u_int64_t)(uintptr_t)new_token);
+	token_value = VM_KERNEL_ADDRHASH((u_int64_t)(uintptr_t)new_token);
 
 	new_token->token.token_value = token_value;
 	new_token->token.pid = proc_pid(p);
@@ -1224,6 +1224,13 @@ pf_rule_copyin(struct pf_rule *src, struct pf_rule *dst, struct proc *p,
 	if ((uint8_t)minordev == PFDEV_PFM) {
 		dst->rule_flag |= PFRULE_PFM;
 	}
+
+	/*
+	 * userland should not pass any skip pointers to us
+	 */
+	for (uint32_t i = 0; i < PF_SKIP_COUNT; ++i) {
+		dst->skip[i].ptr = 0;
+	}
 }
 
 static void
@@ -1241,6 +1248,13 @@ pf_rule_copyout(struct pf_rule *src, struct pf_rule *dst)
 
 	dst->entries.tqe_prev = NULL;
 	dst->entries.tqe_next = NULL;
+
+	/*
+	 * redact skip pointers for security
+	 */
+	for (uint32_t i = 0; i < PF_SKIP_COUNT; ++i) {
+		dst->skip[i].ptr = 0;
+	}
 }
 
 static void
@@ -3337,7 +3351,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 		}
 
 		pf_ruleset_cleanup(ruleset, rs_num);
-		rule->ticket = VM_KERNEL_ADDRPERM((u_int64_t)(uintptr_t)rule);
+		rule->ticket = VM_KERNEL_ADDRHASH((u_int64_t)(uintptr_t)rule);
 
 		pr->rule.ticket = rule->ticket;
 		pf_rule_copyout(rule, &pr->rule);

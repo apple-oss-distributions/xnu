@@ -34,7 +34,6 @@
 
 #include "kern/exclaves.tightbeam.h"
 
-#include "exclaves_boot.h"
 #include "exclaves_frame_mint.h"
 #include "exclaves_resource.h"
 #include "exclaves_debug.h"
@@ -47,11 +46,9 @@
 static framemint_framemint_s frame_mint_client;
 
 /*
- * As this only happens once, in theory this could be done as part of the
- * populate call. As we can't cleanup tightbeam connections anyway it doesn't
- * make much difference to just do it up-front and keep it around. If we ever
- * need to make any other calls to FrameMint, having it separate makes that
- * easier.
+ * Called as part of the populate call. As we can't cleanup tightbeam
+ * connections it just sticks around. If we ever need to make any other calls to
+ * FrameMint, having it a separate function makes that easier.
  */
 static kern_return_t
 exclaves_frame_mint_init(void)
@@ -78,13 +75,16 @@ exclaves_frame_mint_init(void)
 	return KERN_SUCCESS;
 }
 
-EXCLAVES_BOOT_TASK(exclaves_frame_mint_init, EXCLAVES_BOOT_RANK_ANY);
-
 kern_return_t
 exclaves_frame_mint_populate(void)
 {
 	__block bool success = false;
 	tb_error_t tb_result = TB_ERROR_SUCCESS;
+
+	kern_return_t kr = exclaves_frame_mint_init();
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 
 	/* BEGIN IGNORE CODESTYLE */
 	tb_result = framemint_framemint_populate(&frame_mint_client,

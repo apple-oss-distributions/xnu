@@ -1194,6 +1194,7 @@ struct exclave_addressspace_info {
 	uint64_t eas_flags;                     /* A combination of enum exclave_addressspace_flags values */
 	uint64_t eas_layoutid;                  /* textLayout for this address space */
 	uint64_t eas_slide;                     /* slide to apply to textlayout, or UINT64_MAX if omitted */
+	uint64_t eas_asroot;                    /* ASRoot/TTBR0 value used as an identifier for the address space by cL4 */
 } __attribute__((packed));
 
 enum exclave_textlayout_flags : uint64_t {

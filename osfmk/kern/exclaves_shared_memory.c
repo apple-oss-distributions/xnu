@@ -33,6 +33,7 @@
 #include <kern/assert.h>
 #include <kern/misc_protos.h>
 
+#include "exclaves_debug.h"
 #include "exclaves_shared_memory.h"
 #include "kern/exclaves.tightbeam.h"
 
@@ -116,15 +117,17 @@ exclaves_shared_memory_setup(const sharedmemorybase_segxnuaccess_s *sm_client,
 	sharedmemorybase_pagerange__opt_init(&opt_range, &range);
 
 	*mapping = 0;
+
+	/* BEGIN IGNORE CODESTYLE */
 	ret = sharedmemorybase_segxnuaccess_createxnumapping(sm_client, perm,
 	    &opt_range,
 	    ^(sharedmemorybase_segxnuaccess_createxnumapping__result_s result) {
 		sharedmemorybase_accesserror_s *error = NULL;
 		error = sharedmemorybase_segxnuaccess_createxnumapping__result_get_failure(&result);
 		if (error != NULL) {
-		        (void) printf("%s: failed to create mapping: %u",
-		        __func__, *error);
-		        return;
+			exclaves_debug_printf(show_errors,
+			    "%s: failed to create mapping: %u", __func__, *error);
+			return;
 		}
 
 		sharedmemorybase_mappingresult_s *sm_result = NULL;
@@ -134,6 +137,7 @@ exclaves_shared_memory_setup(const sharedmemorybase_segxnuaccess_s *sm_client,
 		*mapping = sm_result->mappinginfo.mapping;
 		assert3u(*mapping, !=, 0);
 	});
+	/* END IGNORE CODESTYLE */
 
 	if (ret != TB_ERROR_SUCCESS || *mapping == 0) {
 		return KERN_FAILURE;
@@ -155,19 +159,21 @@ exclaves_shared_memory_teardown(const sharedmemorybase_segxnuaccess_s *sm_client
 	tb_error_t ret = TB_ERROR_SUCCESS;
 	__block bool success = false;
 
+	/* BEGIN IGNORE CODESTYLE */
 	ret = sharedmemorybase_segxnuaccess_mappingdestroy(sm_client, *mapping,
 	    ^(sharedmemorybase_segaccessbase_mappingdestroy__result_s result) {
 		sharedmemorybase_accesserror_s *error;
 		error = sharedmemorybase_segaccessbase_mappingdestroy__result_get_failure(&result);
 		if (error != NULL) {
-		        (void) printf("%s: failed to destroy mapping: %u\n",
-		        __func__, *error);
-		        return;
+			exclaves_debug_printf(show_errors,
+			    "%s: failed to destroy mapping: %u\n", __func__, *error);
+			return;
 		}
 
 		assert(sharedmemorybase_segaccessbase_mappingdestroy__result_get_success(&result));
 		success = true;
 	});
+	/* END IGNORE CODESTYLE */
 
 	if (ret != TB_ERROR_SUCCESS || !success) {
 		return KERN_FAILURE;
@@ -196,19 +202,21 @@ exclaves_shared_memory_map(const sharedmemorybase_segxnuaccess_s *sm_client,
 		.endpage = endpage,
 	};
 
+	/* BEGIN IGNORE CODESTYLE */
 	ret = sharedmemorybase_segxnuaccess_mappingmap(sm_client, *mapping,
 	    &range, ^(sharedmemorybase_segaccessbase_mappingmap__result_s result) {
 		sharedmemorybase_accesserror_s *error;
 		error = sharedmemorybase_segaccessbase_mappingmap__result_get_failure(&result);
 		if (error != NULL) {
-		        (void) printf("%s: failed to map: %u\n",
-		        __func__, *error);
-		        return;
+			exclaves_debug_printf(show_errors,
+			    "%s: failed to map: %u\n", __func__, *error);
+			return;
 		}
 
 		assert(sharedmemorybase_segaccessbase_mappingmap__result_get_success(&result));
 		success = true;
 	});
+	/* END IGNORE CODESTYLE */
 
 	if (ret != TB_ERROR_SUCCESS || !success) {
 		return KERN_FAILURE;
@@ -235,19 +243,21 @@ exclaves_shared_memory_unmap(const sharedmemorybase_segxnuaccess_s *sm_client,
 		.endpage = endpage,
 	};
 
+	/* BEGIN IGNORE CODESTYLE */
 	ret = sharedmemorybase_segxnuaccess_mappingunmap(sm_client, *mapping,
 	    &range, ^(sharedmemorybase_segaccessbase_mappingunmap__result_s result) {
 		sharedmemorybase_accesserror_s *error;
 		error = sharedmemorybase_segaccessbase_mappingunmap__result_get_failure(&result);
 		if (error != NULL) {
-		        (void) printf("%s: failed to unmap: %u\n",
-		        __func__, *error);
-		        return;
+			exclaves_debug_printf(show_errors, "%s: failed to unmap: %u\n",
+			    __func__, *error);
+			return;
 		}
 
 		assert(sharedmemorybase_segaccessbase_mappingunmap__result_get_success(&result));
 		success = true;
 	});
+	/* END IGNORE CODESTYLE */
 
 	if (ret != TB_ERROR_SUCCESS || !success) {
 		return KERN_FAILURE;
@@ -273,15 +283,17 @@ exclaves_shared_memory_iterate(const sharedmemorybase_segxnuaccess_s *sm_client,
 		.endpage = endpage,
 	};
 
+	/* BEGIN IGNORE CODESTYLE */
 	ret = sharedmemorybase_segxnuaccess_mappinggetphysicaladdresses(sm_client,
 	    *mapping, &full_range,
 	    ^(sharedmemorybase_segaccessbase_mappinggetphysicaladdresses__result_s result) {
 		sharedmemorybase_accesserror_s *error = NULL;
 		error = sharedmemorybase_segaccessbase_mappinggetphysicaladdresses__result_get_failure(&result);
 		if (error != NULL) {
-		        (void) printf("%s: failed to get physical address: %u",
-		        __func__, *error);
-		        return;
+			exclaves_debug_printf(show_errors,
+			    "%s: failed to get physical address: %u",
+			    __func__, *error);
+			return;
 		}
 
 		physicaladdress_v_s *phys_addr = NULL;
@@ -295,6 +307,7 @@ exclaves_shared_memory_iterate(const sharedmemorybase_segxnuaccess_s *sm_client,
 
 		success = true;
 	});
+	/* END IGNORE CODESTYLE */
 
 	if (ret != TB_ERROR_SUCCESS || !success) {
 		return KERN_FAILURE;

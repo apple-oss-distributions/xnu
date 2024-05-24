@@ -38,6 +38,7 @@
 #include <kperf/callstack.h>
 #include <kperf/ast.h>
 #include <sys/errno.h>
+#include <mach/exclaves.h>
 
 #if defined(__arm64__)
 #include <arm/cpu_data.h>
@@ -231,6 +232,14 @@ kperf_backtrace_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 	    &ctl, &btinfo);
 	if (cs->kpkc_nframes > 0) {
 		cs->kpkc_flags |= CALLSTACK_VALID;
+
+		cs->kpkc_exclaves_offset = 0;
+#if CONFIG_EXCLAVES
+		if ((context->cur_thread->th_exclaves_state & TH_EXCLAVES_RPC) != 0) {
+			cs->kpkc_exclaves_offset = exclaves_stack_offset(cs->kpkc_word_frames, cs->kpkc_nframes, true);
+		}
+#endif /* CONFIG_EXCLAVES */
+
 		/*
 		 * Fake the value pointed to by the stack pointer or the link
 		 * register for symbolicators.
@@ -282,6 +291,13 @@ kperf_kcallstack_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 		if ((btinfo & BTI_TRUNCATED)) {
 			cs->kpkc_flags |= CALLSTACK_TRUNCATED;
 		}
+
+		cs->kpkc_exclaves_offset = 0;
+#if CONFIG_EXCLAVES
+		if ((thread->th_exclaves_state & TH_EXCLAVES_RPC) != 0) {
+			cs->kpkc_exclaves_offset = exclaves_stack_offset(cs->kpkc_word_frames, cs->kpkc_nframes, true);
+		}
+#endif /* CONFIG_EXCLAVES */
 	} else {
 		/*
 		 * Rely on legacy CHUD backtracer to backtrace kernel stacks on
@@ -436,6 +452,10 @@ kperf_kcallstack_log(struct kp_kcallstack *cs)
 {
 	callstack_log(PERF_CS_KHDR, PERF_CS_KDATA, cs->kpkc_frames,
 	    cs->kpkc_nframes, cs->kpkc_flags, 0, 0);
+
+	if (cs->kpkc_exclaves_offset != 0) {
+		BUF_DATA(PERF_CS_KEXOFFSET, cs->kpkc_exclaves_offset);
+	}
 }
 
 void

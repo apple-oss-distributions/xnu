@@ -2306,11 +2306,11 @@ thread_wire_internal(
  */
 kern_return_t
 thread_wire(
-	host_priv_t     host_priv,
-	thread_t        thread,
-	boolean_t       wired)
+	host_priv_t     host_priv __unused,
+	thread_t        thread __unused,
+	boolean_t       wired __unused)
 {
-	return thread_wire_internal(host_priv, thread, wired, NULL);
+	return KERN_NOT_SUPPORTED;
 }
 
 boolean_t

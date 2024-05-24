@@ -1117,18 +1117,22 @@ pmap_mark_page_as_ppl_page_internal(pmap_paddr_t pa, bool initially_free)
 	pvh_lock(pai);
 
 	/* A page that the PPL already owns can't be given to the PPL. */
-	if (ppattr_pa_test_monitor(pa)) {
+	if (__improbable(ppattr_pa_test_monitor(pa))) {
 		panic("%s: page already belongs to PPL, pa=0x%llx", __func__, pa);
 	}
 
+	if (__improbable(pvh_get_flags(pai_to_pvh(pai)) & PVH_FLAG_LOCKDOWN_MASK)) {
+		panic("%s: page locked down, pa=0x%llx", __func__, pa);
+	}
+
 	/* The page cannot be mapped outside of the physical aperture. */
-	if (!pmap_verify_free((ppnum_t)atop(pa))) {
+	if (__improbable(!pmap_verify_free((ppnum_t)atop(pa)))) {
 		panic("%s: page still has mappings, pa=0x%llx", __func__, pa);
 	}
 
 	do {
 		attr = pp_attr_table[pai];
-		if (attr & PP_ATTR_NO_MONITOR) {
+		if (__improbable(attr & PP_ATTR_NO_MONITOR)) {
 			panic("%s: page excluded from PPL, pa=0x%llx", __func__, pa);
 		}
 	} while (!OSCompareAndSwap16(attr, attr | PP_ATTR_MONITOR, &pp_attr_table[pai]));

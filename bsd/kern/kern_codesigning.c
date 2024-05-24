@@ -36,6 +36,7 @@
 #include <libkern/section_keywords.h>
 #include <libkern/coretrust/coretrust.h>
 #include <pexpert/pexpert.h>
+#include <sys/user.h>
 #include <sys/vm.h>
 #include <sys/proc.h>
 #include <sys/proc_require.h>
@@ -977,19 +978,25 @@ csm_code_signing_violation(
 	printf("[%s: killed] code-signing-violation at %p\n", proc_best_name(proc), (void*)addr);
 
 	/*
+	 * For now, the only input into this function is from current_proc(), so using current_thread()
+	 * over here is alright. If this function ever gets called from another location, we need to
+	 * then change where we get the user thread from.
+	 */
+	assert(proc == current_proc());
+
+	/*
 	 * Create a reason for the SIGKILL and set it to allow generating crash reports,
-	 * which is critical for better triaging these issues.
+	 * which is critical for better triaging these issues. set_thread_exit_reason will
+	 * consume the kill_reason, so we don't have to free it.
 	 */
 	kill_reason = os_reason_create(OS_REASON_CODESIGNING, CODESIGNING_EXIT_REASON_INVALID_PAGE);
 	if (kill_reason != NULL) {
 		kill_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
 	}
+	set_thread_exit_reason(current_thread(), kill_reason, false);
 
-	/*
-	 * Send a SIGKILL to the process. This function will consume the kill_reason, so
-	 * we do not need to manually free it here.
-	 */
-	psignal_with_reason(proc, SIGKILL, kill_reason);
+	/* Send a SIGKILL to the thread */
+	threadsignal(current_thread(), SIGKILL, EXC_BAD_ACCESS, false);
 }
 
 kern_return_t

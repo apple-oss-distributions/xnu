@@ -3895,6 +3895,12 @@ thread_block_reason(
 	}
 #endif
 
+#if CONFIG_EXCLAVES
+	if (continuation != NULL) {
+		assert3u(self->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
+	}
+#endif /* CONFIG_EXCLAVES */
+
 	self->continuation = continuation;
 	self->parameter = parameter;
 

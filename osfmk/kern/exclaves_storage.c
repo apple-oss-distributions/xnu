@@ -193,6 +193,17 @@ exclaves_storage_upcall_create(const enum xnuupcalls_fstag_s fstag,
 	return completion(result);
 }
 
+// Borrowed from bsd_init.c
+extern bool bsd_rooted_ramdisk(void);
+
+static bool
+is_restore(void)
+{
+	bool is_restore = false;
+	(void) PE_parse_boot_argn("-restore", &is_restore, sizeof(is_restore));
+	return is_restore;
+}
+
 static exclaves_resource_t *storage_resource = NULL;
 static kern_return_t
 exclaves_storage_init(void)
@@ -205,7 +216,14 @@ exclaves_storage_init(void)
 	if (kr != KERN_SUCCESS) {
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls] exclaves_named_buffer_map failed with %d\n", kr);
-		return kr;
+		if (is_restore() || bsd_rooted_ramdisk()) {
+			// Don't fail boot here. Fail the upcalls that try to use the sharemem buffer instead.
+			// This is to prevent panic during boot-time when xnu-proxy was initialized before StorageExclave
+			// This can be reverted once Storage switched to V2
+			storage_resource = NULL;
+		} else {
+			return kr;
+		}
 	}
 	return KERN_SUCCESS;
 }
@@ -222,6 +240,13 @@ exclaves_storage_upcall_read(const enum xnuupcalls_fstag_s fstag,
 	int error;
 
 	xnuupcalls_xnuupcalls_read__result_s result = {};
+
+	if (!storage_resource) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcalls_xnuupcalls_read__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
 
 	error = verify_storage_buf_offset(descriptor->buf, descriptor->length);
 	if (error != 0) {
@@ -263,6 +288,13 @@ exclaves_storage_upcall_write(const enum xnuupcalls_fstag_s fstag,
 	int error;
 
 	xnuupcalls_xnuupcalls_write__result_s result = {};
+
+	if (!storage_resource) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcalls_xnuupcalls_write__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
 
 	error = verify_storage_buf_offset(descriptor->buf, descriptor->length);
 	if (error != 0) {
@@ -362,6 +394,13 @@ exclaves_storage_upcall_readdir(const enum xnuupcalls_fstag_s fstag,
 
 	xnuupcalls_xnuupcalls_readdir__result_s result = {};
 
+	if (!storage_resource) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
+
 	if ((error = verify_storage_buf_offset(buf, length))) {
 		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, error);
 		return completion(result);
@@ -423,6 +462,32 @@ exclaves_storage_upcall_getsize(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_getsize succeeded\n");
 		xnuupcalls_xnuupcalls_getsize__result_init_success(&result, size);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_sealstate(const enum xnuupcalls_fstag_s fstag,
+    tb_error_t (^completion)(xnuupcalls_xnuupcalls_sealstate__result_s result))
+{
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] sealstate %d\n",
+	    fstag);
+	int error;
+	bool sealed;
+	xnuupcalls_xnuupcalls_sealstate__result_s result = {};
+
+	error = vfs_exclave_fs_sealstate((uint32_t)fstag, &sealed);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_sealstate(%d) "
+		    "failed with %d\n", fstag, error);
+		xnuupcalls_xnuupcalls_sealstate__result_init_failure(&result, error);
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_sealstate succeeded\n");
+		xnuupcalls_xnuupcalls_sealstate__result_init_success(&result, sealed);
 	}
 
 	return completion(result);

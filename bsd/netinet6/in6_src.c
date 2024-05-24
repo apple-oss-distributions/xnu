@@ -228,7 +228,7 @@ in6_selectsrc_core_ifa(struct sockaddr_in6 *addr, struct ifnet *ifp, int srcsel_
 
 	if ((in6 = in6_selectsrc_core(addr,
 	    (ip6_prefer_tempaddr ? IPV6_SRCSEL_HINT_PREFER_TMPADDR : 0),
-	    ifp, 0, &src_storage, &src_ifp, &err, &ifa, NULL)) == NULL) {
+	    ifp, 0, &src_storage, &src_ifp, &err, &ifa, NULL, FALSE)) == NULL) {
 		if (err == 0) {
 			err = EADDRNOTAVAIL;
 		}
@@ -273,7 +273,8 @@ done:
 struct in6_addr *
 in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
     struct ifnet *ifp, int srcsel_debug, struct in6_addr *src_storage,
-    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp, struct route_in6 *ro)
+    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp, struct route_in6 *ro,
+    boolean_t is_for_clat46)
 {
 	u_int32_t odstzone;
 	int bestrule = IP6S_SRCRULE_0;
@@ -352,9 +353,15 @@ addrloop:
 		/*
 		 * Simply skip addresses reserved for CLAT46
 		 */
-		if (ia->ia6_flags & IN6_IFF_CLAT46) {
+		if (!is_for_clat46 && (ia->ia6_flags & IN6_IFF_CLAT46)) {
 			SASEL_LOG("NEXT ia %s address on ifp1 %s skipped as it is "
 			    "reserved for CLAT46\n", s_src, ifp1->if_xname);
+			goto next;
+		}
+
+		if (is_for_clat46 && !(ia->ia6_flags & IN6_IFF_CLAT46)) {
+			SASEL_LOG("CLAT46: NEXT ia %s address on ifp1 %s skipped as it is "
+			    "not reserved for CLAT46\n", s_src, ifp1->if_xname);
 			goto next;
 		}
 
@@ -877,7 +884,7 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 	}
 
 	if (in6_selectsrc_core(dstsock, hint_mask, ifp, inp_debug, src_storage,
-	    &sifp, errorp, NULL, ro) == NULL) {
+	    &sifp, errorp, NULL, ro, FALSE) == NULL) {
 		src_storage = NULL;
 		goto done;
 	}

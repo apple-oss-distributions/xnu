@@ -1963,6 +1963,8 @@ data_requested:
 				 * store (different memory object).
 				 */
 phys_contig_object:
+				assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
+				assert(object == first_object);
 				goto done;
 			}
 			/*
@@ -3758,10 +3760,18 @@ vm_fault_enter_prepare(
 		 */
 
 		/* This had better not be a JIT page. */
-		if (!pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
-			*prot &= ~VM_PROT_WRITE;
+		if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
+			/*
+			 * This pmap enforces extra constraints for this set of
+			 * protections, so we can't modify them.
+			 */
+			if (!cs_bypass) {
+				panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x !cs_bypass",
+				    __FUNCTION__, pmap, (uint64_t)vaddr,
+				    *prot, fault_info->pmap_options);
+			}
 		} else {
-			assert(cs_bypass);
+			*prot &= ~VM_PROT_WRITE;
 		}
 	}
 	if (m->vmp_pmapped == FALSE) {
@@ -3825,7 +3835,17 @@ vm_fault_enter_prepare(
 			 * to make an already writeable page executable.
 			 */
 			if (!cs_bypass) {
-				assert(!pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot));
+				if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
+					/*
+					 * This pmap enforces extra constraints
+					 * for this set of protections, so we
+					 * can't change the protections.
+					 */
+					panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+					    __FUNCTION__, pmap,
+					    (uint64_t)vaddr, *prot,
+					    fault_info->pmap_options);
+				}
 				*prot &= ~VM_PROT_EXECUTE;
 			}
 		}
@@ -4827,9 +4847,7 @@ upgrade_lock_and_retry:
 			}
 
 			if (!(fault_type & VM_PROT_WRITE) && !need_copy) {
-				if (!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
-					prot &= ~VM_PROT_WRITE;
-				} else {
+				if (pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
 					/*
 					 * For a protection that the pmap cares
 					 * about, we must hand over the full
@@ -4839,7 +4857,14 @@ upgrade_lock_and_retry:
 					 * set, as this can force us to pass
 					 * RWX.
 					 */
-					assert(fault_info.cs_bypass);
+					if (!fault_info.cs_bypass) {
+						panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+						    __FUNCTION__, pmap,
+						    (uint64_t)vaddr, prot,
+						    fault_info.pmap_options);
+					}
+				} else {
+					prot &= ~VM_PROT_WRITE;
 				}
 
 				if (object != cur_object) {
@@ -5516,10 +5541,25 @@ FastPmapEnter:
 					 * pushing this page to a copy object
 					 * or making a shadow object.
 					 */
-					if (!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
-						prot &= ~VM_PROT_WRITE;
+					if (pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+						/*
+						 * This pmap enforces extra
+						 * constraints for this set of
+						 * protections, so we can't
+						 * change the protections.
+						 * We would expect code-signing
+						 * to be bypassed in this case.
+						 */
+						if (!fault_info.cs_bypass) {
+							panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+							    __FUNCTION__,
+							    pmap,
+							    (uint64_t)vaddr,
+							    prot,
+							    fault_info.pmap_options);
+						}
 					} else {
-						assert(fault_info.cs_bypass);
+						prot &= ~VM_PROT_WRITE;
 					}
 				}
 				assertf(!((fault_type & VM_PROT_WRITE) && object->vo_copy),
@@ -5626,17 +5666,18 @@ FastPmapEnter:
 							 * The write access will fault again and we'll
 							 * resolve the copy-on-write then.
 							 */
-							if (!pmap_has_prot_policy(pmap,
+							if (pmap_has_prot_policy(pmap,
 							    fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE,
 							    prot)) {
-								/* the pmap layer is OK with changing the PTE's prot */
-								prot &= ~VM_PROT_WRITE;
-							} else {
 								/* we should not do CoW on pmap_has_prot_policy mappings */
-								panic("map %p va 0x%llx obj %p,%u saved %p,%u: unexpected CoW",
+								panic("%s: map %p va 0x%llx obj %p,%u saved %p,%u: unexpected CoW",
+								    __FUNCTION__,
 								    map, (uint64_t)vaddr,
 								    object, object->vo_copy_version,
 								    saved_copy_object, saved_copy_version);
+							} else {
+								/* the pmap layer is OK with changing the PTE's prot */
+								prot &= ~VM_PROT_WRITE;
 							}
 						}
 					}
@@ -6136,7 +6177,19 @@ handle_copy_delay:
 		 * The copy object changed while the top-level object
 		 * was unlocked, so take away write permission.
 		 */
-		assert(!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot));
+		if (pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+			/*
+			 * This pmap enforces extra constraints for this set
+			 * of protections, so we can't change the protections.
+			 * This mapping should have been setup to avoid
+			 * copy-on-write since that requires removing write
+			 * access.
+			 */
+			panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x m%p obj %p copyobj %p",
+			    __FUNCTION__, pmap, (uint64_t)vaddr, prot,
+			    fault_info.pmap_options,
+			    m, m_object, m_object->vo_copy);
+		}
 		prot &= ~VM_PROT_WRITE;
 	}
 

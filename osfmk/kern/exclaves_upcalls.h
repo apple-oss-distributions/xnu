@@ -36,4 +36,7 @@ __BEGIN_DECLS
 extern kern_return_t
 exclaves_call_upcall_handler(exclaves_id_t upcall_id);
 
+extern kern_return_t
+exclaves_upcall_early_init(void);
+
 __END_DECLS

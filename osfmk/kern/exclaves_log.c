@@ -38,15 +38,17 @@
 
 #include "kern/exclaves.tightbeam.h"
 #include "exclaves_boot.h"
+#include "exclaves_resource.h"
 
-#define EXCLAVES_ID_LOGSERVER_EP \
-    (exclaves_endpoint_lookup("com.apple.service.LogServer_xnuproxy"))
+#define EXCLAVES_ID_LOGSERVER_EP                     \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.LogServer_xnuproxy"))
+
+TUNABLE(bool, oslog_exclaves, "oslog_exclaves", true);
 
 #if DEVELOPMENT || DEBUG
 
 #define OS_LOG_MAX_SIZE (2048)
-
-TUNABLE(bool, oslog_exclaves, "oslog_exclaves", true);
 
 SCALABLE_COUNTER_DEFINE(oslog_e_log_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_log_dropped_count);
@@ -178,12 +180,6 @@ log_server_retrieve_logs(void *arg, __unused wait_result_t w)
 }
 
 #else // DEVELOPMENT || DEBUG
-
-/*
- * Exclaves logging is temporarily disabled until all parts of the logging
- * pipeline land.
- */
-TUNABLE(bool, oslog_exclaves, "oslog_exclaves", false);
 
 static void
 replay_redacted_log(const oslogdarwin_redactedlogdata_log_s *log)

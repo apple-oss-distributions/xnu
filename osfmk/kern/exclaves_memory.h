@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,37 +26,41 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#pragma once
-
 #if CONFIG_EXCLAVES
 
+#pragma once
+
+#include <stdint.h>
 #include <mach/kern_return.h>
-#include <xnuproxy/messages.h>
-#include <vm/pmap.h>
+
+#include "kern/exclaves.tightbeam.h"
+
+/* The maximum number of pages in a memory request. */
+#define EXCLAVES_MEMORY_MAX_REQUEST (64)
 
 __BEGIN_DECLS
 
-/*
- * Fetch the exclave panic string.
- */
-extern kern_return_t
-exclaves_panic_get_string(char **string);
-
-/*
- * Append additional info and panic bactrace to the paniclog.
- */
 extern void
-exclaves_panic_append_info(void);
+exclaves_memory_alloc(uint32_t npages, uint32_t *pages, const xnuupcalls_pagekind_s kind);
 
 extern void
-exclaves_panic_thread_wait(void);
+exclaves_memory_free(uint32_t npages, const uint32_t *pages, const xnuupcalls_pagekind_s kind);
 
+/* BEGIN IGNORE CODESTYLE */
+extern tb_error_t
+exclaves_memory_upcall_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
+    tb_error_t (^completion)(xnuupcalls_pagelist_s));
+/* END IGNORE CODESTYLE */
 
-extern kern_return_t
-exclaves_panic_thread_setup(void);
+/* BEGIN IGNORE CODESTYLE */
+extern tb_error_t
+exclaves_memory_upcall_free(const uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST],
+    uint32_t npages, const xnuupcalls_pagekind_s kind,
+    tb_error_t (^completion)(void));
+/* END IGNORE CODESTYLE */
 
-void
-handle_response_panic_buffer_address(pmap_paddr_t address);
+extern void
+exclaves_memory_report_accounting(void);
 
 __END_DECLS
 

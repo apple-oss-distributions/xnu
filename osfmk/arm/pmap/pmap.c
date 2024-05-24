@@ -4243,6 +4243,9 @@ pmap_remove_range_options(
 		}
 
 #if XNU_MONITOR
+		if (__improbable(pmap == kernel_pmap && ppattr_pa_test_no_monitor(pa))) {
+			panic("%s: PA 0x%llx is pinned.", __func__, (uint64_t)pa);
+		}
 		if (__improbable(ro_va)) {
 			pmap_ppl_unlockdown_page_locked(pai, PVH_FLAG_LOCKDOWN_RO, true);
 		}
@@ -4753,6 +4756,9 @@ pmap_page_protect_options_with_flush_range(
 	}
 	if (__improbable(ppattr_pa_test_monitor(phys))) {
 		panic("%s: PA 0x%llx belongs to PPL.", __func__, (uint64_t)phys);
+	}
+	if (__improbable(remove && ppattr_pa_test_no_monitor(phys))) {
+		panic("%s: PA 0x%llx is pinned.", __func__, (uint64_t)phys);
 	}
 #endif
 
@@ -11824,17 +11830,25 @@ pmap_pin_kernel_pages(vm_offset_t kva, size_t nbytes)
 	}
 	for (vm_offset_t ckva = trunc_page(kva); ckva < end; ckva = round_page(ckva + 1)) {
 		pmap_paddr_t pa = kvtophys_nofail(ckva);
-		pp_attr_t attr;
 		unsigned int pai = pa_index(pa);
-		if (ckva == phystokv(pa)) {
+		pp_attr_t attr;
+		if (__improbable(!pa_valid(pa))) {
+			panic("%s(%s): attempt to pin mapping of non-managed page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
+		}
+		pvh_lock(pai);
+		if (__improbable(ckva == phystokv(pa))) {
 			panic("%s(%p): attempt to pin static mapping for page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
 		}
 		do {
 			attr = pp_attr_table[pai] & ~PP_ATTR_NO_MONITOR;
-			if (attr & PP_ATTR_MONITOR) {
+			if (__improbable(attr & PP_ATTR_MONITOR)) {
 				panic("%s(%p): physical page 0x%llx belongs to PPL", __func__, (void*)kva, (uint64_t)pa);
 			}
 		} while (!OSCompareAndSwap16(attr, attr | PP_ATTR_NO_MONITOR, &pp_attr_table[pai]));
+		pvh_unlock(pai);
+		if (__improbable(kvtophys_nofail(ckva) != pa)) {
+			panic("%s(%p): VA no longer mapped to physical page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
+		}
 	}
 }
 
@@ -12108,7 +12122,7 @@ pmap_ro_zone_validate_element(
 }
 
 /**
- * Ensure that physical page is locked down and pinned, before writing to it.
+ * Ensure that physical page is locked down before writing to it.
  *
  * @note Should be called before writing to an allocation from the read
  * only allocator. This function pairs with pmap_ro_zone_unlock_phy_page,
@@ -12127,6 +12141,10 @@ pmap_ro_zone_lock_phy_page(
 	vm_offset_t         va,
 	vm_size_t           size)
 {
+	if (__improbable(trunc_page(va + size - 1) != trunc_page(va))) {
+		panic("%s: va 0x%llx size 0x%llx crosses page boundary",
+		    __func__, (unsigned long long)va, (unsigned long long)size);
+	}
 	const unsigned int pai = pa_index(pa);
 	pvh_lock(pai);
 
@@ -12137,13 +12155,10 @@ pmap_ro_zone_lock_phy_page(
 		panic("%s: Physical page not locked down %llx", __func__, pa);
 	}
 #endif /* XNU_MONITOR */
-
-	/* Ensure page can't become PPL-owned memory before the memcpy occurs */
-	pmap_pin_kernel_pages(va, size);
 }
 
 /**
- * Unlock and unpin physical page after writing to it.
+ * Unlock physical page after writing to it.
  *
  * @note Should be called after writing to an allocation from the read
  * only allocator. This function pairs with pmap_ro_zone_lock_phy_page,
@@ -12158,11 +12173,10 @@ pmap_ro_zone_lock_phy_page(
 MARK_AS_PMAP_TEXT static void
 pmap_ro_zone_unlock_phy_page(
 	const pmap_paddr_t  pa,
-	vm_offset_t         va,
-	vm_size_t           size)
+	vm_offset_t         va __unused,
+	vm_size_t           size __unused)
 {
 	const unsigned int pai = pa_index(pa);
-	pmap_unpin_kernel_pages(va, size);
 	pvh_unlock(pai);
 }
 

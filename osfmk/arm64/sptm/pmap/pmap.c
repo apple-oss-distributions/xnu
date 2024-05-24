@@ -5285,7 +5285,8 @@ pmap_enter_pte(
 		}
 		sptm_retype_params_t retype_params = {.raw = SPTM_RETYPE_PARAMS_NULL};
 		/* Reload the existing frame type, as pmap_page_protect_options() may have changed it back to XNU_DEFAULT. */
-		sptm_retype(pa, sptm_get_frame_type(pa), new_frame_type, retype_params);
+		prev_frame_type = sptm_get_frame_type(pa);
+		sptm_retype(pa, prev_frame_type, new_frame_type, retype_params);
 	}
 
 	/* TXMTODO: Switch this to read the type configuration table */

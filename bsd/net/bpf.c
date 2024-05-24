@@ -328,6 +328,37 @@ done:
 	return error;
 }
 
+static inline void
+bpf_set_bcast_mcast(mbuf_t m, struct ether_header * eh)
+{
+	if (ETHER_IS_MULTICAST(eh->ether_dhost)) {
+		if (_ether_cmp(etherbroadcastaddr, eh->ether_dhost) == 0) {
+			m->m_flags |= M_BCAST;
+		} else {
+			m->m_flags |= M_MCAST;
+		}
+	}
+}
+
+#if DEBUG | DEVELOPMENT
+static void
+bpf_log_bcast(const char * func, const char * ifname, uint16_t flags,
+    bool hdrcmplt)
+{
+	const char *    type;
+
+	if ((flags & M_BCAST) != 0) {
+		type = "broadcast";
+	} else if ((flags & M_MCAST) != 0) {
+		type = "multicast";
+	} else {
+		type = "unicast";
+	}
+	os_log(OS_LOG_DEFAULT, "%s %s %s hdrcmplt=%s", func, ifname, type,
+	    hdrcmplt ? "true" : "false");
+}
+#endif /* DEBUG | DEVELOPMENT */
+
 static int
 bpf_movein(struct uio *uio, int copy_len, struct bpf_d *d, struct mbuf **mp,
     struct sockaddr *sockp)
@@ -477,6 +508,18 @@ bpf_movein(struct uio *uio, int copy_len, struct bpf_d *d, struct mbuf **mp,
 			goto bad;
 		}
 		len -= hlen;
+		if (linktype == DLT_EN10MB) {
+			struct ether_header * eh;
+
+			eh = (struct ether_header *)(void *)sockp->sa_data;
+			bpf_set_bcast_mcast(m, eh);
+#if DEBUG || DEVELOPMENT
+			if (__improbable(bpf_debug != 0)) {
+				bpf_log_bcast(__func__, ifp->if_xname,
+				    m->m_flags, false);
+			}
+#endif /* DEBUG || DEVELOPMENT */
+		}
 	}
 	/*
 	 * bpf_copy_uio_to_mbuf_packet() does set the length of each mbuf and adds it to
@@ -490,21 +533,17 @@ bpf_movein(struct uio *uio, int copy_len, struct bpf_d *d, struct mbuf **mp,
 	}
 
 	/* Check for multicast destination */
-	switch (linktype) {
-	case DLT_EN10MB: {
+	if (hlen == 0 && linktype == DLT_EN10MB) {
 		struct ether_header *eh;
 
 		eh = mtod(m, struct ether_header *);
-		if (ETHER_IS_MULTICAST(eh->ether_dhost)) {
-			if (_ether_cmp(etherbroadcastaddr,
-			    eh->ether_dhost) == 0) {
-				m->m_flags |= M_BCAST;
-			} else {
-				m->m_flags |= M_MCAST;
-			}
+		bpf_set_bcast_mcast(m, eh);
+#if DEBUG || DEVELOPMENT
+		if (__improbable(bpf_debug != 0)) {
+			bpf_log_bcast(__func__, ifp->if_xname,
+			    m->m_flags, true);
 		}
-		break;
-	}
+#endif /* DEBUG || DEVELOPMENT */
 	}
 	*mp = m;
 

@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -3381,13 +3381,13 @@ vgone(vnode_t vp, int flags)
 }
 
 /*
- * Lookup a vnode by device number.
+ * internal helper function only!
+ * vend an _iocounted_ vnode via output argument, or return an error if unable.
  */
-int
-check_mountedon(dev_t dev, enum vtype type, int  *errorp)
+static int
+get_vp_from_dev(dev_t dev, enum vtype type, vnode_t *outvp)
 {
 	vnode_t vp;
-	int rc = 0;
 	int vid;
 
 loop:
@@ -3399,26 +3399,124 @@ loop:
 		vid = vp->v_id;
 		vnode_hold(vp);
 		SPECHASH_UNLOCK();
+
+		/* acquire iocount */
 		if (vnode_getwithvid(vp, vid)) {
 			vnode_drop(vp);
 			goto loop;
 		}
 		vnode_drop(vp);
-		vnode_lock_spin(vp);
-		if ((vp->v_usecount > 0) || (vp->v_iocount > 1)) {
-			vnode_unlock(vp);
-			if ((*errorp = vfs_mountedon(vp)) != 0) {
-				rc = 1;
-			}
-		} else {
-			vnode_unlock(vp);
-		}
-		vnode_put(vp);
-		return rc;
+
+		/* Vend iocounted vnode */
+		*outvp = vp;
+		return 0;
 	}
+
+	/* vnode not found, error out */
 	SPECHASH_UNLOCK();
-	return 0;
+	return ENOENT;
 }
+
+
+
+/*
+ * Lookup a vnode by device number.
+ */
+int
+check_mountedon(dev_t dev, enum vtype type, int *errorp)
+{
+	vnode_t vp = NULLVP;
+	int rc = 0;
+
+	rc = get_vp_from_dev(dev, type, &vp);
+	if (rc) {
+		/* if no vnode found, it cannot be mounted on */
+		return 0;
+	}
+
+	/* otherwise, examine it */
+	vnode_lock_spin(vp);
+	/* note: exclude the iocount we JUST got (e.g. >1, not >0) */
+	if ((vp->v_usecount > 0) || (vp->v_iocount > 1)) {
+		vnode_unlock(vp);
+		if ((*errorp = vfs_mountedon(vp)) != 0) {
+			rc = 1;
+		}
+	} else {
+		vnode_unlock(vp);
+	}
+	/* release iocount! */
+	vnode_put(vp);
+
+	return rc;
+}
+
+extern dev_t chrtoblk(dev_t d);
+
+/*
+ * Examine the supplied vnode's dev_t and find its counterpart
+ * (e.g.  VCHR => VDEV) to compare against.
+ */
+static int
+vnode_cmp_paired_dev(vnode_t vp, vnode_t bdev_vp, enum vtype in_type,
+    enum vtype out_type)
+{
+	if (!vp || !bdev_vp) {
+		return EINVAL;
+	}
+	/* Verify iocounts */
+	if (vnode_iocount(vp) <= 0 ||
+	    vnode_iocount(bdev_vp) <= 0) {
+		return EINVAL;
+	}
+
+	/* check for basic matches */
+	if (vnode_vtype(vp) != in_type) {
+		return EINVAL;
+	}
+	if (vnode_vtype(bdev_vp) != out_type) {
+		return EINVAL;
+	}
+
+	dev_t dev = vnode_specrdev(vp);
+	dev_t blk_devt = vnode_specrdev(bdev_vp);
+
+	if (in_type == VCHR) {
+		if (out_type != VBLK) {
+			return EINVAL;
+		}
+		dev_t bdev = chrtoblk(dev);
+		if (bdev == NODEV) {
+			return EINVAL;
+		} else if (bdev == blk_devt) {
+			return 0;
+		}
+		//fall through
+	}
+	/*
+	 * else case:
+	 *
+	 * in_type == VBLK? => VCHR?
+	 * not implemented...
+	 * exercise to the reader: this can be built by
+	 * taking the device's major, and iterating the `chrtoblktab`
+	 * array to look for a value that matches.
+	 */
+	return EINVAL;
+}
+/*
+ * Vnode compare: does the supplied vnode's CHR device, match the dev_t
+ * of the accompanying `blk_vp` ?
+ * NOTE: vnodes MUST be iocounted BEFORE calling this!
+ */
+
+int
+vnode_cmp_chrtoblk(vnode_t vp, vnode_t blk_vp)
+{
+	return vnode_cmp_paired_dev(vp, blk_vp, VCHR, VBLK);
+}
+
+
 
 /*
  * Calculate the total number of references to a special device.

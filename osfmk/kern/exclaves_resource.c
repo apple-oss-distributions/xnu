@@ -29,6 +29,7 @@
 #if CONFIG_EXCLAVES
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include <mach/exclaves.h>
 #include <mach/kern_return.h>
@@ -36,6 +37,7 @@
 #include <string.h>
 
 #include <kern/assert.h>
+#include <kern/bits.h>
 #include <kern/queue.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
@@ -56,10 +58,11 @@
 
 #include <sys/event.h>
 
-#include "exclaves_resource.h"
-#include "exclaves_shared_memory.h"
-#include "exclaves_sensor.h"
 #include "exclaves_conclave.h"
+#include "exclaves_debug.h"
+#include "exclaves_resource.h"
+#include "exclaves_sensor.h"
+#include "exclaves_shared_memory.h"
 
 /* Use the new version of xnuproxy_msg_t. */
 #define xnuproxy_msg_t xnuproxy_msg_new_t
@@ -67,6 +70,12 @@
 static LCK_GRP_DECLARE(resource_lck_grp, "exclaves_resource");
 
 extern kern_return_t exclaves_xnu_proxy_send(xnuproxy_msg_t *, void *);
+
+/*
+ * A cache of service ids in the kernel domain
+ */
+static bitmap_t
+    kernel_service_bitmap[BITMAP_LEN(CONCLAVE_SERVICE_MAX)] = {0};
 
 /*
  * Exclave Resources
@@ -254,6 +263,22 @@ table_alloc(size_t nbuckets)
 	return table;
 }
 
+static void
+table_iterate(table_t *table,
+    bool (^cb)(const void *key, size_t key_len, void *value))
+{
+	for (size_t i = 0; i < table->t_buckets_count; i++) {
+		const queue_head_t *head = &table->t_buckets[i];
+		table_item_t *elem = NULL;
+
+		qe_foreach_element(elem, head, i_chain) {
+			if (cb(elem->i_key, elem->i_key_len, elem->i_value)) {
+				return;
+			}
+		}
+	}
+}
+
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Root Table
@@ -291,6 +316,27 @@ lookup_domain(const char *domain_name)
 	});
 
 	return domain;
+}
+
+static void
+iterate_domains(bool (^cb)(exclaves_resource_domain_t *))
+{
+	table_iterate(&root_table,
+	    ^(__unused const void *key, __unused size_t key_len, void *value) {
+		exclaves_resource_domain_t *domain = value;
+		return cb(domain);
+	});
+}
+
+static void
+iterate_resources(exclaves_resource_domain_t *domain,
+    bool (^cb)(exclaves_resource_t *))
+{
+	table_iterate(domain->d_table_name,
+	    ^(__unused const void *key, __unused size_t key_len, void *value) {
+		exclaves_resource_t *resource = value;
+		return cb(resource);
+	});
 }
 
 static exclaves_resource_t *
@@ -434,6 +480,52 @@ static void exclaves_resource_sensor_reset(exclaves_resource_t *resource);
 static void exclaves_resource_shared_memory_unmap(exclaves_resource_t *resource);
 static void exclaves_resource_audio_memory_unmap(exclaves_resource_t *resource);
 
+static void
+populate_conclave_services(void)
+{
+	/* BEGIN IGNORE CODESTYLE */
+	iterate_domains(^(exclaves_resource_domain_t *domain) {
+
+		const bool is_kernel_domain =
+		    (strcmp(domain->d_name, EXCLAVES_DOMAIN_KERNEL) == 0 ||
+		    strcmp(domain->d_name, EXCLAVES_DOMAIN_DARWIN) == 0);
+
+		exclaves_resource_t *cm = exclaves_resource_lookup_by_name(
+		    EXCLAVES_DOMAIN_KERNEL, domain->d_name,
+		    XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
+
+		iterate_resources(domain, ^(exclaves_resource_t *resource) {
+			if (resource->r_type != XNUPROXY_RESOURCE_SERVICE) {
+				return (bool)false;
+			}
+
+			if (cm != NULL) {
+				conclave_resource_t *c = &cm->r_conclave;
+				bitmap_set(c->c_service_bitmap,
+				    (uint32_t)resource->r_id);
+				return (bool)false;
+			}
+
+			if (is_kernel_domain) {
+				bitmap_set(kernel_service_bitmap,
+				    (uint32_t)resource->r_id);
+				return (bool)false;
+
+			}
+
+			/*
+			 * Ignore services that are in unknown domains. This can
+			 * happen if a conclave manager doesn't have a populated
+			 * endpoint (for example during bringup).
+			 */
+			return (bool)false;
+		});
+
+		return (bool)false;
+	});
+	/* END IGNORE CODESTYLE */
+}
+
 /*
  * Discover all the static exclaves resources populating the resource tables as
  * we go.
@@ -498,10 +590,17 @@ exclaves_resource_init(void)
 			exclaves_notification_init(resource);
 			break;
 
+		case XNUPROXY_RESOURCE_SERVICE:
+			assert3u(resource->r_id, <, CONCLAVE_SERVICE_MAX);
+			break;
+
 		default:
 			break;
 		}
 	}
+
+	/* Populate the conclave service ID bitmaps. */
+	populate_conclave_services();
 
 	return KERN_SUCCESS;
 }
@@ -1050,7 +1149,7 @@ named_buffer_map(exclaves_resource_t *resource, size_t size,
 		if (nb->nb_nranges + nranges > EXCLAVES_SHARED_BUFFER_MAX_RANGES) {
 			named_buffer_unmap(resource);
 			lck_mtx_unlock(&resource->r_mutex);
-			printf("exclaves: "
+			exclaves_debug_printf(show_errors, "exclaves: "
 			    "fragmented named buffer can't fit\n");
 			return KERN_FAILURE;
 		}
@@ -1113,14 +1212,16 @@ exclaves_named_buffer_unmap(exclaves_resource_t *resource)
 
 	kern_return_t kr = exclaves_xnu_proxy_send(&msg, NULL);
 	if (kr != KERN_SUCCESS) {
-		printf("exclaves: failed to delete named buffer: %s\n",
+		exclaves_debug_printf(show_errors,
+		    "exclaves: failed to delete named buffer: %s\n",
 		    resource->r_name);
 		return;
 	}
 	uint8_t status = msg.cmd_named_buf_delete.response.status;
 
 	if (status != XNUPROXY_NAMED_BUFFER_SUCCESS) {
-		printf("exclaves: failed to delete named buffer: %s, "
+		exclaves_debug_printf(show_errors,
+		    "exclaves: failed to delete named buffer: %s, "
 		    "status: %d\n", resource->r_name, status);
 		return;
 	}
@@ -1170,14 +1271,16 @@ exclaves_audio_buffer_delete(exclaves_resource_t *resource)
 
 	kern_return_t kr = exclaves_xnu_proxy_send(&msg, NULL);
 	if (kr != KERN_SUCCESS) {
-		printf("exclaves: failed to delete audio buffer: %s\n",
+		exclaves_debug_printf(show_errors,
+		    "exclaves: failed to delete audio buffer: %s\n",
 		    resource->r_name);
 		return;
 	}
 	uint8_t status = msg.cmd_audio_buf_delete.response.status;
 
 	if (status != XNUPROXY_NAMED_BUFFER_SUCCESS) {
-		printf("exclaves: failed to delete audio buffer: %s, "
+		exclaves_debug_printf(show_errors,
+		    "exclaves: failed to delete audio buffer: %s, "
 		    "status: %d\n", resource->r_name, status);
 		return;
 	}
@@ -1338,6 +1441,15 @@ exclaves_conclave_inherit(exclaves_resource_t *resource, task_t old_task,
 	return KERN_SUCCESS;
 }
 
+bool
+exclaves_conclave_is_attached(const exclaves_resource_t *resource)
+{
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
+	const conclave_resource_t *conclave = &resource->r_conclave;
+
+	return conclave->c_state == CONCLAVE_S_ATTACHED;
+}
+
 kern_return_t
 exclaves_conclave_launch(exclaves_resource_t *resource)
 {
@@ -1371,7 +1483,7 @@ exclaves_conclave_launch(exclaves_resource_t *resource)
 
 		lck_mtx_lock(&resource->r_mutex);
 		conclave->c_state = CONCLAVE_S_STOPPED;
-	} else {
+	} else if (conclave->c_state == CONCLAVE_S_LAUNCHING) {
 		conclave->c_state = CONCLAVE_S_LAUNCHED;
 	}
 	lck_mtx_unlock(&resource->r_mutex);
@@ -1379,46 +1491,21 @@ exclaves_conclave_launch(exclaves_resource_t *resource)
 	return KERN_SUCCESS;
 }
 
-kern_return_t
-exclaves_conclave_lookup_resources(exclaves_resource_t *resource,
-    struct exclaves_resource_user *conclave_resource_user, int resource_count)
+/*
+ * Return the domain associated with the current conclave.
+ * If not joined to a conclave, return the KERNEL domain. This implies that the
+ * calling task is sufficiently privileged.
+ */
+const char *
+exclaves_conclave_get_domain(exclaves_resource_t *resource)
 {
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
-	conclave_resource_t *conclave = &resource->r_conclave;
-	lck_mtx_lock(&resource->r_mutex);
-
-	if (conclave->c_state != CONCLAVE_S_LAUNCHED) {
-		lck_mtx_unlock(&resource->r_mutex);
-		return KERN_FAILURE;
+	if (resource != NULL) {
+		assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
+		return resource->r_name;
 	}
 
-	for (int i = 0; i < resource_count; i++) {
-		exclaves_resource_t *service_resource =
-		    exclaves_resource_lookup_by_name(resource->r_name,
-		    conclave_resource_user[i].r_name,
-		    XNUPROXY_RESOURCE_SERVICE);
-		if (service_resource == NULL) {
-			/*
-			 * Fall back to checking the Darwin domain. This should
-			 * be removed once conclaves are properly defined.
-			 */
-			service_resource = exclaves_resource_lookup_by_name(
-				EXCLAVES_DOMAIN_DARWIN,
-				conclave_resource_user[i].r_name,
-				XNUPROXY_RESOURCE_SERVICE);
-		}
-		if (service_resource == NULL) {
-			conclave_resource_user[i].r_id = 0;
-			conclave_resource_user[i].r_port = MACH_PORT_NULL;
-			continue;
-		}
-
-		conclave_resource_user[i].r_id = service_resource->r_id;
-		conclave_resource_user[i].r_port = MACH_PORT_NULL;
-	}
-
-	lck_mtx_unlock(&resource->r_mutex);
-	return KERN_SUCCESS;
+	assert(exclaves_has_priv(current_task(), EXCLAVES_PRIV_KERNEL_DOMAIN));
+	return EXCLAVES_DOMAIN_KERNEL;
 }
 
 kern_return_t
@@ -1475,12 +1562,13 @@ exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt)
 extern int exit_with_exclave_exception(void *p);
 
 kern_return_t
-exclaves_conclave_stop_upcall(exclaves_resource_t *resource, task_t task)
+exclaves_conclave_stop_upcall(exclaves_resource_t *resource)
 {
 	assert3p(resource, !=, NULL);
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
 
 	conclave_resource_t *conclave = &resource->r_conclave;
+	thread_t thread = current_thread();
 
 	lck_mtx_lock(&resource->r_mutex);
 
@@ -1491,20 +1579,58 @@ exclaves_conclave_stop_upcall(exclaves_resource_t *resource, task_t task)
 	}
 
 	if (conclave->c_state != CONCLAVE_S_LAUNCHED && conclave->c_state != CONCLAVE_S_LAUNCHING
-	    && conclave->c_state != CONCLAVE_S_ATTACHED) {
+	    && conclave->c_state != CONCLAVE_S_ATTACHED
+	    && conclave->c_state != CONCLAVE_S_STOP_REQUESTED) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_FAILURE;
 	}
 
 	conclave->c_state = CONCLAVE_S_STOPPING;
+	thread->th_exclaves_state |= TH_EXCLAVES_STOP_UPCALL_PENDING;
 	lck_mtx_unlock(&resource->r_mutex);
 
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+exclaves_conclave_stop_upcall_complete(exclaves_resource_t *resource, task_t task)
+{
+	assert3p(resource, !=, NULL);
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
+
+	conclave_resource_t *conclave = &resource->r_conclave;
+	thread_t thread = current_thread();
+
+	thread->th_exclaves_state &= ~TH_EXCLAVES_STOP_UPCALL_PENDING;
 	exit_with_exclave_exception(get_bsdtask_info(task));
 
 	lck_mtx_lock(&resource->r_mutex);
+
+	assert3u(conclave->c_state, ==, CONCLAVE_S_STOPPING);
 	conclave->c_state = CONCLAVE_S_STOPPED;
+
 	lck_mtx_unlock(&resource->r_mutex);
 	return KERN_SUCCESS;
+}
+
+bool
+exclaves_conclave_has_service(exclaves_resource_t *resource, uint64_t id)
+{
+	assert3u(id, <, CONCLAVE_SERVICE_MAX);
+
+	if (resource == NULL) {
+		/* There's no conclave, fallback to the kernel domain. */
+		assert(exclaves_has_priv(current_task(),
+		    EXCLAVES_PRIV_KERNEL_DOMAIN));
+		return bitmap_test(kernel_service_bitmap, (uint32_t)id);
+	}
+
+	assert3p(resource, !=, NULL);
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCE_CONCLAVE_MANAGER);
+
+	conclave_resource_t *conclave = &resource->r_conclave;
+
+	return bitmap_test(conclave->c_service_bitmap, (uint32_t)id);
 }
 
 
@@ -2072,6 +2198,7 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 	 * the memory.
 	 */
 	__block bool success = true;
+	/* BEGIN IGNORE CODESTYLE */
 	kr = exclaves_shared_memory_iterate(&sm->sm_client, &mapping, 0,
 	    rounded_size / PAGE_SIZE, ^(uint64_t pa) {
 		char *vaddr = (char *)phystokv(pa);
@@ -2091,9 +2218,10 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 			}
 
 		        if (sm->sm_nranges == EXCLAVES_SHARED_BUFFER_MAX_RANGES - 1) {
-		                (void) printf("exclaves: too many ranges, can't fit\n");
-		                success = false;
-		                return;
+				exclaves_debug_printf(show_errors,
+				    "exclaves: too many ranges, can't fit\n");
+				success = false;
+				return;
 			}
 		}
 
@@ -2105,6 +2233,9 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 		sm->sm_range[sm->sm_nranges].address = vaddr;
 		sm->sm_nranges++;
 	});
+	/* END IGNORE CODESTYLE */
+
+
 	if (kr != KERN_SUCCESS || !success) {
 		exclaves_shared_memory_teardown(&sm->sm_client, &mapping);
 		lck_mtx_unlock(&resource->r_mutex);
@@ -2157,7 +2288,8 @@ exclaves_resource_shared_memory_unmap(exclaves_resource_t *resource)
 	kern_return_t kr = exclaves_shared_memory_teardown(&sm->sm_client,
 	    &sm->sm_mapping);
 	if (kr != KERN_SUCCESS) {
-		printf("exclaves: failed to teardown shared memory: %s, \n",
+		exclaves_debug_printf(show_errors,
+		    "exclaves: failed to teardown shared memory: %s, \n",
 		    resource->r_name);
 		return;
 	}

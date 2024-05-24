@@ -6,5 +6,7 @@
 	<true/>
 	<key>com.apple.private.stackshot.stats</key>
 	<true/>
+	<key>com.apple.private.exclaves.kernel-domain</key>
+	<true/>
 </dict>
 </plist>

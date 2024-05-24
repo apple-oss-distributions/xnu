@@ -3804,9 +3804,9 @@ inp_update_cellular_policy(struct inpcb *inp, boolean_t set)
 		/* allow this socket to generate another notification event */
 		so->so_ifdenied_notifies = 0;
 
-		log(LOG_DEBUG, "%s: so 0x%llx [%d,%d] epid %d "
+		log(LOG_DEBUG, "%s: so %llu [%d,%d] epid %d "
 		    "euuid %s%s %s->%s\n", __func__,
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), epid, euuid_buf,
 		    (so->so_flags & SOF_DELEGATED) ?
 		    " [delegated]" : "",
@@ -3846,9 +3846,9 @@ inp_update_necp_want_app_policy(struct inpcb *inp, boolean_t set)
 			epid = so->last_pid;
 		}
 
-		log(LOG_DEBUG, "%s: so 0x%llx [%d,%d] epid %d "
+		log(LOG_DEBUG, "%s: so %llu [%d,%d] epid %d "
 		    "euuid %s%s %s->%s\n", __func__,
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), epid, euuid_buf,
 		    (so->so_flags & SOF_DELEGATED) ?
 		    " [delegated]" : "",

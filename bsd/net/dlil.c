@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -7457,9 +7457,9 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	struct ip *iph = NULL;
 	struct in_addr osrc, odst;
 	uint8_t proto = 0;
-	struct in6_ifaddr *ia6_clat_src = NULL;
+	struct in6_addr src_storage = {};
 	struct in6_addr *src = NULL;
-	struct in6_addr dst;
+	struct sockaddr_in6 dstsock = {};
 	int error = 0;
 	uint16_t off = 0;
 	uint16_t tot_len = 0;
@@ -7504,30 +7504,34 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	}
 
 	/*
+	 * Translate IPv4 destination to IPv6 destination by using the
+	 * prefixes learned through prior PLAT discovery.
+	 */
+	if ((error = nat464_synthesize_ipv6(ifp, &odst, &dstsock.sin6_addr)) != 0) {
+		ip6stat.ip6s_clat464_out_v6synthfail_drop++;
+		goto cleanup;
+	}
+
+	dstsock.sin6_len = sizeof(struct sockaddr_in6);
+	dstsock.sin6_family = AF_INET6;
+
+	/*
 	 * Retrive the local IPv6 CLAT46 address reserved for stateless
 	 * translation.
 	 */
-	ia6_clat_src = in6ifa_ifpwithflag(ifp, IN6_IFF_CLAT46);
-	if (ia6_clat_src == NULL) {
+	src = in6_selectsrc_core(&dstsock, 0, ifp, 0, &src_storage, NULL, &error,
+	    NULL, NULL, TRUE);
+
+	if (src == NULL) {
 		ip6stat.ip6s_clat464_out_nov6addr_drop++;
 		error = -1;
 		goto cleanup;
 	}
 
-	src = &ia6_clat_src->ia_addr.sin6_addr;
-
-	/*
-	 * Translate IPv4 destination to IPv6 destination by using the
-	 * prefixes learned through prior PLAT discovery.
-	 */
-	if ((error = nat464_synthesize_ipv6(ifp, &odst, &dst)) != 0) {
-		ip6stat.ip6s_clat464_out_v6synthfail_drop++;
-		goto cleanup;
-	}
 
 	/* Translate the IP header part first */
 	error = (nat464_translate_46(pbuf, off, iph->ip_tos, iph->ip_p,
-	    iph->ip_ttl, *src, dst, tot_len) == NT_NAT64) ? 0 : -1;
+	    iph->ip_ttl, src_storage, dstsock.sin6_addr, tot_len) == NT_NAT64) ? 0 : -1;
 
 	iph = NULL;     /* Invalidate iph as pbuf has been modified */
 
@@ -7559,10 +7563,6 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	}
 
 cleanup:
-	if (ia6_clat_src != NULL) {
-		ifa_remref(&ia6_clat_src->ia_ifa);
-	}
-
 	if (pbuf_is_valid(pbuf)) {
 		*m = pbuf->pb_mbuf;
 		pbuf->pb_mbuf = NULL;

@@ -282,7 +282,7 @@ device_pager_init(
 	vm_object_unlock(vm_object);
 
 
-	attributes.copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+	attributes.copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	/* attributes.cluster_size = (1 << (CLUSTER_SHIFT + PAGE_SHIFT));*/
 	attributes.cluster_size = (1 << (PAGE_SHIFT));
 	attributes.may_cache_object = FALSE;

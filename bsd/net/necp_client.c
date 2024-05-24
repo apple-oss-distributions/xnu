@@ -4458,6 +4458,7 @@ necp_update_client_result(proc_t proc,
 		kfree_type(struct necp_client_parsed_parameters, parsed_parameters);
 		return FALSE;
 	}
+	bool originally_scoped = (parsed_parameters->required_interface_index != IFSCOPE_NONE);
 
 	// Update saved IP protocol
 	client->ip_protocol = parsed_parameters->ip_protocol;
@@ -4776,7 +4777,7 @@ necp_update_client_result(proc_t proc,
 			}
 		}
 	} else if (parsed_parameters->flags & NECP_CLIENT_PARAMETER_FLAG_BROWSE) {
-		if (result.routing_result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED) {
+		if (result.routing_result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED && originally_scoped) {
 			if (direct_interface != NULL) {
 				// Add browse option if it has an agent
 				necp_client_add_browse_interface_options(client, parsed_parameters, direct_interface);
@@ -5836,6 +5837,19 @@ necp_find_matching_interface_index(struct necp_client_parsed_parameters *parsed_
 			// Don't set return_ifindex, so the client doesn't need to scope
 			ifnet_head_done();
 			return TRUE;
+		}
+
+		if (parsed_parameters->valid_fields & NECP_PARSED_PARAMETERS_FIELD_REMOTE_ADDR &&
+		    parsed_parameters->remote_addr.sin6.sin6_family == AF_INET6 &&
+		    parsed_parameters->remote_addr.sin6.sin6_scope_id != IFSCOPE_NONE &&
+		    parsed_parameters->remote_addr.sin6.sin6_scope_id <= (u_int32_t)if_index) {
+			ifp = ifindex2ifnet[parsed_parameters->remote_addr.sin6.sin6_scope_id];
+			if (ifp != NULL && necp_ifnet_matches_parameters(ifp, parsed_parameters, 0, NULL, false, false)) {
+				// Don't set return_ifindex, so the client doesn't need to scope since the v6 scope ID will
+				// already route to the correct interface
+				ifnet_head_done();
+				return TRUE;
+			}
 		}
 	}
 
@@ -10450,7 +10464,7 @@ necp_client_get_signed_client_id(__unused struct necp_fd_data *fd_data, struct n
 	// Only allow entitled processes to get the client ID.
 	proc_t proc = current_proc();
 	task_t __single task = proc_task(proc);
-	bool has_delegation_entitlement = task != NULL && IOTaskHasEntitlement(task, kCSWebBrowserNetworkEntitlement);
+	bool has_delegation_entitlement = task != NULL && IOTaskHasEntitlement(task, kCSWebBrowserHostEntitlement);
 	if (!has_delegation_entitlement) {
 		has_delegation_entitlement = (priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, 0) == 0);
 	}

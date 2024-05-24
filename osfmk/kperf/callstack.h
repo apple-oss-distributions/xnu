@@ -69,6 +69,7 @@ struct kp_kcallstack {
 		uintptr_t kpkc_word_frames[MAX_KCALLSTACK_FRAMES];
 		uint64_t kpkc_frames[MAX_KCALLSTACK_FRAMES] __kernel_ptr_semantics;
 	};
+	uint32_t kpkc_exclaves_offset;
 };
 
 struct kperf_context;

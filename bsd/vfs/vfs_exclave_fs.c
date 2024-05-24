@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -54,6 +54,7 @@ struct open_vnode {
 #define ROOT_DIR_INO_NUM 2
 
 #define VFS_EXCLAVE_FS_BASE_DIR_GRAFT 1
+#define VFS_EXCLAVE_FS_BASE_DIR_SEALED 2
 
 typedef struct {
 	uint32_t flags;
@@ -84,8 +85,10 @@ static lck_mtx_t open_vnodes_mtx;
 #define HASHFUNC(dev, file_id) (((dev) + (file_id)) & open_vnodes_hashmask)
 #define OPEN_VNODES_HASH(dev, file_id) (&open_vnodes_hashtbl[HASHFUNC(dev, file_id)])
 
-static bool integrity_checks_enabled = false;
-#define EXCLAVE_INTEGRITY_CHECKS_ENABLED_BOOTARG "enable_integrity_checks"
+#if (DEVELOPMENT || DEBUG)
+static bool integrity_checks_disabled = false;
+#define EXCLAVE_INTEGRITY_CHECKS_DISABLED_BOOTARG "disable_integrity_checks"
+#endif
 
 static int exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
     int flags, uint64_t *file_id);
@@ -144,6 +147,12 @@ static inline bool
 is_graft(base_dir_t *base_dir)
 {
 	return base_dir->flags & VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
+}
+
+static inline bool
+is_sealed(base_dir_t *base_dir)
+{
+	return base_dir->flags & VFS_EXCLAVE_FS_BASE_DIR_SEALED;
 }
 
 static int
@@ -241,7 +250,7 @@ out:
  * Set a base directory for the given fs tag.
  */
 static int
-set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info)
+set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info, bool is_sealed)
 {
 	dev_t dev;
 	base_dir_t *base_dir;
@@ -254,7 +263,11 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info)
 	lck_mtx_lock(&base_dirs_mtx);
 
 	if (base_dirs[fs_tag].vp) {
-		error = EBUSY;
+		if (base_dirs[fs_tag].vp == vp) {
+			error = EALREADY;
+		} else {
+			error = EBUSY;
+		}
 		goto out;
 	}
 
@@ -288,6 +301,9 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info)
 
 	if (graft_info) {
 		base_dir->flags |= VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
+		if (is_sealed) {
+			base_dir->flags |= VFS_EXCLAVE_FS_BASE_DIR_SEALED;
+		}
 		base_dir->graft_info = *graft_info;
 	}
 
@@ -348,8 +364,6 @@ out:
 int
 vfs_exclave_fs_start(void)
 {
-	uint32_t bootarg_val;
-
 	lck_mtx_init(&base_dirs_mtx, &vfs_exclave_lck_grp, LCK_ATTR_NULL);
 	lck_mtx_init(&open_vnodes_mtx, &vfs_exclave_lck_grp, LCK_ATTR_NULL);
 
@@ -362,11 +376,14 @@ vfs_exclave_fs_start(void)
 		return ENOMEM;
 	}
 
-	if (PE_parse_boot_argn(EXCLAVE_INTEGRITY_CHECKS_ENABLED_BOOTARG, &bootarg_val, sizeof(bootarg_val))) {
+#if (DEVELOPMENT || DEBUG)
+	uint32_t bootarg_val;
+	if (PE_parse_boot_argn(EXCLAVE_INTEGRITY_CHECKS_DISABLED_BOOTARG, &bootarg_val, sizeof(bootarg_val))) {
 		if (bootarg_val) {
-			integrity_checks_enabled = true;
+			integrity_checks_disabled = true;
 		}
 	}
+#endif
 
 	return 0;
 }
@@ -400,7 +417,9 @@ vfs_exclave_fs_stop(void)
 	lck_mtx_destroy(&base_dirs_mtx, &vfs_exclave_lck_grp);
 	lck_mtx_destroy(&open_vnodes_mtx, &vfs_exclave_lck_grp);
 
-	integrity_checks_enabled = false;
+#if (DEVELOPMENT || DEBUG)
+	integrity_checks_disabled = false;
+#endif
 }
 
 static bool
@@ -448,9 +467,22 @@ vfs_exclave_fs_register(uint32_t fs_tag, vnode_t vp)
 		return error;
 	}
 
-	error = set_base_dir(fs_tag, vp, is_graft ? &graft_info : NULL);
+	// Check if tag is sealed, RW tags are always not sealed
+	bool is_sealed = false;
+	if (!is_fs_writeable(fs_tag)) {
+		error = VNOP_IOCTL(vp, FSIOC_EVAL_ROOTAUTH, NULL, 0, vfs_context_kernel());
+		if (!error) {
+			is_sealed = true;
+		}
+	}
+
+	error = set_base_dir(fs_tag, vp, is_graft ? &graft_info : NULL, is_sealed);
 	if (error) {
 		vnode_rele(vp);
+		// if this directory is already registered in this tag do not consider it as an error
+		if (error == EALREADY) {
+			error = 0;
+		}
 		return error;
 	}
 
@@ -896,9 +928,16 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 	struct vnode_attr *vap = NULL;
 	uint64_t vp_file_id;
 	int error;
+	uint32_t ndflags = NOCROSSMOUNT;
 
 	if (flags & ~(O_CREAT | O_DIRECTORY)) {
 		return EINVAL;
+	}
+
+	if (is_fs_writeable(fs_tag)) {
+		ndflags |= NOFOLLOW;
+	} else {
+		ndflags |= FOLLOW;
 	}
 
 	if ((flags & O_CREAT) && !is_fs_writeable(fs_tag)) {
@@ -926,7 +965,7 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 
 	ctx = vfs_context_kernel();
 
-	NDINIT(ndp, LOOKUP, OP_OPEN, NOFOLLOW | NOCROSSMOUNT, UIO_SYSSPACE,
+	NDINIT(ndp, LOOKUP, OP_OPEN, ndflags, UIO_SYSSPACE,
 	    CAST_USER_ADDR_T(path), ctx);
 
 	ndp->ni_rootdir = dvp;
@@ -1244,19 +1283,25 @@ vfs_exclave_fs_readdir(uint32_t fs_tag, uint64_t file_id, void *dirent_buf,
 		return ENXIO;
 	}
 
+	error = get_base_dir(fs_tag, &base_dir, NULL);
+	if (error) {
+		return error;
+	}
+
+	/*
+	 * For RO tags, readdir thru VFS is not permitted in RELEASE -
+	 * it should be based on the catalogue.
+	 * For non-RELEASE we allow readdir if a boot-arg is set
+	 * or if the volume is not sealed (roots installation flow).
+	 */
 	if (fs_tag != EFT_EXCLAVE) {
 #if (DEVELOPMENT || DEBUG)
-		if (integrity_checks_enabled) {
+		if (!integrity_checks_disabled && is_sealed(&base_dir)) {
 			return ENOTSUP;
 		}
 #else
 		return ENOTSUP;
 #endif
-	}
-
-	error = get_base_dir(fs_tag, &base_dir, NULL);
-	if (error) {
-		return error;
 	}
 
 	error = get_open_vnode(&base_dir, file_id, &dvp);
@@ -1398,5 +1443,25 @@ out:
 	}
 
 	return error;
+}
+
+int
+vfs_exclave_fs_sealstate(uint32_t fs_tag, bool *sealed)
+{
+	base_dir_t base_dir;
+	int error;
+
+	if (!exclave_fs_started()) {
+		return ENXIO;
+	}
+
+	error = get_base_dir(fs_tag, &base_dir, NULL);
+	if (error) {
+		return error;
+	}
+
+	*sealed = is_sealed(&base_dir);
+
+	return 0;
 }
 

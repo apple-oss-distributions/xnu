@@ -56,8 +56,13 @@ local hw_page_size, err = sysctl("hw.pagesize")
 benchmark:assert(err == nil, "Unable to check hw page size")
 local vm_page_size, err = sysctl("vm.pagesize")
 benchmark:assert(err == nil, "Unable to check vm page size")
+local product_name = benchmark:spawn{'/usr/bin/sw_vers', '-productName'}
 if hw_page_size ~= vm_page_size then
-    print "Skipping benchmark on this platform because benchmark process has a different page size than the kernel"
+    benchmark:print "Skipping benchmark on this platform because benchmark process has a different page size than the kernel"
+    os.exit(0)
+elseif string.find(product_name, "Watch OS") or string.find(product_name, "TVOS") then
+    -- rdar://119044527: Temporarily disable test for watchOS and tvOS
+    benchmark:print "Skipping benchmark on this platform as a temporary workaround to avoid device panics"
     os.exit(0)
 end
 

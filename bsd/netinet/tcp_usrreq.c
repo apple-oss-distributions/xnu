@@ -1160,7 +1160,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 
 	TCPDEBUG0;
 
-	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD
+	bool cant_connect = (inp->inp_flowhash == 0) && (nam == NULL);
+
+	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD || cant_connect
 #if NECP
 	    || (necp_socket_should_use_flow_divert(inp))
 #endif /* NECP */
@@ -1180,6 +1182,8 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 
 		if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD) {
 			error = ECONNRESET;     /* XXX EPIPE? */
+		} else if (cant_connect) {
+			error = EAFNOSUPPORT;
 		} else {
 			error = EPROTOTYPE;
 		}

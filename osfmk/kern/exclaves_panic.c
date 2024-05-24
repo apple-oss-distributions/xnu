@@ -35,7 +35,6 @@
 #include <mach/exclaves_l4.h>
 
 #include <uuid/uuid.h>
-#include <vm/pmap.h>
 
 #include <xnuproxy/messages.h>
 #include <xnuproxy/panic.h>
@@ -58,9 +57,31 @@
 #define EXCLAVES_PANIC_STRING_SIZE     \
     (sizeof(EXCLAVE_PANIC_MESSAGE_MARKER) + XNUPROXY_PANIC_MESSAGE_LEN + XNUPROXY_PANIC_NAME_BYTES + 64)
 
+#define P2ROUNDUP(x, align) (-(-(x) & -(align)))
+#define PANIC_BUFFER_PAGE_COUNT  (P2ROUNDUP(sizeof (xnuproxy_panic_buffer_t), PAGE_SIZE) / PAGE_SIZE)
+
 static char exclaves_panic_string[EXCLAVES_PANIC_STRING_SIZE];
-static xnuproxy_panic_buffer_t *exclaves_panic_buffer;
+static char *exclaves_panic_buffer_pages[PANIC_BUFFER_PAGE_COUNT];
+static xnuproxy_panic_buffer_t exclaves_panic_buffer;
 static int exclaves_panic_thread_wait_forever;
+
+static void
+copy_panic_buffer_pages(pmap_paddr_t addr)
+{
+	uint64_t *pages = (uint64_t *)phystokv(addr);
+
+	for (int i = 0; i < PANIC_BUFFER_PAGE_COUNT; i++) {
+		exclaves_panic_buffer_pages[i] = (char *)phystokv(pages[i]);
+	}
+
+	/*
+	 * For backwards compat always use the base page even if not listed
+	 * explicitly.
+	 */
+	exclaves_panic_buffer_pages[0] = (char *)pages;
+
+	return;
+}
 
 static void
 exclaves_xnu_proxy_panic_thread(void *arg __unused, wait_result_t wr __unused)
@@ -82,11 +103,16 @@ exclaves_xnu_proxy_panic_thread(void *arg __unused, wait_result_t wr __unused)
 		return;
 	}
 
-	exclaves_panic_buffer = (xnuproxy_panic_buffer_t *)
-	    phystokv(msg.cmd_panic_setup.response.physical_address);
+	/* Dont copy if the panic buffer initialisation already happended */
+	if (exclaves_panic_buffer_pages[0] == 0) {
+		copy_panic_buffer_pages(msg.cmd_panic_setup.response.physical_address);
+	}
 
 	thread = current_thread();
 	thread->th_exclaves_scheduling_context_id = spawned_scid;
+
+	assert3u(thread->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
+	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
 
 	while (1) {
 		extern kern_return_t exclaves_scheduler_resume_scheduling_context(Exclaves_L4_Word_t,
@@ -96,25 +122,62 @@ exclaves_xnu_proxy_panic_thread(void *arg __unused, wait_result_t wr __unused)
 	}
 }
 
+static bool
+exclaves_panic_buffer_sync(void)
+{
+	char *panic_buffer = (char *)&exclaves_panic_buffer;
+	size_t len = sizeof(exclaves_panic_buffer);
+
+	/* Just return if the panic buffer initialisation hasn't happened yet.  */
+	if (exclaves_panic_buffer_pages[0] == 0) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	/*
+	 * Initialize next page to the first page. This is for the backwards
+	 * compatibility case.
+	 */
+	char *next_page = exclaves_panic_buffer_pages[0];
+	for (int i = 0; i < PANIC_BUFFER_PAGE_COUNT; i++) {
+		size_t nbytes = MIN(len, PAGE_SIZE);
+
+		next_page = exclaves_panic_buffer_pages[i] != 0 ?
+		    exclaves_panic_buffer_pages[i] : next_page + PAGE_SIZE;
+
+		(void)memcpy(panic_buffer, next_page, nbytes);
+
+		panic_buffer += nbytes;
+		len -= nbytes;
+
+		if (len == 0) {
+			break;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 static void
 exclaves_append_panic_backtrace(void)
 {
 	uuid_string_t uuid_string;
 	xnuproxy_panic_backtrace_word_t *words;
 
-	if ((exclaves_panic_buffer->panicked_thread.backtrace.frames >
+	assert3p(exclaves_panic_buffer_pages[0], !=, NULL);
+
+	if ((exclaves_panic_buffer.panicked_thread.backtrace.frames >
 	    XNUPROXY__PANIC_BACKTRACE_WORDS)) {
 		return;
 	}
 
-	words = exclaves_panic_buffer->backtrace.words;
+	words = exclaves_panic_buffer.backtrace.words;
 	paniclog_append_noflush("Exclaves backtrace:\n");
-	for (size_t i = 0; i < exclaves_panic_buffer->panicked_thread.backtrace.frames; i++) {
+	for (size_t i = 0; i < exclaves_panic_buffer.panicked_thread.backtrace.frames; i++) {
 		uuid_unparse_upper(
-			(const unsigned char *)exclaves_panic_buffer->backtrace.images[words[i].image].uuid,
+			(const unsigned char *)exclaves_panic_buffer.backtrace.images[words[i].image].uuid,
 			uuid_string);
 		paniclog_append_noflush("\t\t%s 0x%016zx\n", uuid_string,
-		    exclaves_panic_buffer->backtrace.words[i].offset);
+		    exclaves_panic_buffer.backtrace.words[i].offset);
 	}
 
 	paniclog_append_noflush("\n");
@@ -175,12 +238,13 @@ exclaves_panic_get_string(char **string)
 	uint32_t status = 0;
 	char component_name[XNUPROXY_PANIC_NAME_BYTES] = {0};
 
-	if (exclaves_panic_buffer == NULL) {
-		return KERN_FAILURE;
+	kern_return_t kr = exclaves_panic_buffer_sync();
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
 	xnuproxy_panicked_thread_t *ex_thread =
-	    &exclaves_panic_buffer->panicked_thread;
+	    &exclaves_panic_buffer.panicked_thread;
 
 	strlcpy(component_name, ex_thread->component.name, sizeof(component_name));
 
@@ -191,7 +255,7 @@ exclaves_panic_get_string(char **string)
 
 	snprintf(exclaves_panic_string, sizeof(exclaves_panic_string),
 	    "%s %s:%s at PC: 0x%zx, LR: 0x%zx", EXCLAVE_PANIC_MESSAGE_MARKER,
-	    component_name, exclaves_panic_buffer->message,
+	    component_name, exclaves_panic_buffer.message,
 	    ex_thread->thread.registers.pc, ex_thread->thread.registers.lr);
 	exclaves_panic_string[sizeof(exclaves_panic_string) - 1] = '\0';
 	*string = exclaves_panic_string;
@@ -204,12 +268,14 @@ exclaves_panic_append_info(void)
 {
 	uint32_t status = 0;
 	char *status_str;
-	if (exclaves_panic_buffer == NULL) {
+
+	kern_return_t kr = exclaves_panic_buffer_sync();
+	if (kr != KERN_SUCCESS) {
 		return;
 	}
 
 	xnuproxy_panicked_thread_t *ex_thread =
-	    &exclaves_panic_buffer->panicked_thread;
+	    &exclaves_panic_buffer.panicked_thread;
 
 	status = os_atomic_load(&ex_thread->status, seq_cst);
 
@@ -241,6 +307,12 @@ exclaves_panic_thread_wait(void)
 
 	/* NOT REACHABLE */
 	panic("Exclaves panic thread woken up");
+}
+
+void
+handle_response_panic_buffer_address(pmap_paddr_t addr)
+{
+	return copy_panic_buffer_pages(addr);
 }
 
 kern_return_t

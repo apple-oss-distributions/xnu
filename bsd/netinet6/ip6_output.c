@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1765,7 +1765,7 @@ ip6_fragment_packet(struct mbuf **mptr, struct ip6_pktopts *opt,
 		}
 		error = ip6_do_fragmentation(mptr, optlen, ifp,
 		    unfragpartlen, mtod(m, struct ip6_hdr *), lexthdrsp, mtu,
-		    nxt0, htonl(ip6_randomid()));
+		    nxt0, htonl(ip6_randomid((uint64_t)m)));
 	}
 
 	return error;

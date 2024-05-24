@@ -774,6 +774,7 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 #if CONFIG_PHYS_WRITE_ACCT
 	uint64_t fs_metadata_writes = coal->r.fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
+	int64_t conclave_mem = 0;
 	int64_t cpu_time_billed_to_me = 0;
 	int64_t cpu_time_billed_to_others = 0;
 	int64_t energy_billed_to_me = 0;
@@ -821,6 +822,11 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		recount_task_usage_perf_only(task, &stats_sum, &stats_perf_only);
 	}
 
+	kr = ledger_get_balance(sum_ledger, task_ledgers.conclave_mem, (int64_t *)&conclave_mem);
+	if (kr != KERN_SUCCESS || conclave_mem < 0) {
+		conclave_mem = 0;
+	}
+
 	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_me, (int64_t *)&cpu_time_billed_to_me);
 	if (kr != KERN_SUCCESS || cpu_time_billed_to_me < 0) {
 		cpu_time_billed_to_me = 0;
@@ -856,6 +862,7 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	if (kr != KERN_SUCCESS) {
 		credit = 0;
 	}
+	cru_out->conclave_mem = conclave_mem;
 	cru_out->cpu_time = credit;
 	cru_out->cpu_time_billed_to_me = (uint64_t)cpu_time_billed_to_me;
 	cru_out->cpu_time_billed_to_others = (uint64_t)cpu_time_billed_to_others;

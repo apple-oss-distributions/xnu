@@ -1246,7 +1246,7 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 		ro.ro_rt = rt;
 
 		if ((in6 = in6_selectsrc_core(SIN6(dst), hints,
-		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro)) == NULL) {
+		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro, FALSE)) == NULL) {
 			if (err == 0) {
 				err = EADDRNOTAVAIL;
 			}

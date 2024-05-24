@@ -909,9 +909,9 @@ nstat_route_copy_descriptor(
 	bzero(desc, sizeof(*desc));
 
 	struct rtentry  *rt = (struct rtentry*)cookie;
-	desc->id = (uint64_t)VM_KERNEL_ADDRPERM(rt);
-	desc->parent_id = (uint64_t)VM_KERNEL_ADDRPERM(rt->rt_parent);
-	desc->gateway_id = (uint64_t)VM_KERNEL_ADDRPERM(rt->rt_gwroute);
+	desc->id = (uint64_t)VM_KERNEL_ADDRHASH(rt);
+	desc->parent_id = (uint64_t)VM_KERNEL_ADDRHASH(rt->rt_parent);
+	desc->gateway_id = (uint64_t)VM_KERNEL_ADDRHASH(rt->rt_gwroute);
 
 
 	// key/dest

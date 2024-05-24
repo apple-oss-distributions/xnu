@@ -72,5 +72,6 @@ int vfs_exclave_fs_sync(uint32_t fs_tag, uint64_t file_id, uint64_t sync_op);
 int vfs_exclave_fs_readdir(uint32_t fs_tag, uint64_t file_id, void *dirent_buf,
     uint32_t buf_size, int32_t *count);
 int vfs_exclave_fs_getsize(uint32_t fs_tag, uint64_t file_id, uint64_t *size);
+int vfs_exclave_fs_sealstate(uint32_t fs_tag, bool *sealed);
 
 #endif

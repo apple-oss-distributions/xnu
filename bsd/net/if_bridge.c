@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -9899,7 +9899,7 @@ gso_tcp(struct ifnet *ifp, struct mbuf **mp, u_int mac_hlen, bool is_ipv4,
 	}
 	tcp = (struct tcphdr *)(void *)info.ip_proto_hdr;
 	gso_ip_tcp_init_state(&state, ifp, is_ipv4, mac_hlen,
-	    info.ip_hlen, info.ip_hdr.ptr, tcp);
+	    info.ip_hlen + info.ip_opt_len, info.ip_hdr.ptr, tcp);
 	if (is_ipv4) {
 		csum_flags = CSUM_DELAY_DATA; /* XXX */
 		if (!is_tx) {

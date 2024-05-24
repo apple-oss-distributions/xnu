@@ -70,6 +70,7 @@
 #include <kern/processor.h>
 
 #include <sys/kdebug.h>
+#include <sys/random.h>
 
 #if CONFIG_ATM
 #include <atm/atm_internal.h>
@@ -616,6 +617,41 @@ commpage_populate( void )
 #if CONFIG_ATM
 	commpage_update_atm_diagnostic_config(atm_get_diagnostic_config());
 #endif
+
+	/*
+	 * Set random values for targets in Apple Security Bounty
+	 * addr should be unmapped for userland processes
+	 * kaddr should be unmapped for kernel
+	 */
+	uint64_t asb_value, asb_addr, asb_kvalue, asb_kaddr;
+	uint64_t asb_rand_vals[] = {
+		0x93e78adcded4d3d5, 0xd16c5b76ad99bccf, 0x67dfbbd12c4a594e, 0x7365636e6f6f544f,
+		0x239a974c9811e04b, 0xbf60e7fa45741446, 0x8acf5210b466b05, 0x67dfbbd12c4a594e
+	};
+	const int nrandval = sizeof(asb_rand_vals) / sizeof(asb_rand_vals[0]);
+	uint8_t randidx;
+	read_random(&randidx, sizeof(uint8_t));
+
+
+	asb_value = asb_rand_vals[randidx++ % nrandval];
+	commpage_update(_COMM_PAGE_ASB_TARGET_VALUE, &asb_value, sizeof(asb_value));
+
+	asb_addr = asb_rand_vals[randidx++ % nrandval];
+	uint64_t user_min = MACH_VM_MAX_ADDRESS;
+	uint64_t user_max = UINT64_MAX;
+	asb_addr %= (user_max - user_min);
+	asb_addr += user_min;
+	commpage_update(_COMM_PAGE_ASB_TARGET_ADDRESS, &asb_addr, sizeof(asb_addr));
+
+	asb_kvalue = asb_rand_vals[randidx++ % nrandval];
+	commpage_update(_COMM_PAGE_ASB_TARGET_KERN_VALUE, &asb_kvalue, sizeof(asb_kvalue));
+
+	asb_kaddr = asb_rand_vals[randidx++ % nrandval];
+	uint64_t kernel_min = 0x0LL;
+	uint64_t kernel_max = VM_MIN_KERNEL_ADDRESS;
+	asb_kaddr %= (kernel_max - kernel_min);
+	asb_kaddr += kernel_min;
+	commpage_update(_COMM_PAGE_ASB_TARGET_KERN_ADDRESS, &asb_kaddr, sizeof(asb_kaddr));
 }
 
 /* Fill in the common routines during kernel initialization.

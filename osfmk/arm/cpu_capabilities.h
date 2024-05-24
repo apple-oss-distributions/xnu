@@ -74,6 +74,7 @@
 /* Extending into 64-bits from here: */
 #define kHasFeatSHA3            0x0000000100000000      // Optional ARMv8.2 SHA3 instructions
 #define kHasFeatFCMA            0x0000000200000000      // ARMv8.3 complex number instructions
+#define kHasFeatAFP             0x0000000400000000      // ARMv8.7 alternate floating point mode
 #define kHasFEATFlagM           0x0000010000000000
 #define kHasFEATFlagM2          0x0000020000000000
 #define kHasFeatDotProd         0x0000040000000000
@@ -367,6 +368,12 @@ _Static_assert((_COMM_PAGE64_BASE_ADDRESS >= _COMM_PAGE64_NESTING_START) &&
 #define _COMM_PAGE_CPU_QUIESCENT_COUNTER        (_COMM_PAGE_START_ADDRESS+0x180)        // uint64_t, but reserve the whole 128 (0x80) bytes
 
 #define _COMM_PAGE_CPU_TO_CLUSTER               (_COMM_PAGE_START_ADDRESS+0x200)        // 256 bytes reserved for (logical) CPU_ID -> CLUSTER_ID mappings
+
+// Apple Security Bounty random values
+#define _COMM_PAGE_ASB_TARGET_VALUE             (_COMM_PAGE_START_ADDRESS+0x320)        // uint64_t for random value
+#define _COMM_PAGE_ASB_TARGET_ADDRESS           (_COMM_PAGE_START_ADDRESS+0x328)        // uint64_t for random target address
+#define _COMM_PAGE_ASB_TARGET_KERN_VALUE        (_COMM_PAGE_START_ADDRESS+0x330)        // uint64_t for random kernel value
+#define _COMM_PAGE_ASB_TARGET_KERN_ADDRESS      (_COMM_PAGE_START_ADDRESS+0x338)        // uint64_t for random kernel target address
 
 #define _COMM_PAGE_END                          (_COMM_PAGE_START_ADDRESS+0xfff)        // end of common page
 

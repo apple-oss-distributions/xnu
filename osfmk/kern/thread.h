@@ -289,7 +289,26 @@ __options_decl(thread_exclaves_state_flags_t, uint16_t, {
 	 * xnu or Darwin userspace. Must not re-enter exclaves via RPC or return to
 	 * Darwin userspace. */
 	TH_EXCLAVES_SCHEDULER_REQUEST          = 0x4,
+	/* Thread is calling into xnu proxy server directly (but may have
+	 * returned to xnu due to an exclaves scheduler request or having
+	 * upcalled). Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_XNUPROXY                   = 0x8,
+	/* Thread is calling into the exclaves scheduler directly.
+	 * Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_SCHEDULER_CALL             = 0x10,
+	/* Thread has called the stop upcall and once the thread returns from
+	 * downcall, exit_with_reason needs to be called on the task.
+	 */
+	TH_EXCLAVES_STOP_UPCALL_PENDING        = 0x20,
 });
+#define TH_EXCLAVES_STATE_ANY           ( \
+    TH_EXCLAVES_RPC               | \
+    TH_EXCLAVES_UPCALL            | \
+    TH_EXCLAVES_SCHEDULER_REQUEST | \
+    TH_EXCLAVES_XNUPROXY          | \
+    TH_EXCLAVES_SCHEDULER_CALL)
 
 __options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
 	/* Thread is on Stackshot's inspection queue */

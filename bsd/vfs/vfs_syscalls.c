@@ -4720,7 +4720,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				 */
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
-			} else if (!strncmp(v_name, "mediaserverd", len)) {
+			} else if (!strncmp(v_name, "audiomxd", len) ||
+			    !strncmp(v_name, "mediaplaybackd", len)) {
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
 				memory_object_mark_for_realtime(moc,

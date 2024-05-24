@@ -4825,6 +4825,61 @@ IOGeneralMemoryDescriptor::complete(IODirection forDirection)
 	return kIOReturnSuccess;
 }
 
+IOOptionBits
+IOGeneralMemoryDescriptor::memoryReferenceCreateOptions(IOOptionBits options, IOMemoryMap * mapping)
+{
+	IOOptionBits createOptions = 0;
+
+	if (!(kIOMap64Bit & options)) {
+		panic("IOMemoryDescriptor::makeMapping !64bit");
+	}
+	if (!(kIOMapReadOnly & options)) {
+		createOptions |= kIOMemoryReferenceWrite;
+#if DEVELOPMENT || DEBUG
+		if ((kIODirectionOut == (kIODirectionOutIn & _flags))
+		    && (!reserved || (reserved->creator != mapping->fAddressTask))) {
+			OSReportWithBacktrace("warning: creating writable mapping from IOMemoryDescriptor(kIODirectionOut) - use kIOMapReadOnly or change direction");
+		}
+#endif
+	}
+	return createOptions;
+}
+
+/*
+ * Attempt to create any kIOMemoryMapCopyOnWrite named entry needed ahead of the global
+ * lock taken in IOMemoryDescriptor::makeMapping() since it may allocate real pages on
+ * creation.
+ */
+
+IOMemoryMap *
+IOGeneralMemoryDescriptor::makeMapping(
+	IOMemoryDescriptor *    owner,
+	task_t                  __intoTask,
+	IOVirtualAddress        __address,
+	IOOptionBits            options,
+	IOByteCount             __offset,
+	IOByteCount             __length )
+{
+	IOReturn err = kIOReturnSuccess;
+
+	if ((kIOMemoryMapCopyOnWrite & _flags) && _task && !_memRef) {
+		if (!_memRef) {
+			struct IOMemoryReference * newRef;
+			err = memoryReferenceCreate(memoryReferenceCreateOptions(options, (IOMemoryMap *) __address), &newRef);
+			if (kIOReturnSuccess == err) {
+				if (!OSCompareAndSwapPtr(NULL, newRef, &_memRef)) {
+					memoryReferenceFree(newRef);
+				}
+			}
+		}
+	}
+	if (kIOReturnSuccess != err) {
+		return NULL;
+	}
+	return IOMemoryDescriptor::makeMapping(
+		owner, __intoTask, __address, options, __offset, __length);
+}
+
 IOReturn
 IOGeneralMemoryDescriptor::doMap(
 	vm_map_t                __addressMap,
@@ -4887,17 +4942,7 @@ IOGeneralMemoryDescriptor::doMap(
 	}
 
 	if (!_memRef) {
-		IOOptionBits createOptions = 0;
-		if (!(kIOMapReadOnly & options)) {
-			createOptions |= kIOMemoryReferenceWrite;
-#if DEVELOPMENT || DEBUG
-			if ((kIODirectionOut == (kIODirectionOutIn & _flags))
-			    && (!reserved || (reserved->creator != mapping->fAddressTask))) {
-				OSReportWithBacktrace("warning: creating writable mapping from IOMemoryDescriptor(kIODirectionOut) - use kIOMapReadOnly or change direction");
-			}
-#endif
-		}
-		err = memoryReferenceCreate(createOptions, &_memRef);
+		err = memoryReferenceCreate(memoryReferenceCreateOptions(options, mapping), &_memRef);
 		if (kIOReturnSuccess != err) {
 			traceInterval.setEndArg1(err);
 			DEBUG4K_ERROR("map %p err 0x%x\n", __addressMap, err);

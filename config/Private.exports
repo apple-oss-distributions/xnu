@@ -1073,6 +1073,7 @@ _vn_getpath_fsenter_with_parent
 _vn_getpath_no_firmlink
 _vnode_getfirmlink
 _vn_searchfs_inappropriate_name
+_vnode_cmp_chrtoblk
 _vnode_create_empty
 _vnode_create_ext
 _vnode_initialize
@@ -1162,6 +1163,7 @@ _vnode_clearfastdevicecandidate
 _vnode_getname_printable
 _vnode_getfromfd
 _vnode_parent
+_vnode_getparent_and_name
 _vnode_isautocandidate
 _vnode_isfastdevicecandidate
 _vnode_putname_printable

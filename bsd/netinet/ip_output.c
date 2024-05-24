@@ -2036,7 +2036,7 @@ in_finalize_cksum(struct mbuf *m, uint32_t hoff, uint32_t csum_flags)
 			printf("%s: mbuf 0x%llx proto %d IP len %d (%x) "
 			    "[swapped %d (%x)] doesn't match actual packet "
 			    "length; %d is used instead\n", __func__,
-			    (uint64_t)VM_KERNEL_ADDRPERM(m), ip->ip_p,
+			    (uint64_t)VM_KERNEL_ADDRHASH(m), ip->ip_p,
 			    ip->ip_len, ip->ip_len, ip_len, ip_len,
 			    (mlen - hoff));
 			if (mlen - hoff > UINT16_MAX) {

@@ -43,8 +43,6 @@
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <kern/task.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
 
 #include <xnuproxy/exclaves.h>
 
@@ -56,14 +54,13 @@
 #include "exclaves_storage.h"
 #include "exclaves_test_stackshot.h"
 #include "exclaves_conclave.h"
+#include "exclaves_memory.h"
 
 #include <sys/errno.h>
 
-#define EXCLAVES_ID_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloExclave"))
-
-#define EXCLAVES_ID_SWIFT_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloTightbeam"))
+#define EXCLAVES_ID_HELLO_EXCLAVE_EP                 \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.HelloExclave"))
 
 #define EXCLAVES_ID_TIGHTBEAM_UPCALL \
     ((exclaves_id_t)XNUPROXY_UPCALL_TIGHTBEAM)
@@ -82,15 +79,6 @@ static exclaves_upcall_handler_registration_t
 static kern_return_t
 exclaves_test_hello_upcall_handler(void *, exclaves_tag_t *, exclaves_badge_t);
 #endif /* DEVELOPMENT || DEBUG */
-
-#define EXCLAVES_MAX_PAGES_REQUEST (64)
-static tb_error_t
-exclaves_alloc_pages(uint32_t npages, xnuupcalls_pagekind_s kind,
-    tb_error_t (^completion)(xnuupcalls_pagelist_s));
-static tb_error_t
-exclaves_free_pages(const uint32_t pages[EXCLAVES_MAX_PAGES_REQUEST],
-    uint32_t npages, const xnuupcalls_pagekind_s kind,
-    tb_error_t (^completion)(void));
 
 extern kern_return_t exclaves_xnu_proxy_send(xnuproxy_msg_t *,
     Exclaves_L4_Word_t *);
@@ -116,13 +104,13 @@ static const xnuupcalls_xnuupcalls__server_s exclaves_tightbeam_upcalls = {
 
 	.alloc = ^(const uint32_t npages, xnuupcalls_pagekind_s kind,
 	    tb_error_t (^completion)(xnuupcalls_pagelist_s)) {
-		return exclaves_alloc_pages(npages, kind, completion);
+		return exclaves_memory_upcall_alloc(npages, kind, completion);
 	},
 
-	.free = ^(const uint32_t pages[_Nonnull EXCLAVES_MAX_PAGES_REQUEST],
+	.free = ^(const uint32_t pages[_Nonnull EXCLAVES_MEMORY_MAX_REQUEST],
 	    const uint32_t npages, const xnuupcalls_pagekind_s kind,
 	    tb_error_t (^completion)(void)) {
-		return exclaves_free_pages(pages, npages, kind, completion);
+		return exclaves_memory_upcall_free(pages, npages, kind, completion);
 	},
 
 	.root = ^(const uint8_t exclaveid[_Nonnull 32],
@@ -182,6 +170,11 @@ static const xnuupcalls_xnuupcalls__server_s exclaves_tightbeam_upcalls = {
 	.getsize = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t fileid,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_getsize__result_s)) {
 		return exclaves_storage_upcall_getsize(fstag, fileid, completion);
+	},
+
+	.sealstate = ^(const enum xnuupcalls_fstag_s fstag,
+		tb_error_t (^completion)(xnuupcalls_xnuupcalls_sealstate__result_s)) {
+		return exclaves_storage_upcall_sealstate(fstag, completion);
 	},
 
 	.irq_register = ^(const uint64_t id, const int32_t index,
@@ -331,8 +324,8 @@ exclaves_register_upcall_handler(exclaves_id_t upcall_id, void *upcall_context,
 	return KERN_SUCCESS;
 }
 
-static kern_return_t
-exclaves_upcall_init(void)
+kern_return_t
+exclaves_upcall_early_init(void)
 {
 	lck_mtx_assert(&exclaves_boot_lock, LCK_MTX_ASSERT_OWNED);
 
@@ -353,18 +346,24 @@ exclaves_upcall_init(void)
 	    (xnuupcalls_xnuupcalls__server_s *)&exclaves_tightbeam_upcalls);
 #pragma clang diagnostic pop
 
+	return error == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+static kern_return_t
+exclaves_upcall_init(void)
+{
+	lck_mtx_assert(&exclaves_boot_lock, LCK_MTX_ASSERT_OWNED);
+
 #if XNUPROXY_MSG_VERSION >= 2
-	if (error == TB_ERROR_SUCCESS) {
-		kern_return_t kkr;
-		xnuproxy_msg_t msg = {
-			.cmd = XNUPROXY_CMD_UPCALL_READY,
-		};
-		kkr = exclaves_xnu_proxy_send(&msg, NULL);
-		assert3u(kkr, ==, KERN_SUCCESS);
-	}
+	kern_return_t kkr;
+	xnuproxy_msg_t msg = {
+		.cmd = XNUPROXY_CMD_UPCALL_READY,
+	};
+	kkr = exclaves_xnu_proxy_send(&msg, NULL);
+	assert3u(kkr, ==, KERN_SUCCESS);
 #endif /* XNUPROXY_MSG_VERSION >= 2 */
 
-	return error == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+	return kkr;
 }
 
 EXCLAVES_BOOT_TASK(exclaves_upcall_init, EXCLAVES_BOOT_RANK_FIRST);
@@ -374,6 +373,9 @@ kern_return_t
 exclaves_call_upcall_handler(exclaves_id_t upcall_id)
 {
 	kern_return_t kr = KERN_INVALID_CAPABILITY;
+
+	__assert_only thread_t thread = current_thread();
+	assert3u(thread->th_exclaves_state & TH_EXCLAVES_UPCALL, !=, 0);
 
 	exclaves_tag_t tag = Exclaves_L4_GetMessageTag();
 
@@ -392,104 +394,6 @@ exclaves_call_upcall_handler(exclaves_id_t upcall_id)
 
 	return kr;
 }
-
-/* -------------------------------------------------------------------------- */
-
-#pragma mark exclaves allocation
-
-#if CONFIG_EXCLAVES
-
-static tb_error_t
-exclaves_alloc_pages(uint32_t npages, xnuupcalls_pagekind_s kind __unused,
-    tb_error_t (^completion)(xnuupcalls_pagelist_s))
-{
-	vm_page_t page_list = NULL;
-	vm_page_t sequestered = NULL;
-	unsigned p = 0;
-
-	xnuupcalls_pagelist_s pagelist = {};
-
-	assert3u(npages, <=, ARRAY_COUNT(pagelist.pages));
-	if (npages > ARRAY_COUNT(pagelist.pages)) {
-		panic("npages");
-	}
-
-	while (npages) {
-		vm_page_t next;
-		vm_page_alloc_list(npages, KMA_ZERO | KMA_NOFAIL, &page_list);
-
-		vm_object_lock(exclaves_object);
-		for (vm_page_t mem = page_list; mem != VM_PAGE_NULL; mem = next) {
-			next = mem->vmp_snext;
-			if (vm_page_created(mem)) {
-				// avoid ml_static_mfree() pages due to 117505258
-				mem->vmp_snext = sequestered;
-				sequestered = mem;
-				continue;
-			}
-
-			vm_page_lock_queues();
-			vm_page_wire(mem, VM_KERN_MEMORY_EXCLAVES, FALSE);
-			vm_page_unlock_queues();
-			/* Insert the page into the exclaves object */
-			vm_page_insert_wired(mem, exclaves_object,
-			    ptoa(VM_PAGE_GET_PHYS_PAGE(mem)),
-			    VM_KERN_MEMORY_EXCLAVES);
-
-			/* Retype via SPTM to SK owned */
-			sptm_retype_params_t retype_params = {
-				.raw = SPTM_RETYPE_PARAMS_NULL
-			};
-			sptm_retype(ptoa(VM_PAGE_GET_PHYS_PAGE(mem)),
-			    XNU_DEFAULT, SK_DEFAULT, retype_params);
-
-			pagelist.pages[p++] = VM_PAGE_GET_PHYS_PAGE(mem);
-			npages--;
-		}
-		vm_object_unlock(exclaves_object);
-	}
-
-	vm_page_free_list(sequestered, FALSE);
-
-	return completion(pagelist);
-}
-
-static tb_error_t
-exclaves_free_pages(const uint32_t pages[EXCLAVES_MAX_PAGES_REQUEST],
-    uint32_t npages, __unused const xnuupcalls_pagekind_s kind,
-    tb_error_t (^completion)(void))
-{
-	/* Get pointer for page list paddr */
-	assert(npages <= EXCLAVES_MAX_PAGES_REQUEST);
-	if (npages > EXCLAVES_MAX_PAGES_REQUEST) {
-		panic("npages");
-	}
-
-	vm_object_lock(exclaves_object);
-	for (size_t p = 0; p < npages; p++) {
-		/* Find the page in the exclaves object. */
-		vm_page_t m;
-		m = vm_page_lookup(exclaves_object, ptoa(pages[p]));
-
-		/* Assert we found the page */
-		assert(m != VM_PAGE_NULL);
-
-		/* Via SPTM, verify the page type is something ownable by xnu. */
-		assert3u(sptm_get_frame_type(ptoa(VM_PAGE_GET_PHYS_PAGE(m))),
-		    ==, XNU_DEFAULT);
-
-		/* Free the page */
-		vm_page_lock_queues();
-		vm_page_free(m);
-		vm_page_unlock_queues();
-	}
-	vm_object_unlock(exclaves_object);
-
-	return completion();
-}
-#endif /* CONFIG_EXCLAVES */
-
-/* -------------------------------------------------------------------------- */
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Testing

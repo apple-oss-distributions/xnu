@@ -6101,9 +6101,6 @@ SYSCTL_PROC(_kern, OID_AUTO, task_conclave_untaintable,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     "", 0, sysctl_task_conclave_untaintable, "A", "Task could not be tainted by talking to conclaves");
 
-extern uint32_t fake_crash_buffer_length;
-SYSCTL_INT(_kern, OID_AUTO, fake_crash_buffer_length, CTLFLAG_RD, &fake_crash_buffer_length, 0, NULL);
-
 #endif /* CONFIG_EXCLAVES */
 
 #if (DEVELOPMENT || DEBUG)

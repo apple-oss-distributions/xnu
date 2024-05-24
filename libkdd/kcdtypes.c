@@ -592,6 +592,7 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_flags);
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_layoutid);
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_slide);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_asroot);
 		setup_type_definition(retval, type_id, i, "exclave_addressspace_info");
 		break;
 

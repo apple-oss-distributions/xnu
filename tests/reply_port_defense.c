@@ -251,6 +251,7 @@ T_DECL(test_unentitled_thread_set_exception_ports,
 	bool triggers_exception = true;
 
 #if TARGET_OS_OSX
+	T_SKIP("Test disabled on macOS due to SIP disabled and AMFI boot args usage on BATS");
 	/*
 	 * CS_CONFIG_GET_OUT_OF_MY_WAY (enabled via AMFI boot-args)
 	 * disables this security feature. This boot-arg previously

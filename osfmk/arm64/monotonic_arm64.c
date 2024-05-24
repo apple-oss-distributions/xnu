@@ -191,6 +191,9 @@ core_init_execution_modes(void)
 	pmcr1 = __builtin_arm_rsr64("PMCR1_EL1");
 	pmcr1 |= PMCR1_INIT;
 	__builtin_arm_wsr64("PMCR1_EL1", pmcr1);
+#if CONFIG_EXCLAVES
+	__builtin_arm_wsr64("PMCR1_EL12", pmcr1);
+#endif
 }
 
 #define PMSR_OVF(CTR) (1ULL << (CTR))

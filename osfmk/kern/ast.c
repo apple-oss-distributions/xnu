@@ -70,7 +70,8 @@
 #include <kern/waitq.h>
 #include <kern/ledger.h>
 #include <kern/machine.h>
-#include <kperf/kperf_kpc.h>
+#include <kern/kpc.h>
+#include <kperf/kperf.h>
 #include <mach/policy.h>
 #include <security/mac_mach_internal.h> // for MACF AST hook
 #include <stdatomic.h>
@@ -256,8 +257,10 @@ ast_taken_user(void)
 	if (reasons & AST_KPERF) {
 		thread_ast_clear(thread, AST_KPERF);
 #if CONFIG_CPU_COUNTERS
-		kperf_kpc_thread_ast(thread);
+		kpc_thread_ast_handler(thread);
 #endif /* CONFIG_CPU_COUNTERS */
+		kperf_thread_ast_handler(thread);
+		thread->kperf_ast = 0;
 	}
 
 	if (reasons & AST_RESET_PCS) {

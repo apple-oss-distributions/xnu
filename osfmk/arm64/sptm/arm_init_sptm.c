@@ -36,6 +36,7 @@
 #include <arm/machine_cpu.h>
 #include <arm/rtclock.h>
 #include <vm/vm_map.h>
+#include <mach/exclaves.h>
 #include <mach/vm_param.h>
 #include <libkern/stack_protector.h>
 #include <console/serial_protos.h>
@@ -989,6 +990,15 @@ arm_init_cpu(
 		serial_init();
 		PE_init_platform(TRUE, NULL);
 		commpage_update_timebase();
+
+		exclaves_update_timebase(EXCLAVES_CLOCK_ABSOLUTE,
+		    rtclock_base_abstime);
+#if HIBERNATION
+		if (gIOHibernateState == kIOHibernateStateWakingFromHibernate) {
+			exclaves_update_timebase(EXCLAVES_CLOCK_CONTINUOUS,
+			    hwclock_conttime_offset);
+		}
+#endif /* HIBERNATION */
 	}
 	PE_init_cpu();
 

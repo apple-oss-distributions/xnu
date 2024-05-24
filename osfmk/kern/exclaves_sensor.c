@@ -91,11 +91,8 @@ eic_sensorstatus_to_sensor_status(exclaveindicatorcontroller_sensorstatusrespons
 static kern_return_t
 exclaves_eic_init(void)
 {
-	/*
-	 * As this happens during exclaves_boot() we can't rely on
-	 * exclaves_endpoint_lookup().
-	 */
-	exclaves_id_t eic_id = exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, EXCLAVES_EIC);
+	exclaves_id_t eic_id = exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL,
+	    EXCLAVES_EIC);
 	if (eic_id == UINT64_C(~0)) {
 		return KERN_FAILURE;
 	}

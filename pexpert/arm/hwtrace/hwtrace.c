@@ -359,6 +359,7 @@ panic_trace_apply_stress_rack_policy(void)
 		(void)entryP;
 		if (PE_parse_boot_argn("panic_trace", NULL, 0)) {
 			// Prefer user specified boot-arg even when running on stress racks.
+			// Make an exception for devices with broken single-stepping.
 		} else {
 			panic_trace = 0;
 		}

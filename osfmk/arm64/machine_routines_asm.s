@@ -1000,6 +1000,7 @@ is_deep_sleep:
 #endif
 
 not_deep_sleep:
+#if !NO_CPU_OVRD
 	// Set "OK to power down" (<rdar://problem/12390433>)
 	mrs		x9, CPU_OVRD
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_down)
@@ -1007,6 +1008,7 @@ not_deep_sleep:
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_disWfiRetn)
 #endif
 	msr		CPU_OVRD, x9
+#endif
 
 	EXEC_END
 
@@ -1027,9 +1029,11 @@ LEXT(arm64_force_wfi_clock_gate)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
 
+#if !NO_CPU_OVRD
 	mrs		x0, CPU_OVRD
 	orr		x0, x0, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_up)
 	msr		CPU_OVRD, x0
+#endif
 	
 	POP_FRAME
 	ARM64_STACK_EPILOG

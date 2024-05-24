@@ -22,6 +22,9 @@
 
 #include <pexpert/arm64/board_config.h>
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
 
 /* extern references */
 extern void     pe_identify_machine(boot_args *bootArgs);
@@ -363,6 +366,9 @@ PE_init_iokit(void)
 		}
 
 		KDBG_RELEASE(IOKDBG_CODE(DBG_BOOTER, 0), start_time_value, debug_wait_start_value, load_kernel_start_value, populate_registry_time_value);
+#if CONFIG_SPTM
+		KDBG_RELEASE(IOKDBG_CODE(DBG_BOOTER, 1), SPTMArgs->timestamp_sk_bootstrap, SPTMArgs->timestamp_xnu_bootstrap);
+#endif
 	}
 
 	InitIOKit(PE_state.deviceTreeHead);

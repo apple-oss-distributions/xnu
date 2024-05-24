@@ -3569,7 +3569,7 @@ exit_with_mach_exception(proc_t p, os_reason_t reason, exception_type_t exceptio
 
 	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
 	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), NULL,
-	           TRUE, FALSE, 0, reason);
+	           FALSE, FALSE, 0, reason);
 }
 
 #if CONFIG_EXCLAVES
@@ -3581,7 +3581,7 @@ exit_with_exclave_exception(proc_t p)
 	assert(reason != OS_REASON_NULL);
 	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
 
-	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, TRUE, FALSE,
+	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, FALSE, FALSE,
 	           0, reason);
 }
 #endif /* CONFIG_EXCLAVES */
@@ -3593,6 +3593,6 @@ exit_with_jit_exception(proc_t p)
 	assert(reason != OS_REASON_NULL);
 	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
 
-	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, TRUE, FALSE,
+	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, FALSE, FALSE,
 	           0, reason);
 }

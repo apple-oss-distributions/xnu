@@ -1672,11 +1672,10 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
-	proc_t proc = current_proc();
 	if (user_fault_in_self_restrict_mode(thread) &&
-	    address_space_debugged(proc) != KERN_SUCCESS) {
+	    task_is_jit_exception_fatal(get_threadtask(thread))) {
 		extern int exit_with_jit_exception(proc_t p);
-		exit_with_jit_exception(proc);
+		exit_with_jit_exception(current_proc());
 	}
 
 	exception_triage(exc, codes, numcodes);

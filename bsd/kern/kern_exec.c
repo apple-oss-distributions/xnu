@@ -268,7 +268,7 @@ extern void proc_apply_task_networkbg_internal(proc_t, thread_t);
 extern void task_set_did_exec_flag(task_t task);
 extern void task_clear_exec_copy_flag(task_t task);
 proc_t proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task,
-    task_t new_task, thread_t new_thread, void **inherit);
+    task_t new_task, struct image_params *imgp, void **inherit);
 boolean_t task_is_active(task_t);
 boolean_t thread_is_active(thread_t thread);
 void thread_copy_resource_info(thread_t dst_thread, thread_t src_thread);
@@ -282,8 +282,8 @@ char *task_get_vm_shared_region_id_and_jop_pid(task_t task, uint64_t *jop_pid);
 task_t convert_port_to_task(ipc_port_t port);
 
 #if CONFIG_EXCLAVES
-int task_add_conclave(task_t task, const char *task_conclave_id);
-kern_return_t task_inherit_conclave(task_t old_task, task_t new_task);
+int task_add_conclave(task_t task, void *vnode, int64_t off, const char *task_conclave_id);
+kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnode, int64_t off);
 #endif /* CONFIG_EXCLAVES */
 
 
@@ -3436,6 +3436,7 @@ proc_apply_jit_and_vm_policies(struct image_params *imgp, proc_t p, task_t task)
 #pragma unused(p)
 #endif /* CONFIG_MACF */
 
+
 	if (needs_jumbo_va) {
 		vm_map_set_jumbo(get_task_map(task));
 	}
@@ -4285,7 +4286,7 @@ do_fork1:
 	 */
 
 	if (error == 0 && !spawn_no_exec) {
-		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp->ip_new_thread, &inherit);
+		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp, &inherit);
 		/* proc ref returned */
 		should_release_proc_ref = TRUE;
 	}
@@ -4298,7 +4299,8 @@ do_fork1:
 #if CONFIG_EXCLAVES
 	if (!error && task_conclave_id != NULL) {
 		kern_return_t kr;
-		kr = task_add_conclave(new_task, task_conclave_id);
+		kr = task_add_conclave(new_task, imgp->ip_vp, (int64_t)imgp->ip_arch_offset,
+		    task_conclave_id);
 		if (kr != KERN_SUCCESS) {
 			error = EINVAL;
 			goto bad;
@@ -4588,6 +4590,7 @@ bad:
 #if __has_feature(ptrauth_calls)
 		task_set_pac_exception_fatal_flag(new_task);
 #endif /* __has_feature(ptrauth_calls) */
+		task_set_jit_exception_fatal_flag(new_task);
 	}
 
 	/* Inherit task role from old task to new task for exec */
@@ -4918,7 +4921,7 @@ bad:
  *		new_proc		proc after exec
  *		old_task		task before exec
  *		new_task		task after exec
- *		new_thread		thread in new task
+ *		imgp			image params
  *		inherit			resulting importance linkage
  *
  * Returns: proc.
@@ -4935,14 +4938,14 @@ bad:
  * error and let the terminated process complete exec and die.
  */
 proc_t
-proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t new_task, thread_t new_thread,
-    void **inherit)
+proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t new_task, struct image_params *imgp, void **inherit)
 {
 	boolean_t task_active;
 	boolean_t proc_active;
 	boolean_t thread_active;
 	boolean_t reparent_traced_child = FALSE;
 	thread_t old_thread = current_thread();
+	thread_t new_thread = imgp->ip_new_thread;
 
 	thread_set_exec_promotion(old_thread);
 	old_proc = proc_refdrain_will_exec(old_proc);
@@ -5065,7 +5068,10 @@ proc_exec_switch_task(proc_t old_proc, proc_t new_proc, task_t old_task, task_t 
 
 		proc_list_unlock();
 #if CONFIG_EXCLAVES
-		task_inherit_conclave(old_task, new_task);
+		if (task_inherit_conclave(old_task, new_task, imgp->ip_vp,
+		    (int64_t)imgp->ip_arch_offset) != KERN_SUCCESS) {
+			task_terminate_internal(new_task);
+		}
 #endif
 	} else {
 		task_terminate_internal(new_task);
@@ -5275,7 +5281,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 	}
 
 	if (!error) {
-		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp->ip_new_thread, &inherit);
+		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp, &inherit);
 		/* proc ref returned */
 		should_release_proc_ref = TRUE;
 	}
@@ -5378,6 +5384,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 #if __has_feature(ptrauth_calls)
 		task_set_pac_exception_fatal_flag(new_task);
 #endif /* __has_feature(ptrauth_calls) */
+		task_set_jit_exception_fatal_flag(new_task);
 
 #if CONFIG_ARCADE
 		/*

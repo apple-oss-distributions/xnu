@@ -42,6 +42,7 @@
 
 #include "exclaves_debug.h"
 #include "exclaves_conclave.h"
+#include "exclaves_resource.h"
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Conclave Launcher
@@ -287,11 +288,13 @@ LCK_MTX_DECLARE(exclaves_conclave_lock, &exclaves_lck_grp);
 
 static conclave_test_context_t *conclave_context = NULL;
 
-#define EXCLAVES_ID_CONCLAVECONTROL_EP \
-    (exclaves_endpoint_lookup("com.apple.service.ConclaveLauncherControl"))
+#define EXCLAVES_ID_CONCLAVECONTROL_EP               \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.ConclaveLauncherControl"))
 
 #define EXCLAVES_ID_CONCLAVEDEBUG_EP \
-    (exclaves_endpoint_lookup("com.apple.service.ConclaveLauncherDebug"))
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.ConclaveLauncherDebug"))
 
 static TUNABLE(bool, enable_hello_conclaves, "enable_hello_conclaves", false);
 
@@ -300,14 +303,14 @@ exclaves_hello_conclaves_test(int64_t in, int64_t *out)
 {
 	tb_error_t tb_result = TB_ERROR_SUCCESS;
 	if (!enable_hello_conclaves) {
-		exclaves_debug_printf(show_errors,
+		exclaves_debug_printf(show_test_output,
 		    "%s: SKIPPED: enable_hello_conclaves not set\n", __func__);
 		*out = -1;
 		return 0;
 	}
 
 	if (exclaves_get_status() != EXCLAVES_STATUS_AVAILABLE) {
-		exclaves_debug_printf(show_errors,
+		exclaves_debug_printf(show_test_output,
 		    "%s: SKIPPED: Exclaves not available\n", __func__);
 		*out = -1;
 		return 0;

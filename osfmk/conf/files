@@ -129,19 +129,20 @@ osfmk/kern/ecc_logging.c			optional config_ecc_logging
 osfmk/kern/energy_perf.c		standard
 osfmk/kern/exception.c		standard
 osfmk/kern/exclaves.c		standard
-osfmk/kern/exclaves_conclave.c	standard
 osfmk/kern/exclaves_boot.c		standard
-osfmk/kern/exclaves_upcalls.c		standard
+osfmk/kern/exclaves_conclave.c	standard
 osfmk/kern/exclaves_driverkit.c		standard
 osfmk/kern/exclaves_frame_mint.c	standard
+osfmk/kern/exclaves_inspection.c	standard
 osfmk/kern/exclaves_log.c		standard
+osfmk/kern/exclaves_memory.c            standard
 osfmk/kern/exclaves_panic.c		standard
 osfmk/kern/exclaves_resource.c		standard
 osfmk/kern/exclaves_sensor.c		standard
 osfmk/kern/exclaves_shared_memory.c	standard
 osfmk/kern/exclaves_storage.c		standard
 osfmk/kern/exclaves_tests.c		standard
-osfmk/kern/exclaves_inspection.c	standard
+osfmk/kern/exclaves_upcalls.c		standard
 ./kern/exclaves.tightbeam.c			optional config_exclaves
 osfmk/kern/extmod_statistics.c		standard
 osfmk/kern/host.c			standard

@@ -158,6 +158,12 @@ static size_t stackshot_exclave_inspect_ctid_capacity = 0;
 static kern_return_t stackshot_exclave_kr = KERN_SUCCESS;
 #endif /* CONFIG_EXCLAVES */
 
+#if DEBUG || DEVELOPMENT
+TUNABLE(bool, disable_exclave_stackshot, "-disable_exclave_stackshot", false);
+#else
+const bool disable_exclave_stackshot = false;
+#endif
+
 __private_extern__ void stackshot_init( void );
 static boolean_t memory_iszero(void *addr, size_t size);
 uint32_t                get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj);
@@ -221,7 +227,7 @@ extern kern_return_t kern_stack_snapshot_internal(int stackshot_config_version, 
 static size_t stackshot_plh_est_size(void);
 
 #if CONFIG_EXCLAVES
-static kern_return_t collect_exclave_threads(void);
+static kern_return_t collect_exclave_threads(uint64_t);
 #endif
 
 /*
@@ -474,8 +480,8 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 #if CONFIG_EXCLAVES
 	/* stackshot trap should only finish successfully or with no pending Exclave threads */
 	assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
-	if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
-		error = collect_exclave_threads();
+	if (stackshot_exclave_inspect_ctids) {
+		error = collect_exclave_threads(flags);
 	}
 #endif /* CONFIG_EXCLAVES */
 	if (error == KERN_SUCCESS) {
@@ -490,11 +496,6 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_END,
 	    error, (time_end - time_start), size, *bytes_traced);
 out:
-#if CONFIG_EXCLAVES
-	stackshot_exclave_inspect_ctids = NULL;
-	stackshot_exclave_inspect_ctid_capacity = 0;
-	stackshot_exclave_inspect_ctid_count = 0;
-#endif
 
 	stackshot_kcdata_p = NULL;
 	STACKSHOT_SUBSYS_UNLOCK();
@@ -673,15 +674,25 @@ error:
 }
 
 static kern_return_t
-collect_exclave_threads(void)
+collect_exclave_threads(uint64_t stackshot_flags)
 {
 	size_t i;
 	ctid_t ctid;
 	thread_t thread;
-	kern_return_t kr;
+	kern_return_t kr = KERN_SUCCESS;
 	STACKSHOT_SUBSYS_ASSERT_LOCKED();
 
 	lck_mtx_lock(&exclaves_collect_mtx);
+
+	if (stackshot_exclave_inspect_ctid_count == 0) {
+		/* Nothing to do */
+		goto out;
+	}
+
+	// When asking for ASIDs, make sure we get all exclaves asids and mappings as well
+	exclaves_stackshot_raw_addresses = (stackshot_flags & STACKSHOT_ASID);
+	exclaves_stackshot_all_address_spaces = (stackshot_flags & STACKSHOT_ASID);
+
 	/* This error is intentionally ignored: we are now committed to collecting
 	 * these threads, or at least properly waking them. If this fails, the first
 	 * collected thread should also fail to append to the kcdata, and will abort
@@ -709,6 +720,11 @@ collect_exclave_threads(void)
 		goto out;
 	}
 out:
+	/* clear Exclave buffer now that it's been used */
+	stackshot_exclave_inspect_ctids = NULL;
+	stackshot_exclave_inspect_ctid_capacity = 0;
+	stackshot_exclave_inspect_ctid_count = 0;
+
 	lck_mtx_unlock(&exclaves_collect_mtx);
 	return kr;
 }
@@ -822,7 +838,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	__block struct exclave_textlayout_segment * info = NULL;
@@ -842,7 +858,11 @@ stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_No
 
 	stackshot_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshot_textsegment_s *_Nonnull item) {
 		memcpy(&info->layoutSegment_uuid, item->uuid, sizeof(uuid_t));
-		info->layoutSegment_loadAddress = item->loadaddress;
+		if (want_raw_addresses) {
+		        info->layoutSegment_loadAddress = item->rawloadaddress.has_value ? item->rawloadaddress.value: 0;
+		} else {
+		        info->layoutSegment_loadAddress = item->loadaddress;
+		}
 		info++;
 	});
 
@@ -853,7 +873,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	__block struct exclave_textlayout_info info = { 0 };
@@ -863,10 +883,10 @@ stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout
 
 	info.layout_id = tl->textlayoutid;
 
-	info.etl_flags = kExclaveTextLayoutLoadAddressesUnslid;
+	info.etl_flags = want_raw_addresses ? 0 : kExclaveTextLayoutLoadAddressesUnslid;
 
 	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO, sizeof(struct exclave_textlayout_info), &info));
-	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr));
+	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr, want_raw_addresses));
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
 	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
 error_exit:
@@ -874,7 +894,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull as, void *kcdata_ptr)
+stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull as, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	struct exclave_addressspace_info info = { 0 };
@@ -887,7 +907,7 @@ stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull
 
 	info.eas_id = as->asid;
 
-	if (as->rawaddressslide.has_value) {
+	if (want_raw_addresses && as->rawaddressslide.has_value) {
 		info.eas_flags = kExclaveAddressSpaceHaveSlide;
 		info.eas_slide = as->rawaddressslide.value;
 	} else {
@@ -896,6 +916,7 @@ stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull
 	}
 
 	info.eas_layoutid = as->textlayoutid; // text layout for this address space
+	info.eas_asroot = as->asroot.has_value ? as->asroot.value : 0;
 
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
 	    STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE, as->asid));
@@ -920,10 +941,10 @@ error_exit:
 }
 
 kern_return_t
-stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr);
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr, bool want_raw_addresses);
 
 kern_return_t
-stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr)
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr, bool want_raw_addresses)
 {
 	__block kern_return_t kr = KERN_SUCCESS;
 
@@ -935,13 +956,13 @@ stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, 
 
 	stackshot_addressspace__v_visit(&result->addressspaces, ^(size_t __unused i, const stackshot_addressspace_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
-		        kr = stackshot_exclaves_process_addressspace(item, kcdata_ptr);
+		        kr = stackshot_exclaves_process_addressspace(item, kcdata_ptr, want_raw_addresses);
 		}
 	});
 
 	stackshot_textlayout__v_visit(&result->textlayouts, ^(size_t i, const stackshot_textlayout_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
-		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr);
+		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr, want_raw_addresses);
 		}
 	});
 
@@ -949,17 +970,17 @@ stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, 
 }
 
 kern_return_t
-stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result);
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, bool want_raw_addresses);
 
 kern_return_t
-stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result)
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, bool want_raw_addresses)
 {
 	kern_return_t kr = KERN_SUCCESS;
 	if (result == NULL) {
 		return collect_kr;
 	}
 
-	kr = stackshot_exclaves_process_stackshot(result, stackshot_kcdata_p);
+	kr = stackshot_exclaves_process_stackshot(result, stackshot_kcdata_p, want_raw_addresses);
 
 	stackshot_exclave_kr = kr;
 
@@ -1213,9 +1234,11 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 #if CONFIG_EXCLAVES
 		/* trigger Exclave thread collection if any are queued */
 		assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
-		if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
-			STACKSHOT_TESTPOINT(TP_START_COLLECTION);
-			error = collect_exclave_threads();
+		if (stackshot_exclave_inspect_ctids) {
+			if (stackshot_exclave_inspect_ctid_count > 0) {
+				STACKSHOT_TESTPOINT(TP_START_COLLECTION);
+			}
+			error = collect_exclave_threads(flags);
 		}
 #endif /* CONFIG_EXCLAVES */
 
@@ -1291,12 +1314,6 @@ error_exit:
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_END,
 		    error, tot_interrupts_off_abs, stackshotbuf_size, bytes_traced);
 	}
-
-#if CONFIG_EXCLAVES
-	stackshot_exclave_inspect_ctids = NULL;
-	stackshot_exclave_inspect_ctid_capacity = 0;
-	stackshot_exclave_inspect_ctid_count = 0;
-#endif
 
 error_early_exit:
 	if (kcdata_p != NULL) {
@@ -2633,26 +2650,6 @@ _stackshot_backtrace_copy(void *vctx, void *dst, user_addr_t src, size_t size)
 	return 0;
 }
 
-#if CONFIG_EXCLAVES
-
-/* Return index of last xnu frame before secure world. Valid frame index is
- * always in range <0, nframes-1>. When frame is not found, return nframes
- * value. */
-static uint32_t
-kdp_exclave_stack_offset(uintptr_t * out_addr, size_t nframes)
-{
-	size_t i = 0;
-	while (i < nframes &&
-	    !((exclaves_enter_range_start < out_addr[i]) && (out_addr[i] <= exclaves_enter_range_end))
-	    && !((exclaves_upcall_range_start < out_addr[i]) && (out_addr[i] <= exclaves_upcall_range_end))
-	    ) {
-		i++;
-	}
-
-	return (uint32_t)i;
-}
-#endif /* CONFIG_EXCLAVES */
-
 static kern_return_t
 kcdata_record_thread_snapshot(
 	kcdata_descriptor_t kcd, thread_t thread, task_t task, uint64_t trace_flags, boolean_t have_pmap, boolean_t thread_on_core)
@@ -3003,7 +3000,7 @@ kcdata_record_thread_snapshot(
 					info.tei_flags |= kExclaveUpcallActive;
 				}
 				info.tei_scid = thread->th_exclaves_scheduling_context_id;
-				info.tei_thread_offset = kdp_exclave_stack_offset((uintptr_t *)out_addr, saved_count / frame_size);
+				info.tei_thread_offset = exclaves_stack_offset((uintptr_t *)out_addr, saved_count / frame_size, false);
 
 				kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO, sizeof(struct thread_exclaves_info), &info));
 			}
@@ -3632,7 +3629,8 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 	/* process the flags */
 	bool collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
 	bool use_fault_path          = ((trace_flags & (STACKSHOT_ENABLE_UUID_FAULTING | STACKSHOT_ENABLE_BT_FAULTING)) != 0);
-	stack_enable_faulting = (trace_flags & (STACKSHOT_ENABLE_BT_FAULTING));
+	bool collect_exclaves        = !disable_exclave_stackshot && ((trace_flags & STACKSHOT_SKIP_EXCLAVES) == 0);
+	stack_enable_faulting        = (trace_flags & (STACKSHOT_ENABLE_BT_FAULTING));
 
 	/* Currently we only support returning explicit KEXT load info on fileset kernels */
 	kc_format_t primary_kc_type = KCFormatUnknown;
@@ -3662,10 +3660,12 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 
 	_stackshot_validation_reset();
 #if CONFIG_EXCLAVES
-	if (!panic_stackshot) {
+	if (!panic_stackshot && collect_exclaves) {
 		kcd_exit_on_error(stackshot_setup_exclave_waitlist(stackshot_kcdata_p)); /* Allocate list of exclave threads */
 	}
-#endif
+#else /* CONFIG_EXCLAVES */
+#pragma unused(collect_exclaves)
+#endif /* CONFIG_EXCLAVES */
 	stackshot_plh_setup(stackshot_kcdata_p); /* set up port label hash */
 
 
@@ -3922,6 +3922,35 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 #if CONFIG_EXCLAVES
 	/* Avoid setting AST until as late as possible, in case the stackshot fails */
 	commit_exclaves_ast();
+
+	/* If this is the panic stackshot, check if Exclaves panic left its stackshot in the shared region */
+	if (panic_stackshot) {
+		struct exclaves_panic_stackshot excl_ss;
+		kdp_read_panic_exclaves_stackshot(&excl_ss);
+
+		if (excl_ss.stackshot_buffer != NULL && excl_ss.stackshot_buffer_size != 0) {
+			tb_error_t tberr = TB_ERROR_SUCCESS;
+			exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_FOUND;
+
+			/* this block does not escape, so this is okay... */
+			kern_return_t *error_in_block = &error;
+			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
+			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+			tberr = stackshot_stackshotresult__unmarshal(excl_ss.stackshot_buffer, excl_ss.stackshot_buffer_size, ^(stackshot_stackshotresult_s result){
+				*error_in_block = stackshot_exclaves_process_stackshot(&result, stackshot_kcdata_p, true);
+			});
+			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
+			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+			if (tberr != TB_ERROR_SUCCESS) {
+				exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_DECODE_FAILED;
+			}
+		} else {
+			exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_NOT_FOUND;
+		}
+
+		/* check error from the block */
+		kcd_exit_on_error(error);
+	}
 #endif
 
 	*trace_flags_p = trace_flags;

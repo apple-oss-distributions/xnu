@@ -490,6 +490,21 @@ vm_map_entry_copy_code_signing(
 	if (VM_MAP_POLICY_ALLOW_JIT_COPY(map)) {
 		assert(new->used_for_jit == old->used_for_jit);
 	} else {
+		if (old->used_for_jit) {
+			DTRACE_VM3(cs_wx,
+			    uint64_t, new->vme_start,
+			    uint64_t, new->vme_end,
+			    vm_prot_t, new->protection);
+			printf("CODE SIGNING: %d[%s] %s: curprot cannot be write+execute. %s\n",
+			    proc_selfpid(),
+			    (get_bsdtask_info(current_task())
+			    ? proc_name_address(get_bsdtask_info(current_task()))
+			    : "?"),
+			    __FUNCTION__,
+			    "removing execute access");
+			new->protection &= ~VM_PROT_EXECUTE;
+			new->max_protection &= ~VM_PROT_EXECUTE;
+		}
 		new->used_for_jit = FALSE;
 	}
 }
@@ -4178,6 +4193,11 @@ vm_map_enter_mem_object_helper(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if (__improbable((cur_protection & max_protection) != cur_protection)) {
+		/* cur is more permissive than max */
+		cur_protection &= max_protection;
+	}
+
 #if __arm64__
 	if (cur_protection & VM_PROT_EXECUTE) {
 		cur_protection |= VM_PROT_READ;
@@ -5110,6 +5130,11 @@ vm_map_enter_mem_object_control(
 	    (inheritance > VM_INHERIT_LAST_VALID) ||
 	    initial_size == 0) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (__improbable((cur_protection & max_protection) != cur_protection)) {
+		/* cur is more permissive than max */
+		cur_protection &= max_protection;
 	}
 
 #if __arm64__
@@ -13076,11 +13101,25 @@ vm_map_fork_share(
 		if (!old_entry->needs_copy && is_writable) {
 			vm_prot_t prot;
 
-			assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection));
+			if (pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection)) {
+				panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+				    __FUNCTION__, old_map, old_map->pmap,
+				    old_entry,
+				    (uint64_t)old_entry->vme_start,
+				    (uint64_t)old_entry->vme_end,
+				    old_entry->protection);
+			}
 
 			prot = old_entry->protection & ~VM_PROT_WRITE;
 
-			assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, prot));
+			if (pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, prot)) {
+				panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+				    __FUNCTION__, old_map, old_map->pmap,
+				    old_entry,
+				    (uint64_t)old_entry->vme_start,
+				    (uint64_t)old_entry->vme_end,
+				    prot);
+			}
 
 			if (override_nx(old_map, VME_ALIAS(old_entry)) && prot) {
 				prot |= VM_PROT_EXECUTE;
@@ -13606,7 +13645,14 @@ vm_map_fork(
 			if (src_needs_copy && !old_entry->needs_copy) {
 				vm_prot_t prot;
 
-				assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection));
+				if (pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, old_entry->protection)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    old_map, old_map->pmap, old_entry,
+					    (uint64_t)old_entry->vme_start,
+					    (uint64_t)old_entry->vme_end,
+					    old_entry->protection);
+				}
 
 				prot = old_entry->protection & ~VM_PROT_WRITE;
 
@@ -13615,7 +13661,14 @@ vm_map_fork(
 					prot |= VM_PROT_EXECUTE;
 				}
 
-				assert(!pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, prot));
+				if (pmap_has_prot_policy(old_map->pmap, old_entry->translated_allow_execute, prot)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    old_map, old_map->pmap, old_entry,
+					    (uint64_t)old_entry->vme_start,
+					    (uint64_t)old_entry->vme_end,
+					    prot);
+				}
 
 				vm_object_pmap_protect(
 					VME_OBJECT(old_entry),
@@ -14275,9 +14328,23 @@ RetrySubMap:
 				submap_entry->needs_copy = TRUE;
 
 				prot = submap_entry->protection;
-				assert(!pmap_has_prot_policy(map->pmap, submap_entry->translated_allow_execute, prot));
+				if (pmap_has_prot_policy(map->pmap, submap_entry->translated_allow_execute, prot)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    map, map->pmap, submap_entry,
+					    (uint64_t)submap_entry->vme_start,
+					    (uint64_t)submap_entry->vme_end,
+					    prot);
+				}
 				prot = prot & ~VM_PROT_WRITE;
-				assert(!pmap_has_prot_policy(map->pmap, submap_entry->translated_allow_execute, prot));
+				if (pmap_has_prot_policy(map->pmap, submap_entry->translated_allow_execute, prot)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    map, map->pmap, submap_entry,
+					    (uint64_t)submap_entry->vme_start,
+					    (uint64_t)submap_entry->vme_end,
+					    prot);
+				}
 
 				if (override_nx(old_map,
 				    VME_ALIAS(submap_entry))
@@ -15241,9 +15308,9 @@ recurse_again:
 		}
 		if (original_count >= VM_REGION_SUBMAP_INFO_V2_COUNT_64) {
 			if (curr_entry->is_sub_map) {
-				submap_info->object_id_full = (vm_object_id_t)VM_KERNEL_ADDRPERM(VME_SUBMAP(curr_entry));
+				submap_info->object_id_full = (vm_object_id_t)VM_KERNEL_ADDRHASH(VME_SUBMAP(curr_entry));
 			} else if (VME_OBJECT(curr_entry)) {
-				submap_info->object_id_full = (vm_object_id_t)VM_KERNEL_ADDRPERM(VME_OBJECT(curr_entry));
+				submap_info->object_id_full = (vm_object_id_t)VM_KERNEL_ADDRHASH(VME_OBJECT(curr_entry));
 			} else {
 				submap_info->object_id_full = 0ull;
 			}
@@ -15581,10 +15648,11 @@ vm_map_region_top_walk(
 			}
 			top->ref_count = ref_count;
 		}
-		/* XXX K64: obj_id will be truncated */
-		top->obj_id = (unsigned int) (uintptr_t)VM_KERNEL_ADDRPERM(obj);
 
 		vm_object_unlock(obj);
+
+		/* XXX K64: obj_id will be truncated */
+		top->obj_id = (unsigned int) (uintptr_t)VM_KERNEL_ADDRHASH(obj);
 	}
 }
 
@@ -17892,7 +17960,15 @@ vm_map_remap_extract(
 				if (!src_entry->needs_copy && is_writable) {
 					vm_prot_t prot;
 
-					assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection));
+					if (pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection)) {
+						panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+						    __FUNCTION__,
+						    map, map->pmap,
+						    src_entry,
+						    (uint64_t)src_entry->vme_start,
+						    (uint64_t)src_entry->vme_end,
+						    src_entry->protection);
+					}
 
 					prot = src_entry->protection & ~VM_PROT_WRITE;
 
@@ -17902,7 +17978,15 @@ vm_map_remap_extract(
 						prot |= VM_PROT_EXECUTE;
 					}
 
-					assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, prot));
+					if (pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, prot)) {
+						panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+						    __FUNCTION__,
+						    map, map->pmap,
+						    src_entry,
+						    (uint64_t)src_entry->vme_start,
+						    (uint64_t)src_entry->vme_end,
+						    prot);
+					}
 
 					if (map->mapped_in_other_pmaps) {
 						vm_object_pmap_protect(
@@ -18067,7 +18151,14 @@ RestartCopy:
 			if (src_needs_copy && !src_entry->needs_copy) {
 				vm_prot_t prot;
 
-				assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection));
+				if (pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, src_entry->protection)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    map, map->pmap, src_entry,
+					    (uint64_t)src_entry->vme_start,
+					    (uint64_t)src_entry->vme_end,
+					    src_entry->protection);
+				}
 
 				prot = src_entry->protection & ~VM_PROT_WRITE;
 
@@ -18077,7 +18168,14 @@ RestartCopy:
 					prot |= VM_PROT_EXECUTE;
 				}
 
-				assert(!pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, prot));
+				if (pmap_has_prot_policy(map->pmap, src_entry->translated_allow_execute, prot)) {
+					panic("%s: map %p pmap %p entry %p 0x%llx:0x%llx prot 0x%x",
+					    __FUNCTION__,
+					    map, map->pmap, src_entry,
+					    (uint64_t)src_entry->vme_start,
+					    (uint64_t)src_entry->vme_end,
+					    prot);
+				}
 
 				vm_object_pmap_protect(object,
 				    offset,
@@ -19013,6 +19111,11 @@ vm_map_remap(
 	}
 
 	if (__improbable(vm_map_range_overflows(src_map, memory_address, size))) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (__improbable((*cur_protection & *max_protection) != *cur_protection)) {
+		/* cur is more permissive than max */
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -20361,7 +20464,7 @@ vm_map_page_range_info_internal(
 				basic_info->disposition = disposition;
 				basic_info->ref_count = ref_count;
 				basic_info->object_id = (vm_object_id_t) (uintptr_t)
-				    VM_KERNEL_ADDRPERM(curr_object);
+				    VM_KERNEL_ADDRHASH(curr_object);
 				basic_info->offset =
 				    (memory_object_offset_t) curr_offset_in_object + offset_in_page;
 				basic_info->depth = depth;

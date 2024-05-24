@@ -1717,36 +1717,36 @@ unpcb_to_compat(struct unpcb *up, struct unpcb_compat *cp)
 {
 #if defined(__LP64__)
 	cp->unp_link.le_next = (u_int32_t)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_next);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_next);
 	cp->unp_link.le_prev = (u_int32_t)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_prev);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_prev);
 #else
 	cp->unp_link.le_next = (struct unpcb_compat *)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_next);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_next);
 	cp->unp_link.le_prev = (struct unpcb_compat **)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_prev);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_prev);
 #endif
 	cp->unp_socket = (_UNPCB_PTR(struct socket *))
-	    VM_KERNEL_ADDRPERM(up->unp_socket);
+	    VM_KERNEL_ADDRHASH(up->unp_socket);
 	cp->unp_vnode = (_UNPCB_PTR(struct vnode *))
-	    VM_KERNEL_ADDRPERM(up->unp_vnode);
+	    VM_KERNEL_ADDRHASH(up->unp_vnode);
 	cp->unp_ino = up->unp_ino;
 	cp->unp_conn = (_UNPCB_PTR(struct unpcb_compat *))
-	    VM_KERNEL_ADDRPERM(up->unp_conn);
-	cp->unp_refs = (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_refs.lh_first);
+	    VM_KERNEL_ADDRHASH(up->unp_conn);
+	cp->unp_refs = (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_refs.lh_first);
 #if defined(__LP64__)
 	cp->unp_reflink.le_next =
-	    (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_reflink.le_next);
+	    (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_reflink.le_next);
 	cp->unp_reflink.le_prev =
-	    (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_reflink.le_prev);
+	    (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_reflink.le_prev);
 #else
 	cp->unp_reflink.le_next =
-	    (struct unpcb_compat *)VM_KERNEL_ADDRPERM(up->unp_reflink.le_next);
+	    (struct unpcb_compat *)VM_KERNEL_ADDRHASH(up->unp_reflink.le_next);
 	cp->unp_reflink.le_prev =
-	    (struct unpcb_compat **)VM_KERNEL_ADDRPERM(up->unp_reflink.le_prev);
+	    (struct unpcb_compat **)VM_KERNEL_ADDRHASH(up->unp_reflink.le_prev);
 #endif
 	cp->unp_addr = (_UNPCB_PTR(struct sockaddr_un *))
-	    VM_KERNEL_ADDRPERM(up->unp_addr);
+	    VM_KERNEL_ADDRHASH(up->unp_addr);
 	cp->unp_cc = up->unp_cc;
 	cp->unp_mbcnt = up->unp_mbcnt;
 	cp->unp_gencnt = up->unp_gencnt;
@@ -1832,7 +1832,7 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 			bzero(&xu, sizeof(xu));
 			xu.xu_len = sizeof(xu);
 			xu.xu_unpp = (_UNPCB_PTR(struct unpcb_compat *))
-			    VM_KERNEL_ADDRPERM(unp);
+			    VM_KERNEL_ADDRHASH(unp);
 			/*
 			 * XXX - need more locking here to protect against
 			 * connect/disconnect races for SMP.
@@ -1963,24 +1963,24 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 
 			bzero(&xu, xu_len);
 			xu.xu_len = (u_int32_t)xu_len;
-			xu.xu_unpp = (u_int64_t)VM_KERNEL_ADDRPERM(unp);
+			xu.xu_unpp = (u_int64_t)VM_KERNEL_ADDRHASH(unp);
 			xu.xunp_link.le_next = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_link.le_next);
+			    VM_KERNEL_ADDRHASH(unp->unp_link.le_next);
 			xu.xunp_link.le_prev = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_link.le_prev);
+			    VM_KERNEL_ADDRHASH(unp->unp_link.le_prev);
 			xu.xunp_socket = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_socket);
+			    VM_KERNEL_ADDRHASH(unp->unp_socket);
 			xu.xunp_vnode = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_vnode);
+			    VM_KERNEL_ADDRHASH(unp->unp_vnode);
 			xu.xunp_ino = unp->unp_ino;
 			xu.xunp_conn = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_conn);
+			    VM_KERNEL_ADDRHASH(unp->unp_conn);
 			xu.xunp_refs = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_refs.lh_first);
+			    VM_KERNEL_ADDRHASH(unp->unp_refs.lh_first);
 			xu.xunp_reflink.le_next = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_reflink.le_next);
+			    VM_KERNEL_ADDRHASH(unp->unp_reflink.le_next);
 			xu.xunp_reflink.le_prev = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_reflink.le_prev);
+			    VM_KERNEL_ADDRHASH(unp->unp_reflink.le_prev);
 			xu.xunp_cc = unp->unp_cc;
 			xu.xunp_mbcnt = unp->unp_mbcnt;
 			xu.xunp_gencnt = unp->unp_gencnt;
@@ -2118,12 +2118,12 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 
 		xu->xunp_len = sizeof(struct xunpcb_n);
 		xu->xunp_kind = XSO_UNPCB;
-		xu->xunp_unpp = (uint64_t)VM_KERNEL_ADDRPERM(unp);
-		xu->xunp_vnode = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_vnode);
+		xu->xunp_unpp = (uint64_t)VM_KERNEL_ADDRHASH(unp);
+		xu->xunp_vnode = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_vnode);
 		xu->xunp_ino = unp->unp_ino;
-		xu->xunp_conn = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_conn);
-		xu->xunp_refs = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_refs.lh_first);
-		xu->xunp_reflink = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_reflink.le_next);
+		xu->xunp_conn = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_conn);
+		xu->xunp_refs = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_refs.lh_first);
+		xu->xunp_reflink = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_reflink.le_next);
 		xu->xunp_cc = unp->unp_cc;
 		xu->xunp_mbcnt = unp->unp_mbcnt;
 		xu->xunp_flags = unp->unp_flags;

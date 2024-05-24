@@ -1043,6 +1043,7 @@ vm_test_per_mapping_internal_accounting(void)
 	vm_object_lock(device_object);
 	VM_OBJECT_SET_PRIVATE(device_object, TRUE);
 	VM_OBJECT_SET_PHYS_CONTIGUOUS(device_object, TRUE);
+	device_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	vm_object_unlock(device_object);
 	kr = vm_object_populate_with_private(device_object, 0,
 	    ppnum, PAGE_SIZE);

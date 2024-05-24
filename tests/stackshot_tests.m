@@ -84,6 +84,7 @@ static const NSString* asyncstack_expected_stack_key = @"asyncstack_expected_sta
 static const NSString* driverkit_found_key = @"driverkit_found_key"; // callback when driverkit process is found. argument is the process pid.
 static const NSString* sp_throttled_expected_ctxt_key = @"sp_throttled_expected_ctxt_key"; // -> @(ctxt), required for PARSE_STACKSHOT_THROTTLED_SP
 static const NSString* sp_throttled_expect_flag = @"sp_throttled_expect_flag"; // -> @(is_throttled), required for PARSE_STACKSHOT_THROTTLED_SP
+static const NSString* no_exclaves_key = @"no_exclaves";
 
 #define TEST_STACKSHOT_QUEUE_LABEL        "houston.we.had.a.problem"
 #define TEST_STACKSHOT_QUEUE_LABEL_LENGTH sizeof(TEST_STACKSHOT_QUEUE_LABEL)
@@ -484,6 +485,7 @@ T_DECL(stress, "test that taking stackshots for 60 seconds doesn't crash the sys
 				STACKSHOT_THREAD_GROUP |
 				STACKSHOT_SAVE_JETSAM_COALITIONS |
 				STACKSHOT_ASID |
+				STACKSHOT_EXCLAVES |
 				0),
 	};
 
@@ -2338,6 +2340,9 @@ T_DECL(flag_perf, "test stackshot performance with different flags set", T_META_
 	stackshot_flag_perf(STACKSHOT_SAVE_JETSAM_COALITIONS, "save_jetsam_coalitions");
 	stackshot_flag_perf(STACKSHOT_INSTRS_CYCLES, "instrs_cycles");
 	stackshot_flag_perf(STACKSHOT_ASID, "asid");
+	stackshot_flag_perf(STACKSHOT_EXCLAVES, "exclaves");
+	stackshot_flag_perf(STACKSHOT_EXCLAVES | STACKSHOT_ASID, "exclaves + asid");
+	stackshot_flag_perf(STACKSHOT_SKIP_EXCLAVES, "exclaves skipped");
 }
 
 T_DECL(perf_no_size_hint, "test stackshot performance with no size hint",
@@ -2362,6 +2367,13 @@ T_DECL(perf_delta, "test delta stackshot performance",
 		T_META_TAG_PERF)
 {
 	stackshot_perf(SHOULD_REUSE_SIZE_HINT | SHOULD_USE_DELTA);
+}
+
+T_DECL(perf_delta_no_exclaves, "test delta stackshot performance without Exclaves",
+	    T_META_REQUIRES_SYSCTL_EQ("kern.exclaves_status", 1),
+		T_META_TAG_PERF)
+{
+	stackshot_perf(SHOULD_REUSE_SIZE_HINT | SHOULD_USE_DELTA | STACKSHOT_SKIP_EXCLAVES);
 }
 
 T_DECL(perf_delta_process, "test delta stackshot performance targeted at a process",
@@ -2543,6 +2555,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 	bool found_sharedcache_child = false, found_sharedcache_badflags = false, found_sharedcache_self = false;
 	bool found_asyncstack = false;
 	bool found_throttled_service = false;
+	bool found_exclaves = false;
 	uint64_t srp_expected_threadid = 0;
 	pid_t zombie_child_pid = -1, srp_expected_pid = -1, sharedcache_child_pid = -1, throttled_service_ctx = -1;
 	pid_t translated_child_pid = -1, transistioning_task_pid = -1;
@@ -2798,6 +2811,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 			}
 
 			if (container_type == STACKSHOT_KCCONTAINER_EXCLAVES) {
+				found_exclaves = true;
 				break;
 			}
 
@@ -3272,6 +3286,10 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 
 	if (expect_asyncstack) {
 		T_QUIET; T_ASSERT_TRUE(found_asyncstack, "found async stack threadid");
+	}
+
+	if ([extra objectForKey:no_exclaves_key] != nil) {
+		T_QUIET; T_ASSERT_FALSE(found_exclaves, "did not find any Exclaves data");
 	}
 
 

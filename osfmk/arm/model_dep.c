@@ -91,6 +91,7 @@
 
 #if CONFIG_EXCLAVES
 #include <kern/exclaves_panic.h>
+#include <kern/exclaves_inspection.h>
 #endif
 
 #if     MACH_KDP
@@ -401,6 +402,20 @@ panic_display_last_pc_lr(void)
 	}
 #endif
 }
+
+#if CONFIG_EXCLAVES
+static void
+panic_report_exclaves_stackshot(void)
+{
+	if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_FOUND) {
+		paniclog_append_noflush("** Exclaves panic stackshot found\n");
+	} else if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_NOT_FOUND) {
+		paniclog_append_noflush("** Exclaves panic stackshot not found\n");
+	} else if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_DECODE_FAILED) {
+		paniclog_append_noflush("!! Exclaves panic stackshot decode failed !!\n");
+	}
+}
+#endif /* CONFIG_EXCLAVES */
 
 static void
 do_print_all_backtraces(const char *message, uint64_t panic_options)
@@ -723,6 +738,9 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 				panic_info->eph_stackshot_len = bytes_traced;
 
 				panic_info->eph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
+#if CONFIG_EXCLAVES
+				panic_report_exclaves_stackshot();
+#endif /* CONFIG_EXCLAVES */
 				if (stackshot_flags & STACKSHOT_DO_COMPRESS) {
 					panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED;
 					bytes_uncompressed = kdp_stack_snapshot_bytes_uncompressed();
@@ -732,6 +750,9 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 				}
 			} else {
 				bytes_used = kcdata_memory_get_used_bytes(&kc_panic_data);
+#if CONFIG_EXCLAVES
+				panic_report_exclaves_stackshot();
+#endif /* CONFIG_EXCLAVES */
 				if (bytes_used > 0) {
 					/* Zero out the stackshot data */
 					bzero(stackshot_begin_loc, bytes_used);

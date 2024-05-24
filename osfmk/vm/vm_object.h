@@ -1352,7 +1352,7 @@ extern kern_return_t vm_object_ownership_change(
 // LP64todo: all the current tools are 32bit, obviously never worked for 64b
 // so probably should be a real 32b ID vs. ptr.
 // Current users just check for equality
-#define VM_OBJECT_ID(o) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((o)))
+#define VM_OBJECT_ID(o) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRHASH((o)))
 
 static inline void
 VM_OBJECT_COPY_SET(
