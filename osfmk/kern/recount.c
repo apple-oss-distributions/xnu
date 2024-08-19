@@ -197,12 +197,6 @@ recount_get_snap(processor_t processor)
 	return &processor->pr_recount.rpr_snap;
 }
 
-static struct recount_snap *
-recount_get_interrupt_snap(processor_t processor)
-{
-	return &processor->pr_recount.rpr_interrupt_snap;
-}
-
 // A simple sequence lock implementation.
 
 static void
@@ -697,7 +691,7 @@ uint64_t
 recount_current_thread_interrupt_time_mach(void)
 {
 	thread_t thread = current_thread();
-	return thread->th_recount.rth_interrupt_time_mach;
+	return thread->th_recount.rth_interrupt_duration_mach;
 }
 
 void
@@ -1115,8 +1109,13 @@ void
 recount_enter_interrupt(void)
 {
 	processor_t processor = current_processor();
-	struct recount_snap *last = recount_get_interrupt_snap(processor);
-	recount_snapshot_speculative(last);
+#if MACH_ASSERT
+	if (processor->pr_recount.rpr_last_interrupt_enter_time_mach != 0) {
+		panic("recount: unbalanced interrupt enter/leave, started at %llu",
+		    processor->pr_recount.rpr_last_interrupt_enter_time_mach);
+	}
+#endif // MACH_ASSERT
+	processor->pr_recount.rpr_last_interrupt_enter_time_mach = recount_timestamp_speculative();
 }
 
 void
@@ -1124,13 +1123,14 @@ recount_leave_interrupt(void)
 {
 	processor_t processor = current_processor();
 	thread_t thread = processor->active_thread;
-	struct recount_snap *last = recount_get_snap(processor);
-	uint64_t last_time = last->rsn_time_mach;
-	recount_snapshot_speculative(last);
-	processor->pr_recount.rpr_interrupt_time_mach +=
-	    last->rsn_time_mach - last_time;
-	thread->th_recount.rth_interrupt_time_mach +=
-	    last->rsn_time_mach - last_time;
+	uint64_t now = recount_timestamp_speculative();
+	uint64_t since = now - processor->pr_recount.rpr_last_interrupt_enter_time_mach;
+	processor->pr_recount.rpr_interrupt_duration_mach += since;
+	thread->th_recount.rth_interrupt_duration_mach += since;
+	processor->pr_recount.rpr_last_interrupt_leave_time_mach = now;
+#if MACH_ASSERT
+	processor->pr_recount.rpr_last_interrupt_enter_time_mach = 0;
+#endif // MACH_ASSERT
 }
 
 #if __x86_64__
@@ -1252,10 +1252,10 @@ recount_processor_usage(struct recount_processor *pr,
 }
 
 uint64_t
-recount_current_processor_interrupt_time_mach(void)
+recount_current_processor_interrupt_duration_mach(void)
 {
 	assert(!preemption_enabled());
-	return current_processor()->pr_recount.rpr_interrupt_time_mach;
+	return current_processor()->pr_recount.rpr_interrupt_duration_mach;
 }
 
 bool

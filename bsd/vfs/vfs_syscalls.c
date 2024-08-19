@@ -218,6 +218,9 @@ struct fd_vn_data * fg_vn_data_alloc(void);
 /* Max retry limit for rename due to vnode recycling. */
 #define MAX_RENAME_ERECYCLE_RETRIES 1024
 
+/* Max retries for concurrent mounts on the same covered vnode. */
+#define MAX_MOUNT_RETRIES       10
+
 static int rmdirat_internal(vfs_context_t, int, user_addr_t, enum uio_seg,
     int unlink_flags);
 
@@ -827,6 +830,7 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 	size_t labelsz = 0;
 	int flags = uap->flags;
 	int error;
+	int num_retries = 0;
 #if CONFIG_IMGSRC_ACCESS || CONFIG_MACF
 	boolean_t is_64bit = IS_64BIT_PROCESS(p);
 #else
@@ -840,6 +844,7 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 		return error;
 	}
 
+retry:
 	/*
 	 * Get the vnode to be covered
 	 */
@@ -971,6 +976,13 @@ out:
 		nameidone(&nd);
 	}
 
+	if (error == EBUSY) {
+		/* Retry the lookup and mount again due to concurrent mounts. */
+		if (++num_retries < MAX_MOUNT_RETRIES) {
+			goto retry;
+		}
+	}
+
 	return error;
 }
 
@@ -1014,6 +1026,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	boolean_t did_rele = FALSE;
 	boolean_t have_usecount = FALSE;
 	boolean_t did_set_lmount = FALSE;
+	boolean_t did_set_vmount = FALSE;
 	boolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
 
 #if CONFIG_ROSV_STARTUP || CONFIG_MOUNT_VM || CONFIG_BASESYSTEMROOT
@@ -1169,6 +1182,11 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	if (error != 0) {
 		goto out1;
 	}
+
+	/*
+	 * Upon successful of prepare_coveredvp(), VMOUNT is set for the covered vp.
+	 */
+	did_set_vmount = TRUE;
 
 	/*
 	 * Allocate and initialize the filesystem (mount_t)
@@ -1349,17 +1367,16 @@ update:
 				goto out1;
 			}
 
-			strlcpy(mp->mnt_vfsstat.f_mntfromname, nd.ni_cnd.cn_pnbuf, MAXPATHLEN);
 			devvp = nd.ni_vp;
-
-			nameidone(&nd);
 
 			if (devvp->v_type != VBLK) {
 				error = ENOTBLK;
+				nameidone(&nd);
 				goto out2;
 			}
 			if (major(devvp->v_rdev) >= nblkdev) {
 				error = ENXIO;
+				nameidone(&nd);
 				goto out2;
 			}
 			/*
@@ -1373,9 +1390,13 @@ update:
 					accessmode |= KAUTH_VNODE_WRITE_DATA;
 				}
 				if ((error = vnode_authorize(devvp, NULL, accessmode, ctx)) != 0) {
+					nameidone(&nd);
 					goto out2;
 				}
 			}
+
+			strlcpy(mp->mnt_vfsstat.f_mntfromname, nd.ni_cnd.cn_pnbuf, MAXPATHLEN);
+			nameidone(&nd);
 		}
 		/* On first mount, preflight and open device */
 		if (devpath && ((flags & MNT_UPDATE) == 0)) {
@@ -1650,6 +1671,12 @@ update:
 		CLR(vp->v_flag, VMOUNT);
 		vp->v_mountedhere = mp;
 		SET(vp->v_flag, VMOUNTEDHERE);
+
+		/*
+		 * Wakeup any waiter(s) in prepare_coveredvp() that is waiting for the
+		 * 'v_mountedhere' to be planted.
+		 */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 
 		/*
@@ -1750,6 +1777,8 @@ update:
 
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 		mount_list_lock();
 		mp->mnt_vtable->vfc_refcount--;
@@ -1852,6 +1881,14 @@ out1:
 		mount_unlock(mp);
 	}
 
+	if (did_set_vmount) {
+		vnode_lock_spin(vp);
+		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
+		vnode_unlock(vp);
+	}
+
 	if (mntalloc) {
 		if (mp->mnt_crossref) {
 			mount_dropcrossref(mp, vp, 0);
@@ -1890,7 +1927,7 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	int error;
 	boolean_t skip_auth = !!(internal_flags & KERNEL_MOUNT_NOAUTH);
 	boolean_t is_fmount = !!(internal_flags & KERNEL_MOUNT_FMOUNT);
-	boolean_t is_busy;
+	boolean_t is_kmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
 
 	if (!skip_auth) {
 		/*
@@ -1921,12 +1958,29 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	}
 
 	vnode_lock_spin(vp);
-	is_busy = is_fmount ?
-	    (ISSET(vp->v_flag, VMOUNT) || (vp->v_mountedhere != NULL)) :
-	    (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL));
-	if (is_busy) {
-		vnode_unlock(vp);
+
+	if (is_fmount && (ISSET(vp->v_flag, VMOUNT) || (vp->v_mountedhere != NULL))) {
 		error = EBUSY;
+	} else if (!is_kmount && (ISSET(vp->v_flag, VMOUNT) ||
+	    (vp->v_mountedhere != NULL))) {
+		/*
+		 * For mount triggered from mount() call, we want to wait for the
+		 * current in-progress mount to complete, redo lookup and retry the
+		 * mount again. Similarly, we also want to retry if we lost the race
+		 * due to concurrent mounts and the 'VMOUNT' flag has been cleared and
+		 * 'v_mountedhere' has been planted after initial lookup.
+		 */
+		if (ISSET(vp->v_flag, VMOUNT)) {
+			vnode_lock_convert(vp);
+			msleep(&vp->v_flag, &vp->v_lock, PVFS, "vnode_waitformount", NULL);
+		}
+		error = EBUSY;
+	} else if (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL)) {
+		error = EBUSY;
+	}
+
+	if (error) {
+		vnode_unlock(vp);
 		goto out;
 	}
 	SET(vp->v_flag, VMOUNT);
@@ -1938,6 +1992,8 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	if (error != 0) {
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 	}
 #endif
@@ -2052,6 +2108,8 @@ place_mount_and_checkdirs(mount_t mp, vnode_t vp, vfs_context_t ctx)
 	CLR(vp->v_flag, VMOUNT);
 	vp->v_mountedhere = mp;
 	SET(vp->v_flag, VMOUNTEDHERE);
+	/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+	wakeup(&vp->v_flag);
 	vnode_unlock(vp);
 
 	/*
@@ -2092,6 +2150,8 @@ undo_place_on_covered_vp(mount_t mp, vnode_t vp)
 	vnode_lock_spin(vp);
 	CLR(vp->v_flag, (VMOUNT | VMOUNTEDHERE));
 	vp->v_mountedhere = (mount_t)NULL;
+	/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+	wakeup(&vp->v_flag);
 	vnode_unlock(vp);
 
 	mp->mnt_vnodecovered = NULLVP;
@@ -2379,6 +2439,8 @@ out2:
 	} else {
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 	}
 out1:
@@ -2859,6 +2921,8 @@ dounmount(struct mount *mp, int flags, int withref, vfs_context_t ctx)
 		mp->mnt_crossref++;
 		coveredvp->v_mountedhere = (struct mount *)0;
 		CLR(coveredvp->v_flag, VMOUNT | VMOUNTEDHERE);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&coveredvp->v_flag);
 		vnode_unlock(coveredvp);
 		vnode_put(coveredvp);
 	}

@@ -86,6 +86,8 @@
 #define ARM_PAGEIN_STATE         27
 
 
+#define THREAD_STATE_FLAVORS     29     /* This must be updated to 1 more than the highest numerical state flavor */
+
 #ifndef ARM_STATE_FLAVOR_IS_OTHER_VALID
 #define ARM_STATE_FLAVOR_IS_OTHER_VALID(_flavor_) 0
 #endif

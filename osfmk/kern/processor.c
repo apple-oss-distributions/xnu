@@ -1293,23 +1293,25 @@ processor_set_statistics(
  */
 static kern_return_t
 processor_set_things(
-	processor_set_t pset,
-	void **thing_list,
+	processor_set_t         pset,
+	mach_port_array_t      *thing_list,
 	mach_msg_type_number_t *countp,
-	int type,
-	mach_task_flavor_t flavor)
+	int                     type,
+	mach_task_flavor_t      flavor)
 {
 	unsigned int i;
 	task_t task;
 	thread_t thread;
 
+	mach_port_array_t task_addr;
 	task_t *task_list;
 	vm_size_t actual_tasks, task_count_cur, task_count_needed;
 
+	mach_port_array_t thread_addr;
 	thread_t *thread_list;
 	vm_size_t actual_threads, thread_count_cur, thread_count_needed;
 
-	void *addr, *newaddr;
+	mach_port_array_t addr, newaddr;
 	vm_size_t count, count_needed;
 
 	if (pset == PROCESSOR_SET_NULL || pset != &pset0) {
@@ -1319,11 +1321,13 @@ processor_set_things(
 	task_count_cur = 0;
 	task_count_needed = 0;
 	task_list = NULL;
+	task_addr = NULL;
 	actual_tasks = 0;
 
 	thread_count_cur = 0;
 	thread_count_needed = 0;
 	thread_list = NULL;
+	thread_addr = NULL;
 	actual_threads = 0;
 
 	for (;;) {
@@ -1348,29 +1352,32 @@ processor_set_things(
 
 		/* grow task array */
 		if (task_count_needed > task_count_cur) {
-			kfree_type(task_t, task_count_cur, task_list);
+			mach_port_array_free(task_addr, task_count_cur);
 			assert(task_count_needed > 0);
 			task_count_cur = task_count_needed;
 
-			task_list = kalloc_type(task_t, task_count_cur, Z_WAITOK | Z_ZERO);
-			if (task_list == NULL) {
-				kfree_type(thread_t, thread_count_cur, thread_list);
+			task_addr = mach_port_array_alloc(task_count_cur,
+			    Z_WAITOK | Z_ZERO);
+			if (task_addr == NULL) {
+				mach_port_array_free(thread_addr, thread_count_cur);
 				return KERN_RESOURCE_SHORTAGE;
 			}
+			task_list = (task_t *)task_addr;
 		}
 
 		/* grow thread array */
 		if (thread_count_needed > thread_count_cur) {
-			kfree_type(thread_t, thread_count_cur, thread_list);
-
+			mach_port_array_free(thread_addr, thread_count_cur);
 			assert(thread_count_needed > 0);
 			thread_count_cur = thread_count_needed;
 
-			thread_list = kalloc_type(thread_t, thread_count_cur, Z_WAITOK | Z_ZERO);
-			if (thread_list == NULL) {
-				kfree_type(task_t, task_count_cur, task_list);
+			thread_addr = mach_port_array_alloc(thread_count_cur,
+			    Z_WAITOK | Z_ZERO);
+			if (thread_addr == NULL) {
+				mach_port_array_free(task_addr, task_count_cur);
 				return KERN_RESOURCE_SHORTAGE;
 			}
+			thread_list = (thread_t *)thread_addr;
 		}
 	}
 
@@ -1458,10 +1465,10 @@ processor_set_things(
 		for (i = 0; i < actual_tasks; i++) {
 			task_deallocate(task_list[i]);
 		}
-		kfree_type(task_t, task_count_cur, task_list);
+		mach_port_array_free(task_addr, task_count_cur);
+		task_list = NULL;
 		task_count_cur = 0;
 		actual_tasks = 0;
-		task_list = NULL;
 	}
 #endif
 
@@ -1469,32 +1476,33 @@ processor_set_things(
 		if (actual_threads == 0) {
 			/* no threads available to return */
 			assert(task_count_cur == 0);
-			kfree_type(thread_t, thread_count_cur, thread_list);
+			mach_port_array_free(thread_addr, thread_count_cur);
+			thread_list = NULL;
 			*thing_list = NULL;
 			*countp = 0;
 			return KERN_SUCCESS;
 		}
 		count_needed = actual_threads;
 		count = thread_count_cur;
-		addr = thread_list;
+		addr = thread_addr;
 	} else {
 		if (actual_tasks == 0) {
 			/* no tasks available to return */
 			assert(thread_count_cur == 0);
-			kfree_type(task_t, task_count_cur, task_list);
+			mach_port_array_free(task_addr, task_count_cur);
 			*thing_list = NULL;
 			*countp = 0;
 			return KERN_SUCCESS;
 		}
 		count_needed = actual_tasks;
 		count = task_count_cur;
-		addr = task_list;
+		addr = task_addr;
 	}
 
 	/* if we allocated too much, must copy */
 	if (count_needed < count) {
-		newaddr = kalloc_type(void *, count_needed, Z_WAITOK | Z_ZERO);
-		if (newaddr == 0) {
+		newaddr = mach_port_array_alloc(count_needed, Z_WAITOK | Z_ZERO);
+		if (newaddr == NULL) {
 			for (i = 0; i < actual_tasks; i++) {
 				if (type == PSET_THING_THREAD) {
 					thread_deallocate(thread_list[i]);
@@ -1502,18 +1510,18 @@ processor_set_things(
 					task_deallocate(task_list[i]);
 				}
 			}
-			kfree_type(void *, count, addr);
+			mach_port_array_free(addr, count);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
 		bcopy(addr, newaddr, count_needed * sizeof(void *));
-		kfree_type(void *, count, addr);
+		mach_port_array_free(addr, count);
 
 		addr = newaddr;
 		count = count_needed;
 	}
 
-	*thing_list = (void **)addr;
+	*thing_list = addr;
 	*countp = (mach_msg_type_number_t)count;
 
 	return KERN_SUCCESS;
@@ -1532,44 +1540,14 @@ processor_set_tasks_internal(
 	mach_task_flavor_t      flavor)
 {
 	kern_return_t ret;
-	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)task_list, count, PSET_THING_TASK, flavor);
+	ret = processor_set_things(pset, task_list, count, PSET_THING_TASK, flavor);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
 
 	/* do the conversion that Mig should handle */
-	switch (flavor) {
-	case TASK_FLAVOR_CONTROL:
-		for (i = 0; i < *count; i++) {
-			if ((*task_list)[i] == current_task()) {
-				/* if current_task(), return pinned port */
-				(*task_list)[i] = (task_t)convert_task_to_port_pinned((*task_list)[i]);
-			} else {
-				(*task_list)[i] = (task_t)convert_task_to_port((*task_list)[i]);
-			}
-		}
-		break;
-	case TASK_FLAVOR_READ:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_read_to_port((*task_list)[i]);
-		}
-		break;
-	case TASK_FLAVOR_INSPECT:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_inspect_to_port((*task_list)[i]);
-		}
-		break;
-	case TASK_FLAVOR_NAME:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_name_to_port((*task_list)[i]);
-		}
-		break;
-	default:
-		return KERN_INVALID_ARGUMENT;
-	}
-
+	convert_task_array_to_ports(*task_list, *count, flavor);
 	return KERN_SUCCESS;
 }
 
@@ -1613,8 +1591,8 @@ processor_set_tasks_with_flavor(
 #if defined(SECURE_KERNEL)
 kern_return_t
 processor_set_threads(
-	__unused processor_set_t                pset,
-	__unused thread_array_t         *thread_list,
+	__unused processor_set_t         pset,
+	__unused thread_act_array_t     *thread_list,
 	__unused mach_msg_type_number_t *count)
 {
 	return KERN_FAILURE;
@@ -1622,8 +1600,8 @@ processor_set_threads(
 #elif !defined(XNU_TARGET_OS_OSX)
 kern_return_t
 processor_set_threads(
-	__unused processor_set_t                pset,
-	__unused thread_array_t         *thread_list,
+	__unused processor_set_t         pset,
+	__unused thread_act_array_t     *thread_list,
 	__unused mach_msg_type_number_t *count)
 {
 	return KERN_NOT_SUPPORTED;
@@ -1632,21 +1610,19 @@ processor_set_threads(
 kern_return_t
 processor_set_threads(
 	processor_set_t         pset,
-	thread_array_t          *thread_list,
+	thread_act_array_t      *thread_list,
 	mach_msg_type_number_t  *count)
 {
 	kern_return_t ret;
-	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)thread_list, count, PSET_THING_THREAD, TASK_FLAVOR_CONTROL);
+	ret = processor_set_things(pset, thread_list, count,
+	    PSET_THING_THREAD, TASK_FLAVOR_CONTROL);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
 
 	/* do the conversion that Mig should handle */
-	for (i = 0; i < *count; i++) {
-		(*thread_list)[i] = (thread_t)convert_thread_to_port((*thread_list)[i]);
-	}
+	convert_thread_array_to_ports(*thread_list, *count, TASK_FLAVOR_CONTROL);
 	return KERN_SUCCESS;
 }
 #endif

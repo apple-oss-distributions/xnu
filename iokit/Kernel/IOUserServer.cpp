@@ -3533,8 +3533,7 @@ IOUserServer::rpc(IORPC rpc)
 
 	if (oneway) {
 		ret = kernel_mach_msg_send(&mach->msgh, sendSize,
-		    MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_NOIMPORTANCE,
-		    0, &message_moved);
+		    MACH_SEND_KERNEL_DEFAULT, 0, &message_moved);
 	} else {
 		assert(replySize >= (sizeof(IORPCMessageMach) + sizeof(IORPCMessage)));
 		ret = kernel_mach_msg_rpc(&mach->msgh, sendSize, replySize, FALSE, &message_moved);

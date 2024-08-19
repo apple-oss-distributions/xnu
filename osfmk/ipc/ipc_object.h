@@ -373,6 +373,6 @@ extern void ipc_object_copyout_dest(
 	mach_port_name_t        *namep);
 
 #pragma GCC visibility pop
-__ASSUME_PTR_ABI_SINGLE_BEGIN __END_DECLS
+__ASSUME_PTR_ABI_SINGLE_END __END_DECLS
 
 #endif  /* _IPC_IPC_OBJECT_H_ */

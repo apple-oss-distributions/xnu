@@ -164,7 +164,7 @@ host_processors(host_priv_t host_priv, processor_array_t * out_array, mach_msg_t
 
 	static_assert(sizeof(mach_port_t) == sizeof(processor_t));
 
-	mach_port_t *ports = kalloc_type(mach_port_t, count, Z_WAITOK);
+	mach_port_array_t ports = mach_port_array_alloc(count, Z_WAITOK);
 	if (!ports) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -174,12 +174,11 @@ host_processors(host_priv_t host_priv, processor_array_t * out_array, mach_msg_t
 		assert(processor != PROCESSOR_NULL);
 
 		/* do the conversion that Mig should handle */
-		ipc_port_t processor_port = convert_processor_to_port(processor);
-		ports[i] = processor_port;
+		ports[i].port = convert_processor_to_port(processor);
 	}
 
 	*countp = count;
-	*out_array = (processor_array_t)ports;
+	*out_array = ports;
 
 	return KERN_SUCCESS;
 }
@@ -1042,7 +1041,7 @@ host_kernel_version(host_t host, kernel_version_t out_version)
 kern_return_t
 host_processor_sets(host_priv_t host_priv, processor_set_name_array_t * pset_list, mach_msg_type_number_t * count)
 {
-	mach_port_t *ports;
+	mach_port_array_t ports;
 
 	if (host_priv == HOST_PRIV_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1053,12 +1052,12 @@ host_processor_sets(host_priv_t host_priv, processor_set_name_array_t * pset_lis
 	 *	touched while holding a lock.
 	 */
 
-	ports = kalloc_type(mach_port_t, 1, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ports = mach_port_array_alloc(1, Z_WAITOK | Z_NOFAIL);
 
 	/* do the conversion that Mig should handle */
-	ports[0] = convert_pset_name_to_port(&pset0);
+	ports[0].port = convert_pset_name_to_port(&pset0);
 
-	*pset_list = (processor_set_array_t)ports;
+	*pset_list = ports;
 	*count = 1;
 
 	return KERN_SUCCESS;

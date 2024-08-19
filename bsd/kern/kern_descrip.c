@@ -3473,6 +3473,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
+
+		if ((fp->fp_glob->fg_flag & FWRITE) == 0) {
+			error = EBADF;
+			goto out;
+		}
 		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 

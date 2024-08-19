@@ -98,6 +98,7 @@ osfmk/ipc/ipc_kmsg.c			standard
 osfmk/ipc/ipc_mqueue.c		standard
 osfmk/ipc/ipc_notify.c		standard
 osfmk/ipc/ipc_object.c		standard
+osfmk/ipc/ipc_policy.c			standard
 osfmk/ipc/ipc_port.c			standard
 osfmk/ipc/ipc_pset.c			standard
 osfmk/ipc/ipc_right.c			standard
@@ -242,7 +243,6 @@ osfmk/kern/epoch_sync.c		optional config_exclaves
 ./mach/memory_entry_server.c		standard
 ./mach/resource_notify_user.c		standard
 ./mach/restartable_server.c		standard
-./mach/upl_server.c			standard
 ./mach/audit_triggers_user.c		standard
 ./mach/task_access_user.c          	standard
 osfmk/corpses/corpse.c			standard

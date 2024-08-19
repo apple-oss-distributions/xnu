@@ -325,8 +325,6 @@ ${MIG_USHDRS} : \
 
 INCFLAGS_MAKEFILE= -I..
 
-MIGKSFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1 -mach_msg2
-MIGKUFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024
 #
 # MIG-generated headers that are traditionally used by kernel
 # level code.
@@ -399,7 +397,6 @@ MIG_KSSRC = \
 	mach_eventlink_server.c \
 	exc_server.c \
 	host_priv_server.c \
-	host_security_server.c \
 	mach_exc_server.c \
 	mach_host_server.c \
 	mach_notify_server.c \

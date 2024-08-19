@@ -70,15 +70,7 @@ is_kernel_pointer(void *arg, size_t arg_len)
 	assert(arg_len <= sizeof(value));
 	(void) memcpy(&value, arg, arg_len);
 
-#if __has_feature(ptrauth_calls)
-	/**
-	 * Strip out the pointer authentication code before
-	 * checking whether the pointer is a kernel address.
-	 */
-	value = (unsigned long long)VM_KERNEL_STRIP_PTR(value);
-#endif /* __has_feature(ptrauth_calls) */
-
-	return value >= VM_MIN_KERNEL_AND_KEXT_ADDRESS && value <= VM_MAX_KERNEL_ADDRESS;
+	return VM_KERNEL_ADDRESS(value);
 }
 
 static void

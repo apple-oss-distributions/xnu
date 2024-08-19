@@ -1038,6 +1038,8 @@ vm_map_apple_protected(
 			.vmf_overwrite = true,
 			.vmkf_overwrite_immutable = true,
 		};
+		/* make the new mapping as "permanent" as the one it replaces */
+		vmk_flags.vmf_permanent = tmp_entry.vme_permanent;
 #if __arm64__
 		if (tmp_entry.used_for_jit &&
 		    (VM_MAP_PAGE_SHIFT(map) != FOURK_PAGE_SHIFT ||

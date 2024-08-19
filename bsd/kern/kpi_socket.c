@@ -1159,12 +1159,21 @@ sock_release(socket_t sock)
 		/* NOTREACHED */
 	}
 	/*
+	 * The so_usecount values '2' and '3' are special because they
+	 * indicate how many references are on the socket when it is
+	 * ready for closing:
+	 *  - there is always one use count that was just taken by this function;
+	 *  - '2' works for most kinds of socket as there is one use count
+	 *    for the socket held by the file or by the KEXT;
+	 *  - '3' works for connected Unix domain sockets as each peer
+	 *    holds a connection to the other peer.
 	 * Check SS_NOFDREF in case a close happened as sock_retain()
 	 * was grabbing the lock
 	 */
-	if ((sock->so_retaincnt == 0) && (sock->so_usecount == 2) &&
-	    (!(sock->so_state & SS_NOFDREF) ||
-	    (sock->so_flags & SOF_MP_SUBFLOW))) {
+	if ((sock->so_retaincnt == 0) &&
+	    ((SOCK_DOM(sock) != PF_LOCAL && sock->so_usecount == 2) ||
+	    (SOCK_DOM(sock) == PF_LOCAL && (sock->so_state & SS_ISCONNECTED) && sock->so_usecount == 3)) &&
+	    (!(sock->so_state & SS_NOFDREF) || (sock->so_flags & SOF_MP_SUBFLOW))) {
 		/* close socket only if the FD is not holding it */
 		soclose_locked(sock);
 	} else {

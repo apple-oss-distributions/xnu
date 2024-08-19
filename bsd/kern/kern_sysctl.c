@@ -4906,28 +4906,6 @@ SYSCTL_INT(_kern, OID_AUTO, ipc_portbt,
     &ipc_portbt, 0, "");
 
 /*
- * Mach message signature validation control and outputs
- */
-extern unsigned int ikm_signature_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_failures, 0, "Message signature failure count");
-extern unsigned int ikm_signature_failure_id;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_failure_id,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_failure_id, 0, "Message signature failure count");
-
-#if (DEVELOPMENT || DEBUG)
-extern unsigned int ikm_signature_panic_disable;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_panic_disable,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ikm_signature_panic_disable, 0, "Message signature failure mode");
-extern unsigned int ikm_signature_header_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_header_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_header_failures, 0, "Message header signature failure count");
-extern unsigned int ikm_signature_trailer_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_trailer_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_trailer_failures, 0, "Message trailer signature failure count");
-#endif
-
-/*
  * Scheduler sysctls
  */
 
@@ -5881,6 +5859,22 @@ SYSCTL_PROC(_kern, OID_AUTO, test_panic_with_thread,
     CTLFLAG_MASKED | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_WR | CTLTYPE_STRING,
     0, 0, sysctl_test_panic_with_thread, "A", "test panic flow for backtracing a different thread");
 #endif /* defined (__x86_64__) */
+
+static int
+sysctl_generate_file_permissions_guard_exception SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+	generate_file_permissions_guard_exception(0, val);
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, file_perm_guard_exception, CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    0, 0, sysctl_generate_file_permissions_guard_exception, "I", "Test File Permission Guard exception");
 
 #endif /* DEVELOPMENT || DEBUG */
 

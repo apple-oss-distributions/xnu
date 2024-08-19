@@ -236,6 +236,15 @@ typedef ipc_info_port_t         exception_handler_info_t;
  * are not completely accurate at the moment for other kernel
  * components.
  */
+#if XNU_KERNEL_PRIVATE
+typedef mach_port_array_t        task_array_t;
+typedef mach_port_array_t        thread_array_t;
+typedef mach_port_array_t        processor_set_array_t;
+typedef mach_port_array_t        processor_set_name_array_t;
+typedef mach_port_array_t        processor_array_t;
+typedef mach_port_array_t        thread_act_array_t;
+typedef mach_port_array_t        ledger_array_t;
+#else
 typedef task_t                  *task_array_t;
 typedef thread_t                *thread_array_t;
 typedef processor_set_t         *processor_set_array_t;
@@ -243,6 +252,7 @@ typedef processor_set_t         *processor_set_name_array_t;
 typedef processor_t             *processor_array_t;
 typedef thread_act_t            *thread_act_array_t;
 typedef ledger_t                *ledger_array_t;
+#endif
 
 /*
  * However the real mach_types got declared, we also have to declare

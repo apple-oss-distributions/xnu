@@ -71,8 +71,10 @@
 #ifndef _MACH_MESSAGE_H_
 #define _MACH_MESSAGE_H_
 
+#include <stddef.h>
 #include <stdint.h>
 #include <machine/limits.h>
+#include <machine/types.h> /* user_addr_t */
 #include <mach/port.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
@@ -83,6 +85,9 @@
 #include <Availability.h>
 #if !KERNEL && PRIVATE
 #include <TargetConditionals.h>
+#endif
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
 #endif
 
 /*
@@ -370,6 +375,14 @@ typedef unsigned int mach_msg_descriptor_type_t;
 
 #define MACH_MSG_DESCRIPTOR_MAX MACH_MSG_GUARDED_PORT_DESCRIPTOR
 
+#if XNU_KERNEL_PRIVATE && __has_feature(ptrauth_calls)
+#define __ipc_desc_sign(d) \
+	__ptrauth(ptrauth_key_process_independent_data, \
+	    1, ptrauth_string_discriminator("ipc_desc." d))
+#else
+#define __ipc_desc_sign(d)
+#endif /* KERNEL */
+
 #pragma pack(push, 4)
 
 typedef struct {
@@ -380,16 +393,21 @@ typedef struct {
 } mach_msg_type_descriptor_t;
 
 typedef struct {
+#if KERNEL
+	union {
+		mach_port_t __ipc_desc_sign("port") name;
+		mach_port_t           kext_name;
+		mach_port_t           u_name;
+	};
+#else
 	mach_port_t                   name;
-#if !(defined(KERNEL) && defined(__LP64__))
-// Pad to 8 bytes everywhere except the K64 kernel where mach_port_t is 8 bytes
 	mach_msg_size_t               pad1;
 #endif
 	unsigned int                  pad2 : 16;
 	mach_msg_type_name_t          disposition : 8;
 	mach_msg_descriptor_type_t    type : 8;
 #if defined(KERNEL)
-	uint32_t          pad_end;
+	uint32_t                      pad_end;
 #endif
 } mach_msg_port_descriptor_t;
 
@@ -422,7 +440,15 @@ typedef struct {
 } mach_msg_ool_descriptor64_t;
 
 typedef struct {
-	void*                         address;
+#if KERNEL
+	union {
+		void *__ipc_desc_sign("address") address;
+		void                 *kext_address;
+		user_addr_t           u_address;
+	};
+#else
+	void                         *address;
+#endif
 #if !defined(__LP64__)
 	mach_msg_size_t               size;
 #endif
@@ -457,7 +483,15 @@ typedef struct {
 } mach_msg_ool_ports_descriptor64_t;
 
 typedef struct {
-	void*                         address;
+#if KERNEL
+	union {
+		void *__ipc_desc_sign("port_array") address;
+		void                 *kext_address;
+		user_addr_t           u_address;
+	};
+#else
+	void                         *address;
+#endif
 #if !defined(__LP64__)
 	mach_msg_size_t               count;
 #endif
@@ -491,16 +525,18 @@ typedef struct {
 
 typedef struct {
 #if defined(KERNEL)
-	mach_port_t                   name;
-#if !defined(__LP64__)
-	uint32_t                      pad1;
-#endif
+	union {
+		mach_port_t __ipc_desc_sign("guarded_port") name;
+		mach_port_t           kext_name;
+		mach_port_context_t   u_context;
+	};
 	mach_msg_guard_flags_t        flags : 16;
 	mach_msg_type_name_t          disposition : 8;
 	mach_msg_descriptor_type_t    type : 8;
-#if defined(__LP64__)
-	uint32_t                      pad_end;
-#endif /* defined(__LP64__) */
+	union {
+		uint32_t              pad_end;
+		mach_port_name_t      u_name;
+	};
 #else
 	mach_port_context_t           context;
 #if !defined(__LP64__)
@@ -521,7 +557,7 @@ typedef struct {
  * are of the same size in that environment.
  */
 #if defined(__LP64__) && defined(KERNEL)
-typedef union{
+typedef union {
 	mach_msg_port_descriptor_t            port;
 	mach_msg_ool_descriptor32_t           out_of_line;
 	mach_msg_ool_ports_descriptor32_t     ool_ports;
@@ -529,7 +565,7 @@ typedef union{
 	mach_msg_guarded_port_descriptor32_t  guarded_port;
 } mach_msg_descriptor_t;
 #else
-typedef union{
+typedef union {
 	mach_msg_port_descriptor_t            port;
 	mach_msg_ool_descriptor_t             out_of_line;
 	mach_msg_ool_ports_descriptor_t       ool_ports;
@@ -576,8 +612,8 @@ typedef struct {
 } mach_msg_vector_t;
 
 typedef struct {
-	mach_msg_size_t         msgdh_size;
-	uint32_t                msgdh_reserved; /* For future */
+	mach_msg_size_t                 msgdh_size;
+	uint32_t                        msgdh_reserved; /* For future */
 } mach_msg_aux_header_t;
 
 #endif /* PRIVATE */
@@ -591,6 +627,7 @@ typedef struct {
 } mach_msg_base_t;
 
 #if MACH_KERNEL_PRIVATE
+
 typedef struct {
 	/* first two fields must align with mach_msg_header_t */
 	mach_msg_bits_t               msgh_bits;
@@ -605,6 +642,39 @@ typedef struct {
 	mach_msg_user_header_t        header;
 	mach_msg_body_t               body;
 } mach_msg_user_base_t;
+
+typedef union {
+	mach_msg_type_descriptor_t            kdesc_header;
+	mach_msg_port_descriptor_t            kdesc_port;
+	mach_msg_ool_descriptor_t             kdesc_memory;
+	mach_msg_ool_ports_descriptor_t       kdesc_port_array;
+	mach_msg_guarded_port_descriptor_t    kdesc_guarded_port;
+} mach_msg_kdescriptor_t;
+
+static inline mach_msg_descriptor_type_t
+mach_msg_kdescriptor_type(const mach_msg_kdescriptor_t *kdesc)
+{
+	return kdesc->kdesc_header.type;
+}
+
+typedef struct {
+	mach_msg_header_t             msgb_header;
+	mach_msg_size_t               msgb_dsc_count;
+	mach_msg_kdescriptor_t        msgb_dsc_array[];
+} mach_msg_kbase_t;
+
+static inline mach_msg_kbase_t *
+mach_msg_header_to_kbase(mach_msg_header_t *hdr)
+{
+	return __container_of(hdr, mach_msg_kbase_t, msgb_header);
+}
+
+#define mach_port_array_alloc(count, flags) \
+	kalloc_type(mach_port_ool_t, count, flags)
+
+#define mach_port_array_free(ptr, count) \
+	kfree_type(mach_port_ool_t, count, ptr)
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 typedef unsigned int mach_msg_trailer_type_t;
@@ -1002,15 +1072,55 @@ __options_decl(mach_msg_option64_t, uint64_t, {
 	MACH64_SEND_MQ_CALL                    = 0x0000000400000000ull,
 	/* This message destination is unknown. Used by old simulators only. */
 	MACH64_SEND_ANY                        = 0x0000000800000000ull,
-	/* This message is a DriverKit call (Temporary) */
+	/* This message is a DriverKit call */
 	MACH64_SEND_DK_CALL                    = 0x0000001000000000ull,
 
 #ifdef XNU_KERNEL_PRIVATE
 	/*
+	 * Policy for the mach_msg2_trap() call
+	 */
+	MACH64_POLICY_KERNEL_EXTENSION         = 0x0002000000000000ull,
+	MACH64_POLICY_FILTER_NON_FATAL         = 0x0004000000000000ull,
+	MACH64_POLICY_FILTER_MSG               = 0x0008000000000000ull,
+	MACH64_POLICY_DEFAULT                  = 0x0010000000000000ull,
+#if XNU_TARGET_OS_OSX
+	MACH64_POLICY_SIMULATED                = 0x0020000000000000ull,
+#else
+	MACH64_POLICY_SIMULATED                = 0x0000000000000000ull,
+#endif
+#if CONFIG_ROSETTA
+	MACH64_POLICY_TRANSLATED               = 0x0040000000000000ull,
+#else
+	MACH64_POLICY_TRANSLATED               = 0x0000000000000000ull,
+#endif
+	MACH64_POLICY_HARDENED                 = 0x0080000000000000ull,
+	MACH64_POLICY_RIGID                    = 0x0100000000000000ull,
+	MACH64_POLICY_PLATFORM                 = 0x0200000000000000ull,
+	MACH64_POLICY_KERNEL                   = MACH64_SEND_KERNEL,
+
+	/* one of these bits must be set to have a valid policy */
+	MACH64_POLICY_NEEDED_MASK              = (
+		MACH64_POLICY_SIMULATED |
+		MACH64_POLICY_TRANSLATED |
+		MACH64_POLICY_DEFAULT |
+		MACH64_POLICY_HARDENED |
+		MACH64_POLICY_RIGID |
+		MACH64_POLICY_PLATFORM |
+		MACH64_POLICY_KERNEL),
+
+	/* extra policy modifiers */
+	MACH64_POLICY_MASK                     = (
+		MACH64_POLICY_KERNEL_EXTENSION |
+		MACH64_POLICY_FILTER_NON_FATAL |
+		MACH64_POLICY_FILTER_MSG |
+		MACH64_POLICY_NEEDED_MASK),
+
+	/*
 	 * If kmsg has auxiliary data, append it immediate after the message
 	 * and trailer.
 	 *
-	 * Must be used in conjunction with MACH64_MSG_VECTOR
+	 * Must be used in conjunction with MACH64_MSG_VECTOR,
+	 * only used by kevent() from the kernel.
 	 */
 	MACH64_RCV_LINEAR_VECTOR               = 0x1000000000000000ull,
 	/* Receive into highest addr of buffer */
@@ -1091,17 +1201,6 @@ __options_decl(mach_msg_option64_t, uint64_t, {
 /* The options implemented by the library interface to mach_msg et. al. */
 #define MACH_MSG_OPTION_LIB      (MACH_SEND_INTERRUPT | MACH_RCV_INTERRUPT)
 
-/*
- * Default options to use when sending from the kernel.
- *
- * Until we are sure of its effects, we are disabling
- * importance donation from the kernel-side of user
- * threads in importance-donating tasks.
- * (11938665 & 23925818)
- */
-#define MACH_SEND_KERNEL_DEFAULT (MACH_SEND_MSG | \
-	                          MACH_SEND_ALWAYS | MACH_SEND_NOIMPORTANCE)
-
 #define MACH_SEND_WITH_STRICT_REPLY(_opts) (((_opts) & (MACH_MSG_STRICT_REPLY | MACH_SEND_MSG)) == \
 	                                    (MACH_MSG_STRICT_REPLY | MACH_SEND_MSG))
 
@@ -1118,6 +1217,23 @@ __options_decl(mach_msg_option64_t, uint64_t, {
 	                                      (MACH_MSG_STRICT_REPLY | MACH_RCV_MSG | MACH_RCV_GUARDED_DESC))
 
 #endif /* MACH_KERNEL_PRIVATE */
+#ifdef XNU_KERNEL_PRIVATE
+
+/*
+ * Default options to use when sending from the kernel.
+ *
+ * Until we are sure of its effects, we are disabling
+ * importance donation from the kernel-side of user
+ * threads in importance-donating tasks.
+ * (11938665 & 23925818)
+ */
+#define MACH_SEND_KERNEL_DEFAULT \
+	(mach_msg_option64_t)(MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_NOIMPORTANCE)
+
+#define MACH_SEND_KERNEL_IMPORTANCE \
+	(mach_msg_option64_t)(MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE)
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*
  * XXXMAC: note that in the case of MACH_RCV_TRAILER_LABELS,
@@ -1409,13 +1525,132 @@ extern kern_return_t            mach_voucher_deallocate(
 
 #elif defined(MACH_KERNEL_PRIVATE)
 
-extern mach_msg_return_t mach_msg_receive_results_kevent(
-	mach_msg_size_t *size,
-	mach_msg_size_t *aux_size,
-	uint32_t        *ppri,
-	mach_msg_qos_t  *oqos);
+/*!
+ * @typedef mach_msg_send_uctx_t
+ *
+ * @brief
+ * Data structure used for the send half of a @c mach_msg() call from userspace.
+ *
+ * @discussion
+ * Callers must fill the @c send_header, @c send_dsc_count with the user header
+ * being sent, as well as the parameters of user buffers used for send
+ * (@c send_{msg,aux}_{addr,size}).
+ *
+ * @field send_header           a copy of the user header being sent.
+ * @field send_dsc_count        the number of descriptors being sent.
+ *                              must be 0 if the header doesn't have
+ *                              the MACH_MSGH_BITS_COMPLEX bit set.
+ * @field send_msg_addr         the userspace address for the message being sent.
+ * @field send_msg_size         the size of the message being sent.
+ * @field send_aux_addr         the userspace address for the auxiliary data
+ *                              being sent (will be 0 if not using a vector
+ *                              operation)
+ * @field send_aux_size         the size for the auxiliary data being sent.
+ *
+ * @field send_dsc_mask         internal field being used during right copyin
+ *                              of descriptors.
+ * @field send_dsc_usize        the size (in bytes) of the user representation
+ *                              of descriptors being sent.
+ * @field send_dsc_port_count   number of ports being sent in descriptors
+ *                              (both in port or port array descriptors).
+ * @field send_dsc_vm_size      kernel wired memory (not counting port arrays)
+ *                              needed to copyin this message.
+ */
+typedef struct {
+	/* send context/arguments */
+	mach_msg_user_header_t send_header;
+	mach_msg_size_t        send_dsc_count;
 
-extern mach_msg_return_t mach_msg_receive_results(void);
+	mach_vm_address_t      send_msg_addr;
+	mach_vm_address_t      send_aux_addr;
+	mach_msg_size_t        send_msg_size;
+	mach_msg_size_t        send_aux_size;
+
+	/* filled by copyin */
+	uint64_t               send_dsc_mask;
+	mach_msg_size_t        send_dsc_usize;
+	mach_msg_size_t        send_dsc_port_count;
+	vm_size_t              send_dsc_vm_size;
+} mach_msg_send_uctx_t;
+
+
+/*!
+ * @typedef mach_msg_recv_bufs_t
+ *
+ * @brief
+ * Data structure representing the buffers being used by userspace to receive
+ * a message.
+ *
+ * @field recv_msg_addr         the userspace address for the message
+ *                              receive buffer.
+ * @field recv_msg_size         the size of the message receive buffer.
+ *
+ * @field recv_aux_addr         the userspace address for the auxiliary data
+ *                              receive buffer (will be 0 if not using a vector
+ *                              operation)
+ * @field recv_aux_size         the size for the auxiliary data receive buffer.
+ */
+typedef struct {
+	mach_vm_address_t      recv_msg_addr;
+	mach_vm_address_t      recv_aux_addr;
+	mach_msg_size_t        recv_msg_size;
+	mach_msg_size_t        recv_aux_size;
+} mach_msg_recv_bufs_t;
+
+
+/*!
+ * @typedef mach_msg_recv_result_t
+ *
+ * @brief
+ * Data structure representing the results of a receive operation,
+ * in the context of the user task receiving that message.
+ *
+ * @field msgr_msg_size         the user size of the message being copied out
+ *                              (not including trailer or auxiliary data).
+ *                              set for MACH_RCV_TOO_LARGE or MACH_MSG_SUCCESS,
+ *                              0 otherwise.
+ *
+ * @field msgr_trailer_size     the trailer size of the message being copied out.
+ *                              set MACH_MSG_SUCCESS, 0 otherwise.
+ *
+ * @field msgr_aux_size         the auxiliary data size of the message being
+ *                              copied out.
+ *                              set for MACH_RCV_TOO_LARGE or MACH_MSG_SUCCESS,
+ *                              0 otherwise.
+ *
+ * @field msgr_recv_name        the name of the port receiving the message.
+ *                              Set for MACH_RCV_TOO_LARGE,
+ *                              or to MSGR_PSEUDO_RECEIVE for pseudo-receive.
+ *
+ * @field msgr_seqno            the sequence number for the message being
+ *                              received.
+ *
+ * @field msgr_context          the mach port context fort the port receiving
+ *                              the message.
+ *
+ * @field msgr_priority         the pthread priority of the message being
+ *                              received.
+ *
+ * @field msgr_qos_ovrd         the qos override for the message being received.
+ */
+typedef struct {
+	/* general info about the message being copied out */
+	mach_msg_size_t        msgr_msg_size;
+	mach_msg_size_t        msgr_trailer_size;
+	mach_msg_size_t        msgr_aux_size;
+#define MSGR_PSEUDO_RECEIVE    (0xfffffffe)
+	mach_port_name_t       msgr_recv_name;
+	mach_port_seqno_t      msgr_seqno;
+	mach_port_context_t    msgr_context;
+
+	/* metadata for the sake of kevent only */
+	uint32_t               msgr_priority;
+	mach_msg_qos_t         msgr_qos_ovrd;
+} mach_msg_recv_result_t;
+
+extern mach_msg_return_t mach_msg_receive_results(
+	mach_msg_recv_result_t *msg); /* out only, can be NULL */
+
 #endif  /* KERNEL */
 
 __END_DECLS

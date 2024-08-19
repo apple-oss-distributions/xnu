@@ -428,10 +428,6 @@ extern void         ipc_kobject_upgrade_mktimer_locked(
 	ipc_port_t                  port,
 	ipc_kobject_t               kobject);
 
-/* in mk_timer.c */
-extern void         ipc_kobject_mktimer_require_locked(
-	ipc_port_t                  port);
-
 /* Check if a kobject can be copied out to a given space */
 extern bool     ipc_kobject_label_check(
 	ipc_space_t                 space,
@@ -469,7 +465,7 @@ extern void ipc_kobject_init(void);
 extern ipc_kmsg_t ipc_kobject_server(
 	ipc_port_t                  receiver,
 	ipc_kmsg_t                  request,
-	mach_msg_option_t           option);
+	mach_msg_option64_t         option);
 
 /* Release any kernel object resources associated with a port */
 extern void ipc_kobject_destroy(

@@ -190,7 +190,7 @@ host_notify_all(
 		zfree(host_notify_zone, entry);
 
 		msg->msgh_remote_port = port;
-		(void)mach_msg_send_from_kernel_proper(msg, msg_size);
+		(void)mach_msg_send_from_kernel(msg, msg_size);
 	}
 }
 

@@ -5940,23 +5940,26 @@ necp_copy_inp_domain_info(struct inpcb *inp, struct socket *so, nstat_domain_inf
 
 	necp_lock_socket_attributes();
 
-	domain_info->is_tracker = !!(so->so_flags1 & SOF1_KNOWN_TRACKER);
-	domain_info->is_non_app_initiated = !!(so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED);
-	if (domain_info->is_tracker &&
-	    inp->inp_necp_attributes.inp_tracker_domain != NULL) {
-		strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_tracker_domain,
-		    sizeof(domain_info->domain_name));
-	} else if (inp->inp_necp_attributes.inp_domain != NULL) {
-		strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_domain,
-		    sizeof(domain_info->domain_name));
-	}
-	if (inp->inp_necp_attributes.inp_domain_owner != NULL) {
-		strlcpy(domain_info->domain_owner, inp->inp_necp_attributes.inp_domain_owner,
-		    sizeof(domain_info->domain_owner));
-	}
-	if (inp->inp_necp_attributes.inp_domain_context != NULL) {
-		strlcpy(domain_info->domain_tracker_ctxt, inp->inp_necp_attributes.inp_domain_context,
-		    sizeof(domain_info->domain_tracker_ctxt));
+	domain_info->is_silent = !!(so->so_flags1 & SOF1_DOMAIN_INFO_SILENT);
+	if (!domain_info->is_silent) {
+		domain_info->is_tracker = !!(so->so_flags1 & SOF1_KNOWN_TRACKER);
+		domain_info->is_non_app_initiated = !!(so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED);
+		if (domain_info->is_tracker &&
+		    inp->inp_necp_attributes.inp_tracker_domain != NULL) {
+			strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_tracker_domain,
+			    sizeof(domain_info->domain_name));
+		} else if (inp->inp_necp_attributes.inp_domain != NULL) {
+			strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_domain,
+			    sizeof(domain_info->domain_name));
+		}
+		if (inp->inp_necp_attributes.inp_domain_owner != NULL) {
+			strlcpy(domain_info->domain_owner, inp->inp_necp_attributes.inp_domain_owner,
+			    sizeof(domain_info->domain_owner));
+		}
+		if (inp->inp_necp_attributes.inp_domain_context != NULL) {
+			strlcpy(domain_info->domain_tracker_ctxt, inp->inp_necp_attributes.inp_domain_context,
+			    sizeof(domain_info->domain_tracker_ctxt));
+		}
 	}
 
 	necp_unlock_socket_attributes();
@@ -6074,7 +6077,10 @@ necp_find_domain_info_common(struct necp_client *client,
 		offset += sizeof(struct necp_tlv_header) + length;
 	}
 
-	if (domain_info->is_tracker && tracker_domain != NULL && tracker_domain_length > 0) {
+	if (domain_info->is_silent) {
+		memset(domain_info, 0, sizeof(*domain_info));
+		domain_info->is_silent = true;
+	} else if (domain_info->is_tracker && tracker_domain != NULL && tracker_domain_length > 0) {
 		size_t length_to_copy = MIN(tracker_domain_length, sizeof(domain_info->domain_name));
 		strlcpy(domain_info->domain_name, (const char *)tracker_domain, length_to_copy);
 	} else if (domain != NULL && domain_length > 0) {

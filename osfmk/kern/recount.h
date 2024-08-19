@@ -267,7 +267,7 @@ struct recount_thread {
 	// `recount_thread_plan`.
 	struct recount_track *rth_lifetime;
 	// Time spent by this thread running interrupt handlers.
-	uint64_t rth_interrupt_time_mach;
+	uint64_t rth_interrupt_duration_mach;
 #if RECOUNT_THREAD_BASED_LEVEL
 	// The current level this thread is executing in.
 	recount_level_t rth_current_level;
@@ -347,11 +347,12 @@ struct recount_snap {
 struct recount_processor {
 	struct recount_snap rpr_snap;
 	struct recount_track rpr_active;
-	struct recount_snap rpr_interrupt_snap;
 #if MACH_ASSERT
 	recount_level_t rpr_current_level;
 #endif // MACH_ASSERT
-	uint64_t rpr_interrupt_time_mach;
+	uint64_t rpr_interrupt_duration_mach;
+	uint64_t rpr_last_interrupt_enter_time_mach;
+	uint64_t rpr_last_interrupt_leave_time_mach;
 	uint64_t rpr_idle_time_mach;
 	_Atomic uint64_t rpr_state_last_abs_time;
 #if __AMP__
@@ -368,7 +369,7 @@ void recount_processor_usage(struct recount_processor *pr,
 
 // Get the current amount of time spent handling interrupts by the current
 // processor.
-uint64_t recount_current_processor_interrupt_time_mach(void);
+uint64_t recount_current_processor_interrupt_duration_mach(void);
 
 #pragma mark updates
 

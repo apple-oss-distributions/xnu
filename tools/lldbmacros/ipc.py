@@ -225,13 +225,11 @@ def GetKmsgHeader(kmsgp):
     returns:
         Mach message header for kmsgp
     """
-    inline_buffer = kmsgp + sizeof(dereference(kmsgp))
-
-    if kmsgp.ikm_type <= int(GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL')):
-        return kern.GetValueFromAddress(inline_buffer, 'mach_msg_header_t *')
-
-    vec = kern.GetValueFromAddress(inline_buffer, 'ipc_kmsg_vector_t *')
-    return kern.GetValueFromAddress(unsigned(vec.kmsgv_data), 'mach_msg_header_t *')
+    if kmsgp.ikm_type == GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_ALL_INLINED'):
+        return kern.GetValueFromAddress(int(addressof(kmsgp.ikm_big_data)), 'mach_msg_header_t *')
+    if kmsgp.ikm_type == GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL'):
+        return kern.GetValueFromAddress(int(addressof(kmsgp.ikm_small_data)), 'mach_msg_header_t *')
+    return kern.GetValueFromAddress(unsigned(kmsgp.ikm_kdata), 'mach_msg_header_t *')
 
 @header("{:<20s} {:<20s} {:<20s} {:<10s} {:>6s}  {:<20s}  {:<8s}  {:<26s} {:<26s}".format(
             "", "kmsg", "header", "msgid", "size", "reply-port", "disp", "source", "destination"))
@@ -1114,6 +1112,9 @@ def CollectPortsForAnalysis(port, disposition):
                 continue
             ipr_bits = unsigned(ipr.ipr_soright) & 3
             ipr_port = kern.GetValueFromAddress(int(ipr.ipr_soright) & ~3, 'struct ipc_port *')
+            # skip unused entries in the ipc table to avoid null dereferences
+            if not ipr_port:
+                continue
             ipr_disp = 0
             if ipr_bits & 3: ## send-possible armed and requested
                 ipr_disp = -5

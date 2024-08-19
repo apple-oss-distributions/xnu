@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -300,7 +300,8 @@ exception_deliver(
 		}
 
 		c_thr_exc_raise_state++;
-		old_state_cnt = _MachineStateCount[flavor];
+		assert(flavor < THREAD_STATE_FLAVORS);
+		old_state_cnt = (flavor < THREAD_STATE_FLAVORS) ? _MachineStateCount[flavor] : 0;
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
 		    &old_state_cnt, get_flags);
@@ -439,7 +440,8 @@ exception_deliver(
 		}
 		/* task and thread ref consumed */
 
-		old_state_cnt = _MachineStateCount[flavor];
+		assert(flavor < THREAD_STATE_FLAVORS);
+		old_state_cnt = (flavor < THREAD_STATE_FLAVORS) ? _MachineStateCount[flavor] : 0;
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
 		    &old_state_cnt, get_flags);

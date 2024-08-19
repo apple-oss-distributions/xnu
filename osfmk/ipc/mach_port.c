@@ -570,13 +570,13 @@ mach_port_allocate_qos(
  *	Purpose:
  *		Allocates a right in a space.  Supports the
  *		special case of specifying a name. The name may
- *      be any legal name in the space that doesn't
+ *		be any legal name in the space that doesn't
  *		currently denote a right.
  *
- *      While we no longer support users requesting
- *      preallocated message for the port, we still
- *      check for errors in such requests and then
- *      just clear the request.
+ *		While we no longer support users requesting
+ *		preallocated message for the port, we still
+ *		check for errors in such requests and then
+ *		just clear the request.
  *	Conditions:
  *		Nothing locked.
  *	Returns:

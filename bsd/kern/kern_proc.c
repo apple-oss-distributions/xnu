@@ -903,17 +903,17 @@ proc_ref_hold_proc_task_struct(proc_t proc)
 }
 
 static void
-proc_free(proc_t proc)
+proc_free(proc_t proc, proc_ro_t proc_ro)
 {
-	proc_ro_t proc_ro = proc->p_proc_ro;
 	kauth_cred_t cred;
 
-	if (proc_ro) {
-		cred = smr_serialized_load(&proc_ro->p_ucred);
+	assert(proc_ro != NULL);
 
-		kauth_cred_set(&cred, NOCRED);
-		zfree_ro(ZONE_ID_PROC_RO, proc_ro);
-	}
+	cred = smr_serialized_load(&proc_ro->p_ucred);
+	kauth_cred_set(&cred, NOCRED);
+
+	zfree_ro(ZONE_ID_PROC_RO, proc_ro);
+
 	zfree(proc_task_zone, proc);
 }
 
@@ -922,7 +922,7 @@ proc_release_proc_task_struct(proc_t proc)
 {
 	uint32_t old_ref = os_atomic_andnot_orig(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
 	if ((old_ref & P_REF_TASK_HOLD) == 0) {
-		proc_free(proc);
+		proc_free(proc, proc->p_proc_ro);
 	}
 }
 
@@ -934,13 +934,13 @@ task_ref_hold_proc_task_struct(task_t task)
 }
 
 void
-task_release_proc_task_struct(task_t task)
+task_release_proc_task_struct(task_t task, proc_ro_t proc_ro)
 {
 	proc_t proc_from_task = task_get_proc_raw(task);
 	uint32_t old_ref = os_atomic_andnot_orig(&proc_from_task->p_refcount, P_REF_TASK_HOLD, relaxed);
 
 	if ((old_ref & P_REF_PROC_HOLD) == 0) {
-		proc_free(proc_from_task);
+		proc_free(proc_from_task, proc_ro);
 	}
 }
 

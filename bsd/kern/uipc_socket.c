@@ -5736,6 +5736,23 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			}
 			break;
 		}
+		case SO_MARK_DOMAIN_INFO_SILENT:
+			error = sooptcopyin(sopt, &optval, sizeof(optval),
+			    sizeof(optval));
+			if (error != 0) {
+				goto out;
+			}
+			if (optval < 0) {
+				error = EINVAL;
+				goto out;
+			}
+			if (optval == 0) {
+				so->so_flags1 &= ~SOF1_DOMAIN_INFO_SILENT;
+			} else {
+				so->so_flags1 |= SOF1_DOMAIN_INFO_SILENT;
+			}
+			break;
+
 		default:
 			error = ENOPROTOOPT;
 			break;
@@ -6241,6 +6258,10 @@ integer:
 			error = sooptcopyout(sopt, &application_id, sizeof(so_application_id_t));
 			break;
 		}
+		case SO_MARK_DOMAIN_INFO_SILENT:
+			optval = ((so->so_flags1 & SOF1_DOMAIN_INFO_SILENT) > 0)
+			    ? 1 : 0;
+			goto integer;
 		default:
 			error = ENOPROTOOPT;
 			break;

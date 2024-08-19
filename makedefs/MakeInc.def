@@ -889,10 +889,6 @@ LDFILES_KERNEL_ONLY = $(TARGET)/all-kpi.exp $(TARGET)/all-alias.exp $(TARGET)/sy
 #
 LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
-# Link opensource binary library
-ifneq ($(filter T6000 T6020 T8101 T8103 T8112 VMAPPLE T6000 T6020 T8101 T8103 T8112 VMAPPLE,$(CURRENT_MACHINE_CONFIG)),)
-	LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
-endif
 
 
 #
@@ -925,6 +921,22 @@ INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTER
 #
 MIGFLAGS	= $(DEFINES) $(INCFLAGS) -novouchers $($(addsuffix $(CURRENT_ARCH_CONFIG),CFLAGS_)) $($(addsuffix $(CURRENT_ARCH_CONFIG),ARCH_FLAGS_)) \
 		$(DEPLOYMENT_TARGET_FLAGS)
+
+#
+# Default MIG Kernel Server flags
+#
+MIGKSFLAGS = \
+	-DMACH_KERNEL_PRIVATE \
+	-DKERNEL_SERVER=1 \
+	-mach_msg2
+
+#
+# Default MIG KernelUser flags
+#
+MIGKUFLAGS = \
+	-DMACH_KERNEL_PRIVATE \
+	-DKERNEL_USER=1 \
+	-maxonstack 1024
 
 # Support for LLVM Profile Guided Optimization (PGO)
 

@@ -11,6 +11,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <perfdata/perfdata.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
@@ -18,6 +19,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/resource_private.h>
+#include <time.h>
 #include <os/atomic_private.h>
 #include <libproc.h>
 #include <TargetConditionals.h>
@@ -608,4 +610,170 @@ alrm_handler(int signum, struct __siginfo *info __unused, void *uap)
 		os_atomic_inc(&entry->xcpu_count, relaxed);
 		break;
 	}
+}
+
+// When the SIGPROF signal was received.
+static uint64_t sigprof_received_ns = 0;
+
+static const uint64_t ITIMER_PROF_SECS = 2;
+#define PROF_EXTRA_THREAD_COUNT (1)
+// Include the main thread as participating in consuming CPU.
+static const uint64_t EXPECTED_PROF_DURATION_SECS =
+    ITIMER_PROF_SECS / (PROF_EXTRA_THREAD_COUNT + 1);
+static const uint64_t EXTRA_TIMEOUT_SECS = 1;
+
+struct cpu_spin_args {
+	bool spin_while_true;
+};
+
+static void *
+cpu_thread_main(void *arg)
+{
+	bool *spin = arg;
+	while (*spin) {
+	}
+	return NULL;
+}
+
+static void
+sigprof_received(int __unused sig)
+{
+	sigprof_received_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+}
+
+T_DECL(setitimer_prof,
+    "ensure a single-threaded process doesn't receive early signals")
+{
+	T_SETUPBEGIN;
+	(void)signal(SIGPROF, sigprof_received);
+
+	uint64_t start_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+	uint64_t expected_end_ns = start_ns + (ITIMER_PROF_SECS * NSEC_PER_SEC);
+	uint64_t end_timeout_ns = expected_end_ns + (EXTRA_TIMEOUT_SECS * NSEC_PER_SEC);
+
+	struct itimerval prof_timer = {
+		.it_value.tv_sec = ITIMER_PROF_SECS,
+	};
+
+	int ret = setitimer(ITIMER_PROF, &prof_timer, NULL);
+	T_ASSERT_POSIX_SUCCESS(ret, "setitimer(ITIMER_PROF, %llus)",
+	    ITIMER_PROF_SECS);
+	T_SETUPEND;
+
+	uint64_t last_ns = 0;
+	while ((last_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC)) < end_timeout_ns) {
+		if (sigprof_received_ns) {
+			break;
+		}
+	}
+
+	T_EXPECT_LE(last_ns, end_timeout_ns, "received SIGPROF within the timeout (%.9gs < %.9gs)",
+	    (double)(last_ns - start_ns) / 1e9, (double)(end_timeout_ns - start_ns) / 1e9);
+	T_LOG("SIGPROF was delivered %+.6gms after expected duration",
+	    (double)(last_ns - expected_end_ns) / 1e6);
+	T_EXPECT_GE(last_ns, expected_end_ns, "received SIGPROF after enough time (%.9gs > %.9gs)",
+	    (double)(last_ns - start_ns) / 1e9, (double)(expected_end_ns - start_ns) / 1e9);
+}
+
+T_DECL(setitimer_prof_multi_threaded,
+    "ensure a multi-threaded process doesn't receive early signals")
+{
+	T_SETUPBEGIN;
+	(void)signal(SIGPROF, sigprof_received);
+
+	pthread_t cpu_threads[PROF_EXTRA_THREAD_COUNT] = { 0 };
+	bool spin_while_true = true;
+	for (unsigned int i = 0; i < PROF_EXTRA_THREAD_COUNT; i++) {
+		int error = pthread_create(&cpu_threads[i], NULL, cpu_thread_main, &spin_while_true);
+		T_QUIET; T_ASSERT_POSIX_ZERO(error, "create thread %d", i);
+	}
+	T_LOG("spinning %d threads on CPU", PROF_EXTRA_THREAD_COUNT + 1);
+
+	uint64_t start_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+	uint64_t expected_end_ns = start_ns + (EXPECTED_PROF_DURATION_SECS * NSEC_PER_SEC);
+	uint64_t end_timeout_ns = expected_end_ns + (EXTRA_TIMEOUT_SECS * NSEC_PER_SEC);
+
+	struct itimerval prof_timer = {
+		.it_value.tv_sec = ITIMER_PROF_SECS,
+	};
+
+	int ret = setitimer(ITIMER_PROF, &prof_timer, NULL);
+	T_ASSERT_POSIX_SUCCESS(ret, "setitimer(ITIMER_PROF, %llus)",
+	    ITIMER_PROF_SECS);
+	T_SETUPEND;
+
+	uint64_t last_ns = 0;
+	while ((last_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC)) < end_timeout_ns) {
+		if (sigprof_received_ns) {
+			break;
+		}
+	}
+
+	spin_while_true = false;
+	T_EXPECT_LE(last_ns, end_timeout_ns, "received SIGPROF within the timeout (%.9gs < %.9gs)",
+	    (double)(last_ns - start_ns) / 1e9, (double)(end_timeout_ns - start_ns) / 1e9);
+	T_LOG("SIGPROF was delivered %+.6gms after expected duration",
+	    (double)(last_ns - expected_end_ns) / 1e6);
+	T_EXPECT_GE(last_ns, expected_end_ns, "received SIGPROF after enough time (%.9gs > %.9gs)",
+	    (double)(last_ns - start_ns) / 1e9, (double)(expected_end_ns - start_ns) / 1e9);
+}
+
+static uint64_t sigprof_received_usage_mach = 0;
+extern uint64_t __thread_selfusage(void);
+static int const ITERATION_COUNT = 50;
+static uint64_t const ITIMER_PERF_PROF_US = 50000;
+
+static void
+sigprof_received_usage(int __unused sig)
+{
+	sigprof_received_usage_mach = __thread_selfusage();
+}
+
+T_DECL(setitimer_prof_latency,
+    "measure the latency of delivering SIGPROF",
+    T_META_TAG_PERF,
+    T_META_TIMEOUT(10))
+{
+	T_SETUPBEGIN;
+	(void)signal(SIGPROF, sigprof_received_usage);
+
+	struct itimerval prof_timer = {
+		.it_value.tv_usec = ITIMER_PERF_PROF_US,
+	};
+	mach_timebase_info_data_t timebase = { 0 };
+	int ret = mach_timebase_info(&timebase);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mach_timebase_info");
+
+	char pd_path[PATH_MAX] = "";
+	pdwriter_t pd = pdwriter_open_tmp("xnu", "setitimer_sigprof_latency", 1, 0, pd_path, sizeof(pd_path));
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(pd, "opened perfdata file");
+	T_SETUPEND;
+
+	T_LOG("running %d iterations, %lluus each", ITERATION_COUNT, ITIMER_PERF_PROF_US);
+	for (int i = 0; i < ITERATION_COUNT; i++) {
+		sigprof_received_usage_mach = 0;
+
+		uint64_t const start_usage_mach = __thread_selfusage();
+
+		ret = setitimer(ITIMER_PROF, &prof_timer, NULL);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "setitimer(ITIMER_PROF, %llus)",
+		    ITIMER_PROF_SECS);
+
+		while (sigprof_received_usage_mach == 0) {
+			// XXX ITIMER_PROF only re-evaluates the timers at user/kernel boundaries.
+			// Issue a trivial syscall (getpid has a fast path without making a syscall)
+			// to ensure the system checks the timer.
+			(void)getppid();
+		}
+
+		uint64_t const end_usage_mach = start_usage_mach +
+		    (ITIMER_PERF_PROF_US * NSEC_PER_USEC) * timebase.denom / timebase.numer;
+		uint64_t const latency_mach = sigprof_received_usage_mach - end_usage_mach;
+		uint64_t const latency_ns = latency_mach * timebase.denom / timebase.numer;
+
+		pdwriter_new_value(pd, "sigprof_latency", pdunit_ns, latency_ns);
+	}
+
+	pdwriter_close(pd);
+	T_LOG("wrote perfdata to %s", pd_path);
 }

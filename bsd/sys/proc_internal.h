@@ -248,9 +248,13 @@ struct  sigacts {
 
 #define PROC_NULL ((struct proc *)NULL)
 
-/*
+/*!
+ * @struct proc
+ *
+ * @brief
  * Description of a process.
  *
+ * @discussion
  * This structure contains the information needed to manage a thread of
  * control, known in UN*X as a process; it has references to substructures
  * containing descriptions of things that the process uses, but may share
@@ -258,6 +262,11 @@ struct  sigacts {
  * are always addressible except for those marked "(PROC ONLY)" below,
  * which might be addressible only on a processor on which the process
  * is running.
+ *
+ * The lifetime of a @c proc struct begins from forkproc() and ends at
+ * proc_free(). Do not modify the @c proc struct or rely on its fields
+ * being properly initialized before forkproc(). For corpses, forkproc()
+ * is not called and the @c proc struct is never initialized.
  */
 struct proc {
 	union {
@@ -930,7 +939,7 @@ extern proc_t task_get_proc_raw(task_t task);
 extern void proc_ref_hold_proc_task_struct(proc_t proc);
 extern void proc_release_proc_task_struct(proc_t proc);
 extern void task_ref_hold_proc_task_struct(task_t task);
-extern void task_release_proc_task_struct(task_t task);
+extern void task_release_proc_task_struct(task_t task, proc_ro_t proc_ro);
 extern void proc_setpidversion(proc_t, int);
 extern uint64_t proc_getcsflags(proc_t);
 extern void proc_csflags_update(proc_t, uint64_t);

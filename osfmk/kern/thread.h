@@ -689,16 +689,16 @@ struct thread {
 	/* Various bits of state to stash across a continuation, exclusive to the current thread block point */
 	union {
 		struct {
+			/* set before ipc_mqueue_receive() as implicit arguments */
+			mach_msg_recv_bufs_t    recv_bufs;      /* receive context */
+			mach_msg_option64_t     option;         /* 64 bits options for receive */
+			ipc_object_t            object;         /* object received on */
+
+			/* set by ipc_mqueue_receive() as implicit results */
 			mach_msg_return_t       state;          /* receive state */
 			mach_port_seqno_t       seqno;          /* seqno of recvd message */
-			ipc_object_t            object;         /* object received on */
-			mach_vm_address_t       msg_addr;       /* receive msg buffer pointer */
-			mach_vm_address_t       aux_addr;       /* receive aux buffer pointer */
-			mach_msg_size_t         max_msize;      /* max rcv size for msg */
-			mach_msg_size_t         max_asize;      /* max rcv size for aux data */
 			mach_msg_size_t         msize;          /* actual size for the msg */
 			mach_msg_size_t         asize;          /* actual size for aux data */
-			mach_msg_option64_t     option;         /* 64 bits options for receive */
 			mach_port_name_t        receiver_name;  /* the receive port name */
 			union {
 				struct ipc_kmsg   *XNU_PTRAUTH_SIGNED_PTR("thread.ith_kmsg")  kmsg;  /* received message */
@@ -1031,16 +1031,16 @@ struct thread {
 #endif /* CONFIG_EXCLAVES */
 };
 
+#define ith_receive         saved.receive
+/* arguments */
+#define ith_recv_bufs       saved.receive.recv_bufs
+#define ith_object          saved.receive.object
+#define ith_option          saved.receive.option
+/* results */
 #define ith_state           saved.receive.state
 #define ith_seqno           saved.receive.seqno
-#define ith_object          saved.receive.object
-#define ith_msg_addr        saved.receive.msg_addr
-#define ith_aux_addr        saved.receive.aux_addr
-#define ith_max_msize       saved.receive.max_msize
-#define ith_max_asize       saved.receive.max_asize
 #define ith_msize           saved.receive.msize
 #define ith_asize           saved.receive.asize
-#define ith_option          saved.receive.option
 #define ith_receiver_name   saved.receive.receiver_name
 #define ith_kmsg            saved.receive.kmsg
 #if MACH_FLIPC
@@ -1092,6 +1092,9 @@ extern void             thread_inspect_deallocate(
 
 extern void             thread_read_deallocate(
 	thread_read_t           thread);
+
+extern kern_return_t    thread_terminate(
+	thread_t                thread);
 
 extern void             thread_terminate_self(void);
 
@@ -1671,10 +1674,8 @@ extern vm_offset_t      kernel_stack_depth_max;
 extern void guard_ast(thread_t);
 extern void fd_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
-#if CONFIG_VNGUARD
 extern void vn_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
-#endif
 extern void mach_port_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
 extern void virt_memory_guard_ast(thread_t,
@@ -1814,6 +1815,7 @@ extern ipc_port_t convert_thread_to_port(thread_t);
 extern ipc_port_t convert_thread_to_port_pinned(thread_t);
 extern ipc_port_t convert_thread_inspect_to_port(thread_inspect_t);
 extern ipc_port_t convert_thread_read_to_port(thread_read_t);
+extern void       convert_thread_array_to_ports(thread_act_array_t, size_t, mach_thread_flavor_t);
 extern boolean_t is_external_pageout_thread(void);
 extern boolean_t is_vm_privileged(void);
 extern boolean_t set_vm_privilege(boolean_t);

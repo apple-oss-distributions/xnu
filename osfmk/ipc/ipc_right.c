@@ -3034,7 +3034,7 @@ ipc_right_copyout(
 			if (kn != ITH_KNOTE_PSEUDO) {
 				port->ip_immovable_receive = 1;
 			}
-			port->ip_context = current_thread()->ith_msg_addr;
+			port->ip_context = current_thread()->ith_recv_bufs.recv_msg_addr;
 			*context = port->ip_context;
 			*guard_flags = *guard_flags & ~MACH_MSG_GUARD_FLAGS_UNGUARDED_ON_SEND;
 		}

@@ -153,12 +153,12 @@ extern int copyinstr(
 /* Move arbitrarily-aligned data from a user space to kernel space */
 extern int copyinmsg(
 	const user_addr_t   user_addr,
-	char                *kernel_addr,
+	void                *kernel_addr,
 	mach_msg_size_t     nbytes);
 
 /* Move arbitrarily-aligned data from a kernel space to user space */
 extern int copyoutmsg(
-	const char      *kernel_addr,
+	const void      *kernel_addr,
 	user_addr_t     user_addr,
 	mach_msg_size_t nbytes);
 

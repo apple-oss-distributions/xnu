@@ -381,7 +381,7 @@ struct exec_port_actions {
 	uint32_t registered_count;
 	struct exception_port_action_t *excport_array;
 	ipc_port_t *portwatch_array;
-	ipc_port_t *registered_array;
+	ipc_port_t registered_array[TASK_PORT_REGISTER_MAX];
 };
 
 struct image_params;    /* Forward */
@@ -2495,12 +2495,15 @@ exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_
 	}
 
 	if (port_actions->registered_count) {
-		if (mach_ports_register(proc_task(p), port_actions->registered_array,
-		    port_actions->registered_count)) {
+		if (_kernelrpc_mach_ports_register3(proc_task(p),
+		    port_actions->registered_array[0],
+		    port_actions->registered_array[1],
+		    port_actions->registered_array[2])) {
 			return EINVAL;
 		}
 		/* mach_ports_register() consumed the array */
-		port_actions->registered_array = NULL;
+		bzero(port_actions->registered_array,
+		    sizeof(port_actions->registered_array));
 		port_actions->registered_count = 0;
 	}
 
@@ -2532,15 +2535,11 @@ exec_port_actions_destroy(struct exec_port_actions *port_actions)
 		    port_actions->portwatch_array);
 	}
 
-	if (port_actions->registered_array) {
-		for (uint32_t i = 0; i < port_actions->registered_count; i++) {
-			ipc_port_t port = NULL;
-			if ((port = port_actions->registered_array[i]) != NULL) {
-				ipc_port_release_send(port);
-			}
+	for (uint32_t i = 0; i < port_actions->registered_count; i++) {
+		ipc_port_t port = NULL;
+		if ((port = port_actions->registered_array[i]) != NULL) {
+			ipc_port_release_send(port);
 		}
-		kfree_type(ipc_port_t, port_actions->registered_count,
-		    port_actions->registered_array);
 	}
 }
 
@@ -2631,15 +2630,6 @@ exec_handle_port_actions(struct image_params *imgp,
 		actions->portwatch_array = kalloc_type(ipc_port_t,
 		    actions->portwatch_count, Z_WAITOK | Z_ZERO);
 		if (actions->portwatch_array == NULL) {
-			ret = ENOMEM;
-			goto done;
-		}
-	}
-
-	if (actions->registered_count) {
-		actions->registered_array = kalloc_type(ipc_port_t,
-		    actions->registered_count, Z_WAITOK | Z_ZERO);
-		if (actions->registered_array == NULL) {
 			ret = ENOMEM;
 			goto done;
 		}
@@ -3231,6 +3221,7 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 {
 	int error = 0;
 	struct persona *persona = NULL;
+	kauth_cred_t mycred = kauth_cred_get();
 
 	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
 		return EPERM;
@@ -3244,15 +3235,16 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 
 	persona = persona_lookup(px_persona->pspi_id);
 	if (!persona) {
-		error = ESRCH;
-		goto out;
+		return ESRCH;
 	}
 
-out:
-	if (persona) {
-		persona_put(persona);
+	// non-root process should not be allowed to set persona with uid/gid 0
+	if (!kauth_cred_issuser(mycred) &&
+	    (px_persona->pspi_uid == 0 || px_persona->pspi_gid == 0)) {
+		return EPERM;
 	}
 
+	persona_put(persona);
 	return error;
 }
 

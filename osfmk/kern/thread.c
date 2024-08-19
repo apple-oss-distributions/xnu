@@ -2494,11 +2494,9 @@ guard_ast(thread_t t)
 	case GUARD_TYPE_FD:
 		fd_guard_ast(t, code, subcode);
 		break;
-#if CONFIG_VNGUARD
 	case GUARD_TYPE_VN:
 		vn_guard_ast(t, code, subcode);
 		break;
-#endif
 	case GUARD_TYPE_VIRT_MEMORY:
 		virt_memory_guard_ast(t, code, subcode);
 		break;

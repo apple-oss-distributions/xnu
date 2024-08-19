@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,26 +26,35 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#ifndef XNU_LIBKERN_LIBKERN_CXX_OS_BOUNDED_PTR_FWD_H
-#define XNU_LIBKERN_LIBKERN_CXX_OS_BOUNDED_PTR_FWD_H
+#include <sys/socket.h>
 
-#if !TAPI
+#include <nfs/nfs.h>
 
-#if DRIVERKIT_FRAMEWORK_INCLUDE
-#include <DriverKit/IOLib.h>
-#include <DriverKit/bounded_ptr_fwd.h>
-#else
-#include <kern/debug.h>
-#include <libkern/c++/bounded_ptr_fwd.h>
-#endif /* DRIVERKIT_FRAMEWORK_INCLUDE */
+#include <darwintest.h>
 
-namespace os_detail {
-struct panic_trapping_policy;
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_ASROOT(true)
+	);
+
+T_DECL(test_unp_sock_release, "UDS with sock_release()")
+{
+	int fds[2] = { -1, -1 };
+	struct nfsd_args nfsd_args = { 0 };
+
+	T_ASSERT_POSIX_SUCCESS(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds),
+	    "socketpair(AF_UNIX, SOCK_DGRAM, 0)");
+	T_LOG("socketpair() fds: %d, %d\n", fds[0], fds[1]);
+
+	nfsd_args.sock = fds[0];
+	T_ASSERT_POSIX_SUCCESS(nfssvc(NFSSVC_EXPORT | NFSSVC_ADDSOCK | NFSSVC_NFSD, &nfsd_args),
+	    "nfssvc() sock %d", fds[0]);
+
+	T_ASSERT_POSIX_SUCCESS(close(fds[0]), "close(%d)\n", fds[0]);
+
+	T_ASSERT_POSIX_SUCCESS(nfssvc(NFSSVC_EXPORT | NFSSVC_NFSD, NULL), "nfssvc() NULL");
+
+	T_ASSERT_POSIX_SUCCESS(close(fds[1]), "close(%d)\n", fds[1]);
 }
-
-template <typename T>
-using OSBoundedPtr = libkern::bounded_ptr<T, os_detail::panic_trapping_policy>;
-
-#endif /* !TAPI */
-
-#endif /* !XNU_LIBKERN_LIBKERN_CXX_OS_BOUNDED_PTR_FWD_H */

@@ -264,7 +264,7 @@ _preemption_disable_snap_start(void)
 	struct _preemption_disable_pcpu *pcpu = PERCPU_GET(_preemption_disable_pcpu_data);
 	pcpu->pdp_abandon = false;
 	pcpu->pdp_start.pds_mach_time = ml_get_sched_hygiene_timebase();
-	pcpu->pdp_start.pds_int_mach_time = recount_current_processor_interrupt_time_mach();
+	pcpu->pdp_start.pds_int_mach_time = recount_current_processor_interrupt_duration_mach();
 #if CONFIG_CPU_COUNTERS
 	if (__probable(sched_hygiene_debug_pmc)) {
 		mt_cur_cpu_cycles_instrs_speculative(&pcpu->pdp_start.pds_cycles,
@@ -315,7 +315,7 @@ _preemption_disable_snap_end(
 	*start = pcpu->pdp_start;
 	uint64_t now_time = ml_get_sched_hygiene_timebase();
 	now->pds_mach_time = now_time;
-	now->pds_int_mach_time = recount_current_processor_interrupt_time_mach();
+	now->pds_int_mach_time = recount_current_processor_interrupt_duration_mach();
 	const bool abandon = pcpu->pdp_abandon;
 	const uint64_t max_duration = os_atomic_load(&pcpu->pdp_max_mach_duration, relaxed);
 

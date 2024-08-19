@@ -90,6 +90,9 @@
 #include <stdint.h>
 #include <mach/boolean.h>
 #include <mach/machine/vm_types.h>
+#if XNU_KERNEL_PRIVATE
+#include <ptrauth.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*
  *	mach_port_name_t - the local identity for a Mach port
@@ -183,7 +186,21 @@ typedef ipc_port_t              mach_port_t;
 
 #endif  /* KERNEL */
 
+#if XNU_KERNEL_PRIVATE
+#if __has_feature(ptrauth_calls)
+#define __mach_port_array_auth \
+	__ptrauth(ptrauth_key_process_independent_data, 1, \
+	    ptrauth_string_discriminator("mach_port_ool_t"))
+#else
+#define __mach_port_array_auth
+#endif
+typedef struct {
+	mach_port_t __mach_port_array_auth port;
+} mach_port_ool_t;
+typedef mach_port_ool_t                 *mach_port_array_t;
+#else
 typedef mach_port_t                     *mach_port_array_t;
+#endif
 
 /*
  *  MACH_PORT_NULL is a legal value that can be carried in messages.

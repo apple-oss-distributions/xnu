@@ -20,6 +20,10 @@ T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VAL
 {
 	kern_return_t kr        = KERN_SUCCESS;
 	mach_voucher_t voucher  = MACH_VOUCHER_NULL;
+	mach_port_name_t reply;
+	mach_port_options_t opts = {
+		.flags = MPO_REPLY_PORT,
+	};
 
 	/*
 	 * The bank voucher already exists in this process, so using it doesn't
@@ -48,36 +52,59 @@ T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VAL
 
 	T_ASSERT_EQ(refs, (mach_port_urefs_t)1, "voucher must have only one ref");
 
+	T_ASSERT_MACH_SUCCESS(mach_port_construct(mach_task_self(),
+	    &opts, 0, &reply), "make reply port");
+
 	/* First, try with two moves (must fail because there's only one ref) */
 	mach_msg_header_t request_msg_1 = {
 		.msgh_remote_port   = voucher,
-		.msgh_local_port    = MACH_PORT_NULL,
+		.msgh_local_port    = reply,
 		.msgh_voucher_port  = voucher,
-		.msgh_bits          = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND, 0, MACH_MSG_TYPE_MOVE_SEND, 0),
+		.msgh_bits          = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND,
+	    MACH_MSG_TYPE_MAKE_SEND_ONCE, MACH_MSG_TYPE_MOVE_SEND, 0),
 		.msgh_id            = 0xDEAD,
 		.msgh_size          = sizeof(request_msg_1),
 	};
 
-	kr = mach_msg2(&request_msg_1, MACH64_SEND_MSG | MACH64_SEND_KOBJECT_CALL,
+	kr = mach_msg2(&request_msg_1, MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL,
 	    request_msg_1, request_msg_1.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0);
 
 	T_ASSERT_MACH_ERROR(MACH_SEND_INVALID_DEST, kr, "send with two moves should fail with invalid dest");
 
+	T_ASSERT_MACH_SUCCESS(mach_port_destruct(mach_task_self(), reply, 0, 0),
+	    "destroy reply port");
+
+	T_ASSERT_MACH_SUCCESS(mach_port_construct(mach_task_self(),
+	    &opts, 0, &reply), "make reply port");
+
 	/* Next, try with a move and a copy (will succeed and destroy the last ref) */
-	mach_msg_header_t request_msg_2 = {
-		.msgh_remote_port   = voucher,
-		.msgh_local_port    = MACH_PORT_NULL,
-		.msgh_voucher_port  = voucher,
-		.msgh_bits          = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND, 0, MACH_MSG_TYPE_COPY_SEND, 0),
-		.msgh_id            = 0xDEAD,
-		.msgh_size          = sizeof(request_msg_2),
+	union {
+		mach_msg_header_t hdr;
+		struct {
+			mig_reply_error_t err;
+			mach_msg_trailer_t trailer;
+		};
+	} request_msg_2 = {
+		.hdr = {
+			.msgh_remote_port   = voucher,
+			.msgh_local_port    = reply,
+			.msgh_voucher_port  = voucher,
+			.msgh_bits          = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_MOVE_SEND,
+	    MACH_MSG_TYPE_MAKE_SEND_ONCE, MACH_MSG_TYPE_COPY_SEND, 0),
+			.msgh_id            = 0xDEAD,
+			.msgh_size          = sizeof(request_msg_2),
+		}
 	};
 
 	/* panic happens here */
-	kr = mach_msg2(&request_msg_2, MACH64_SEND_MSG | MACH64_SEND_KOBJECT_CALL,
-	    request_msg_2, request_msg_2.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 0);
+	kr = mach_msg2(&request_msg_2, MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL,
+	    request_msg_2.hdr, request_msg_2.hdr.msgh_size, sizeof(request_msg_2),
+	    reply, MACH_MSG_TIMEOUT_NONE, 0);
 
 	T_ASSERT_MACH_SUCCESS(kr, "send with move and copy succeeds");
+
+	T_ASSERT_MACH_SUCCESS(mach_port_destruct(mach_task_self(), reply, 0, 0),
+	    "destroy reply port");
 
 	kr = mach_port_get_refs(mach_task_self(), voucher, MACH_PORT_RIGHT_SEND, &refs);
 

@@ -307,7 +307,6 @@ struct task {
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
 #define TF_HAS_REPLY_PORT_TELEMETRY 0x10000000                          /* Rate limit telemetry for reply port security semantics violations rdar://100244531 */
-#define TF_HAS_EXCEPTION_TELEMETRY  0x20000000                          /* Rate limit telemetry for exception identity violations rdar://100729339 */
 #define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
 
 /*
@@ -387,12 +386,6 @@ struct task {
 
 #define task_set_reply_port_telemetry(task) \
 	((task)->t_flags |= TF_HAS_REPLY_PORT_TELEMETRY)
-
-#define task_has_exception_telemetry(task) \
-	(((task)->t_flags & TF_HAS_EXCEPTION_TELEMETRY) != 0)
-
-#define task_set_exception_telemetry(task) \
-	((task)->t_flags |= TF_HAS_EXCEPTION_TELEMETRY)
 
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0
@@ -1316,6 +1309,13 @@ extern int get_task_cdhash(task_t task, char cdhash[CS_CDHASH_LEN]);
 
 extern boolean_t kdp_task_is_locked(task_t task);
 
+/* redeclaration from task_server.h for the sake of kern_exec.c */
+extern kern_return_t _kernelrpc_mach_ports_register3(
+	task_t                  task,
+	mach_port_t             port1,
+	mach_port_t             port2,
+	mach_port_t             port3);
+
 /* Kernel side prototypes for MIG routines */
 extern kern_return_t task_get_exception_ports(
 	task_t                          task,
@@ -1368,6 +1368,7 @@ extern ipc_port_t convert_task_to_port(task_t);
 extern ipc_port_t convert_task_to_port_kernel(task_t);
 extern ipc_port_t convert_task_to_port_external(task_t);
 extern ipc_port_t convert_task_to_port_pinned(task_t);
+extern void       convert_task_array_to_ports(task_array_t, size_t, mach_task_flavor_t);
 
 extern ipc_port_t convert_task_read_to_port(task_t);
 extern ipc_port_t convert_task_read_to_port_kernel(task_read_t);

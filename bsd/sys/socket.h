@@ -381,6 +381,11 @@ typedef struct {
 
 #endif
 
+#ifdef PRIVATE
+/* Note gap for SO_BINDTODEVICE at 0x1134 */
+
+#define SO_MARK_DOMAIN_INFO_SILENT 0x1135  /* Domain information should be silently withheld */
+#endif
 
 /* When adding new socket-options, you need to make sure MPTCP supports these as well! */
 

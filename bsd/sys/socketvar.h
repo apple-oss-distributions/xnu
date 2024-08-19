@@ -296,7 +296,8 @@ struct socket {
 #define SOF1_FLOW_DIVERT_SKIP           0x04000000 /* Flow divert already declined to handle the socket */
 #define SOF1_KNOWN_TRACKER              0x08000000 /* Socket is a connection to a known tracker */
 #define SOF1_TRACKER_NON_APP_INITIATED  0x10000000 /* Tracker connection is non-app initiated */
-#define SOF1_APPROVED_APP_DOMAIN            0x20000000 /* Connection is for an approved associated app domain */
+#define SOF1_APPROVED_APP_DOMAIN        0x20000000 /* Connection is for an approved associated app domain */
+#define SOF1_DOMAIN_INFO_SILENT         0x40000000 /* Maintain silence on any domain information */
 
 	uint32_t        so_upcallusecount; /* number of upcalls in progress */
 	int             so_usecount;    /* refcounting of socket use */

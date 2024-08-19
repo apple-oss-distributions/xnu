@@ -721,6 +721,8 @@ ifneq ($(PLATFORM),iPhoneOS)
 	EXCLUDED_SOURCES += vm/compression_sweep.c
 endif
 
+unp_sock_release: CODE_SIGN_ENTITLEMENTS = unp_sock_release-entitlements.plist
+
 bpf_write: bpflib.c in_cksum.c net_test_lib.c
 bpf_write: OTHER_LDFLAGS += -ldarwintest_utils
 
@@ -1329,7 +1331,8 @@ task_suspend_stats: OTHER_LDFLAGS += -ldarwintest_utils
 task_suspend_stats: CODE_SIGN_ENTITLEMENTS = task_for_pid_entitlement.plist
 
 # os_atomic use throws this warning
-setitimer: OTHER_CFLAGS += -Wno-c++98-compat
+setitimer: OTHER_CFLAGS += -Wno-c++98-compat -framework perfdata
+setitimer: OTHER_LDFLAGS += -framework perfdata
 
 
 include $(DEVELOPER_DIR)/AppleInternal/Makefiles/darwintest/Makefile.targets

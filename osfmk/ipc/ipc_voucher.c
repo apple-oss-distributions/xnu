@@ -2182,7 +2182,7 @@ ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg)
 void
 ipc_voucher_receive_postprocessing(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option)
+	mach_msg_option64_t     option)
 {
 	uint8_t recipes[(MACH_VOUCHER_ATTR_KEY_NUM + 1) * sizeof(ipc_voucher_attr_recipe_data_t)];
 	ipc_voucher_attr_raw_recipe_array_size_t recipe_size = (MACH_VOUCHER_ATTR_KEY_NUM + 1) *

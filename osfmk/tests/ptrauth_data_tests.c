@@ -122,7 +122,6 @@ ptrauth_data_tests(void)
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_entry, struct ipc_object *, ie_object, "ipc_entry.ie_object");
 
 	/* ipc_kmsg */
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_prealloc, "kmsg.ikm_prealloc");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_udata, "kmsg.ikm_udata");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher_port, "kmsg.ikm_voucher_port");
 

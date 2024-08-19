@@ -68,6 +68,7 @@
 #include <mach/message.h>
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_object.h>
+#include <ipc/ipc_policy.h>
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_space.h>
@@ -591,7 +592,7 @@ filt_wlattach_sync_ipc(struct knote *kn)
 
 	if (bits & MACH_PORT_TYPE_RECEIVE) {
 		port = ip_object_to_port(object);
-		if (port->ip_specialreply) {
+		if (port->ip_specialreply || ip_is_kobject(port)) {
 			error = ENOENT;
 		}
 	} else if (bits & MACH_PORT_TYPE_SEND_ONCE) {
@@ -968,9 +969,8 @@ filt_machportprocess(
 	wait_result_t wresult;
 	mach_msg_option64_t option64;
 	mach_vm_address_t msg_addr;
-	mach_msg_size_t max_msg_size, cpout_aux_size, cpout_msg_size;
-	uint32_t ppri;
-	mach_msg_qos_t oqos;
+	mach_msg_size_t max_msg_size;
+	mach_msg_recv_result_t msgr;
 
 	int result = FILTER_ACTIVE;
 
@@ -991,10 +991,14 @@ filt_machportprocess(
 	 * name of the port and sizeof the waiting message.
 	 *
 	 * Extend kn_sfflags to 64 bits.
+	 *
+	 * Add MACH_RCV_TIMEOUT to never wait (in case someone concurrently
+	 * dequeued the message that made this knote active already).
 	 */
-	option64 = (mach_msg_option64_t)kn->kn_sfflags & (MACH_RCV_MSG |
-	    MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY |
-	    MACH_RCV_TRAILER_MASK | MACH_RCV_VOUCHER | MACH_MSG_STRICT_REPLY);
+	option64 = kn->kn_sfflags & (MACH_RCV_MSG | MACH_RCV_LARGE |
+	    MACH_RCV_LARGE_IDENTITY | MACH_RCV_TRAILER_MASK |
+	    MACH_RCV_VOUCHER | MACH_MSG_STRICT_REPLY);
+	option64 = ipc_current_user_policy(current_task(), option64);
 
 	if (option64 & MACH_RCV_MSG) {
 		msg_addr = (mach_vm_address_t) kn->kn_ext[0];
@@ -1004,6 +1008,10 @@ filt_machportprocess(
 		 * Copy out the incoming message as vector, and append aux data
 		 * immediately after the message proper (if any) and report its
 		 * size on ext3.
+		 *
+		 * Note: MACH64_RCV_LINEAR_VECTOR is how the receive machinery
+		 *       knows this comes from kevent (see comment in
+		 *       mach_msg_receive_too_large()).
 		 */
 		option64 |= (MACH64_MSG_VECTOR | MACH64_RCV_LINEAR_VECTOR);
 
@@ -1027,6 +1035,7 @@ filt_machportprocess(
 		msg_addr = 0;
 		max_msg_size = 0;
 	}
+	option64 |= MACH_RCV_TIMEOUT; /* never wait */
 
 	/*
 	 * Set up to receive a message or the notification of a
@@ -1038,33 +1047,21 @@ filt_machportprocess(
 	 * Note: while in filt_machportprocess(),
 	 *       the knote has a reference on `object` that we can borrow.
 	 */
+
+	/* Set up message proper receive params on thread */
+	bzero(&self->ith_receive, sizeof(self->ith_receive));
+	self->ith_recv_bufs = (mach_msg_recv_bufs_t){
+		.recv_msg_addr = msg_addr,
+		.recv_msg_size = max_msg_size,
+	};
 	self->ith_object = object;
-
-	/* Using msg_addr as combined buffer for message proper and aux */
-	self->ith_msg_addr = msg_addr;
-	self->ith_max_msize = max_msg_size;
-	self->ith_msize = 0;
-
-	self->ith_aux_addr = 0;
-	self->ith_max_asize = 0;
-	self->ith_asize = 0;
-
 	self->ith_option = option64;
-	self->ith_receiver_name = MACH_PORT_NULL;
-	option64 |= MACH_RCV_TIMEOUT; // never wait
-	self->ith_state = MACH_RCV_IN_PROGRESS;
-	self->ith_knote = kn;
+	self->ith_knote  = kn;
 
 	ipc_object_lock(object, otype);
 
-	wresult = ipc_mqueue_receive_on_thread_and_unlock(
-		io_waitq(object),
-		option64,
-		self->ith_max_msize,       /* max msg suze */
-		0,                         /* max aux size 0, using combined buffer */
-		0,                         /* immediate timeout */
-		THREAD_INTERRUPTIBLE,
-		self);
+	wresult = ipc_mqueue_receive_on_thread_and_unlock(io_waitq(object),
+	    MACH_MSG_TIMEOUT_NONE, THREAD_INTERRUPTIBLE, self);
 	/* port unlocked */
 
 	/* If we timed out, or the process is exiting, just zero.  */
@@ -1125,8 +1122,7 @@ filt_machportprocess(
 	 * the results in the fflags field.
 	 */
 	io_reference(object);
-	kev->fflags = mach_msg_receive_results_kevent(&cpout_msg_size,
-	    &cpout_aux_size, &ppri, &oqos);
+	kev->fflags = mach_msg_receive_results(&msgr);
 
 	/* kmsg and object reference consumed */
 
@@ -1135,17 +1131,12 @@ filt_machportprocess(
 	 * a too-large message, return it in the data field (as we
 	 * do for messages we didn't try to receive).
 	 */
-	if (kev->fflags == MACH_RCV_TOO_LARGE) {
-		kev->ext[1] = self->ith_msize;
-		kev->ext[3] = self->ith_asize;  /* Only lower 32 bits of ext3 are used */
-		if (option64 & MACH_RCV_LARGE_IDENTITY) {
-			kev->data = self->ith_receiver_name;
-		} else {
-			kev->data = MACH_PORT_NULL;
-		}
+	kev->ext[1] = msgr.msgr_msg_size + msgr.msgr_trailer_size;
+	kev->ext[3] = msgr.msgr_aux_size;  /* Only lower 32 bits of ext3 are used */
+	if (kev->fflags == MACH_RCV_TOO_LARGE &&
+	    (option64 & MACH_RCV_LARGE_IDENTITY)) {
+		kev->data = msgr.msgr_recv_name;
 	} else {
-		kev->ext[1] = cpout_msg_size;
-		kev->ext[3] = cpout_aux_size; /* Only lower 32 bits of ext3 are used */
 		kev->data = MACH_PORT_NULL;
 	}
 
@@ -1154,12 +1145,15 @@ filt_machportprocess(
 	 * store the address used in the knote and adjust the residual and
 	 * other parameters for future use.
 	 */
-	if (kectx) {
-		assert(kectx->kec_data_resid >= cpout_msg_size + cpout_aux_size);
-		kectx->kec_data_resid -= cpout_msg_size + cpout_aux_size;
+	if (kectx && kev->fflags != MACH_RCV_TOO_LARGE) {
+		mach_vm_size_t size = msgr.msgr_msg_size +
+		    msgr.msgr_trailer_size + msgr.msgr_aux_size;
+
+		assert(kectx->kec_data_resid >= size);
+		kectx->kec_data_resid -= size;
 		if ((kectx->kec_process_flags & KEVENT_FLAG_STACK_DATA) == 0) {
 			kev->ext[0] = kectx->kec_data_out;
-			kectx->kec_data_out += cpout_msg_size + cpout_aux_size;
+			kectx->kec_data_out += size;
 		} else {
 			assert(option64 & MACH64_RCV_STACK);
 			kev->ext[0] = kectx->kec_data_out + kectx->kec_data_resid;
@@ -1171,8 +1165,8 @@ filt_machportprocess(
 	 * The kev->ext[2] field gets (msg-qos << 32) | (override-qos).
 	 */
 	if (kev->fflags == MACH_MSG_SUCCESS) {
-		kev->ext[2] = ((uint64_t)ppri << 32) |
-		    _pthread_priority_make_from_thread_qos(oqos, 0, 0);
+		kev->ext[2] = ((uint64_t)msgr.msgr_priority << 32) |
+		    _pthread_priority_make_from_thread_qos(msgr.msgr_qos_ovrd, 0, 0);
 	}
 
 	self->ith_knote = ITH_KNOTE_NULL;

@@ -372,11 +372,11 @@ ptmx_get_ioctl(int minor, int open_flag)
 		DEVFS_UNLOCK();
 
 		/* Create the /dev/ttysXXX device {<major>,XXX} */
-		_state.pis_ioctl_list[minor]->pt_devhandle = devfs_make_node(
+		new_ptmx_ioctl->pt_devhandle = devfs_make_node(
 			makedev(ptsd_major, minor),
 			DEVFS_CHAR, UID_ROOT, GID_TTY, 0620,
 			PTSD_TEMPLATE, minor);
-		if (_state.pis_ioctl_list[minor]->pt_devhandle == NULL) {
+		if (new_ptmx_ioctl->pt_devhandle == NULL) {
 			printf("devfs_make_node() call failed for ptmx_get_ioctl()!!!!\n");
 		}
 	}

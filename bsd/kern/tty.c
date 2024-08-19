@@ -1177,12 +1177,14 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 				goto out;
 			}
 			if ((error = suser(kauth_cred_get(), &p->p_acflag))) {
-				if (constty == tp) {
-					ttyfree_locked(constty);
-				} else {
-					ttyfree(constty);
+				if (constty) {
+					if (constty == tp) {
+						ttyfree_locked(constty);
+					} else {
+						ttyfree(constty);
+					}
+					constty = NULL;
 				}
-				constty = NULL;
 				goto out;
 			}
 			if (tp != constty) {

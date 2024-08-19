@@ -411,7 +411,7 @@ copyio_phys(addr64_t source, addr64_t sink, vm_size_t csize, int which)
 }
 
 int
-copyinmsg(const user_addr_t user_addr, char *kernel_addr, mach_msg_size_t nbytes)
+copyinmsg(const user_addr_t user_addr, void *kernel_addr, mach_msg_size_t nbytes)
 {
 	return copyio(COPYIN, user_addr, kernel_addr, nbytes, NULL, 0);
 }
@@ -491,7 +491,7 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
 }
 
 int
-copyoutmsg(const char *kernel_addr, user_addr_t user_addr, mach_msg_size_t nbytes)
+copyoutmsg(const void *kernel_addr, user_addr_t user_addr, mach_msg_size_t nbytes)
 {
 	CALL_COPYOUT_SHIM_MSG(kernel_addr, user_addr, (vm_size_t)nbytes)
 	return copyio(COPYOUT, user_addr, (char *)(uintptr_t)kernel_addr, nbytes, NULL, 0);

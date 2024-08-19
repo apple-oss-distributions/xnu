@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -103,7 +103,7 @@
 /*
  * Maps state flavor to number of words in the state:
  */
-unsigned int _MachineStateCount[] = {
+unsigned int _MachineStateCount[THREAD_STATE_FLAVORS] = {
 	[x86_THREAD_STATE32]            = x86_THREAD_STATE32_COUNT,
 	[x86_THREAD_STATE64]            = x86_THREAD_STATE64_COUNT,
 	[x86_THREAD_FULL_STATE64]       = x86_THREAD_FULL_STATE64_COUNT,
@@ -123,7 +123,9 @@ unsigned int _MachineStateCount[] = {
 	[x86_AVX512_STATE32]            = x86_AVX512_STATE32_COUNT,
 	[x86_AVX512_STATE64]            = x86_AVX512_STATE64_COUNT,
 	[x86_AVX512_STATE]              = x86_AVX512_STATE_COUNT,
-	[x86_PAGEIN_STATE]              = x86_PAGEIN_STATE_COUNT
+	[x86_PAGEIN_STATE]              = x86_PAGEIN_STATE_COUNT,
+	[x86_INSTRUCTION_STATE]         = x86_INSTRUCTION_STATE_COUNT,
+	[x86_LAST_BRANCH_STATE]         = x86_LAST_BRANCH_STATE_COUNT
 };
 
 ZONE_DEFINE_TYPE(iss_zone, "x86_64 saved state",

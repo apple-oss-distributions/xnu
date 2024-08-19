@@ -127,6 +127,7 @@
 #endif /* CONFIG_ARCADE */
 
 #include <ipc/ipc_kmsg.h>
+#include <ipc/ipc_policy.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_voucher.h>
 #include <kern/sync_sema.h>
@@ -267,6 +268,10 @@ mig_init(void)
 				if (mig_e[i]->kroutine[j].max_reply_msg) {
 					mig_buckets[pos].kreply_size = mig_e[i]->kroutine[j].max_reply_msg;
 					mig_buckets[pos].kreply_desc_cnt = mig_e[i]->kroutine[j].reply_descr_count;
+					assert3u(mig_e[i]->kroutine[j].descr_count,
+					    <=, IPC_KOBJECT_DESC_MAX);
+					assert3u(mig_e[i]->kroutine[j].reply_descr_count,
+					    <=, IPC_KOBJECT_RDESC_MAX);
 				} else {
 					/*
 					 * Allocating a larger-than-needed kmsg creates hole for
@@ -462,9 +467,12 @@ ipc_kobject_init_new_reply(
 static ipc_kmsg_t
 ipc_kobject_alloc_mig_error(void)
 {
-	return ipc_kmsg_alloc(sizeof(mig_reply_error_t),
-	           0, 0, IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_ZERO |
-	           IPC_KMSG_ALLOC_NOFAIL);
+	ipc_kmsg_alloc_flags_t flags = IPC_KMSG_ALLOC_KERNEL |
+	    IPC_KMSG_ALLOC_ZERO |
+	    IPC_KMSG_ALLOC_ALL_INLINE |
+	    IPC_KMSG_ALLOC_NOFAIL;
+
+	return ipc_kmsg_alloc(sizeof(mig_reply_error_t), 0, 0, flags);
 }
 
 /*
@@ -496,7 +504,7 @@ ipc_kobject_server_internal(
 
 	req_hdr = ikm_header(request);
 	req_data = ikm_udata_from_header(request);
-	req_trailer = ipc_kmsg_get_trailer(request, FALSE);
+	req_trailer = ipc_kmsg_get_trailer(request);
 	request_msgh_id = req_hdr->msgh_id;
 
 	/* Find corresponding mig_hash entry, if any */
@@ -558,17 +566,17 @@ ipc_kobject_server_internal(
 	 * Discussion by case:
 	 *
 	 * (1) IKM_TYPE_ALL_INLINED
-	 *     - IKM_SAVED_MSG_SIZE is large enough for mig_reply_error_t
+	 *     - IKM_BIG_MSG_SIZE is large enough for mig_reply_error_t
 	 * (2) IKM_TYPE_UDATA_OOL
-	 *     - Same as (1).
+	 *     - IKM_SMALL_MSG_SIZE is large enough for mig_reply_error_t
 	 * (3) IKM_TYPE_ALL_OOL
 	 *     - This layout is only possible if kdata (header + descs) doesn't fit
-	 *       in IKM_SAVED_MSG_SIZE. So we must have at least one descriptor
+	 *       in IKM_SMALL_MSG_SIZE. So we must have at least one descriptor
 	 *       following the header, which is enough to fit mig_reply_error_t.
 	 */
-	static_assert(sizeof(mig_reply_error_t) < IKM_SAVED_MSG_SIZE);
+	static_assert(sizeof(mig_reply_error_t) < IKM_BIG_MSG_SIZE);
 	static_assert(sizeof(mig_reply_error_t) < sizeof(mach_msg_base_t) +
-	    1 * sizeof(mach_msg_descriptor_t));
+	    1 * sizeof(mach_msg_kdescriptor_t));
 
 	/*
 	 * Therefore, we can temporarily treat `reply` as a *simple* message that
@@ -666,7 +674,7 @@ ipc_kmsg_t
 ipc_kobject_server(
 	ipc_port_t          port,
 	ipc_kmsg_t          request,
-	mach_msg_option_t   option __unused)
+	mach_msg_option64_t option __unused)
 {
 	mach_msg_header_t *req_hdr = ikm_header(request);
 #if DEVELOPMENT || DEBUG

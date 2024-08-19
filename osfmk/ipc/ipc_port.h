@@ -186,10 +186,7 @@ struct ipc_port {
 #define IP_KOBJECT_NSREQUEST_ARMED      ((struct ipc_port *)1)
 	struct ipc_port                *ip_nsrequest;
 	ipc_port_request_table_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_request") ip_requests;
-	union {
-		struct ipc_kmsg *XNU_PTRAUTH_SIGNED_PTR("ipc_port.premsg") ip_premsg;
-		struct turnstile       *ip_send_turnstile;
-	};
+	struct turnstile               *ip_send_turnstile;
 	mach_vm_address_t               ip_context;
 
 #if DEVELOPMENT || DEBUG
@@ -226,18 +223,16 @@ ip_in_pset(ipc_port_t port)
 #define ip_reply_context        ip_messages.imq_context
 #define ip_klist                ip_messages.imq_klist
 
-#define port_send_turnstile(port)                            \
-	(IP_PREALLOC(port) ? TURNSTILE_NULL : (port)->ip_send_turnstile)
+#define port_send_turnstile(port) \
+	((port)->ip_send_turnstile)
 
-#define set_port_send_turnstile(port, value)                 \
-MACRO_BEGIN                                                  \
-if (!IP_PREALLOC(port)) {                                     \
-	(port)->ip_send_turnstile = (value);           \
-}                                                         \
+#define set_port_send_turnstile(port, value) \
+MACRO_BEGIN                                  \
+	(port)->ip_send_turnstile = (value); \
 MACRO_END
 
-#define port_send_turnstile_address(port)                    \
-	(IP_PREALLOC(port) ? NULL : &((port)->ip_send_turnstile))
+#define port_send_turnstile_address(port)    \
+	(&((port)->ip_send_turnstile))
 
 #define port_rcv_turnstile_address(port)   (&(port)->ip_waitq.waitq_ts)
 
@@ -390,23 +385,6 @@ extern bool ip_violates_reply_port_semantics(ipc_port_t dest_port, ipc_port_t re
 #define RRP_3P_VIOLATOR                  5
 
 /* Bits reserved in IO_BITS_PORT_INFO are defined here */
-
-/*
- * JMM - Preallocation flag
- * This flag indicates that there is a message buffer preallocated for this
- * port and we should use that when sending (from the kernel) rather than
- * allocate a new one.  This avoids deadlocks during notification message
- * sends by critical system threads (which may be needed to free memory and
- * therefore cannot be blocked waiting for memory themselves).
- */
-#define IP_BIT_PREALLOC         0x00008000      /* preallocated mesg */
-#define IP_PREALLOC(port)       (io_bits(ip_to_object(port)) & IP_BIT_PREALLOC)
-
-#define IP_SET_PREALLOC(port, kmsg)                                     \
-MACRO_BEGIN                                                             \
-	io_bits_or(ip_to_object(port), IP_BIT_PREALLOC);                \
-	(port)->ip_premsg = (kmsg);                                     \
-MACRO_END
 
 /*
  * This flag indicates that the port has opted into message filtering based
@@ -630,7 +608,7 @@ extern boolean_t ipc_port_request_sparm(
 	ipc_port_t                port,
 	mach_port_name_t          name,
 	ipc_port_request_index_t  index,
-	mach_msg_option_t         option,
+	mach_msg_option64_t       option,
 	mach_msg_priority_t       priority);
 
 /* Make a no-senders request */
@@ -894,7 +872,7 @@ extern ipc_port_t ipc_port_make_send_any(
  *
  * @returns
  * - IP_NULL            if @c port was not a message queue port
- *                      (IKOT_NONE, or IKOT_TIMER), or @c port was IP_NULL.
+ *                      (IKOT_NONE), or @c port was IP_NULL.
  * - IP_DEAD            if @c port was dead.
  * - @c port            if @c port was valid, in which case
  *                      a naked send right was made.
@@ -956,7 +934,7 @@ extern ipc_port_t ipc_port_copy_send_any(
  *
  * @returns
  * - IP_NULL            if @c port was not a message queue port
- *                      (IKOT_NONE, or IKOT_TIMER), or @c port was IP_NULL.
+ *                      (IKOT_NONE), or @c port was IP_NULL.
  * - IP_DEAD            if @c port was dead.
  * - @c port            if @c port was valid, in which case
  *                      a naked send right was made.

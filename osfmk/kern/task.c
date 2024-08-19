@@ -578,7 +578,7 @@ static void task_wait_locked(task_t task, boolean_t until_not_runnable);
 static void task_release_locked(task_t task);
 extern task_t proc_get_task_raw(void *proc);
 extern void task_ref_hold_proc_task_struct(task_t task);
-extern void task_release_proc_task_struct(task_t task);
+extern void task_release_proc_task_struct(task_t task, proc_ro_t proc_ro);
 
 static void task_synchronizer_destroy_all(task_t task);
 static os_ref_count_t
@@ -716,6 +716,9 @@ task_disable_mach_hardening(task_t task)
 bool
 task_opted_out_mach_hardening(task_t task)
 {
+	if (!task) {
+		return false;
+	}
 	return task_ro_flags_get(task) & TFRO_MACH_HARDENING_OPT_OUT;
 }
 #endif /* XNU_TARGET_OS_OSX */
@@ -2237,7 +2240,7 @@ task_deallocate_internal(
 
 	task_ref_count_fini(task);
 	proc_ro_erase_task(task->bsd_info_ro);
-	task_release_proc_task_struct(task);
+	task_release_proc_task_struct(task, task->bsd_info_ro);
 }
 
 /*
@@ -3776,13 +3779,13 @@ task_release(
 
 static kern_return_t
 task_threads_internal(
-	task_t                      task,
-	thread_act_array_t         *threads_out,
-	mach_msg_type_number_t     *countp,
-	mach_thread_flavor_t        flavor)
+	task_t                  task,
+	thread_act_array_t     *threads_out,
+	mach_msg_type_number_t *countp,
+	mach_thread_flavor_t    flavor)
 {
 	mach_msg_type_number_t  actual, count, count_needed;
-	thread_t               *thread_list;
+	thread_act_array_t      thread_list;
 	thread_t                thread;
 	unsigned int            i;
 
@@ -3800,7 +3803,7 @@ task_threads_internal(
 		if (!task->active) {
 			task_unlock(task);
 
-			kfree_type(thread_t, count, thread_list);
+			mach_port_array_free(thread_list, count);
 			return KERN_FAILURE;
 		}
 
@@ -3812,9 +3815,9 @@ task_threads_internal(
 		/* unlock the task and allocate more memory */
 		task_unlock(task);
 
-		kfree_type(thread_t, count, thread_list);
+		mach_port_array_free(thread_list, count);
 		count = count_needed;
-		thread_list = kalloc_type(thread_t, count, Z_WAITOK);
+		thread_list = mach_port_array_alloc(count, Z_WAITOK);
 
 		if (thread_list == NULL) {
 			return KERN_RESOURCE_SHORTAGE;
@@ -3825,7 +3828,7 @@ task_threads_internal(
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
 		assert(i < actual);
 		thread_reference(thread);
-		thread_list[i++] = thread;
+		((thread_t *)thread_list)[i++] = thread;
 	}
 
 	count_needed = actual;
@@ -3836,68 +3839,37 @@ task_threads_internal(
 	if (actual == 0) {
 		/* no threads, so return null pointer and deallocate memory */
 
+		mach_port_array_free(thread_list, count);
+
 		*threads_out = NULL;
 		*countp = 0;
-		kfree_type(thread_t, count, thread_list);
 	} else {
 		/* if we allocated too much, must copy */
 		if (count_needed < count) {
-			void *newaddr;
+			mach_port_array_t newaddr;
 
-			newaddr = kalloc_type(thread_t, count_needed, Z_WAITOK);
+			newaddr = mach_port_array_alloc(count_needed, Z_WAITOK);
 			if (newaddr == NULL) {
 				for (i = 0; i < actual; ++i) {
-					thread_deallocate(thread_list[i]);
+					thread_deallocate(((thread_t *)thread_list)[i]);
 				}
-				kfree_type(thread_t, count, thread_list);
+				mach_port_array_free(thread_list, count);
 				return KERN_RESOURCE_SHORTAGE;
 			}
 
 			bcopy(thread_list, newaddr, count_needed * sizeof(thread_t));
-			kfree_type(thread_t, count, thread_list);
-			thread_list = (thread_t *)newaddr;
+			mach_port_array_free(thread_list, count);
+			thread_list = newaddr;
 		}
+
+		/* do the conversion that Mig should handle */
+		convert_thread_array_to_ports(thread_list, actual, flavor);
 
 		*threads_out = thread_list;
 		*countp = actual;
-
-		/* do the conversion that Mig should handle */
-
-		switch (flavor) {
-		case THREAD_FLAVOR_CONTROL:
-			if (task == current_task()) {
-				for (i = 0; i < actual; ++i) {
-					((ipc_port_t *) thread_list)[i] = convert_thread_to_port_pinned(thread_list[i]);
-				}
-			} else {
-				for (i = 0; i < actual; ++i) {
-					((ipc_port_t *) thread_list)[i] = convert_thread_to_port(thread_list[i]);
-				}
-			}
-			break;
-		case THREAD_FLAVOR_READ:
-			for (i = 0; i < actual; ++i) {
-				((ipc_port_t *) thread_list)[i] = convert_thread_read_to_port(thread_list[i]);
-			}
-			break;
-		case THREAD_FLAVOR_INSPECT:
-			for (i = 0; i < actual; ++i) {
-				((ipc_port_t *) thread_list)[i] = convert_thread_inspect_to_port(thread_list[i]);
-			}
-			break;
-		}
 	}
 
 	return KERN_SUCCESS;
-}
-
-kern_return_t
-task_threads(
-	task_t                      task,
-	thread_act_array_t         *threads_out,
-	mach_msg_type_number_t     *count)
-{
-	return task_threads_internal(task, threads_out, count, THREAD_FLAVOR_CONTROL);
 }
 
 
@@ -6373,6 +6345,7 @@ task_dyld_process_info_notify_register(
 		    offsetof(struct user64_dyld_all_image_infos, notifyMachPorts));
 	}
 
+retry:
 	if (task->itk_dyld_notify == NULL) {
 		notifiers_ptr = kalloc_type(ipc_port_t,
 		    DYLD_MAX_PROCESS_INFO_NOTIFY_COUNT,
@@ -6383,6 +6356,11 @@ task_dyld_process_info_notify_register(
 	itk_lock(task);
 
 	if (task->itk_dyld_notify == NULL) {
+		if (notifiers_ptr == NULL) {
+			itk_unlock(task);
+			lck_mtx_unlock(&g_dyldinfo_mtx);
+			goto retry;
+		}
 		task->itk_dyld_notify = notifiers_ptr;
 		notifiers_ptr = NULL;
 	}

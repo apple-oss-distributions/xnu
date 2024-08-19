@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -66,7 +66,7 @@ uint32_t thread_get_sigreturn_diversifier(thread_t thread);
  * Maps state flavor to number of words in the state:
  */
 /* __private_extern__ */
-unsigned int _MachineStateCount[] = {
+unsigned int _MachineStateCount[THREAD_STATE_FLAVORS] = {
 	[ARM_UNIFIED_THREAD_STATE] = ARM_UNIFIED_THREAD_STATE_COUNT,
 	[ARM_VFP_STATE] = ARM_VFP_STATE_COUNT,
 	[ARM_EXCEPTION_STATE] = ARM_EXCEPTION_STATE_COUNT,

@@ -2308,32 +2308,24 @@ out:
  */
 
 kern_return_t
-mach_ports_register(
+_kernelrpc_mach_ports_register3(
 	task_t                  task,
-	mach_port_array_t       memory,
-	mach_msg_type_number_t  portsCnt)
+	mach_port_t             port1,
+	mach_port_t             port2,
+	mach_port_t             port3)
 {
-	ipc_port_t ports[TASK_PORT_REGISTER_MAX];
-	unsigned int i;
+	ipc_port_t ports[TASK_PORT_REGISTER_MAX] = {
+		port1, port2, port3,
+	};
 
-	if ((task == TASK_NULL) ||
-	    (portsCnt > TASK_PORT_REGISTER_MAX) ||
-	    (portsCnt && memory == NULL)) {
+	if (task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/*
-	 *	Pad the port rights with nulls.
-	 */
-
-	for (i = 0; i < portsCnt; i++) {
-		ports[i] = memory[i];
+	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
 		if (IP_VALID(ports[i]) && ports[i]->ip_immovable_send) {
 			return KERN_INVALID_RIGHT;
 		}
-	}
-	for (; i < TASK_PORT_REGISTER_MAX; i++) {
-		ports[i] = IP_NULL;
 	}
 
 	itk_lock(task);
@@ -2347,7 +2339,7 @@ mach_ports_register(
 	 *	Release the old rights after unlocking.
 	 */
 
-	for (i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
+	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
 		ipc_port_t old;
 
 		old = task->itk_registered[i];
@@ -2357,19 +2349,8 @@ mach_ports_register(
 
 	itk_unlock(task);
 
-	for (i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
-		if (IP_VALID(ports[i])) {
-			ipc_port_release_send(ports[i]);
-		}
-	}
-
-	/*
-	 *	Now that the operation is known to be successful,
-	 *	we can free the memory.
-	 */
-
-	if (portsCnt != 0) {
-		kfree_type(mach_port_t, portsCnt, memory);
+	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
+		ipc_port_release_send(ports[i]);
 	}
 
 	return KERN_SUCCESS;
@@ -2390,36 +2371,28 @@ mach_ports_register(
  */
 
 kern_return_t
-mach_ports_lookup(
+_kernelrpc_mach_ports_lookup3(
 	task_t                  task,
-	mach_port_array_t       *portsp,
-	mach_msg_type_number_t  *portsCnt)
+	ipc_port_t             *port1,
+	ipc_port_t             *port2,
+	ipc_port_t             *port3)
 {
-	ipc_port_t *ports;
-
 	if (task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	ports = kalloc_type(ipc_port_t, TASK_PORT_REGISTER_MAX,
-	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
-
 	itk_lock(task);
 	if (!task->ipc_active) {
 		itk_unlock(task);
-		kfree_type(ipc_port_t, TASK_PORT_REGISTER_MAX, ports);
-
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
-		ports[i] = ipc_port_copy_send_any(task->itk_registered[i]);
-	}
+	*port1 = ipc_port_copy_send_any(task->itk_registered[0]);
+	*port2 = ipc_port_copy_send_any(task->itk_registered[1]);
+	*port3 = ipc_port_copy_send_any(task->itk_registered[2]);
 
 	itk_unlock(task);
 
-	*portsp = ports;
-	*portsCnt = TASK_PORT_REGISTER_MAX;
 	return KERN_SUCCESS;
 }
 
@@ -3327,6 +3300,39 @@ convert_thread_inspect_to_port(thread_inspect_t thread)
 	return convert_thread_to_port_with_flavor(thread, tro, THREAD_FLAVOR_INSPECT);
 }
 
+void
+convert_thread_array_to_ports(
+	thread_act_array_t      array,
+	size_t                  count,
+	mach_thread_flavor_t    flavor)
+{
+	thread_t *thread_list = (thread_t *)array;
+	task_t task_self = current_task();
+
+	for (size_t i = 0; i < count; i++) {
+		thread_t   thread = thread_list[i];
+		ipc_port_t port;
+
+		switch (flavor) {
+		case THREAD_FLAVOR_CONTROL:
+			if (get_threadtask(thread) == task_self) {
+				port = convert_thread_to_port_pinned(thread);
+			} else {
+				port = convert_thread_to_port(thread);
+			}
+			break;
+		case THREAD_FLAVOR_READ:
+			port = convert_thread_read_to_port(thread);
+			break;
+		case THREAD_FLAVOR_INSPECT:
+			port = convert_thread_inspect_to_port(thread);
+			break;
+		}
+
+		array[i].port = port;
+	}
+}
+
 
 /*
  *	Routine:	port_name_to_thread
@@ -3850,6 +3856,44 @@ convert_task_to_port_pinned(
 	task_deallocate(task);
 	return port;
 }
+
+void
+convert_task_array_to_ports(
+	task_array_t            array,
+	size_t                  count,
+	mach_task_flavor_t      flavor)
+{
+	task_t *task_list = (task_t *)array;
+	task_t task_self = current_task();
+
+	for (size_t i = 0; i < count; i++) {
+		task_t     task = task_list[i];
+		ipc_port_t port;
+
+		switch (flavor) {
+		case TASK_FLAVOR_CONTROL:
+			if (task == task_self) {
+				/* if current_task(), return pinned port */
+				port = convert_task_to_port_pinned(task);
+			} else {
+				port = convert_task_to_port(task);
+			}
+			break;
+		case TASK_FLAVOR_READ:
+			port = convert_task_read_to_port(task);
+			break;
+		case TASK_FLAVOR_INSPECT:
+			port = convert_task_inspect_to_port(task);
+			break;
+		case TASK_FLAVOR_NAME:
+			port = convert_task_name_to_port(task);
+			break;
+		}
+
+		array[i].port = port;
+	}
+}
+
 /*
  *	Routine:	convert_task_suspend_token_to_port
  *	Purpose:
@@ -4013,22 +4057,12 @@ send_set_exception_telemetry(const task_t excepting_task, const exception_mask_t
 
 /* Returns whether the violation should be ignored */
 static boolean_t
-set_exception_behavior_violation(const ipc_port_t new_port, const task_t excepting_task,
-    const exception_mask_t mask, const char *level)
+set_exception_behavior_violation(const task_t excepting_task,
+    const exception_mask_t mask, const char * level)
 {
-	mach_port_name_t new_name = CAST_MACH_PORT_TO_NAME(new_port);
-	boolean_t rate_limited;
-
-	task_lock(current_task());
-	rate_limited = task_has_exception_telemetry(current_task());
-	if (!rate_limited) {
-		task_set_exception_telemetry(current_task());
-	}
-	task_unlock(current_task());
-
-	if (thid_should_crash && !rate_limited) {
+	if (thid_should_crash) {
 		/* create lightweight corpse */
-		mach_port_guard_exception(new_name, 0, 0, kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE);
+		mach_port_guard_exception(0, 0, 0, kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE);
 	}
 
 	/* always report the proc name to CA */
@@ -4087,10 +4121,10 @@ set_exception_behavior_allowed(__unused const ipc_port_t new_port, __unused int 
 	    && !proc_is_simulated(current_proc())
 	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state") /* rdar://109119238 */
 	    && !IOCurrentTaskHasEntitlement(SET_EXCEPTION_ENTITLEMENT)) {
-		return set_exception_behavior_violation(new_port, excepting_task, mask, level);
+		return set_exception_behavior_violation(excepting_task, mask, level);
 	}
 
-	return TRUE;
+	return true;
 }
 
 /*

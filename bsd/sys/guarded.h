@@ -120,10 +120,11 @@ enum guard_fd_exception_codes {
 #define VNG_TRUNC_OTHER         (1u << 4)
 #define VNG_LINK                (1u << 5)
 #define VNG_EXCHDATA            (1u << 6)
+#define VNG_PERMISSIONS         (1u << 7)
 
 #define VNG_ALL \
 	(VNG_RENAME_TO | VNG_RENAME_FROM | VNG_UNLINK | VNG_LINK | \
-	 VNG_WRITE_OTHER | VNG_TRUNC_OTHER | VNG_EXCHDATA)
+	 VNG_WRITE_OTHER | VNG_TRUNC_OTHER | VNG_EXCHDATA | VNG_PERMISSIONS)
 
 struct vnguard_set {
 	int vns_fd;

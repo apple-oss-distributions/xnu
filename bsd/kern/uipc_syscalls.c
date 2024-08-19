@@ -3720,6 +3720,7 @@ sendfile(proc_ref_t p, struct sendfile_args *uap, __unused int *retval)
 	size_t sizeof_hdtr;
 	off_t file_size;
 	struct vfs_context context = *vfs_context_current();
+	bool got_vnode_ref = false;
 
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
 
@@ -3736,6 +3737,11 @@ sendfile(proc_ref_t p, struct sendfile_args *uap, __unused int *retval)
 	if ((error = fp_getfvp(p, uap->fd, &fp, &vp))) {
 		goto done;
 	}
+	if ((error = vnode_getwithref(vp))) {
+		goto done;
+	}
+	got_vnode_ref = true;
+
 	if ((fp->f_flag & FREAD) == 0) {
 		error = EBADF;
 		goto done1;
@@ -4097,6 +4103,9 @@ done2:
 done1:
 	file_drop(uap->fd);
 done:
+	if (got_vnode_ref) {
+		vnode_put(vp);
+	}
 	if (uap->nbytes != USER_ADDR_NULL) {
 		/* XXX this appears bogus for some early failure conditions */
 		copyout(&sbytes, uap->nbytes, sizeof(off_t));

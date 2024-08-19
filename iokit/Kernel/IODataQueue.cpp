@@ -276,7 +276,8 @@ IODataQueue::sendDataAvailableNotification()
 
 	msgh = &((IODataQueueInternal *) notifyMsg)->msg;
 	if (msgh->msgh_remote_port) {
-		kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size, MACH_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
+		kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size,
+		    MACH64_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
 		switch (kr) {
 		case MACH_SEND_TIMED_OUT: // Notification already sent
 		case MACH_MSG_SUCCESS:
