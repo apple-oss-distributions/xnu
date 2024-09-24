@@ -262,7 +262,7 @@ T_HELPER_DECL(create_new_session_and_exit, "create_new_session_and_exit") {
 	run_test(0);
 }
 
-T_DECL(tty_exit_bgread_hang_test, "test for background read hang on ttys with proc exit")
+T_DECL(tty_exit_bgread_hang_test, "test for background read hang on ttys with proc exit", T_META_TAG_VM_PREFERRED)
 {
 	dt_helper_t helpers[1];
 
@@ -276,7 +276,7 @@ T_HELPER_DECL(create_new_session_and_revoke_terminal, "create_new_session_and_re
 	run_test(1);
 }
 
-T_DECL(tty_revoke_bgread_hang_test, "test for background read hang on ttys with revoke")
+T_DECL(tty_revoke_bgread_hang_test, "test for background read hang on ttys with revoke", T_META_TAG_VM_PREFERRED)
 {
 	dt_helper_t helpers[1];
 

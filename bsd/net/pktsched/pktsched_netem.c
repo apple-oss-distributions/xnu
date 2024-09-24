@@ -37,7 +37,7 @@
 
 #define NETEM_STUB \
 int \
-netem_config(__unused struct netem **ne, __unused const char *name, \
+netem_config(__unused struct netem **ne, __unused const char *__null_terminated name, \
     __unused struct ifnet *ifp, __unused const struct if_netem_params *p,\
     __unused void *output_handle, __unused netem_output_func_t *output_func, \
     __unused uint32_t output_max_batch_size) \
@@ -691,7 +691,7 @@ struct heap_elem {
 struct heap {
 	size_t limit;  /* max size */
 	size_t size;   /* current size */
-	struct heap_elem p[0];
+	struct heap_elem __counted_by(limit) p[];
 };
 
 static struct heap *heap_create(size_t size);
@@ -1204,7 +1204,7 @@ __attribute__((noreturn))
 static void
 netem_output_thread_cont(void *v, wait_result_t w)
 {
-	struct netem *ne = v;
+	struct netem *__single ne = v;
 	bool more = false;
 	pktsched_pkt_t pkts[NETEM_MAX_BATCH_SIZE];
 	uint32_t n_pkts = 0;
@@ -1277,11 +1277,14 @@ static void
 netem_output_thread_func(void *v, wait_result_t w)
 {
 #pragma unused(w)
-	struct netem *ne = v;
+	struct netem *__single ne = v;
 	uint64_t wakeup;
 
 	ASSERT(ne->netem_output_thread == current_thread());
-	thread_set_thread_name(current_thread(), ne->netem_name);
+
+	char *__null_terminated tname =
+	    __unsafe_null_terminated_from_indexable(ne->netem_name);
+	thread_set_thread_name(current_thread(), tname);
 
 	NETEM_MTX_LOCK(ne);
 	VERIFY(!(ne->netem_flags & NETEMF_RUNNING));
@@ -1598,7 +1601,7 @@ netem_get_params(struct netem *ne, struct if_netem_params *p)
 }
 
 int
-netem_config(struct netem **ne, const char *name, struct ifnet *ifp,
+netem_config(struct netem **ne, const char *__null_terminated name, struct ifnet *ifp,
     const struct if_netem_params *p, void *output_handle,
     netem_output_func_t *output_func, uint32_t output_max_batch_size)
 {
@@ -1653,7 +1656,7 @@ netem_config(struct netem **ne, const char *name, struct ifnet *ifp,
 		NETEM_LOG(LOG_INFO, "| netem disable %s", name);
 		if (*ne != NULL) {
 			netem = *ne;
-			os_atomic_store(ne, NULL, release);
+			os_atomic_store(ne, (void *__single)NULL, release);
 			NETEM_LOG(LOG_INFO, "| netem destroy %s", name);
 			netem_destroy(netem);
 		}

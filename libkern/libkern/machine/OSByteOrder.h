@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -28,6 +28,8 @@
 
 #ifndef _OS_OSBYTEORDERMACHINE_H
 #define _OS_OSBYTEORDERMACHINE_H
+
+#if !defined(__GNUC__) || (!defined(__i386__) && !defined(__x86_64__) && !defined (__arm__) && !defined(__arm64__))
 
 #include <stdint.h>
 
@@ -139,5 +141,7 @@ OSWriteSwapInt64(
 {
 	*(volatile uint64_t *)((uintptr_t)base + byteOffset) = _OSSwapInt64(data);
 }
+
+#endif /* !defined(__GNUC__) || (!defined(__i386__) && !defined(__x86_64__) && !defined (__arm__) && !defined(__arm64__)) */
 
 #endif /* ! _OS_OSBYTEORDERMACHINE_H */

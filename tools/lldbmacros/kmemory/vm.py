@@ -5,7 +5,7 @@ from core import (
     xnu_format,
     SBValueFormatter,
 )
-from core.collections import (
+from core.iterators import (
     RB_HEAD,
 )
 
@@ -74,7 +74,7 @@ class VMMapEntry(MemoryObject):
     MO_KIND = "kernel map entry"
 
     def __init__(self, kmem, address, vm_map):
-        super(VMMapEntry, self).__init__(kmem, address)
+        super().__init__(kmem, address)
         self.vm_map = vm_map
         self.sbv    = vm_map.find(address)
 

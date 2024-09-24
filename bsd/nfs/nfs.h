@@ -761,6 +761,96 @@ extern volatile uint32_t nfsrv_uc_queue_count;
 
 #endif // XNU_KERNEL_PRIVATE
 
+typedef struct nfserr_info {
+	const char *    nei_name;
+	const int       nei_error;
+	const int       nei_index;
+} nfserr_info_t;
+
+/*
+ * NFS Common Errors
+ */
+#define NFSERR_INFO_COMMON \
+	        { "NFS_OK", NFS_OK, 0 }, \
+	        { "NFSERR_PERM", NFSERR_PERM, 1 }, \
+	        { "NFSERR_NOENT", NFSERR_NOENT, 2 }, \
+	        { "NFSERR_IO", NFSERR_IO, 3 }, \
+	        { "NFSERR_NXIO", NFSERR_NXIO, 4 }, \
+	        { "NFSERR_ACCES", NFSERR_ACCES, 5 }, \
+	        { "NFSERR_EXIST", NFSERR_EXIST, 6 }, \
+	        { "NFSERR_XDEV", NFSERR_XDEV, 7 }, \
+	        { "NFSERR_NODEV", NFSERR_NODEV, 8 }, \
+	        { "NFSERR_NOTDIR", NFSERR_NOTDIR, 9 }, \
+	        { "NFSERR_ISDIR", NFSERR_ISDIR, 10 }, \
+	        { "NFSERR_INVAL", NFSERR_INVAL, 11 }, \
+	        { "NFSERR_FBIG", NFSERR_FBIG, 12 }, \
+	        { "NFSERR_NOSPC", NFSERR_NOSPC, 13 }, \
+	        { "NFSERR_ROFS", NFSERR_ROFS, 14 }, \
+	        { "NFSERR_MLINK", NFSERR_MLINK, 15 }, \
+	        { "NFSERR_NAMETOL", NFSERR_NAMETOL, 16 }, \
+	        { "NFSERR_NOTEMPTY", NFSERR_NOTEMPTY, 17 }, \
+	        { "NFSERR_DQUOT", NFSERR_DQUOT, 18 }, \
+	        { "NFSERR_STALE", NFSERR_STALE, 19 }, \
+	        { "NFSERR_REMOTE", NFSERR_REMOTE, 20 }, \
+	        { "NFSERR_WFLUSH", NFSERR_WFLUSH, 21 }, \
+	        { "NFSERR_BADHANDLE", NFSERR_BADHANDLE, 22 }, \
+	        { "NFSERR_NOT_SYNC", NFSERR_NOT_SYNC, 23 }, \
+	        { "NFSERR_BAD_COOKIE", NFSERR_BAD_COOKIE, 24 }, \
+	        { "NFSERR_NOTSUPP", NFSERR_NOTSUPP, 25 }, \
+	        { "NFSERR_TOOSMALL", NFSERR_TOOSMALL, 26 }, \
+	        { "NFSERR_SERVERFAULT", NFSERR_SERVERFAULT, 27 }, \
+	        { "NFSERR_BADTYPE", NFSERR_BADTYPE, 28 }, \
+	        { "NFSERR_DELAY", NFSERR_DELAY, 29 }
+
+#define NFSERR_INFO_COMMON_SIZE 30
+
+/*
+ * NFSv4 Errors
+ */
+#define NFSERR_INFO_V4 \
+	        { "ERR_SAME", NFSERR_SAME, 0 }, \
+	        { "ERR_DENIED", NFSERR_DENIED, 1 }, \
+	        { "ERR_EXPIRED", NFSERR_EXPIRED, 2 }, \
+	        { "ERR_LOCKED", NFSERR_LOCKED, 3 }, \
+	        { "ERR_GRACE", NFSERR_GRACE, 4 }, \
+	        { "ERR_FHEXPIRED", NFSERR_FHEXPIRED, 5 }, \
+	        { "ERR_SHARE_DENIED", NFSERR_SHARE_DENIED, 6 }, \
+	        { "ERR_WRONGSEC", NFSERR_WRONGSEC, 7 }, \
+	        { "ERR_CLID_INUSE", NFSERR_CLID_INUSE, 8 }, \
+	        { "ERR_RESOURCE", NFSERR_RESOURCE, 9 }, \
+	        { "ERR_MOVED", NFSERR_MOVED, 10 }, \
+	        { "ERR_NOFILEHANDLE", NFSERR_NOFILEHANDLE, 11 }, \
+	        { "ERR_MINOR_VERS_MISMATCH", NFSERR_MINOR_VERS_MISMATCH, 12 }, \
+	        { "ERR_STALE_CLIENTID", NFSERR_STALE_CLIENTID, 13 }, \
+	        { "ERR_STALE_STATEID", NFSERR_STALE_STATEID, 14 }, \
+	        { "ERR_OLD_STATEID", NFSERR_OLD_STATEID, 15 }, \
+	        { "ERR_BAD_STATEID", NFSERR_BAD_STATEID, 16 }, \
+	        { "ERR_BAD_SEQID", NFSERR_BAD_SEQID, 17 }, \
+	        { "ERR_NOT_SAME", NFSERR_NOT_SAME, 18 }, \
+	        { "ERR_LOCK_RANGE", NFSERR_LOCK_RANGE, 19 }, \
+	        { "ERR_SYMLINK", NFSERR_SYMLINK, 20 }, \
+	        { "ERR_RESTOREFH", NFSERR_RESTOREFH, 21 }, \
+	        { "ERR_LEASE_MOVED", NFSERR_LEASE_MOVED, 22 }, \
+	        { "ERR_ATTRNOTSUPP", NFSERR_ATTRNOTSUPP, 23 }, \
+	        { "ERR_NO_GRACE", NFSERR_NO_GRACE, 24 }, \
+	        { "ERR_RECLAIM_BAD", NFSERR_RECLAIM_BAD, 25 }, \
+	        { "ERR_RECLAIM_CONFLICT", NFSERR_RECLAIM_CONFLICT, 26 }, \
+	        { "ERR_BADXDR", NFSERR_BADXDR, 27 }, \
+	        { "ERR_LOCKS_HELD", NFSERR_LOCKS_HELD, 28 }, \
+	        { "ERR_OPENMODE", NFSERR_OPENMODE, 29 }, \
+	        { "ERR_BADOWNER", NFSERR_BADOWNER, 30 }, \
+	        { "ERR_BADCHAR", NFSERR_BADCHAR, 31 }, \
+	        { "ERR_BADNAME", NFSERR_BADNAME, 32 }, \
+	        { "ERR_BAD_RANGE", NFSERR_BAD_RANGE, 33 }, \
+	        { "ERR_LOCK_NOTSUPP", NFSERR_LOCK_NOTSUPP, 34 }, \
+	        { "ERR_OP_ILLEGAL", NFSERR_OP_ILLEGAL, 35 }, \
+	        { "ERR_DEADLOCK", NFSERR_DEADLOCK, 36 }, \
+	        { "ERR_FILE_OPEN", NFSERR_FILE_OPEN, 37 }, \
+	        { "ERR_ADMIN_REVOKED", NFSERR_ADMIN_REVOKED, 38 }, \
+	        { "ERR_CB_PATH_DOWN", NFSERR_CB_PATH_DOWN, 39 }
+
+#define NFSERR_INFO_V4_SIZE 40
+
 /*
  * XXX to allow amd to include nfs.h without nfsproto.h
  */
@@ -788,6 +878,11 @@ struct nfsclntstats {
 	uint64_t        biocache_readdirs;
 	uint64_t        readdir_bios;
 	uint64_t        rpccntv3[NFS_NPROCS];
+	struct {
+		uint64_t    nlm_lock;
+		uint64_t    nlm_test;
+		uint64_t    nlm_unlock;
+	} nlmcnt; // NFSv3 only
 	uint64_t        opcntv4[NFS_OP_COUNT];
 	uint64_t        rpcretries;
 	uint64_t        rpcrequests;
@@ -796,6 +891,11 @@ struct nfsclntstats {
 	uint64_t        rpcinvalid;
 	uint64_t        pageins;
 	uint64_t        pageouts;
+	struct {
+		uint64_t    errs_common[NFSERR_INFO_COMMON_SIZE];
+		uint64_t    errs_v4[NFSERR_INFO_V4_SIZE];
+		uint64_t    errs_unknown;
+	} nfs_errs;
 };
 
 struct nfsrvstats {
@@ -807,6 +907,10 @@ struct nfsrvstats {
 	uint64_t        srvcache_nonidemdonehits;
 	uint64_t        srvcache_misses;
 	uint64_t        srvvop_writes;
+	struct {
+		uint64_t    errs_common[NFSERR_INFO_COMMON_SIZE];
+		uint64_t    errs_unknown;
+	} nfs_errs;
 };
 
 #endif

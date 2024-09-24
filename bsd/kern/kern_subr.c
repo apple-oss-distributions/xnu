@@ -224,7 +224,7 @@ uio_advance_sys(uio_t uio)
  *		for typedef'ed types doesn't work in gcc.
  */
 int
-uiomove(const char * cp, int n, uio_t uio)
+uiomove(const char *__counted_by(n) cp, int n, uio_t uio)
 {
 	return uiomove64((const addr64_t)(uintptr_t)cp, n, uio);
 }
@@ -238,7 +238,7 @@ uiomove(const char * cp, int n, uio_t uio)
  *	copypv:EFAULT
  */
 int
-uiomove64(const addr64_t c_cp, int n, struct uio *uio)
+uiomove64(const addr64_t c_cp __sized_by(n), int n, struct uio *uio)
 {
 	if (IS_PURE_USER_SPACE_SEGFLG(uio->uio_segflg)) {
 		if (uio->uio_rw == UIO_READ) {
@@ -270,7 +270,7 @@ uiomove64(const addr64_t c_cp, int n, struct uio *uio)
 }
 
 int
-uio_copyout_user(const char *c_cp, int n, uio_t uio)
+uio_copyout_user(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -310,7 +310,7 @@ uio_copyout_user(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyin_user(const char *c_cp, int n, uio_t uio)
+uio_copyin_user(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -350,7 +350,7 @@ uio_copyin_user(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyout_sys(const char *c_cp, int n, uio_t uio)
+uio_copyout_sys(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -380,7 +380,7 @@ uio_copyout_sys(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyin_sys(const char *c_cp, int n, uio_t uio)
+uio_copyin_sys(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -410,7 +410,7 @@ uio_copyin_sys(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyout_phys_user(const char *c_cp, int n, uio_t uio)
+uio_copyout_phys_user(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -451,7 +451,7 @@ uio_copyout_phys_user(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyin_phys_user(const char *c_cp, int n, uio_t uio)
+uio_copyin_phys_user(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -492,7 +492,7 @@ uio_copyin_phys_user(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyout_phys_sys(const char *c_cp, int n, uio_t uio)
+uio_copyout_phys_sys(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -533,7 +533,7 @@ uio_copyout_phys_sys(const char *c_cp, int n, uio_t uio)
 }
 
 int
-uio_copyin_phys_sys(const char *c_cp, int n, uio_t uio)
+uio_copyin_phys_sys(const char *c_cp __sized_by(n), int n, uio_t uio)
 {
 	addr64_t cp = (const addr64_t)(uintptr_t)c_cp;
 
@@ -607,27 +607,49 @@ ureadc(int c, struct uio *uio)
 	return 0;
 }
 
-LIST_HEAD(generic_hash_head, generic);
 
 /*
  * General routine to allocate a hash table.
  */
+static size_t __pure2
+hashsize(int elements)
+{
+	if (__improbable(elements <= 0)) {
+		panic("hashsize: bad cnt");
+	}
+	return 1UL << (fls(elements) - 1);
+}
+
 void *
 hashinit(int elements, int type __unused, u_long *hashmask)
 {
 	struct generic_hash_head *hashtbl;
-	vm_size_t hashsize;
+	vm_size_t hash_size;
 
-	if (__improbable(elements <= 0)) {
-		panic("hashinit: bad cnt");
-	}
-
-	hashsize = 1UL << (fls(elements) - 1);
-	hashtbl = kalloc_type(struct generic_hash_head, hashsize, Z_WAITOK | Z_ZERO);
+	hash_size = hashsize(elements);
+	hashtbl = kalloc_type(struct generic_hash_head, hash_size, Z_WAITOK | Z_ZERO);
 	if (hashtbl != NULL) {
-		*hashmask = hashsize - 1;
+		*hashmask = hash_size - 1;
 	}
 	return hashtbl;
+}
+
+void
+hashinit_generic(int elements,
+    struct generic_hash_head *__counted_by(*out_count) *out_ptr,
+    size_t *out_count)
+{
+	u_long hashmask = 0;
+	struct generic_hash_head *__unsafe_indexable hash = hashinit(elements, 0, &hashmask);
+	size_t count = hashmask + 1;
+	if (hash == NULL) {
+		return;
+	} else {
+		*out_count = count;
+		*out_ptr = __unsafe_forge_bidi_indexable(struct generic_hash_head *,
+		    hash,
+		    count * sizeof(struct generic_hash_head));
+	}
 }
 
 void

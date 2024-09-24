@@ -893,7 +893,7 @@ test_waitpid_blocking(void)
  *
  */
 
-T_DECL(stackshot_block_owner_klocks, "tests stackshot block owner for kernel locks") {
+T_DECL(stackshot_block_owner_klocks, "tests stackshot block owner for kernel locks", T_META_TAG_VM_PREFERRED) {
 	/* check to see if kmutex sysctl exists before running kmutex test */
 	if (kmutex_action(KMUTEX_SYSCTL_CHECK_EXISTS))
 		test_kmutex_blocking();
@@ -903,26 +903,26 @@ T_DECL(stackshot_block_owner_klocks, "tests stackshot block owner for kernel loc
 	test_ulock_blocking();
 }
 
-T_DECL(stackshot_block_owner_pthread_mutex, "tests stackshot block owner: pthread mutex") {
+T_DECL(stackshot_block_owner_pthread_mutex, "tests stackshot block owner: pthread mutex", T_META_TAG_VM_PREFERRED) {
 	test_pthread_mutex_blocking();
 }
 
-T_DECL(stackshot_block_owner_pthread_rwlck, "tests stackshot block owner: pthread rw locks") {
+T_DECL(stackshot_block_owner_pthread_rwlck, "tests stackshot block owner: pthread rw locks", T_META_TAG_VM_PREFERRED) {
 	test_pthread_rwlck_blocking();
 }
 
-T_DECL(stackshot_block_owner_pthread_condvar, "tests stackshot block owner: pthread condvar") {
+T_DECL(stackshot_block_owner_pthread_condvar, "tests stackshot block owner: pthread condvar", T_META_TAG_VM_PREFERRED) {
 	test_pthread_cond_blocking();
 }
 
-T_DECL(stackshot_block_owner_semaphore, "tests stackshot block owner: semaphore") {
+T_DECL(stackshot_block_owner_semaphore, "tests stackshot block owner: semaphore", T_META_TAG_VM_PREFERRED) {
 	test_semaphore_blocking();
 }
 
-T_DECL(stackshot_block_owner_mach_msg, "tests stackshot block owner: mach messaging") {
+T_DECL(stackshot_block_owner_mach_msg, "tests stackshot block owner: mach messaging", T_META_TAG_VM_PREFERRED) {
 	test_mach_msg_blocking();
 }
 
-T_DECL(stackshot_block_owner_waitpid, "tests stackshot block owner: waitpid") {
+T_DECL(stackshot_block_owner_waitpid, "tests stackshot block owner: waitpid", T_META_TAG_VM_PREFERRED) {
 	test_waitpid_blocking();
 }

@@ -114,7 +114,7 @@ cpu_init(void)
 	i386_activate_cpu();
 }
 
-kern_return_t
+void
 cpu_start(
 	int cpu)
 {
@@ -122,7 +122,7 @@ cpu_start(
 
 	if (cpu == cpu_number()) {
 		cpu_machine_init();
-		return KERN_SUCCESS;
+		return;
 	}
 
 	/*
@@ -140,10 +140,8 @@ cpu_start(
 	}
 
 	if (ret != KERN_SUCCESS) {
-		kprintf("cpu: cpu_start(%d) returning failure!\n", cpu);
+		panic("cpu_start(%d) failed: %d\n", cpu, ret);
 	}
-
-	return ret;
 }
 
 void

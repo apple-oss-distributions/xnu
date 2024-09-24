@@ -23,7 +23,8 @@ run_sysctl_test(const char *t, int64_t value)
 }
 
 T_DECL(waitq_basic, "General waitq test",
-    T_META_RUN_CONCURRENTLY(false))
+    T_META_RUN_CONCURRENTLY(false),
+    T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("waitq_basic", 0), "waitq_basic_test");
 }

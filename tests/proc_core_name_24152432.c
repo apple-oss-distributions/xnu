@@ -158,7 +158,8 @@ T_DECL(
 	proc_core_name_24152432,
 	"Tests behavior of core dump when kern.corefile ends in %, e.g., /cores/core.%",
 	T_META_ASROOT(true),
-	T_META_IGNORECRASHES("proc_core_name_24152432.*"))
+	T_META_IGNORECRASHES("proc_core_name_24152432.*"),
+	T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_OSX
 	DIR *dirp;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -247,11 +247,13 @@ icmp_error(
 	}
 
 	if (oip->ip_p == IPPROTO_ICMP && type != ICMP_REDIRECT &&
-	    n->m_len >= oiphlen + ICMP_MINLEN &&
-	    !ICMP_INFOTYPE(((struct icmp *)(void *)((caddr_t)oip + oiphlen))->
-	    icmp_type)) {
-		icmpstat.icps_oldicmp++;
-		goto freeit;
+	    n->m_len >= oiphlen + ICMP_MINLEN) {
+		struct icmp oicp = {0};
+		memcpy(&oicp, mtodo(n, oiphlen), ICMP_MINLEN);
+		if (!ICMP_INFOTYPE(oicp.icmp_type)) {
+			icmpstat.icps_oldicmp++;
+			goto freeit;
+		}
 	}
 
 	/*
@@ -474,12 +476,14 @@ icmp_input(struct mbuf *m, int hlen)
 		icmpstat.icps_tooshort++;
 		return;
 	}
-	/* Re-seat the pointers, since `m_pullup' might have moved `m'. `icp' is re-seated below. */
+	/* Reset the pointers, since `m_pullup' might have moved `m'. `icp' is reset below. */
 	ip = mtod(m, struct ip *);
 
 	m->m_len -= hlen;
 	m->m_data += hlen;
-	icp = mtod(m, struct icmp *);
+	// Forging because we might not have the full size of one struct icmp,
+	// but we have enough bytes to work with
+	icp = __unsafe_forge_single(struct icmp *, mtod(m, struct icmp *));
 	if (in_cksum(m, icmplen) != 0) {
 		icmpstat.icps_checksum++;
 		goto freeit;
@@ -585,9 +589,9 @@ deliver:
 			goto freeit;
 		}
 
-		/* Re-seat the pointers, since `m_pullup' might have moved `m'*/
+		/* Reset the pointers, since `m_pullup' might have moved `m'*/
 		ip = mtod(m, struct ip *);
-		icp = (struct icmp *)(void *)(mtod(m, uint8_t *) + hlen);
+		icp = __unsafe_forge_single(struct icmp *, mtodo(m, hlen));
 
 #if BYTE_ORDER != BIG_ENDIAN
 		NTOHS(icp->icmp_ip.ip_len);
@@ -706,8 +710,8 @@ badcode:
 		default:
 			icmpdst.sin_addr = ip->ip_dst;
 		}
-		ia = (struct in_ifaddr *)ifaof_ifpforaddr(
-			SA(&icmpdst), m->m_pkthdr.rcvif);
+		ia = ifatoia(ifaof_ifpforaddr(SA(&icmpdst),
+		    m->m_pkthdr.rcvif));
 		if (ia == 0) {
 			break;
 		}
@@ -867,18 +871,18 @@ match:
 	icmpdst.sin_len = sizeof(struct sockaddr_in);
 	icmpdst.sin_family = AF_INET;
 	icmpdst.sin_addr = t;
-	if ((ia == (struct in_ifaddr *)0) && m->m_pkthdr.rcvif) {
-		ia = (struct in_ifaddr *)ifaof_ifpforaddr(
-			SA(&icmpdst), m->m_pkthdr.rcvif);
+	if ((ia == NULL) && m->m_pkthdr.rcvif) {
+		ia = ifatoia(ifaof_ifpforaddr(SA(&icmpdst),
+		    m->m_pkthdr.rcvif));
 	}
 	/*
 	 * The following happens if the packet was not addressed to us,
 	 * and was received on an interface with no IP address.
 	 */
-	if (ia == (struct in_ifaddr *)0) {
+	if (ia == NULL) {
 		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		ia = in_ifaddrhead.tqh_first;
-		if (ia == (struct in_ifaddr *)0) {/* no address yet, bail out */
+		if (ia == NULL) {/* no address yet, bail out */
 			lck_rw_done(&in_ifaddr_rwlock);
 			m_freem(m);
 			goto done;
@@ -1007,7 +1011,7 @@ icmp_send(struct mbuf *m, struct mbuf *opts)
 	hlen = IP_VHL_HL(ip->ip_vhl) << 2;
 	m->m_data += hlen;
 	m->m_len -= hlen;
-	icp = mtod(m, struct icmp *);
+	icp = __unsafe_forge_single(struct icmp *, mtod(m, struct icmp *));
 	icp->icmp_cksum = 0;
 	icp->icmp_cksum = in_cksum(m, ip->ip_len - hlen);
 	m->m_data -= hlen;
@@ -1158,6 +1162,11 @@ icmp_dgram_ctloutput(struct socket *so, struct sockopt *sopt)
 {
 	int     error;
 
+	/* Allow <SOL_SOCKET,SO_BINDTODEVICE> at this level */
+	if (sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_BINDTODEVICE) {
+		return rip_ctloutput(so, sopt);;
+	}
+
 	if (sopt->sopt_level != IPPROTO_IP) {
 		return EINVAL;
 	}
@@ -1291,13 +1300,13 @@ ours:
 		/* Do not trust we got a valid checksum */
 		ip->ip_sum = 0;
 
-		icp = (struct icmp *)(void *)(((char *)m->m_data) + hlen);
+		icp = __unsafe_forge_single(struct icmp *, mtodo(m, hlen));
 		icmplen = m->m_pkthdr.len - hlen;
 	} else {
 		if ((icmplen = m->m_pkthdr.len) < ICMP_MINLEN) {
 			goto bad;
 		}
-		icp = mtod(m, struct icmp *);
+		icp = __unsafe_forge_single(struct icmp *, mtod(m, struct icmp *));
 	}
 	/*
 	 * Allow only to send request types with code 0

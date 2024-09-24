@@ -232,7 +232,7 @@ main_test(void)
 	out_buffer = NULL;
 }
 
-T_DECL(test_get_vmobject_list, "Get owned vm_objects for process")
+T_DECL(test_get_vmobject_list, "Get owned vm_objects for process", T_META_TAG_VM_PREFERRED)
 {
 	main_test();
 }

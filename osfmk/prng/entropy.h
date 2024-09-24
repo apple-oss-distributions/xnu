@@ -50,7 +50,7 @@ __BEGIN_DECLS
 typedef uint32_t entropy_sample_t;
 
 // Called during startup to initialize internal data structures.
-void entropy_init(void);
+void entropy_init(size_t seed_size, uint8_t *seed);
 
 // Called during hardware interrupts to collect entropy in per-CPU
 // structures.

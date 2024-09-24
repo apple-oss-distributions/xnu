@@ -172,7 +172,8 @@ exclaves_launch_conclave(mach_port_t port, void *arg1,
 }
 
 kern_return_t
-exclaves_lookup_service(mach_port_t port, const char *name, exclaves_id_t *resource_id)
+exclaves_lookup_service(mach_port_t port, const char *name,
+    exclaves_id_t *resource_id)
 {
 	struct exclaves_resource_user conclave_resource_user;
 	kern_return_t kr;
@@ -180,7 +181,8 @@ exclaves_lookup_service(mach_port_t port, const char *name, exclaves_id_t *resou
 
 	strlcpy(conclave_resource_user.r_name, name, MAXCONCLAVENAME);
 	conclave_resource_user.r_type = 0;
-	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(LOOKUP_RESOURCES, 0);
+	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(LOOKUP_SERVICES, 0);
+
 	kr = EXCLAVES_CTL_TRAP(port, opf, 0,
 	    (mach_vm_address_t)&conclave_resource_user, size, 0, 0);
 	if (kr == KERN_SUCCESS && resource_id) {
@@ -253,7 +255,8 @@ exclaves_sensor_status(mach_port_t sensor_port, uint64_t flags,
 }
 
 kern_return_t
-exclaves_notification_create(__unused mach_port_t port, const char *name, uint64_t *notification_id)
+exclaves_notification_create(__unused mach_port_t port, const char *name,
+    uint64_t *notification_id)
 {
 	const uint32_t opf = EXCLAVES_CTL_OP_AND_FLAGS(NOTIFICATION_RESOURCE_LOOKUP, 0);
 	kern_return_t kr;

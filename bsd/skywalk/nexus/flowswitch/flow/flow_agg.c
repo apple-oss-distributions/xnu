@@ -69,7 +69,7 @@ struct flow_agg {
 				struct mbuf *   _fa_smbuf;      /* super mbuf */
 				struct __kern_packet *_fa_spkt; /* super pkt */
 			};
-			uint8_t *_fa_sptr;        /* ptr to super IP header */
+			uint8_t *__indexable _fa_sptr;        /* ptr to super IP header */
 			bool     _fa_sobj_is_pkt; /* super obj is pkt or mbuf */
 			/*
 			 * super obj is not large enough to hold the IP & TCP
@@ -96,12 +96,21 @@ struct flow_agg {
 #define fa_fix_pkt_sum   __flow_agg._fa_fix_pkt_sum
 };
 
+#if __has_ptrcheck
 #define FLOW_AGG_CLEAR(_fa) do {                                    \
-	_CASSERT(sizeof(struct flow_agg) == 40);                        \
+	_CASSERT(sizeof(struct flow_agg) == 48);         \
+	_CASSERT(offsetof(struct flow_agg, fa_fix_pkt_sum) == 40);              \
+	sk_zero_48(_fa);                                                \
+	(_fa)->fa_fix_pkt_sum = 0;                                                                             \
+} while (0)
+#else
+#define FLOW_AGG_CLEAR(_fa) do {                                    \
+	_CASSERT(sizeof(struct flow_agg) == 40);         \
 	_CASSERT(offsetof(struct flow_agg, fa_fix_pkt_sum) == 32);              \
 	sk_zero_32(_fa);                                                \
 	(_fa)->fa_fix_pkt_sum = 0;                                                                             \
 } while (0)
+#endif
 
 #define MASK_SIZE       80      /* size of struct {ip,ip6}_tcp_mask */
 
@@ -230,8 +239,8 @@ _pkt_agg_log(struct __kern_packet *pkt, struct proc *p, bool is_input)
 		/* Individual buflets */
 		for (uint64_t i = 0; i < bufcnt && buf != NULL; i++) {
 			SK_DF(logflags | SK_VERB_DUMP, "%s",
-			    sk_dump("buf", kern_buflet_get_data_address(buf),
-			    pkt->pkt_length, 128, NULL, 0));
+			    sk_dump("buf", __buflet_get_data_address(buf),
+			    __buflet_get_data_length(buf), 128, NULL, 0));
 			buf = kern_packet_get_next_buflet(ph, buf);
 		}
 	}
@@ -438,7 +447,8 @@ _copy_data_sum_dbuf(struct __kern_packet *spkt, uint16_t soff, uint16_t plen,
 
 		if (dbuf->dba_is_buflet) {
 			ASSERT(kern_buflet_get_data_offset(dbuf->dba_buflet[i]) == 0);
-			dbuf_addr = kern_buflet_get_data_address(dbuf->dba_buflet[i]);
+			/* XXX -fbounds-safety: use the inline variant to return an __indexable */
+			dbuf_addr = __buflet_get_data_address(dbuf->dba_buflet[i]);
 
 			buflet_dlim = kern_buflet_get_data_limit(dbuf->dba_buflet[i]);
 			buflet_dlen = kern_buflet_get_data_length(dbuf->dba_buflet[i]);
@@ -451,6 +461,7 @@ _copy_data_sum_dbuf(struct __kern_packet *spkt, uint16_t soff, uint16_t plen,
 			buf_off = dbuf->dba_mbuf[i]->m_len;
 			dbuf_addr += buf_off;
 		}
+
 		tmplen = min(plen, dbuf_lim);
 		if (PKT_IS_TRUNC_MBUF(spkt)) {
 			if (do_csum) {
@@ -531,8 +542,9 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 		curr_oldlen = currp->buf_dlen;
 		curr_trailing = currp->buf_dlim - currp->buf_doff -
 		    currp->buf_dlen;
-		curr_ptr = (char *)(currp->buf_addr + currp->buf_doff +
-		    currp->buf_dlen);
+		/* XXX -fbounds-safety: use the inline variant to return an __indexable */
+		curr_ptr = (char *)__buflet_get_data_address(currp) + currp->buf_doff +
+		    currp->buf_dlen;
 		curr_len = currp->buf_dlen;
 	}
 
@@ -703,7 +715,8 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 	uint8_t *daddr;
 
 	if (dbuf->dba_is_buflet) {
-		daddr = kern_buflet_get_data_address(dbuf->dba_buflet[0]);
+		/* XXX -fbounds-safety: use the inline variant to return an __indexable */
+		daddr = __buflet_get_data_address(dbuf->dba_buflet[0]);
 		daddr += kern_buflet_get_data_length(dbuf->dba_buflet[0]);
 	} else {
 		daddr = mtod(dbuf->dba_mbuf[0], uint8_t *);
@@ -921,16 +934,25 @@ flow_agg_init_spkt(struct nx_flowswitch *fsw, struct flow_agg *fa,
 	flow_agg_init_common(fsw, fa, pkt);
 }
 
+/*
+ * -fbounds-safety: The reason hardcoded values 64 (and 80) are used here is
+ * because this function calls the 64-byte version of sk memcmp function (same
+ * thing for the 80-byte version). In can_agg_fastpath, there is a check being
+ * done for TCP header length with options: sizeof(struct tcphdr) +
+ * TCPOLEN_TSTAMP_APPA , which is 20 + 12 = 32 bytes. In case of IPv4, adding IP
+ * header size of 20 to it makes it 52 bytes. From the sk_memcmp_* variants, the
+ * closest one is the 64B option.
+ */
 SK_INLINE_ATTRIBUTE
 static bool
-ipv4_tcp_memcmp(const uint8_t *h1, const uint8_t *h2)
+ipv4_tcp_memcmp(const uint8_t *__counted_by(64)h1, const uint8_t *__counted_by(64)h2)
 {
 	return sk_memcmp_mask_64B(h1, h2, (const uint8_t *)&ip_tcp_mask) == 0;
 }
 
 SK_INLINE_ATTRIBUTE
 static bool
-ipv6_tcp_memcmp(const uint8_t *h1, const uint8_t *h2)
+ipv6_tcp_memcmp(const uint8_t *__counted_by(80)h1, const uint8_t *__counted_by(80)h2)
 {
 	return sk_memcmp_mask_80B(h1, h2, (const uint8_t *)&ip6_tcp_mask) == 0;
 }
@@ -941,6 +963,7 @@ can_agg_fastpath(struct flow_agg *fa, struct __kern_packet *pkt,
     struct fsw_stats *fsws)
 {
 	bool match;
+	uint8_t *ip_hdr;
 
 	ASSERT(fa->fa_sptr != NULL);
 	_CASSERT(sizeof(struct ip6_tcp_mask) == MASK_SIZE);
@@ -963,12 +986,20 @@ can_agg_fastpath(struct flow_agg *fa, struct __kern_packet *pkt,
 
 	switch (pkt->pkt_flow_ip_ver) {
 	case IPVERSION:
-		match = ipv4_tcp_memcmp(fa->fa_sptr,
-		    (uint8_t *)pkt->pkt_flow_ip_hdr);
+		/*
+		 * -fbounds-safety: pkt->pkt_flow_ip_hdr is a mach_vm_address_t,
+		 * so we forge it here. The reason the constant values 64 and 80
+		 * are used is because ipv4_tcp_memcmp takes a __counted_by(64)
+		 * and __counted_by(80), respectively.
+		 */
+		ip_hdr = __unsafe_forge_bidi_indexable(uint8_t *,
+		    pkt->pkt_flow_ip_hdr, 64);
+		match = ipv4_tcp_memcmp(fa->fa_sptr, ip_hdr);
 		break;
 	case IPV6_VERSION:
-		match = ipv6_tcp_memcmp(fa->fa_sptr,
-		    (uint8_t *)pkt->pkt_flow_ip_hdr);
+		ip_hdr = __unsafe_forge_bidi_indexable(uint8_t *,
+		    pkt->pkt_flow_ip_hdr, 80);
+		match = ipv6_tcp_memcmp(fa->fa_sptr, ip_hdr);
 		break;
 	default:
 		VERIFY(0);
@@ -1000,6 +1031,8 @@ can_agg_slowpath(struct flow_agg *fa, struct __kern_packet *pkt,
     struct fsw_stats *fsws)
 {
 	uint8_t *sl3_hdr = fa->fa_sptr;
+	uint8_t *l3_hdr = __unsafe_forge_bidi_indexable(uint8_t *,
+	    pkt->pkt_flow_ip_hdr, pkt->pkt_flow_ip_hlen);
 	uint32_t sl3tlen = 0;
 	uint16_t sl3hlen = 0;
 
@@ -1015,7 +1048,7 @@ can_agg_slowpath(struct flow_agg *fa, struct __kern_packet *pkt,
 	 */
 	if (pkt->pkt_flow_ip_ver == IPVERSION) {
 		struct ip *siph = (struct ip *)(void *)sl3_hdr;
-		struct ip *iph = (struct ip *)pkt->pkt_flow_ip_hdr;
+		struct ip *iph = (struct ip *)(void *)l3_hdr;
 
 		ASSERT(siph->ip_v == IPVERSION);
 		/* 16-bit alignment is sufficient (handles mbuf case) */
@@ -1066,7 +1099,7 @@ can_agg_slowpath(struct flow_agg *fa, struct __kern_packet *pkt,
 		sl3tlen = ntohs(siph->ip_len);
 	} else {
 		struct ip6_hdr *sip6 = (struct ip6_hdr *)(void *)sl3_hdr;
-		struct ip6_hdr *ip6 = (struct ip6_hdr *)pkt->pkt_flow_ip_hdr;
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)l3_hdr;
 
 		ASSERT(pkt->pkt_flow_ip_ver == IPV6_VERSION);
 		ASSERT((sip6->ip6_vfc & IPV6_VERSION_MASK) == IPV6_VERSION);
@@ -1087,7 +1120,7 @@ can_agg_slowpath(struct flow_agg *fa, struct __kern_packet *pkt,
 
 		sl3hlen = sizeof(struct ip6_hdr);
 		/* For IPv6, flow info mask covers TOS and flow label */
-		if (memcmp(&sip6->ip6_flow, &ip6->ip6_flow,
+		if (memcmp((uint8_t *)&sip6->ip6_flow, (uint8_t *)&ip6->ip6_flow,
 		    sizeof(sip6->ip6_flow)) != 0) {
 			STATS_INC(fsws, FSW_STATS_RX_AGG_NO_TOS_IP);
 			DTRACE_SKYWALK2(aggr__fail8, uint32_t,
@@ -1112,7 +1145,9 @@ can_agg_slowpath(struct flow_agg *fa, struct __kern_packet *pkt,
 	 * Compare TCP header length and TCP options
 	 */
 	struct tcphdr *stcp = (struct tcphdr *)(void *)(sl3_hdr + sl3hlen);
-	struct tcphdr *tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+	/* -fbounds-safety: pkt_flow_tcp_hdr is a mach_vm_address_t */
+	struct tcphdr *tcp = __unsafe_forge_bidi_indexable(struct tcphdr *,
+	    pkt->pkt_flow_tcp_hdr, pkt->pkt_flow_tcp_hlen);
 
 	uint16_t sl4hlen = (stcp->th_off << 2);
 	if (memcmp(&stcp->th_ack, &tcp->th_ack, sizeof(stcp->th_ack)) != 0 ||
@@ -1258,12 +1293,13 @@ flow_agg_pkt_fix_sum_no_op(uint16_t __unused csum, uint16_t __unused old,
 }
 
 static inline void
-flow_agg_pkt_fix_hdr_sum(struct flow_agg *fa, uint8_t *field, uint16_t *csum,
+flow_agg_pkt_fix_hdr_sum(struct flow_agg *fa,
+    uint8_t *__sized_by(sizeof(uint32_t))field, uint16_t *csum,
     uint32_t new)
 {
 	uint32_t old;
-	memcpy(&old, field, sizeof(old));
-	memcpy(field, &new, sizeof(uint32_t));
+	memcpy((uint8_t *)&old, field, sizeof(old));
+	memcpy(field, (uint8_t *)&new, sizeof(uint32_t));
 	*csum = fa->fa_fix_pkt_sum(fa->fa_fix_pkt_sum(*csum,
 	    (uint16_t)(old >> 16), (uint16_t)(new >> 16)),
 	    (uint16_t)(old & 0xffff),
@@ -1351,7 +1387,9 @@ flow_agg_merge_hdr(struct flow_agg *fa, struct __kern_packet *pkt,
 	}
 
 	stcp = (struct tcphdr *)(void *)(l3hdr + l3hlen);
-	tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+	tcp = __unsafe_forge_bidi_indexable(struct tcphdr *,
+	    (struct tcphdr *)pkt->pkt_flow_tcp_hdr, pkt->pkt_flow_tcp_hlen);
+
 	/* 16-bit alignment is sufficient (handles mbuf case) */
 	ASSERT(IS_P2ALIGNED(stcp, sizeof(uint16_t)));
 	ASSERT(IS_P2ALIGNED(tcp, sizeof(uint16_t)));
@@ -1384,10 +1422,20 @@ flow_agg_merge_hdr(struct flow_agg *fa, struct __kern_packet *pkt,
 		if ((stcp->th_flags & TH_PUSH) == 0 &&
 		    (tcp->th_flags & TH_PUSH) != 0) {
 			uint16_t old, new;
-			old = *(uint16_t *)(void *)(&stcp->th_ack + 1);
+			tcp_seq *th_ack = &stcp->th_ack;
+			/*
+			 * -fbounds-safety: C-style cast (uint16_t *)(th_ack+1)
+			 * doesn't work here, because th_ack's bound is a single
+			 * uint32_t, so trying to go one address above, and then
+			 * later dereferncing it would lead to a panic.
+			 */
+			uint16_t *next = __unsafe_forge_single(uint16_t *,
+			    th_ack + 1);
+			old = *next;
 			/* If the new segment has a PUSH-flag, append it! */
 			stcp->th_flags |= tcp->th_flags & TH_PUSH;
-			new = *(uint16_t *)(void *)(&stcp->th_ack + 1);
+			next = __unsafe_forge_single(uint16_t *, th_ack + 1);
+			new = *next;
 			stcp->th_sum = fa->fa_fix_pkt_sum(stcp->th_sum, old, new);
 		}
 	}
@@ -1467,20 +1515,24 @@ pkt_finalize(kern_packet_t ph)
 }
 
 static inline uint32_t
-estimate_buf_cnt(struct flow_entry *fe, uint32_t min_bufsize,
-    uint32_t agg_bufsize)
+estimate_buf_cnt(struct flow_entry *fe, uint32_t total_bytes, uint32_t total_pkts,
+    uint32_t min_bufsize, uint32_t agg_bufsize)
 {
 	uint32_t max_ip_len = MAX_AGG_IP_LEN();
 	uint32_t agg_size = MAX(fe->fe_rx_largest_size, min_bufsize);
 	uint32_t hdr_overhead;
 
+	if (__improbable(sk_fsw_rx_agg_tcp == 0)) {
+		return MIN(total_pkts, MAX_BUFLET_COUNT);
+	}
+
 	agg_size = MIN(agg_size, agg_bufsize);
 
-	hdr_overhead = (fe->fe_rx_pktq_bytes / max_ip_len) *
+	hdr_overhead = (total_bytes / max_ip_len) *
 	    (MAX(sizeof(struct ip), sizeof(struct ip6_hdr)) +
 	    sizeof(struct tcphdr));
 
-	return ((fe->fe_rx_pktq_bytes + hdr_overhead) / agg_size) + 1;
+	return ((total_bytes + hdr_overhead) / agg_size) + 1;
 }
 
 SK_INLINE_ATTRIBUTE
@@ -1554,30 +1606,31 @@ converge_aggregation_size(struct flow_entry *fe, uint32_t largest_agg_size)
 SK_NO_INLINE_ATTRIBUTE
 static void
 flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    struct pktq *dropped_pkts, bool is_mbuf)
+    struct pktq *rx_pkts, uint32_t rx_bytes, bool is_mbuf)
 {
-#define __RX_AGG_CHAN_DROP_SOURCE_PACKET(_pkt)    do {   \
-	KPKTQ_ENQUEUE(dropped_pkts, (_pkt));             \
-	(_pkt) = NULL;                                   \
-	FLOW_AGG_CLEAR(&fa);                             \
-	prev_csum_ok = false;                            \
+#define __RX_AGG_CHAN_DROP_SOURCE_PACKET(_pkt, _reason, _flags)    do {    \
+	pp_drop_packet_single(_pkt, fsw->fsw_ifp, _flags, _reason, __func__, __LINE__); \
+	(_pkt) = NULL;                                                     \
+	FLOW_AGG_CLEAR(&fa);                                               \
+	prev_csum_ok = false;                                              \
 } while (0)
 	struct flow_agg fa;             /* states */
 	FLOW_AGG_CLEAR(&fa);
 
-	struct pktq pkts;               /* dst super packets */
+	struct pktq super_pkts;         /* dst super packets */
 	struct pktq disposed_pkts;      /* done src packets */
 
-	KPKTQ_INIT(&pkts);
+	KPKTQ_INIT(&super_pkts);
 	KPKTQ_INIT(&disposed_pkts);
 
 	struct __kern_channel_ring *ring;
 	ring = fsw_flow_get_rx_ring(fsw, fe);
 	if (__improbable(ring == NULL)) {
 		SK_ERR("Rx ring is NULL");
-		KPKTQ_CONCAT(dropped_pkts, &fe->fe_rx_pktq);
 		STATS_ADD(&fsw->fsw_stats, FSW_STATS_DST_NXPORT_INVALID,
-		    KPKTQ_LEN(dropped_pkts));
+		    KPKTQ_LEN(rx_pkts));
+		pp_drop_pktq(rx_pkts, fsw->fsw_ifp, DROPTAP_FLAG_DIR_IN,
+		    DROP_REASON_FSW_DST_NXPORT_INVALID, __func__, __LINE__);
 		return;
 	}
 	struct kern_pbufpool *dpp = ring->ckr_pp;
@@ -1585,9 +1638,9 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 
 	struct __kern_packet *pkt, *tpkt;
 	/* state for super packet */
-	struct __kern_packet *spkt = NULL;
+	struct __kern_packet *__single spkt = NULL;
 	kern_packet_t sph = 0;
-	kern_buflet_t sbuf = NULL;
+	kern_buflet_t __single sbuf = NULL;
 	bool prev_csum_ok = false, csum_ok, agg_ok;
 	uint16_t spkts = 0, bufcnt = 0;
 	int err;
@@ -1604,7 +1657,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	bool large_buffer = false;
 
 	SK_LOG_VAR(uint64_t logflags = (SK_VERB_FSW | SK_VERB_RX));
-	SK_DF(logflags, "Rx input queue len %u", KPKTQ_LEN(&fe->fe_rx_pktq));
+	SK_DF(logflags, "Rx input queue len %u", KPKTQ_LEN(rx_pkts));
 
 	if (__probable(fe->fe_rx_largest_size != 0 &&
 	    NX_FSW_TCP_RX_AGG_ENABLED())) {
@@ -1615,8 +1668,8 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			agg_bufsize = PP_BUF_SIZE_LARGE(dpp);
 			large_buffer = true;
 		}
-		bh_cnt = estimate_buf_cnt(fe, PP_BUF_SIZE_DEF(dpp),
-		    agg_bufsize);
+		bh_cnt = estimate_buf_cnt(fe, rx_bytes, KPKTQ_LEN(rx_pkts),
+		    PP_BUF_SIZE_DEF(dpp), agg_bufsize);
 		DTRACE_SKYWALK1(needed_blt_cnt_agg, uint32_t, bh_cnt);
 		bh_cnt = MIN(bh_cnt, MAX_BUFLET_COUNT);
 		bh_cnt_tmp = bh_cnt;
@@ -1626,7 +1679,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		 * OR aggregation is disabled.
 		 */
 		agg_bufsize = PP_BUF_SIZE_DEF(dpp);
-		bh_cnt_tmp = bh_cnt = MIN(KPKTQ_LEN(&fe->fe_rx_pktq), MAX_BUFLET_COUNT);
+		bh_cnt_tmp = bh_cnt = MIN(KPKTQ_LEN(rx_pkts), MAX_BUFLET_COUNT);
 		DTRACE_SKYWALK1(needed_blt_cnt_no_agg, uint32_t, bh_cnt);
 	}
 
@@ -1637,7 +1690,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		    bh_cnt_tmp, err);
 	}
 	bool is_ipv4 = (fe->fe_key.fk_ipver == IPVERSION);
-	KPKTQ_FOREACH_SAFE(pkt, &fe->fe_rx_pktq, tpkt) {
+	KPKTQ_FOREACH_SAFE(pkt, rx_pkts, tpkt) {
 		if (tpkt != NULL) {
 			void *baddr;
 			MD_BUFLET_ADDR_ABS_PKT(tpkt, baddr);
@@ -1659,8 +1712,8 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		uint32_t plen = (thlen + pkt->pkt_flow_ulen);
 		uint16_t data_csum = 0;
 
-		KPKTQ_REMOVE(&fe->fe_rx_pktq, pkt);
-		fe->fe_rx_pktq_bytes -= pkt->pkt_flow_ulen;
+		KPKTQ_REMOVE(rx_pkts, pkt);
+		rx_bytes -= pkt->pkt_flow_ulen;
 		err = flow_pkt_track(fe, pkt, true);
 		if (__improbable(err != 0)) {
 			STATS_INC(fsws, FSW_STATS_RX_FLOW_TRACK_ERR);
@@ -1668,8 +1721,9 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			if (err == ENETRESET) {
 				flow_track_abort_tcp(fe, pkt, NULL);
 			}
-			SK_ERR("flow_pkt_track failed (err %d)", err);
-			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
+			SK_DF(SK_VERB_FLOW_TRACK, "flow_pkt_track failed (err %d)", err);
+			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt,
+			    DROP_REASON_FSW_FLOW_TRACK_ERR, 0);
 			continue;
 		}
 
@@ -1721,7 +1775,8 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 			SK_ERR("packet too big: bufcnt %d len %d", bh_cnt_tmp,
 			    plen);
-			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
+			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt,
+			    DROP_REASON_FSW_GSO_NOMEM_PKT, 0);
 			continue;
 		}
 		if (bh_cnt < bh_cnt_tmp) {
@@ -1739,8 +1794,8 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 				}
 				iter = 0;
 			}
-			tmp = estimate_buf_cnt(fe, PP_BUF_SIZE_DEF(dpp),
-			    agg_bufsize);
+			tmp = estimate_buf_cnt(fe, rx_bytes, KPKTQ_LEN(rx_pkts),
+			    PP_BUF_SIZE_DEF(dpp), agg_bufsize);
 			tmp = MIN(tmp, MAX_BUFLET_COUNT);
 			tmp = MAX(tmp, bh_cnt_tmp);
 			tmp -= bh_cnt;
@@ -1752,7 +1807,8 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			if (__improbable((tmp == 0) || (bh_cnt < bh_cnt_tmp))) {
 				STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 				SK_ERR("buflet alloc failed (err %d)", err);
-				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
+				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt,
+				    DROP_REASON_FSW_GSO_NOMEM_PKT, 0);
 				continue;
 			}
 		}
@@ -1760,8 +1816,12 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		ASSERT(bh_cnt >= bh_cnt_tmp);
 		dbuf_array.dba_num_dbufs = bh_cnt_tmp;
 		while (bh_cnt_tmp-- > 0) {
+			/*
+			 * -fbounds-safety: buf_arr[iter] is a uint64_t, so
+			 * forging it
+			 */
 			dbuf_array.dba_buflet[bh_cnt_tmp] =
-			    (kern_buflet_t)(buf_arr[iter]);
+			    __unsafe_forge_single(kern_buflet_t, buf_arr[iter]);
 			buf_arr[iter] = 0;
 			bh_cnt--;
 			iter++;
@@ -1826,7 +1886,8 @@ non_agg:
 				STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 				SK_ERR("packet alloc failed (err %d)", err);
 				_free_dbuf_array(dpp, &dbuf_array);
-				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
+				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt,
+				    DROP_REASON_FSW_GSO_NOMEM_PKT, 0);
 				continue;
 			}
 			spkt = SK_PTR_ADDR_KPKT(sph);
@@ -1844,7 +1905,7 @@ non_agg:
 			_append_dbuf_array_to_kpkt(sph, sbuf, &dbuf_array,
 			    &sbuf);
 
-			KPKTQ_ENQUEUE(&pkts, spkt);
+			KPKTQ_ENQUEUE(&super_pkts, spkt);
 			_UUID_COPY(spkt->pkt_flow_id, fe->fe_uuid);
 			_UUID_COPY(spkt->pkt_policy_euuid, fe->fe_eproc_uuid);
 			spkt->pkt_policy_id = fe->fe_policy_id;
@@ -1862,7 +1923,9 @@ next:
 	/* Free unused buflets */
 	STATS_ADD(fsws, FSW_STATS_RX_WASTED_BFLT, bh_cnt);
 	while (bh_cnt > 0) {
-		pp_free_buflet(dpp, (kern_buflet_t)(buf_arr[iter]));
+		/* -fbounds-saftey: buf_arr[iter] is a uint64_t, so forging it */
+		pp_free_buflet(dpp, __unsafe_forge_single(kern_buflet_t,
+		    buf_arr[iter]));
 		buf_arr[iter] = 0;
 		bh_cnt--;
 		iter++;
@@ -1881,11 +1944,12 @@ next:
 	}
 	FLOW_STATS_IN_ADD(fe, spackets, spkts);
 
-	KPKTQ_FINI(&fe->fe_rx_pktq);
-	KPKTQ_CONCAT(&fe->fe_rx_pktq, &pkts);
-	KPKTQ_FINI(&pkts);
+	KPKTQ_FINI(rx_pkts);
 
-	fsw_ring_enqueue_tail_drop(fsw, ring, &fe->fe_rx_pktq);
+	if (KPKTQ_LEN(&super_pkts) > 0) {
+		fsw_ring_enqueue_tail_drop(fsw, ring, &super_pkts);
+	}
+	KPKTQ_FINI(&super_pkts);
 
 	pp_free_pktq(&disposed_pkts);
 }
@@ -1916,15 +1980,15 @@ _finalize_smbuf(struct mbuf *smbuf)
 SK_NO_INLINE_ATTRIBUTE
 static void
 flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    struct pktq *dropped_pkts, bool is_mbuf)
+    struct pktq *rx_pkts, uint32_t rx_bytes, bool is_mbuf)
 {
-#define __RX_AGG_HOST_DROP_SOURCE_PACKET(_pkt)    do {   \
-	drop_packets++;                                  \
-	drop_bytes += (_pkt)->pkt_length;                \
-	KPKTQ_ENQUEUE(dropped_pkts, (_pkt));             \
-	(_pkt) = NULL;                                   \
-	FLOW_AGG_CLEAR(&fa);                             \
-	prev_csum_ok = false;                            \
+#define __RX_AGG_HOST_DROP_SOURCE_PACKET(_pkt, _reason, _flags)    do {   \
+	drop_packets++;                                                   \
+	drop_bytes += (_pkt)->pkt_length;                                 \
+	pp_drop_packet_single(_pkt, fsw->fsw_ifp, _flags, _reason, __func__, __LINE__); \
+	(_pkt) = NULL;                                                    \
+	FLOW_AGG_CLEAR(&fa);                                              \
+	prev_csum_ok = false;                                             \
 } while (0)
 	struct flow_agg fa;             /* states */
 	FLOW_AGG_CLEAR(&fa);
@@ -1955,9 +2019,9 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	uint32_t mhead_bufsize = 0;
 	struct mbuf * mhead = NULL;
 
-	uint16_t l2len = KPKTQ_FIRST(&fe->fe_rx_pktq)->pkt_l2_len;
+	uint16_t l2len = KPKTQ_FIRST(rx_pkts)->pkt_l2_len;
 
-	SK_DF(logflags, "Rx input queue bytes %u", fe->fe_rx_pktq_bytes);
+	SK_DF(logflags, "Rx input queue bytes %u", rx_bytes);
 
 	if (__probable(!is_mbuf)) {
 		/*
@@ -1967,16 +2031,16 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		if (__probable(fe->fe_rx_largest_size != 0 &&
 		    NX_FSW_TCP_RX_AGG_ENABLED())) {
 			unsigned int num_segs = 1;
-			int pktq_len = KPKTQ_LEN(&fe->fe_rx_pktq);
+			int pktq_len = KPKTQ_LEN(rx_pkts);
 
 			if (fe->fe_rx_largest_size <= MCLBYTES &&
-			    fe->fe_rx_pktq_bytes / pktq_len <= MCLBYTES) {
+			    rx_bytes / pktq_len <= MCLBYTES) {
 				mhead_bufsize = MCLBYTES;
 			} else if (fe->fe_rx_largest_size <= MBIGCLBYTES &&
-			    fe->fe_rx_pktq_bytes / pktq_len <= MBIGCLBYTES) {
+			    rx_bytes / pktq_len <= MBIGCLBYTES) {
 				mhead_bufsize = MBIGCLBYTES;
 			} else if (fe->fe_rx_largest_size <= M16KCLBYTES &&
-			    fe->fe_rx_pktq_bytes / pktq_len <= M16KCLBYTES) {
+			    rx_bytes / pktq_len <= M16KCLBYTES) {
 				mhead_bufsize = M16KCLBYTES;
 			} else {
 				mhead_bufsize = M16KCLBYTES * 2;
@@ -1984,9 +2048,9 @@ flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			}
 
 try_again:
-			if (fe->fe_rx_pktq_bytes != 0) {
-				mhead_cnt = estimate_buf_cnt(fe, MCLBYTES,
-				    mhead_bufsize);
+			if (rx_bytes != 0) {
+				mhead_cnt = estimate_buf_cnt(fe, rx_bytes, KPKTQ_LEN(rx_pkts),
+				    MCLBYTES, mhead_bufsize);
 			} else {
 				/* No payload, thus it's all small-sized ACKs/... */
 				mhead_bufsize = MHLEN;
@@ -2021,7 +2085,7 @@ try_again:
 		    mhead_bufsize);
 	}
 
-	KPKTQ_FOREACH_SAFE(pkt, &fe->fe_rx_pktq, tpkt) {
+	KPKTQ_FOREACH_SAFE(pkt, rx_pkts, tpkt) {
 		if (tpkt != NULL) {
 			void *baddr;
 			MD_BUFLET_ADDR_ABS_PKT(tpkt, baddr);
@@ -2058,13 +2122,13 @@ try_again:
 		rcvd_bytes += pkt->pkt_length;
 		rcvd_packets++;
 
-		KPKTQ_REMOVE(&fe->fe_rx_pktq, pkt);
-		fe->fe_rx_pktq_bytes -= pkt->pkt_flow_ulen;
+		KPKTQ_REMOVE(rx_pkts, pkt);
+		rx_bytes -= pkt->pkt_flow_ulen;
 
 		/* packet is for BSD flow, create a mbuf chain */
 		uint32_t len = (l2len + plen);
 		uint16_t data_csum = 0;
-		struct mbuf *m;
+		struct mbuf *__single m;
 		bool is_wake_pkt = false;
 		if (__improbable(is_mbuf)) {
 			m = pkt->pkt_mbuf;
@@ -2081,6 +2145,19 @@ try_again:
 			/* Remove the trailer */
 			if (trailer > 0) {
 				m_adj(m, -trailer);
+			}
+			if ((uint32_t) m->m_len < (l2len + thlen)) {
+				m = m_pullup(m, (l2len + thlen));
+				if (m == NULL) {
+					STATS_INC(fsws,
+					    FSW_STATS_RX_DROP_NOMEM_BUF);
+					SK_ERR("mbuf pullup failed (err %d)",
+					    err);
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt,
+					    DROP_REASON_FSW_GSO_NOMEM_MBUF, DROPTAP_FLAG_DIR_IN);
+					continue;
+				}
+				m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
 			}
 			/* attached mbuf is already allocated */
 			csum_ok = mbuf_csum(pkt, m, is_ipv4, &data_csum);
@@ -2161,7 +2238,8 @@ try_again:
 					SK_ERR("mbuf alloc failed (err %d), "
 					    "maxchunks %d, len %d", err, num_segs,
 					    tot_len);
-					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt,
+					    DROP_REASON_FSW_GSO_NOMEM_MBUF, DROPTAP_FLAG_DIR_IN);
 					continue;
 				}
 			} else {
@@ -2275,18 +2353,6 @@ non_agg:
 		ASSERT(m->m_nextpkt == NULL);
 
 		if (__improbable(is_mbuf)) {
-			if ((uint32_t) m->m_len < (l2len + thlen)) {
-				m = m_pullup(m, (l2len + thlen));
-				if (m == NULL) {
-					STATS_INC(fsws,
-					    FSW_STATS_RX_DROP_NOMEM_BUF);
-					SK_ERR("mbuf pullup failed (err %d)",
-					    err);
-					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
-					continue;
-				}
-				m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
-			}
 			if (prev_csum_ok && csum_ok) {
 				ASSERT(fa.fa_smbuf == smbuf);
 				agg_ok = flow_agg_is_ok(&fa, pkt, fsws);
@@ -2321,7 +2387,8 @@ non_agg:
 					    FSW_STATS_RX_DROP_NOMEM_BUF);
 					SK_ERR("mbuf pullup failed (err %d)",
 					    err);
-					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt,
+					    DROP_REASON_FSW_GSO_NOMEM_MBUF, DROPTAP_FLAG_DIR_IN);
 					continue;
 				}
 				m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
@@ -2377,23 +2444,20 @@ non_agg:
 
 			flow_agg_init_smbuf(fsw, &fa, smbuf, pkt);
 			/*
-			 * if the super packet is an mbuf which can't accomodate
-			 * (sizeof(struct ip6_tcp_mask) in a single buffer then
-			 * do the aggregation check in slow path.
-			 * Note that an mbuf without cluster has only 80 bytes
-			 * available for data, sizeof(struct ip6_tcp_mask) is
-			 * also 80 bytes, so if the packet contains an
-			 * ethernet header, this mbuf won't be able to fully
-			 * contain "struct ip6_tcp_mask" data in a single
-			 * buffer.
+			 * If the super packet is an mbuf which can't accomodate
+			 * sizeof(struct ip_tcp_mask) or sizeof(struct ip6_tcp_mask)
+			 * in a single buffer, then do the aggregation check in slow path.
+			 * Note that on Intel platforms, an mbuf without cluster
+			 * has only 80 bytes available for data. That means if a
+			 * packet contains an Ethernet header, the mbuf won't be
+			 * able to fully contain "struct ip6_tcp_mask" or
+			 * "struct ip6_tcp_mask" data in a single buffer, because
+			 * sizeof(struct ip_tcp_mask) and sizeof(struct ip6_tcp_mask)
+			 * are all 80 bytes as well.
 			 */
-			if (pkt->pkt_flow_ip_ver == IPV6_VERSION) {
-				if (__improbable(smbuf->m_len <
-				    ((m_mtod_current(smbuf) -
-				    (caddr_t)(smbuf->m_pkthdr.pkt_hdr)) +
-				    MASK_SIZE))) {
-					fa.fa_sobj_is_short = true;
-				}
+			if (__improbable(smbuf->m_len <
+			    ((m_mtod_current(smbuf) - (caddr_t)(smbuf->m_pkthdr.pkt_hdr)) + MASK_SIZE))) {
+				fa.fa_sobj_is_short = true;
 			}
 		}
 next:
@@ -2402,7 +2466,7 @@ next:
 		KPKTQ_ENQUEUE(&disposed_pkts, pkt);
 	}
 
-	KPKTQ_FINI(&fe->fe_rx_pktq);
+	KPKTQ_FINI(rx_pkts);
 
 	/* Free any leftover mbufs, true only for native  */
 	if (__improbable(mhead != NULL)) {
@@ -2460,14 +2524,14 @@ next:
 
 void
 flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    uint32_t flags)
+    struct pktq *rx_pkts, uint32_t rx_bytes, uint32_t flags)
 {
 #pragma unused(flags)
 	struct pktq dropped_pkts;
 	bool is_mbuf;
 
-	if (__improbable(fe->fe_rx_frag_count > 0)) {
-		dp_flow_rx_process(fsw, fe, 0);
+	if (__improbable((flags & FLOW_PROC_FLAG_FRAGMENTS) != 0)) {
+		dp_flow_rx_process(fsw, fe, rx_pkts, rx_bytes, FLOW_PROC_FLAG_FRAGMENTS);
 		return;
 	}
 
@@ -2475,13 +2539,15 @@ flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
 
 	if (!dp_flow_rx_route_process(fsw, fe)) {
 		SK_ERR("Rx route bad");
-		fsw_snoop_and_dequeue(fe, &dropped_pkts, true);
+		fsw_snoop_and_dequeue(fe, &dropped_pkts, rx_pkts, true);
 		STATS_ADD(&fsw->fsw_stats, FSW_STATS_RX_FLOW_NONVIABLE,
 		    KPKTQ_LEN(&dropped_pkts));
-		goto done;
+		pp_drop_pktq(&dropped_pkts, fsw->fsw_ifp, DROPTAP_FLAG_DIR_IN,
+		    DROP_REASON_FSW_FLOW_NONVIABLE, __func__, __LINE__);
+		return;
 	}
 
-	is_mbuf = !!(PKT_IS_MBUF(KPKTQ_FIRST(&fe->fe_rx_pktq)));
+	is_mbuf = !!(PKT_IS_MBUF(KPKTQ_FIRST(rx_pkts)));
 
 	if (fe->fe_nx_port == FSW_VP_HOST) {
 		boolean_t do_rx_agg;
@@ -2495,21 +2561,18 @@ flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			    !dlil_has_if_filter(fsw->fsw_ifp);
 		}
 		if (__improbable(!do_rx_agg)) {
-			fsw_host_rx(fsw, &fe->fe_rx_pktq);
+			fsw_host_rx(fsw, rx_pkts);
 			return;
 		}
 		if (__improbable(pktap_total_tap_count != 0)) {
-			fsw_snoop(fsw, fe, true);
+			fsw_snoop(fsw, fe, rx_pkts, true);
 		}
-		flow_rx_agg_host(fsw, fe, &dropped_pkts, is_mbuf);
+		flow_rx_agg_host(fsw, fe, rx_pkts, rx_bytes, is_mbuf);
 	} else {
 		/* channel flow */
 		if (__improbable(pktap_total_tap_count != 0)) {
-			fsw_snoop(fsw, fe, true);
+			fsw_snoop(fsw, fe, rx_pkts, true);
 		}
-		flow_rx_agg_channel(fsw, fe, &dropped_pkts, is_mbuf);
+		flow_rx_agg_channel(fsw, fe, rx_pkts, rx_bytes, is_mbuf);
 	}
-
-done:
-	pp_free_pktq(&dropped_pkts);
 }

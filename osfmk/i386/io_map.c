@@ -57,8 +57,8 @@
  */
 
 #include <mach/vm_param.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 #include <i386/pmap.h>
 #include <san/kasan.h>
 

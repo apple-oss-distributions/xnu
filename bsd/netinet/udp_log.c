@@ -68,20 +68,27 @@ SYSCTL_STRING(_net_inet_udp_log, OID_AUTO, enable_usage, CTLFLAG_RD | CTLFLAG_LO
 /*
  *
  */
-uint32_t udp_log_local_port_included = 0;
-SYSCTL_UINT(_net_inet_udp_log, OID_AUTO, local_port_included, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_local_port_included, 0, "");
-uint32_t udp_log_remote_port_included = 0;
-SYSCTL_UINT(_net_inet_udp_log, OID_AUTO, remote_port_included, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_remote_port_included, 0, "");
+static int sysctl_udp_log_port SYSCTL_HANDLER_ARGS;
 
-uint32_t udp_log_local_port_excluded = 0;
-SYSCTL_UINT(_net_inet_udp_log, OID_AUTO, local_port_excluded, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_local_port_excluded, 0, "");
-uint32_t udp_log_remote_port_excluded = 0;
-SYSCTL_UINT(_net_inet_udp_log, OID_AUTO, remote_port_excluded, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &udp_log_remote_port_excluded, 0, "");
+uint16_t udp_log_local_port_included = 0;
+SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, local_port_included,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &udp_log_local_port_included, 0, &sysctl_udp_log_port, "UI", "");
 
+uint16_t udp_log_remote_port_included = 0;
+SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, remote_port_included,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &udp_log_remote_port_included, 0, &sysctl_udp_log_port, "UI", "");
+
+uint16_t udp_log_local_port_excluded = 0;
+SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, local_port_excluded,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &udp_log_local_port_excluded, 0, &sysctl_udp_log_port, "UI", "");
+
+uint16_t udp_log_remote_port_excluded = 0;
+SYSCTL_PROC(_net_inet_udp_log, OID_AUTO, remote_port_excluded,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &udp_log_remote_port_excluded, 0, &sysctl_udp_log_port, "UI", "");
 
 #define UDP_LOG_RATE_LIMIT 1000
 static unsigned int udp_log_rate_limit = UDP_LOG_RATE_LIMIT;
@@ -173,22 +180,18 @@ udp_log_is_rate_limited(void)
 static bool
 udp_log_port_allowed(struct inpcb *inp)
 {
-	if ((udp_log_local_port_included > 0 && udp_log_local_port_included <= IPPORT_HILASTAUTO) ||
-	    (udp_log_remote_port_included > 0 && udp_log_remote_port_included <= IPPORT_HILASTAUTO)) {
-		if (ntohs(inp->inp_lport) == udp_log_local_port_included ||
-		    ntohs(inp->inp_fport) == udp_log_remote_port_included) {
-			return true;
-		} else {
-			return false;
-		}
+	if (ntohs(inp->inp_lport) == udp_log_local_port_included ||
+	    ntohs(inp->inp_fport) == udp_log_remote_port_included) {
+		return true;
+	} else {
+		return false;
 	}
-	if ((udp_log_local_port_excluded > 0 && udp_log_local_port_excluded <= IPPORT_HILASTAUTO) ||
-	    (udp_log_remote_port_excluded > 0 && udp_log_remote_port_excluded <= IPPORT_HILASTAUTO)) {
-		if (ntohs(inp->inp_lport) == udp_log_local_port_excluded ||
-		    ntohs(inp->inp_fport) == udp_log_remote_port_excluded) {
-			return false;
-		}
+
+	if (ntohs(inp->inp_lport) == udp_log_local_port_excluded ||
+	    ntohs(inp->inp_fport) == udp_log_remote_port_excluded) {
+		return false;
 	}
+
 	return true;
 }
 
@@ -390,6 +393,7 @@ udp_log_connection_summary(struct inpcb *inp)
 	    "Conn_Time: %lu.%03d sec " \
 	    "bytes in/out: %llu/%llu " \
 	    "pkts in/out: %llu/%llu " \
+	    "rxnospace pkts/bytes: %llu/%llu " \
 	    "so_error: %d " \
 	    "svc/tc: %u " \
 	    "flow: 0x%x"
@@ -400,6 +404,8 @@ udp_log_connection_summary(struct inpcb *inp)
 	    connection_secs, connection_microsecs / 1000, \
 	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
 	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
+	    so->so_tc_stats[SO_STATS_SBNOSPACE].rxpackets, \
+	    so->so_tc_stats[SO_STATS_SBNOSPACE].rxbytes, \
 	    so->so_error, \
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class, \
 	    inp->inp_flowhash
@@ -423,4 +429,23 @@ udp_log_connection_summary(struct inpcb *inp)
 	    UDP_LOG_CONNECTION_SUMMARY_ARGS);
 #undef UDP_LOG_CONNECTION_SUMMARY_FMT
 #undef UDP_LOG_CONNECTION_SUMMARY_ARGS
+}
+
+static int
+sysctl_udp_log_port SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error;
+	int new_value = *(int *)oidp->oid_arg1;
+
+	error = sysctl_handle_int(oidp, &new_value, 0, req);
+	if (error != 0) {
+		return error;
+	}
+	if (new_value < 0 || new_value > UINT16_MAX) {
+		return EINVAL;
+	}
+	*(uint16_t *)oidp->oid_arg1 = (uint16_t)new_value;
+
+	return 0;
 }

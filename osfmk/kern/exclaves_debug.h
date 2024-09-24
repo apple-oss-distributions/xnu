@@ -33,6 +33,11 @@
 #include <sys/cdefs.h>
 #include <stdbool.h>
 
+#include <kern/assert.h>
+#include <kern/debug.h>
+
+#include <mach/exclaves.h>
+
 #if DEVELOPMENT || DEBUG
 extern unsigned int exclaves_debug;
 #else
@@ -109,5 +114,55 @@ __options_closed_decl(exclaves_debug_flags, unsigned int, {
 	if (exclaves_debug_enabled(flag)) { \
 	        printf(format, ##__VA_ARGS__); \
 	}})
+
+
+#pragma mark exclaves relaxed requirement management
+
+#if DEVELOPMENT || DEVELOPMENT
+extern exclaves_requirement_t exclaves_relaxed_requirements;
+#else
+extern const exclaves_requirement_t exclaves_relaxed_requirements;
+#endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Return true if the specified exclaves requirement has been relaxed, false
+ * otherwise.
+ */
+static inline bool
+exclaves_requirement_is_relaxed(exclaves_requirement_t requirement)
+{
+	assert3u(requirement & (requirement - 1), ==, 0);
+
+	/*
+	 * The medium-term plan is that the boot-arg controlling entitlements
+	 * goes away entirely and is replaced with EXCLAVES_R_ENTITLEMENTS.
+	 * Until that happens, for historical reasons, if the entitlement
+	 * boot-arg has disabled EXCLAVES_PRIV_CONCLAVE_HOST, then relax
+	 * EXCLAVES_R_CONCLAVE and EXCLAVES_R_CONCLAVE_RESOURCES here too.
+	 */
+	extern unsigned int exclaves_entitlement_flags;
+	exclaves_requirement_t current = exclaves_relaxed_requirements;
+	if ((exclaves_entitlement_flags & EXCLAVES_PRIV_CONCLAVE_HOST) == 0) {
+		current |= EXCLAVES_R_CONCLAVE | EXCLAVES_R_CONCLAVE_RESOURCES;
+	}
+
+
+	return (requirement & current) != 0;
+}
+
+/*
+ * Called when a requirement has not been met. Produces a log message and
+ * continues if the requirement is relaxed, otherwise panics.
+ */
+#define exclaves_requirement_assert(requirement, fmt, ...) { \
+	if (exclaves_requirement_is_relaxed(requirement)) {                   \
+	        exclaves_debug_printf(show_errors,                            \
+	            "exclaves: requirement was relaxed, ignoring error: "     \
+	             fmt "\n", ##__VA_ARGS__);                                \
+	} else {                                                              \
+	        panic("exclaves: requirement failed: " fmt,                   \
+	            ##__VA_ARGS__);                                           \
+	}                                                                     \
+};
 
 #endif /* CONFIG_EXCLAVES */

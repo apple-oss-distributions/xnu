@@ -105,7 +105,7 @@ struct  ip6asfrag {
 
 MBUFQ_HEAD(fq6_head);
 
-static void frag6_save_context(struct mbuf *, int);
+static void frag6_save_context(struct mbuf *, uintptr_t);
 static void frag6_scrub_context(struct mbuf *);
 static int frag6_restore_context(struct mbuf *);
 
@@ -179,9 +179,9 @@ frag6_init(void)
 }
 
 static void
-frag6_save_context(struct mbuf *m, int val)
+frag6_save_context(struct mbuf *m, uintptr_t val)
 {
-	m->m_pkthdr.pkt_hdr = (void *)(uintptr_t)val;
+	m->m_pkthdr.pkt_hdr = __unsafe_forge_single(void *, val);
 }
 
 static void
@@ -207,7 +207,7 @@ frag6_icmp6_paramprob_error(struct fq6_head *diq6)
 	LCK_MTX_ASSERT(&ip6qlock, LCK_MTX_ASSERT_NOTOWNED);
 
 	if (!MBUFQ_EMPTY(diq6)) {
-		struct mbuf *merr, *merr_tmp;
+		mbuf_ref_t merr, merr_tmp;
 		int param;
 		MBUFQ_FOREACH_SAFE(merr, diq6, merr_tmp) {
 			MBUFQ_REMOVE(diq6, merr);
@@ -230,7 +230,7 @@ frag6_icmp6_timeex_error(struct fq6_head *diq6)
 	LCK_MTX_ASSERT(&ip6qlock, LCK_MTX_ASSERT_NOTOWNED);
 
 	if (!MBUFQ_EMPTY(diq6)) {
-		struct mbuf *m, *m_tmp;
+		mbuf_ref_t m, m_tmp;
 		MBUFQ_FOREACH_SAFE(m, diq6, m_tmp) {
 			MBUFQ_REMOVE(diq6, m);
 			MBUFQ_NEXT(m) = NULL;
@@ -276,16 +276,16 @@ int
 frag6_input(struct mbuf **mp, int *offp, int proto)
 {
 #pragma unused(proto)
-	struct mbuf *m = *mp, *t = NULL;
+	mbuf_ref_t m = *mp, t = NULL;
 	struct ip6_hdr *ip6 = NULL;
-	struct ip6_frag *ip6f = NULL;
-	struct ip6q *q6 = NULL;
-	struct ip6asfrag *af6 = NULL, *ip6af = NULL, *af6dwn = NULL;
+	struct ip6_frag *__single ip6f = NULL;
+	struct ip6q *__single q6 = NULL;
+	struct ip6asfrag *__single af6 = NULL, *__single ip6af = NULL, *__single af6dwn = NULL;
 	int offset = *offp, i = 0, next = 0;
 	u_int8_t nxt = 0;
 	int first_frag = 0;
 	int fragoff = 0, frgpartlen = 0;        /* must be larger than u_int16_t */
-	struct ifnet *dstifp = NULL;
+	ifnet_ref_t dstifp = NULL;
 	u_int8_t ecn = 0, ecn0 = 0;
 	uint32_t csum = 0, csum_flags = 0;
 	struct fq6_head diq6 = {};
@@ -583,8 +583,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 
 			if (local_ip6q_unfrglen + af6->ip6af_off + af6->ip6af_frglen >
 			    IPV6_MAXPACKET) {
-				struct mbuf *merr = IP6_REASS_MBUF(af6);
-				struct ip6_hdr *ip6err;
+				mbuf_ref_t merr = IP6_REASS_MBUF(af6);
+				struct ip6_hdr *__single ip6err;
 				int erroff = af6->ip6af_offset;
 
 				/* dequeue the fragment. */
@@ -957,14 +957,14 @@ dropfrag:
 static void
 frag6_purgef(struct ip6q *q6, struct fq6_head *dfq6, struct fq6_head *diq6)
 {
-	struct ip6asfrag *af6 = NULL;
-	struct ip6asfrag *down6 = NULL;
+	struct ip6asfrag *__single af6 = NULL;
+	struct ip6asfrag *__single down6 = NULL;
 
 	LCK_MTX_ASSERT(&ip6qlock, LCK_MTX_ASSERT_OWNED);
 
 	for (af6 = q6->ip6q_down; af6 != (struct ip6asfrag *)q6;
 	    af6 = down6) {
-		struct mbuf *m = IP6_REASS_MBUF(af6);
+		mbuf_ref_t m = IP6_REASS_MBUF(af6);
 
 		down6 = af6->ip6af_down;
 		frag6_deq(af6);
@@ -976,7 +976,7 @@ frag6_purgef(struct ip6q *q6, struct fq6_head *dfq6, struct fq6_head *diq6)
 		 * free queue.
 		 */
 		if (af6->ip6af_off == 0 && diq6 != NULL) {
-			struct ip6_hdr *ip6;
+			struct ip6_hdr *__single ip6;
 
 			/* adjust pointer */
 			ip6 = mtod(m, struct ip6_hdr *);
@@ -1071,8 +1071,8 @@ frag6_timeout(void *arg)
 {
 #pragma unused(arg)
 	struct fq6_head dfq6, diq6;
-	struct fq6_head *diq6_tmp = NULL;
-	struct ip6q *q6;
+	struct fq6_head *__single diq6_tmp = NULL;
+	struct ip6q *__single q6;
 
 	MBUFQ_INIT(&dfq6);      /* for deferred frees */
 	MBUFQ_INIT(&diq6);      /* for deferred ICMP time exceeded errors */
@@ -1156,7 +1156,7 @@ void
 frag6_drain(void)
 {
 	struct fq6_head dfq6, diq6;
-	struct fq6_head *diq6_tmp = NULL;
+	struct fq6_head *__single diq6_tmp = NULL;
 
 	MBUFQ_INIT(&dfq6);      /* for deferred frees */
 	MBUFQ_INIT(&diq6);      /* for deferred ICMP time exceeded errors */
@@ -1189,7 +1189,7 @@ frag6_drain(void)
 static struct ip6q *
 ip6q_alloc(void)
 {
-	struct ip6q *q6;
+	struct ip6q *__single q6;
 
 	/*
 	 * See comments in ip6q_updateparams().  Keep the count separate
@@ -1217,7 +1217,7 @@ ip6q_free(struct ip6q *q6)
 static struct ip6asfrag *
 ip6af_alloc(void)
 {
-	struct ip6asfrag *af6;
+	struct ip6asfrag *__single af6;
 
 	/*
 	 * See comments in ip6q_updateparams().  Keep the count separate

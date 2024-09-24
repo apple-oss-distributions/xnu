@@ -216,7 +216,7 @@ typedef struct _class_queue_ {
 
 extern u_int32_t classq_verbose;
 #if DEBUG || DEVELOPMENT
-extern uint16_t fq_codel_quantum;
+extern uint32_t fq_codel_quantum;
 #endif /* DEBUG || DEVELOPMENT */
 
 SYSCTL_DECL(_net_classq);

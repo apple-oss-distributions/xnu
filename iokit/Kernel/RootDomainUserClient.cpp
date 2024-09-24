@@ -224,6 +224,24 @@ RootDomainUserClient::secureGetSystemSleepType(
 }
 
 IOReturn
+RootDomainUserClient::secureAttemptIdleSleepAbort(
+	uint32_t    *outReverted)
+{
+	int                     admin_priv = 0;
+	IOReturn                ret;
+
+	ret = clientHasPrivilege(fOwningTask, kIOClientPrivilegeAdministrator);
+	admin_priv = (kIOReturnSuccess == ret);
+
+	if (admin_priv && fOwner) {
+		*outReverted = (uint32_t) fOwner->attemptIdleSleepAbort();
+	} else {
+		ret = kIOReturnNotPrivileged;
+	}
+	return ret;
+}
+
+IOReturn
 RootDomainUserClient::clientClose( void )
 {
 	terminate();
@@ -390,6 +408,15 @@ RootDomainUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 			.allowAsync               = false,
 			.checkEntitlement         = NULL,
 		},
+		[kPMRequestIdleSleepRevert] = {
+			.function                 = &RootDomainUserClient::externalMethodDispatched,
+			.checkScalarInputCount    = 0,
+			.checkStructureInputSize  = 0,
+			.checkScalarOutputCount   = 1,
+			.checkStructureOutputSize = 0,
+			.allowAsync               = false,
+			.checkEntitlement         = NULL,
+		},
 	};
 
 	return dispatchExternalMethod(selector, args, dispatchArray, sizeof(dispatchArray) / sizeof(dispatchArray[0]), this, NULL);
@@ -484,7 +511,6 @@ RootDomainUserClient::externalMethodDispatched(OSObject * target, void * referen
 		}
 		break;
 
-
 	case kPMSleepWakeDebugTrig:
 		ret = clientHasPrivilege(me->fOwningTask, kIOClientPrivilegeAdministrator);
 		if (ret == kIOReturnSuccess) {
@@ -499,6 +525,12 @@ RootDomainUserClient::externalMethodDispatched(OSObject * target, void * referen
 			me->fOwner->setDisplayPowerOn((uint32_t)arguments->scalarInput[0]);
 		}
 		break;
+
+	case kPMRequestIdleSleepRevert:
+		ret = me->secureAttemptIdleSleepAbort(
+			(uint32_t *) &arguments->scalarOutput[0]);
+		break;
+
 
 	default:
 		// bad selector

@@ -37,6 +37,8 @@
 #include <os/hash.h>
 #include <os/overflow.h>
 
+#include <sys/kdebug.h>
+
 #include <stdint.h>
 
 #define ES_INVALID_ID UINT64_MAX
@@ -73,16 +75,46 @@ typedef struct ht {
  */
 
 #define NBUCKETS_QUEUE 512
-ht_t esync_queue_ht = {
+static ht_t exclaves_queue_ht = {
 	.ht_size = NBUCKETS_QUEUE,
 	.ht_bucket = &(ht_bucket_t[NBUCKETS_QUEUE]){}[0],
 };
 
 #define NBUCKETS_THREAD 64
-ht_t esync_thread_ht = {
+static ht_t exclaves_thread_ht = {
 	.ht_size = NBUCKETS_THREAD,
 	.ht_bucket = &(ht_bucket_t[NBUCKETS_THREAD]){}[0],
 };
+
+#if DEVELOPMENT || DEBUG
+
+#define NBUCKETS_TEST 8
+static ht_t esync_test_ht = {
+	.ht_size = NBUCKETS_TEST,
+	.ht_bucket = &(ht_bucket_t[NBUCKETS_TEST]){}[0],
+};
+#endif /* DEVELOPMENT || DEBUG */
+
+
+static ht_t *
+space_to_ht(esync_space_t space)
+{
+	switch (space) {
+	case ESYNC_SPACE_EXCLAVES_Q:
+		return &exclaves_queue_ht;
+
+	case ESYNC_SPACE_EXCLAVES_T:
+		return &exclaves_thread_ht;
+
+#if DEVELOPMENT || DEBUG
+	case ESYNC_SPACE_TEST:
+		return &esync_test_ht;
+#endif /* DEVELOPMENT || DEBUG */
+
+	default:
+		panic("unknown epoch sync space");
+	}
+}
 
 static __startup_func void
 ht_startup_init(ht_t *ht)
@@ -92,8 +124,8 @@ ht_startup_init(ht_t *ht)
 		lck_spin_init(&ht->ht_bucket[i].htb_lock, &ht_lck_grp, NULL);
 	}
 }
-STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, ht_startup_init, &esync_queue_ht);
-STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, ht_startup_init, &esync_thread_ht);
+STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, ht_startup_init, &exclaves_queue_ht);
+STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, ht_startup_init, &exclaves_thread_ht);
 
 static inline ht_bucket_t *
 ht_get_bucket(ht_t *ht, const uint64_t key)
@@ -333,12 +365,13 @@ esync_update_epoch(const uint64_t epoch, os_atomic(uint64_t) *counter)
  * Will only use "owner" if the epoch is fresh.
  */
 wait_result_t
-esync_wait(ht_t *ht, const uint64_t id, const uint64_t epoch,
+esync_wait(esync_space_t space, const uint64_t id, const uint64_t epoch,
     os_atomic(uint64_t) *counter, const ctid_t owner_ctid,
     const esync_policy_t policy, const wait_interrupt_t interruptible)
 {
-	assert3p(ht, !=, NULL);
 	assert3u(id, !=, ES_INVALID_ID);
+
+	ht_t *ht = space_to_ht(space);
 
 	esync_t *to_be_freed = NULL;
 	esync_t *sync = esync_get(ht, id, policy, &to_be_freed);
@@ -347,9 +380,21 @@ esync_wait(ht_t *ht, const uint64_t id, const uint64_t epoch,
 
 	const bool fresh_epoch = esync_update_epoch(epoch, counter);
 	if (!fresh_epoch) {
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAIT_STALE), space, id, epoch, NULL);
 		esync_put(ht, sync, to_be_freed);
 		return THREAD_NOT_WAITING;
 	}
+
+	/*
+	 * It is safe to lookup the thread from the ctid here as the lock is
+	 * held and the epoch is fresh.
+	 */
+	thread_t owner_thread = ctid_get_thread(owner_ctid);
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC, MACH_EPOCH_SYNC_WAIT) |
+	    DBG_FUNC_START, space, id, epoch,
+	    owner_thread != NULL ? thread_tid(owner_thread) : 0);
 
 	assert(sync->es_policy == ESYNC_POLICY_KERNEL ||
 	    sync->es_policy == ESYNC_POLICY_USER);
@@ -359,11 +404,9 @@ esync_wait(ht_t *ht, const uint64_t id, const uint64_t epoch,
 	    &sync->es_turnstile, TURNSTILE_NULL, tt);
 
 	/*
-	 * owner_ctid may not be set, that's fine, the inheritor will be
+	 * owner_thread may not be set, that's fine, the inheritor will be
 	 * cleared.
 	 */
-	thread_t owner_thread = ctid_get_thread(owner_ctid);
-
 	turnstile_update_inheritor(ts, owner_thread,
 	    (TURNSTILE_DELAYED_UPDATE | TURNSTILE_INHERITOR_THREAD));
 
@@ -382,6 +425,9 @@ esync_wait(ht_t *ht, const uint64_t id, const uint64_t epoch,
 
 	turnstile_complete((uintptr_t)sync, &sync->es_turnstile, NULL, tt);
 
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC, MACH_EPOCH_SYNC_WAIT) |
+	    DBG_FUNC_END, wr);
+
 	/* Drops the lock, refcount and possibly frees sync. */
 	esync_put(ht, sync, to_be_freed);
 
@@ -393,17 +439,18 @@ esync_wait(ht_t *ht, const uint64_t id, const uint64_t epoch,
  * active waiter) just return. The epoch is always updated.
  */
 kern_return_t
-esync_wake(ht_t *ht, const uint64_t id, const uint64_t epoch,
+esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
     os_atomic(uint64_t) *counter, const esync_wake_mode_t mode,
     const ctid_t ctid)
 {
-	assert3p(ht, !=, NULL);
 	assert3u(id, !=, ES_INVALID_ID);
 	assert(
 		mode == ESYNC_WAKE_ONE ||
 		mode == ESYNC_WAKE_ALL ||
 		mode == ESYNC_WAKE_ONE_WITH_OWNER ||
 		mode == ESYNC_WAKE_THREAD);
+
+	ht_t *ht = space_to_ht(space);
 
 	kern_return_t kr = KERN_FAILURE;
 
@@ -418,6 +465,9 @@ esync_wake(ht_t *ht, const uint64_t id, const uint64_t epoch,
 	esync_t *sync = ht_get(ht, id);
 	if (sync == NULL) {
 		/* Drop pre-posted WAKEs. */
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAKE_NO_WAITERS), space, id,
+		    epoch, mode);
 		return KERN_NOT_WAITING;
 	}
 	LCK_SPIN_ASSERT(&sync->es_lock, LCK_ASSERT_OWNED);
@@ -434,18 +484,25 @@ esync_wake(ht_t *ht, const uint64_t id, const uint64_t epoch,
 	switch (mode) {
 	case ESYNC_WAKE_ONE:
 		/* The woken thread is the new inheritor. */
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAKE_ONE), space, id, epoch);
 		kr = waitq_wakeup64_one(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 		break;
 
 	case ESYNC_WAKE_ALL:
 		/* The inheritor is cleared. */
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAKE_ALL), space, id, epoch);
 		kr = waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 		break;
 
 	case ESYNC_WAKE_ONE_WITH_OWNER:
 		/* The specified thread is the new inheritor (may be NULL). */
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAKE_ONE_WITH_OWNER), space, id, epoch,
+		    thread_tid(ctid_get_thread(ctid)));
 		kr = waitq_wakeup64_one(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
 		turnstile_update_inheritor(ts, ctid_get_thread(ctid),
@@ -454,6 +511,9 @@ esync_wake(ht_t *ht, const uint64_t id, const uint64_t epoch,
 
 	case ESYNC_WAKE_THREAD:
 		/* No new inheritor. Wake the specified thread (if waiting). */
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
+		    MACH_EPOCH_SYNC_WAKE_THREAD), space, id, epoch,
+		    thread_tid(ctid_get_thread(ctid)));
 		kr = waitq_wakeup64_thread(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    ctid_get_thread(ctid), WAITQ_WAKEUP_DEFAULT);
 	}
@@ -508,11 +568,7 @@ static os_atomic(uint64_t) server_counter = 0;
 /* The "mutex" itself. */
 static uint64_t test_mutex;
 
-#define NBUCKETS_TEST 8
-static ht_t esync_test_ht = {
-	.ht_size = NBUCKETS_TEST,
-	.ht_bucket = &(ht_bucket_t[NBUCKETS_TEST]){}[0],
-};
+
 STARTUP_ARG(LOCKS, STARTUP_RANK_LAST, ht_startup_init, &esync_test_ht);
 
 /*
@@ -545,7 +601,7 @@ test_lock(uint64_t *lock)
 				os_atomic_inc(&test_waiter_count, acq_rel);
 
 				random_delay();
-				const wait_result_t wr = esync_wait(&esync_test_ht, (uintptr_t)lock, epoch,
+				const wait_result_t wr = esync_wait(ESYNC_SPACE_TEST, (uintptr_t)lock, epoch,
 				    &server_counter, OWNER(old), ESYNC_POLICY_KERNEL, THREAD_UNINT);
 				assert(wr == THREAD_NOT_WAITING || wr == THREAD_AWAKENED);
 				random_delay();
@@ -580,7 +636,7 @@ test_unlock(uint64_t *lock)
 
 	if ((old & WAITER_BIT) != 0) {
 		random_delay();
-		(void) esync_wake(&esync_test_ht, (uintptr_t)lock, epoch,
+		(void) esync_wake(ESYNC_SPACE_TEST, (uintptr_t)lock, epoch,
 		    &server_counter, ESYNC_WAKE_ONE, 0);
 		random_delay();
 	}
@@ -661,7 +717,7 @@ esync_test_wait(__unused int64_t in, __unused int64_t *out)
 
 	printf("%s: STARTING\n", __func__);
 
-	wait_result_t wr = esync_wait(&esync_test_ht, 0, 0, &counter, 0,
+	wait_result_t wr = esync_wait(ESYNC_SPACE_TEST, 0, 0, &counter, 0,
 	    ESYNC_POLICY_USER, THREAD_INTERRUPTIBLE);
 	if (wr != THREAD_INTERRUPTED) {
 		printf("%s: FAILURE - unexpected wait result (%d)\n", __func__, wr);

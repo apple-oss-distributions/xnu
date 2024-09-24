@@ -38,6 +38,8 @@
 #include <libkern/OSDebug.h>
 #include <mach/mach_vm.h>
 
+#include <vm/vm_kern_xnu.h>
+
 #include "IOKitKernelInternal.h"
 
 #ifdef IOALLOCDEBUG

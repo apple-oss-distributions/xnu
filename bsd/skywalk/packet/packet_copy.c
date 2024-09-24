@@ -46,7 +46,7 @@ SYSCTL_UINT(_kern_skywalk_packet, OID_AUTO, copy_pkt_tx_time,
 
 __attribute__((always_inline))
 static inline void
-_pkt_copy(void *src, void *dst, size_t len)
+_pkt_copy(void *__sized_by(len)src, void *__sized_by(len)dst, size_t len)
 {
 	if (__probable(IS_P2ALIGNED(src, 8) && IS_P2ALIGNED(dst, 8))) {
 		switch (len) {
@@ -211,7 +211,7 @@ pkt_copy_from_pkt(const enum txrx t, kern_packet_t dph, const uint16_t doff,
  * as well as to perform the final 1's complement on it.
  */
 uint32_t static inline
-_pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
+_pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *__sized_by(len)dbaddr,
     uint32_t len, boolean_t do_csum, uint32_t initial_sum, boolean_t *odd_start)
 {
 	uint8_t odd = 0;
@@ -239,7 +239,7 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 		ASSERT(sboff <= soff);
 		ASSERT(soff < sboff + sblen);
 		sblen -= (soff - sboff);
-		sbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(sbuf) + soff);
+		sbaddr = (uint8_t *)__buflet_get_data_address(sbuf) + soff;
 
 		clen = (uint16_t)MIN(len, sblen);
 
@@ -265,7 +265,7 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 		sblen = __buflet_get_data_length(sbuf);
 		ASSERT((sboff <= soff) && (soff < sboff + sblen));
 		sblen -= (soff - sboff);
-		sbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(sbuf) + soff);
+		sbaddr = (uint8_t *)__buflet_get_data_address(sbuf) + soff;
 		soff = 0;
 		clen = (uint16_t)MIN(len, sblen);
 		if (__probable(do_csum)) {
@@ -278,10 +278,19 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 #else /* BYTE_ORDER != LITTLE_ENDIAN */
 				partial = (uint8_t)*sbaddr;
 #endif /* BYTE_ORDER != LITTLE_ENDIAN */
-				*dbaddr++ = *sbaddr++;
+				/*
+				 * -fbounds-safety: *dbaddr++ = *sbaddr++ fails
+				 * to compile. But the following works. Also,
+				 * grouping dbaddr and len updates led to higher
+				 * throughput performance, compared to doing
+				 * dbaddr++; sbaddr++; len -= 1; in that order.
+				 */
+				*dbaddr = *sbaddr;
+				dbaddr++;
 				sblen -= 1;
 				clen -= 1;
 				len -= 1;
+				sbaddr++;
 			}
 			needs_swap = started_on_odd;
 
@@ -307,6 +316,19 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 		}
 
 		dbaddr += clen;
+
+		/*
+		 * -fbounds-safety: the following 3 lines were moved up from
+		 * after the if-block. None of these are modified in the
+		 * if-block, so moving these up here shouldn't change the
+		 * behavior. Also, updating len before updating sbaddr led to
+		 * faster throughput than doing: dbaddr += clen; sbaddr += clen;
+		 * len -= clen + odd;
+		 */
+		sblen -= clen + odd;
+		len -= clen + odd;
+		ASSERT(sblen == 0 || len == 0);
+
 		sbaddr += clen;
 
 		if (__probable(do_csum)) {
@@ -330,10 +352,6 @@ _pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
 			 */
 			sum = (sum >> 16) + (sum & 0xffff);
 		}
-
-		sblen -= clen + odd;
-		len -= clen + odd;
-		ASSERT(sblen == 0 || len == 0);
 	}
 
 	if (odd_start) {
@@ -392,7 +410,7 @@ _pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 			ASSERT(soff >= sboff);
 			ASSERT(sboff + sblen > soff);
 			sblen -= (soff - sboff);
-			sbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(sbuf) + soff);
+			sbaddr = (uint8_t *)__buflet_get_data_address(sbuf) + soff;
 			soff = 0;
 		}
 
@@ -412,7 +430,7 @@ _pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 			if (doff != 0) {
 				VERIFY(__buflet_set_data_offset(dbuf, doff) == 0);
 			}
-			dbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(dbuf) + doff);
+			dbaddr = (uint8_t *)__buflet_get_data_address(dbuf) + doff;
 			dlen0 = dlim;
 			doff = 0;
 		}
@@ -530,7 +548,7 @@ pkt_sum(kern_packet_t sph, uint16_t soff, uint16_t len)
 		ASSERT(soff >= sboff);
 		ASSERT(sboff + sblen > soff);
 		sblen -= (soff - sboff);
-		sbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(sbuf) + soff);
+		sbaddr = (uint8_t *)__buflet_get_data_address(sbuf) + soff;
 
 		clen = MIN(len, sblen);
 
@@ -557,7 +575,7 @@ pkt_sum(kern_packet_t sph, uint16_t soff, uint16_t len)
 			ASSERT(soff >= sboff);
 			ASSERT(sboff + sblen > soff);
 			sblen -= (soff - sboff);
-			sbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(sbuf) + soff);
+			sbaddr = (uint8_t *)__buflet_get_data_address(sbuf) + soff;
 			soff = 0;
 		}
 
@@ -790,6 +808,7 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
     const boolean_t copysum, const uint16_t start)
 {
 	struct __kern_packet *pkt = SK_PTR_ADDR_KPKT(ph);
+	struct m_tag *ts_tag = NULL;
 	uint32_t partial;
 	uint16_t csum = 0;
 	uint8_t *baddr;
@@ -952,6 +971,12 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 			m_add_crumb(m, PKT_CRUMB_SK_PKT_COPY);
 		}
 
+		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
+		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
+			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
+			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		}
+
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
 		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u",
 		    sk_proc_name_address(current_proc()),
@@ -1062,7 +1087,7 @@ m_copypkt_sum(mbuf_t m, int soff, kern_packet_t dph, uint16_t doff,
 			}
 			dbufp = dbuf;
 			dlim = __buflet_get_data_limit(dbuf) - doff;
-			dbaddr = (uint8_t *)((uintptr_t)__buflet_get_data_address(dbuf) + doff);
+			dbaddr = (uint8_t *)__buflet_get_data_address(dbuf) + doff;
 			dlen0 = dlim;
 			doff = 0;
 		}
@@ -1171,6 +1196,7 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
     const uint32_t len, const boolean_t copysum, const uint16_t start)
 {
 	struct __kern_packet *pkt = SK_PTR_ADDR_KPKT(ph);
+	struct m_tag *ts_tag = NULL;
 	uint32_t partial;
 	uint16_t csum = 0;
 	uint8_t *baddr;
@@ -1335,6 +1361,12 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 			m_add_crumb(m, PKT_CRUMB_SK_PKT_COPY);
 		}
 
+		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
+		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
+			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
+			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		}
+
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
 		    "%s(%d) TX len %u, copy+sum %u (csum 0x%04x), start %u",
 		    sk_proc_name_address(current_proc()),
@@ -1441,7 +1473,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		if (__probable(do_sum && start != 0)) {
 			ASSERT(M_TRAILINGSPACE(m) >= start);
 			ASSERT(m->m_len == 0);
-			dp = (uint8_t *)m->m_data;
+			dp = (uint8_t *)m_mtod_current(m);
 			_pkt_copy(baddr, dp, start);
 			remaining_len -= start;
 			copied_len += start;
@@ -1452,7 +1484,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		while (curr_m != NULL && remaining_len != 0) {
 			uint32_t tmp_len = MIN(remaining_len,
 			    (uint32_t)M_TRAILINGSPACE(curr_m));
-			dp = (uint8_t *)curr_m->m_data + curr_m->m_len;
+			dp = (uint8_t *)m_mtod_end(curr_m);
 			if (__probable(do_sum)) {
 				partial = __packet_copy_and_sum((baddr + copied_len),
 				    dp, tmp_len, partial);
@@ -1507,7 +1539,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		break;
 
 	case NR_TX:
-		dp = (uint8_t *)m->m_data;
+		dp = (uint8_t *)m_mtod_current(m);
 		ASSERT(m->m_next == NULL);
 
 		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
@@ -1609,7 +1641,7 @@ pkt_copy_to_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 	SK_DF(SK_VERB_COPY_MBUF | SK_VERB_DUMP, "%s(%d) %s %s",
 	    sk_proc_name_address(current_proc()), sk_proc_pid(current_proc()),
 	    (t == NR_RX) ? "RX" : "TX",
-	    sk_dump("buf", (uint8_t *)dp, m->m_pkthdr.len, 128, NULL, 0));
+	    sk_dump("buf", (uint8_t *)dp, m->m_len, 128, NULL, 0));
 }
 
 /*
@@ -1654,7 +1686,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		if (__probable(do_sum && start != 0)) {
 			ASSERT(M_TRAILINGSPACE(m) >= start);
 			ASSERT(m->m_len == 0);
-			dp = (uint8_t *)m->m_data;
+			dp = (uint8_t *)m_mtod_current(m);
 			_pkt_copy(baddr, dp, start);
 			remaining_len -= start;
 			copied_len += start;
@@ -1666,7 +1698,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 			uint32_t tmp_len = MIN(remaining_len,
 			    (uint32_t)M_TRAILINGSPACE(curr_m));
 			uint16_t soff = poff + (uint16_t)copied_len;
-			dp = (uint8_t *)curr_m->m_data + curr_m->m_len;
+			dp = (uint8_t *)m_mtod_end(curr_m);
 
 			if (__probable(do_sum)) {
 				partial = _pkt_copyaddr_sum(ph, soff,
@@ -1725,7 +1757,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 		    (uint32_t)pkt->pkt_csum_rx_value);
 		break;
 	case NR_TX:
-		dp = (uint8_t *)m->m_data;
+		dp = (uint8_t *)m_mtod_current(m);
 		ASSERT(m->m_next == NULL);
 		VERIFY(((intptr_t)dp - (intptr_t)mbuf_datastart(m)) + len <=
 		    (uint32_t)mbuf_maxlen(m));
@@ -1823,7 +1855,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
 	SK_DF(SK_VERB_COPY_MBUF | SK_VERB_DUMP, "%s(%d) %s %s",
 	    sk_proc_name_address(current_proc()), sk_proc_pid(current_proc()),
 	    (t == NR_RX) ? "RX" : "TX",
-	    sk_dump("buf", (uint8_t *)dp, m->m_pkthdr.len, 128, NULL, 0));
+	    sk_dump("buf", (uint8_t *)dp, m->m_len, 128, NULL, 0));
 }
 
 /*
@@ -1834,7 +1866,7 @@ pkt_copy_multi_buflet_to_mbuf(const enum txrx t, kern_packet_t ph,
  * as well as to perform the final 1's complement on it.
  */
 uint32_t
-m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
+m_copydata_sum(struct mbuf *m, int off, int len, void *__sized_by(len)vp, uint32_t initial_sum,
     boolean_t *odd_start)
 {
 	boolean_t needs_swap, started_on_odd = FALSE;
@@ -1869,12 +1901,12 @@ m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
 	}
 	sum = initial_sum;
 
-	for (; len > 0; m = m->m_next) {
+	for (; len0 > 0; m = m->m_next) {
 		uint8_t *datap;
 
 		if (__improbable(m == NULL)) {
 			panic("%s: invalid mbuf chain %p [off %d, len %d]",
-			    __func__, m0, off0, len0);
+			    __func__, m0, off0, len);
 			/* NOTREACHED */
 			__builtin_unreachable();
 		}
@@ -1886,7 +1918,7 @@ m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
 			continue;
 		}
 
-		count = MIN(count - off, (unsigned)len);
+		count = MIN(count - off, (unsigned)len0);
 		partial = 0;
 
 		if ((uintptr_t)datap & 1) {
@@ -1899,7 +1931,7 @@ m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
 #endif /* BYTE_ORDER != LITTLE_ENDIAN */
 			*cp++ = *datap++;
 			count -= 1;
-			len -= 1;
+			len0 -= 1;
 		}
 
 		needs_swap = started_on_odd;
@@ -1911,7 +1943,7 @@ m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
 			    cp, count, (uint32_t)partial);
 			datap += count;
 			cp += count;
-			len -= count;
+			len0 -= count;
 			if (__improbable((partial & (3ULL << 62)) != 0)) {
 				if (needs_swap) {
 					partial = (partial << 8) +
@@ -1930,7 +1962,7 @@ m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
 			partial += *datap << 8;
 #endif /* BYTE_ORDER != LITTLE_ENDIAN */
 			*cp++ = *datap++;
-			len -= 1;
+			len0 -= 1;
 			started_on_odd = !started_on_odd;
 		}
 		off = 0;
@@ -2037,7 +2069,7 @@ pkt_copypkt_sum(kern_packet_t sph, uint16_t soff, kern_packet_t dph,
 }
 
 uint32_t
-pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
+pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *__sized_by(len)dbaddr,
     uint32_t len, boolean_t do_csum, uint32_t initial_sum, boolean_t *odd_start)
 {
 	return _pkt_copyaddr_sum(sph, soff, dbaddr, len, do_csum, initial_sum, odd_start);
@@ -2051,7 +2083,7 @@ pkt_mcopypkt_sum(mbuf_t m, int soff, kern_packet_t dph, uint16_t doff,
 }
 
 void
-pkt_copy(void *src, void *dst, size_t len)
+pkt_copy(void *__sized_by(len)src, void *__sized_by(len)dst, size_t len)
 {
 	return _pkt_copy(src, dst, len);
 }

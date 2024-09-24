@@ -184,8 +184,8 @@ static struct ns *netns_global_wild[NETNS_N_GLOBAL];
 struct ns_token {
 	/* Reservation state */
 	ifnet_t                 nt_ifp;
-	SLIST_ENTRY(ns_token)   nt_ifp_link;
-	SLIST_ENTRY(ns_token)   nt_all_link;
+	LIST_ENTRY(ns_token)    nt_ifp_link;
+	LIST_ENTRY(ns_token)    nt_all_link;
 	uint32_t                nt_state;       /* NETNS_STATE_* */
 
 	/* Reservation context */
@@ -210,11 +210,11 @@ struct ns_token {
 #define NETNS_STATE_BITS        "\020\01HALFCLOSED\02WITHDRAWN"
 
 /* List of tokens not bound to an ifnet */
-SLIST_HEAD(, ns_token) netns_unbound_tokens = SLIST_HEAD_INITIALIZER(
+LIST_HEAD(, ns_token) netns_unbound_tokens = LIST_HEAD_INITIALIZER(
 	netns_unbound_tokens);
 
 /* List of all tokens currently allocated in the system */
-SLIST_HEAD(, ns_token) netns_all_tokens = SLIST_HEAD_INITIALIZER(
+LIST_HEAD(, ns_token) netns_all_tokens = LIST_HEAD_INITIALIZER(
 	netns_all_tokens);
 
 /*
@@ -245,13 +245,16 @@ static void netns_ns_token_free(struct ns_token *);
 /*
  * Utility/internal code
  */
-static struct ns *_netns_get_ns(uint32_t *, uint8_t, uint8_t, bool);
-static inline boolean_t _netns_is_wildcard_addr(const uint32_t *, uint8_t);
+static struct ns *_netns_get_ns(uint32_t *__sized_by(addr_len), uint8_t addr_len,
+    uint8_t, bool);
+static inline boolean_t _netns_is_wildcard_addr(
+	const uint32_t *__sized_by(addr_len), uint8_t addr_len);
 static int _netns_reserve_common(struct ns *, in_port_t, uint32_t);
 static void _netns_release_common(struct ns *, in_port_t, uint32_t);
 static inline void netns_clear_ifnet(struct ns_token *);
-static int _netns_reserve_kpi_common(struct ns *, netns_token *, uint32_t *,
-    uint8_t, uint8_t, in_port_t *, uint32_t, struct ns_flow_info *);
+static int _netns_reserve_kpi_common(struct ns *, netns_token *,
+    uint32_t *__sized_by(addr_len), uint8_t addr_len, uint8_t, in_port_t *,
+    uint32_t, struct ns_flow_info *);
 static void _netns_set_ifnet_internal(struct ns_token *, struct ifnet *);
 
 static struct ns_reservation *
@@ -384,7 +387,7 @@ netns_ns_token_alloc(boolean_t with_nfi)
 		    SKMEM_SLEEP);
 		ASSERT(token->nt_flow_info != NULL);
 	}
-	SLIST_INSERT_HEAD(&netns_all_tokens, token, nt_all_link);
+	LIST_INSERT_HEAD(&netns_all_tokens, token, nt_all_link);
 
 	return token;
 }
@@ -394,7 +397,7 @@ netns_ns_token_free(struct ns_token *token)
 {
 	NETNS_LOCK_ASSERT_HELD();
 	NETNS_LOCK_CONVERT();
-	SLIST_REMOVE(&netns_all_tokens, token, ns_token, nt_all_link);
+	LIST_REMOVE(token, nt_all_link);
 
 	if (token->nt_flow_info != NULL) {
 		skmem_cache_free(netns_ns_flow_info_cache, token->nt_flow_info);
@@ -450,7 +453,7 @@ ns_reservation_tree_find(struct ns_reservation_tree *tree, const in_port_t port)
  * created.
  */
 static struct ns *
-_netns_get_ns(uint32_t *addr, uint8_t addr_len, uint8_t proto, bool create)
+_netns_get_ns(uint32_t *__sized_by(addr_len)addr, uint8_t addr_len, uint8_t proto, bool create)
 {
 	struct ns *namespace = NULL;
 	struct ns find = {
@@ -500,7 +503,7 @@ _netns_get_ns(uint32_t *addr, uint8_t addr_len, uint8_t proto, bool create)
  */
 __attribute__((always_inline))
 static boolean_t
-_netns_is_wildcard_addr(const uint32_t *addr, uint8_t addr_len)
+_netns_is_wildcard_addr(const uint32_t *__sized_by(addr_len)addr, uint8_t addr_len)
 {
 	boolean_t wildcard;
 
@@ -889,8 +892,7 @@ netns_clear_ifnet(struct ns_token *nstoken)
 	NETNS_LOCK_ASSERT_HELD();
 
 	if (nstoken->nt_ifp != NULL) {
-		SLIST_REMOVE(&nstoken->nt_ifp->if_netns_tokens, nstoken,
-		    ns_token, nt_ifp_link);
+		LIST_REMOVE(nstoken, nt_ifp_link);
 
 		SK_DF(NS_VERB_IP(nstoken->nt_addr_len) |
 		    NS_VERB_PROTO(nstoken->nt_proto),
@@ -904,8 +906,7 @@ netns_clear_ifnet(struct ns_token *nstoken)
 		ifnet_decr_iorefcnt(nstoken->nt_ifp);
 		nstoken->nt_ifp = NULL;
 	} else {
-		SLIST_REMOVE(&netns_unbound_tokens, nstoken, ns_token,
-		    nt_ifp_link);
+		LIST_REMOVE(nstoken, nt_ifp_link);
 	}
 }
 
@@ -915,9 +916,9 @@ netns_clear_ifnet(struct ns_token *nstoken)
  * surrounding kernel code.
  */
 static int
-_netns_reserve_kpi_common(struct ns *ns, netns_token *token, uint32_t *addr,
-    uint8_t addr_len, uint8_t proto, in_port_t *port, uint32_t flags,
-    struct ns_flow_info *nfi)
+_netns_reserve_kpi_common(struct ns *ns, netns_token *token,
+    uint32_t *__sized_by(addr_len)addr, uint8_t addr_len, uint8_t proto,
+    in_port_t *port, uint32_t flags, struct ns_flow_info *nfi)
 {
 	boolean_t ns_want_cleanup = (ns == NULL);
 	struct ns_token *nt;
@@ -1120,8 +1121,8 @@ netns_init(void)
 		__builtin_unreachable();
 	}
 
-	SLIST_INIT(&netns_unbound_tokens);
-	SLIST_INIT(&netns_all_tokens);
+	LIST_INIT(&netns_unbound_tokens);
+	LIST_INIT(&netns_all_tokens);
 
 	netns_n_namespaces = 0;
 	RB_INIT(&netns_namespaces);
@@ -1216,8 +1217,9 @@ netns_is_enabled(void)
 }
 
 int
-netns_reserve(netns_token *token, uint32_t *addr, uint8_t addr_len,
-    uint8_t proto, in_port_t port, uint32_t flags, struct ns_flow_info *nfi)
+netns_reserve(netns_token *token, uint32_t *__sized_by(addr_len)addr,
+    uint8_t addr_len, uint8_t proto, in_port_t port, uint32_t flags,
+    struct ns_flow_info *nfi)
 {
 	int err = 0;
 #if SK_LOG
@@ -1261,8 +1263,9 @@ extern int      udp_use_randomport;
 extern int      tcp_use_randomport;
 
 int
-netns_reserve_ephemeral(netns_token *token, uint32_t *addr, uint8_t addr_len,
-    uint8_t proto, in_port_t *port, uint32_t flags, struct ns_flow_info *nfi)
+netns_reserve_ephemeral(netns_token *token, uint32_t *__sized_by(addr_len)addr,
+    uint8_t addr_len, uint8_t proto, in_port_t *port, uint32_t flags,
+    struct ns_flow_info *nfi)
 {
 	int err = 0;
 	in_port_t first = (in_port_t)ipport_firstauto;
@@ -1461,7 +1464,8 @@ netns_release(netns_token *token)
 }
 
 int
-netns_change_addr(netns_token *token, uint32_t *addr, uint8_t addr_len)
+netns_change_addr(netns_token *token, uint32_t *__sized_by(addr_len)addr,
+    uint8_t addr_len)
 {
 	int err = 0;
 	struct ns *old_namespace;
@@ -1580,7 +1584,7 @@ _netns_set_ifnet_internal(struct ns_token *nt, struct ifnet *ifp)
 
 	if (ifp != NULL && ifnet_is_attached(ifp, 1)) {
 		nt->nt_ifp = ifp;
-		SLIST_INSERT_HEAD(&ifp->if_netns_tokens, nt, nt_ifp_link);
+		LIST_INSERT_HEAD(&ifp->if_netns_tokens, nt, nt_ifp_link);
 
 		SK_DF(NS_VERB_IP(nt->nt_addr_len) | NS_VERB_PROTO(nt->nt_proto),
 		    "%s:%s:%d // added to ifnet %d",
@@ -1589,7 +1593,7 @@ _netns_set_ifnet_internal(struct ns_token *nt, struct ifnet *ifp)
 		    PROTO_STR(nt->nt_proto), nt->nt_port,
 		    ifp->if_index);
 	} else {
-		SLIST_INSERT_HEAD(&netns_unbound_tokens, nt, nt_ifp_link);
+		LIST_INSERT_HEAD(&netns_unbound_tokens, nt, nt_ifp_link);
 	}
 }
 
@@ -1640,10 +1644,10 @@ netns_ifnet_detach(ifnet_t ifp)
 
 	NETNS_LOCK();
 
-	SLIST_FOREACH_SAFE(token, &ifp->if_netns_tokens, nt_ifp_link,
+	LIST_FOREACH_SAFE(token, &ifp->if_netns_tokens, nt_ifp_link,
 	    tmp_token) {
 		netns_clear_ifnet(token);
-		SLIST_INSERT_HEAD(&netns_unbound_tokens, token, nt_ifp_link);
+		LIST_INSERT_HEAD(&netns_unbound_tokens, token, nt_ifp_link);
 	}
 
 	NETNS_UNLOCK();
@@ -1755,7 +1759,7 @@ netns_change_flags(netns_token *token, uint32_t set_flags,
  */
 static inline void
 netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protocol,
-    u_int32_t flags, u_int8_t *bitfield)
+    u_int32_t flags, u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN])
 {
 	struct ns_token *token;
 	boolean_t iswildcard = false;
@@ -1933,7 +1937,7 @@ netns_local_port_scan_flow_entry(struct flow_entry *fe, protocol_family_t protoc
 
 static void
 netns_get_if_local_ports(ifnet_t ifp, protocol_family_t protocol,
-    u_int32_t flags, u_int8_t *bitfield)
+    u_int32_t flags, u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN])
 {
 	struct nx_flowswitch *fsw = NULL;
 
@@ -1962,7 +1966,7 @@ done:
 
 errno_t
 netns_get_local_ports(ifnet_t ifp, protocol_family_t protocol,
-    u_int32_t flags, u_int8_t *bitfield)
+    u_int32_t flags, u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN])
 {
 	if (__netns_inited == 0) {
 		return 0;
@@ -1971,8 +1975,8 @@ netns_get_local_ports(ifnet_t ifp, protocol_family_t protocol,
 		netns_get_if_local_ports(ifp, protocol, flags, bitfield);
 	} else {
 		errno_t error;
-		ifnet_t *ifp_list;
 		uint32_t count, i;
+		ifnet_t *__counted_by(count) ifp_list;
 
 		error = ifnet_list_get_all(IFNET_FAMILY_ANY, &ifp_list, &count);
 		if (error != 0) {
@@ -1988,7 +1992,7 @@ netns_get_local_ports(ifnet_t ifp, protocol_family_t protocol,
 			netns_get_if_local_ports(ifp_list[i], protocol, flags,
 			    bitfield);
 		}
-		ifnet_list_free(ifp_list);
+		ifnet_list_free_counted_by(ifp_list, count);
 	}
 
 	return 0;
@@ -2017,7 +2021,7 @@ netns_find_anyres_byaddr(struct ifaddr *ifa, uint8_t proto)
 
 	NETNS_LOCK();
 
-	SLIST_FOREACH(token, &ifp->if_netns_tokens, nt_ifp_link) {
+	LIST_FOREACH(token, &ifp->if_netns_tokens, nt_ifp_link) {
 		if ((token->nt_flags & NETNS_OWNER_MASK) == NETNS_PF) {
 			continue;
 		}
@@ -2047,7 +2051,7 @@ netns_find_anyres_byaddr(struct ifaddr *ifa, uint8_t proto)
 }
 
 static uint32_t
-_netns_lookup_ns_n_reservations(uint32_t *addr, uint8_t addr_len, uint8_t proto)
+_netns_lookup_ns_n_reservations(uint32_t *__sized_by(addr_len)addr, uint8_t addr_len, uint8_t proto)
 {
 	uint32_t ns_n_reservations = 0;
 	NETNS_LOCK_SPIN();

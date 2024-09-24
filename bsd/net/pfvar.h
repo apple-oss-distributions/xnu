@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -81,10 +81,10 @@ extern "C" {
 #include <sys/queue.h>
 #include <libkern/tree.h>
 
-#include <net/radix.h>
 #include <netinet/in.h>
 #include <net/if_var.h>
 #ifdef KERNEL
+#include <net/radix.h>
 #include <kern/kern_types.h>
 #include <kern/zalloc.h>
 #include <kern/locks.h>
@@ -97,6 +97,11 @@ extern "C" {
 #include <netinet/in_pcb.h>
 #include <skywalk/namespace/netns.h>
 #endif
+
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
 
 #if BYTE_ORDER == BIG_ENDIAN
 #define htobe64(x)      (x)
@@ -150,11 +155,17 @@ union sockaddr_union {
 #endif /* MD5_DIGEST_LENGTH */
 
 #ifdef KERNEL
-struct ip;
-struct ip6_hdr;
-struct tcphdr;
-struct pf_grev1_hdr;
-struct pf_esp_hdr;
+struct pf_grev1_hdr {
+	u_int16_t flags;
+	u_int16_t protocol_type;
+	u_int16_t payload_length;
+	u_int16_t call_id;
+};
+
+struct pf_esp_hdr {
+	u_int32_t spi;
+	u_int32_t seqno;
+};
 #endif /* KERNEL */
 
 #define PF_GRE_PPTP_VARIANT     0x01
@@ -1203,7 +1214,7 @@ struct pf_ruleset {
 		struct pf_rulequeue      queues[2];
 		struct {
 			struct pf_rulequeue     *ptr;
-			struct pf_rule          **ptr_array;
+			struct pf_rule          **__counted_by(rsize) ptr_array;
 			u_int32_t                rcount;
 			u_int32_t                rsize;
 			u_int32_t                ticket;
@@ -1412,16 +1423,16 @@ struct pf_pdesc {
 		pid_t    pid;
 	}                lookup;
 	u_int64_t        tot_len;       /* Make Mickey money */
-	union {
-		struct tcphdr           *tcp;
-		struct udphdr           *udp;
-		struct icmp             *icmp;
-		struct icmp6_hdr        *icmp6;
-		struct pf_grev1_hdr     *grev1;
-		struct pf_esp_hdr       *esp;
-		void                    *any;
-	} hdr;
 
+	/*
+	 * hdrlen and hdrmaxlen may differ in cases such as ICMP,
+	 * where hdrlen == ICMP_MINLEN, and hdrmaxlen == sizeof(struct icmp).
+	 * Another example is GRE, where hdrlen is only non-zero if the packet
+	 * is PPTP, but hdrmaxlen is always the actual buffer length.
+	 */
+	void *__sized_by(hdrmaxlen) hdr;
+	size_t hdrlen;
+	size_t hdrmaxlen;
 	/* XXX TODO: Change baddr and naddr to *saddr */
 	struct pf_addr   baddr;         /* src address before translation */
 	struct pf_addr   bdaddr;        /* dst address before translation */
@@ -1436,7 +1447,6 @@ struct pf_pdesc {
 	struct pf_mtag  *pf_mtag;
 	u_int16_t       *ip_sum;
 	u_int32_t        off;           /* protocol header offset */
-	u_int32_t        hdrlen;        /* protocol header length */
 	u_int32_t        p_len;         /* total length of payload */
 	u_int16_t        flags;         /* Let SCRUB trigger behavior in */
 	                                /* state code. Easier than tags */
@@ -1454,6 +1464,69 @@ struct pf_pdesc {
 	u_int32_t        flowsrc;       /* flow source (FLOWSRC) */
 	u_int32_t        flowhash;      /* flow hash to identify the sender */
 };
+
+#define _DEFINE_PDESC_HDR_ACCESSOR(HDR_TAG, HDR_TYPE)           \
+/* getter */                                                    \
+static inline                                                   \
+HDR_TYPE * __single                                             \
+pf_pd_get_hdr_##HDR_TAG(const struct pf_pdesc *pdesc)           \
+{                                                               \
+	return (HDR_TYPE * __single)pdesc->hdr;                     \
+}                                                               \
+/* ptr getter */                                                \
+static inline                                                   \
+uint8_t *__header_indexable                                     \
+pf_pd_get_hdr_ptr_##HDR_TAG(const struct pf_pdesc *pdesc)       \
+{                                                               \
+	return (uint8_t *__header_indexable) pdesc->hdr;            \
+}                                                               \
+/* setter with hdrlen != hdrmaxlen != sizeof(TYPE)   */         \
+static inline                                                   \
+void                                                            \
+__attribute__((overloadable))                                   \
+pf_pd_set_hdr_##HDR_TAG(struct pf_pdesc *pdesc,                 \
+	               void *__sized_by(hdrmaxlen) hdr,           \
+	               uint32_t hdrlen,                             \
+	               uint32_t hdrmaxlen)                          \
+{                                                               \
+    pdesc->hdrlen = hdrlen;                                     \
+	pdesc->hdrmaxlen = hdrmaxlen;                               \
+	pdesc->hdr = (void *) hdr;                                  \
+}
+
+#define _DEFINE_PDESC_TYPED_HDR_ACCESSOR(HDR_TAG, HDR_TYPE)     \
+_DEFINE_PDESC_HDR_ACCESSOR(HDR_TAG, HDR_TYPE)                   \
+/* setter with hdrlen == hdrmaxlen == sizeof(TYPE)   */         \
+static inline                                                   \
+void                                                            \
+__attribute__((overloadable))                                   \
+pf_pd_set_hdr_##HDR_TAG(struct pf_pdesc *pdesc,                 \
+	               HDR_TYPE *hdr)                               \
+{                                                               \
+    pf_pd_set_hdr_##HDR_TAG(pdesc,                              \
+	    hdr, sizeof(HDR_TYPE), sizeof(HDR_TYPE));           \
+}                                                               \
+/* setter with hdrlen != hdrmaxlen == sizeof(TYPE)   */         \
+static inline                                                   \
+void                                                            \
+__attribute__((overloadable))                                   \
+pf_pd_set_hdr_##HDR_TAG(struct pf_pdesc *pdesc,                 \
+	               HDR_TYPE *hdr,                               \
+	               uint32_t hdrlen)                             \
+{                                                               \
+    pf_pd_set_hdr_##HDR_TAG(pdesc,                              \
+	    hdr, hdrlen, sizeof(HDR_TYPE));                     \
+}                                                               \
+
+
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(tcp, struct tcphdr);
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(udp, struct udphdr);
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(icmp, struct icmp);
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(icmp6, struct icmp6_hdr);
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(grev1, struct pf_grev1_hdr);
+_DEFINE_PDESC_TYPED_HDR_ACCESSOR(esp, struct pf_esp_hdr);
+_DEFINE_PDESC_HDR_ACCESSOR(any, void);
+
 #endif /* KERNEL */
 
 /* flags for RDR options */
@@ -2145,7 +2218,7 @@ struct pf_ifspeed {
 #define DIOCKILLSRCNODES _IOWR('D', 91, struct pfioc_src_node_kill)
 #define DIOCGIFSPEED    _IOWR('D', 92, struct pf_ifspeed)
 
-#ifdef KERNEL
+#ifdef KERNEL_PRIVATE
 RB_HEAD(pf_src_tree, pf_src_node);
 RB_PROTOTYPE_SC(__private_extern__, pf_src_tree, pf_src_node, entry,
     pf_src_compare);
@@ -2225,7 +2298,7 @@ __private_extern__ int pf_refragment6(struct ifnet *, pbuf_t **,
 
 __private_extern__ void *pf_lazy_makewritable(struct pf_pdesc *,
     pbuf_t *, int);
-__private_extern__ void *pf_pull_hdr(pbuf_t *, int, void *, int,
+__private_extern__ void *pf_pull_hdr(pbuf_t *, int, void __sized_by(p_buflen) * p, int p_buflen, int copylen,
     u_short *, u_short *, sa_family_t);
 __private_extern__ void pf_change_a(void *, u_int16_t *, u_int32_t, u_int8_t);
 __private_extern__ int pflog_packet(struct pfi_kif *, pbuf_t *,
@@ -2276,7 +2349,7 @@ __private_extern__ void pfr_dynaddr_update(struct pfr_ktable *,
     struct pfi_dynaddr *);
 __private_extern__ void pfr_table_copyin_cleanup(struct pfr_table *);
 __private_extern__ struct pfr_ktable *pfr_attach_table(struct pf_ruleset *,
-    char *);
+    char const *);
 __private_extern__ void pfr_detach_table(struct pfr_ktable *);
 __private_extern__ int pfr_clr_tables(struct pfr_table *, int *, int);
 __private_extern__ int pfr_add_tables(user_addr_t, int, int *, int);
@@ -2328,13 +2401,13 @@ __private_extern__ int pfi_match_addr(struct pfi_dynaddr *, struct pf_addr *,
 __private_extern__ int pfi_dynaddr_setup(struct pf_addr_wrap *, sa_family_t);
 __private_extern__ void pfi_dynaddr_remove(struct pf_addr_wrap *);
 __private_extern__ void pfi_dynaddr_copyout(struct pf_addr_wrap *);
-__private_extern__ void pfi_update_status(const char *, struct pf_status *);
+__private_extern__ void pfi_update_status(const char *__null_terminated, struct pf_status *);
 __private_extern__ int pfi_get_ifaces(const char *, user_addr_t, int *);
 __private_extern__ int pfi_set_flags(const char *, int);
 __private_extern__ int pfi_clear_flags(const char *, int);
 
-__private_extern__ u_int16_t pf_tagname2tag(char *);
-__private_extern__ u_int16_t pf_tagname2tag_ext(char *);
+__private_extern__ u_int16_t pf_tagname2tag(char const *);
+__private_extern__ u_int16_t pf_tagname2tag_ext(char const *);
 __private_extern__ void pf_tag_ref(u_int16_t);
 __private_extern__ void pf_tag_unref(u_int16_t);
 __private_extern__ int pf_tag_packet(pbuf_t *, struct pf_mtag *,
@@ -2361,14 +2434,6 @@ __private_extern__ int pf_af_hook(struct ifnet *, struct mbuf **,
 __private_extern__ int pf_ifaddr_hook(struct ifnet *);
 __private_extern__ void pf_ifnet_hook(struct ifnet *, int);
 
-/*
- * The following are defined with "private extern" storage class for
- * kernel, and "extern" for user-space.
- */
-extern struct pf_anchor_global pf_anchors;
-extern struct pf_anchor pf_main_anchor;
-#define pf_main_ruleset pf_main_anchor.ruleset
-
 extern int pf_is_enabled;
 extern int16_t pf_nat64_configured;
 #define PF_IS_ENABLED (pf_is_enabled != 0)
@@ -2377,7 +2442,7 @@ extern u_int32_t pf_hash_seed;
 __private_extern__ int pf_get_ruleset_number(u_int8_t);
 __private_extern__ void pf_init_ruleset(struct pf_ruleset *);
 __private_extern__ int pf_anchor_setup(struct pf_rule *,
-    const struct pf_ruleset *, const char *);
+    const struct pf_ruleset *, const char *__counted_by(len), size_t len);
 __private_extern__ int pf_anchor_copyout(const struct pf_ruleset *,
     const struct pf_rule *, struct pfioc_rule *);
 __private_extern__ void pf_anchor_remove(struct pf_rule *);
@@ -2396,7 +2461,7 @@ __private_extern__ int pf_osfp_add(struct pf_osfp_ioctl *);
 __private_extern__ struct pf_osfp_enlist *pf_osfp_fingerprint(struct pf_pdesc *,
     pbuf_t *, int, const struct tcphdr *);
 __private_extern__ struct pf_osfp_enlist *pf_osfp_fingerprint_hdr(
-	const struct ip *, const struct ip6_hdr *, const struct tcphdr *);
+	const struct ip *, const struct ip6_hdr *, const struct tcphdr *__sized_by(tcphdr_max_len), size_t tcphdr_max_len);
 __private_extern__ void pf_osfp_flush(void);
 __private_extern__ int pf_osfp_get(struct pf_osfp_ioctl *);
 __private_extern__ void pf_osfp_initialize(void);
@@ -2410,34 +2475,17 @@ __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag_pbuf(pbuf_t *);
 __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag(struct mbuf *);
 __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
     struct pf_fragment_tag *, int);
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 #define PF_COMPATIBLE_FLAGS_PF_ENABLED 0x00000001
 #define PF_COMPATIBLE_FLAGS_CUSTOM_ANCHORS_PRESENT 0x00000002
 #define PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT 0x00000004
 
 __private_extern__ uint32_t pf_check_compatible_rules(void);
-#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
-#else /* !KERNEL */
+#endif // SKYWALK
+#endif /* KERNEL_PRIVATE */
 extern struct pf_anchor_global pf_anchors;
 extern struct pf_anchor pf_main_anchor;
 #define pf_main_ruleset pf_main_anchor.ruleset
-
-/* these ruleset functions can be linked into userland programs (pfctl) */
-extern int pf_get_ruleset_number(u_int8_t);
-extern void pf_init_ruleset(struct pf_ruleset *);
-extern int pf_anchor_setup(struct pf_rule *, const struct pf_ruleset *,
-    const char *);
-extern int pf_anchor_copyout(const struct pf_ruleset *, const struct pf_rule *,
-    struct pfioc_rule *);
-extern void pf_anchor_remove(struct pf_rule *);
-extern void pf_remove_if_empty_ruleset(struct pf_ruleset *);
-extern struct pf_anchor *pf_find_anchor(const char *);
-extern struct pf_ruleset *pf_find_ruleset(const char *);
-extern struct pf_ruleset *pf_find_ruleset_with_owner(const char *,
-    const char *, int, int *);
-extern struct pf_ruleset *pf_find_or_create_ruleset(const char *);
-extern void pf_rs_initialize(void);
-#endif /* !KERNEL */
 
 #ifdef  __cplusplus
 }

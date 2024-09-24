@@ -67,7 +67,8 @@ static int mptcp_getconnids(struct mptses *, sae_associd_t, uint32_t *,
 static int mptcp_getconninfo(struct mptses *, sae_connid_t *, uint32_t *,
     uint32_t *, int32_t *, user_addr_t, socklen_t *, user_addr_t, socklen_t *,
     uint32_t *, user_addr_t, uint32_t *);
-static int mptcp_usr_control(struct socket *, u_long, caddr_t, struct ifnet *,
+static int mptcp_usr_control(struct socket *, u_long cmd,
+    caddr_t __sized_by(IOCPARM_LEN(cmd)), struct ifnet *,
     struct proc *);
 static int mptcp_disconnect(struct mptses *);
 static int mptcp_usr_disconnect(struct socket *);
@@ -143,8 +144,8 @@ out:
 static int
 mptcp_usr_detach(struct socket *mp_so)
 {
-	struct mptses *mpte = mpsotompte(mp_so);
-	struct mppcb *mpp = mpsotomppcb(mp_so);
+	struct mptses *__single mpte = mpsotompte(mp_so);
+	struct mppcb *__single mpp = mpsotomppcb(mp_so);
 
 	if (mpp == NULL || mpp->mpp_state == MPPCB_STATE_DEAD) {
 		os_log_error(mptcp_log_handle, "%s - %lx: state: %d\n",
@@ -174,9 +175,9 @@ static int
 mptcp_attach(struct socket *mp_so, struct proc *p)
 {
 #pragma unused(p)
-	struct mptses *mpte = NULL;
-	struct mptcb *mp_tp = NULL;
-	struct mppcb *mpp = NULL;
+	struct mptses *__single mpte = NULL;
+	struct mptcb *__single mp_tp = NULL;
+	struct mppcb *__single mpp = NULL;
 	int error = 0;
 
 	if (mp_so->so_snd.sb_hiwat == 0 || mp_so->so_rcv.sb_hiwat == 0) {
@@ -796,7 +797,8 @@ interface_info:
  * User-protocol pru_control callback.
  */
 static int
-mptcp_usr_control(struct socket *mp_so, u_long cmd, caddr_t data,
+mptcp_usr_control(struct socket *mp_so, u_long cmd,
+    caddr_t __sized_by(IOCPARM_LEN(cmd)) data,
     struct ifnet *ifp, struct proc *p)
 {
 #pragma unused(ifp, p)
@@ -1672,6 +1674,26 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 			/* nothing to do; just return */
 			goto out;
 		}
+	} else if (sopt->sopt_level == IPPROTO_IP) {
+		switch (optname) {
+		case IP_TOS:
+			/* eligible; record it */
+			break;
+		default:
+			/* not eligible */
+			error = ENOPROTOOPT;
+			goto err_out;
+		}
+	} else if (sopt->sopt_level == IPPROTO_IPV6) {
+		switch (optname) {
+		case IPV6_TCLASS:
+			/* eligible; record it */
+			break;
+		default:
+			/* not eligible */
+			error = ENOPROTOOPT;
+			goto err_out;
+		}
 	} else {
 		switch (optname) {
 		case TCP_NODELAY:
@@ -1862,23 +1884,18 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 	if (rec) {
 		/* search for an existing one; if not found, allocate */
 		if ((mpo = mptcp_sopt_find(mpte, sopt)) == NULL) {
-			mpo = mptcp_sopt_alloc(Z_WAITOK);
+			mpo = mptcp_sopt_alloc();
 		}
 
-		if (mpo == NULL) {
-			error = ENOBUFS;
-			goto err_out;
-		} else {
-			/* initialize or update, as needed */
-			mpo->mpo_intval = optval;
-			if (!(mpo->mpo_flags & MPOF_ATTACHED)) {
-				mpo->mpo_level = level;
-				mpo->mpo_name = optname;
-				mptcp_sopt_insert(mpte, mpo);
-			}
-			/* this can be issued on the subflow socket */
-			mpo->mpo_flags |= MPOF_SUBFLOW_OK;
+		/* initialize or update, as needed */
+		mpo->mpo_intval = optval;
+		if (!(mpo->mpo_flags & MPOF_ATTACHED)) {
+			mpo->mpo_level = level;
+			mpo->mpo_name = optname;
+			mptcp_sopt_insert(mpte, mpo);
 		}
+		/* this can be issued on the subflow socket */
+		mpo->mpo_flags |= MPOF_SUBFLOW_OK;
 	} else {
 		bzero(&smpo, sizeof(smpo));
 		mpo = &smpo;
@@ -2047,7 +2064,7 @@ static int
 mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 {
 	int error = 0, optval = 0;
-	struct socket *mp_so;
+	struct socket *__single mp_so;
 
 	mp_so = mptetoso(mpte);
 
@@ -2080,7 +2097,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	case TCP_ADAPTIVE_WRITE_TIMEOUT:
 	case TCP_FASTOPEN_FORCE_ENABLE:
 	{
-		struct mptopt *mpo = mptcp_sopt_find(mpte, sopt);
+		struct mptopt *__single mpo = mptcp_sopt_find(mpte, sopt);
 
 		if (mpo != NULL) {
 			optval = mpo->mpo_intval;
@@ -2150,8 +2167,8 @@ out:
 int
 mptcp_ctloutput(struct socket *mp_so, struct sockopt *sopt)
 {
-	struct mppcb *mpp = mpsotomppcb(mp_so);
-	struct mptses *mpte;
+	struct mppcb *__single mpp = mpsotomppcb(mp_so);
+	struct mptses *__single mpte;
 	int error = 0;
 
 	if (mpp == NULL || mpp->mpp_state == MPPCB_STATE_DEAD) {
@@ -2162,7 +2179,8 @@ mptcp_ctloutput(struct socket *mp_so, struct sockopt *sopt)
 	socket_lock_assert_owned(mp_so);
 
 	/* we only handle socket and TCP-level socket options for MPTCP */
-	if (sopt->sopt_level != SOL_SOCKET && sopt->sopt_level != IPPROTO_TCP) {
+	if (sopt->sopt_level != SOL_SOCKET && sopt->sopt_level != IPPROTO_TCP &&
+	    sopt->sopt_level != IPPROTO_IP && sopt->sopt_level != IPPROTO_IPV6) {
 		error = EINVAL;
 		goto out;
 	}
@@ -2277,6 +2295,20 @@ mptcp_sopt2str(int level, int optname)
 		}
 
 		break;
+	case IPPROTO_IP:
+		switch (optname) {
+		case IP_TOS:
+			return "IP_TOS";
+		}
+
+		break;
+	case IPPROTO_IPV6:
+		switch (optname) {
+		case IPV6_TCLASS:
+			return "IPV6_TCLASS";
+		}
+
+		break;
 	case IPPROTO_TCP:
 		switch (optname) {
 		case TCP_NODELAY:
@@ -2322,11 +2354,11 @@ mptcp_sopt2str(int level, int optname)
 static int
 mptcp_usr_preconnect(struct socket *mp_so)
 {
-	struct mptsub *mpts = NULL;
-	struct mppcb *mpp = mpsotomppcb(mp_so);
-	struct mptses *mpte;
-	struct socket *so;
-	struct tcpcb *tp = NULL;
+	struct mptsub *__single mpts = NULL;
+	struct mppcb *__single mpp = mpsotomppcb(mp_so);
+	struct mptses *__single mpte;
+	struct socket *__single so;
+	struct tcpcb *__single tp = NULL;
 	int error;
 
 	mpte = mptompte(mpp);

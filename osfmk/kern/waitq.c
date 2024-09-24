@@ -71,7 +71,7 @@
 #include <os/hash.h>
 #include <libkern/section_keywords.h>
 #include <mach/sync_policy.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <sys/kdebug.h>
 
@@ -2563,7 +2563,7 @@ wqt_link(uint32_t index, struct waitq_set *wqset, kern_return_t want)
 }
 
 static void
-wqt_unlink(uint32_t index, struct waitq_set *wqset, kern_return_t want)
+wqt_unlink(uint32_t index, struct waitq_set *wqset, __assert_only kern_return_t want)
 {
 	struct waitq *waitq = wqt_wq(index);
 	waitq_link_t link;
@@ -2590,7 +2590,7 @@ wqt_unlink(uint32_t index, struct waitq_set *wqset, kern_return_t want)
 }
 
 static void
-wqt_wakeup_one(uint32_t index, event64_t event64, kern_return_t want)
+wqt_wakeup_one(uint32_t index, event64_t event64, __assert_only kern_return_t want)
 {
 	kern_return_t kr;
 
@@ -2641,7 +2641,7 @@ again:
 }
 
 static void
-wqt_expect_preposts(struct waitq_set *wqset, uint64_t preposts)
+wqt_expect_preposts(struct waitq_set *wqset, __assert_only uint64_t preposts)
 {
 	struct waitq_link *link;
 	uint64_t found = 0;

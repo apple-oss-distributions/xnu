@@ -41,6 +41,8 @@
 #include <libkern/prelink.h>
 #include <libkern/OSKextLibPrivate.h>
 #include <san/kasan.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 
 #define KASLR_IOREG_DEBUG 0
 
@@ -177,7 +179,7 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 		 * new MH_FILESET format kext collection.
 		 */
 		rval = mach_vm_allocate_kernel(g_kext_map, &addr, size,
-		    vm_map_kernel_flags_vmflags(vmk_flags), vmk_flags.vm_tag);
+		    vmk_flags);
 		if (rval != KERN_SUCCESS) {
 			printf("vm_allocate failed - %d\n", rval);
 			goto finish;
@@ -209,8 +211,7 @@ kext_alloc(vm_offset_t *_addr, vm_size_t size, boolean_t fixed)
 	}
 check_reachable:
 #else
-	rval = mach_vm_allocate_kernel(g_kext_map, &addr, size,
-	    vm_map_kernel_flags_vmflags(vmk_flags), vmk_flags.vm_tag);
+	rval = mach_vm_allocate_kernel(g_kext_map, &addr, size, vmk_flags);
 	if (rval != KERN_SUCCESS) {
 		printf("vm_allocate failed - %d\n", rval);
 		goto finish;

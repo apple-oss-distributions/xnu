@@ -37,7 +37,7 @@
 
 #include <machine/machine_cpu.h>
 #include <libkern/OSAtomic.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <console/video_console.h>
 #include <console/serial_protos.h>
@@ -400,7 +400,7 @@ console_ring_try_empty(bool fail_fast)
 	int size_before_wrap = 0;
 	bool in_debugger = (kernel_debugger_entry_count > 0);
 
-	if (__improbable(!console_io_allowed()) || get_preemption_level() != 0) {
+	if (__improbable(!console_io_allowed()) || (!in_debugger && get_preemption_level() != 0)) {
 		return;
 	}
 

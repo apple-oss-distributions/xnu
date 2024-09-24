@@ -51,7 +51,7 @@ T_GLOBAL_META(
 #define REG_SSBS                "S3_3_C4_C2_6" /* clang will not emit MRS/MSR to "SSBS" itself since it doesnt always exist */
 
 T_DECL(armv85_ssbs,
-    "Test that ARMv8.5 SSBS is off by default (PSTATE.SSBS==1, don't ask!) and can be enabled by userspace.")
+    "Test that ARMv8.5 SSBS is off by default (PSTATE.SSBS==1, don't ask!) and can be enabled by userspace.", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #ifndef __arm64__
 	T_SKIP("Running on non-arm64 target, skipping...");

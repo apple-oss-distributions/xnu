@@ -10,7 +10,7 @@
 T_GLOBAL_META(T_META_CHECK_LEAKS(false));
 
 T_DECL(settimeofday, "check setting and getting time of day",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct timeval origtime = {};
 	struct timezone origtz = {};
@@ -68,7 +68,7 @@ create_tmpfile(void)
 }
 
 T_DECL(futimes, "check that futimes updates file times",
-    T_META_RUN_CONCURRENTLY(true))
+    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
 {
 	int tmpfd = create_tmpfile();
 

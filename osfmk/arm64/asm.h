@@ -60,6 +60,9 @@
 #ifdef __arm64__
 
 #include <arm/arch.h>
+#if XNU_KERNEL_PRIVATE
+#include <pexpert/arm64/board_config.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* There is another definition of ALIGN for .c sources */
 #ifdef __ASSEMBLER__
@@ -208,8 +211,35 @@
 .macro PANIC_UNIMPLEMENTED
 	bl EXT(panic_unimplemented)
 .endmacro
-#endif
 
+/**
+ * Marks the first instruction of an externally callable assembly routine.
+ *
+ * Callable functions which might be executed via indirect branches (i.e. any 
+ * function which could be invoked from C/C++) MUST use either this macro or 
+ * ARM64_STACK_PROLOG, depending on whether LR will be spilled to the stack. 
+ * Failure to use one of these macros may cause unexpected runtime BTI 
+ * exceptions when invoking a function.
+ */
+.macro ARM64_PROLOG
+#if BTI_ENFORCED
+    bti c
+#endif /* BTI_ENFORCED */
+.endmacro
+
+/**
+ * Marks the first instruction of an indirect branch target.
+ *
+ * This macro is not required if the location is only ever branched to by direct
+ * branches (as is most common). This macro is necessary for computed
+ * branches (i.e. switch cases) and other forms of dynamic dispatch.
+ */
+.macro ARM64_JUMP_TARGET
+#if BTI_ENFORCED
+    bti j
+#endif /* BTI_ENFORCED */
+.endmacro
+#endif /* XNU_KERNEL_PRIVATE */
 #else /* NOT __ASSEMBLER__ */
 
 /* These defines are here for .c files that wish to reference global symbols

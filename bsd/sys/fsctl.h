@@ -313,8 +313,12 @@ typedef struct fsioc_ungraft_fs {
 	uint64_t ungraft_flags;
 } fsioc_ungraft_fs_t;
 
+/* auth fs flags */
+#define AUTH_FS_ALLOW_UNAUTH_ROOT_HASH          0x0001  /* Allow a sealed volume with an unauthenticated root hash */
+
 typedef struct fsioc_auth_fs {
 	vnode_t authvp;
+	uint64_t flags;
 } fsioc_auth_fs_t;
 
 #endif /* KERNEL */
@@ -323,6 +327,7 @@ typedef struct fsioc_auth_fs {
 typedef enum {
 	EFT_EXCLAVE,
 	EFT_SYSTEM,
+	EFT_EXCLAVE_MAIN,
 	EFT_FS_NUM_TAGS,
 } exclave_fs_tag_t;
 

@@ -117,7 +117,7 @@ _check_no_usage(struct thsc_time_energy_cpi *before,
 }
 
 T_DECL(thread_selfcounts_cpi_sanity, "check the current thread's CPI",
-    REQUIRE_RECOUNT_PMCS)
+    REQUIRE_RECOUNT_PMCS, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int err;
 	struct thsc_cpi counts[2] = { 0 };
@@ -135,7 +135,7 @@ T_DECL(thread_selfcounts_perf_level_sanity,
     REQUIRE_RECOUNT_PMCS,
     // REQUIRE_MULTIPLE_PERF_LEVELS, disabled due to rdar://111297938
     SET_THREAD_BIND_BOOTARG,
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	unsigned int level_count = perf_level_count();
 
@@ -169,7 +169,7 @@ T_DECL(thread_selfcounts_perf_level_sanity,
 }
 
 static void
-_expect_counts_on_perf_level(const char *name,
+_expect_counts_on_perf_level(unsigned int perf_level_index,
 		struct thsc_time_energy_cpi *before,
 		struct thsc_time_energy_cpi *after)
 {
@@ -184,12 +184,12 @@ _expect_counts_on_perf_level(const char *name,
 	T_ASSERT_POSIX_ZERO(err,
 			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
 
-	unsigned int index = perf_level_index(name);
-	_check_usage(&before[index], &after[index], name);
+	char *name = perf_level_name(perf_level_index);
+	_check_usage(&before[perf_level_index], &after[perf_level_index], name);
 }
 
 static void
-_expect_no_counts_on_perf_level(const char *name,
+_expect_no_counts_on_perf_level(unsigned int perf_level_index,
 		struct thsc_time_energy_cpi *before,
 		struct thsc_time_energy_cpi *after)
 {
@@ -204,8 +204,8 @@ _expect_no_counts_on_perf_level(const char *name,
 	T_ASSERT_POSIX_ZERO(err,
 			"thread_selfcounts(THSC_TIME_ENERGY_CPI_PER_PERF_LEVEL, ...)");
 
-	unsigned int index = perf_level_index(name);
-	_check_no_usage(&before[index], &after[index], name);
+	char *name = perf_level_name(perf_level_index);
+	_check_no_usage(&before[perf_level_index], &after[perf_level_index], name);
 }
 
 T_DECL(thread_selfcounts_perf_level_correct,
@@ -213,7 +213,7 @@ T_DECL(thread_selfcounts_perf_level_correct,
     REQUIRE_RECOUNT_PMCS,
     // REQUIRE_MULTIPLE_PERF_LEVELS, disabled due to rdar://111297938
     SET_THREAD_BIND_BOOTARG,
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	unsigned int level_count = perf_level_count();
 
@@ -232,15 +232,15 @@ T_DECL(thread_selfcounts_perf_level_correct,
 	T_SETUPBEGIN;
 	bind_to_cluster('E');
 	T_SETUPEND;
-	_expect_counts_on_perf_level("Efficiency", before, after);
-	_expect_no_counts_on_perf_level("Performance", before, after);
+	_expect_counts_on_perf_level(1, before, after);
+	_expect_no_counts_on_perf_level(0, before, after);
 
 	T_LOG("Binding to Performance cluster, should only see counts from P-cores");
 	T_SETUPBEGIN;
 	bind_to_cluster('P');
 	T_SETUPEND;
-	_expect_counts_on_perf_level("Performance", before, after);
-	_expect_no_counts_on_perf_level("Efficiency", before, after);
+	_expect_counts_on_perf_level(0, before, after);
+	_expect_no_counts_on_perf_level(1, before, after);
 
 	free(before);
 	free(after);
@@ -248,7 +248,7 @@ T_DECL(thread_selfcounts_perf_level_correct,
 
 T_DECL(thread_selfcounts_cpi_perf,
     "test the overhead of thread_selfcounts(2) THSC_CPI", T_META_TAG_PERF,
-    REQUIRE_RECOUNT_PMCS)
+    REQUIRE_RECOUNT_PMCS, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct thsc_cpi counts[2];
 

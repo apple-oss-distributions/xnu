@@ -81,13 +81,6 @@ void kasan_tbi_mark_free_space(vm_offset_t, vm_size_t);
  */
 uint8_t *kasan_tbi_get_tag_address(vm_offset_t);
 
-/*
- * Copy the metadata associated with one address onto the metadata associated
- * to another address. This function is useful whenever a given virtual address
- * view of a mapping gets migrated to a new virtual address.
- */
-void kasan_tbi_copy_tags(vm_offset_t, vm_offset_t, vm_size_t);
-
 /* Hanlder for the brk emitted instruction, see ESR definitions above */
 void kasan_handle_brk_failure(void *, uint16_t);
 

@@ -68,13 +68,15 @@
 
 #include <vm/vnode_pager.h>
 #include <vm/vm_pageout.h>
+#include <vm/vm_ubc.h>
 
 #include <kern/assert.h>
 #include <sys/kdebug.h>
 #include <nfs/nfs.h>
 
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
 
+#include <sys/kdebug.h>
 #include <sys/kdebug_triage.h>
 #include <vfs/vfs_disk_conditioner.h>
 
@@ -358,18 +360,18 @@ vnode_pageout(struct vnode *vp,
 		 * just go ahead and call vnop_pageout since
 		 * it has already sorted out the dirty ranges
 		 */
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_START,
-		    size, 1, 0, 0, 0);
+		KDBG_RELEASE(
+			VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_START,
+			size, 1);
 
 		if ((error_ret = VNOP_PAGEOUT(vp, upl, upl_offset, (off_t)f_offset,
 		    (size_t)size, flags, ctx))) {
 			result = PAGER_ERROR;
 		}
 
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_END,
-		    size, 1, 0, 0, 0);
+		KDBG_RELEASE(
+			VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_END,
+			size, 1);
 
 		goto out;
 	}
@@ -384,17 +386,15 @@ vnode_pageout(struct vnode *vp,
 			 * via 'f_offset' and 'size' into a UPL... this allows the filesystem to first
 			 * take any locks it needs, before effectively locking the pages into a UPL...
 			 */
-			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-			    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_START,
-			    size, (int)f_offset, 0, 0, 0);
+			KDBG_RELEASE(VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_START,
+			    size, (int)f_offset);
 
 			if ((error_ret = VNOP_PAGEOUT(vp, NULL, upl_offset, (off_t)f_offset,
 			    size, flags, ctx))) {
 				result = PAGER_ERROR;
 			}
-			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-			    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_END,
-			    size, 0, 0, 0, 0);
+			KDBG_RELEASE(VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_END,
+			    size);
 
 			goto out;
 		}
@@ -547,9 +547,8 @@ vnode_pageout(struct vnode *vp,
 		}
 		xsize = num_of_pages * PAGE_SIZE;
 
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_START,
-		    xsize, (int)f_offset, 0, 0, 0);
+		KDBG_RELEASE(VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_START,
+		    xsize, (int)f_offset);
 
 		if ((error = VNOP_PAGEOUT(vp, upl, offset, (off_t)f_offset,
 		    xsize, flags, ctx))) {
@@ -558,9 +557,8 @@ vnode_pageout(struct vnode *vp,
 			}
 			result = PAGER_ERROR;
 		}
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    (MACHDBG_CODE(DBG_MACH_VM, 1)) | DBG_FUNC_END,
-		    xsize, 0, 0, 0, 0);
+		KDBG_RELEASE(VMDBG_CODE(DBG_VM_VNODE_PAGEOUT) | DBG_FUNC_END,
+		    xsize, error);
 
 		f_offset += xsize;
 		offset   += xsize;

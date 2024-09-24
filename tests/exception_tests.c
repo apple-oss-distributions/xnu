@@ -45,7 +45,8 @@ exc_handler_identity_protected(
 	T_END;
 }
 
-T_DECL(exc_immovable, "Test that exceptions receive immovable ports")
+T_DECL(exc_immovable, "Test that exceptions receive immovable ports",
+    T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
 	uint32_t opts = 0;
@@ -75,10 +76,11 @@ T_DECL(exc_immovable, "Test that exceptions receive immovable ports")
 	*(void *volatile*)0 = 0;
 }
 
-T_DECL(exc_raise_identity_protected, "Test identity-protected exception delivery behavior")
+T_DECL(exc_raise_identity_protected, "Test identity-protected exception delivery behavior",
+    T_META_TAG_VM_NOT_PREFERRED)
 {
 	mach_port_t exc_port = create_exception_port_behavior64(EXC_MASK_BAD_ACCESS, EXCEPTION_IDENTITY_PROTECTED);
 
-	run_exception_handler_behavior64(exc_port, NULL, exc_handler_identity_protected, EXCEPTION_IDENTITY_PROTECTED);
+	run_exception_handler_behavior64(exc_port, NULL, exc_handler_identity_protected, EXCEPTION_IDENTITY_PROTECTED, true);
 	*(void *volatile*)0 = 0;
 }

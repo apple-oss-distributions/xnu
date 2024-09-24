@@ -592,6 +592,7 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_flags);
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_layoutid);
 		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_slide);
+		_SUBTYPE(KC_ST_UINT64, struct exclave_addressspace_info, eas_asroot);
 		setup_type_definition(retval, type_id, i, "exclave_addressspace_info");
 		break;
 
@@ -630,6 +631,13 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		i = 0;
 		_STRINGTYPE("osversion");
 		setup_type_definition(retval, type_id, i, "osversion");
+		break;
+	}
+
+	case STACKSHOT_KCTYPE_OS_BUILD_VERSION: {
+		i = 0;
+		_STRINGTYPE("os_build_version");
+		setup_type_definition(retval, type_id, i, "os_build_version");
 		break;
 	}
 
@@ -986,7 +994,13 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, 1, "cs_trust_level");
 		break;
 	}
-
+	case TASK_CRASHINFO_JIT_ADDRESS_RANGE: {
+		i = 0;
+		_SUBTYPE(KC_ST_UINT64, struct crashinfo_jit_address_range, start_address);
+		_SUBTYPE(KC_ST_UINT64, struct crashinfo_jit_address_range, end_address);
+		setup_type_definition(retval, type_id, 1, "jit_address_range");
+		break;
+	}
 	case EXIT_REASON_SNAPSHOT: {
 		_SUBTYPE(KC_ST_UINT32, struct exit_reason_snapshot, ers_namespace);
 		_SUBTYPE(KC_ST_UINT64, struct exit_reason_snapshot, ers_code);

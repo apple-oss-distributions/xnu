@@ -110,27 +110,7 @@ typedef __uint64_t      rlim_t;
 #if __DARWIN_C_LEVEL >= __DARWIN_C_FULL
 #define PRIO_DARWIN_THREAD      3               /* Second argument is always 0 (current thread) */
 #define PRIO_DARWIN_PROCESS     4               /* Second argument is a PID */
-
-#ifdef PRIVATE
-
-#define PRIO_DARWIN_GPU         5               /* Second argument is a PID */
-
-#define PRIO_DARWIN_GPU_ALLOW   0x1
-#define PRIO_DARWIN_GPU_DENY    0x2
-
-#define PRIO_DARWIN_ROLE        6               /* Second argument is a PID */
-
-#define PRIO_DARWIN_ROLE_DEFAULT        0x0     /* Reset to default state */
-#define PRIO_DARWIN_ROLE_UI_FOCAL       0x1     /* On  screen,     focal UI */
-#define PRIO_DARWIN_ROLE_UI             0x2     /* On  screen UI,  focal unknown */
-#define PRIO_DARWIN_ROLE_NON_UI         0x3     /* Off screen, non-focal UI */
-#define PRIO_DARWIN_ROLE_UI_NON_FOCAL   0x4     /* On  screen, non-focal UI */
-#define PRIO_DARWIN_ROLE_TAL_LAUNCH     0x5     /* Throttled-launch (for OS X TAL resume) */
-#define PRIO_DARWIN_ROLE_DARWIN_BG      0x6     /* Throttled for running in the background */
-
 /* Additional private parameters to getpriority()/setpriority() are in resource_private.h */
-
-#endif /* PRIVATE */
 
 /*
  * Range limitations for the value of the third parameter to setpriority().
@@ -437,7 +417,10 @@ struct rusage_info_v6 {
 	uint64_t ri_penergy_nj;
 	uint64_t ri_secure_time_in_system;
 	uint64_t ri_secure_ptime_in_system;
-	uint64_t ri_reserved[12];
+	uint64_t ri_neural_footprint;
+	uint64_t ri_lifetime_max_neural_footprint;
+	uint64_t ri_interval_max_neural_footprint;
+	uint64_t ri_reserved[9];
 };
 
 typedef struct rusage_info_v6 rusage_info_current;
@@ -579,21 +562,10 @@ struct proc_rlimit_control_wakeupmon {
 	int32_t wm_rate;
 };
 
-#if PRIVATE
-/*
- * Flags for I/O monitor control.
- */
-#define IOMON_ENABLE                    0x01
-#define IOMON_DISABLE                   0x02
-
-#endif /* PRIVATE */
-
+/* Additional private I/O policies are in resource_private.h */
 
 /* I/O type */
 #define IOPOL_TYPE_DISK 0
-#if PRIVATE
-#define IOPOL_TYPE_VFS_HFS_CASE_SENSITIVITY 1
-#endif
 #define IOPOL_TYPE_VFS_ATIME_UPDATES 2
 #define IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES 3
 #define IOPOL_TYPE_VFS_STATFS_NO_DATA_VOLUME 4
@@ -603,10 +575,6 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_TYPE_VFS_SKIP_MTIME_UPDATE 8
 #define IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES 9
 #define IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY 10
-#if PRIVATE
-#define IOPOL_TYPE_VFS_ALTLINK 11
-#define IOPOL_TYPE_VFS_NOCACHE_WRITE_FS_BLKSIZE  12
-#endif
 
 /* scope */
 #define IOPOL_SCOPE_PROCESS   0
@@ -624,14 +592,6 @@ struct proc_rlimit_control_wakeupmon {
 /* compatibility with older names */
 #define IOPOL_APPLICATION       IOPOL_STANDARD
 #define IOPOL_NORMAL            IOPOL_IMPORTANT
-
-#if PRIVATE
-#define IOPOL_VFS_HFS_CASE_SENSITIVITY_DEFAULT  0
-#define IOPOL_VFS_HFS_CASE_SENSITIVITY_FORCE_CASE_SENSITIVE     1
-
-#define IOPOL_VFS_ALTLINK_DISABLED 0
-#define IOPOL_VFS_ALTLINK_ENABLED  1
-#endif
 
 #define IOPOL_ATIME_UPDATES_DEFAULT     0
 #define IOPOL_ATIME_UPDATES_OFF         1
@@ -664,28 +624,6 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_DEFAULT 0
 #define IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON 1
 
-#ifdef PRIVATE
-/*
- * Structures for use in communicating via iopolicysys() between Libc and the
- * kernel.  Not to be used by user programs directly.
- */
-
-/*
- * the command to iopolicysys()
- */
-#define IOPOL_CMD_GET           0x00000001      /* Get I/O policy */
-#define IOPOL_CMD_SET           0x00000002      /* Set I/O policy */
-
-/*
- * Second parameter to iopolicysys()
- */
-struct _iopol_param_t {
-	int iop_scope;  /* current process or a thread */
-	int iop_iotype;
-	int iop_policy;
-};
-
-#endif  /* PRIVATE */
 #endif /* __DARWIN_C_LEVEL >= __DARWIN_C_FULL */
 
 #ifndef KERNEL
@@ -705,4 +643,9 @@ int     setrlimit(int, const struct rlimit *) __DARWIN_ALIAS(setrlimit);
 __END_DECLS
 
 #endif  /* !KERNEL */
+
+#ifdef PRIVATE
+#include <sys/resource_private.h>
+#endif
+
 #endif  /* !_SYS_RESOURCE_H_ */

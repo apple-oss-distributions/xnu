@@ -221,14 +221,14 @@ struct ifaddr *
 in6_selectsrc_core_ifa(struct sockaddr_in6 *addr, struct ifnet *ifp, int srcsel_debug)
 {
 	int err = 0;
-	struct ifnet *src_ifp = NULL;
+	struct ifnet *__single src_ifp = NULL;
 	struct in6_addr src_storage = {};
-	struct in6_addr *in6 = NULL;
-	struct ifaddr *ifa = NULL;
+	struct in6_addr *__single in6 = NULL;
+	struct ifaddr *__single ifa = NULL;
 
 	if ((in6 = in6_selectsrc_core(addr,
 	    (ip6_prefer_tempaddr ? IPV6_SRCSEL_HINT_PREFER_TMPADDR : 0),
-	    ifp, 0, &src_storage, &src_ifp, &err, &ifa, NULL)) == NULL) {
+	    ifp, 0, &src_storage, &src_ifp, &err, &ifa, NULL, FALSE)) == NULL) {
 		if (err == 0) {
 			err = EADDRNOTAVAIL;
 		}
@@ -273,19 +273,20 @@ done:
 struct in6_addr *
 in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
     struct ifnet *ifp, int srcsel_debug, struct in6_addr *src_storage,
-    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp, struct route_in6 *ro)
+    struct ifnet **sifp, int *errorp, struct ifaddr **ifapp, struct route_in6 *ro,
+    boolean_t is_for_clat46)
 {
 	u_int32_t odstzone;
 	int bestrule = IP6S_SRCRULE_0;
-	struct in6_addrpolicy *dst_policy = NULL, *best_policy = NULL;
+	struct in6_addrpolicy *__single dst_policy = NULL, *__single best_policy = NULL;
 	struct in6_addr dst;
-	struct in6_ifaddr *ia = NULL, *ia_best = NULL;
+	struct in6_ifaddr *__single ia = NULL, *__single ia_best = NULL;
 	char s_src[MAX_IPv6_STR_LEN] = {0};
 	char s_dst[MAX_IPv6_STR_LEN] = {0};
-	const struct in6_addr *tmp = NULL;
+	const struct in6_addr *__single  tmp = NULL;
 	int dst_scope = -1, best_scope = -1, best_matchlen = -1;
 	uint64_t secs = net_uptime();
-	struct nd_defrouter *dr = NULL;
+	struct nd_defrouter *__single dr = NULL;
 	uint32_t genid = in6_ifaddrlist_genid;
 	VERIFY(dstsock != NULL);
 	VERIFY(src_storage != NULL);
@@ -325,7 +326,7 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 	if (ro != NULL && ro->ro_rt != NULL &&
 	    (ro->ro_rt->rt_flags & RTF_GATEWAY) &&
 	    ro->ro_rt->rt_gateway != NULL) {
-		struct rtentry *rt = ro->ro_rt;
+		struct rtentry *__single rt = ro->ro_rt;
 		lck_mtx_lock(nd6_mutex);
 		dr = defrouter_lookup(NULL,
 		    &SIN6(rt->rt_gateway)->sin6_addr, rt->rt_ifp);
@@ -336,10 +337,10 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 addrloop:
 	TAILQ_FOREACH(ia, &in6_ifaddrhead, ia6_link) {
 		int new_scope = -1, new_matchlen = -1;
-		struct in6_addrpolicy *new_policy = NULL;
+		struct in6_addrpolicy *__single new_policy = NULL;
 		u_int32_t srczone = 0, osrczone, dstzone;
 		struct in6_addr src;
-		struct ifnet *ifp1 = ia->ia_ifp;
+		struct ifnet *__single ifp1 = ia->ia_ifp;
 		int srcrule;
 
 		if (srcsel_debug) {
@@ -352,9 +353,15 @@ addrloop:
 		/*
 		 * Simply skip addresses reserved for CLAT46
 		 */
-		if (ia->ia6_flags & IN6_IFF_CLAT46) {
+		if (!is_for_clat46 && (ia->ia6_flags & IN6_IFF_CLAT46)) {
 			SASEL_LOG("NEXT ia %s address on ifp1 %s skipped as it is "
 			    "reserved for CLAT46\n", s_src, ifp1->if_xname);
+			goto next;
+		}
+
+		if (is_for_clat46 && !(ia->ia6_flags & IN6_IFF_CLAT46)) {
+			SASEL_LOG("CLAT46: NEXT ia %s address on ifp1 %s skipped as it is "
+			    "not reserved for CLAT46\n", s_src, ifp1->if_xname);
 			goto next;
 		}
 
@@ -494,8 +501,8 @@ addrloop:
 			boolean_t ia_has_prefix = FALSE;
 			struct nd_prefix ia_best_prefix = {};
 			struct nd_prefix ia_prefix = {};
-			struct nd_prefix *p_ia_best_prefix = NULL;
-			struct nd_prefix *p_ia_prefix = NULL;
+			struct nd_prefix *__single p_ia_best_prefix = NULL;
+			struct nd_prefix *__single p_ia_prefix = NULL;
 
 			if (ia_best->ia6_ndpr) {
 				ia_best_prefix = *ia_best->ia6_ndpr;
@@ -732,14 +739,14 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
     struct ifnet **ifpp, struct in6_addr *src_storage, unsigned int ifscope,
     int *errorp)
 {
-	struct ifnet *ifp = NULL;
-	struct in6_pktinfo *pi = NULL;
-	struct ip6_moptions *mopts;
+	struct ifnet *__single ifp = NULL;
+	struct in6_pktinfo *__single pi = NULL;
+	struct ip6_moptions *__single mopts;
 	struct ip6_out_args ip6oa;
 	boolean_t inp_debug = FALSE;
 	uint32_t hint_mask = 0;
 	int prefer_tempaddr = 0;
-	struct ifnet *sifp = NULL;
+	struct ifnet *__single sifp = NULL;
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = ifscope;
@@ -793,7 +800,7 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 	if (opts && (pi = opts->ip6po_pktinfo) &&
 	    !IN6_IS_ADDR_UNSPECIFIED(&pi->ipi6_addr)) {
 		struct sockaddr_in6 srcsock;
-		struct in6_ifaddr *ia6;
+		struct in6_ifaddr *__single ia6;
 
 		/* get the outgoing interface */
 		if ((*errorp = in6_selectif(dstsock, opts, mopts, ro, &ip6oa,
@@ -820,7 +827,7 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 				goto done;
 			}
 		}
-		ia6 = (struct in6_ifaddr *)ifa_ifwithaddr(SA(&srcsock));
+		ia6 = ifatoia6(ifa_ifwithaddr(SA(&srcsock)));
 		if (ia6 == NULL) {
 			*errorp = EADDRNOTAVAIL;
 			src_storage = NULL;
@@ -877,7 +884,7 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 	}
 
 	if (in6_selectsrc_core(dstsock, hint_mask, ifp, inp_debug, src_storage,
-	    &sifp, errorp, NULL, ro) == NULL) {
+	    &sifp, errorp, NULL, ro, FALSE) == NULL) {
 		src_storage = NULL;
 		goto done;
 	}
@@ -927,12 +934,12 @@ selectroute(struct sockaddr_in6 *srcsock, struct sockaddr_in6 *dstsock,
     int norouteok, struct ip6_out_args *ip6oa)
 {
 	int error = 0;
-	struct ifnet *ifp = NULL, *ifp0 = NULL;
-	struct route_in6 *route = NULL;
-	struct sockaddr_in6 *sin6_next;
-	struct in6_pktinfo *pi = NULL;
-	struct in6_addr *dst = &dstsock->sin6_addr;
-	struct ifaddr *ifa = NULL;
+	struct ifnet *__single ifp = NULL, *__single ifp0 = NULL;
+	struct route_in6 *__single route = NULL;
+	struct sockaddr_in6 *__single sin6_next;
+	struct in6_pktinfo *__single pi = NULL;
+	struct in6_addr *__single dst = &dstsock->sin6_addr;
+	struct ifaddr *__single ifa = NULL;
 	char s_src[MAX_IPv6_STR_LEN], s_dst[MAX_IPv6_STR_LEN];
 	boolean_t select_srcif, proxied_ifa = FALSE, local_dst = FALSE;
 	unsigned int ifscope = ((ip6oa != NULL) ?
@@ -977,7 +984,7 @@ selectroute(struct sockaddr_in6 *srcsock, struct sockaddr_in6 *dstsock,
 	if (ifscope != IFSCOPE_NONE &&
 	    !(srcsock != NULL && IN6_IS_ADDR_LINKLOCAL(&srcsock->sin6_addr)) &&
 	    !IN6_IS_ADDR_MULTICAST(dst) && !IN6_IS_ADDR_LINKLOCAL(dst)) {
-		struct rtentry *temp_rt = NULL;
+		struct rtentry *__single temp_rt = NULL;
 
 		lck_mtx_lock(rnh_lock);
 		temp_rt = rt_lookup(TRUE, SA(dstsock),
@@ -1089,7 +1096,7 @@ getsrcif:
 	 */
 	if (ifscope != IFSCOPE_NONE || (ro != NULL && ro->ro_rt != NULL)) {
 		unsigned int scope = ifscope;
-		struct ifnet *rt_ifp;
+		struct ifnet *__single rt_ifp;
 
 		rt_ifp = (ro->ro_rt != NULL) ? ro->ro_rt->rt_ifp : NULL;
 
@@ -1122,7 +1129,7 @@ getsrcif:
 			ifa = (struct ifaddr *)
 			    ifa_foraddr6(&srcsock->sin6_addr);
 			if (ifa != NULL && !(proxied_ifa =
-			    nd6_prproxy_ifaddr((struct in6_ifaddr *)ifa))) {
+			    nd6_prproxy_ifaddr(ifatoia6(ifa)))) {
 				ifa_remref(ifa);
 				ifa = NULL;
 			}
@@ -1156,7 +1163,7 @@ getsrcif:
 	 *	found interface.
 	 */
 	if (ifa == NULL && ifscope == IFSCOPE_NONE) {
-		struct ifaddr *ifadst;
+		struct ifaddr *__single ifadst;
 
 		/* Check if the destination address is one of ours */
 		ifadst = (struct ifaddr *)ifa_foraddr6(&dstsock->sin6_addr);
@@ -1188,7 +1195,7 @@ getroute:
 	 * use it as the gateway.
 	 */
 	if (opts != NULL && opts->ip6po_nexthop != NULL) {
-		struct route_in6 *ron;
+		struct route_in6 *__single ron;
 
 		sin6_next = satosin6(opts->ip6po_nexthop);
 
@@ -1279,7 +1286,7 @@ getroute:
 		ROUTE_RELEASE(ro);
 	}
 	if (ro->ro_rt == NULL) {
-		struct sockaddr_in6 *sa6;
+		struct sockaddr_in6 *__single sa6;
 
 		/* No route yet, so try to acquire one */
 		SOCKADDR_ZERO(&ro->ro_dst, sizeof(struct sockaddr_in6));
@@ -1481,7 +1488,7 @@ done:
 		if (ifa != NULL) {
 			ifa_addref(ifa);        /* for caller */
 		}
-		*retsrcia = (struct in6_ifaddr *)ifa;
+		*retsrcia = ifatoia6(ifa);
 	}
 
 	if (error == 0) {
@@ -1517,7 +1524,7 @@ in6_selectif(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 {
 	int err = 0;
 	struct route_in6 sro;
-	struct rtentry *rt = NULL;
+	struct rtentry *__single rt = NULL;
 
 	if (ro == NULL) {
 		bzero(&sro, sizeof(sro));
@@ -1611,7 +1618,7 @@ in6_selecthlim(struct in6pcb *in6p, struct ifnet *ifp)
 		return (uint8_t)in6p->in6p_hops;
 	} else if (NULL != ifp) {
 		uint8_t chlim;
-		struct nd_ifinfo *ndi = ND_IFINFO(ifp);
+		struct nd_ifinfo *__single ndi = ND_IFINFO(ifp);
 		if (ndi && ndi->initialized) {
 			/* access chlim without lock, for performance */
 			chlim = ndi->chlim;
@@ -1629,16 +1636,17 @@ in6_selecthlim(struct in6pcb *in6p, struct ifnet *ifp)
  * share this function by all *bsd*...
  */
 int
-in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
+in6_pcbsetport(struct in6_addr *laddr, struct sockaddr *remote, struct inpcb *inp, struct proc *p,
     int locked)
 {
-	struct socket *so = inp->inp_socket;
-	uint16_t lport = 0, first, last, *lastport, rand_port;
+	struct socket *__single so = inp->inp_socket;
+	uint16_t lport = 0, first, last, rand_port;
+	uint16_t *__single lastport;
 	int count, error = 0, wild = 0;
 	boolean_t counting_down;
 	bool found, randomport;
-	struct inpcbinfo *pcbinfo = inp->inp_pcbinfo;
-	kauth_cred_t cred;
+	struct inpcbinfo *__single pcbinfo = inp->inp_pcbinfo;
+	kauth_cred_t __single cred;
 #if SKYWALK
 	bool laddr_unspecified = IN6_IS_ADDR_UNSPECIFIED(laddr);
 #else
@@ -1800,7 +1808,7 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 	inp->inp_lport = lport;
 	inp->inp_flags |= INP_ANONPORT;
 
-	if (in_pcbinshash(inp, 1) != 0) {
+	if (in_pcbinshash(inp, remote, 1) != 0) {
 		inp->in6p_laddr = in6addr_any;
 		inp->in6p_last_outifp = NULL;
 		inp->inp_lifscope = IFSCOPE_NONE;
@@ -2009,7 +2017,7 @@ addrsel_policy_init(void)
 struct in6_addrpolicy *
 in6_addrsel_lookup_policy(struct sockaddr_in6 *key)
 {
-	struct in6_addrpolicy *match = NULL;
+	struct in6_addrpolicy *__single match = NULL;
 
 	match = match_addrsel_policy(key);
 
@@ -2025,8 +2033,8 @@ in6_addrsel_lookup_policy(struct sockaddr_in6 *key)
 static struct in6_addrpolicy *
 match_addrsel_policy(struct sockaddr_in6 *key)
 {
-	struct addrsel_policyent *pent;
-	struct in6_addrpolicy *bestpol = NULL, *pol;
+	struct addrsel_policyent *__single pent;
+	struct in6_addrpolicy *__single bestpol = NULL, *__single pol;
 	int matchlen, bestmatchlen = -1;
 	u_char *mp, *ep, *k, *p, m;
 
@@ -2070,7 +2078,7 @@ next:
 static int
 add_addrsel_policyent(const struct in6_addrpolicy *newpolicy)
 {
-	struct addrsel_policyent *new, *pol;
+	struct addrsel_policyent *__single new, *__single pol;
 
 	new = kalloc_type(struct addrsel_policyent, Z_WAITOK | Z_ZERO);
 
@@ -2097,7 +2105,7 @@ int
 walk_addrsel_policy(int (*callback)(const struct in6_addrpolicy *, void *),
     void *w)
 {
-	struct addrsel_policyent *pol;
+	struct addrsel_policyent *__single pol;
 	int error = 0;
 
 	TAILQ_FOREACH(pol, &addrsel_policytab, ape_entry) {
@@ -2119,7 +2127,7 @@ static int
 dump_addrsel_policyent(const struct in6_addrpolicy *pol, void *arg)
 {
 	int error = 0;
-	struct walkarg *w = arg;
+	struct walkarg *__single w = arg;
 
 	error = SYSCTL_OUT(w->w_req, pol, sizeof(*pol));
 
@@ -2145,7 +2153,7 @@ in6_src_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_NODE(_net_inet6_ip6, IPV6CTL_ADDRCTLPOLICY, addrctlpolicy,
     CTLFLAG_RD | CTLFLAG_LOCKED, in6_src_sysctl, "");
 int
-in6_src_ioctl(u_long cmd, caddr_t data)
+in6_src_ioctl(u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data)
 {
 	int i;
 	struct in6_addrpolicy ent0;
@@ -2198,9 +2206,9 @@ int
 in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
     struct in6pcb *in6p, struct ifnet **ifpp, struct ip6_pktopts *opt, uint32_t *ret_ifscope)
 {
-	struct ifnet *ifp = NULL;
+	struct ifnet *__single ifp = NULL;
 	u_int32_t scopeid;
-	struct ip6_pktopts *optp = NULL;
+	struct ip6_pktopts *__single optp = NULL;
 
 	*in6 = sin6->sin6_addr;
 	scopeid = sin6->sin6_scope_id;
@@ -2220,8 +2228,8 @@ in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
 #endif
 
 	if (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
-		struct in6_pktinfo *pi;
-		struct ifnet *im6o_multicast_ifp = NULL;
+		struct in6_pktinfo *__single pi;
+		struct ifnet *__single im6o_multicast_ifp = NULL;
 
 		if (in6p != NULL && IN6_IS_ADDR_MULTICAST(in6) &&
 		    in6p->in6p_moptions != NULL) {

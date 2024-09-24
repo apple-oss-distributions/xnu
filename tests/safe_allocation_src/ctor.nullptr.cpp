@@ -43,7 +43,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_nullptr, "safe_allocation.ctor.nullptr") {
+T_DECL(ctor_nullptr, "safe_allocation.ctor.nullptr", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

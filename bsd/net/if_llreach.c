@@ -113,7 +113,6 @@
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/tree.h>
-#include <sys/sysctl.h>
 #include <sys/mcache.h>
 #include <sys/protosw.h>
 
@@ -126,6 +125,7 @@
 #include <net/dlil.h>
 #include <net/kpi_interface.h>
 #include <net/route.h>
+#include <net/net_sysctl.h>
 
 #include <kern/assert.h>
 #include <kern/locks.h>
@@ -238,7 +238,8 @@ ifnet_llreach_reachable_delta(struct if_llreach *lr, u_int64_t tval)
 }
 
 void
-ifnet_llreach_set_reachable(struct ifnet *ifp, u_int16_t llproto, void *addr,
+ifnet_llreach_set_reachable(struct ifnet *ifp, u_int16_t llproto,
+    void *__sized_by(alen) addr,
     unsigned int alen)
 {
 	struct if_llreach find, *lr;
@@ -262,7 +263,8 @@ ifnet_llreach_set_reachable(struct ifnet *ifp, u_int16_t llproto, void *addr,
 }
 
 struct if_llreach *
-ifnet_llreach_alloc(struct ifnet *ifp, u_int16_t llproto, void *addr,
+ifnet_llreach_alloc(struct ifnet *ifp, u_int16_t llproto,
+    void *__sized_by(alen) addr,
     unsigned int alen, u_int32_t llreach_base)
 {
 	struct if_llreach find, *lr;
@@ -597,22 +599,15 @@ static int
 sysctl_llreach_ifinfo SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp)
-	int             *name, retval = 0;
-	unsigned int    namelen;
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 1, name, namelen);
+	int             retval = 0;
 	uint32_t        ifindex;
 	struct if_llreach *lr;
 	struct if_llreach_info lri = {};
 	struct ifnet    *ifp;
 
-	name = (int *)arg1;
-	namelen = (unsigned int)arg2;
-
 	if (req->newptr != USER_ADDR_NULL) {
 		return EPERM;
-	}
-
-	if (namelen != 1) {
-		return EINVAL;
 	}
 
 	ifindex = name[0];

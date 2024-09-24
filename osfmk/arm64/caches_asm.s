@@ -43,6 +43,7 @@
 	.globl EXT(invalidate_mmu_icache)
 LEXT(InvalidatePoU_Icache)
 LEXT(invalidate_mmu_icache)
+	ARM64_PROLOG
 	dsb		sy
 	ic		ialluis								// Invalidate icache
 	dsb		sy
@@ -179,10 +180,10 @@ L_ipui_loop:
  */
 .macro ENABLE_DC_MVA_OPS
 	isb		sy
-	ARM64_IS_PCORE $0
-	ARM64_READ_EP_SPR $0, $1, EHID4, HID4
-	and		$1, $1, (~ARM64_REG_HID4_DisDcMVAOps)
-	ARM64_WRITE_EP_SPR $0, $1, EHID4, HID4
+	ARM64_IS_ECORE          $0
+	ARM64_READ_CORE_SYSREG   $0, $1, EHID4, HID4
+	and                     $1, $1, (~ARM64_REG_HID4_DisDcMVAOps)
+	ARM64_WRITE_CORE_SYSREG  $0, $1, EHID4, HID4
 	isb		sy
 .endmacro
 
@@ -194,10 +195,10 @@ L_ipui_loop:
  */
 .macro DISABLE_DC_MVA_OPS
 	isb		sy
-	ARM64_IS_PCORE $0
-	ARM64_READ_EP_SPR $0, $1, EHID4, HID4
-	orr		$1, $1, ARM64_REG_HID4_DisDcMVAOps
-	ARM64_WRITE_EP_SPR $0, $1, EHID4, HID4
+	ARM64_IS_ECORE          $0
+	ARM64_READ_CORE_SYSREG   $0, $1, EHID4, HID4
+	orr                     $1, $1, ARM64_REG_HID4_DisDcMVAOps
+	ARM64_WRITE_CORE_SYSREG  $0, $1, EHID4, HID4
 	isb		sy
 .endmacro
 #endif
@@ -212,6 +213,7 @@ L_ipui_loop:
 	.globl EXT(CleanPoC_Dcache)
 	.globl EXT(clean_mmu_dcache)
 LEXT(CleanPoC_Dcache)
+	ARM64_PROLOG
 #if  defined(APPLE_ARM64_ARCH_FAMILY)
 	dsb		sy
 	ret
@@ -231,6 +233,7 @@ LEXT(CleanPoC_Dcache)
 	.align 2
 	.globl EXT(CleanPoU_Dcache)
 LEXT(CleanPoU_Dcache)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	dsb sy
 	ret
@@ -250,6 +253,7 @@ LEXT(CleanPoU_Dcache)
 	.align 2
 	.globl EXT(CleanPoU_DcacheRegion)
 LEXT(CleanPoU_DcacheRegion)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* "Fully Coherent." */
 #else /* !defined(APPLE_ARM64_ARCH_FAMILY) */
@@ -269,24 +273,17 @@ L_cpudr_loop:
 	dsb		sy
 	ret
 
-/*
- *	void CleanPoC_DcacheRegion_internal(vm_offset_t va, size_t length)
- *
- *		Clean d-cache region to Point of Coherency
- */
-	.text
-	.align 2
-LEXT(CleanPoC_DcacheRegion_internal)
+.macro CLEANPOC_DCACHEREGION
 	#define CLINE_FLUSH_STRIDE MMU_CLINE
 
+	ARM64_PROLOG
 	mov		x9, #((1<<CLINE_FLUSH_STRIDE)-1)
 	and		x2, x0, x9
 	bic		x0, x0, x9							// Cached aligned
 	add		x1, x1, x2
 	sub		x1, x1, #1
 	lsr		x1, x1, #(CLINE_FLUSH_STRIDE)		// Set cache line counter
-	dsb		sy
-L_cpcdr_loop:
+1:
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	// It may be tempting to clean the cache (dc cvac), but it's always a NOP on
 	// Apple hardware.
@@ -296,7 +293,20 @@ L_cpcdr_loop:
 #endif /* defined(APPLE_ARM64_ARCH_FAMILY) */
 	add		x0, x0, #(1<<CLINE_FLUSH_STRIDE)	// Get next cache aligned addr
 	subs	x1, x1, #1							// Decrementer cache line counter
-	b.pl	L_cpcdr_loop						// Loop in counter not null
+	b.pl	1b						// Loop in counter not null
+.endmacro
+
+
+/*
+ *	void CleanPoC_DcacheRegion_internal(vm_offset_t va, size_t length)
+ *
+ *		Clean d-cache region to Point of Coherency
+ */
+	.text
+	.align 2
+LEXT(CleanPoC_DcacheRegion_internal)
+	dsb		sy
+	CLEANPOC_DCACHEREGION
 	dsb		sy
 	ret
 
@@ -309,6 +319,7 @@ L_cpcdr_loop:
 	.align 2
 	.globl EXT(CleanPoC_DcacheRegion)
 LEXT(CleanPoC_DcacheRegion)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* "Fully Coherent." */
 	dsb		sy
@@ -339,6 +350,7 @@ LEXT(CleanPoC_DcacheRegion_Force)
 	POP_FRAME
 	ARM64_STACK_EPILOG
 #else
+	ARM64_PROLOG
 	b		EXT(CleanPoC_DcacheRegion_internal)
 #endif /* APPLE_ARM64_ARCH_FAMILY */
 
@@ -351,6 +363,7 @@ LEXT(CleanPoC_DcacheRegion_Force)
 	.align 2
 	.globl EXT(FlushPoC_Dcache)
 LEXT(FlushPoC_Dcache)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	dsb sy
 	ret
@@ -370,6 +383,7 @@ LEXT(FlushPoC_Dcache)
 	.align 2
 	.globl EXT(Flush_Dcache)
 LEXT(Flush_Dcache)
+	ARM64_PROLOG
 	mov x0, #6 // Maximum allowable caching level (0-based)
 	DCACHE_SET_WAY cisw 
 
@@ -382,6 +396,7 @@ LEXT(Flush_Dcache)
 	.align 2
 	.globl EXT(FlushPoU_Dcache)
 LEXT(FlushPoU_Dcache)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	dsb sy
 	ret
@@ -401,6 +416,7 @@ LEXT(FlushPoU_Dcache)
 	.align 2
 	.globl EXT(FlushPoC_DcacheRegion)
 LEXT(FlushPoC_DcacheRegion)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* "Fully Coherent." */
 #else /* !defined(APPLE_ARM64_ARCH_FAMILY) */
@@ -427,6 +443,7 @@ L_fpcdr_loop:
         .align 2
         .globl EXT(flush_dcache64)
 LEXT(flush_dcache64)
+	ARM64_PROLOG
 	BRANCH_EXTERN    flush_dcache
 
 /*
@@ -436,6 +453,7 @@ LEXT(flush_dcache64)
         .align 2
         .globl EXT(clean_dcache64)
 LEXT(clean_dcache64)
+	ARM64_PROLOG
 	BRANCH_EXTERN    clean_dcache
 
 /*
@@ -448,6 +466,7 @@ LEXT(clean_dcache64)
         .globl EXT(invalidate_icache)
 LEXT(invalidate_icache64)
 LEXT(invalidate_icache)
+	ARM64_PROLOG
 	cmp     w2, #0								// Is it physical?
 	b.eq	Lcall_invalidate_worker
 	adrp	x2, _gPhysBase@page

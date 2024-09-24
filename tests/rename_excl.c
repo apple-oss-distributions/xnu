@@ -11,8 +11,8 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vfs"),
-	T_META_CHECK_LEAKS(false)
-	);
+	T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED);
 
 #define TEST_DIR         "rename_dir"
 #define TEST_FILE1       TEST_DIR "/file1"

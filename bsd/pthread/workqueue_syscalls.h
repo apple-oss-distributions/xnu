@@ -70,10 +70,11 @@
 #define KQ_WORKLOOP_DESTROY                             0x02
 
 /* indicate which fields of kq_workloop_create params are valid */
-#define KQ_WORKLOOP_CREATE_SCHED_PRI     0x01
-#define KQ_WORKLOOP_CREATE_SCHED_POL     0x02
-#define KQ_WORKLOOP_CREATE_CPU_PERCENT   0x04
-#define KQ_WORKLOOP_CREATE_WORK_INTERVAL 0x08
+#define KQ_WORKLOOP_CREATE_SCHED_PRI         0x01
+#define KQ_WORKLOOP_CREATE_SCHED_POL         0x02
+#define KQ_WORKLOOP_CREATE_CPU_PERCENT       0x04
+#define KQ_WORKLOOP_CREATE_WORK_INTERVAL     0x08
+#define KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD 0x10
 
 struct kqueue_workloop_params {
 	int kqwlp_version;

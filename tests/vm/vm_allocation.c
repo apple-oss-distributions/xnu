@@ -1678,6 +1678,43 @@ test_allocate_with_kernel_flags()
 	logv("Returned expected error with each invalid flag: %s.", mach_error_string(KERN_INVALID_ARGUMENT));
 }
 
+/* Allocating super-page with incompatible flags fails. */
+void
+test_allocate_superpage_with_incompatible_flags()
+{
+	allocate_fn_t allocator   = get_allocator();
+	vm_map_t this_task        = mach_task_self();
+	mach_vm_address_t address = get_vm_address();
+	mach_vm_size_t size       = get_vm_size();
+	int flag                  = get_address_flag();
+	int bad_flag, i;
+	kern_return_t kr;
+	int incompatible_flags = VM_FLAGS_PURGABLE | VM_FLAGS_TPRO;
+
+	logv("Allocating 0x%jx (%ju) byte%s", (uintmax_t)size, (uintmax_t)size, (size == 1) ? "" : "s");
+	if (!(flag & VM_FLAGS_ANYWHERE)) {
+		logv(" at address 0x%jx", (uintmax_t)address);
+	}
+	logv(" with various incompatible flags...");
+	for (i = 0; i < sizeof(int) * 8; i++) {
+		int test_flag = 1 << i;
+
+		/* Skip compatible flags */
+		if (!(incompatible_flags & test_flag)) {
+			continue;
+		}
+
+		bad_flag = test_flag | flag | VM_FLAGS_SUPERPAGE_SIZE_ANY;
+		kr = allocator(this_task, &address, size, bad_flag);
+		T_QUIET; T_ASSERT_EQ(kr, KERN_INVALID_ARGUMENT,
+		    "Allocator "
+		    "with invalid flag 0x%x unexpectedly returned: %s.\n"
+		    "Should have returned: %s.",
+		    bad_flag, mach_error_string(kr), mach_error_string(KERN_INVALID_ARGUMENT));
+	}
+	logv("Returned expected error with each invalid flag: %s.", mach_error_string(KERN_INVALID_ARGUMENT));
+}
+
 /*****************************/
 /* mach_vm_map() error tests */
 /*****************************/
@@ -3563,7 +3600,9 @@ run_allocate_test_suites()
 		 test_allocate_2MB_boundary_unaligned_page_aligned_address},
 	};
 	UnitTests allocate_argument_error_tests = {
-		{"Allocate in NULL VM map", test_allocate_in_null_map}, {"Allocate with kernel flags", test_allocate_with_kernel_flags},
+		{"Allocate in NULL VM map", test_allocate_in_null_map},
+		{"Allocate with kernel flags", test_allocate_with_kernel_flags},
+		{"Allocate super-page with incompatible flags", test_allocate_superpage_with_incompatible_flags},
 	};
 	UnitTests allocate_fixed_size_tests = {
 		{"Allocate zero size", test_allocate_zero_size},

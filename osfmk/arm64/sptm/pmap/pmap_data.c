@@ -31,11 +31,11 @@
 #include <libkern/section_keywords.h>
 #include <pexpert/device_tree.h>
 #include <os/atomic_private.h>
-#include <vm/cpm.h>
+#include <vm/cpm_internal.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
+#include <vm/vm_object_xnu.h>
+#include <vm/vm_page_internal.h>
 #include <vm/vm_pageout.h>
 
 #include <arm64/sptm/pmap/pmap_internal.h>
@@ -246,6 +246,15 @@ SECURITY_READ_ONLY_LATE(pmap_io_range_t*) io_attr_table = (pmap_io_range_t*)0;
 SECURITY_READ_ONLY_LATE(unsigned int) num_io_rgns = 0;
 
 /**
+ * Sorted representation of the pmap-io-filter entries in the device tree
+ * The entries are sorted and queried by {signature, range}.
+ */
+SECURITY_READ_ONLY_LATE(pmap_io_filter_entry_t*) io_filter_table = (pmap_io_filter_entry_t*)0;
+
+/* Number of total pmap-io-filter entries. */
+SECURITY_READ_ONLY_LATE(unsigned int) num_io_filter_entries = 0;
+
+/**
  * A list of pages that define the per-cpu scratch areas used by IOMMU drivers
  * when preparing data to be passed into the SPTM. The size allocated per-cpu is
  * defined by PMAP_IOMMU_SCRATCH_SIZE.
@@ -280,7 +289,7 @@ pmap_data_bootstrap(void)
 	 * fit in a single page. We need to allow for some padding between the two,
 	 * so that no ptd_info_t shares a cache line with a pt_desc_t.
 	 */
-	const unsigned ptd_info_size = sizeof(ptd_info_t) * PT_INDEX_MAX;
+	const unsigned ptd_info_size = sizeof(ptd_info_t);
 	const unsigned l2_cline_bytes = 1 << MAX_L2_CLINE;
 	ptd_per_page = (PAGE_SIZE - (l2_cline_bytes - 1)) / (sizeof(pt_desc_t) + ptd_info_size);
 	unsigned increment = 0;
@@ -336,7 +345,8 @@ pmap_data_bootstrap(void)
 	vm_size_t ptd_root_table_size = num_ptd_pages * PAGE_SIZE;
 
 	/* Number of VM pages that span all of kernel-managed memory. */
-	const unsigned int npages = (unsigned int)atop(mem_size);
+	unsigned int npages = (unsigned int)atop(mem_size);
+
 
 	/* The pv_head_table and pp_attr_table both have one entry per VM page. */
 	const vm_size_t pp_attr_table_size = npages * sizeof(pp_attr_t);
@@ -345,8 +355,10 @@ pmap_data_bootstrap(void)
 	/* Scan the device tree and override heuristics in the PV entry management code. */
 	pmap_compute_pv_targets();
 
-	__assert_only const libsptm_error_t error = sptm_get_io_ranges_address((sptm_vaddr_t *) &io_attr_table, &num_io_rgns);
-	assert(error == SPTM_SUCCESS);
+	io_attr_table = (pmap_io_range_t *) SPTMArgs->sptm_pmap_io_ranges;
+	num_io_rgns = SPTMArgs->sptm_pmap_io_ranges_count;
+	io_filter_table = (pmap_io_filter_entry_t *) SPTMArgs->sptm_pmap_io_filters;
+	num_io_filter_entries = SPTMArgs->sptm_pmap_io_filters_count;
 
 	/**
 	 * Don't make any assumptions about the alignment of avail_start before
@@ -413,12 +425,6 @@ pmap_enqueue_pages(vm_page_t mem)
 	vm_object_unlock(pmap_object);
 }
 
-static inline boolean_t
-pmap_is_preemptible(void)
-{
-	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT);
-}
-
 /**
  * Allocate a page from the VM for usage within the pmap.
  *
@@ -456,7 +462,7 @@ pmap_page_alloc(pmap_paddr_t *ppa, unsigned options)
 {
 	assert(ppa != NULL);
 	pmap_paddr_t pa = 0;
-	ASSERT_NOT_HIBERNATING();
+	PMAP_ASSERT_NOT_WRITING_HIB();
 	vm_page_t mem = VM_PAGE_NULL;
 	thread_t self = current_thread();
 
@@ -801,7 +807,7 @@ pv_list_free(pv_entry_t *pve_head, pv_entry_t *pve_tail, unsigned int pv_cnt)
 			freed_count = 0;
 			if (__improbable(pmap_pending_preemption())) {
 				enable_preemption();
-				assert(preemption_enabled());
+				assert(preemption_enabled() || PMAP_IS_HIBERNATING());
 				disable_preemption();
 				pmap_cpu_data = pmap_get_cpu_data();
 			}
@@ -1309,7 +1315,7 @@ pmap_enter_pv(
 
 	bool first_cpu_mapping = false;
 
-	ASSERT_NOT_HIBERNATING();
+	PMAP_ASSERT_NOT_WRITING_HIB();
 
 	if (pmap != NULL) {
 		pmap_assert_locked(pmap, lock_mode);
@@ -1457,7 +1463,7 @@ pmap_remove_pv(
 	bool *is_internal_p,
 	bool *is_altacct_p)
 {
-	ASSERT_NOT_HIBERNATING();
+	PMAP_ASSERT_NOT_WRITING_HIB();
 	assert(locked_pvh != NULL);
 
 	pv_remove_return_t ret = PV_REMOVE_SUCCESS;
@@ -1584,10 +1590,11 @@ pmap_remove_pv(
 			pv_free(pvep);
 		}
 	} else {
-		if (__improbable(!pvh_test_type(locked_pvh->pvh, PVH_TYPE_NULL))) {
-			panic("%s: unexpected PV head %p, ptep=%p pmap=%p pai=0x%x",
-			    __func__, (void*)locked_pvh->pvh, ptep, pmap, pai);
-		}
+		/*
+		 * A concurrent disconnect operation may have already cleared the PVH to PVH_TYPE_NULL.
+		 * It's also possible that a subsequent page table allocation may have transitioned
+		 * the PVH to PVH_TYPE_PTDP.
+		 */
 		return PV_REMOVE_FAIL;
 	}
 
@@ -1771,16 +1778,10 @@ ptd_alloc_unlinked(unsigned int alloc_flags)
 
 	const uintptr_t start_of_page = (uintptr_t)ptdp & ~PAGE_MASK;
 	ptd_info_t *first_ptd_info = (ptd_info_t *)(start_of_page + ptd_info_offset);
-	ptdp->ptd_info = &first_ptd_info[ptd_index * PT_INDEX_MAX];
+	ptdp->ptd_info = &first_ptd_info[ptd_index];
 
-	/**
-	 * On systems where the VM page size doesn't match the hardware page size,
-	 * one PTD might have to manage multiple page tables.
-	 */
-	for (unsigned int i = 0; i < PT_INDEX_MAX; i++) {
-		ptdp->va[i] = (vm_offset_t)-1;
-		ptdp->ptd_info[i].wiredcnt = 0;
-	}
+	ptdp->va = (vm_offset_t)-1;
+	ptdp->ptd_info->wiredcnt = 0;
 
 	return ptdp;
 }
@@ -1885,18 +1886,12 @@ ptd_info_init(
 	assert(level > pt_attr_root_level(pt_attr));
 
 	/**
-	 * Each PTD can represent multiple page tables. Get the correct index to use
-	 * with the per-page-table properties.
-	 */
-	const unsigned pt_index = ptd_get_index(ptdp, ptep);
-
-	/**
 	 * The "va" field represents the first virtual address that this page table
 	 * is translating for. Naturally, this is dependent on the level the page
 	 * table resides at since more VA space is mapped the closer the page
 	 * table's level is to the root.
 	 */
-	ptdp->va[pt_index] = (vm_offset_t) va & ~pt_attr_ln_pt_offmask(pt_attr, level - 1);
+	ptdp->va = (vm_offset_t) va & ~pt_attr_ln_pt_offmask(pt_attr, level - 1);
 }
 
 /**
@@ -2091,6 +2086,7 @@ pmap_cpu_data_init_internal(unsigned int cpu_number)
 	assert(((uintptr_t)sptm_pcpu & (PMAP_SPTM_PCPU_ALIGN - 1)) == 0);
 	sptm_pcpu->sptm_ops_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_ops);
 	sptm_pcpu->sptm_templates_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_templates);
+	sptm_pcpu->sptm_guest_dispatch_paddr = kvtophys_nofail((vm_offset_t)&sptm_pcpu->sptm_guest_dispatch);
 
 	const uint16_t sptm_cpu_number = sptm_cpu_id(ml_get_topology_info()->cpus[cpu_number].phys_id);
 	sptm_pcpu->sptm_cpu_id = sptm_cpu_number;
@@ -2100,6 +2096,7 @@ pmap_cpu_data_init_internal(unsigned int cpu_number)
 	assert(iommu_scratch <= (sptm_cpu_iommu_scratch_end - PMAP_IOMMU_SCRATCH_SIZE));
 	sptm_pcpu->sptm_iommu_scratch = (void*)phystokv(iommu_scratch);
 	sptm_pcpu->sptm_prev_ptes = (sptm_pte_t *)((uintptr_t)(SPTMArgs->sptm_prev_ptes) + (PAGE_SIZE * sptm_cpu_number));
+	sptm_pcpu->sptm_cpu_id = sptm_cpu_number;
 }
 
 /**

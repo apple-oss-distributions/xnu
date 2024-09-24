@@ -46,7 +46,8 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("arm"),
 	T_META_OWNER("devon_andrade"),
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_NOT_ELIGIBLE);
 
 /* The bit to set in FPCR to enable the divide-by-zero floating point exception. */
 #define FPCR_DIV_EXC 0x200

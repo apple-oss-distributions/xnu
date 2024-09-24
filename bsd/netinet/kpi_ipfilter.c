@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -41,9 +41,9 @@
 #include <net/route.h>
 #include <net/kpi_protocol.h>
 #include <net/net_api_stats.h>
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 #include <skywalk/lib//net_filter_event.h>
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */
 
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
@@ -88,9 +88,9 @@ extern errno_t ipf_addv6(const struct ipf_filter *filter,
 static errno_t ipf_add(const struct ipf_filter *filter,
     ipfilter_t *filter_ref, struct ipfilter_list *head, bool is_internal);
 
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 static bool net_check_compatible_ipf(void);
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */
 
 __private_extern__ void
 ipf_ref(void)
@@ -121,7 +121,7 @@ ipf_unref(void)
 			}
 
 			ipf_detach_func ipf_detach = filter->ipf_filter.ipf_detach;
-			void* cookie = filter->ipf_filter.cookie;
+			void *__single cookie = filter->ipf_filter.cookie;
 
 			TAILQ_REMOVE(filter->ipf_head, filter, ipf_link);
 			TAILQ_REMOVE(&tbr_filters, filter, ipf_tbr);
@@ -138,10 +138,12 @@ ipf_unref(void)
 			}
 		}
 	}
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_IP,
-	    net_check_compatible_ipf());
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#if SKYWALK
+	if (kernel_is_macos_or_server()) {
+		net_filter_event_mark(NET_FILTER_EVENT_IP,
+		    net_check_compatible_ipf());
+	}
+#endif /* SKYWALK */
 	lck_mtx_unlock(&kipf_lock);
 }
 
@@ -172,10 +174,12 @@ ipf_add(
 		OSIncrementAtomic64(&net_api_stats.nas_ipf_add_os_count);
 		INC_ATOMIC_INT64_LIM(net_api_stats.nas_ipf_add_os_total);
 	}
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_IP,
-	    net_check_compatible_ipf());
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#if SKYWALK
+	if (kernel_is_macos_or_server()) {
+		net_filter_event_mark(NET_FILTER_EVENT_IP,
+		    net_check_compatible_ipf());
+	}
+#endif /* SKYWALK */
 
 	lck_mtx_unlock(&kipf_lock);
 
@@ -261,7 +265,7 @@ ipf_remove(
 	TAILQ_FOREACH(match, head, ipf_link) {
 		if (match == (struct ipfilter *)filter_ref) {
 			ipf_detach_func ipf_detach = match->ipf_filter.ipf_detach;
-			void* cookie = match->ipf_filter.cookie;
+			void *__single cookie = match->ipf_filter.cookie;
 
 			/*
 			 * Cannot detach when they are filters running
@@ -293,10 +297,12 @@ ipf_remove(
 			return 0;
 		}
 	}
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_IP,
-	    net_check_compatible_ipf());
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#if SKYWALK
+	if (kernel_is_macos_or_server()) {
+		net_filter_event_mark(NET_FILTER_EVENT_IP,
+		    net_check_compatible_ipf());
+	}
+#endif /* SKYWALK */
 
 	lck_mtx_unlock(&kipf_lock);
 
@@ -426,7 +432,7 @@ ipf_injectv4_out(mbuf_t data, ipfilter_t filter_ref, ipf_pktopts_t options)
 			return ENOMEM;
 		}
 	}
-	ip = (struct ip *)m_mtod(m);
+	ip = mtod(m, struct ip *);
 
 	if (filter_ref != 0) {
 		mtag = m_tag_create(KERNEL_MODULE_TAG_ID,
@@ -515,7 +521,7 @@ ipf_injectv6_out(mbuf_t data, ipfilter_t filter_ref, ipf_pktopts_t options)
 			return ENOMEM;
 		}
 	}
-	ip6 = (struct ip6_hdr *)m_mtod(m);
+	ip6 = mtod(m, struct ip6_hdr *);
 
 	if (filter_ref != 0) {
 		mtag = m_tag_create(KERNEL_MODULE_TAG_ID,
@@ -626,12 +632,12 @@ done:
 __private_extern__ ipfilter_t
 ipf_get_inject_filter(struct mbuf *m)
 {
-	ipfilter_t filter_ref = 0;
+	ipfilter_t __single filter_ref = 0;
 	struct m_tag *mtag;
 
 	mtag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_IPFILT);
 	if (mtag) {
-		filter_ref = *(ipfilter_t *)(mtag->m_tag_data);;
+		filter_ref = *(ipfilter_t *)(mtag->m_tag_data);
 
 		m_tag_delete(m, mtag);
 	}
@@ -690,7 +696,7 @@ ipfilter_register_m_tag(void)
 	assert3u(error, ==, 0);
 }
 
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 bool
 net_check_compatible_ipf(void)
 {
@@ -699,4 +705,4 @@ net_check_compatible_ipf(void)
 	}
 	return true;
 }
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */

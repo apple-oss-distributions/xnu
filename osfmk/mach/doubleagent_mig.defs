@@ -1,0 +1,89 @@
+/*
+ * Copyright (c) 2023 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+
+subsystem
+#if    KERNEL_USER
+    KernelUser
+#endif    /* KERNEL_USER */
+    doubleagent 6300;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+import <mach/doubleagent_types.h>;
+
+#define MAX_NUM_OF_XATTRS 256
+#define DA_XATTR_MAXNAMELEN 127 // Must match the 'XATTR_MAXNAMELEN' in <sys/xattr.h>.
+#define XATTR_FINDERINFO_NAME_LEN 21 // sizeof("com.apple.FinderInfo") (including '\0')
+#define XATTR_RESOURCEFORK_NAME_LEN 23 // sizeof("com.apple.ResourceFork") (including '\0')
+
+#define LISTXATTR_RESULT_MAX_NAMES_LEN_MIG (XATTR_FINDERINFO_NAME_LEN + XATTR_RESOURCEFORK_NAME_LEN + (MAX_NUM_OF_XATTRS * ((DA_XATTR_MAXNAMELEN + 1)))) // Mig copy of LISTXATTR_RESULT_MAX_NAMES_LEN
+#define LISTXATTR_RESULT_MAX_HINTS_LEN_MIG (MAX_NUM_OF_XATTRS * 8) // Mig copy of LISTXATTR_RESULT_MAX_HINTS_LEN (8 = 2 * sizeof(uint32_t))
+#define LISTXATTR_RESULT_MAX_SIZE_MIG (LISTXATTR_RESULT_MAX_NAMES_LEN_MIG + LISTXATTR_RESULT_MAX_HINTS_LEN_MIG) // Mig copy of LISTXATTR_RESULT_MAX_SIZE
+#define LISTXATTR_RESULT_MAX_SIZE_INCLUDING_HEADER_MIG (LISTXATTR_RESULT_MAX_SIZE_MIG + 56) // 56 = 7 fields of uint64_t.
+
+
+type xattrname = c_string[*:DA_XATTR_MAXNAMELEN + 1];
+type listxattrs_result_t = struct [LISTXATTR_RESULT_MAX_SIZE_INCLUDING_HEADER_MIG] of uint8_t;
+
+routine doubleagent_lookup_xattr(
+    server                  : mach_port_t;
+    in file_port            : mach_port_move_send_t; /* fileport */
+    in file_size            : int64_t;      /* AD file size */
+    in name                 : xattrname;    /* xattr name to lookup */
+    out err                 : int;          /* error value */
+    out value_offset        : uint64_t;     /* returned xattr offset */
+    out value_length        : uint64_t      /* returned xattr length */
+);
+
+routine doubleagent_allocate_xattr(
+    server                  : mach_port_t;
+    in file_port            : mach_port_move_send_t; /* fileport */
+    in file_size            : int64_t;      /* AD file size */
+    in name                 : xattrname;    /* xattr name to allocate */
+    in size                 : uint64_t;     /* xattr size to allocate */
+    in options              : uint32_t;     /* how to allocate */
+    out err                 : int;          /* error value */
+    out value_offset        : uint64_t      /* returned xattr offset */
+);
+
+routine doubleagent_list_xattrs(
+    server                  : mach_port_t;
+    in file_port            : mach_port_move_send_t; /* fileport */
+    in file_size            : int64_t;             /* AD file size */
+    out err                 : int;                 /* error value */
+    out result              : listxattrs_result_t  /* listxattr result struct */
+);
+
+routine doubleagent_remove_xattr(
+    server                  : mach_port_t;
+    in file_port            : mach_port_move_send_t;  /* fileport */
+    in file_size            : int64_t;      /* AD file size */
+    in name                 : xattrname;    /* xattr name to remove */
+    out err                 : int;          /* error value */
+    out is_empty            : boolean_t     /* true if we've removed the last xattr in file */
+);

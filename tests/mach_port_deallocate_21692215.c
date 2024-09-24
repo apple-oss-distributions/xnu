@@ -10,7 +10,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
 
 #define NR_PORTS 4
 
-T_DECL(mach_port_deallocate, "mach_port_deallocate deallocates also PORT_SET"){
+T_DECL(mach_port_deallocate, "mach_port_deallocate deallocates also PORT_SET", T_META_TAG_VM_PREFERRED){
 	mach_port_t port_set;
 	mach_port_t port[NR_PORTS];
 	int i, ret;

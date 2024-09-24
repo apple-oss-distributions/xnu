@@ -100,15 +100,23 @@ class NativePointer(PointerPolicy, metaclass=Singleton):
 
     @staticmethod
     @cache_statically
-    def isKasanTBI(target=None):
+    def isTagged(target=None):
         """ Returns true on TBI KASan targets, false otherwise. """
-        return any(target.FindGlobalVariables('kasan_tbi_enabled', 1))
+        is_tagged = target.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+        return is_tagged
+
+    def __init__(self):
+        if self.isTagged():
+            self._stripPtr = self.stripPtr
+        else:
+            self._stripPtr = lambda val: val
 
     @classmethod
     def match(cls, sbvalue):
         return cls() if sbvalue.GetType().IsPointerType() else None
 
-    def stripTBI(self, sbvalue):
+    @staticmethod
+    def stripPtr(sbvalue):
         """ Strips the TBI byte value. Since the value is not a plain value but
             represents a value of a variable, a register or an expression the
             conversion is performed by (re-)creating the value through expression.
@@ -118,9 +126,8 @@ class NativePointer(PointerPolicy, metaclass=Singleton):
             sbv_new = sbvalue.CreateValueFromExpression(None, '(void *)' + str(addr))
             return sbv_new.Cast(sbvalue.GetType())
 
+
         return sbvalue
 
     def GetPointerSBValue(self, sbvalue):
-        if self.isKasanTBI():
-            return self.stripTBI(sbvalue)
-        return sbvalue
+        return self._stripPtr(sbvalue)

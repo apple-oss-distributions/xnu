@@ -71,7 +71,7 @@ zba_test_setup(void)
 	zba_init_chunk(0, false);
 }
 
-T_DECL(zone_buddy_allocator_encodings, "test the buddy allocator formulas")
+T_DECL(zone_buddy_allocator_encodings, "test the buddy allocator formulas", T_META_TAG_VM_PREFERRED)
 {
 	uint8_t bits[sizeof(zba_base_header()->zbah_bits)] = { };
 
@@ -99,7 +99,7 @@ T_DECL(zone_buddy_allocator_encodings, "test the buddy allocator formulas")
 	T_PASS("zba_node, zba_chain_for_node look sane");
 }
 
-T_DECL(zone_buddy_allocator, "test the zone bits setup")
+T_DECL(zone_buddy_allocator, "test the zone bits setup", T_META_TAG_VM_PREFERRED)
 {
 	vm_address_t base, pos;
 

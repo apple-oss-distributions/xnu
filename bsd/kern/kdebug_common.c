@@ -21,6 +21,7 @@
  */
 
 #include <sys/kdebug_common.h>
+#include <vm/vm_kern_xnu.h>
 
 LCK_GRP_DECLARE(kdebug_lck_grp, "kdebug");
 int kdbg_debug = 0;

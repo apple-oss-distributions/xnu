@@ -17,7 +17,8 @@
 T_GLOBAL_META(T_META_NAMESPACE("xnu.ipc"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("IPC"),
-    T_META_RUN_CONCURRENTLY(true));
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_TAG_VM_PREFERRED);
 
 /*
  * Attempt to inspect kernel_task using a task_inspect_t.  Interact with the

@@ -85,21 +85,70 @@
  * macro rather than a function since it's just one instruction on release and 
  * it avoids the need to spill a return addresses unless the macro caller
  * explicitly needs to preserve LR.
- * 
+ *
+ * On CONFIG_XNUPOST, this functions returns a 1 in x0 if a simulated lockdown
+ * was performed, 0 otherwise.
+ *
  * This macro preserves callee saved registers but clobbers all others.
  */
-.macro BEGIN_PANIC_LOCKDOWN
+.macro BEGIN_PANIC_LOCKDOWN unused
+#if DEVELOPMENT || DEBUG
+	/*
+	 * Forcefully clobber all caller saved GPRs on DEBUG so we don't
+	 * accidentally violate our contract with SPTM.
+	 */
+	mov		x0, #0
+	mov		x1, #0
+	mov		x2, #0
+	mov		x3, #0
+	mov		x4, #0
+	mov		x5, #0
+	mov		x6, #0
+	mov		x7, #0
+	mov		x8, #0
+	mov		x9, #0
+	mov		x10, #0
+	mov		x11, #0
+	mov		x12, #0
+	mov		x13, #0
+	mov		x14, #0
+	mov		x15, #0
+	mov		x16, #0
+	mov		x17, #0
+	mov		x18, #0
+#endif /* DEVELOPMENT || DEBUG */
 #if CONFIG_XNUPOST
-	mrs		x8, TPIDR_EL1
+	mrs		x0, TPIDR_EL1
 	/* 
 	 * If hitting this with a null TPIDR, it's likely that this was an unexpected
 	 * exception in early boot rather than an expected one as a part of a test.
 	 * Trigger lockdown.
 	 */
-	cbz		x8, 0f
-	ldr		x8, [x8, TH_EXPECTED_FAULT_HANDLER]
-	cbnz 	x8, 1f
-0:
+	cbz		x0, Lbegin_panic_lockdown_real_\@
+	ldr		x1, [x0, TH_EXPECTED_FAULT_HANDLER]
+	/* Is a fault handler installed? */
+	cbz 	x1, Lbegin_panic_lockdown_real_\@
+
+	/* Do the VA bits of ELR match the expected fault PC? */
+	ldr		x1, [x0, TH_EXPECTED_FAULT_PC]
+	mrs		x2, ELR_EL1
+	mov		x3, #((1 << (64 - T1SZ_BOOT - 1)) - 1)
+	and		x4, x1, x3
+	and		x5, x2, x3
+	cmp		x4, x5
+	b.eq	Lbegin_panic_lockdown_simulated_\@
+	/* If we had an expected PC but didn't hit it, fail out */
+	cbnz	x1, Lbegin_panic_lockdown_real_\@
+
+	/* Alternatively, do the FAR VA bits match the expected fault address? */
+	ldr		x1, [x0, TH_EXPECTED_FAULT_ADDR]
+	mrs		x2, FAR_EL1
+	and		x4, x1, x3
+	and		x5, x2, x3
+	cmp		x4, x5
+	b.eq	Lbegin_panic_lockdown_simulated_\@
+
+Lbegin_panic_lockdown_real_\@:
 #endif /* CONFIG_XNUPOST */
 	/*
 	 * The sptm_xnu_panic_begin routine is guaranteed to unavoidably lead to
@@ -107,19 +156,20 @@
 	 */
 	bl EXT(sptm_xnu_panic_begin)
 #if CONFIG_XNUPOST
-	b		2f
-1:
+	mov		x0, #0 // not a simulated lockdown
+	b		Lbegin_panic_lockdown_continue_\@
+Lbegin_panic_lockdown_simulated_\@:
 	/* 
-	 * We hit lockdown while an exception handler was installed. 
-	 * This was likely an expected exception. Skip setting the panic bit (since 
-	 * this will kill the system) and instead set a bit in the test handler.
+	 * We hit lockdown with a matching exception handler installed.
+	 * Since this is an expected test exception, skip setting the panic bit
+	 * (since this will kill the system) and instead set a bit in the test
+	 * handler.
 	 */
-	mov		w9, #1
-	adrp	x8, EXT(xnu_post_panic_lockdown_did_fire)@page
-	add		x8, x8, EXT(xnu_post_panic_lockdown_did_fire)@pageoff
-	strb	w9, [x8]
+	mov		x0, #1 // this is a simulated lockdown!
+	adrp	x1, EXT(xnu_post_panic_lockdown_did_fire)@page
+	strb	w0, [x1, EXT(xnu_post_panic_lockdown_did_fire)@pageoff]
 	mov		lr, xzr // trash LR to ensure callers don't rely on it
-2:
+Lbegin_panic_lockdown_continue_\@:
 #endif /* CONFIG_XNUPOST */
 .endmacro
 #endif /* CONFIG_SPTM */
@@ -239,11 +289,82 @@ Lcorrupt_stack_\@:
 	mov		x0, sp								// Copy exception frame pointer to x0
 	adrp	x1, fleh_invalid_stack@page			// Load address for fleh
 	add		x1, x1, fleh_invalid_stack@pageoff	// fleh_dispatch64 will save register state before we get there
-	b		fleh_dispatch64_noreturn
+	mov		x2, #(FLEH_DISPATCH64_OPTION_FATAL_SYNC_EXCEPTION)
+	b		fleh_dispatch64
 Lvalid_stack_\@:
 	ldp		x2, x3, [sp], #16			// Restore {x2-x3}
 .endmacro
 
+/*
+ * CHECK_EXCEPTION_CRITICAL_REGION
+ *
+ * Checks if the exception occurred within range [VECTOR_BEGIN, VECTOR_END).
+ * If so, jumps to \fail_label. Otherwise, continues.
+ * This is useful for avoiding infinite exception loops.
+ *
+ * Clobbers x18, NZCV.
+ */
+.macro CHECK_EXCEPTION_CRITICAL_REGION vector_begin, vector_end, fail_label
+	/*
+	 * We need two registers to do a compare but only have x18 free without
+	 * spilling. We can't safely spill to memory yet, however, because doing so
+	 * may fault. It's evil, but since we're operating on ELR here we can
+	 * temporarily spill into it to get another free register as long as we put
+	 * everything back at the end.
+	 */
+	mrs		x18, ELR_EL1
+	msr		ELR_EL1, x19
+
+	adrp	x19, \vector_begin@PAGE
+	add		x19, x19, \vector_begin@PAGEOFF
+	cmp		x18, x19 /* HS if at or above (suspect), LO if below (safe) */
+	adrp	x19, \vector_end@PAGE
+	add		x19, x19, \vector_end@PAGEOFF
+	/*
+	 * If ELR >= \vector_begin (HS), set flags for ELR - \vector_end. LO here
+	 * indicates we are in range.
+	 * Otherwise, set HS (C)
+	 */
+	ccmp	x18, x19, #0b0010 /* C/HS */, HS
+	/* Unspill x19/fixup ELR */
+	mrs		x19, ELR_EL1
+	msr		ELR_EL1, x18
+	mov		x18, #0
+	/* If we're in the range, fail out */
+	b.lo	\fail_label
+.endmacro
+
+/*
+ * CHECK_EXCEPTION_STACK
+ *
+ * Verifies that SP1 is within exception stack and continues if it is.
+ * If not, jumps to \invalid_stack_label as we have nothing to fall back on.
+ *
+ * (out) x18: The unauthenticated CPU_EXCEPSTACK_TOP used for the comparison or
+ *            zero if the check could not be performed (such as because the
+ *            thread pointer was invalid).
+ *
+ * Clobbers NZCV.
+ */
+.macro CHECK_EXCEPTION_STACK invalid_stack_label
+	mrs		x18, TPIDR_EL1					// Get thread pointer
+	/*
+	 * The thread pointer might be invalid during early boot.
+	 * Return zero in x18 to indicate that we failed to execute the check.
+	 */
+	cbz		x18, Lskip_stack_check_\@
+	ldr		x18, [x18, ACT_CPUDATAP]
+	cbz		x18, \invalid_stack_label		// If thread context is set, cpu data should be too
+	ldr		x18, [x18, CPU_EXCEPSTACK_TOP]
+	cmp		sp, x18
+	b.gt	\invalid_stack_label			// Fail if above exception stack top
+	sub		x18, x18, EXCEPSTACK_SIZE_NUM	// Find bottom of exception stack
+	cmp		sp, x18
+	b.lt	\invalid_stack_label			// Fail if below exception stack bottom
+	add		x18, x18, EXCEPSTACK_SIZE_NUM	// Return stack top in x18
+Lskip_stack_check_\@:
+	/* FALLTHROUGH */
+.endmacro
 
 #if __ARM_KERNEL_PROTECT__
 	.section __DATA_CONST,__const
@@ -356,6 +477,7 @@ Lel0_serror_vector_64:
 	msr		SPSel, #0							// Switch to SP0
 	sub		sp, sp, ARM_CONTEXT_SIZE			// Create exception frame
 	stp		x0, x1, [sp, SS64_X0]				// Save x0, x1 to exception frame
+	stp		x2, x3, [sp, SS64_X2]				// Save x2, x3 to exception frame
 	add		x0, sp, ARM_CONTEXT_SIZE			// Calculate the original stack pointer
 	str		x0, [sp, SS64_SP]					// Save stack pointer to exception frame
 	INIT_SAVED_STATE_FLAVORS sp, w0, w1
@@ -367,7 +489,7 @@ Lel0_serror_vector_64:
 	// point in the exception vector we can't spare the extra GPR.  Instead note
 	// that EL1_SP0_VECTOR ends with x0 == sp and use this to unclobber x0.
 	mrs		x1, TPIDR_EL1
-	LOAD_INT_STACK	dst=x1, src=x1, tmp=x0
+	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=x0
 	mov		x0, sp
 	mov		sp, x1
 .endmacro
@@ -386,6 +508,7 @@ Lkernel_stack_valid:
 	EL1_SP0_VECTOR
 	adrp	x1, EXT(fleh_synchronous)@page			// Load address for fleh
 	add		x1, x1, EXT(fleh_synchronous)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION)
 	b		fleh_dispatch64
 
 el1_sp0_irq_vector_long:
@@ -393,6 +516,7 @@ el1_sp0_irq_vector_long:
 	EL1_SP0_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_irq)@page					// Load address for fleh
 	add		x1, x1, EXT(fleh_irq)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
 el1_sp0_fiq_vector_long:
@@ -401,52 +525,183 @@ el1_sp0_fiq_vector_long:
 	EL1_SP0_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_fiq)@page					// Load address for fleh
 	add		x1, x1, EXT(fleh_fiq)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
 el1_sp0_serror_vector_long:
 	EL1_SP0_VECTOR
 	adrp	x1, EXT(fleh_serror)@page				// Load address for fleh
 	add		x1, x1, EXT(fleh_serror)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
-.macro EL1_SP1_VECTOR
+.macro EL1_SP1_VECTOR set_x0_to_exception_frame_ptr=1
 	sub		sp, sp, ARM_CONTEXT_SIZE			// Create exception frame
 	stp		x0, x1, [sp, SS64_X0]				// Save x0, x1 to exception frame
+	stp		x2, x3, [sp, SS64_X2]				// Save x2, x3 to exception frame
 	add		x0, sp, ARM_CONTEXT_SIZE			// Calculate the original stack pointer
 	str		x0, [sp, SS64_SP]					// Save stack pointer to exception frame
 	INIT_SAVED_STATE_FLAVORS sp, w0, w1
+.if \set_x0_to_exception_frame_ptr
 	mov		x0, sp								// Copy saved state pointer to x0
+.endif
 .endmacro
 
 el1_sp1_synchronous_vector_long:
-	b		check_exception_stack
-Lel1_sp1_synchronous_valid_stack:
-#if defined(KERNEL_INTEGRITY_KTRR)
+	/*
+	 * Before making our first (potentially faulting) memory access, check if we
+	 * previously tried and failed to execute this vector. If we did, it's not
+	 * going to work this time either so let's just spin.
+	 */
+#ifdef CONFIG_SPTM
+	/*
+	 * This check is doubly important for devices which support panic lockdown
+	 * as we use this check to ensure that we can take only a bounded number of
+	 * exceptions on SP1 while trying to spill before we give up on spilling and
+	 * lockdown anyways.
+	 *
+	 * Note, however, that we only check if we took an exception inside this
+	 * vector. Although an attacker could cause exceptions outside this routine,
+	 * they can only do this a finite number of times before overflowing the
+	 * exception stack (causing CHECK_EXCEPTION_STACK to fail) since we subtract
+	 * from SP inside the checked region and do not reload SP from memory before
+	 * we hit post-spill lockdown point in fleh_synchronous_sp1.
+	 */
+#endif /* CONFIG_SPTM */
+	CHECK_EXCEPTION_CRITICAL_REGION el1_sp1_synchronous_vector_long, Lel1_sp1_synchronous_vector_long_end, EXT(el1_sp1_synchronous_vector_long_spill_failed)
+	CHECK_EXCEPTION_STACK EXT(el1_sp1_synchronous_vector_long_spill_failed)
+#ifdef KERNEL_INTEGRITY_KTRR
 	b		check_ktrr_sctlr_trap
 Lel1_sp1_synchronous_vector_continue:
-#endif
-	EL1_SP1_VECTOR
+#endif /* KERNEL_INTEGRITY_KTRR */
+#if CONFIG_SPTM
+	/* Don't bother setting up x0 since we need it as a temporary */
+	EL1_SP1_VECTOR set_x0_to_exception_frame_ptr=0
+
+	/*
+	 * Did we fail to execute the stack check (x18=0)?
+	 * On devices which support panic lockdown, we cannot allow this check to be
+	 * skipped after early-boot as doing so many allow exception processing to
+	 * be delayed indefinitely.
+	 */
+	adrp	x0, EXT(startup_phase)@page
+	ldr		w0, [x0, EXT(startup_phase)@pageoff]
+	/* Are we in early-boot? */
+	cmp		w0, #-1 // STARTUP_SUB_LOCKDOWN
+	/*
+	 * If we're still in early-boot (LO), set flags for if we skipped the check
+	 * If we're after early-boot (HS), pass NE
+	 */
+	ccmp	x18, xzr, #0b0000 /* !Z/NE */, LO
+	/* Skip authentication if this was an early boot check fail */
+	b.eq	1f
+	/*
+	 * If we're not in early boot but still couldn't execute the stack bounds
+	 * check (x18=0), something is wrong (TPIDR is corrupted?).
+	 * Trigger a lockdown.
+	 */
+	cbz		x18, EXT(el1_sp1_synchronous_vector_long_spill_failed)
+
+	/*
+	 * In CHECK_EXCEPTION_STACK, we didn't have enough registers to perform the
+	 * signature verification on the exception stack top value and instead used
+	 * the unauthenticated value (x18) for the stack pointer bounds check.
+	 *
+	 * Ensure that we actually performed the check on a legitmate value now.
+	 */
+	mrs		x0, TPIDR_EL1
+	LOAD_EXCEP_STACK_THREAD dst=x0, src=x0, tmp=x1
+	cmp		x0, x18
+	/* If we aren't equal, something is very wrong and we should lockdown. */
+	b.ne	EXT(el1_sp1_synchronous_vector_long_spill_failed)
+
+1:
+	mov		x0, sp	/* Set x0 to saved state pointer */
+#else
+	EL1_SP1_VECTOR set_x0_to_exception_frame_ptr=1
+#endif /* CONFIG_SPTM */
 	adrp	x1, fleh_synchronous_sp1@page
 	add		x1, x1, fleh_synchronous_sp1@pageoff
-	b		fleh_dispatch64_noreturn
+	mov		x2, #(FLEH_DISPATCH64_OPTION_FATAL_SYNC_EXCEPTION)
+	b		fleh_dispatch64
+
+	/*
+	 * Global symbol to make it easy to pick out in backtraces.
+	 * Do not call externally.
+	 */
+	.global EXT(el1_sp1_synchronous_vector_long_spill_failed)
+LEXT(el1_sp1_synchronous_vector_long_spill_failed)
+	TRAP_UNWIND_PROLOGUE
+	TRAP_UNWIND_DIRECTIVES
+	/*
+	 * We couldn't process the exception due to either having an invalid
+	 * exception stack or because we previously tried to process it and failed.
+	 */
+#if CONFIG_SPTM
+	/*
+	 * For SP1 exceptions, we usually delay initiating lockdown until after
+	 * we've spilled in order to not lose register state. Since we have nowhere
+	 * to safely spill, we have no choice but to initiate it now, clobbering
+	 * some of our exception state in the process (RIP).
+	 */
+	BEGIN_PANIC_LOCKDOWN
+#if CONFIG_XNUPOST
+	/* Macro returns x0=1 if it performed a simulated lockdown */
+	cbz		x0, 0f
+	/* This was a test; return to fault handler so they can fixup the system. */
+	mrs		x0, TPIDR_EL1
+	ldr		x16, [x0, TH_EXPECTED_FAULT_HANDLER]
+#if __has_feature(ptrauth_calls)
+	movk	x17, #TH_EXPECTED_FAULT_HANDLER_DIVERSIFIER
+	autia	x16, x17
+#endif /* ptrauth_calls */
+	msr		ELR_EL1, x16
+	/* Pass a NULL saved state since we didn't actually save anything */
+	mov		x0, #0
+	ERET_NO_STRAIGHT_LINE_SPECULATION
+#endif /* CONFIG_XNUPOST */
+#endif /* CONFIG_SPTM */
+0:
+	wfe
+	b		0b // Spin for watchdog
+	UNWIND_EPILOGUE
+
+#if CONFIG_SPTM
+#if CONFIG_XNUPOST
+	/**
+	 * Test function which raises an exception from a location considered inside
+	 * the vector. Does not return.
+	 */
+	.global EXT(el1_sp1_synchronous_raise_exception_in_vector)
+LEXT(el1_sp1_synchronous_raise_exception_in_vector)
+	ARM64_PROLOG
+	brk		#0
+	/* Unreachable */
+	b		.
+#endif /* CONFIG_XNUPOST */
+#endif /* CONFIG_SPTM */
+Lel1_sp1_synchronous_vector_long_end:
 
 el1_sp1_irq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_irq_sp1@page
 	add		x1, x1, fleh_irq_sp1@pageoff
-	b		fleh_dispatch64_noreturn
+	mov		x2, #(FLEH_DISPATCH64_OPTION_FATAL_EXCEPTION)
+	b		fleh_dispatch64
 
 el1_sp1_fiq_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_fiq_sp1@page
 	add		x1, x1, fleh_fiq_sp1@pageoff
-	b		fleh_dispatch64_noreturn
+	mov		x2, #(FLEH_DISPATCH64_OPTION_FATAL_EXCEPTION)
+	b		fleh_dispatch64
 
 el1_sp1_serror_vector_long:
 	EL1_SP1_VECTOR
 	adrp	x1, fleh_serror_sp1@page
 	add		x1, x1, fleh_serror_sp1@pageoff
-	b		fleh_dispatch64_noreturn
+	mov		x2, #(FLEH_DISPATCH64_OPTION_FATAL_EXCEPTION)
+	b		fleh_dispatch64
 
 
 .macro EL0_64_VECTOR guest_label
@@ -462,9 +717,32 @@ el1_sp1_serror_vector_long:
 	ldp		x0, x1, [sp], #16					// Restore x0 and x1 from the exception stack
 	msr		SPSel, #0							// Switch to SP0
 	stp		x0, x1, [sp, SS64_X0]				// Save x0, x1 to the user PCB
+	stp		x2, x3, [sp, SS64_X2]				// Save x2, x3 to the user PCB
 	mrs		x1, TPIDR_EL1						// Load the thread register
 
 
+#if HAS_ARM_FEAT_SME
+	str		x2, [sp, SS64_X2]
+	// current_thread()->machine.umatrix_hdr == NULL: this thread has never
+	// executed smstart, so no SME state to save
+	ldr		x2, [x1, ACT_UMATRIX_HDR]
+	cbz		x2, 1f
+
+	mrs		x0, SVCR
+	str		x0, [x2, SME_SVCR]
+	// SVCR.SM == 0: save SVCR only (ZA is handled during context-switch)
+	tbz		x0, #SVCR_SM_SHIFT, 1f
+
+	// SVCR.SM == 1: save SVCR, Z, and P; and exit streaming SVE mode
+	ldrh	w0, [x2, SME_SVL_B]
+	add		x2, x2, SME_Z_P_ZA
+	LOAD_OR_STORE_Z_P_REGISTERS	str, svl_b=x0, ss=x2
+	mrs		x2, FPSR
+	smstop	sm
+	msr		FPSR, x2
+1:
+	ldr		x2, [sp, SS64_X2]
+#endif /* HAS_ARM_FEAT_SME */
 
 	mov		x0, sp								// Copy the user PCB pointer to x0
 												// x1 contains thread register
@@ -474,7 +752,7 @@ el1_sp1_serror_vector_long:
 	// Similarly to EL1_SP0_VECTOR_SWITCH_TO_INT_STACK, we need to take
 	// advantage of EL0_64_VECTOR ending with x0 == sp.  EL0_64_VECTOR also
 	// populates x1 with the thread state, so we can skip reloading it.
-	LOAD_INT_STACK	dst=x1, src=x1, tmp=x0
+	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=x0
 	mov		x0, sp
 	mov		sp, x1
 .endmacro
@@ -490,6 +768,7 @@ el0_synchronous_vector_64_long:
 	EL0_64_VECTOR_SWITCH_TO_KERN_STACK
 	adrp	x1, EXT(fleh_synchronous)@page			// Load address for fleh
 	add		x1, x1, EXT(fleh_synchronous)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION)
 	b		fleh_dispatch64
 
 el0_irq_vector_64_long:
@@ -497,6 +776,7 @@ el0_irq_vector_64_long:
 	EL0_64_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_irq)@page					// load address for fleh
 	add		x1, x1, EXT(fleh_irq)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
 el0_fiq_vector_64_long:
@@ -504,6 +784,7 @@ el0_fiq_vector_64_long:
 	EL0_64_VECTOR_SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_fiq)@page					// load address for fleh
 	add		x1, x1, EXT(fleh_fiq)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
 el0_serror_vector_64_long:
@@ -511,44 +792,9 @@ el0_serror_vector_64_long:
 	EL0_64_VECTOR_SWITCH_TO_KERN_STACK
 	adrp	x1, EXT(fleh_serror)@page				// load address for fleh
 	add		x1, x1, EXT(fleh_serror)@pageoff
+	mov		x2, #(FLEH_DISPATCH64_OPTION_NONE)
 	b		fleh_dispatch64
 
-
-/*
- * check_exception_stack
- *
- * Verifies that stack pointer at SP1 is within exception stack
- * If not, will simply hang as we have no more stack to fall back on.
- */
- 
-	.text
-	.align 2
-check_exception_stack:
-	mrs		x18, TPIDR_EL1					// Get thread pointer
-	cbz		x18, Lvalid_exception_stack			// Thread context may not be set early in boot
-	ldr		x18, [x18, ACT_CPUDATAP]
-	cbz		x18, Lcheck_exception_stack_fail	// If thread context is set, cpu data should be too
-	ldr		x18, [x18, CPU_EXCEPSTACK_TOP]
-	cmp		sp, x18
-	b.gt	Lcheck_exception_stack_fail	// Hang if above exception stack top
-	sub		x18, x18, EXCEPSTACK_SIZE_NUM			// Find bottom of exception stack
-	cmp		sp, x18
-	b.lt	Lcheck_exception_stack_fail	// Hang if below exception stack bottom
-Lvalid_exception_stack:
-	mov		x18, #0
-	b		Lel1_sp1_synchronous_valid_stack
-
-Lcheck_exception_stack_fail:
-#if CONFIG_SPTM
-	/*
-	 * To prevent exceptions delivered on SP1 from being delayed indefinitely, 
-	 * make recieving an exception on an invalid exception stack fatal.
-	 */
-	BEGIN_PANIC_LOCKDOWN
-#endif /* CONFIG_SPTM */
-1:  
-	wfi
-	b		1b		// Spin for debugger/watchdog
 
 #if defined(KERNEL_INTEGRITY_KTRR)
 	.text
@@ -581,33 +827,8 @@ check_ktrr_sctlr_trap:
 	add		sp, sp, ARM_CONTEXT_SIZE	// Clean up stack
 	b.ne	Lel1_sp1_synchronous_vector_continue
 	msr		ELR_EL1, lr					// Return to caller
-	ERET_CONTEXT_SYNCHRONIZING
+	ERET_NO_STRAIGHT_LINE_SPECULATION
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
-
-/* 64-bit first level exception handler dispatcher.
- * Completes register context saving and branches to a non-returning FLEH.
- * FLEH can inspect the spilled thread state, but it contains an invalid
- * thread signature.
- *
- * Expects:
- *  {x0, x1, sp} - saved
- *  x0 - arm_context_t
- *  x1 - address of FLEH
- *  fp - previous stack frame if EL1
- *  lr - unused
- *  sp - kernel stack
- */
-	.text
-	.align 2
-fleh_dispatch64_noreturn:
-#if HAS_APPLE_PAC
-	pacia	x1, sp
-	/* Save arm_saved_state64 with invalid signature */
-	SPILL_REGISTERS KERNEL_MODE, POISON_THREAD_SIGNATURE
-	b	fleh_dispatch64_common
-#else
-	// Fall through to fleh_dispatch64
-#endif
 
 /* 64-bit first level exception handler dispatcher.
  * Completes register context saving and branches to FLEH.
@@ -615,6 +836,8 @@ fleh_dispatch64_noreturn:
  *  {x0, x1, sp} - saved
  *  x0 - arm_context_t
  *  x1 - address of FLEH
+ *  x2 - bitfield of type FLEH_DISPATCH64_OPTION_xxx, clobbered
+ *  x3 - unused
  *  fp - previous stack frame if EL1
  *  lr - unused
  *  sp - kernel stack
@@ -627,16 +850,18 @@ fleh_dispatch64:
 #endif
 
 	/* Save arm_saved_state64 */
-	SPILL_REGISTERS KERNEL_MODE
+	SPILL_REGISTERS KERNEL_MODE, options_register=x2
 
-fleh_dispatch64_common:
 	/* If exception is from userspace, zero unused registers */
 	and		x23, x23, #(PSR64_MODE_EL_MASK)
 	cmp		x23, #(PSR64_MODE_EL0)
 	bne		1f
 
 	SANITIZE_FPCR x25, x2, 2 // x25 is set to current FPCR by SPILL_REGISTERS
+
+
 2:
+
 	mov		x2, #0
 	mov		x3, #0
 	mov		x4, #0
@@ -678,8 +903,8 @@ fleh_dispatch64_common:
 #endif
 
 #if PRECISE_USER_KERNEL_TIME
-	tst		x23, PSR64_MODE_EL_KERNEL			// If interrupting this kernel, skip
-	b.ne	1f                                  // precise time update.
+	cmp		x23, #PSR64_MODE_EL0			// If interrupting this kernel, skip
+	b.gt	1f                                  // precise time update.
 	PUSH_FRAME
 	bl		EXT(recount_leave_user)
 	POP_FRAME_WITHOUT_LR
@@ -700,10 +925,9 @@ fleh_dispatch64_common:
 	.align 2
 	.global EXT(fleh_synchronous)
 LEXT(fleh_synchronous)
-	
-UNWIND_PROLOGUE
-UNWIND_DIRECTIVES	
-	
+TRAP_UNWIND_PROLOGUE
+TRAP_UNWIND_DIRECTIVES	
+	ARM64_JUMP_TARGET
 	mrs		x1, ESR_EL1							// Load exception syndrome
 	mrs		x2, FAR_EL1							// Load fault address
 
@@ -721,6 +945,8 @@ UNWIND_DIRECTIVES
 Lvalid_link_register:
 
 #if CONFIG_SPTM
+	mrs		x25, ELR_EL1
+
 	/* 
 	 * Sync exceptions in the kernel are rare, so check that first.
 	 * This check should be trivially predicted NT. We also take 
@@ -738,6 +964,9 @@ Lvalid_link_register:
 	cbnz	w4, Lblocked_user_sync_exception
 
 Lfleh_synchronous_continue:
+	/* We've had our chance to lockdown, release PC/FAR */
+	str		x25, [x0, SS64_PC]
+	str		x2,  [x0, SS64_FAR]
 #endif /* CONFIG_SPTM */
 
 	PUSH_FRAME
@@ -785,6 +1014,7 @@ Lfleh_synchronous_ool_check_exception_el1:
 	 *				(ESR.EC == ESR_EC_BRK_AARCH64)
 	 *				(ESR.ISS is in PTRAUTH_TRAPS)
 	 *			)
+	 *			(CONFIG_BTI_TELEMETRY && ESR.EC != ESR_EC_BTI_FAIL) // Do not make BTI telemetry exceptions fatal
 	 * 			(startup_phase < STARTUP_SUB_LOCKDOWN) // Not in early-boot
 	 * 			(OR !CONFIG_XNUPOST (saved_expected_fault_handler == NULL)) // Not an expected, test exception
 	 *			(NAND // copyio data aborts are permitted while exceptions are masked
@@ -947,16 +1177,22 @@ Lfleh_synchronous_ool_check_exception_el1:
 	ccmp	x10, #1, #0b0000 /* !Z/NE */, EQ
 	b.eq	Lfleh_synchronous_continue
 
+#if BTI_ENFORCED && CONFIG_BTI_TELEMETRY
+	/* BTI telemetry exceptions are recoverable only in telemetry mode */
+	cmp		w6, #ESR_EC_BTI_FAIL
+	b.eq	Lfleh_synchronous_continue
+#endif /* CONFIG_BTI_TELEMETRY */
+
 	/* FALLTHROUGH */
 Lfleh_synchronous_panic_lockdown:
 	/* Save off arguments for sleh as SPTM may clobber */
-	mov x26, x0
-	mov x27, x1
-	mov x28, x2
+	mov		x26, x0
+	mov		x27, x1
+	mov		x28, x2
 	BEGIN_PANIC_LOCKDOWN
-	mov x0, x26
-	mov x1, x27
-	mov x2, x28
+	mov		x0, x26
+	mov		x1, x27
+	mov		x2, x28
 	/* 
 	 * A captain goes down with her ship; system is sunk but for telemetry 
 	 * try to handle the crash normally.
@@ -973,8 +1209,8 @@ UNWIND_EPILOGUE
 	.global EXT(blocked_user_sync_exception)
 LEXT(blocked_user_sync_exception)
 Lblocked_user_sync_exception:
-	UNWIND_PROLOGUE
-	UNWIND_DIRECTIVES
+	TRAP_UNWIND_PROLOGUE
+	TRAP_UNWIND_DIRECTIVES
 	/*
 	 * User space took a sync exception after panic lockdown had been initiated.
 	 * The system is going to panic soon, so let's just re-enable FIQs and wait
@@ -982,7 +1218,7 @@ Lblocked_user_sync_exception:
 	 */
 	msr		DAIFClr, #DAIFSC_FIQF
 0:
-	wfi
+	wfe
 	b		0b
 	UNWIND_EPILOGUE
 #endif /* CONFIG_SPTM */
@@ -1047,8 +1283,9 @@ Lblocked_user_sync_exception:
 	.align 2
 	.global EXT(fleh_irq)
 LEXT(fleh_irq)
-UNWIND_PROLOGUE
-UNWIND_DIRECTIVES
+TRAP_UNWIND_PROLOGUE
+TRAP_UNWIND_DIRECTIVES
+	ARM64_JUMP_TARGET
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_irq)
@@ -1067,14 +1304,19 @@ UNWIND_EPILOGUE
 	.align 2
 	.global EXT(fleh_fiq_generic)
 LEXT(fleh_fiq_generic)
+	/*
+	 * This function is a placeholder which should never be invoked.
+	 * We omit the landingpad here since there is no sensible choice.
+	 */
 	PANIC_UNIMPLEMENTED
 
 	.text
 	.align 2
 	.global EXT(fleh_fiq)
 LEXT(fleh_fiq)
-UNWIND_PROLOGUE
-UNWIND_DIRECTIVES
+TRAP_UNWIND_PROLOGUE
+TRAP_UNWIND_DIRECTIVES
+	ARM64_JUMP_TARGET
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_fiq)
@@ -1093,8 +1335,9 @@ UNWIND_EPILOGUE
 	.align 2
 	.global EXT(fleh_serror)
 LEXT(fleh_serror)
-UNWIND_PROLOGUE
-UNWIND_DIRECTIVES
+TRAP_UNWIND_PROLOGUE
+TRAP_UNWIND_DIRECTIVES
+	ARM64_JUMP_TARGET
 	mrs		x1, ESR_EL1							// Load exception syndrome
 	mrs		x2, FAR_EL1							// Load fault address
 
@@ -1116,20 +1359,29 @@ UNWIND_EPILOGUE
 	.text
 	.align 2
 fleh_invalid_stack:
+	ARM64_JUMP_TARGET
 #if CONFIG_SPTM
 	/*
 	 * Taking a data abort with an invalid kernel stack pointer is unrecoverable.
 	 * Initiate lockdown.
 	 */
-	/* Save off x0 as SPTM may clobber */
-	mov		x26, x0
+
+	/* Save off temporaries (including exception SPRs) as SPTM can clobber */
+	mov		x25, x0
+	mrs		x26, ELR_EL1
+	mrs		x27, ESR_EL1
+	mrs		x28, FAR_EL1
 	BEGIN_PANIC_LOCKDOWN
-	mov		x0, x26
-#endif /* CONFIG_SPTM */
+	mov		x0, x25
+	mov		x1, x27
+	mov		x2, x28
+	/* We deferred storing PC/FAR until after lockdown, so do that now */
+	str		x26, [x0, SS64_PC]
+	str		x28, [x0, SS64_FAR]
+#else
 	mrs		x1, ESR_EL1							// Load exception syndrome
-	str		x1, [x0, SS64_ESR]
 	mrs		x2, FAR_EL1							// Load fault address
-	str		x2, [x0, SS64_FAR]
+#endif /* CONFIG_SPTM */
 	PUSH_FRAME
 	bl		EXT(sleh_invalid_stack)				// Shouldn't return!
 	b 		.
@@ -1137,11 +1389,7 @@ fleh_invalid_stack:
 	.text
 	.align 2
 fleh_synchronous_sp1:
-	mrs		x1, ESR_EL1							// Load exception syndrome
-	str		x1, [x0, SS64_ESR]
-	mrs		x2, FAR_EL1							// Load fault address
-	str		x2, [x0, SS64_FAR]
-
+	ARM64_JUMP_TARGET
 #if CONFIG_SPTM
 	/*
 	 * Without debugger intervention, all exceptions on SP1 (including debug
@@ -1154,15 +1402,22 @@ fleh_synchronous_sp1:
 	tst		w1, #(ESR_EC_MASK)
 	b.eq	Lfleh_synchronous_sp1_skip_panic_lockdown // ESR_EC_UNCATEGORIZED is 0, so skip lockdown if Z
 #endif /* DEVELOPMENT || DEBUG */
-	/* Save off arguments for sleh as SPTM may clobber */
-	mov x26, x0
-	mov x27, x1
-	mov x28, x2
+	/* Save off temporaries (including exception SPRs) as SPTM can clobber */
+	mov		x25, x0
+	mrs		x26, ELR_EL1
+	mrs		x27, ESR_EL1
+	mrs		x28, FAR_EL1
 	BEGIN_PANIC_LOCKDOWN
-	mov x0, x26
-	mov x1, x27
-	mov x2, x28
+	mov		x0, x25
+	mov		x1, x27
+	mov		x2, x28
+	/* We deferred storing PC/FAR until after lockdown, so do that now */
+	str		x26, [x0, SS64_PC]
+	str		x28, [x0, SS64_FAR]
 Lfleh_synchronous_sp1_skip_panic_lockdown:
+#else
+	mrs		x1, ESR_EL1
+	mrs		x2, FAR_EL1
 #endif /* CONFIG_SPTM */
 
 	PUSH_FRAME
@@ -1172,6 +1427,7 @@ Lfleh_synchronous_sp1_skip_panic_lockdown:
 	.text
 	.align 2
 fleh_irq_sp1:
+	ARM64_JUMP_TARGET
 	mov		x1, x0
 	adr		x0, Lsp1_irq_str
 	b		EXT(panic_with_thread_kernel_state)
@@ -1181,6 +1437,7 @@ Lsp1_irq_str:
 	.text
 	.align 2
 fleh_fiq_sp1:
+	ARM64_JUMP_TARGET
 	mov		x1, x0
 	adr		x0, Lsp1_fiq_str
 	b		EXT(panic_with_thread_kernel_state)
@@ -1190,6 +1447,7 @@ Lsp1_fiq_str:
 	.text
 	.align 2
 fleh_serror_sp1:
+	ARM64_JUMP_TARGET
 	mov		x1, x0
 	adr		x0, Lsp1_serror_str
 	b		EXT(panic_with_thread_kernel_state)
@@ -1257,6 +1515,8 @@ LEXT(xnu_return_to_gl2)
 	.align 2
 	.global EXT(return_to_kernel)
 LEXT(return_to_kernel)
+	UNWIND_PROLOGUE
+	RETURN_TO_KERNEL_UNWIND
 	tbnz	w0, #DAIF_IRQF_SHIFT, exception_return  // Skip AST check if IRQ disabled
 	mrs		x3, TPIDR_EL1                           // Load thread pointer
 	ldr		w1, [x3, ACT_PREEMPT_CNT]               // Load preemption count
@@ -1271,10 +1531,12 @@ LEXT(return_to_kernel)
 	bl		EXT(ast_taken_kernel)                   // Handle AST_URGENT
 	POP_FRAME_WITHOUT_LR
 	b		exception_return
+	UNWIND_EPILOGUE
 
 	.text
 	.globl EXT(thread_bootstrap_return)
 LEXT(thread_bootstrap_return)
+	ARM64_PROLOG
 #if CONFIG_DTRACE
 	bl		EXT(dtrace_thread_bootstrap)
 #endif
@@ -1288,6 +1550,7 @@ LEXT(thread_bootstrap_return)
 	.text
 	.globl EXT(arm64_thread_exception_return)
 LEXT(arm64_thread_exception_return)
+	ARM64_PROLOG
 	mrs		x0, TPIDR_EL1
 	LOAD_USER_PCB	dst=x21, src=x0, tmp=x28
 	mov		x28, xzr
@@ -1471,6 +1734,33 @@ Lexception_return_restore_registers:
 1:
 
 
+#if HAS_ARM_FEAT_SME
+	mrs		x2, SPSR_EL1
+	and		x2, x2, #(PSR64_MODE_EL_MASK)
+	cmp		x2, #(PSR64_MODE_EL0)
+	// SPSR_EL1.M != EL0: no SME state to restore
+	bne		Lno_sme_saved_state
+
+	mrs		x3, TPIDR_EL1
+	ldr		x2, [x3, ACT_UMATRIX_HDR]
+	cbz		x2, Lno_sme_saved_state
+
+	ldr		x3, [x2, SME_SVCR]
+	msr		SVCR, x3
+	// SVCR.SM == 0: restore SVCR only (ZA is handled during context-switch)
+	tbz		x3, #SVCR_SM_SHIFT, Lno_sme_saved_state
+
+	// SVCR.SM == 1: restore SVCR, Z, and P
+	ldrh	w3, [x2, SME_SVL_B]
+	add		x2, x2, SME_Z_P_ZA
+	LOAD_OR_STORE_Z_P_REGISTERS	ldr, svl_b=x3, ss=x2
+
+	// The FPSIMD register file acts like a view into the lower 128 bits of
+	// Z0-Z31.  While there's no harm reading it out during exception entry,
+	// writing it back would truncate the Z0-Z31 values we just restored.
+	b		Lskip_restore_neon_saved_state
+Lno_sme_saved_state:
+#endif /* HAS_ARM_FEAT_SME */
 
 	/* Restore arm_neon_saved_state64 */
 	ldp		q0, q1, [x0, NS64_Q0]
@@ -1489,6 +1779,9 @@ Lexception_return_restore_registers:
 	ldp		q26, q27, [x0, NS64_Q26]
 	ldp		q28, q29, [x0, NS64_Q28]
 	ldp		q30, q31, [x0, NS64_Q30]
+#if HAS_ARM_FEAT_SME
+Lskip_restore_neon_saved_state:
+#endif
 
 	/* Restore arm_saved_state64 */
 
@@ -1547,7 +1840,7 @@ Lexception_return_restore_registers:
 Lskip_ttbr1_switch:
 #endif /* __ARM_KERNEL_PROTECT__ */
 
-	ERET_CONTEXT_SYNCHRONIZING
+	ERET_NO_STRAIGHT_LINE_SPECULATION
 
 user_take_ast:
 	PUSH_FRAME
@@ -1603,6 +1896,7 @@ LEXT(ExceptionVectorsEnd)
 	.text
 	.align 2
 fleh_synchronous_from_ppl:
+	ARM64_JUMP_TARGET
 	/* Save x0. */
 	mov		x15, x0
 
@@ -1657,14 +1951,17 @@ Lcorrupt_ppl_stack:
 	b		fleh_invalid_stack
 
 fleh_fiq_from_ppl:
+	ARM64_JUMP_TARGET
 	SWITCH_TO_INT_STACK	tmp=x25
 	b		EXT(fleh_fiq)
 
 fleh_irq_from_ppl:
+	ARM64_JUMP_TARGET
 	SWITCH_TO_INT_STACK	tmp=x25
 	b		EXT(fleh_irq)
 
 fleh_serror_from_ppl:
+	ARM64_JUMP_TARGET
 	GET_PMAP_CPU_DATA x5, x6, x7
 	ldr		x6, [x5, PMAP_CPU_DATA_KERN_SAVED_SP]
 	mov		sp, x6
@@ -1798,6 +2095,7 @@ Lppl_dispatch_exit:
 
 	.text
 ppl_exit:
+	ARM64_PROLOG
 	/*
 	 * If we are dealing with an exception, hand off to the first level
 	 * exception handler.
@@ -2015,6 +2313,7 @@ Lppl_fail_bootstrap_dispatch:
 	.align 2
 	.globl EXT(ml_panic_trap_to_debugger)
 LEXT(ml_panic_trap_to_debugger)
+	ARM64_PROLOG
 	mrs		x10, DAIF
 	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)
 
@@ -2039,6 +2338,33 @@ LEXT(ml_panic_trap_to_debugger)
 	mov		w13, #PPL_STATE_PANIC
 	str		w13, [x11, PMAP_CPU_DATA_PPL_STATE]
 
+	/**
+	 * When we panic in PPL, we might have un-synced PTE updates. Shoot down
+	 * all the TLB entries.
+	 *
+	 * A check must be done here against CurrentEL because the alle1is flavor
+	 * of tlbi is not available to EL1, but the vmalle1is flavor is. When PPL
+	 * runs at GL2, we can issue an alle2is and an alle1is tlbi to kill all
+	 * the TLB entries. When PPL runs at GL1, as a guest or on an pre-H13
+	 * platform, we issue a vmalle1is tlbi instead.
+	 *
+	 * Note that we only do this after passing the `PPL_STATE_DISPATCH` check
+	 * because if we did this for every panic, including the ones triggered
+	 * by fabric problems we may be stuck at the DSB below and trigger an AP
+	 * watchdog.
+	 */
+	mrs		x12, CurrentEL
+	cmp		x12, PSR64_MODE_EL2
+	bne		Lnot_in_gl2
+	tlbi		alle2is
+	tlbi		alle1is
+	b		Ltlb_invalidate_all_done
+Lnot_in_gl2:
+	tlbi		vmalle1is
+Ltlb_invalidate_all_done:
+	dsb		ish
+	isb
+
 	/* Now we are ready to exit the PPL. */
 	b		ppl_return_to_kernel_mode
 Lnot_in_ppl_dispatch:
@@ -2053,6 +2379,7 @@ Lppl_bad_call_panic_str:
 	.align 2
 	.globl EXT(ml_panic_trap_to_debugger)
 LEXT(ml_panic_trap_to_debugger)
+	ARM64_PROLOG
 	ret
 #endif /* XNU_MONITOR && !CONFIG_SPTM */
 
@@ -2130,6 +2457,7 @@ LEXT(_sptm_post_exit_hook)
 	stp		x2, x3, [sp, #0x10]
 	stp		x4, x5, [sp, #0x20]
 	stp		x6, x7, [sp, #0x30]
+
 
 	/* Load the preemption count. */
 	mrs		x0, TPIDR_EL1

@@ -106,13 +106,13 @@
 #include <corpses/task_corpse.h>
 #include <prng/random.h>
 #include <console/serial_protos.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_init.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_init_xnu.h>
 #include <vm/vm_map.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_xnu.h>
 #include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_shared_region.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_shared_region_xnu.h>
 #include <machine/pmap.h>
 #include <machine/commpage.h>
 #include <machine/machine_routines.h>
@@ -142,10 +142,6 @@ extern void mbuf_tag_init(void);
 
 #if CONFIG_ATM
 #include <atm/atm_internal.h>
-#endif
-
-#if CONFIG_CSR
-#include <sys/csr.h>
 #endif
 
 #if ALTERNATE_DEBUGGER
@@ -192,6 +188,10 @@ extern void dtrace_early_init(void);
 extern void sdt_early_init(void);
 #endif
 
+#ifdef CONFIG_BTI_TELEMETRY
+#include <arm64/bti_telemetry.h>
+#endif /* CONFIG_BTI_TELEMETRY */
+
 // libkern/OSKextLib.cpp
 extern void OSKextRemoveKextBootstrap(void);
 
@@ -214,9 +214,10 @@ static struct startup_entry *__startup_data startup_entry_cur = startup_entries;
 
 SECURITY_READ_ONLY_LATE(startup_subsystem_id_t) startup_phase = STARTUP_SUB_NONE;
 
-extern int serverperfmode;
-
 TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
+
+/* Indicates a server boot when set */
+TUNABLE(int, serverperfmode, "serverperfmode", 0);
 
 static inline void
 kernel_bootstrap_log(const char *message)
@@ -456,6 +457,11 @@ kernel_bootstrap(void)
 	ubsan_minimal_init();
 #endif
 
+#ifdef CONFIG_BTI_TELEMETRY
+	kernel_bootstrap_log("BTI exception telemetry runtime init");
+	bti_telemetry_init();
+#endif /* CONFIG_BTI_TELEMETRY */
+
 #if KASAN
 	kernel_bootstrap_log("kasan_late_init");
 	kasan_late_init();
@@ -607,9 +613,9 @@ kernel_bootstrap_thread(void)
 
 	kernel_bootstrap_thread_log("idle_thread_create");
 	/*
-	 * Create the idle processor thread.
+	 * Create the idle processor thread for the boot processor.
 	 */
-	idle_thread_create(processor);
+	idle_thread_create(processor, idle_thread);
 
 	/*
 	 * N.B. Do not stick anything else
@@ -636,6 +642,7 @@ kernel_bootstrap_thread(void)
 	 * additional processors come online.
 	 */
 	kernel_bootstrap_thread_log("thread_bind");
+	suspend_cluster_powerdown();
 	thread_bind(processor);
 
 	/*
@@ -751,7 +758,6 @@ kernel_bootstrap_thread(void)
 	csm_initialize_provisioning_profiles();
 #endif
 
-#ifndef BCM2837
 	kernel_bootstrap_log("trust_cache_init");
 
 	/* Initialize the runtime for the trust cache interface */
@@ -759,7 +765,6 @@ kernel_bootstrap_thread(void)
 
 	/* Load the static and engineering trust caches */
 	load_static_trust_cache();
-#endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);
 
@@ -825,6 +830,7 @@ kernel_bootstrap_thread(void)
 	vm_page_init_local_q(machine_info.max_cpus);
 
 	thread_bind(PROCESSOR_NULL);
+	resume_cluster_powerdown();
 
 	/*
 	 * Now that all CPUs are available to run threads, this is essentially
@@ -841,36 +847,21 @@ kernel_bootstrap_thread(void)
 }
 
 /*
- *	slave_main:
+ *	secondary_cpu_main:
  *
- *	Load the first thread to start a processor.
+ *	Load the first thread to start a processor, or
+ *	load the previous thread context when restarting a processor
+ *	from shutdown.
  *	This path will also be used by the master processor
  *	after being offlined.
  */
 void
-slave_main(void *machine_param)
+secondary_cpu_main(void *machine_param)
 {
 	processor_t             processor = current_processor();
-	thread_t                thread;
+	thread_t                thread = processor->idle_thread;
 
-	/*
-	 *	Use the idle processor thread if there
-	 *	is no dedicated start up thread.
-	 */
-	if (processor->processor_offlined == true) {
-		/* Return to the saved processor_offline context */
-		assert(processor->startup_thread == THREAD_NULL);
-
-		thread = processor->idle_thread;
-		thread->parameter = machine_param;
-	} else if (processor->startup_thread) {
-		thread = processor->startup_thread;
-		processor->startup_thread = THREAD_NULL;
-	} else {
-		thread = processor->idle_thread;
-		thread->continuation = processor_start_thread;
-		thread->parameter = machine_param;
-	}
+	thread->parameter = machine_param;
 
 	load_context(thread);
 	/*NOTREACHED*/
@@ -887,20 +878,35 @@ void
 processor_start_thread(void *machine_param,
     __unused wait_result_t result)
 {
-	processor_t             processor = current_processor();
-	thread_t                self = current_thread();
+	assert(ml_get_interrupts_enabled() == FALSE);
+	assert(current_thread() == current_processor()->idle_thread);
 
-	slave_machine_init(machine_param);
+#if CONFIG_KCOV
+	kcov_start_cpu(current_processor()->cpu_id);
+#endif
 
+#if USE_APPLEARMSMP
 	/*
-	 *	If running the idle processor thread,
-	 *	reenter the idle loop, else terminate.
+	 * On AppleARMSMP platforms, the cpu_boot_thread registers the AIC and
+	 * FastIPI interrupt handlers before the secondary CPU is booted, so we
+	 * can expect the self-IPI to deliver immediately.
 	 */
-	if (self == processor->idle_thread) {
-		thread_block(idle_thread);
-	}
+	bool wait_for_cpu_signal = true;
+#else /* USE_APPLEARMSMP */
+	/*
+	 * On AppleARMCPU platforms, the AIC and AppleARMCPU threads must be
+	 * scheduled after the secondary CPUs boot in order to register the IPI
+	 * interrupt handlers, so we can not be guaranteed when the self-IPI
+	 * will deliver.  The threads may even need to run on this CPU, so we
+	 * can't spin against the self-IPI being delivered.
+	 * See rdar://125383535.
+	 */
+	bool wait_for_cpu_signal = false;
+#endif /* USE_APPLEARMSMP */
 
-	thread_terminate(self);
+	processor_cpu_reinit(machine_param, wait_for_cpu_signal, false);
+
+	thread_block(idle_thread);
 	/*NOTREACHED*/
 }
 
@@ -982,12 +988,31 @@ load_context(
 	/*NOTREACHED*/
 }
 
+#define SERVER_PERF_MODE_VALIDATION_DISABLES 0x5dee
+extern unsigned int kern_feature_overrides;
+
 void
 scale_setup(void)
 {
+	boolean_t pe_serverperfmode = FALSE;
 	int scale = 0;
+
+	/* First, check boot-arg only for the feature overrides. Only then we
+	 * take the device-tree setting into account.
+	 */
+	if (serverperfmode) {
+		/* If running in serverperfmode disable some internal only diagnostics. */
+		kern_feature_overrides |= SERVER_PERF_MODE_VALIDATION_DISABLES;
+	}
+
+	pe_serverperfmode = PE_get_default("kern.serverperfmode",
+	    &pe_serverperfmode, sizeof(pe_serverperfmode));
+	if (pe_serverperfmode) {
+		serverperfmode = pe_serverperfmode;
+	}
 #if defined(__LP64__)
 	typeof(task_max) task_max_base = task_max;
+
 
 	/* Raise limits for servers with >= 16G */
 	if ((serverperfmode != 0) && ((uint64_t)max_mem_actual >= (uint64_t)(16 * 1024 * 1024 * 1024ULL))) {

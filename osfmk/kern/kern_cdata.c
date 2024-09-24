@@ -348,6 +348,14 @@ kcdata_memory_static_init(kcdata_descriptor_t data, mach_vm_address_t buffer_add
 void *
 kcdata_endalloc(kcdata_descriptor_t data, size_t length)
 {
+	/*
+	 * We do not support endalloc with a space allocation callback - the
+	 * callback may need to free the remaining free space in the buffer,
+	 * trampling endallocs and complicating things.
+	 */
+	if (data->kcd_alloc_callback != NULL) {
+		return NULL;
+	}
 	mach_vm_address_t curend = data->kcd_addr_begin + data->kcd_length;
 	/* round up allocation and ensure return value is uint64-aligned */
 	size_t toalloc = ROUNDUP(length, sizeof(uint64_t)) + (curend % sizeof(uint64_t));
@@ -1175,6 +1183,14 @@ kcdata_get_memory_addr_with_flavor(
 	/* check available memory, including trailer size for KCDATA_TYPE_BUFFER_END */
 	if (total_size + sizeof(info) > data->kcd_length ||
 	    data->kcd_length - (total_size + sizeof(info)) < data->kcd_addr_end - data->kcd_addr_begin) {
+		if (data->kcd_alloc_callback) {
+			size_t const hdr_ftr_sz = 2 * sizeof(info);
+			kcdata_descriptor_t new_data = data->kcd_alloc_callback(data, total_size + hdr_ftr_sz);
+			if (new_data != NULL) {
+				*data = *new_data;
+				return kcdata_get_memory_addr_with_flavor(data, type, size, flags, user_addr);
+			}
+		}
 		return KERN_INSUFFICIENT_BUFFER_SIZE;
 	}
 

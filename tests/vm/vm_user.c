@@ -64,7 +64,7 @@ get_permanent_mapping(mach_vm_size_t size)
 	return addr;
 }
 
-T_DECL(permanent_mapping, "check permanent mappings semantics")
+T_DECL(permanent_mapping, "check permanent mappings semantics", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_size_t size = 1 << 20;

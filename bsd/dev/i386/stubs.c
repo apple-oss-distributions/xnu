@@ -44,6 +44,7 @@
 #include <kern/thread.h>
 #include <vm/vm_map.h>
 #include <machine/machine_routines.h>
+#include <sys/sysproto.h>
 
 /*
  * copy a null terminated string from the kernel address space into
@@ -114,4 +115,13 @@ copywithin(void *src, void *dst, size_t count)
 {
 	bcopy(src, dst, count);
 	return 0;
+}
+
+int
+objc_bp_assist_cfg_np(
+	__unused struct proc                        *p,
+	__unused struct objc_bp_assist_cfg_np_args  *uap,
+	__unused int                                *retvalp)
+{
+	return KERN_FAILURE;
 }

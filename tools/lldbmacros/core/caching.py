@@ -82,7 +82,7 @@ class _Registry(list):
     __slots__ = ('name')
 
     def __init__(self, name):
-        super(_Registry, self).__init__()
+        super().__init__()
         self.name = name
 
     @property
@@ -99,7 +99,7 @@ class _Registry(list):
 
     def __repr__(self):
         return "_Registry({}, {})".format(
-            self.name, super(_Registry, self).__repr__())
+            self.name, super().__repr__())
 
     def __str__(self):
         return "_Registry({}, {} caches, size {})".format(
@@ -116,7 +116,7 @@ class _Cache(dict):
     __slots__ = ('name')
 
     def __init__(self, name, registry):
-        super(_Cache, self).__init__()
+        super().__init__()
         self.name = name
         registry.append(self)
 
@@ -129,7 +129,7 @@ class _Cache(dict):
 
     def __repr__(self):
         return "_Cache({}, {})".format(
-            self.name, super(_Cache, self).__repr__())
+            self.name, super().__repr__())
 
     def __str__(self):
         return "_Cache({}, {} entries, size {})".format(

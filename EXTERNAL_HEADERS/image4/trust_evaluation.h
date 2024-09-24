@@ -1,3 +1,30 @@
+/*
+ * Copyright © 2017-2024 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
 /*!
  * @header
  * Encapsulation which describes an Image4 trust evaluation procedure. The type
@@ -103,6 +130,41 @@ OS_EXPORT
 const image4_trust_evaluation_t _image4_trust_evaluation_boot;
 #define IMAGE4_TRUST_EVALUATION_BOOT (&_image4_trust_evaluation_boot)
 IMAGE4_XNU_AVAILABLE_INDIRECT(_image4_trust_evaluation_boot);
+
+/*!
+ * @const IMAGE4_TRUST_EVALUATION_NORMALIZE
+ * The trust evaluation is intended to produce a normalized form of an Image4
+ * manifest known as a "policy closure". This form of a manifest describes all
+ * possible personalized instantiations of a manifest. The normalized contents
+ * include all items in the signed section, i.e. all object dictionaries are
+ * captured.
+ *
+ * Because this type of trust evaluation operates on all objects in the
+ * manifest (as opposed to the object corresponding to a specific payload), only
+ * manifest properties are recorded through the
+ * {@link image4_trust_record_property_*} family of APIs. The property values
+ * recorded are the ones from the source manifest, not the ones which were
+ * inserted into the policy closure.
+ *
+ * Any payload provided to this type of trust evaluation is ignored.
+ *
+ * @section Trust Evaluation Result
+ * Upon successful evaluation, the result is a pointer to the resulting Image4
+ * manifest object representing the closure.
+ *
+ * @discussion
+ * This trust evaluation is only supported on targets which have an allocator.
+ * The pointer to the resulting bytes is not valid beyond the scope of the
+ * trust evaluation callback.
+ *
+ * @availability
+ * This constant first became available in API version 20231215.
+ */
+IMAGE4_API_AVAILABLE_FALL_2024
+OS_EXPORT
+const image4_trust_evaluation_t _image4_trust_evaluation_normalize;
+#define IMAGE4_TRUST_EVALUATION_NORMALIZE (&_image4_trust_evaluation_normalize)
+IMAGE4_XNU_AVAILABLE_INDIRECT(_image4_trust_evaluation_normalize);
 
 OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END

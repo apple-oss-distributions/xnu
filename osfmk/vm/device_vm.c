@@ -42,14 +42,17 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 #include <device/device_port.h>
-#include <vm/memory_object.h>
+#include <vm/memory_object_internal.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
 #include <mach/sdt.h>
 #include <os/refcnt.h>
+#include <vm/vm_ubc.h>
+#include <vm/vm_iokit.h>
+#include <vm/vm_object_internal.h>
 
 
 /* Device VM COMPONENT INTERFACES */
@@ -282,7 +285,7 @@ device_pager_init(
 	vm_object_unlock(vm_object);
 
 
-	attributes.copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+	attributes.copy_strategy = MEMORY_OBJECT_COPY_NONE;
 	/* attributes.cluster_size = (1 << (CLUSTER_SHIFT + PAGE_SHIFT));*/
 	attributes.cluster_size = (1 << (PAGE_SHIFT));
 	attributes.may_cache_object = FALSE;
@@ -413,7 +416,7 @@ device_pager_deallocate(
 			device_object->device_handle = (device_port_t) NULL;
 		}
 		device_control = device_object->dev_pgr_hdr.mo_control;
-		memory_object_destroy(device_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
+		memory_object_destroy(device_control, VM_OBJECT_DESTROY_PAGER);
 	} else if (ref_count == 0) {
 		/*
 		 * No more references: free the pager.

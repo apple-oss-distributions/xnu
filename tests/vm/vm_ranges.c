@@ -5,6 +5,8 @@
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/task_info.h>
+#include <mach/vm_param.h>
 #include <mach/vm_types.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -12,22 +14,27 @@
 
 enum {
 	DEFAULT = 0,
-	HEAP
+	HEAP,
+	LARGE_FILE
 };
 
-#define ALLOCATION_SIZE (PAGE_SIZE)
 static char _filepath[MAXPATHLEN];
 static struct mach_vm_range parent_default;
 static struct mach_vm_range parent_heap;
 
 #define CHILD_PROCESS_COUNT     (20)
-#define MAX_VM_ADDRESS          (0xFC0000000ULL)
 #undef KiB
 #undef MiB
 #undef GiB
 #define KiB(x)  ((uint64_t)(x) << 10)
 #define MiB(x)  ((uint64_t)(x) << 20)
 #define GiB(x)  ((uint64_t)(x) << 30)
+
+#define ALLOCATION_SIZE (PAGE_SIZE)
+#define LARGE_ALLOCATION_SIZE (GiB(1))
+#define PER_ALLOC_AMT_GB (GiB(256))
+#define N_ALLOC 5
+
 
 /*
  * Choose an arbitrary memory tag which applies to each of default/heap range
@@ -90,12 +97,33 @@ get_range(int target_range)
 		T_ASSERT_POSIX_SUCCESS(ret, "successfully retrieved user heap range");
 		break;
 
+	case LARGE_FILE:
+		ret = sysctlbyname("vm.vm_map_user_range_large_file", &range, &range_sz, NULL, 0);
+		T_QUIET;
+		T_ASSERT_POSIX_SUCCESS(ret, "successfully retrieved user large file range");
+		break;
+
 	default:
 		/* Fall through with EINVAL */
 		break;
 	}
 
 	return range;
+}
+
+static task_vm_info_data_t
+get_vm_task_info(void)
+{
+	task_vm_info_data_t ti;
+
+	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+	kern_return_t const kr = task_info(mach_task_self(),
+	    TASK_VM_INFO,
+	    (task_info_t) &ti,
+	    &count);
+	T_QUIET;
+	T_ASSERT_MACH_SUCCESS(kr, "get task_info()");
+	return ti;
 }
 
 static mach_vm_address_t
@@ -111,8 +139,8 @@ assert_in_range(struct mach_vm_range range, mach_vm_offset_t addr)
 {
 	T_LOG("checking if %llx <= %llx <= %llx", range.min_address, addr,
 	    range.max_address);
-	T_EXPECT_GE(addr, range.min_address, "allocation above heap min address");
-	T_EXPECT_LE(addr, range.max_address, "allocation below heap max address");
+	T_EXPECT_GE(addr, range.min_address, "allocation above min address");
+	T_EXPECT_LE(addr, range.max_address, "allocation below max address");
 }
 
 static void
@@ -124,9 +152,9 @@ assert_in_heap_range(mach_vm_offset_t addr)
 }
 
 static void *
-assert_mmap(void *addr, int fd, int flags)
+assert_mmap(void *addr, size_t sz, int fd, int flags)
 {
-	void *ret = mmap(addr, ALLOCATION_SIZE, VM_PROT_READ | VM_PROT_WRITE,
+	void *ret = mmap(addr, sz, VM_PROT_READ | VM_PROT_WRITE,
 	    flags, fd, 0);
 	T_EXPECT_NE(ret, MAP_FAILED, "mmap should not have MAP_FAILED");
 	T_EXPECT_NE(ret, NULL, "mmap should have returned a valid pointer");
@@ -156,14 +184,22 @@ assert_allocate_in_range(int target_range, mach_vm_address_t dst, int vm_flags)
 }
 
 static void *
-assert_mmap_in_range(void *addr, int target_range, int fd, int flags)
+assert_mmap_in_range(void *addr, int target_range, size_t sz, int fd, int flags)
 {
 	struct mach_vm_range range = get_range(target_range);
-	void *dst = assert_mmap(addr, fd, flags);
+	void *dst = assert_mmap(addr, sz, fd, flags);
 
 	assert_in_range(range, (mach_vm_offset_t)dst);
 
 	return dst;
+}
+
+static void
+ensure_mmap_fails(void *addr, size_t sz, int flags, int fd)
+{
+	void *ret = mmap(addr, sz, VM_PROT_READ | VM_PROT_WRITE, flags, fd, 0);
+	T_QUIET;
+	T_EXPECT_EQ_PTR(ret, MAP_FAILED, "mmap should fail");
 }
 
 __attribute__((overloadable))
@@ -207,7 +243,7 @@ cleanup_file(void)
 }
 
 T_DECL(range_allocate_heap,
-    "ensure malloc tagged memory is allocated within the heap range")
+    "ensure malloc tagged memory is allocated within the heap range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -215,7 +251,7 @@ T_DECL(range_allocate_heap,
 }
 
 T_DECL(range_allocate_anywhere,
-    "ensure allocation is within target range when hint is outwith range")
+    "ensure allocation is within target range when hint is outwith range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -225,7 +261,7 @@ T_DECL(range_allocate_anywhere,
 }
 
 T_DECL(range_allocate_stack,
-    "ensure a stack allocation is in the default range")
+    "ensure a stack allocation is in the default range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -282,7 +318,7 @@ ensure_fixed_mapping(void)
 	ensure_rogue_fixed_fails();
 }
 
-T_DECL(range_allocate_fixed, "ensure fixed target is honored (even with an incorrect tag)")
+T_DECL(range_allocate_fixed, "ensure fixed target is honored (even with an incorrect tag)", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -290,14 +326,14 @@ T_DECL(range_allocate_fixed, "ensure fixed target is honored (even with an incor
 	fork_child_test(ensure_fixed_mapping);
 }
 
-T_DECL(range_mmap_anon, "ensure anon mapping within HEAP range")
+T_DECL(range_mmap_anon, "ensure anon mapping within HEAP range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
-	assert_mmap_in_range(NULL, HEAP, -1, MAP_ANON | MAP_PRIVATE);
+	assert_mmap_in_range(NULL, HEAP, ALLOCATION_SIZE, -1, MAP_ANON | MAP_PRIVATE);
 }
 
-T_DECL(range_mmap_file, "ensure file is mapped within HEAP range")
+T_DECL(range_mmap_file, "ensure file is mapped within HEAP range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -313,47 +349,47 @@ T_DECL(range_mmap_file, "ensure file is mapped within HEAP range")
 	/* map it in to the heap rage */
 #if TARGET_OS_OSX
 	T_LOG("mapping file in DEFAULT range");
-	assert_mmap_in_range(NULL, DEFAULT, fd, MAP_FILE | MAP_SHARED);
+	assert_mmap_in_range(NULL, DEFAULT, ALLOCATION_SIZE, fd, MAP_FILE | MAP_SHARED);
 #else
 	T_LOG("mapping file in HEAP range");
-	assert_mmap_in_range(NULL, HEAP, fd, MAP_FILE | MAP_SHARED);
+	assert_mmap_in_range(NULL, HEAP, ALLOCATION_SIZE, fd, MAP_FILE | MAP_SHARED);
 #endif
 }
 
 
-T_DECL(range_mmap_alias_tag, "ensure anon mapping with tag is honored")
+T_DECL(range_mmap_alias_tag, "ensure anon mapping with tag is honored", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
-	assert_mmap_in_range(NULL, DEFAULT, VM_MEMORY_RANGE_DEFAULT, MAP_ANON | MAP_PRIVATE);
+	assert_mmap_in_range(NULL, DEFAULT, ALLOCATION_SIZE, VM_MEMORY_RANGE_DEFAULT, MAP_ANON | MAP_PRIVATE);
 }
 
 T_DECL(range_mmap_with_low_hint,
-    "ensure allocation is within target range when hint is below range")
+    "ensure allocation is within target range when hint is below range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
 	struct mach_vm_range range = get_range(HEAP);
 	mach_vm_address_t target = range.min_address - ALLOCATION_SIZE;
 
-	assert_mmap_in_range((void *)target, HEAP, -1, MAP_ANON | MAP_PRIVATE);
+	assert_mmap_in_range((void *)target, HEAP, ALLOCATION_SIZE, -1, MAP_ANON | MAP_PRIVATE);
 }
 
 T_DECL(range_mmap_with_high_hint,
-    "ensure allocation is within target range when hint is within range")
+    "ensure allocation is within target range when hint is within range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
 	struct mach_vm_range range = get_range(HEAP);
 	mach_vm_address_t target = range.max_address - 100 * ALLOCATION_SIZE;
 
-	void *dst = assert_mmap_in_range((void *)target, HEAP, -1, MAP_ANON | MAP_PRIVATE);
+	void *dst = assert_mmap_in_range((void *)target, HEAP, ALLOCATION_SIZE, -1, MAP_ANON | MAP_PRIVATE);
 
 	T_EXPECT_EQ((mach_vm_address_t)dst, target, "unexpected allocation address");
 }
 
 T_DECL(range_mmap_with_bad_hint,
-    "ensure allocation fails when hint is above range")
+    "ensure allocation fails when hint is above range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -361,11 +397,11 @@ T_DECL(range_mmap_with_bad_hint,
 	mach_vm_address_t target = range.max_address + 0x100000000;
 
 	/* mmap should retry with 0 base on initial KERN_NO_SPACE failure */
-	assert_mmap_in_range((void *)target, HEAP, -1, MAP_ANON | MAP_PRIVATE);
+	assert_mmap_in_range((void *)target, HEAP, ALLOCATION_SIZE, -1, MAP_ANON | MAP_PRIVATE);
 }
 
 T_DECL(range_mach_vm_map_with_bad_hint,
-    "ensure mach_vm_map fails when hint is above range")
+    "ensure mach_vm_map fails when hint is above range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -384,7 +420,7 @@ T_DECL(range_mach_vm_map_with_bad_hint,
 }
 
 T_DECL(range_mach_vm_remap_default,
-    "ensure mach_vm_remap is successful in default range")
+    "ensure mach_vm_remap is successful in default range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -401,7 +437,7 @@ T_DECL(range_mach_vm_remap_default,
 }
 
 T_DECL(range_mach_vm_remap_heap_with_hint,
-    "ensure mach_vm_remap is successful in heap range")
+    "ensure mach_vm_remap is successful in heap range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -419,7 +455,7 @@ T_DECL(range_mach_vm_remap_heap_with_hint,
 }
 
 T_DECL(range_mach_vm_remap_heap,
-    "ensure mach_vm_remap remains in same range")
+    "ensure mach_vm_remap remains in same range", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -444,8 +480,8 @@ ensure_range(void)
 
 	T_EXPECT_GT(heap.min_address, def.max_address,
 	    "ranges should not overlap");
-	T_EXPECT_LE(heap.max_address, MAX_VM_ADDRESS,
-	    "expected max <= %llx", MAX_VM_ADDRESS);
+	T_EXPECT_LE(heap.max_address, MACH_VM_MAX_ADDRESS,
+	    "expected max <= %llx", MACH_VM_MAX_ADDRESS);
 	T_EXPECT_EQ(heap.min_address,
 	    heap.min_address & (unsigned long)~0x1FFFFF,
 	    "expected alignment on 2MB TT boundary");
@@ -467,7 +503,7 @@ ensure_child_range(void)
 	    "expected forked heap max to be equal");
 }
 
-T_DECL(range_ensure_bounds, "ensure ranges respect map bounds")
+T_DECL(range_ensure_bounds, "ensure ranges respect map bounds", T_META_TAG_VM_PREFERRED)
 {
 	CHECK_RANGES_ENABLED();
 
@@ -516,7 +552,7 @@ parse_void_ranges(struct mach_vm_range *void1, struct mach_vm_range *void2)
 	return true;
 }
 
-T_DECL(create_range, "ensure create ranges kinda works")
+T_DECL(create_range, "ensure create ranges kinda works", T_META_TAG_VM_PREFERRED)
 {
 	struct mach_vm_range void1, void2, *r;
 
@@ -599,4 +635,100 @@ T_DECL(create_range, "ensure create ranges kinda works")
 #undef create_ranges
 #undef add_range
 #undef reset
+}
+
+T_DECL(range_mmap_too_large, "ensure mmap fails when allocation is too large", T_META_TAG_VM_PREFERRED)
+{
+	// Get VM map min_offset and max_offset
+	task_vm_info_data_t const ti = get_vm_task_info();
+	T_LOG("task_info range: 0x%llx-0x%llx, covering %llu bytes of memory",
+	    ti.min_address, ti.max_address, ti.max_address - ti.min_address);
+
+	// Try to mmap more memory than the address space can handle
+	size_t const sz_too_large = ti.max_address - ti.min_address + 1;
+	T_LOG("Trying to allocate %zu bytes", sz_too_large);
+	ensure_mmap_fails(NULL, sz_too_large, MAP_ANON | MAP_PRIVATE, -1);
+}
+
+T_DECL(range_mmap_outside_map_range_fixed,
+    "ensure mmap fails when making a fixed allocation beyond VM map max address", T_META_TAG_VM_PREFERRED)
+{
+	// Get VM map min_offset and max_offset
+	task_vm_info_data_t const ti = get_vm_task_info();
+	T_LOG("task_info range: 0x%llx-0x%llx", ti.min_address, ti.max_address);
+
+	// Try to allocate a page between VM map max_offset and MACH_VM_MAX_ADDRESS
+	mach_vm_address_t const target = ti.max_address + PAGE_SIZE;
+	T_LOG("Trying to allocate memory at 0x%llx", target);
+	ensure_mmap_fails((void *)target, ALLOCATION_SIZE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1);
+}
+
+static bool
+large_file_range_enabled(void)
+{
+	struct mach_vm_range range;
+	size_t range_sz = sizeof(range);
+
+	bzero(&range, sizeof(range));
+
+	/*
+	 * We will fail with ENOENT or EINVAL if ranges are either not supported
+	 * or not enabled on our process.
+	 */
+	int const ret = sysctlbyname("vm.vm_map_user_range_large_file",
+	    &range, &range_sz, NULL, 0);
+	if (ret) {
+		T_LOG("vm.vm_map_user_range_large_file errno: %d", errno);
+	} else {
+		T_LOG("large file range: (%llx, %llx)",
+		    range.min_address, range.max_address);
+	}
+	return ret == 0;
+}
+
+T_DECL(range_mmap_large_file,
+    "ensure large file is mapped within LARGE_FILE range", T_META_TAG_VM_PREFERRED)
+{
+	if (!large_file_range_enabled()) {
+		T_SKIP("large file range not enabled");
+	}
+
+	void *ptrs[N_ALLOC];
+	uint32_t i;
+
+	int fd = -1;
+	/* prepare temp file */
+	char const * tmp_dir = dt_tmpdir();
+	snprintf(_filepath, MAXPATHLEN, "%s/maplargefile.XXXXXX", tmp_dir);
+	T_ASSERT_POSIX_SUCCESS(fd = mkstemp(_filepath), NULL);
+	atexit(cleanup_file);
+
+	T_LOG("Attempting to allocate VA space in %llu GB chunks.",
+	    LARGE_ALLOCATION_SIZE);
+	for (i = 0; i < N_ALLOC; ++i) {
+		void *p = assert_mmap_in_range(NULL, LARGE_FILE, LARGE_ALLOCATION_SIZE,
+		    fd, MAP_SHARED | MAP_FILE);
+		if (p == MAP_FAILED) {
+			if (errno != ENOMEM) {
+				T_WITH_ERRNO;
+				T_LOG("mmap failed: stopped at %u of %d/%llu GB chunks",
+				    i + 1, N_ALLOC, LARGE_ALLOCATION_SIZE);
+			}
+			break;
+		} else {
+			T_LOG("allocation %u: %p", i + 1, p);
+		}
+
+		T_QUIET; T_ASSERT_NOTNULL(p, "mmap");
+		ptrs[i] = p;
+	}
+
+	T_EXPECT_GE_UINT(i, N_ALLOC, "Allocate at least %u/%d %llu-GB chunks of VA space",
+	    i, N_ALLOC, (LARGE_ALLOCATION_SIZE / GiB(1)));
+
+	T_LOG("Unmapping memory");
+	for (uint32_t j = 0; j < i; ++j) {
+		int const res = munmap(ptrs[j], LARGE_ALLOCATION_SIZE);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(res, 0, "munmap");
+	}
 }

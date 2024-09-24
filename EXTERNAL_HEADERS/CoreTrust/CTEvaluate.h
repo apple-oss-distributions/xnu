@@ -371,6 +371,8 @@ enum {
     CORETRUST_POLICY_SENSOR_PROD =          1ULL << 40,
     CORETRUST_POLICY_SENSOR_DEV =           1ULL << 41,
     CORETRUST_POLICY_BAA_USER =             1ULL << 42,
+    CORETRUST_POLICY_XROS_APP_PROD =        1ULL << 43,
+    CORETRUST_POLICY_XROS_APP_DEV =         1ULL << 44,
 };
 
 typedef CT_uint32_t CoreTrustDigestType;

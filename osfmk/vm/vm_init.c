@@ -69,13 +69,13 @@
 #include <kern/zalloc_internal.h>
 #include <kern/kext_alloc.h>
 #include <sys/kdebug.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_internal.h>
 #include <vm/vm_map_internal.h>
-#include <vm/vm_page.h>
+#include <vm/vm_page_internal.h>
 #include <vm/vm_kern.h>
 #include <vm/memory_object.h>
-#include <vm/vm_fault.h>
-#include <vm/vm_init.h>
+#include <vm/vm_fault_xnu.h>
+#include <vm/vm_init_xnu.h>
 
 #include <pexpert/pexpert.h>
 
@@ -123,6 +123,7 @@ vm_mem_bootstrap(void)
 	vm_object_bootstrap();
 
 	vm_retire_boot_pages();
+
 
 	vm_mem_bootstrap_log("vm_map_init");
 	vm_map_init();

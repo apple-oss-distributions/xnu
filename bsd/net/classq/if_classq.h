@@ -314,7 +314,7 @@ extern int ifclassq_attach(struct ifclassq *, u_int32_t, void *);
 extern void ifclassq_detach(struct ifclassq *);
 extern int ifclassq_getqstats(struct ifclassq *, u_int8_t, u_int32_t,
     void *, u_int32_t *);
-extern const char *ifclassq_ev2str(cqev_t);
+extern const char *__null_terminated ifclassq_ev2str(cqev_t);
 extern int ifclassq_tbr_set(struct ifclassq *, struct tb_profile *, boolean_t);
 extern void ifclassq_tbr_dequeue(struct ifclassq *, classq_pkt_t *, u_int8_t);
 extern void ifclassq_tbr_dequeue_sc(struct ifclassq *, mbuf_svc_class_t,

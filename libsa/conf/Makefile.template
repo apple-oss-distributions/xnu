@@ -103,4 +103,6 @@ include $(MakeInc_dir)
 # a way of retrieving these counters from KLD anyway, so there's no harm in just
 # disabling them.
 CXXFLAGS_GEN:=$(filter-out -fprofile-instr-generate,$(CXXFLAGS_GEN))
+CXXFLAGS_GEN:=$(filter-out -fcoverage-mapping,$(CXXFLAGS_GEN))
 CFLAGS_GEN:=$(filter-out -fprofile-instr-generate,$(CFLAGS_GEN))
+CFLAGS_GEN:=$(filter-out -fcoverage-mapping,$(CFLAGS_GEN))

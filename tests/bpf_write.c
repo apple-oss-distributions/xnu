@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -82,7 +82,6 @@ HexDump(void *data, size_t len)
 	}
 }
 
-static int udp_fd = -1;
 static char ifname1[IF_NAMESIZE];
 static char ifname2[IF_NAMESIZE];
 static int default_fake_max_mtu = 0;
@@ -90,11 +89,13 @@ static int default_fake_max_mtu = 0;
 static void
 cleanup(void)
 {
-	if (udp_fd != -1) {
-		(void)ifnet_destroy(udp_fd, ifname1, false);
+	if (ifname1[0] != '\0') {
+		(void)ifnet_destroy(ifname1, false);
 		T_LOG("ifnet_destroy %s", ifname1);
+	}
 
-		(void)ifnet_destroy(udp_fd, ifname2, false);
+	if (ifname2[0] != '\0') {
+		(void)ifnet_destroy(ifname2, false);
 		T_LOG("ifnet_destroy %s", ifname2);
 	}
 
@@ -102,18 +103,12 @@ cleanup(void)
 		T_LOG("sysctl net.link.fake.max_mtu=%d", default_fake_max_mtu);
 		(void) sysctlbyname("net.link.fake.max_mtu", NULL, NULL, &default_fake_max_mtu, sizeof(int));
 	}
-
-	if (udp_fd != -1) {
-		(void) close(udp_fd);
-	}
 }
 
 static void
 init(int mtu)
 {
 	T_ATEND(cleanup);
-
-	udp_fd = inet_dgram_socket();
 
 	if (mtu > 0) {
 		size_t oldlen = sizeof(int);
@@ -123,46 +118,32 @@ init(int mtu)
 }
 
 static int
-set_if_mtu(const char *ifname, int mtu)
-{
-	int error = 0;
-	struct ifreq ifr = {};
-
-	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
-	ifr.ifr_mtu = mtu;
-
-	T_ASSERT_POSIX_SUCCESS(ioctl(udp_fd, SIOCSIFMTU, (caddr_t)&ifr), NULL);
-
-	return error;
-}
-
-static int
 setup_feth_pair(int mtu)
 {
 	int error = 0;
 
 	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
-	error = ifnet_create_2(udp_fd, ifname1, sizeof(ifname1));
+	error = ifnet_create_2(ifname1, sizeof(ifname1));
 	if (error != 0) {
+		ifname1[0] = '\0';
 		goto done;
 	}
 	T_LOG("created %s", ifname1);
 
 	strlcpy(ifname2, FETH_NAME, sizeof(ifname2));
-	error = ifnet_create_2(udp_fd, ifname2, sizeof(ifname2));
+	error = ifnet_create_2(ifname2, sizeof(ifname2));
 	if (error != 0) {
+		ifname2[0] = '\0';
 		goto done;
 	}
 	T_LOG("created %s", ifname2);
 
-	ifnet_attach_ip(udp_fd, ifname1);
+	ifnet_attach_ip(ifname1);
 
-	if ((error = fake_set_peer(udp_fd, ifname1, ifname2)) != 0) {
-		goto done;
-	}
+	fake_set_peer(ifname1, ifname2);
 	if (mtu != 0) {
-		set_if_mtu(ifname1, mtu);
-		set_if_mtu(ifname2, mtu);
+		ifnet_set_mtu(ifname1, mtu);
+		ifnet_set_mtu(ifname2, mtu);
 	}
 done:
 	return error;
@@ -233,13 +214,13 @@ do_bpf_write(const char *ifname, u_int ip_len, bool expect_success, u_int write_
 	T_ASSERT_POSIX_ZERO(create_bpf_on_interface(ifname, &bpf_fd, &bdlen, write_size_max), NULL);
 	T_LOG("bpf bdlen %d", bdlen);
 
-	struct ether_addr src_eaddr = {};
-	ifnet_get_lladdr(udp_fd, ifname1, &src_eaddr);
+	struct ether_addr src_eaddr = { 0 };
+	ifnet_get_lladdr(ifname1, &src_eaddr);
 
 	struct in_addr src_ip = { .s_addr = INADDR_ANY };
 	uint16_t src_port = 68;
 
-	struct ether_addr dst_eaddr = {};
+	struct ether_addr dst_eaddr = { 0 };
 	memset(dst_eaddr.octet, 255, ETHER_ADDR_LEN);
 
 	struct in_addr dst_ip = { .s_addr = INADDR_BROADCAST };
@@ -331,67 +312,67 @@ test_bpf_write(u_int data_len, int mtu, bool expect_success, u_int write_size_ma
 	do_bpf_write(ifname1, data_len, expect_success, write_size_max);
 }
 
-T_DECL(bpf_write_dhcp, "BPF write DHCP feth MTU 1500")
+T_DECL(bpf_write_dhcp, "BPF write DHCP feth MTU 1500", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(0, 1500, true, 0);
 }
 
-T_DECL(bpf_write_1024, "BPF write 1024 feth MTU 1500")
+T_DECL(bpf_write_1024, "BPF write 1024 feth MTU 1500", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(1024, 1500, true, 0);
 }
 
-T_DECL(bpf_write_1514, "BPF write 1500 feth MTU 1500")
+T_DECL(bpf_write_1514, "BPF write 1500 feth MTU 1500", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(1514, 1500, true, 0);
 }
 
-T_DECL(bpf_write_65482, "BPF write 65482 feth MTU 1500")
+T_DECL(bpf_write_65482, "BPF write 65482 feth MTU 1500", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(65482, 1500, false, 0);
 }
 
-T_DECL(bpf_write_2048, "BPF write 2048 feth MTU 1500")
+T_DECL(bpf_write_2048, "BPF write 2048 feth MTU 1500", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(2048, 1500, false, 0);
 }
 
-T_DECL(bpf_write_2048_mtu_4096, "BPF write 2048 feth MTU 4096 ")
+T_DECL(bpf_write_2048_mtu_4096, "BPF write 2048 feth MTU 4096 ", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(2048, 4096, true, 0);
 }
 
-T_DECL(bpf_write_4110_mtu_4096, "BPF write 4110 feth MTU 4096 ")
+T_DECL(bpf_write_4110_mtu_4096, "BPF write 4110 feth MTU 4096 ", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(4110, 4096, true, 0);
 }
 
-T_DECL(bpf_write_4096_mtu_9000, "BPF write 4096 feth MTU 9000")
+T_DECL(bpf_write_4096_mtu_9000, "BPF write 4096 feth MTU 9000", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(4096, 9000, true, 0);
 }
 
-T_DECL(bpf_write_8192_mtu_9000, "BPF write 8192 feth MTU 9000")
+T_DECL(bpf_write_8192_mtu_9000, "BPF write 8192 feth MTU 9000", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(8192, 9000, true, 0);
 }
 
-T_DECL(bpf_write_9000_mtu_9000, "BPF write 9000 feth MTU 9000")
+T_DECL(bpf_write_9000_mtu_9000, "BPF write 9000 feth MTU 9000", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(9000, 9000, true, 0);
 }
 
-T_DECL(bpf_write_9018_mtu_9000, "BPF write 9018 feth MTU 9000")
+T_DECL(bpf_write_9018_mtu_9000, "BPF write 9018 feth MTU 9000", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(9018, 9000, true, 0);
 }
 
-T_DECL(bpf_write_16370_mtu_9000, "BPF write 16370 feth MTU 9000")
+T_DECL(bpf_write_16370_mtu_9000, "BPF write 16370 feth MTU 9000", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(16370, 9000, false, 0);
 }
 
-T_DECL(bpf_write_16370_mtu_9000_max_16370, "BPF write 16370 feth MTU 9000 max 16370")
+T_DECL(bpf_write_16370_mtu_9000_max_16370, "BPF write 16370 feth MTU 9000 max 16370", T_META_TAG_VM_PREFERRED)
 {
 	test_bpf_write(16370, 9000, true, 16370);
 }

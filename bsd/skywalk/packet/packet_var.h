@@ -585,8 +585,8 @@ struct __kern_packet {
 	if (__improbable(((_skp)->pkt_pflags & PKT_F_OPT_DATA) != 0)) { \
 	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_skp)->pkt_pflags & PKT_F_OPT_ALLOC);           \
-	        sk_copy64_40((uint64_t *)(void *)(_skp)->pkt_com_opt,   \
-	            (uint64_t *)(void *)(_dkp)->pkt_com_opt);           \
+	        sk_copy64_40((uint64_t *)(struct __packet_opt *__header_bidi_indexable)(_skp)->pkt_com_opt,   \
+	            (uint64_t *)(struct __packet_opt *__header_bidi_indexable)(_dkp)->pkt_com_opt);           \
 	}                                                               \
 } while (0)
 
@@ -604,8 +604,8 @@ struct __kern_packet {
 	_CASSERT(sizeof(struct __packet_com) == 32);                    \
 	_CASSERT(offsetof(struct __packet, __p_flags) == 24);           \
 	/* copy __packet excluding pkt_pflags */                        \
-	sk_copy64_24((uint64_t *)(void *)&(_skp)->pkt_com,              \
-	    (uint64_t *)(void *)&(_dkp)->pkt_com);                      \
+	sk_copy64_24((uint64_t *)(struct __packet *__header_bidi_indexable)&(_skp)->pkt_com,    \
+	    (uint64_t *)(struct __packet *__header_bidi_indexable)&(_dkp)->pkt_com);            \
 	/* copy relevant pkt_pflags bits */                             \
 	(_dkp)->pkt_pflags = ((_skp)->pkt_pflags & PKT_F_COPY_MASK);    \
 	/* copy __packet_opt if applicable */                           \
@@ -645,7 +645,7 @@ struct __kern_packet {
 	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_kp)->pkt_pflags & PKT_F_OPT_ALLOC);            \
 	        sk_copy64_40((uint64_t *)(void *)&(_up)->pkt_com_opt,   \
-	            (uint64_t *)(void *)(_kp)->pkt_com_opt);            \
+	            (uint64_t *)(struct __packet_opt *__header_bidi_indexable)(_kp)->pkt_com_opt); \
 	}                                                               \
 } while (0)
 
@@ -671,15 +671,15 @@ struct __kern_packet {
 	if (__improbable(((_kp)->pkt_pflags & PKT_F_OPT_DATA) != 0)) {  \
 	        _CASSERT(sizeof(struct __packet_opt) == 40);            \
 	        ASSERT((_kp)->pkt_pflags & PKT_F_OPT_ALLOC);            \
-	        sk_copy64_40((uint64_t *)(void *)(_kp)->pkt_com_opt,    \
+	        sk_copy64_40((uint64_t *)(struct __packet_opt *__header_bidi_indexable)(_kp)->pkt_com_opt, \
 	            (uint64_t *)(void *)&(_up)->pkt_com_opt);           \
 	}                                                               \
 } while (0)
 
 #define SK_PTR_ADDR_KQUM(_ph)   __unsafe_forge_single(struct __kern_quantum *, \
-	                            ((struct __kern_quantum *)SK_PTR_ADDR(_ph)))
+	                            (SK_PTR_ADDR(_ph)))
 #define SK_PTR_ADDR_KPKT(_ph)   __unsafe_forge_single(struct __kern_packet *, \
-	                            ((struct __kern_packet *)SK_PTR_ADDR(_ph)))
+	                            (SK_PTR_ADDR(_ph)))
 #define SK_PTR_KPKT(_pa)        ((struct __kern_packet *)(void *)(_pa))
 #define SK_PKT2PH(_pkt) \
     (SK_PTR_ENCODE((_pkt), METADATA_TYPE((_pkt)), METADATA_SUBTYPE((_pkt))))
@@ -862,15 +862,16 @@ extern pkt_copy_to_mbuf_t pkt_copy_multi_buflet_to_mbuf;
 extern void pkt_copypkt_sum(kern_packet_t, uint16_t, kern_packet_t,
     uint16_t, uint16_t, uint32_t *, boolean_t);
 extern uint32_t
-pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *dbaddr,
+    pkt_copyaddr_sum(kern_packet_t sph, uint16_t soff, uint8_t *__sized_by(len) dbaddr,
     uint32_t len, boolean_t do_csum, uint32_t initial_sum, boolean_t *odd_start);
 extern uint32_t pkt_sum(kern_packet_t, uint16_t, uint16_t);
 extern uint32_t pkt_mcopypkt_sum(mbuf_t, int, kern_packet_t, uint16_t,
     uint16_t, boolean_t);
 extern uint32_t
-m_copydata_sum(struct mbuf *m, int off, int len, void *vp, uint32_t initial_sum,
+    m_copydata_sum(struct mbuf *m, int off, int len, void *__sized_by(len) vp, uint32_t initial_sum,
     boolean_t *odd_start);
-extern void pkt_copy(void *src, void *dst, size_t len);
+extern void pkt_copy(void *__sized_by(len) src, void *__sized_by(len) dst,
+    size_t len);
 
 #if (DEVELOPMENT || DEBUG)
 extern uint32_t pkt_add_trailers(kern_packet_t, const uint32_t, const uint16_t);

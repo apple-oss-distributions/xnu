@@ -25,9 +25,12 @@
 #include <spawn.h>
 #include <spawn_private.h>
 #include <mach/mach_eventlink.h>
+#include <os/atomic_private.h>
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.mach_eventlink"),
     T_META_RUN_CONCURRENTLY(true));
+
+static int g_loop_iterations = 100000;
 
 static kern_return_t
 test_eventlink_create(mach_port_t *port_pair)
@@ -54,9 +57,8 @@ thread_create_for_test(void * (*function)(void *), void *arg)
 }
 
 static void *
-while1loop(void *arg)
+while1loop(__unused void *arg)
 {
-	arg = NULL;
 	while (1) {
 		;
 	}
@@ -256,13 +258,13 @@ test_eventlink_wait_then_signal_loop(void *arg)
 	T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_wait_until");
 	T_EXPECT_EQ(count, (uint64_t)1, "mach_eventlink_wait_until returned correct count value");
 
-	for (i = 1; i < 100; i++) {
+	for (i = 1; i < g_loop_iterations; i++) {
 		/* Signal wait the eventlink */
 		kr = mach_eventlink_signal_wait_until(eventlink_port, &count, 0, MELSW_OPTION_NONE,
 		    KERN_CLOCK_MACH_ABSOLUTE_TIME, 0);
 
-		T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_signal_wait_until");
-		T_EXPECT_EQ(count, (uint64_t)(i + 1), "mach_eventlink_wait_until returned correct count value");
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_signal_wait_until");
+		T_QUIET; T_EXPECT_EQ(count, (uint64_t)(i + 1), "mach_eventlink_wait_until returned correct count value");
 	}
 
 	/* Signal the eventlink to wakeup other side */
@@ -277,7 +279,7 @@ test_eventlink_wait_then_signal_loop(void *arg)
  *
  * Calls eventlink creates which returns a pair of eventlink port objects.
  */
-T_DECL(test_eventlink_create, "eventlink create test", T_META_ASROOT(YES))
+T_DECL(test_eventlink_create, "eventlink create test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -297,7 +299,7 @@ T_DECL(test_eventlink_create, "eventlink create test", T_META_ASROOT(YES))
  * Calls eventlink creates which returns a pair of eventlink port objects.
  * Calls eventlink destroy on eventlink port pair.
  */
-T_DECL(test_eventlink_destroy, "eventlink destroy test", T_META_ASROOT(YES))
+T_DECL(test_eventlink_destroy, "eventlink destroy test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -319,7 +321,7 @@ T_DECL(test_eventlink_destroy, "eventlink destroy test", T_META_ASROOT(YES))
  * Create eventlink object pair and associate threads to each side and then
  * disassociate threads and check for error conditions.
  */
-T_DECL(test_eventlink_associate, "eventlink associate test", T_META_ASROOT(YES))
+T_DECL(test_eventlink_associate, "eventlink associate test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -395,7 +397,7 @@ T_DECL(test_eventlink_associate, "eventlink associate test", T_META_ASROOT(YES))
  *
  * Create an eventlink object, associate threads and test eventlink wait with timeout.
  */
-T_DECL(test_eventlink_wait_timeout, "eventlink wait timeout test", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_timeout, "eventlink wait timeout test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -422,7 +424,7 @@ T_DECL(test_eventlink_wait_timeout, "eventlink wait timeout test", T_META_ASROOT
  *
  * Create an eventlink object, associate threads and test eventlink wait with no wait flag.
  */
-T_DECL(test_eventlink_wait_no_wait, "eventlink wait no wait test", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_no_wait, "eventlink wait no wait test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -446,7 +448,7 @@ T_DECL(test_eventlink_wait_no_wait, "eventlink wait no wait test", T_META_ASROOT
  *
  * Create an eventlink object, associate threads and destroy the port.
  */
-T_DECL(test_eventlink_wait_and_destroy, "eventlink wait and destroy", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_and_destroy, "eventlink wait and destroy", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -480,7 +482,7 @@ T_DECL(test_eventlink_wait_and_destroy, "eventlink wait and destroy", T_META_ASR
  *
  * Create an eventlink object, associate threads, wait and destroy the remote eventlink port.
  */
-T_DECL(test_eventlink_wait_and_destroy_remote, "eventlink wait and remote destroy", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_and_destroy_remote, "eventlink wait and remote destroy", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -513,7 +515,7 @@ T_DECL(test_eventlink_wait_and_destroy_remote, "eventlink wait and remote destro
  *
  * Create an eventlink object, associate threads, wait and deallocate the eventlink port.
  */
-T_DECL(test_eventlink_wait_and_deallocate, "eventlink wait and deallocate", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_and_deallocate, "eventlink wait and deallocate", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -541,7 +543,7 @@ T_DECL(test_eventlink_wait_and_deallocate, "eventlink wait and deallocate", T_ME
  *
  * Create an eventlink object, associate threads, wait and disassociate thread from the eventlink port.
  */
-T_DECL(test_eventlink_wait_and_disassociate, "eventlink wait and disassociate", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_and_disassociate, "eventlink wait and disassociate", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -571,7 +573,7 @@ T_DECL(test_eventlink_wait_and_disassociate, "eventlink wait and disassociate", 
  *
  * Create an eventlink object, associate threads and test wait signal.
  */
-T_DECL(test_eventlink_wait_and_signal, "eventlink wait and signal", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_and_signal, "eventlink wait and signal", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -606,7 +608,7 @@ T_DECL(test_eventlink_wait_and_signal, "eventlink wait and signal", T_META_ASROO
  *
  * Create an eventlink object, associate threads and test wait_signal.
  */
-T_DECL(test_eventlink_wait_signal, "eventlink wait_signal", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_signal, "eventlink wait_signal", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -646,7 +648,7 @@ T_DECL(test_eventlink_wait_signal, "eventlink wait_signal", T_META_ASROOT(YES))
  *
  * Create an eventlink object, associate threads and test wait_signal with no wait.
  */
-T_DECL(test_eventlink_wait_signal_no_wait, "eventlink wait_signal with no wait", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_signal_no_wait, "eventlink wait_signal with no wait", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -686,7 +688,7 @@ T_DECL(test_eventlink_wait_signal_no_wait, "eventlink wait_signal with no wait",
  *
  * Create an eventlink object, associate threads and test wait_signal with prepost.
  */
-T_DECL(test_eventlink_wait_signal_prepost, "eventlink wait_signal with prepost", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_signal_prepost, "eventlink wait_signal with prepost", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -726,7 +728,7 @@ T_DECL(test_eventlink_wait_signal_prepost, "eventlink wait_signal with prepost",
  *
  * Create an eventlink object, set associate on wait on one side and test wait_signal.
  */
-T_DECL(test_eventlink_wait_signal_associate_on_wait, "eventlink wait_signal associate on wait", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_signal_associate_on_wait, "eventlink wait_signal associate on wait", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -775,7 +777,7 @@ T_DECL(test_eventlink_wait_signal_associate_on_wait, "eventlink wait_signal asso
  *
  * Create an eventlink object, associate threads and test wait_signal in a loop.
  */
-T_DECL(test_eventlink_wait_signal_loop, "eventlink wait_signal in loop", T_META_ASROOT(YES))
+T_DECL(test_eventlink_wait_signal_loop, "eventlink wait_signal in loop", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_port_t port_pair[2];
@@ -796,15 +798,120 @@ T_DECL(test_eventlink_wait_signal_loop, "eventlink wait_signal in loop", T_META_
 	kr = mach_eventlink_associate(port_pair[1], self, 0, 0, 0, 0, MELA_OPTION_NONE);
 	T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_associate for object 2");
 
-	for (i = 0; i < 100; i++) {
+	for (i = 0; i < g_loop_iterations; i++) {
 		/* Wait on the eventlink with timeout */
 		kr = mach_eventlink_signal_wait_until(port_pair[1], &count, 0, MELSW_OPTION_NONE,
 		    KERN_CLOCK_MACH_ABSOLUTE_TIME, 0);
 
-		T_ASSERT_MACH_SUCCESS(kr, "main thread: mach_eventlink_signal_wait_until");
-		T_EXPECT_EQ(count, (uint64_t)(i + 1), "main thread: mach_eventlink_signal_wait_until returned correct count value");
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "main thread: mach_eventlink_signal_wait_until");
+		T_QUIET; T_EXPECT_EQ(count, (uint64_t)(i + 1), "main thread: mach_eventlink_signal_wait_until returned correct count value");
 	}
 
+	pthread_join(pthread, NULL);
+
+	mach_port_deallocate(mach_task_self(), port_pair[0]);
+	mach_port_deallocate(mach_task_self(), port_pair[1]);
+}
+
+
+static uint64_t
+nanos_to_abs(uint64_t nanos)
+{
+	static mach_timebase_info_data_t timebase_info;
+	mach_timebase_info(&timebase_info);
+	return nanos * timebase_info.denom / timebase_info.numer;
+}
+
+static const uint64_t DEFAULT_INTERVAL_NS = 15000000; // 15 ms
+
+static void
+set_realtime(pthread_t thread, uint64_t interval_nanos)
+{
+	kern_return_t kr;
+	thread_time_constraint_policy_data_t pol;
+
+	mach_port_t target_thread = pthread_mach_thread_np(thread);
+	T_QUIET; T_ASSERT_GT(target_thread, 0, "pthread_mach_thread_np");
+
+	/* 1s 100ms 10ms */
+	pol.period      = (uint32_t)nanos_to_abs(interval_nanos);
+	pol.constraint  = (uint32_t)nanos_to_abs(interval_nanos);
+	pol.computation = (uint32_t)nanos_to_abs(interval_nanos - 1000000); // 1 ms of leeway
+
+	pol.preemptible = 0; /* Ignored by OS */
+	kr = thread_policy_set(target_thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t) &pol,
+	    THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)");
+}
+
+
+static _Atomic bool suspend_resume_thread_stop = false;
+
+static void *
+test_suspend_resume_thread(void *arg)
+{
+	uint64_t count = 0;
+	mach_port_t suspend_resume_other_thread_port = (mach_port_t) (uintptr_t)arg;
+	kern_return_t kr1 = KERN_SUCCESS, kr2 = KERN_SUCCESS;
+
+	while (!os_atomic_load(&suspend_resume_thread_stop, relaxed) && kr1 == KERN_SUCCESS && kr2 == KERN_SUCCESS) {
+		kr1 = thread_suspend(suspend_resume_other_thread_port);
+		kr2 = thread_resume(suspend_resume_other_thread_port);
+		count++;
+	}
+
+	T_ASSERT_MACH_SUCCESS(kr1, "thread_suspend #%lld", count);
+	T_ASSERT_MACH_SUCCESS(kr2, "thread_resume #%lld", count);
+
+	return NULL;
+}
+
+/*
+ * Test 16: Test suspension of a thread in the middle of a wait-signal operation
+ * rdar://120761588 rdar://123887338
+ */
+T_DECL(test_eventlink_wait_signal_suspend_loop, "eventlink wait_signal + thread_suspend/resume in loop", T_META_ASROOT(YES))
+{
+	kern_return_t kr;
+	mach_port_t port_pair[2];
+	pthread_t pthread, suspend_thread;
+	mach_port_t self = mach_thread_self();
+	uint64_t count = 0;
+	int i;
+
+	/* Create an eventlink and associate threads to it */
+	kr = test_eventlink_create(port_pair);
+	if (kr != KERN_SUCCESS) {
+		return;
+	}
+
+	pthread = thread_create_for_test(test_eventlink_wait_then_signal_loop, (void *)(uintptr_t)port_pair[0]);
+	mach_port_t suspend_resume_other_thread_port = pthread_mach_thread_np(pthread);
+
+	/*
+	 * Threads must be RT to get direct handoff mode.
+	 */
+	set_realtime(pthread_self(), DEFAULT_INTERVAL_NS);
+	set_realtime(pthread, DEFAULT_INTERVAL_NS);
+
+	suspend_thread = thread_create_for_test(test_suspend_resume_thread, (void *)(uintptr_t)suspend_resume_other_thread_port);
+
+	/* Associate thread and wait_signal the eventlink */
+	kr = mach_eventlink_associate(port_pair[1], self, 0, 0, 0, 0, MELA_OPTION_NONE);
+	T_ASSERT_MACH_SUCCESS(kr, "mach_eventlink_associate for object 2");
+
+	for (i = 0; i < g_loop_iterations; i++) {
+		/* Wait on the eventlink with timeout */
+		kr = mach_eventlink_signal_wait_until(port_pair[1], &count, 0, MELSW_OPTION_NONE,
+		    KERN_CLOCK_MACH_ABSOLUTE_TIME, 0);
+
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "main thread: mach_eventlink_signal_wait_until");
+		T_QUIET; T_EXPECT_EQ(count, (uint64_t)(i + 1), "main thread: mach_eventlink_signal_wait_until returned correct count value");
+	}
+
+	os_atomic_store(&suspend_resume_thread_stop, true, relaxed);
+
+	pthread_join(suspend_thread, NULL);
 	pthread_join(pthread, NULL);
 
 	mach_port_deallocate(mach_task_self(), port_pair[0]);

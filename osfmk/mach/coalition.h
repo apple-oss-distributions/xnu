@@ -30,6 +30,7 @@
 #define _MACH_COALITION_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* code shared by userspace and xnu */
 
@@ -113,15 +114,15 @@ struct coalition_resource_usage {
 	uint64_t tasks_started;
 	uint64_t tasks_exited;
 	uint64_t time_nonempty;
-	uint64_t cpu_time;
+	uint64_t cpu_time; /* mach_absolute_time units */
 	uint64_t interrupt_wakeups;
 	uint64_t platform_idle_wakeups;
 	uint64_t bytesread;
 	uint64_t byteswritten;
-	uint64_t gpu_time;
-	uint64_t cpu_time_billed_to_me;
-	uint64_t cpu_time_billed_to_others;
-	uint64_t energy;
+	uint64_t gpu_time; /* nanoseconds */
+	uint64_t cpu_time_billed_to_me; /* mach_absolute_time units */
+	uint64_t cpu_time_billed_to_others; /* mach_absolute_time units */
+	uint64_t energy; /* nanojoules */
 	uint64_t logical_immediate_writes;
 	uint64_t logical_deferred_writes;
 	uint64_t logical_invalidated_writes;
@@ -130,9 +131,9 @@ struct coalition_resource_usage {
 	uint64_t logical_deferred_writes_to_external;
 	uint64_t logical_invalidated_writes_to_external;
 	uint64_t logical_metadata_writes_to_external;
-	uint64_t energy_billed_to_me;
-	uint64_t energy_billed_to_others;
-	uint64_t cpu_ptime;
+	uint64_t energy_billed_to_me; /* nanojoules */
+	uint64_t energy_billed_to_others; /* nanojoules */
+	uint64_t cpu_ptime; /* mach_absolute_time units */
 	uint64_t cpu_time_eqos_len;     /* Stores the number of thread QoS types */
 	uint64_t cpu_time_eqos[COALITION_NUM_THREAD_QOS_TYPES];
 	uint64_t cpu_instructions;
@@ -141,6 +142,13 @@ struct coalition_resource_usage {
 	uint64_t pm_writes;
 	uint64_t cpu_pinstructions;
 	uint64_t cpu_pcycles;
+	uint64_t conclave_mem;
+	uint64_t ane_mach_time; /* mach_absolute_time units */
+	uint64_t ane_energy_nj; /* nanojoules */
+	uint64_t phys_footprint;        /* Sum of instantaneous process phys_footprint */
+	uint64_t gpu_energy_nj; /* nanojoules that I did */
+	uint64_t gpu_energy_nj_billed_to_me; /* nanojoules that others did on my behalf */
+	uint64_t gpu_energy_nj_billed_to_others; /* nanojoules that I did on others' behalf */
 };
 
 #ifdef PRIVATE
@@ -167,6 +175,7 @@ struct coalinfo_debuginfo {
 	uint32_t focal_task_count;
 	uint32_t nonfocal_task_count;
 	uint32_t game_task_count;
+	uint32_t carplay_task_count;
 };
 
 /* coalition_ledger_set operations */
@@ -184,6 +193,7 @@ struct procinfo_coalinfo {
 #endif /* PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
+
 #if COALITION_DEBUG
 #define coal_dbg(fmt, ...) \
 	printf("%s: " fmt "\n", __func__, ## __VA_ARGS__)
@@ -191,6 +201,23 @@ struct procinfo_coalinfo {
 #define coal_dbg(fmt, ...)
 #endif
 
-#endif
+__options_decl(coalition_gpu_energy_t, uint32_t, {
+	CGE_SELF    = 0x1,
+	CGE_BILLED  = 0x2,
+	CGE_OTHERS  = 0x4,
+});
+
+extern bool coalition_add_to_gpu_energy(uint64_t coalition_id, coalition_gpu_energy_t which, uint64_t energy);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+#ifdef MACH_KERNEL_PRIVATE
+
+typedef struct coalition_pend_token {
+	uint32_t        cpt_update_timers      :1,
+	    cpt_update_j_coal_tasks :1;
+} *coalition_pend_token_t;
+
+#endif /* MACH_KERNEL_PRIVATE */
 
 #endif /* _MACH_COALITION_H_ */

@@ -104,7 +104,7 @@ get_host_info(struct all_host_info* data, host_t self, int iter)
 }
 
 T_DECL(test_host_statistics, "testing rate limit for host_statistics",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_NOT_PREFERRED)
 {
 	unsigned long long start, end, window;
 	int retry = 0;

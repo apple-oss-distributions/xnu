@@ -30,11 +30,14 @@
 #ifndef _KERN_SMR_HASH_H_
 #define _KERN_SMR_HASH_H_
 
-#include <kern/counter.h>
 #include <kern/lock_mtx.h>
-#include <kern/lock_ptr.h>
 #include <kern/smr.h>
 #include <os/hash.h>
+#include <vm/vm_memtag.h>
+#if XNU_KERNEL_PRIVATE
+#include <kern/lock_ptr.h>
+#include <kern/counter.h>
+#endif
 
 __BEGIN_DECLS
 
@@ -415,10 +418,31 @@ struct smr_hash {
 #pragma mark SMR hash tables: initialization and accessors
 
 /*!
+ * @function smr_hash_init_empty()
+ *
+ * @brief
+ * Initializes a hash to be empty.
+ *
+ * @discussion
+ * No entry can be added to this hash, but lookup functions
+ * will return sensible results.
+ *
+ * @c smr_hash_init() must be used again if the hash is to be used for
+ * insertions, which is safe with respect to concurrent readers.
+ *
+ * Calling @c smr_hash_destroy() on an empty-initialized hash is legal.
+ *
+ * Whether the hash table is empty-initialized can be tested with
+ * @c smr_hash_is_empty_initialized().
+ */
+extern void smr_hash_init_empty(
+	struct smr_hash        *smrh);
+
+/*!
  * @function smr_hash_init()
  *
  * @brief
- * Initiailizes a hash with the specified size.
+ * Initializes a hash with the specified size.
  *
  * @discussion
  * This function never fails but requires for `size` to be
@@ -440,6 +464,16 @@ extern void smr_hash_init(
  * @c smr_hash_serialized_clear() must be called first if needed.
  */
 extern void smr_hash_destroy(
+	struct smr_hash        *smrh);
+
+/*!
+ * @function smr_hash_is_empty_initialized()
+ *
+ * @brief
+ * Returns whether the smr hash is empty as a result of calling
+ * smr_hash_init_empty().
+ */
+extern bool smr_hash_is_empty_initialized(
 	struct smr_hash        *smrh);
 
 /*!
@@ -468,6 +502,9 @@ smr_hash_array_decode(const struct smr_hash *smrh)
 
 	array.smrh_order = (uint16_t)(ptr >> SMRH_ARRAY_ORDER_SHIFT);
 	ptr |= SMRH_ARRAY_ORDER_MASK;
+#if CONFIG_KERNEL_TAGGING
+	ptr = vm_memtag_fixup_ptr(ptr);
+#endif /* CONFIG_KERNEL_TAGGING */
 	array.smrh_array = (struct smrq_slist_head *)ptr;
 
 	return array;
@@ -490,6 +527,23 @@ static inline unsigned long
 smr_hash_size(const struct smr_hash *smrh)
 {
 	return smr_hash_size(smr_hash_array_decode(smrh));
+}
+
+/*!
+ * @function smr_hash_serialized_count()
+ *
+ * @brief
+ * Returns the number of elements in the hash table.
+ *
+ * @discussion
+ * It can be called without serialization held,
+ * but the value is then racy.
+ */
+__attribute__((always_inline))
+static inline unsigned long
+smr_hash_serialized_count(const struct smr_hash *smrh)
+{
+	return smrh->smrh_count;
 }
 
 
@@ -534,11 +588,12 @@ smr_hash_size(const struct smr_hash *smrh)
  */
 #define smr_hash_contains(smrh, key, traits)  ({ \
 	smrh_traits_t __smrht = &(traits)->smrht;                               \
-	const struct smr_hash *__h = (smrh);                                    \
+	struct smrq_slist_head *__hd;                                           \
 	bool __contains;                                                        \
                                                                                 \
 	smr_enter(__smrht->domain);                                             \
-	__contains = (__smr_hash_entered_find(__h, key, __smrht) != NULL);      \
+	__hd = __smr_hash_bucket(smrh, key, __smrht);                           \
+	__contains = (__smr_hash_entered_find(__hd, key, __smrht) != NULL);     \
 	smr_leave(__smrht->domain);                                             \
                                                                                 \
 	__contains;                                                             \
@@ -872,6 +927,7 @@ smr_hash_serialized_should_grow(
  * to concurrent deletions) or elements twice (due to concurrent resizes).
  */
 struct smr_hash_iterator {
+	struct smr_hash        *smrh;
 	struct smrq_slist_head *hd_next;
 	struct smrq_slist_head *hd_last;
 	__smrq_slink_t         *prev;
@@ -892,6 +948,7 @@ smr_hash_iter_begin(struct smr_hash *smrh)
 {
 	struct smr_hash_array array = smr_hash_array_decode(smrh);
 	struct smr_hash_iterator it = {
+		.smrh    = smrh,
 		.hd_next = array.smrh_array,
 		.hd_last = array.smrh_array + smr_hash_size(array),
 	};
@@ -964,6 +1021,7 @@ static inline void
 smr_hash_iter_serialized_erase(struct smr_hash_iterator *it)
 {
 	it->link = smr_serialized_load(&it->link->next);
+	it->smrh->smrh_count--;
 	smr_serialized_store_relaxed(it->prev, it->link);
 
 	while (it->link == NULL) {
@@ -971,7 +1029,7 @@ smr_hash_iter_serialized_erase(struct smr_hash_iterator *it)
 			break;
 		}
 		it->prev = &it->hd_next->first;
-		it->link = smr_entered_load(it->prev);
+		it->link = smr_serialized_load(it->prev);
 		it->hd_next++;
 	}
 }
@@ -1002,6 +1060,7 @@ smr_hash_iter_serialized_erase(struct smr_hash_iterator *it)
 	    smr_hash_iter_advance(&__it))
 
 
+#if XNU_KERNEL_PRIVATE
 #pragma mark - SMR scalable hash tables
 
 
@@ -1534,6 +1593,7 @@ typedef struct {
 	__smr_shash_entered_mut_abort(cursor)
 
 
+#endif /* XNU_KERNEL_PRIVATE */
 #pragma mark - implementation details
 #pragma mark SMR hash traits
 
@@ -1673,6 +1733,8 @@ extern kern_return_t __smr_hash_grow_and_unlock(
 	lck_mtx_t              *lock,
 	smrh_traits_t           smrht);
 
+#if XNU_KERNEL_PRIVATE
+#pragma GCC visibility push(hidden)
 
 #pragma mark SMR scalable hash tables
 
@@ -1858,6 +1920,9 @@ extern void __smr_shash_entered_mut_replace(
 
 extern void __smr_shash_entered_mut_abort(
 	smr_shash_mut_cursor_t  cursor);
+
+#pragma GCC visibility pop
+#endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS
 

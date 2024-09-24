@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -146,9 +146,9 @@ static void chksm_update(mbuf_t data);
 static void
 pkt_mnglr_rw_lock_exclusive(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void *__single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_lock_exclusive(lck);
 
@@ -160,9 +160,9 @@ pkt_mnglr_rw_lock_exclusive(lck_rw_t *lck)
 static void
 pkt_mnglr_rw_unlock_exclusive(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void *__single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_unlock_exclusive(lck);
 
@@ -174,9 +174,9 @@ pkt_mnglr_rw_unlock_exclusive(lck_rw_t *lck)
 static void
 pkt_mnglr_rw_lock_shared(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void *__single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_lock_shared(lck);
 
@@ -187,9 +187,9 @@ pkt_mnglr_rw_lock_shared(lck_rw_t *lck)
 static void
 pkt_mnglr_rw_unlock_shared(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void *__single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_unlock_shared(lck);
 
@@ -340,8 +340,8 @@ pkt_mnglr_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 
 	pkt_mnglr_rw_lock_shared(&pkt_mnglr_lck_rw);
 
-	if (kcunit > MAX_PACKET_MANGLER) {
-		PKT_MNGLR_LOG(LOG_ERR, "kcunit %u > MAX_PACKET_MANGLER (%d)",
+	if (kcunit > MAX_PACKET_MANGLER || kcunit == 0) {
+		PKT_MNGLR_LOG(LOG_ERR, "kcunit %u > MAX_PACKET_MANGLER (%d) || kcunit == 0",
 		    kcunit, MAX_PACKET_MANGLER);
 		error = EINVAL;
 		goto done;
@@ -1043,7 +1043,7 @@ chksm_update(mbuf_t data)
 	struct tcphdr *tcp;
 	errno_t err;
 
-	unsigned char *ptr = (unsigned char *)mbuf_data(data);
+	unsigned char *ptr = mtod(data, unsigned char *);
 	struct ip *ip = (struct ip *)(void *)ptr;
 	if (ip->ip_v != 4) {
 		return;

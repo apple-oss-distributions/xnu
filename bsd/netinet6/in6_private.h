@@ -230,13 +230,13 @@ extern struct lltable * in6_lltattach(struct ifnet *ifp);
 extern uint16_t in6_pseudo(const struct in6_addr *, const struct in6_addr *,
     uint32_t);
 extern u_int16_t inet6_cksum(struct mbuf *, uint32_t, uint32_t, uint32_t);
-extern u_int16_t inet6_cksum_buffer(const uint8_t *, uint32_t, uint32_t,
-    uint32_t);
+extern u_int16_t inet6_cksum_buffer(const uint8_t * __sized_by(len)buffer, uint32_t,
+    uint32_t, uint32_t, uint32_t len);
 
 #define in6_cksum(_m, _n, _o, _l)                       \
     inet6_cksum(_m, _n, _o, _l)
-#define in6_cksum_buffer(_b, _n, _o, _l)                \
-    inet6_cksum_buffer(_b, _n, _o, _l)
+#define in6_cksum_buffer(_b, _n, _o, _l, _t)            \
+    inet6_cksum_buffer(_b, _n, _o, _l, _t)
 
 extern int in6_addrscope(struct in6_addr *);
 extern struct in6_ifaddr *in6_ifawithscope(struct ifnet *, struct in6_addr *);
@@ -294,7 +294,7 @@ struct in6_event2kev {
 	uint32_t                in6_event_kev_code;
 	const char              *in6_event_str;
 };
-extern struct in6_event2kev in6_event2kev_array[];
+extern struct in6_event2kev in6_event2kev_array[IN6_EVENT_MAX];
 extern void in6_eventhdlr_callback(struct eventhandler_entry_arg, in6_evhdlr_code_t,
     struct ifnet *, struct in6_addr *, uint32_t);
 extern void in6_event_enqueue_nwk_wq_entry(in6_evhdlr_code_t,
@@ -303,6 +303,8 @@ extern void in6_event_enqueue_nwk_wq_entry(in6_evhdlr_code_t,
 typedef void (*in6_event_fn) (struct eventhandler_entry_arg, in6_evhdlr_code_t,
     struct ifnet *, struct in6_addr *, uint32_t);
 EVENTHANDLER_DECLARE(in6_event, in6_event_fn);
+
+extern const char *in6_evhdlr_code2str(in6_evhdlr_code_t);
 #endif /* BSD_KERNEL_PRIVATE */
 
 /* CLAT46 events */
@@ -328,6 +330,8 @@ extern void in6_clat46_event_enqueue_nwk_wq_entry(in6_clat46_evhdlr_code_t,
 typedef void (*in6_clat46_event_fn) (struct eventhandler_entry_arg, in6_clat46_evhdlr_code_t,
     pid_t, uuid_t);
 EVENTHANDLER_DECLARE(in6_clat46_event, in6_clat46_event_fn);
+
+extern const char* in6_clat46_evhdlr_code2str(enum in6_clat46_evhdlr_code_t);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE

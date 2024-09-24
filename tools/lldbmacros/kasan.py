@@ -575,25 +575,25 @@ class AbstractKasan(object, metaclass=ABCMeta):
         if cmd in ['a2s', 'toshadow', 'fromaddr', 'fromaddress']:
             if not args:
                 raise ArgumentError("Missing address argument")
-            self.to_shadow(int(args[0], 0))
+            self.to_shadow(ArgumentStringToInt(args[0]))
         elif cmd in ['s2a', 'toaddr', 'toaddress', 'fromshadow']:
             if not args:
                 raise ArgumentError("Missing address argument")
-            self.from_shadow(int(args[0], 0))
+            self.from_shadow(ArgumentStringToInt(args[0]))
         elif cmd == 'shadow':
             if not args:
                 raise ArgumentError("Missing address argument")
-            self.shadow(int(args[0], 0), int(opts.get("-C", 1)))
+            self.shadow(ArgumentStringToInt(args[0]), int(opts.get("-C", 1)))
         elif cmd == 'whatis':
             if not args:
                 raise ArgumentError("Missing address argument")
-            self.whatis(int(args[0], 0))
+            self.whatis(ArgumentStringToInt(args[0]))
         elif cmd in ['alloc', 'heap']:
             if not args:
                 raise ArgumentError("Missing address argument")
-            self.heap(int(args[0], 0))
+            self.heap(ArgumentStringToInt(args[0]))
         elif cmd == "quarantine":
-            addrs = set(int(arg, base=16) for arg in args) if args else None
+            addrs = set(ArgumentStringToInt(arg) for arg in args) if args else None
             count = int(opts.get("-C")) if "-C" in opts else None
             if addrs and count:
                 raise ArgumentError(
@@ -749,17 +749,17 @@ class ClassicKasan(AbstractKasan):
         return ClassicKasan(shadow_map, mo_provider)
 
     def __init__(self, shadow_map, mo_provider):
-        super(ClassicKasan, self).__init__(
+        super().__init__(
             "kasan-classic", shadow_map, mo_provider)
 
     def from_shadow(self, saddr):
-        super(ClassicKasan, self).from_shadow(saddr)
+        super().from_shadow(saddr)
 
     def to_shadow(self, addr):
-        super(ClassicKasan, self).to_shadow(addr)
+        super().to_shadow(addr)
 
     def shadow(self, addr, line_count):
-        super(ClassicKasan, self).shadow(addr, line_count)
+        super().shadow(addr, line_count)
 
     def whatis(self, addr):
         mo = self._mo_provider.lookup(addr & ~0x7)
@@ -862,17 +862,17 @@ class MTESan(AbstractKasan):
         return MTESan(shadow_map, mo_provider)
 
     def __init__(self, shadow_map, mo_provider):
-        super(MTESan, self).__init__("kasan-tbi", shadow_map, mo_provider)
+        super().__init__("kasan-tbi", shadow_map, mo_provider)
         pass
 
     def from_shadow(self, saddr):
-        super(MTESan, self).from_shadow(saddr)
+        super().from_shadow(saddr)
 
     def to_shadow(self, addr):
-        super(MTESan, self).to_shadow(addr)
+        super().to_shadow(addr)
 
     def shadow(self, addr, line_count):
-        super(MTESan, self).shadow(addr, line_count)
+        super().shadow(addr, line_count)
 
     def whatis(self, addr):
         sme = self._sm.resolve(addr)

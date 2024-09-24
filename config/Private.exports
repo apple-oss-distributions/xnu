@@ -23,6 +23,13 @@ __ZTV6OSKext
 __ZN10IOMachPort10gMetaClassE
 __ZN10IOMachPort10superClassE
 __ZTV10IOMachPort
+__ZN9IOService12exclaveStartEPS_PPNS_19IOExclaveProxyStateE
+__ZN9IOService15exclaveEndpointEPNS_19IOExclaveProxyStateE
+__ZN9IOService32exclaveAsyncNotificationRegisterEPNS_19IOExclaveProxyStateEP22IOInterruptEventSourcePj
+__ZN9IOService37exclaveRegisterANEUpcallSetPowerStateEPNS_19IOExclaveProxyStateEU13block_pointerFbjE
+__ZN9IOService34exclaveRegisterANEUpcallWorkSubmitEPNS_19IOExclaveProxyStateEU13block_pointerFbyyyE
+__ZN9IOService33exclaveRegisterANEUpcallWorkBeginEPNS_19IOExclaveProxyStateEU13block_pointerFbyyyE
+__ZN9IOService31exclaveRegisterANEUpcallWorkEndEPNS_19IOExclaveProxyStateEU13block_pointerFbyyyE
 __ZN11IOPMRequest10gMetaClassE
 __ZN11IOPMRequest10superClassE
 __ZTV11IOPMRequest
@@ -281,6 +288,7 @@ _bufattr_setcpoff
 _bufattr_setcpx
 _bufattr_throttled
 _bufattr_willverify
+_cache_lookup_ext
 _cdevsw
 _cdevsw_setkqueueok
 _clalloc
@@ -292,6 +300,7 @@ _convert_port_to_task_suspension_token:_convert_port_to_task_suspension_token_ex
 _convert_task_suspension_token_to_port:_convert_task_suspension_token_to_port_external
 _convert_task_to_port:_convert_task_to_port_external
 _convert_task_read_to_port:_convert_task_read_to_port_external
+_complete_security_boot_mode
 _compression_interface_register
 _cp_is_valid_class
 _cp_key_store_action
@@ -350,6 +359,7 @@ _csblob_os_entitlements_set
 _csblob_os_entitlements_copy
 _csblob_os_entitlements_get
 _csblob_find_blob_bytes
+_csblob_register_profile
 _csblob_register_profile_uuid
 _csblob_get_addr
 _csblob_get_base_offset
@@ -394,12 +404,14 @@ _csm_resolve_os_entitlements_from_proc
 _ctl_enqueuembuf_list
 _ctl_id_by_name
 _ctl_name_by_id
+_current_energy_id
 _developer_mode_state
 _disable_developer_mode
 _enable_developer_mode
 _get_lockdown_mode_state
 _enable_lockdown_mode
 _disable_lockdown_mode
+_energy_id_report_energy
 _exclaves_get_status
 _exclaves_register_xrt_hosted_callbacks
 _exclaves_sensor_start
@@ -419,6 +431,7 @@ _panic_with_data
  _ext_paniclog_claim_buffer
 _fp_get_pipe_id
 _garbage_collect_provisioning_profiles
+_generate_file_permissions_guard_exception
 _get_aiotask
 _get_system_inshutdown
 _gpu_accumulate_time
@@ -776,14 +789,18 @@ _mbuf_pkt_new_flow
 _mbuf_last_pkt
 _mbuf_get_keepalive_flag
 _mbuf_set_keepalive_flag
+_mbuf_get_wake_packet_flag
+_mbuf_set_wake_packet_flag
 _mcl_to_paddr
 _ml_io_increase_timeouts
+_ml_io_increase_timeouts_phys
 _ml_io_read
 _ml_io_read16
 _ml_io_read32
 _ml_io_read64
 _ml_io_read8
 _ml_io_reset_timeouts
+_ml_io_reset_timeouts_phys
 _ml_io_write
 _ml_io_write16
 _ml_io_write32
@@ -816,6 +833,7 @@ _os_reason_set_description_data
 _os_variant_has_internal_diagnostics
 _panic_active
 _panic_with_options
+_panic_with_options_and_initiator
 _persona_find
 _persona_find_by_type
 _persona_get
@@ -856,11 +874,11 @@ _pmap_cs_configuration
 _port_name_to_task:_port_name_to_task_external
 _port_name_to_thread
 _post_sys_powersource
-_proc_allow_nocache_write_fs_blksize
 _proc_best_name
 _proc_csflags
 _proc_fdlist
 _proc_get_filter_message_flag
+_proc_get_syscall_filter_mask
 _proc_get_syscall_filter_mask_size
 _proc_getexecutableoffset
 _proc_getexecutablevnode
@@ -919,6 +937,8 @@ _q_to_b
 _register_and_init_prng
 _register_crypto_functions
 _register_decmpfs_decompressor
+_restricted_execution_mode_enable
+_restricted_execution_mode_state
 _rootdev
 _rootvp
 _rsr_bump_version
@@ -929,6 +949,7 @@ _sbappendaddr
 _sbappendrecord
 _sbflush
 _sbspace
+_secure_channel_shared_page
 _sflt_register_internal
 _soabort
 _socantrcvmore
@@ -961,7 +982,9 @@ _sosend
 _static_trust_cache_capabilities
 _strnstr
 _sysdiagnose_notify_user
+_task_find_region_details
 _task_get_suspend_stats
+_task_id_token_to_energy_id
 _task_is_driver
 _termioschars
 _thread_call_allocate_with_priority
@@ -984,6 +1007,7 @@ _throttle_info_release
 _throttle_info_reset_window
 _throttle_info_update
 _throttle_info_update_by_mask
+_throttle_info_update_with_type
 _throttle_lowpri_io
 _throttle_lowpri_io_will_be_throttled
 _throttle_lowpri_window
@@ -1013,6 +1037,7 @@ _ttymodem
 _ttyselect
 _ttysleep
 _UBCINFOEXISTS
+_update_csm_device_state
 _utf8_normalizeOptCaseFoldAndHash
 _utf8_normalizeOptCaseFoldAndCompare
 _utf8_normalizeOptCaseFold
@@ -1026,7 +1051,6 @@ _untimeout
 _utun_ctl_disable_crypto_dtls
 _utun_ctl_register_dtls
 _utun_pkt_dtls_input
-_vfs_context_allow_fs_blksize_nocache_write
 _vfs_context_bind
 _vfs_context_create_with_proc
 _vfs_context_task
@@ -1036,6 +1060,8 @@ _vfs_context_dataless_materialization_is_prevented
 _vfs_context_get_special_port
 _vfs_context_set_special_port
 _vfs_context_is_dataless_manipulator
+_vfs_context_skip_mtime_update
+_vfs_setdevvp
 _vfs_devvp
 _vfs_get_thread_fs_private
 _vfs_getattr
@@ -1054,7 +1080,6 @@ _vfs_vnodecovered
 _vm_fault:_vm_fault_external
 _vm_map_copy_discard
 _vm_map_copyin
-_vm_map_copyin_common
 _vm_map_copyout
 _vm_map_create:_vm_map_create_external
 _vm_map_page_mask
@@ -1062,7 +1087,6 @@ _vm_map_page_shift
 _vm_map_page_size
 _vm_map_round_page_mask
 _vm_map_trunc_page_mask
-_vm_map_wire_and_extract:_vm_map_wire_and_extract_external
 _vm_page_wire_count
 _vnode_hold
 _vnode_drop
@@ -1073,6 +1097,7 @@ _vn_getpath_fsenter_with_parent
 _vn_getpath_no_firmlink
 _vnode_getfirmlink
 _vn_searchfs_inappropriate_name
+_vnode_cmp_chrtoblk
 _vnode_create_empty
 _vnode_create_ext
 _vnode_initialize
@@ -1086,9 +1111,11 @@ _vnode_clearnoflush
 _vnode_isnoflush
 _vnode_is_rsr
 _vnode_getbackingvnode
+_vnode_rdadvise
 _vnode_setasnamedstream
 _vnode_setasfirmlink
 _vnode_writecount
+_vnode_getwithref_noblock
 _vnop_compound_mkdir_desc
 _vnop_compound_open_desc
 _vnop_compound_remove_desc
@@ -1156,12 +1183,14 @@ _vfs_setmntsystem
 _vfs_setmntsystemdata
 _vfs_setmntswap
 _vfs_update_vfsstat
+_apfs_smr:__vfs_smr
 _vn_pathconf
 _vnode_cleardirty
 _vnode_clearfastdevicecandidate
 _vnode_getname_printable
 _vnode_getfromfd
 _vnode_parent
+_vnode_getparent_and_name
 _vnode_isautocandidate
 _vnode_isfastdevicecandidate
 _vnode_putname_printable
@@ -1234,6 +1263,7 @@ _lck_rw_sleep_with_inheritor
 _wakeup_one_with_inheritor
 _wakeup_all_with_inheritor
 _change_sleep_inheritor
+_lck_rw_assert
 _lck_rw_gate_init
 _lck_rw_gate_destroy
 _lck_rw_gate_alloc_init
@@ -1266,12 +1296,19 @@ _kern_apfs_reflock_try_lock
 _kern_apfs_reflock_wait_for_unlock
 _kern_apfs_reflock_unlock
 _kern_apfs_reflock_read_ref
+___smr_hash_grow_and_unlock
+___smr_hash_serialized_clear
+___smr_hash_shrink_and_unlock
 _smr_barrier
 _smr_call
 _smr_domain_create
 _smr_domain_free
 _smr_enter
 _smr_entered
+_smr_hash_destroy
+_smr_hash_init
+_smr_hash_init_empty
+_smr_hash_is_empty_initialized
 _smr_leave
 _smr_synchronize
 _Block_size
@@ -1299,6 +1336,7 @@ _mac_labelzone_free
 _mac_iokit_check_hid_control
 _mac_mount_check_snapshot_mount
 _mac_vnode_check_open
+_mac_vnode_check_setflags
 _mac_vnode_check_trigger_resolve
 _sbuf_cat
 _sbuf_data

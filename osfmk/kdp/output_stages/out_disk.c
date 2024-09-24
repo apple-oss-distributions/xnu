@@ -34,6 +34,7 @@
 #include <kdp/processor_core.h>
 #include <IOKit/IOPolledInterface.h>
 #include <IOKit/IOBSD.h>
+#include <vm/vm_kern_xnu.h>
 
 struct disk_stage_data {
 	bool last_operation_was_write;

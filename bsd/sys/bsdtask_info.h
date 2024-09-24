@@ -105,7 +105,6 @@ struct proc_regioninfo_internal {
 extern uint32_t vnode_vid(void *vp);
 
 #if CONFIG_IOSCHED
-kern_return_t vnode_pager_get_object_devvp(memory_object_t mem_obj, uintptr_t *devvp);
 extern struct vnode *vnode_mountdevvp(struct vnode *);
 #endif
 
@@ -115,7 +114,6 @@ extern boolean_t vnode_isonexternalstorage(void *vp);
 
 extern int fill_procregioninfo(task_t t, uint64_t arg, struct proc_regioninfo_internal *pinfo, uintptr_t *vp, uint32_t *vid);
 extern int fill_procregioninfo_onlymappedvnodes(task_t t, uint64_t arg, struct proc_regioninfo_internal *pinfo, uintptr_t *vp, uint32_t *vid);
-extern int find_region_details(task_t task, vm_map_offset_t offset, uintptr_t *vnodeaddr, uint32_t *vid, uint64_t *start, uint64_t *len);
 void fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo);
 int fill_taskthreadinfo(task_t task, uint64_t thaddr, bool thuniqueid, struct proc_threadinfo_internal * ptinfo, void *, int *);
 int fill_taskthreadlist(task_t task, void * buffer, int thcount, bool thuniqueid);

@@ -89,7 +89,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_nullptr, "bounded_ptr.ctor.nullptr") {
+T_DECL(ctor_nullptr, "bounded_ptr.ctor.nullptr", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 	tests<T volatile>();

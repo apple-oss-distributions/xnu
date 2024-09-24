@@ -227,17 +227,17 @@ extern boolean_t ipc_importance_check_circularity(ipc_port_t port, ipc_port_t de
 /* prepare importance attributes for sending */
 extern boolean_t ipc_importance_send(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option);
+	mach_msg_option64_t     option);
 
 /* receive importance attributes from message */
 extern void ipc_importance_receive(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option);
+	mach_msg_option64_t     option);
 
 /* undo receive of importance attributes from message */
 extern void ipc_importance_unreceive(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option);
+	mach_msg_option64_t     option);
 
 /* clean importance attributes out of destroyed message */
 extern void ipc_importance_clean(ipc_kmsg_t kmsg);

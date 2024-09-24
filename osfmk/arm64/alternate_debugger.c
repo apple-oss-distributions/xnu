@@ -63,8 +63,8 @@
 #include <kern/cpu_data.h>
 #include <arm/pmap.h>
 #include <pexpert/pexpert.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <libkern/version.h>
 
 void kprintf(const char *fmt, ...);

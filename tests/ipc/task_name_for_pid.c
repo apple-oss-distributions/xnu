@@ -35,7 +35,8 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("IPC"),
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED);
 
 T_DECL(task_name_for_pid_entitlement, "Test that task_name_for_pid suceeds with entitlement",
     T_META_ASROOT(false),

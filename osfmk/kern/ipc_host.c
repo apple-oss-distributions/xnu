@@ -505,39 +505,9 @@ host_set_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (exception_mask & ~EXC_MASK_VALID) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (IP_VALID(new_port)) {
-		switch (new_behavior & ~MACH_EXCEPTION_MASK) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-		case EXCEPTION_IDENTITY_PROTECTED:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-
-	/*
-	 * Check the validity of the thread_state_flavor by calling the
-	 * VALID_THREAD_STATE_FLAVOR architecture dependent macro defined in
-	 * osfmk/mach/ARCHITECTURE/thread_status.h
-	 */
-	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED ||
-	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
-	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (!set_exception_behavior_allowed(new_port, new_behavior, NULL, exception_mask, "host")) {
-		return KERN_NO_ACCESS;
+	kern_return_t kr = set_exception_ports_validation(NULL, exception_mask, new_port, new_behavior, new_flavor, false);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
 #if CONFIG_MACF
@@ -709,34 +679,9 @@ host_swap_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (exception_mask & ~EXC_MASK_VALID) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (IP_VALID(new_port)) {
-		switch (new_behavior & ~MACH_EXCEPTION_MASK) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-		case EXCEPTION_IDENTITY_PROTECTED:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-
-	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED ||
-	    (new_behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED))
-	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (!set_exception_behavior_allowed(new_port, new_behavior, NULL, exception_mask, "host")) {
-		return KERN_NO_ACCESS;
+	kern_return_t kr = set_exception_ports_validation(NULL, exception_mask, new_port, new_behavior, new_flavor, false);
+	if (kr != KERN_SUCCESS) {
+		return kr;
 	}
 
 #if CONFIG_MACF

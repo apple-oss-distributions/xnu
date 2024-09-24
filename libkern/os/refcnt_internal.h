@@ -203,6 +203,16 @@ os_ref_get_count(struct os_refcnt *rc)
 	return os_ref_get_count_internal(&rc->ref_count);
 }
 
+#if !OS_REFCNT_DEBUG
+#define os_pcpu_ref_init(ref, grp)              (os_pcpu_ref_init)(ref, NULL)
+#define os_pcpu_ref_destroy(ref, grp)           (os_pcpu_ref_destroy)(ref, NULL)
+#define os_pcpu_ref_kill(ref, grp)              (os_pcpu_ref_kill)(ref, NULL)
+#define os_pcpu_ref_retain(ref, grp)            (os_pcpu_ref_retain)(ref, NULL)
+#define os_pcpu_ref_retain_try(ref, grp)        (os_pcpu_ref_retain_try)(ref, NULL)
+#define os_pcpu_ref_release(ref, grp)           (os_pcpu_ref_release)(ref, NULL)
+#define os_pcpu_ref_release_live(ref, grp)      (os_pcpu_ref_release_live)(ref, NULL)
+#endif
+
 #if XNU_KERNEL_PRIVATE
 #pragma GCC visibility push(hidden)
 

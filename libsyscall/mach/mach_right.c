@@ -29,6 +29,7 @@
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
 #include <mach/mach_right.h>
+#include <mach/mach_right_private.h>
 
 
 #pragma mark Utilities
@@ -55,6 +56,12 @@ mach_right_recv_construct(mach_right_flags_t flags,
 
 	if (flags & MACH_RIGHT_RECV_FLAG_UNGUARDED) {
 		opts.flags &= (~MPO_CONTEXT_AS_GUARD);
+	}
+	if (flags & MACH_RIGHT_RECV_FLAG_STRICT) {
+		opts.flags |= MPO_STRICT;
+	}
+	if (flags & MACH_RIGHT_RECV_FLAG_IMMOVABLE) {
+		opts.flags |= MPO_IMMOVABLE_RECEIVE;
 	}
 	if (sr) {
 		opts.flags |= MPO_INSERT_SEND_RIGHT;

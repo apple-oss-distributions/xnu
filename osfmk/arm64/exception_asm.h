@@ -128,8 +128,8 @@
 /*
  * SPILL_REGISTERS
  *
- * Spills the current set of registers (excluding x0, x1, sp) to the specified
- * save area.
+ * Spills the current set of registers (excluding x0, x1, sp as well as x2, x3
+ * in KERNEL_MODE) to the specified save area.
  *
  * On CPUs with PAC, the kernel "A" keys are used to create a thread signature.
  * These keys are deliberately kept loaded into the CPU for later kernel use.
@@ -142,11 +142,36 @@
 #define KERNEL_MODE 0
 #define HIBERNATE_MODE 1
 
-#define ADD_THREAD_SIGNATURE 0
-#define POISON_THREAD_SIGNATURE 1
+/** When set, the thread will be given an invalid thread signature */
+#define SPILL_REGISTERS_OPTION_POISON_THREAD_SIGNATURE_SHIFT	(0)
+#define SPILL_REGISTERS_OPTION_POISON_THREAD_SIGNATURE \
+	(1 << SPILL_REGISTERS_OPTION_POISON_THREAD_SIGNATURE_SHIFT)
+/** When set, ELR and FAR will not be spilled */
+#define SPILL_REGISTERS_OPTION_DONT_SPILL_ELR_FAR_SHIFT			(1)
+#define SPILL_REGISTERS_OPTION_DONT_SPILL_ELR_FAR \
+	(1 << SPILL_REGISTERS_OPTION_DONT_SPILL_ELR_FAR_SHIFT)
 
-.macro SPILL_REGISTERS	mode, signing_mode = ADD_THREAD_SIGNATURE
-	stp		x2, x3, [x0, SS64_X2]                                   // Save remaining GPRs
+#define FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION 0
+#if CONFIG_SPTM
+#undef FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION
+#define FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION \
+	(SPILL_REGISTERS_OPTION_DONT_SPILL_ELR_FAR)
+#endif /* CONFIG_SPTM */
+
+#define FLEH_DISPATCH64_OPTION_FATAL_EXCEPTION \
+	(SPILL_REGISTERS_OPTION_POISON_THREAD_SIGNATURE)
+
+#define FLEH_DISPATCH64_OPTION_FATAL_SYNC_EXCEPTION \
+	(FLEH_DISPATCH64_OPTION_FATAL_EXCEPTION | \
+	 FLEH_DISPATCH64_OPTION_SYNC_EXCEPTION)
+
+#define FLEH_DISPATCH64_OPTION_NONE 0
+
+.macro SPILL_REGISTERS	mode options_register=
+	/* Spill remaining GPRs */
+	.if \mode != KERNEL_MODE
+	stp		x2, x3, [x0, SS64_X2]
+	.endif
 	stp		x4, x5, [x0, SS64_X4]
 	stp		x6, x7, [x0, SS64_X6]
 	stp		x8, x9, [x0, SS64_X8]
@@ -191,10 +216,10 @@ Lsave_neon_state_done_\@:
 #if defined(HAS_APPLE_PAC)
 	.if \mode != HIBERNATE_MODE
 
-.if \signing_mode == POISON_THREAD_SIGNATURE
-	mov		x21, #-1
-	str		x21, [x0, SS64_JOPHASH]
-.else
+.ifnb \options_register
+	tbnz	\options_register, SPILL_REGISTERS_OPTION_POISON_THREAD_SIGNATURE_SHIFT, Lspill_registers_do_poison_\@
+.endif /* options_register */
+
 	/* Save x1 and LR to preserve across call */
 	mov		x21, x1
 	mov		x20, lr
@@ -221,19 +246,34 @@ Lsave_neon_state_done_\@:
 	msr		SPSel, x19
 	mov		lr, x20
 	mov		x1, x21
-.endif
+.ifnb \options_register
+	b		Lspill_registers_poison_continue_\@
+
+Lspill_registers_do_poison_\@:
+	mov		x21, #-1
+	str		x21, [x0, SS64_JOPHASH]
+
+Lspill_registers_poison_continue_\@:
+.endif /* options_register */
 
 	.endif
 #endif /* defined(HAS_APPLE_PAC) */
 
-	str		x22, [x0, SS64_PC]                                               // Save ELR to PCB
-	str		w23, [x0, SS64_CPSR]                                    // Save CPSR to PCB
-
 	mrs		x20, FAR_EL1
 	mrs		x21, ESR_EL1
 
+.ifnb \options_register
+	tbnz	\options_register, SPILL_REGISTERS_OPTION_DONT_SPILL_ELR_FAR_SHIFT, Lspill_registers_skip_elr_far_\@
+.endif /* options_register != NONE */
+
 	str		x20, [x0, SS64_FAR]
+	str		x22, [x0, SS64_PC]
+
+.ifnb \options_register
+Lspill_registers_skip_elr_far_\@:
+.endif /* options_register != NONE */
 	str		w21, [x0, SS64_ESR]
+	str		w23, [x0, SS64_CPSR]
 .endmacro
 
 .macro DEADLOOP
@@ -247,7 +287,68 @@ Lsave_neon_state_done_\@:
  */
 .macro SWITCH_TO_INT_STACK	tmp
 	mrs		x1, TPIDR_EL1
-	LOAD_INT_STACK	dst=x1, src=x1, tmp=\tmp
+	LOAD_INT_STACK_THREAD	dst=x1, src=x1, tmp=\tmp
 	mov		sp, x1			// Set the stack pointer to the interrupt stack
 .endmacro
 
+#if HAS_ARM_FEAT_SME
+/*
+ * LOAD_OR_STORE_Z_P_REGISTERS - loads or stores the Z and P register files
+ *
+ * instr: ldr or str
+ * svl_b: register containing SVL_B
+ * ss: register pointing to save area of size 34 * SVL_B (clobbered)
+ */
+.macro LOAD_OR_STORE_Z_P_REGISTERS	instr, svl_b, ss
+	\instr	z0, [\ss, #0, mul vl]
+	\instr	z1, [\ss, #1, mul vl]
+	\instr	z2, [\ss, #2, mul vl]
+	\instr	z3, [\ss, #3, mul vl]
+	\instr	z4, [\ss, #4, mul vl]
+	\instr	z5, [\ss, #5, mul vl]
+	\instr	z6, [\ss, #6, mul vl]
+	\instr	z7, [\ss, #7, mul vl]
+	\instr	z8, [\ss, #8, mul vl]
+	\instr	z9, [\ss, #9, mul vl]
+	\instr	z10, [\ss, #10, mul vl]
+	\instr	z11, [\ss, #11, mul vl]
+	\instr	z12, [\ss, #12, mul vl]
+	\instr	z13, [\ss, #13, mul vl]
+	\instr	z14, [\ss, #14, mul vl]
+	\instr	z15, [\ss, #15, mul vl]
+	\instr	z16, [\ss, #16, mul vl]
+	\instr	z17, [\ss, #17, mul vl]
+	\instr	z18, [\ss, #18, mul vl]
+	\instr	z19, [\ss, #19, mul vl]
+	\instr	z20, [\ss, #20, mul vl]
+	\instr	z21, [\ss, #21, mul vl]
+	\instr	z22, [\ss, #22, mul vl]
+	\instr	z23, [\ss, #23, mul vl]
+	\instr	z24, [\ss, #24, mul vl]
+	\instr	z25, [\ss, #25, mul vl]
+	\instr	z26, [\ss, #26, mul vl]
+	\instr	z27, [\ss, #27, mul vl]
+	\instr	z28, [\ss, #28, mul vl]
+	\instr	z29, [\ss, #29, mul vl]
+	\instr	z30, [\ss, #30, mul vl]
+	\instr	z31, [\ss, #31, mul vl]
+
+	add		\ss, \ss, \svl_b, lsl #5
+	\instr	p0, [\ss, #0, mul vl]
+	\instr	p1, [\ss, #1, mul vl]
+	\instr	p2, [\ss, #2, mul vl]
+	\instr	p3, [\ss, #3, mul vl]
+	\instr	p4, [\ss, #4, mul vl]
+	\instr	p5, [\ss, #5, mul vl]
+	\instr	p6, [\ss, #6, mul vl]
+	\instr	p7, [\ss, #7, mul vl]
+	\instr	p8, [\ss, #8, mul vl]
+	\instr	p9, [\ss, #9, mul vl]
+	\instr	p10, [\ss, #10, mul vl]
+	\instr	p11, [\ss, #11, mul vl]
+	\instr	p12, [\ss, #12, mul vl]
+	\instr	p13, [\ss, #13, mul vl]
+	\instr	p14, [\ss, #14, mul vl]
+	\instr	p15, [\ss, #15, mul vl]
+.endmacro
+#endif /* HAS_ARM_FEAT_SME */

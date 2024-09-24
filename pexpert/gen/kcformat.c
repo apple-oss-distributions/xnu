@@ -58,7 +58,7 @@ SECURITY_READ_ONLY_LATE(uintptr_t) collection_slide[KCNumKinds];
 SECURITY_READ_ONLY_LATE(void *) collection_vp[KCNumKinds];
 #endif //(__x86_64__) || defined(__i386__)
 
-static inline kc_index_t
+static inline __attribute__((__always_inline__)) kc_index_t
 kc_kind2index(kc_kind_t type)
 {
 	switch (type) {

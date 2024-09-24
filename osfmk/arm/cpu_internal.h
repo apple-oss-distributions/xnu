@@ -45,7 +45,7 @@ extern void                                             cpu_timebase_init(boolea
 
 extern kern_return_t                    cpu_signal(
 	cpu_data_t              *target,
-	unsigned int    signal,
+	cpu_signal_t    signal,
 	void                    *p0,
 	void                    *p1);
 
@@ -56,19 +56,6 @@ extern void                     cpu_signal_cancel(
 	cpu_data_t              *target);
 
 extern bool cpu_has_SIGPdebug_pending(void);
-
-#define SIGPnop                 0x00000000U             /* Send IPI with no service */
-#define SIGPdec                 0x00000001U             /* Request decremeter service */
-/* 0x2U unused */
-#define SIGPxcall               0x00000004U             /* Call a function on a processor */
-#define SIGPast                 0x00000008U             /* Request AST check */
-#define SIGPdebug               0x00000010U             /* Request Debug call */
-#define SIGPLWFlush             0x00000020UL            /* Request LWFlush call */
-#define SIGPLWClean             0x00000040UL            /* Request LWClean call */
-#define SIGPkppet               0x00000100U             /* Request kperf PET handler */
-#define SIGPxcallImm            0x00000200U             /* Send a cross-call, fail if already pending */
-
-#define SIGPdisabled            0x80000000U             /* Signal disabled */
 
 extern unsigned int real_ncpus;
 

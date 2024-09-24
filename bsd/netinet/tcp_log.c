@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,9 +37,7 @@
 #include <netinet/ip6.h>
 #include <netinet/inp_log.h>
 
-#if !TCPDEBUG
 #define TCPSTATES
-#endif /* TCPDEBUG */
 #include <netinet/tcp_fsm.h>
 
 #include <netinet/tcp_log.h>
@@ -51,7 +49,7 @@ SYSCTL_NODE(_net_inet_tcp, OID_AUTO, log, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
 #define TCP_LOG_ENABLE_DEFAULT \
     (TLEF_CONNECTION | TLEF_DST_LOCAL | TLEF_DST_GW | \
     TLEF_DROP_NECP | TLEF_DROP_PCB | TLEF_DROP_PKT | \
-    TLEF_SYN_RXMT)
+    TLEF_SYN_RXMT | TLEF_LOG)
 #else /* (DEVELOPMENT || DEBUG) */
 #define TCP_LOG_ENABLE_DEFAULT 0
 #endif /* (DEVELOPMENT || DEBUG) */
@@ -68,15 +66,12 @@ SYSCTL_STRING(_net_inet_tcp_log, OID_AUTO, enable_usage, CTLFLAG_RD | CTLFLAG_LO
     TCP_ENABLE_FLAG_LIST, 0, "");
 #undef X
 
-/*
- * Values for tcp_log_port when TLEF_RTT is enabled:
- *  0: log all TCP connections regardless of the port numbers
- *  1 to 65535: log TCP connections with this local or foreign port
- *  other: do not log (same effect as as tcp_log_rtt == 0)
- */
-uint32_t tcp_log_port = 0;
-SYSCTL_UINT(_net_inet_tcp_log, OID_AUTO, rtt_port, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_log_port, 0, "");
+static int sysctl_tcp_log_port SYSCTL_HANDLER_ARGS;
+
+uint16_t tcp_log_port = 0;
+SYSCTL_PROC(_net_inet_tcp_log, OID_AUTO, rtt_port,
+    CTLFLAG_RW | CTLFLAG_LOCKED | CTLTYPE_INT, &tcp_log_port, 0,
+    sysctl_tcp_log_port, "UI", "");
 
 /*
  * Bitmap for tcp_log_thflags_if_family when TLEF_THF_XXX is enabled:
@@ -92,7 +87,6 @@ SYSCTL_UINT(_net_inet_tcp_log, OID_AUTO, rtt_port, CTLFLAG_RW | CTLFLAG_LOCKED,
 static uint64_t tcp_log_thflags_if_family = TCP_LOG_THFLAGS_IF_FAMILY_DEFAULT;
 SYSCTL_QUAD(_net_inet_tcp_log, OID_AUTO, thflags_if_family,
     CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_log_thflags_if_family, "");
-
 
 #define TCP_LOG_RATE_LIMIT 1000
 static unsigned int tcp_log_rate_limit = TCP_LOG_RATE_LIMIT;
@@ -181,7 +175,8 @@ tcp_log_is_rate_limited(void)
 }
 
 static void
-tcp_log_inp_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fbuf, socklen_t fbuflen)
+tcp_log_inp_addresses(struct inpcb *inp, char *__sized_by(lbuflen) lbuf, socklen_t lbuflen,
+    char *__sized_by(fbuflen) fbuf, socklen_t fbuflen)
 {
 	/*
 	 * Ugly but %{private} does not work in the kernel version of os_log()
@@ -680,7 +675,8 @@ tcp_log_connection_summary(struct tcpcb *tp)
 __attribute__((noinline))
 static bool
 tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
-    char *lbuf, socklen_t lbuflen, char *fbuf, socklen_t fbuflen)
+    char *__sized_by(lbuflen) lbuf, socklen_t lbuflen,
+    char *__sized_by(fbuflen) fbuf, socklen_t fbuflen)
 {
 	bool isipv6;
 	uint8_t thflags;
@@ -690,23 +686,35 @@ tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
 
 	if (isipv6) {
 		struct ip6_hdr *ip6 = (struct ip6_hdr *)hdr;
+		struct in6_addr src_addr6 = ip6->ip6_src;
+		struct in6_addr dst_addr6 = ip6->ip6_dst;
 
-		if (memcmp(&ip6->ip6_src, &in6addr_loopback, sizeof(struct in6_addr)) == 0 ||
-		    memcmp(&ip6->ip6_dst, &in6addr_loopback, sizeof(struct in6_addr)) == 0) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Waddress-of-packed-member"
+		if (memcmp(&src_addr6, &in6addr_loopback, sizeof(struct in6_addr)) == 0 ||
+		    memcmp(&dst_addr6, &in6addr_loopback, sizeof(struct in6_addr)) == 0) {
 			if (!(tcp_log_enable_flags & TLEF_DST_LOOPBACK)) {
 				return false;
 			}
+		}
+#pragma clang diagnostic pop
+
+		if (IN6_IS_ADDR_LINKLOCAL(&src_addr6)) {
+			src_addr6.s6_addr16[1] = 0;
+		}
+		if (IN6_IS_ADDR_LINKLOCAL(&dst_addr6)) {
+			dst_addr6.s6_addr16[1] = 0;
 		}
 
 		if (inp_log_privacy != 0) {
 			strlcpy(lbuf, "<IPv6-redacted>", lbuflen);
 			strlcpy(fbuf, "<IPv6-redacted>", fbuflen);
 		} else if (outgoing) {
-			inet_ntop(AF_INET6, &ip6->ip6_src, lbuf, lbuflen);
-			inet_ntop(AF_INET6, &ip6->ip6_dst, fbuf, fbuflen);
+			inet_ntop(AF_INET6, &src_addr6, lbuf, lbuflen);
+			inet_ntop(AF_INET6, &dst_addr6, fbuf, fbuflen);
 		} else {
-			inet_ntop(AF_INET6, &ip6->ip6_dst, lbuf, lbuflen);
-			inet_ntop(AF_INET6, &ip6->ip6_src, fbuf, fbuflen);
+			inet_ntop(AF_INET6, &dst_addr6, lbuf, lbuflen);
+			inet_ntop(AF_INET6, &src_addr6, fbuf, fbuflen);
 		}
 	} else {
 		struct ip *ip = (struct ip *)hdr;
@@ -817,16 +825,14 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	"%s" \
 	"%s" \
 	"%s" \
-	"%s" \
-	TCP_LOG_COMMON_FMT
+	"%s"
 
 #define TCP_LOG_TH_FLAGS_COMMON_ARGS \
 	outgoing ? "outgoing" : "incoming", \
 	thflags & TH_SYN ? "SYN " : "", \
 	thflags & TH_FIN ? "FIN " : "", \
 	thflags & TH_RST ? "RST " : "", \
-	thflags & TH_ACK ? "ACK " : "", \
-	TCP_LOG_COMMON_ARGS
+	thflags & TH_ACK ? "ACK " : ""
 
 static bool
 should_log_th_flags(uint8_t thflags, struct tcpcb *tp, bool outgoing, struct ifnet *ifp)
@@ -1221,4 +1227,25 @@ tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp, const char 
 	    TCP_LOG_MESSAGE_ARGS);
 #undef TCP_LOG_MESSAGE_FMT
 #undef TCP_LOG_MESSAGE_ARGS
+}
+
+static int
+sysctl_tcp_log_port SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int i, error;
+
+	i = tcp_log_port;
+
+	error = sysctl_handle_int(oidp, &i, 0, req);
+	if (error) {
+		return error;
+	}
+
+	if (i < 0 || i > UINT16_MAX) {
+		return EINVAL;
+	}
+
+	tcp_log_port = (uint16_t)i;
+	return 0;
 }

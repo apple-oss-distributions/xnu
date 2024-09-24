@@ -115,7 +115,7 @@
 #include <mach/vm_param.h>
 
 #include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <sys/reboot.h>
 #include <dev/busvar.h>                 /* for pseudo_inits */
@@ -334,7 +334,7 @@ static int bsd_find_basesystem_dmg(char *bsdmgpath_out, bool *rooted_dmg, bool *
 static boolean_t bsdmgroot_bootable(void);
 #endif // CONFIG_BASESYSTEMROOT
 
-static bool bsd_rooted_ramdisk(void);
+bool bsd_rooted_ramdisk(void);
 
 #if SYSV_SHM
 extern void sysv_shm_lock_init(void);

@@ -214,7 +214,7 @@ static void
 nx_netif_compat_ringcb(caddr_t cl, uint32_t size, caddr_t arg)
 {
 #pragma unused(cl, size)
-	struct mbuf *m = (void *)arg;
+	struct mbuf *__single m = (void *)arg;
 	struct ifnet *ifp = NULL;
 	struct netif_stats *nifs = NULL;
 	uintptr_t data; /* not used */
@@ -268,7 +268,7 @@ SK_NO_INLINE_ATTRIBUTE
 static struct mbuf *
 nx_netif_compat_ring_alloc(int how, int len, uint16_t idx)
 {
-	struct mbuf *m = NULL;
+	struct mbuf *__single m = NULL;
 	size_t size = len;
 	uint32_t i;
 
@@ -388,7 +388,7 @@ nx_netif_compat_na_notify_rx(struct __kern_channel_ring *kring,
 static int
 nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 {
-	struct nexus_netif_adapter *nifna = (struct nexus_netif_adapter *)na;
+	struct nexus_netif_adapter *nifna = NIFNA(na);
 	boolean_t tx_mit, rx_mit, tx_mit_simple, rx_mit_simple, rxpoll;
 	uint32_t limit = (uint32_t)sk_netif_compat_rx_mbq_limit;
 	struct nx_netif *nif = nifna->nifna_netif;
@@ -396,6 +396,10 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 	ifnet_t ifp = na->na_ifp;
 	uint32_t i, r;
 	int error;
+	/* TODO -fbounds-safety: Remove tmp and use __counted_by_or_null */
+	struct nx_netif_mit *mit_tmp;
+	uint32_t nrings;
+	struct mbuf **ckr_tx_pool_tmp;
 
 	ASSERT(na->na_type == NA_NETIF_COMPAT_DEV);
 	ASSERT(!(na->na_flags & NAF_HOST_ONLY));
@@ -416,15 +420,16 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Init the mitigation support on all the dev TX rings.
 		 */
 		if (na_get_nrings(na, NR_TX) != 0 && tx_mit) {
-			nifna->nifna_tx_mit =
-			    skn_alloc_type_array(tx_on, struct nx_netif_mit,
-			    na_get_nrings(na, NR_TX), Z_WAITOK,
-			    skmem_tag_netif_compat_mit);
-			if (nifna->nifna_tx_mit == NULL) {
+			nrings = na_get_nrings(na, NR_TX);
+			mit_tmp = skn_alloc_type_array(tx_on, struct nx_netif_mit,
+			    nrings, Z_WAITOK, skmem_tag_netif_compat_mit);
+			if (mit_tmp == NULL) {
 				SK_ERR("TX mitigation allocation failed");
 				error = ENOMEM;
 				goto out;
 			}
+			nifna->nifna_tx_mit = mit_tmp;
+			nifna->nifna_tx_mit_count = nrings;
 		} else {
 			ASSERT(nifna->nifna_tx_mit == NULL);
 		}
@@ -474,22 +479,22 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 			(void) netif_rxpoll_set_params(ifp, NULL, FALSE);
 			ASSERT(nifna->nifna_rx_mit == NULL);
 		} else if (rx_mit) {
-			nifna->nifna_rx_mit =
-			    skn_alloc_type_array(rx_on, struct nx_netif_mit,
-			    na_get_nrings(na, NR_RX), Z_WAITOK,
-			    skmem_tag_netif_compat_mit);
-			if (nifna->nifna_rx_mit == NULL) {
+			nrings = na_get_nrings(na, NR_RX);
+			mit_tmp = skn_alloc_type_array(rx_on, struct nx_netif_mit,
+			    nrings, Z_WAITOK, skmem_tag_netif_compat_mit);
+			if (mit_tmp == NULL) {
 				SK_ERR("RX mitigation allocation failed");
 				if (nifna->nifna_tx_mit != NULL) {
-					skn_free_type_array(rx_fail,
+					skn_free_type_array_counted_by(rx_fail,
 					    struct nx_netif_mit,
-					    na_get_nrings(na, NR_TX),
+					    nifna->nifna_tx_mit_count,
 					    nifna->nifna_tx_mit);
-					nifna->nifna_tx_mit = NULL;
 				}
 				error = ENOMEM;
 				goto out;
 			}
+			nifna->nifna_rx_mit = mit_tmp;
+			nifna->nifna_rx_mit_count = nrings;
 		}
 
 		/* intercept na_notify callback on the TX rings */
@@ -538,18 +543,22 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 */
 		for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
 			na->na_tx_rings[r].ckr_tx_pool = NULL;
+			na->na_tx_rings[r].ckr_tx_pool_count = 0;
 		}
 
 		for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
-			na->na_tx_rings[r].ckr_tx_pool =
+			nrings = na_get_nslots(na, NR_TX);
+			ckr_tx_pool_tmp =
 			    skn_alloc_type_array(tx_pool_on, struct mbuf *,
-			    na_get_nslots(na, NR_TX), Z_WAITOK,
+			    nrings, Z_WAITOK,
 			    skmem_tag_netif_compat_pool);
-			if (na->na_tx_rings[r].ckr_tx_pool == NULL) {
+			if (ckr_tx_pool_tmp == NULL) {
 				SK_ERR("ckr_tx_pool allocation failed");
 				error = ENOMEM;
 				goto free_tx_pools;
 			}
+			na->na_tx_rings[r].ckr_tx_pool = ckr_tx_pool_tmp;
+			na->na_tx_rings[r].ckr_tx_pool_count = nrings;
 		}
 
 		/* Prepare to intercept incoming traffic. */
@@ -625,9 +634,8 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		}
 
 		if (nifna->nifna_tx_mit != NULL) {
-			skn_free_type_array(tx_off, struct nx_netif_mit,
-			    na_get_nrings(na, NR_TX), nifna->nifna_tx_mit);
-			nifna->nifna_tx_mit = NULL;
+			skn_free_type_array_counted_by(tx_off, struct nx_netif_mit,
+			    nifna->nifna_tx_mit_count, nifna->nifna_tx_mit);
 		}
 
 		/* reset all RX notify callbacks */
@@ -641,9 +649,8 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 			}
 		}
 		if (nifna->nifna_rx_mit != NULL) {
-			skn_free_type_array(rx_off, struct nx_netif_mit,
-			    na_get_nrings(na, NR_RX), nifna->nifna_rx_mit);
-			nifna->nifna_rx_mit = NULL;
+			skn_free_type_array_counted_by(rx_off, struct nx_netif_mit,
+			    nifna->nifna_rx_mit_count, nifna->nifna_rx_mit);
 		}
 
 		for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
@@ -652,8 +659,8 @@ nx_netif_compat_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 				    na_tx_rings[r].ckr_tx_pool[i]);
 				na->na_tx_rings[r].ckr_tx_pool[i] = NULL;
 			}
-			skn_free_type_array(tx_pool_off,
-			    struct mbuf *, na_get_nslots(na, NR_TX),
+			skn_free_type_array_counted_by(tx_pool_off,
+			    struct mbuf *, na->na_tx_rings[r].ckr_tx_pool_count,
 			    na->na_tx_rings[r].ckr_tx_pool);
 		}
 		break;
@@ -679,25 +686,23 @@ free_tx_pools:
 				na->na_tx_rings[r].ckr_tx_pool[i]);
 			na->na_tx_rings[r].ckr_tx_pool[i] = NULL;
 		}
-		skn_free_type_array(tx_pool, struct mbuf *,
-		    na_get_nslots(na, NR_TX), na->na_tx_rings[r].ckr_tx_pool);
-		na->na_tx_rings[r].ckr_tx_pool = NULL;
+		skn_free_type_array_counted_by(tx_pool, struct mbuf *,
+		    na->na_tx_rings[r].ckr_tx_pool_count,
+		    na->na_tx_rings[r].ckr_tx_pool);
 	}
 	if (nifna->nifna_tx_mit != NULL) {
 		for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
 			nx_netif_mit_cleanup(&nifna->nifna_tx_mit[r]);
 		}
-		skn_free_type_array(tx, struct nx_netif_mit,
-		    na_get_nrings(na, NR_TX), nifna->nifna_tx_mit);
-		nifna->nifna_tx_mit = NULL;
+		skn_free_type_array_counted_by(tx, struct nx_netif_mit,
+		    nifna->nifna_tx_mit_count, nifna->nifna_tx_mit);
 	}
 	if (nifna->nifna_rx_mit != NULL) {
 		for (r = 0; r < na_get_nrings(na, NR_RX); r++) {
 			nx_netif_mit_cleanup(&nifna->nifna_rx_mit[r]);
 		}
-		skn_free_type_array(rx, struct nx_netif_mit,
-		    na_get_nrings(na, NR_RX), nifna->nifna_rx_mit);
-		nifna->nifna_rx_mit = NULL;
+		skn_free_type_array_counted_by(rx, struct nx_netif_mit,
+		    nifna->nifna_rx_mit_count, nifna->nifna_rx_mit);
 	}
 	for (r = 0; r < na_get_nrings(na, NR_RX); r++) {
 		nx_mbq_safe_destroy(&na->na_rx_rings[r].ckr_rx_queue);
@@ -1270,7 +1275,7 @@ nx_netif_compat_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 {
 #pragma unused(p)
 	struct nexus_adapter *na = KRNA(kring);
-	struct nexus_netif_adapter *nifna = (struct nexus_netif_adapter *)na;
+	struct nexus_netif_adapter *nifna = NIFNA(na);
 	struct nx_netif *nif = nifna->nifna_netif;
 	slot_idx_t nm_i;        /* index into the channel ring */
 	struct netif_stats *nifs = &NX_NETIF_PRIVATE(na->na_nx)->nif_stats;
@@ -1373,7 +1378,7 @@ nx_netif_compat_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 		kern_packet_t ph;
 		uint8_t hlen;
 		uint16_t tag;
-		char *h;
+		char *__single h;
 
 		ASSERT(m->m_flags & M_PKTHDR);
 		mlen = m_pktlen(m);
@@ -1517,7 +1522,7 @@ done:
 static void
 nx_netif_compat_na_dtor(struct nexus_adapter *na)
 {
-	struct ifnet *ifp;
+	struct ifnet *__single ifp;
 	struct nexus_netif_compat_adapter *nca =
 	    (struct nexus_netif_compat_adapter *)na;
 
@@ -1558,8 +1563,8 @@ nx_netif_compat_attach(struct kern_nexus *nx, struct ifnet *ifp)
 	struct nxprov_params *nxp = NX_PROV(nx)->nxprov_params;
 	struct nexus_netif_compat_adapter *devnca = NULL;
 	struct nexus_netif_compat_adapter *hostnca = NULL;
-	struct nexus_adapter *devna = NULL;
-	struct nexus_adapter *hostna = NULL;
+	struct nexus_adapter *__single devna = NULL;
+	struct nexus_adapter *__single hostna = NULL;
 	boolean_t embryonic = FALSE;
 	uint32_t tx_rings, tx_slots;
 	int retval = 0;
@@ -1599,8 +1604,7 @@ nx_netif_compat_attach(struct kern_nexus *nx, struct ifnet *ifp)
 	devnca->nca_up.nifna_netif = nif;
 	nx_netif_retain(nif);
 	devna = &devnca->nca_up.nifna_up;
-	(void) strncpy(devna->na_name, ifp->if_xname, sizeof(devna->na_name) - 1);
-	devna->na_name[sizeof(devna->na_name) - 1] = '\0';
+	strlcpy(devna->na_name, ifp->if_xname, sizeof(devna->na_name));
 	uuid_generate_random(devna->na_uuid);
 	if (embryonic) {
 		/*

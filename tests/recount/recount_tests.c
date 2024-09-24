@@ -101,7 +101,7 @@ thread_end(struct usage_thread *th)
 	T_SETUPEND;
 }
 
-T_DECL(proc_pidtaskinfo_sanity, "ensure proc_pidtaskinfo CPU times are sane")
+T_DECL(proc_pidtaskinfo_sanity, "ensure proc_pidtaskinfo CPU times are sane", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct proc_taskinfo prev = { 0 };
 	struct usage_thread first = { 0 };
@@ -191,7 +191,7 @@ proc_pid_rusage_times(pid_t pid)
 	};
 }
 
-T_DECL(proc_pid_rusage_sanity, "ensure proc_pidtaskinfo CPU times are sane")
+T_DECL(proc_pid_rusage_sanity, "ensure proc_pidtaskinfo CPU times are sane", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	test_usr_sys_time_sanity(proc_pid_rusage_times, "proc_pid_rusage");
 }
@@ -215,7 +215,7 @@ task_basic_info_times(pid_t __unused pid)
 	};
 }
 
-T_DECL(task_basic_info_sanity, "ensure TASK_BASIC_INFO CPU times are sane")
+T_DECL(task_basic_info_sanity, "ensure TASK_BASIC_INFO CPU times are sane", T_META_TAG_VM_PREFERRED)
 {
 	test_usr_sys_time_sanity(task_basic_info_times, "TASK_BASIC_INFO");
 }
@@ -239,7 +239,7 @@ task_power_info_times(pid_t __unused pid)
 	};
 }
 
-T_DECL(task_power_info_sanity, "ensure TASK_POWER_INFO CPU times are sane")
+T_DECL(task_power_info_sanity, "ensure TASK_POWER_INFO CPU times are sane", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	test_usr_sys_time_sanity(task_power_info_times, "TASK_POWER_INFO");
 }
@@ -264,7 +264,7 @@ task_absolutetime_info_times(pid_t __unused pid)
 }
 
 T_DECL(task_absolutetime_info_sanity,
-		"ensure TASK_ABSOLUTETIME_INFO CPU times are sane")
+		"ensure TASK_ABSOLUTETIME_INFO CPU times are sane", T_META_TAG_VM_PREFERRED)
 {
 	test_usr_sys_time_sanity(task_absolutetime_info_times,
 			"TASK_ABSOLUTETIME_INFO");
@@ -287,12 +287,12 @@ getrusage_times(pid_t __unused pid)
 	};
 }
 
-T_DECL(getrusage_sanity, "ensure getrusage CPU times are sane")
+T_DECL(getrusage_sanity, "ensure getrusage CPU times are sane", T_META_TAG_VM_NOT_PREFERRED)
 {
 	test_usr_sys_time_sanity(getrusage_times, "getrusage");
 }
 
-T_DECL(thread_selfusage_sanity, "ensure thread_selfusage times are sane")
+T_DECL(thread_selfusage_sanity, "ensure thread_selfusage times are sane", T_META_TAG_VM_PREFERRED)
 {
 	uint64_t before = __thread_selfusage();
 	uint64_t after = __thread_selfusage();
@@ -309,7 +309,7 @@ T_DECL(proc_pid_rusage_perf_levels,
 		"ensure proc_pid_rusage fills in per-perf level information",
 		REQUIRE_RECOUNT_PMCS,
     	// REQUIRE_MULTIPLE_PERF_LEVELS, disabled due to rdar://111297938
-		SET_THREAD_BIND_BOOTARG)
+		SET_THREAD_BIND_BOOTARG, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct rusage_info_v6 before = { 0 };
 	struct rusage_info_v6 after = { 0 };
@@ -352,7 +352,8 @@ T_DECL(proc_pid_rusage_secure_perf_levels,
 		REQUIRE_RECOUNT_PMCS,
 		REQUIRE_MULTIPLE_PERF_LEVELS,
 		REQUIRE_EXCLAVES,
-		SET_THREAD_BIND_BOOTARG)
+		SET_THREAD_BIND_BOOTARG,
+		T_META_TAG_VM_PREFERRED)
 {
 	int status = 0;
 	size_t status_size = sizeof(status);
@@ -503,7 +504,8 @@ T_DECL(proc_pidthreadcounts_sanity,
 		SET_THREAD_BIND_BOOTARG,
 		// Select the most comprehensive test to run on each SoC.
 		XNU_T_META_SOC_SPECIFIC,
-		T_META_ASROOT(true))
+		T_META_ASROOT(true),
+		T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 
@@ -572,7 +574,9 @@ T_DECL(proc_pidthreadcounts_sanity,
 
 T_DECL(proc_pidthreadcounts_invalid_tid,
 		"check that proc_pidthreadcounts returns ESRCH on invalid thread",
-		T_META_ASROOT(true))
+		REQUIRE_RECOUNT_PMCS,
+		T_META_ASROOT(true),
+		T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 	unsigned int level_count = perf_level_count();

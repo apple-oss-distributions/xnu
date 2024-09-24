@@ -102,10 +102,36 @@ __attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant",
 	__asm__ volatile ("brk #%0" : : "i"(code));
 	__builtin_unreachable();
 }
+
+__attribute__((cold, noreturn, always_inline))
+static inline void
+ml_fatal_trap_with_value(unsigned int code, unsigned long value)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+#if __arm64__
+	register unsigned long long _value __asm__("x8") = (value);
+#else
+	register unsigned long _value __asm__("r8") = (value);
+#endif
+	__asm__ volatile ("brk #%[_code]"
+                : "=r"(_value)
+                : [_code] "i"(code)
+                , "0"(_value));
+	__builtin_unreachable();
+}
 #else
 #define ml_recoverable_trap(code) \
 	__asm__ volatile ("brk #%0" : : "i"(code))
 #define ml_fatal_trap(code)  ({ \
+	__asm__ volatile ("brk #%0" : : "i"(code)); \
+	__builtin_unreachable(); \
+})
+/*
+ * for unoptimized builds, drop `value`,
+ * chances are the values are easy to debug anyway
+ */
+#define ml_fatal_trap_with_value(code, value)  ({ \
+	(void)(value); \
 	__asm__ volatile ("brk #%0" : : "i"(code)); \
 	__builtin_unreachable(); \
 })

@@ -48,7 +48,7 @@ spin_for_duration(uint32_t seconds)
 	return;
 }
 
-T_DECL(cooperative_workqueue_and_vfork, "rdar://74489806") {
+T_DECL(cooperative_workqueue_and_vfork, "rdar://74489806", T_META_TAG_VM_PREFERRED) {
 	dispatch_queue_t dq = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
 	T_ASSERT_NE(dq, NULL, "global_queue");
 
@@ -74,7 +74,7 @@ T_DECL(cooperative_workqueue_and_vfork, "rdar://74489806") {
 	dispatch_main();
 }
 
-T_DECL(adjust_quantum_nonovercommit_to_overcommit_switch, "rdar://75084197")
+T_DECL(adjust_quantum_nonovercommit_to_overcommit_switch, "rdar://75084197", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_queue_t dq = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
 	T_ASSERT_NE(dq, NULL, "global_queue");
@@ -95,7 +95,7 @@ T_DECL(adjust_quantum_nonovercommit_to_overcommit_switch, "rdar://75084197")
 	dispatch_main();
 }
 
-T_DECL(cooperative_to_overcommit_switch, "Switching from cooperative queue to another type should not panic")
+T_DECL(cooperative_to_overcommit_switch, "Switching from cooperative queue to another type should not panic", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_queue_t cooperative_dq = dispatch_get_global_queue(QOS_CLASS_UTILITY, DISPATCH_QUEUE_COOPERATIVE);
 	T_ASSERT_NE(cooperative_dq, NULL, "global_queue");
@@ -117,7 +117,7 @@ T_DECL(cooperative_to_overcommit_switch, "Switching from cooperative queue to an
 	dispatch_main();
 }
 
-T_DECL(maintenance_bg_coalesced, "BG and MT coalescing should work")
+T_DECL(maintenance_bg_coalesced, "BG and MT coalescing should work", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_queue_t dq = dispatch_get_global_queue(QOS_CLASS_MAINTENANCE, DISPATCH_QUEUE_COOPERATIVE);
 	T_ASSERT_NE(dq, NULL, "global_queue");

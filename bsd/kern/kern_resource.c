@@ -109,7 +109,7 @@
 #include <net/necp.h>
 #endif /* NECP */
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 #include <kern/assert.h>
 #include <sys/resource.h>
@@ -136,6 +136,8 @@ static int proc_set_darwin_role(proc_t curp, proc_t targetp, int priority);
 static int proc_get_darwin_role(proc_t curp, proc_t targetp, int *priority);
 static int proc_set_game_mode(proc_t targetp, int priority);
 static int proc_get_game_mode(proc_t targetp, int *priority);
+static int proc_set_carplay_mode(proc_t targetp, int priority);
+static int proc_get_carplay_mode(proc_t targetp, int *priority);
 static int get_background_proc(struct proc *curp, struct proc *targetp, int *priority);
 
 int fill_task_rusage(task_t task, rusage_info_current *ri);
@@ -324,6 +326,28 @@ getpriority(struct proc *curp, struct getpriority_args *uap, int32_t *retval)
 
 
 		error = proc_get_game_mode(p, &low);
+
+		if (refheld) {
+			proc_rele(p);
+		}
+		if (error) {
+			return error;
+		}
+		break;
+
+	case PRIO_DARWIN_CARPLAY_MODE:
+		if (uap->who == 0) {
+			p = curp;
+		} else {
+			p = proc_find(uap->who);
+			if (p == PROC_NULL) {
+				break;
+			}
+			refheld = 1;
+		}
+
+
+		error = proc_get_carplay_mode(p, &low);
 
 		if (refheld) {
 			proc_rele(p);
@@ -549,6 +573,26 @@ setpriority(struct proc *curp, struct setpriority_args *uap, int32_t *retval)
 
 
 		error = proc_set_game_mode(p, uap->prio);
+
+		found++;
+		if (refheld != 0) {
+			proc_rele(p);
+		}
+		break;
+	}
+
+	case PRIO_DARWIN_CARPLAY_MODE: {
+		if (uap->who == 0) {
+			p = curp;
+		} else {
+			p = proc_find(uap->who);
+			if (p == PROC_NULL) {
+				break;
+			}
+			refheld = 1;
+		}
+
+		error = proc_set_carplay_mode(p, uap->prio);
 
 		found++;
 		if (refheld != 0) {
@@ -836,7 +880,85 @@ out:
 	return error;
 }
 
+#define SET_CARPLAY_MODE_ENTITLEMENT "com.apple.private.set-carplay-mode"
 
+static int
+proc_set_carplay_mode(proc_t targetp, int priority)
+{
+	int error = 0;
+
+	kauth_cred_t ucred, target_cred;
+
+	ucred = kauth_cred_get();
+	target_cred = kauth_cred_proc_ref(targetp);
+
+	boolean_t entitled = FALSE;
+	entitled = IOCurrentTaskHasEntitlement(SET_CARPLAY_MODE_ENTITLEMENT);
+	if (!entitled) {
+		error = EPERM;
+		goto out;
+	}
+
+	/* Even with entitlement, non-root is only alllowed to set same-user */
+	if (!kauth_cred_issuser(ucred) &&
+	    kauth_cred_getuid(ucred) != kauth_cred_getuid(target_cred)) {
+		error = EPERM;
+		goto out;
+	}
+
+	switch (priority) {
+	case PRIO_DARWIN_CARPLAY_MODE_OFF:
+		task_set_carplay_mode(proc_task(targetp), false);
+		break;
+	case PRIO_DARWIN_CARPLAY_MODE_ON:
+		task_set_carplay_mode(proc_task(targetp), true);
+		break;
+	default:
+		error = EINVAL;
+		goto out;
+	}
+
+out:
+	kauth_cred_unref(&target_cred);
+	return error;
+}
+
+static int
+proc_get_carplay_mode(proc_t targetp, int *priority)
+{
+	int error = 0;
+
+	kauth_cred_t ucred, target_cred;
+
+	ucred = kauth_cred_get();
+	target_cred = kauth_cred_proc_ref(targetp);
+
+	boolean_t entitled = FALSE;
+	entitled = IOCurrentTaskHasEntitlement(SET_CARPLAY_MODE_ENTITLEMENT);
+
+	/* Root is allowed to get without entitlement */
+	if (!kauth_cred_issuser(ucred) && !entitled) {
+		error = EPERM;
+		goto out;
+	}
+
+	/* Even with entitlement, non-root is only alllowed to see same-user */
+	if (!kauth_cred_issuser(ucred) &&
+	    kauth_cred_getuid(ucred) != kauth_cred_getuid(target_cred)) {
+		error = EPERM;
+		goto out;
+	}
+
+	if (task_get_carplay_mode(proc_task(targetp))) {
+		*priority = PRIO_DARWIN_CARPLAY_MODE_ON;
+	} else {
+		*priority = PRIO_DARWIN_CARPLAY_MODE_OFF;
+	}
+
+out:
+	kauth_cred_unref(&target_cred);
+	return error;
+}
 
 static int
 get_background_proc(struct proc *curp, struct proc *targetp, int *priority)
@@ -1197,6 +1319,14 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 				stack_rlim.rlim_max = newrlim->rlim_max;
 				newrlim->rlim_max = maxsmap;
 			}
+		}
+
+		/*
+		 * rlim.rlim_cur could be arbitrarily large due to previous calls to setrlimit().
+		 * Use the actual size for stack region adjustment.
+		 */
+		if (rlim.rlim_cur > maxsmap) {
+			rlim.rlim_cur = maxsmap;
 		}
 
 		/*
@@ -2484,51 +2614,100 @@ out:
 	return error;
 }
 
+static inline void
+set_thread_skip_mtime_policy(struct uthread *ut, int policy)
+{
+	if (policy == IOPOL_VFS_SKIP_MTIME_UPDATE_ON) {
+		os_atomic_or(&ut->uu_flag, UT_SKIP_MTIME_UPDATE, relaxed);
+	} else {
+		os_atomic_andnot(&ut->uu_flag, UT_SKIP_MTIME_UPDATE, relaxed);
+	}
+}
+
+static inline int
+get_thread_skip_mtime_policy(struct uthread *ut)
+{
+	return (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE) ?
+	       IOPOL_VFS_SKIP_MTIME_UPDATE_ON : IOPOL_VFS_SKIP_MTIME_UPDATE_OFF;
+}
+
+static inline void
+set_proc_skip_mtime_policy(struct proc *p, int policy)
+{
+	if (policy == IOPOL_VFS_SKIP_MTIME_UPDATE_ON) {
+		os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_SKIP_MTIME_UPDATE, relaxed);
+	} else {
+		os_atomic_andnot(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_SKIP_MTIME_UPDATE, relaxed);
+	}
+}
+
+static inline int
+get_proc_skip_mtime_policy(struct proc *p)
+{
+	return (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE) ?
+	       IOPOL_VFS_SKIP_MTIME_UPDATE_ON : IOPOL_VFS_SKIP_MTIME_UPDATE_OFF;
+}
+
 #define SKIP_MTIME_UPDATE_ENTITLEMENT \
 	"com.apple.private.vfs.skip-mtime-updates"
 int
 iopolicysys_vfs_skip_mtime_update(struct proc *p, int cmd, int scope,
     int policy, __unused struct _iopol_param_t *iop_param)
 {
-	int error = EINVAL;
+	thread_t thread;
+	int error = 0;
 
+	/* Validate scope */
 	switch (scope) {
+	case IOPOL_SCOPE_THREAD:
+		thread = current_thread();
+		break;
 	case IOPOL_SCOPE_PROCESS:
+		thread = THREAD_NULL;
 		break;
 	default:
+		error = EINVAL;
 		goto out;
 	}
 
+	/* Validate policy */
+	if (cmd == IOPOL_CMD_SET) {
+		switch (policy) {
+		case IOPOL_VFS_SKIP_MTIME_UPDATE_ON:
+		case IOPOL_VFS_SKIP_MTIME_UPDATE_OFF:
+			if (!IOCurrentTaskHasEntitlement(SKIP_MTIME_UPDATE_ENTITLEMENT)) {
+				error = EPERM;
+				goto out;
+			}
+			break;
+		default:
+			error = EINVAL;
+			goto out;
+		}
+	}
+
+	/* Perform command */
 	switch (cmd) {
-	case IOPOL_CMD_GET:
-		policy = os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE ?
-		    IOPOL_VFS_SKIP_MTIME_UPDATE_ON : IOPOL_VFS_SKIP_MTIME_UPDATE_OFF;
-		iop_param->iop_policy = policy;
-		goto out_ok;
 	case IOPOL_CMD_SET:
+		if (thread != THREAD_NULL) {
+			set_thread_skip_mtime_policy(get_bsdthread_info(thread), policy);
+		} else {
+			set_proc_skip_mtime_policy(p, policy);
+		}
+		break;
+	case IOPOL_CMD_GET:
+		if (thread != THREAD_NULL) {
+			policy = get_thread_skip_mtime_policy(get_bsdthread_info(thread));
+		} else {
+			policy = get_proc_skip_mtime_policy(p);
+		}
+		iop_param->iop_policy = policy;
 		break;
 	default:
+		error = EINVAL;         /* unknown command */
 		break;
 	}
 
-	if (!IOCurrentTaskHasEntitlement(SKIP_MTIME_UPDATE_ENTITLEMENT)) {
-		error = EPERM;
-		goto out;
-	}
-
-	switch (policy) {
-	case IOPOL_VFS_SKIP_MTIME_UPDATE_OFF:
-		os_atomic_andnot(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_SKIP_MTIME_UPDATE, relaxed);
-		break;
-	case IOPOL_VFS_SKIP_MTIME_UPDATE_ON:
-		os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_SKIP_MTIME_UPDATE, relaxed);
-		break;
-	default:
-		break;
-	}
-
-out_ok:
-	error = 0;
 out:
 	return error;
 }
@@ -2681,14 +2860,12 @@ iopolicysys_vfs_nocache_write_fs_blksize(struct proc *p, int cmd, int scope, int
 
 	/* Once set, we don't allow the process or thread to clear it. */
 	if ((cmd == IOPOL_CMD_SET) && (policy == IOPOL_VFS_NOCACHE_WRITE_FS_BLKSIZE_ON)) {
-#if 0
 		if (thread != THREAD_NULL) {
 			struct uthread *ut = get_bsdthread_info(thread);
 			ut->uu_flag |= UT_FS_BLKSIZE_NOCACHE_WRITES;
 		} else {
 			os_atomic_or(&p->p_vfs_iopolicy, P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE, relaxed);
 		}
-#endif
 		return 0;
 	}
 
@@ -2715,6 +2892,11 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 	memset(ru, 0, sizeof(*ru));
 	switch (flavor) {
 	case RUSAGE_INFO_V6:
+		ru->ri_neural_footprint = get_task_neural_nofootprint_total(proc_task(p));
+		ru->ri_lifetime_max_neural_footprint = get_task_neural_nofootprint_total_lifetime_max(proc_task(p));
+#if CONFIG_LEDGER_INTERVAL_MAX
+		ru->ri_interval_max_neural_footprint = get_task_neural_nofootprint_total_interval_max(proc_task(p), FALSE);
+#endif
 		/* Any P-specific resource counters are captured in fill_task_rusage. */
 		OS_FALLTHROUGH;
 
@@ -2939,7 +3121,9 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 			break;
 		}
 		interval_max_footprint = get_task_phys_footprint_interval_max(proc_task(targetp), TRUE);
+		interval_max_footprint = get_task_neural_nofootprint_total_interval_max(proc_task(targetp), TRUE);
 		break;
+
 #endif /* CONFIG_LEDGER_INTERVAL_MAX */
 	default:
 		error = EINVAL;

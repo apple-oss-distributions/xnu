@@ -53,6 +53,8 @@ extern "C" {
 #include <sys/mount.h>
 #include <corecrypto/ccsha2.h>
 #include <kdp/sk_core.h>
+#include <pexpert/device_tree.h>
+#include <kern/startup.h>
 
 // how long to wait for matching root device, secs
 #if DEBUG
@@ -81,6 +83,8 @@ extern boolean_t cpuid_vmm_present(void);
 #define kIOCoreDumpPath         "/private/var/vm/kernelcore"
 #endif
 
+#define kIOCoreDumpPrebootPath      "/private/preboot/kernelcore"
+
 #define SYSTEM_NVRAM_PREFIX     "40A0DDD2-77F8-4392-B4A3-1E7304206516:"
 
 #if CONFIG_KDP_INTERACTIVE_DEBUGGING
@@ -103,8 +107,10 @@ extern kern_return_t kdp_core_polled_io_polled_file_unavailable(void);
 
 #if IOPOLLED_COREFILE
 static void IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilename);
+static void IOResolveCoreFilePath();
 
 thread_call_t corefile_open_call = NULL;
+SECURITY_READ_ONLY_LATE(const char*) kdp_corefile_path = kIOCoreDumpPath;
 #endif
 
 kern_return_t
@@ -683,6 +689,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	OSDataAllocation<char> str;
 	const char *        look = NULL;
 	int                 len;
+	int                 wdt = 0;
 	bool                debugInfoPrintedOnce = false;
 	bool                needNetworkKexts = false;
 	const char *        uuidStr = NULL;
@@ -766,7 +773,11 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			data = (OSData *)regEntry->getProperty("RAMDisk");      /* Find the ram disk, if there */
 			if (data) {                                                                                      /* We found one */
 				uintptr_t *ramdParms;
+				/* BEGIN IGNORE CODESTYLE */
+				__typed_allocators_ignore_push
 				ramdParms = (uintptr_t *)data->getBytesNoCopy();        /* Point to the ram disk base and size */
+				__typed_allocators_ignore_pop
+				/* END IGNORE CODESTYLE */
 #if __LP64__
 #define MAX_PHYS_RAM    (((uint64_t)UINT_MAX) << 12)
 				if (ramdParms[1] > MAX_PHYS_RAM) {
@@ -888,12 +899,13 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		IOService::startDeferredMatches();
 	}
 
+	PE_parse_boot_argn("wdt", &wdt, sizeof(wdt));
 	do {
 		t.tv_sec = ROOTDEVICETIMEOUT;
 		t.tv_nsec = 0;
 		matching->retain();
 		service = IOService::waitForService( matching, &t );
-		if ((!service) || (mountAttempts == 10)) {
+		if ((-1 != wdt) && (!service || (mountAttempts == 10))) {
 #if !XNU_TARGET_OS_OSX || !defined(__arm64__)
 			PE_display_icon( 0, "noroot");
 			IOLog( "Still waiting for root device\n" );
@@ -917,7 +929,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 #if XNU_TARGET_OS_OSX && defined(__arm64__)
 			// The disk isn't found - have the user pick from System Recovery.
 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
-#elif XNU_TARGET_OS_IOS
+#elif XNU_TARGET_OS_IOS || XNU_TARGET_OS_XR
 			panic("Failed to mount root device");
 #endif
 		}
@@ -1147,6 +1159,16 @@ IOPolledCoreFileMode_t gIOPolledCoreFileMode = kIOPolledCoreFileModeNotInitializ
 // to store a panic time stackshot
 #define kIOStackshotFileSize    ONE_MB
 
+#elif defined(XNU_TARGET_OS_XR)
+
+// XR OS requries larger corefile storage because XNU core can take
+// up to ~500MB.
+
+#define kIOCoreDumpMinSize      350ULL * ONE_MB
+#define kIOCoreDumpLargeSize    750ULL * ONE_MB
+
+#define kIOCoreDumpFreeSize     350ULL * ONE_MB
+
 #else /* defined(XNU_TARGET_OS_BRIDGE) */
 
 // On embedded devices with >3GB DRAM we allocate a 500MB corefile
@@ -1169,6 +1191,39 @@ GetCoreFileMode()
 		return kIOPolledCoreFileModeDisabled;
 	}
 }
+
+static void
+IOResolveCoreFilePath()
+{
+	DTEntry node;
+	const char *value = NULL;
+	unsigned int size = 0;
+
+	if (kSuccess != SecureDTLookupEntry(NULL, "/product", &node)) {
+		return;
+	}
+	if (kSuccess != SecureDTGetProperty(node, "kernel-core-dump-location", (void const **) &value, &size)) {
+		return;
+	}
+	if (size == 0) {
+		return;
+	}
+
+	// The kdp_corefile_path is allowed to be one of 2 options to working locations.
+	// This value is set on EARLY_BOOT since we need to know it before any volumes are mounted. The mount
+	// event triggers IOOpenPolledCoreFile() which opens the file. Once we commit to using the path from EDT
+	// we can't back out since a different path may reside in a different volume.
+	// In case the path from EDT can't be opened, there will not be a kernel core-dump
+	if (strlcmp(value, "preboot", size) == 0) {
+		kdp_corefile_path = kIOCoreDumpPrebootPath;
+	} else if (strlcmp(value, "default", size) != 0) {
+		IOLog("corefile path selection in device-tree is not one of the allowed values: %s, Using default %s\n", value, kdp_corefile_path);
+		return;
+	}
+
+	IOLog("corefile path selection in device-tree was set to: %s (value: %s)\n", kdp_corefile_path, value);
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, IOResolveCoreFilePath);
 
 static void
 IOCoreFileGetSize(uint64_t *ideal_size, uint64_t *fallback_size, uint64_t *free_space_to_leave, IOPolledCoreFileMode_t mode)
@@ -1287,12 +1342,13 @@ IOOpenPolledCoreFile(thread_call_param_t __unused, thread_call_param_t corefilen
 	}
 
 	do {
+		// This file reference remains open long-term in case we need to write a core-dump
 		err = IOPolledFileOpen(filename, kIOPolledFileCreate, corefile_size_bytes, free_space_to_leave_bytes,
 		    NULL, 0, &gIOPolledCoreFileVars, NULL, NULL, NULL);
 		if (kIOReturnSuccess == err) {
 			break;
 		} else if (kIOReturnNoSpace == err) {
-			IOLog("Failed to open corefile of size %llu MB (low disk space)",
+			IOLog("Failed to open corefile of size %llu MB (low disk space)\n",
 			    (corefile_size_bytes / (1024ULL * 1024ULL)));
 			if (corefile_size_bytes == corefile_fallback_size_bytes) {
 				gIOPolledCoreFileOpenRet = err;
@@ -1348,7 +1404,7 @@ IOProvideCoreFileAccess(IOCoreFileAccessRecipient recipient, void *recipient_con
 
 	// Open the kernel corefile
 	vfs_context = vfs_context_kernel();
-	vnode_error = vnode_open(kIOCoreDumpPath, (FREAD | FWRITE | O_NOFOLLOW), 0600, 0, &vnode_ptr, vfs_context);
+	vnode_error = vnode_open(kdp_corefile_path, (FREAD | FWRITE | O_NOFOLLOW), 0600, 0, &vnode_ptr, vfs_context);
 	if (vnode_error) {
 		IOLog("Failed to open the corefile. Error %d\n", vnode_error);
 		return kIOReturnError;
@@ -1437,11 +1493,12 @@ IOBSDMountChange(struct mount * mp, uint32_t op)
 			break;
 		}
 #endif
-		if (0 != strncmp(path, kIOCoreDumpPath, pathLen - 1)) {
+		// Does this mount point include the kernel core-file?
+		if (0 != strncmp(path, kdp_corefile_path, pathLen - 1)) {
 			break;
 		}
 
-		thread_call_enter1(corefile_open_call, (void *) kIOCoreDumpPath);
+		thread_call_enter1(corefile_open_call, (void *) kdp_corefile_path);
 		break;
 
 	case kIOMountChangeUnmount:

@@ -49,6 +49,8 @@ EXPORTS_FILES := $(foreach symbolset,$(SYMBOL_COMPONENT_LIST),$(symbolset).expor
 	$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports \
 	$(notdir $(wildcard $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).$(PLATFORM).exports))) \
 	Unused.exports
+EXPORTS_FILES += Private.Tightbeam.exports
+
 
 Kasan_EXPORTS := $(SRCROOT)/config/Kasan_disabled.exports
 Kcov_EXPORTS := $(SRCROOT)/config/Kcov_disabled.exports

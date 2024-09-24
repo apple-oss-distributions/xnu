@@ -31,7 +31,8 @@ cleanup_ripe_age(void)
 T_DECL(compression_sweep,
     "ensure some pages are compressed due to pid_hibernate",
     T_META_ASROOT(true),
-    T_META_ENABLED(!TARGET_OS_OSX && !TARGET_OS_WATCH && !TARGET_OS_TV))
+    T_META_ENABLED(!TARGET_OS_OSX && !TARGET_OS_SIMULATOR),
+    T_META_TAG_VM_PREFERRED)
 {
 	/*
 	 * Change the system to sweep out compressed pages that are older than

@@ -53,7 +53,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_allocate, "safe_allocation.ctor.allocate") {
+T_DECL(ctor_allocate, "safe_allocation.ctor.allocate", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 

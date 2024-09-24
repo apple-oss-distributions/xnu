@@ -143,7 +143,7 @@ test_unp_connect_multithread()
 	}
 }
 
-T_DECL(unp_connect_thread_uaf, "Uaf due to multithreaded unp_connect")
+T_DECL(unp_connect_thread_uaf, "Uaf due to multithreaded unp_connect", T_META_TAG_VM_PREFERRED)
 {
 	test_unp_connect_multithread();
 }

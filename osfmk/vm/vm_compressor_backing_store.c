@@ -26,9 +26,14 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include "vm_compressor_backing_store.h"
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include "vm_compressor_backing_store_internal.h"
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_compressor_internal.h>
+#include <vm/vm_iokit.h>
+#include <vm/vm_map_internal.h>
 
 #include <IOKit/IOHibernatePrivate.h>
 
@@ -109,9 +114,9 @@ struct swapfile {
 queue_head_t    swf_global_queue;
 boolean_t       swp_trim_supported = FALSE;
 
-extern clock_sec_t      dont_trim_until_ts;
-clock_sec_t             vm_swapfile_last_failed_to_create_ts = 0;
-clock_sec_t             vm_swapfile_last_successful_create_ts = 0;
+extern uint64_t         dont_trim_until_ts;
+uint64_t                vm_swapfile_last_failed_to_create_ts = 0;
+uint64_t                vm_swapfile_last_successful_create_ts = 0;
 int                     vm_swapfile_can_be_created = FALSE;
 boolean_t               delayed_trim_handling_in_progress = FALSE;
 
@@ -119,7 +124,6 @@ boolean_t               hibernate_in_progress_with_pinned_swap = FALSE;
 
 static void vm_swapout_thread_throttle_adjust(void);
 static void vm_swap_free_now(struct swapfile *swf, uint64_t f_offset);
-void vm_swapout_thread(void);
 static void vm_swapfile_create_thread(void);
 static void vm_swapfile_gc_thread(void);
 static void vm_swap_defragment(void);
@@ -159,8 +163,6 @@ boolean_t vm_swap_force_defrag = FALSE, vm_swap_force_reclaim = FALSE;
 
 #define VM_SWAP_SHOULD_DEFRAGMENT()     (((vm_swap_force_defrag == TRUE) || (c_swappedout_sparse_count > (vm_swapfile_total_segs_used / 16))) ? 1 : 0)
 #define VM_SWAP_SHOULD_PIN(_size)       FALSE
-#define VM_SWAP_SHOULD_CREATE(cur_ts)   ((vm_num_swap_files < vm_num_swap_files_config) && ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) < (unsigned int)vm_swapfile_hiwater_segs) && \
-	                                 ((cur_ts - vm_swapfile_last_failed_to_create_ts) > VM_SWAPFILE_DELAYED_CREATE) ? 1 : 0)
 #define VM_SWAP_SHOULD_TRIM(swf)        ((swf->swp_delayed_trim_count >= VM_SWAPFILE_DELAYED_TRIM_MAX) ? 1 : 0)
 
 #else /* !XNU_TARGET_OS_OSX */
@@ -170,15 +172,12 @@ boolean_t vm_swap_force_defrag = FALSE, vm_swap_force_reclaim = FALSE;
 
 #define VM_SWAP_SHOULD_DEFRAGMENT()     (((vm_swap_force_defrag == TRUE) || (c_swappedout_sparse_count > (vm_swapfile_total_segs_used / 4))) ? 1 : 0)
 #define VM_SWAP_SHOULD_PIN(_size)       (vm_swappin_avail > 0 && vm_swappin_avail >= (int64_t)(_size))
-#define VM_SWAP_SHOULD_CREATE(cur_ts)   ((vm_num_swap_files < vm_num_swap_files_config) && ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) < (unsigned int)vm_swapfile_hiwater_segs) && \
-	                                 ((cur_ts - vm_swapfile_last_failed_to_create_ts) > VM_SWAPFILE_DELAYED_CREATE) ? 1 : 0)
 #define VM_SWAP_SHOULD_TRIM(swf)        ((swf->swp_delayed_trim_count >= VM_SWAPFILE_DELAYED_TRIM_MAX) ? 1 : 0)
 
 #endif /* !XNU_TARGET_OS_OSX */
 
 #define VM_SWAP_SHOULD_RECLAIM()        (((vm_swap_force_reclaim == TRUE) || ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) >= swapfile_reclaim_threshold_segs)) ? 1 : 0)
 #define VM_SWAP_SHOULD_ABORT_RECLAIM()  (((vm_swap_force_reclaim == FALSE) && ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) <= swapfile_reclam_minimum_segs)) ? 1 : 0)
-#define VM_SWAPFILE_DELAYED_CREATE      15
 
 #define VM_SWAP_BUSY()  (((c_early_swapout_count + c_regular_swapout_count + c_late_swapout_count) && (vm_swapper_throttle == THROTTLE_LEVEL_COMPRESSOR_TIER0)) ? 1 : 0)
 
@@ -188,10 +187,10 @@ extern unsigned int hash_string(char *cp, int len);
 #endif
 
 #if RECORD_THE_COMPRESSED_DATA
-boolean_t       c_compressed_record_init_done = FALSE;
+boolean_t       c_compressed_record_init_done = FALSE;  /* was the record file opened? */
 int             c_compressed_record_write_error = 0;
-struct vnode    *c_compressed_record_vp = NULL;
-uint64_t        c_compressed_record_file_offset = 0;
+struct vnode    *c_compressed_record_vp = NULL;         /* the file opened for record write */
+uint64_t        c_compressed_record_file_offset = 0;    /* next write offset */
 void    c_compressed_record_init(void);
 void    c_compressed_record_write(char *, int);
 #endif
@@ -761,19 +760,32 @@ vm_swap_defragment()
 	PAGE_REPLACEMENT_DISALLOWED(FALSE);
 }
 
+TUNABLE(uint64_t, vm_swapfile_creation_delay_ns, "vm_swapfile_creation_delay_ns", 15 * NSEC_PER_SEC);
+
+static inline bool
+vm_swapfile_should_create(uint64_t now)
+{
+	uint64_t delta_failed_creation_ns;
+	absolutetime_to_nanoseconds(now - vm_swapfile_last_failed_to_create_ts, &delta_failed_creation_ns);
+
+	return (vm_num_swap_files < vm_num_swap_files_config) &&
+	       ((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) < (unsigned int)vm_swapfile_hiwater_segs) &&
+	       (delta_failed_creation_ns > vm_swapfile_creation_delay_ns);
+}
 
 bool vm_swapfile_create_thread_inited = false;
+
 static void
 vm_swapfile_create_thread(void)
 {
-	clock_sec_t     sec;
-	clock_nsec_t    nsec;
+	uint64_t now;
 
 	if (!vm_swapfile_create_thread_inited) {
 #if CONFIG_THREAD_GROUPS
 		thread_group_vm_add();
 #endif /* CONFIG_THREAD_GROUPS */
 		current_thread()->options |= TH_OPT_VMPRIV;
+
 		vm_swapfile_create_thread_inited = true;
 	}
 
@@ -799,19 +811,19 @@ vm_swapfile_create_thread(void)
 			break;
 		}
 
-		clock_get_system_nanotime(&sec, &nsec);
+		now = mach_absolute_time();
 
-		if (VM_SWAP_SHOULD_CREATE(sec) == 0) {
+		if (!vm_swapfile_should_create(now)) {
 			break;
 		}
 
 		lck_mtx_unlock(&vm_swap_data_lock);
 
 		if (vm_swap_create_file() == FALSE) {
-			vm_swapfile_last_failed_to_create_ts = sec;
-			HIBLOG("vm_swap_create_file failed @ %lu secs\n", (unsigned long)sec);
+			vm_swapfile_last_failed_to_create_ts = now;
+			HIBLOG("low swap: failed to create swapfile\n");
 		} else {
-			vm_swapfile_last_successful_create_ts = sec;
+			vm_swapfile_last_successful_create_ts = now;
 		}
 	}
 	vm_swapfile_create_thread_running = 0;
@@ -1711,8 +1723,7 @@ vm_swap_put(vm_offset_t addr, uint64_t *f_offset, uint32_t size, c_segment_t c_s
 	boolean_t       waiting = FALSE;
 	boolean_t       retried = FALSE;
 	int             error = 0;
-	clock_sec_t     sec;
-	clock_nsec_t    nsec;
+	uint64_t        now;
 	void            *upl_ctx = NULL;
 	boolean_t       drop_iocount = FALSE;
 
@@ -1752,9 +1763,9 @@ retry:
 					vm_swapfile_total_segs_used_max = vm_swapfile_total_segs_used;
 				}
 
-				clock_get_system_nanotime(&sec, &nsec);
+				now = mach_absolute_time();
 
-				if (VM_SWAP_SHOULD_CREATE(sec) && !vm_swapfile_create_thread_running) {
+				if (vm_swapfile_should_create(now) && !vm_swapfile_create_thread_running) {
 					thread_wakeup((event_t) &vm_swapfile_create_needed);
 				}
 
@@ -1782,9 +1793,9 @@ retry:
 	 * no need to block... setting hibernate_no_swapspace to TRUE,
 	 * will cause "vm_compressor_compact_and_swap" to immediately abort
 	 */
-	clock_get_system_nanotime(&sec, &nsec);
+	now = mach_absolute_time();
 
-	if (VM_SWAP_SHOULD_CREATE(sec)) {
+	if (vm_swapfile_should_create(now)) {
 		if (!vm_swapfile_create_thread_running) {
 			thread_wakeup((event_t) &vm_swapfile_create_needed);
 		}
@@ -1915,8 +1926,7 @@ vm_swap_free(uint64_t f_offset)
 {
 	struct swapfile *swf = NULL;
 	struct trim_list *tl = NULL;
-	clock_sec_t     sec;
-	clock_nsec_t    nsec;
+	uint64_t now;
 
 	if (swp_trim_supported == TRUE) {
 		tl = kalloc_type(struct trim_list, Z_WAITOK);
@@ -1948,9 +1958,9 @@ vm_swap_free(uint64_t f_offset)
 		tl = NULL;
 
 		if (VM_SWAP_SHOULD_TRIM(swf) && !vm_swapfile_create_thread_running) {
-			clock_get_system_nanotime(&sec, &nsec);
+			now = mach_absolute_time();
 
-			if (sec > dont_trim_until_ts) {
+			if (now > dont_trim_until_ts) {
 				thread_wakeup((event_t) &vm_swapfile_create_needed);
 			}
 		}
@@ -2396,23 +2406,23 @@ vm_swap_get_max_configured_space(void)
 	return num_swap_files * MAX_SWAP_FILE_SIZE;
 }
 
-int
+bool
 vm_swap_low_on_space(void)
 {
 	if (vm_num_swap_files == 0 && vm_swapfile_can_be_created == FALSE) {
-		return 0;
+		return false;
 	}
 
 	if (((vm_swapfile_total_segs_alloced - vm_swapfile_total_segs_used) < ((unsigned int)vm_swapfile_hiwater_segs) / 8)) {
 		if (vm_num_swap_files == 0 && !SWAPPER_NEEDS_TO_UNTHROTTLE()) {
-			return 0;
+			return false;
 		}
 
 		if (vm_swapfile_last_failed_to_create_ts >= vm_swapfile_last_successful_create_ts) {
-			return 1;
+			return true;
 		}
 	}
-	return 0;
+	return false;
 }
 
 int

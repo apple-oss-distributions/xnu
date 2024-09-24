@@ -58,7 +58,7 @@ typedef union {
 	uint32_t        data;                       /* Single word version of bitfields and shared count */
 } lck_rw_word_t;
 
-typedef struct {
+typedef struct lck_rw_s {
 	uint32_t        lck_rw_unused : 24; /* tsid one day ... */
 	uint32_t        lck_rw_type   :  8; /* LCK_TYPE_RW */
 	uint32_t        lck_rw_padding;
@@ -194,13 +194,7 @@ extern void             lck_rw_startup_init(
 #define LCK_RW_DECLARE(var, grp) \
 	LCK_RW_DECLARE_ATTR(var, grp, LCK_ATTR_NULL)
 
-#define LCK_RW_ASSERT_SHARED    0x01
-#define LCK_RW_ASSERT_EXCLUSIVE 0x02
-#define LCK_RW_ASSERT_HELD      0x03
-#define LCK_RW_ASSERT_NOTHELD   0x04
-
 #if MACH_ASSERT
-extern boolean_t lck_rw_assert_enabled;
 #define LCK_RW_ASSERT(lck, type) do { \
 	        if (__improbable(!(lck_opts_get() & LCK_OPTION_DISABLE_RW_DEBUG))) { \
 	                lck_rw_assert((lck),(type)); \
@@ -540,26 +534,6 @@ extern wait_result_t    lck_rw_sleep_deadline(
 	uint64_t                deadline);
 
 #ifdef  XNU_KERNEL_PRIVATE
-/*!
- * @function lck_rw_assert
- *
- * @abstract
- * Asserts the rw_lock is held.
- *
- * @discussion
- * read-write locks do not have a concept of ownership when held in shared mode,
- * so this function merely asserts that someone is holding the lock, not necessarily the caller.
- * However if rw_lock_debug is on, a best effort mechanism to track the owners is in place, and
- * this function can be more accurate.
- * Type can be LCK_RW_ASSERT_SHARED, LCK_RW_ASSERT_EXCLUSIVE, LCK_RW_ASSERT_HELD
- * LCK_RW_ASSERT_NOTHELD.
- *
- * @param lck   rw_lock to check.
- * @param type  assert type
- */
-extern void             lck_rw_assert(
-	lck_rw_t                *lck,
-	unsigned int            type);
 
 /*!
  * @function kdp_lck_rw_lock_is_acquired_exclusive
@@ -616,6 +590,27 @@ extern bool             lck_rw_lock_yield_shared(
 	lck_rw_t                *lck,
 	boolean_t               force_yield);
 
+/*!
+ * @function lck_rw_lock_would_yield_shared
+ *
+ * @abstract
+ * Check whether a rw_lock currently held in shared mode would be yielded
+ *
+ * @discussion
+ * This function can be used when lck_rw_lock_yield_shared would be
+ * inappropriate due to the need to perform additional housekeeping
+ * prior to any yield or when the caller may wish to prematurely terminate
+ * an operation rather than resume it after regaining the lock.
+ *
+ * @param lck           rw_lock already held in shared mode to test for possible yield.
+ *
+ * @returns TRUE if the lock would be yielded, FALSE otherwise
+ */
+extern bool             lck_rw_lock_would_yield_shared(
+	lck_rw_t                *lck);
+
+
+
 __enum_decl(lck_rw_yield_t, uint32_t, {
 	LCK_RW_YIELD_WRITERS_ONLY,
 	LCK_RW_YIELD_ANY_WAITER,
@@ -639,6 +634,28 @@ __enum_decl(lck_rw_yield_t, uint32_t, {
  * @returns TRUE if the lock was yield, FALSE otherwise
  */
 extern bool             lck_rw_lock_yield_exclusive(
+	lck_rw_t                *lck,
+	lck_rw_yield_t          mode);
+
+/*!
+ * @function lck_rw_lock_would_yield_exclusive
+ *
+ *
+ * @abstract
+ * Check whether a rw_lock currently held in exclusive mode would be yielded
+ *
+ * @discussion
+ * This function can be used when lck_rw_lock_yield_exclusive would be
+ * inappropriate due to the need to perform additional housekeeping
+ * prior to any yield or when the caller may wish to prematurely terminate
+ * an operation rather than resume it after regaining the lock.
+ *
+ * @param lck           rw_lock already held in exclusive mode to yield.
+ * @param mode          conditions for a possible yield
+ *
+ * @returns TRUE if the lock would be yielded, FALSE otherwise
+ */
+extern bool             lck_rw_lock_would_yield_exclusive(
 	lck_rw_t                *lck,
 	lck_rw_yield_t          mode);
 
@@ -684,6 +701,7 @@ extern void             lck_rw_set_promotion_locked(
 #endif /* MACH_KERNEL_PRIVATE */
 
 #ifdef  KERNEL_PRIVATE
+
 /*!
  * @function lck_rw_try_lock_shared
  *
@@ -731,6 +749,33 @@ extern boolean_t        lck_rw_try_lock_exclusive(
  */
 extern lck_rw_type_t    lck_rw_done(
 	lck_rw_t                *lck);
+
+#define LCK_RW_ASSERT_SHARED    0x01
+#define LCK_RW_ASSERT_EXCLUSIVE 0x02
+#define LCK_RW_ASSERT_HELD      0x03
+#define LCK_RW_ASSERT_NOTHELD   0x04
+
+/*!
+ * @function lck_rw_assert
+ *
+ * @abstract
+ * Asserts the rw_lock is held.
+ *
+ * @discussion
+ * read-write locks do not have a concept of ownership when held in shared mode,
+ * so this function merely asserts that someone is holding the lock, not necessarily the caller.
+ * However if rw_lock_debug is on, a best effort mechanism to track the owners is in place, and
+ * this function can be more accurate.
+ * Type can be LCK_RW_ASSERT_SHARED, LCK_RW_ASSERT_EXCLUSIVE, LCK_RW_ASSERT_HELD
+ * LCK_RW_ASSERT_NOTHELD.
+ *
+ * @param lck   rw_lock to check.
+ * @param type  assert type
+ */
+extern void             lck_rw_assert(
+	lck_rw_t                *lck,
+	unsigned int            type);
+
 #endif /* KERNEL_PRIVATE */
 
 __END_DECLS

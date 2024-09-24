@@ -295,6 +295,7 @@ extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
 #error Unsupported architecture
 #endif /* defined(__arm64__) */
 
+
 extern pmap_paddr_t get_mmu_ttb(void);
 extern pmap_paddr_t mmu_kvtop(vm_offset_t va);
 extern pmap_paddr_t mmu_kvtop_wpreflight(vm_offset_t va);
@@ -473,10 +474,10 @@ struct pmap {
 #if HAS_APPLE_PAC
 	bool disable_jop;
 #else
-	bool reserved10;
+	bool reserved11;
 #endif /* HAS_APPLE_PAC */
 
-	bool reserved11;
+	bool reserved13;
 
 #define PMAP_TYPE_USER 0 /* ordinary pmap */
 #define PMAP_TYPE_KERNEL 1 /* kernel pmap */
@@ -619,6 +620,9 @@ extern boolean_t pmap_is_empty(pmap_t pmap, vm_map_offset_t start, vm_map_offset
 #define ARM_PMAP_MAX_OFFSET_MAX     0x04
 #define ARM_PMAP_MAX_OFFSET_DEVICE  0x08
 #define ARM_PMAP_MAX_OFFSET_JUMBO   0x10
+#if XNU_PLATFORM_iPhoneOS && EXTENDED_USER_VA_SUPPORT
+#define ARM_PMAP_MAX_OFFSET_EXTRA_JUMBO 0x20
+#endif /* XNU_PLATFORM_iPhoneOS && EXTENDED_USER_VA_SUPPORT */
 
 extern vm_map_offset_t pmap_max_offset(boolean_t is64, unsigned int option);
 extern vm_map_offset_t pmap_max_64bit_offset(unsigned int option);
@@ -735,6 +739,7 @@ void pmap_abandon_measurement(void);
 #define PMAP_IMAGE4_MONITOR_TRAP_INDEX 110
 
 #define PMAP_COUNT 111
+
 
 /**
  * Value used when initializing pmap per-cpu data to denote that the structure

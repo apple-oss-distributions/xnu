@@ -91,7 +91,7 @@ test_cow_before_zf_read(
 	return;
 }
 
-T_DECL(vm_test_cow_before_zf_read, "Test COW before a zero-fill read fault")
+T_DECL(vm_test_cow_before_zf_read, "Test COW before a zero-fill read fault", T_META_TAG_VM_PREFERRED)
 {
 	test_cow_before_zf_read(FALSE, FALSE);
 	test_cow_before_zf_read(FALSE, TRUE);

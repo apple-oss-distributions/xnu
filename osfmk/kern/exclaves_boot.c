@@ -45,23 +45,24 @@
 #include "exclaves_boot.h"
 #include "exclaves_debug.h"
 #include "exclaves_frame_mint.h"
-
-extern lck_grp_t exclaves_lck_grp;
+#include "exclaves_upcalls.h"
+#include "exclaves_internal.h"
 
 /* Lock around single-threaded exclaves boot */
 LCK_MTX_DECLARE(exclaves_boot_lock, &exclaves_lck_grp);
 
 /* Boot status. */
 __enum_closed_decl(exclaves_boot_status_t, uint32_t, {
-	EXCLAVES_BS_NOT_SUPPORTED = 0,
-	EXCLAVES_BS_NOT_STARTED = 1,
-	EXCLAVES_BS_BOOTED_STAGE_2 = 2,
-	EXCLAVES_BS_BOOTED_EXCLAVEKIT = 3,
-	EXCLAVES_BS_BOOTED_FAILURE = 4,
+	EXCLAVES_BS_NOT_DEFINED = 0,
+	EXCLAVES_BS_NOT_SUPPORTED = 1,
+	EXCLAVES_BS_NOT_STARTED = 2,
+	EXCLAVES_BS_BOOTED_STAGE_2 = 3,
+	EXCLAVES_BS_BOOTED_EXCLAVEKIT = 4,
+	EXCLAVES_BS_BOOTED_FAILURE = 5,
 });
 
 /* Atomic so that it can be safely checked outside the boot lock. */
-static os_atomic(exclaves_boot_status_t) exclaves_boot_status = EXCLAVES_BS_NOT_SUPPORTED;
+static os_atomic(exclaves_boot_status_t) exclaves_boot_status = EXCLAVES_BS_NOT_DEFINED;
 
 static thread_t exclaves_boot_thread = THREAD_NULL;
 
@@ -112,11 +113,18 @@ exclaves_boot_tasks(void)
 	qsort(boot_tasks, count, sizeof(boot_tasks[0]), ebt_cmp);
 
 	for (size_t i = 0; i < count; i++) {
+		exclaves_debug_printf(show_progress,
+		    "exclaves: boot task started, %s\n", boot_tasks[i].ebt_name);
+
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES,
 		    MACH_EXCLAVES_BOOT_TASK) | DBG_FUNC_START, i);
 		kern_return_t ret = boot_tasks[i].ebt_func();
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES,
 		    MACH_EXCLAVES_BOOT_TASK) | DBG_FUNC_END);
+
+		exclaves_debug_printf(show_progress,
+		    "exclaves: boot task done, %s\n", boot_tasks[i].ebt_name);
+
 		if (ret != KERN_SUCCESS) {
 			panic("exclaves: boot task failed: %s (%p)",
 			    boot_tasks[i].ebt_name, &boot_tasks[i]);
@@ -137,9 +145,12 @@ exclaves_check_sk(void)
 	if (sk_bootstrapped) {
 		os_atomic_store(&exclaves_boot_status,
 		    EXCLAVES_BS_NOT_STARTED, relaxed);
+	} else {
+		os_atomic_store(&exclaves_boot_status,
+		    EXCLAVES_BS_NOT_SUPPORTED, relaxed);
 	}
 }
-STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, exclaves_check_sk);
+STARTUP(EXCLAVES, STARTUP_RANK_FIRST, exclaves_check_sk);
 
 static void
 exclaves_boot_status_wait(const exclaves_boot_status_t status)
@@ -176,6 +187,15 @@ exclaves_boot_status_set(const exclaves_boot_status_t status)
 	exclaves_boot_status_wake();
 }
 
+static bool
+exclaves_boot_status_is_supported(exclaves_boot_status_t status)
+{
+	assert3u(status, !=, EXCLAVES_BS_NOT_DEFINED);
+
+	return status != EXCLAVES_BS_NOT_DEFINED &&
+	       status != EXCLAVES_BS_NOT_SUPPORTED;
+}
+
 static kern_return_t
 exclaves_boot_stage_2(void)
 {
@@ -185,13 +205,8 @@ exclaves_boot_stage_2(void)
 	const exclaves_boot_status_t status =
 	    os_atomic_load(&exclaves_boot_status, relaxed);
 
-	if (status == EXCLAVES_BS_NOT_SUPPORTED) {
+	if (!exclaves_boot_status_is_supported(status)) {
 		return KERN_NOT_SUPPORTED;
-	}
-
-	/* Should only be called from launchd. */
-	if (task_pid(current_task()) != 1) {
-		return KERN_DENIED;
 	}
 
 	/*
@@ -200,6 +215,12 @@ exclaves_boot_stage_2(void)
 	 */
 	if (status != EXCLAVES_BS_NOT_STARTED) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* Initialize xnu upcall server. */
+	kr = exclaves_upcall_init();
+	if (kr != KERN_SUCCESS) {
+		panic("Exclaves upcall early init failed");
 	}
 
 	/* Early boot. */
@@ -236,7 +257,7 @@ exclaves_boot_exclavekit(void)
 	const exclaves_boot_status_t status =
 	    os_atomic_load(&exclaves_boot_status, relaxed);
 
-	if (status == EXCLAVES_BS_NOT_SUPPORTED) {
+	if (!exclaves_boot_status_is_supported(status)) {
 		return KERN_NOT_SUPPORTED;
 	}
 
@@ -245,13 +266,15 @@ exclaves_boot_exclavekit(void)
 		return KERN_INVALID_ARGUMENT;
 	}
 
-
 	/*
 	 * Treat a failure to boot exclavekit as a transition to the
-	 * EXCLAVES_BS_BOOTED_FAILURE state and return a failure.
+	 * EXCLAVES_BS_BOOTED_FAILURE state and return a failure. On RELEASE we
+	 * simply panic as exclavekit is required.
 	 */
 	kern_return_t kr = exclaves_frame_mint_populate();
 	if (kr != KERN_SUCCESS) {
+		exclaves_requirement_assert(EXCLAVES_R_EXCLAVEKIT,
+		    "failed to populate frame mint");
 		exclaves_boot_status_set(EXCLAVES_BS_BOOTED_FAILURE);
 		return KERN_FAILURE;
 	}
@@ -324,7 +347,7 @@ exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 		return KERN_SUCCESS;
 	}
 
-	if (current_boot_status == EXCLAVES_BS_NOT_SUPPORTED) {
+	if (!exclaves_boot_status_is_supported(current_boot_status)) {
 		return KERN_NOT_SUPPORTED;
 	}
 
@@ -375,6 +398,30 @@ exclaves_get_status(void)
 	return EXCLAVES_STATUS_NOT_SUPPORTED;
 }
 
+const char *
+exclaves_get_boot_status_string(void)
+{
+	exclaves_boot_status_t boot_status = os_atomic_load(&exclaves_boot_status, relaxed);
+
+	switch (boot_status) {
+	case EXCLAVES_BS_NOT_DEFINED:
+		return "NOT_DEFINED";
+	case EXCLAVES_BS_NOT_SUPPORTED:
+		return "NOT_SUPPORTED";
+	case EXCLAVES_BS_NOT_STARTED:
+		return "NOT_STARTED";
+	case EXCLAVES_BS_BOOTED_STAGE_2:
+		return "BOOTED_STAGE_2";
+	case EXCLAVES_BS_BOOTED_EXCLAVEKIT:
+		return "BOOTED_EXCLAVEKIT";
+	case EXCLAVES_BS_BOOTED_FAILURE:
+		return "BOOTED_FAILURE";
+	default:
+		assertf(false, "unknown boot status %u", boot_status);
+		return "UNKNOWN";
+	}
+}
+
 exclaves_boot_stage_t
 exclaves_get_boot_stage(void)
 {
@@ -384,6 +431,7 @@ exclaves_get_boot_stage(void)
 	switch (status) {
 	case EXCLAVES_BS_NOT_STARTED:
 	case EXCLAVES_BS_NOT_SUPPORTED:
+	case EXCLAVES_BS_NOT_DEFINED:
 		return EXCLAVES_BOOT_STAGE_NONE;
 
 	case EXCLAVES_BS_BOOTED_STAGE_2:
@@ -400,6 +448,15 @@ exclaves_get_boot_stage(void)
 	}
 }
 
+bool
+exclaves_boot_supported(void)
+{
+	exclaves_boot_status_t status;
+
+	status = os_atomic_load(&exclaves_boot_status, relaxed);
+	return exclaves_boot_status_is_supported(status);
+}
+
 #else /* CONFIG_EXCLAVES */
 
 exclaves_status_t
@@ -408,11 +465,16 @@ exclaves_get_status(void)
 	return EXCLAVES_STATUS_NOT_SUPPORTED;
 }
 
-
 exclaves_boot_stage_t
 exclaves_get_boot_stage(void)
 {
 	return EXCLAVES_BOOT_STAGE_NONE;
+}
+
+bool
+exclaves_boot_supported(void)
+{
+	return false;
 }
 
 #endif /* CONFIG_EXCLAVES */

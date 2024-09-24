@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <vm/vm_page.h>
+#include <vm/vm_page_internal.h>
 #include <vm/pmap.h>
 #include <kern/ledger.h>
 #include <kern/thread.h>
@@ -38,7 +38,7 @@
 #include <arm/pmap/pmap_pt_geometry.h>
 #endif /* CONFIG_SPTM */
 #endif /* defined(__arm64__) */
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 extern void read_random(void* buffer, u_int numBytes);
 
@@ -57,6 +57,7 @@ void test_pmap_call_overhead(unsigned int num_loops);
 uint64_t test_pmap_page_protect_overhead(unsigned int num_loops, unsigned int num_aliases);
 #if CONFIG_SPTM
 kern_return_t test_pmap_huge_pv_list(unsigned int num_loops, unsigned int num_mappings);
+kern_return_t test_pmap_reentrance(unsigned int num_loops);
 #endif
 
 #define PMAP_TEST_VA (0xDEADULL << PAGE_SHIFT)
@@ -183,7 +184,7 @@ pmap_remove_thread(void *arg, wait_result_t __unused wres)
 {
 	pmap_test_thread_args *args = arg;
 	do {
-		kern_return_t kr = pmap_enter_options(args->pmap, args->va, args->pn,
+		__assert_only kern_return_t kr = pmap_enter_options(args->pmap, args->va, args->pn,
 		    VM_PROT_READ, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE, PMAP_OPTIONS_INTERNAL, NULL, PMAP_MAPPING_TYPE_INFER);
 		assert(kr == KERN_SUCCESS);
 		pmap_remove(args->pmap, args->va, args->va + PAGE_SIZE);
@@ -827,5 +828,13 @@ hugepv_cleanup:
 
 	return kr;
 }
+
+
+kern_return_t
+test_pmap_reentrance(unsigned int num_loops __unused)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
 
 #endif /* CONFIG_SPTM */

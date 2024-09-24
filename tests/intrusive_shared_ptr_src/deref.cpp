@@ -32,7 +32,7 @@ tests()
 	}
 }
 
-T_DECL(deref, "intrusive_shared_ptr.deref") {
+T_DECL(deref, "intrusive_shared_ptr.deref", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

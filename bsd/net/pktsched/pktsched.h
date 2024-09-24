@@ -193,6 +193,8 @@ extern int pktsched_getqstats(struct ifclassq *, u_int32_t, u_int32_t,
 extern u_int64_t pktsched_abs_to_nsecs(u_int64_t);
 extern u_int64_t pktsched_nsecs_to_abstime(u_int64_t);
 extern void pktsched_free_pkt(pktsched_pkt_t *);
+extern void pktsched_drop_pkt(pktsched_pkt_t *, uint32_t, const char *, uint16_t,
+    uint16_t);
 extern int pktsched_clone_pkt(pktsched_pkt_t *, pktsched_pkt_t *);
 extern void pktsched_corrupt_packet(pktsched_pkt_t *pkt);
 extern void pktsched_get_pkt_vars(pktsched_pkt_t *, volatile uint32_t **,

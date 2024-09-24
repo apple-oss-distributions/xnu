@@ -11,7 +11,7 @@
 #include <stdbool.h>
 #include "cs_helpers.h"
 
-#define MAX_TEST_NUM 7
+#define MAX_TEST_NUM 9
 
 #if __arm64__
 #define machine_thread_state_t          arm_thread_state64_t
@@ -209,7 +209,7 @@ test_unentitled_thread_set_state(void)
 }
 
 static void
-test_unentitled_thread_set_exception_ports(void)
+unentitled_set_exception_ports_crash(void)
 {
 	mach_port_t exc_port = alloc_server_port();
 
@@ -229,12 +229,64 @@ test_unentitled_thread_set_exception_ports(void)
 	printf("thread_set_exception_ports did not crash\n");
 }
 
+static void
+unentitled_set_exception_ports_pass(void)
+{
+	mach_port_t exc_port = alloc_server_port();
+
+	/* thread_set_exception_ports with state *IDENTITY_PROTECTED should not fail */
+	kern_return_t kr = thread_set_exception_ports(
+		mach_thread_self(),
+		EXC_MASK_ALL,
+		exc_port,
+		(exception_behavior_t)((unsigned int)EXCEPTION_STATE_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES),
+		EXCEPTION_THREAD_STATE);
+	assert(kr == 0);
+
+	kr = thread_set_exception_ports(
+		mach_thread_self(),
+		EXC_MASK_ALL,
+		exc_port,
+		(exception_behavior_t)((unsigned int)EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES),
+		EXCEPTION_THREAD_STATE);
+	assert(kr == 0);
+
+	return;
+}
+
+static void
+exception_ports_crash(void)
+{
+	kern_return_t kr;
+	mach_port_t exc_port;
+	mach_port_options_t opts = {
+		.flags = MPO_INSERT_SEND_RIGHT | MPO_EXCEPTION_PORT,
+	};
+
+	kr = mach_port_construct(mach_task_self(), &opts, 0ull, &exc_port);
+	assert(kr == KERN_SUCCESS);
+
+	kr = task_register_hardened_exception_handler(current_task(),
+	    0, EXC_MASK_BAD_ACCESS,
+	    EXCEPTION_STATE_IDENTITY_PROTECTED, EXCEPTION_THREAD_STATE, exc_port);
+
+	kr = thread_set_exception_ports(
+		mach_thread_self(),
+		EXC_MASK_BAD_ACCESS,
+		exc_port,
+		(exception_behavior_t)((unsigned int)EXCEPTION_STATE_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES),
+		EXCEPTION_THREAD_STATE);
+
+	printf("thread_set_exception_ports did not crash: %d\n", kr);
+}
+
 int
 main(int argc, char *argv[])
 {
 	uint32_t my_csflags = 0;
 	bool thirdparty_hardened = !strcmp(argv[0], "./reply_port_defense_client_3P_hardened");
 
+	/* TODO add some sysctl which disabled platform binary bit here */
 	if (my_csflags & CS_PLATFORM_BINARY == thirdparty_hardened) {
 		printf("platform binary does not match expected\n");
 		return -1;
@@ -244,11 +296,13 @@ main(int argc, char *argv[])
 	void (*tests[MAX_TEST_NUM])(void) = {
 		test_immovable_receive_right, /* 0 */
 		test_make_send_once_right,
-		test_using_send_right,
+		test_using_send_right, /* 2 */
 		test_move_send_right,
-		test_move_provisional_reply_port,
-		test_unentitled_thread_set_exception_ports,
-		test_unentitled_thread_set_state /* 6 */
+		test_move_provisional_reply_port, /* 4 */
+		unentitled_set_exception_ports_crash,
+		test_unentitled_thread_set_state, /* 6 */
+		unentitled_set_exception_ports_pass,
+		exception_ports_crash, /* 8 */
 	};
 
 	if (argc < 2) {

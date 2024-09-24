@@ -323,13 +323,16 @@
 	X(TCP_STATS_PREDDAT,		"PredData",	"\t%llu correct data packet header prediction\n")       \
 	X(TCP_STATS_PCBCACHEMISS,	"Pcb$Miss",	"\t%llu times pcb cahce miss")  \
         \
-	/* SACK related stats */        \
+	/* SACK/RACK related stats */        \
 	X(TCP_STATS_SACK_RECOVERY_EPISODE,	"SACKRecEpi",	"\t%llu SACK recovery episode\n")       \
 	X(TCP_STATS_SACK_REXMITS,	        "SACKReXmt",	"\t%llu segment rexmit in SACK recovery episodes\n")    \
 	X(TCP_STATS_SACK_REXMIT_BYTES,		"SACKReXmtB",	"\t%llu byte rexmit in SACK recovery episodes\n")       \
 	X(TCP_STATS_SACK_RCV_BLOCKS,		"SACKRcvBlk",	"\t%llu SACK option (SACK blocks) received\n")  \
 	X(TCP_STATS_SACK_SEND_BLOCKS,		"SACKSntBlk",	"\t%llu SACK option (SACK blocks) sent\n")      \
 	X(TCP_STATS_SACK_SBOVERFLOW,		"SACKSndBlkOF",	"\t%llu SACK scoreboard overflow\n")    \
+	X(TCP_STATS_RACK_REXMITS,			"RACKReXmt",	"\t%llu segment rexmit in RACK recovery episodes\n")    \
+	X(TCP_STATS_RACK_RECOVERY_EPISODE,	"RACKRecEpi",	"\t%llu RACK recovery episode\n")    \
+	X(TCP_STATS_RACK_REORDERING_TIMEOUT_RECOVERY_EPISODE,	"RACKReorderTimeoutRecEpi",	"\t%llu RACK recovery episode due to reordering timeout\n")    \
         \
 	/* LRO related stats */ \
 	X(TCP_STATS_COALESCED_PACK,		"CoalPkt",	"\t%llu LRO coalesced packet\n")        \
@@ -652,6 +655,7 @@
 	X(NETIF_STATS_DROP_RXQ_OVFL,		"DropRxqOverflow",	"\t\t%llu dropped due to RX Queue overflow\n")     \
 	X(NETIF_STATS_DROP_NO_RX_CB,		"DropNoRxCallback",	"\t\t%llu dropped due to missing RX callback\n") \
 	X(NETIF_STATS_DROP_NO_DELEGATE,		"DropNoDelegate",	"\t\t%llu dropped due to missing delegate interface\n") \
+	X(NETIF_STATS_DROP_INPUT_DISABLED,	"DropInputDisabled",	"\t\t%llu dropped due to input disabled on interface\n") \
         \
 	/* Channel event stats */  \
 	X(NETIF_STATS_EV_RECV,			"EvRecv",		"\t%llu channel event received\n")     \
@@ -799,6 +803,8 @@
 	X(FSW_STATS_RX_DEMUX_SHORT_ERR,		"RxDemuxShortErr",	"\t\t%llu demux failed, classify length short\n") \
 	X(FSW_STATS_RX_WASTED_16KMBUF,		 "RxWasted16KMbuf",	"\t\t%llu wasted an entire pre-allocated 16K mbuf\n") \
 	X(FSW_STATS_RX_PKT_NOT_LISTENER,	"RxPktNotListener",	"\t\t%llu packet not for listener\n") \
+	X(FSW_STATS_RX_FLOW_IN_USE,		    "RxFlowInUse",	"\t\t%llu flow in use\n") \
+	X(FSW_STATS_RX_STALL,                    "RxRingStall",         "\t\t%llu Rx rings stalled\n") \
 	/* Rx frag stats (fsw doesn't manage fragments on Tx) */        \
 	X(FSW_STATS_RX_FRAG_V4,			"RxFragV4",		"\t\t%llu total received ipv4 fragments\n")     \
 	X(FSW_STATS_RX_FRAG_V6,			"RxFragV6",		"\t\t%llu total received ipv6 fragments\n")     \
@@ -1110,7 +1116,8 @@ typedef struct {
 	uint32_t        nce_tx_rings;   /* num of tx rings */
 	uint32_t        nce_rx_rings;   /* num of rx rings */
 	uint32_t        __nce_align_reserved;
-	nexus_channel_ring_entry nce_ring_entries[0]; /* tx followed by rx */
+	uint32_t        nce_ring_count; /* -fbounds-safety: only TX and RX rings*/
+	nexus_channel_ring_entry nce_ring_entries[__counted_by(nce_ring_count)]; /* tx followed by rx */
 } nexus_channel_entry, *nexus_channel_entry_t;
 
 #define SCHF_MONITOR_TX         0x00000001
@@ -1139,7 +1146,7 @@ typedef struct {
 	uuid_t          nci_instance_uuid;      /* nexus instance UUID */
 	uint32_t        nci_channel_entries_count;
 	uint32_t        __nci_align_reserved;
-	nexus_channel_entry     nci_channel_entries[0]; /* variable length */
+	nexus_channel_entry     nci_channel_entries[__counted_by(nci_channel_entries_count)]; /* variable length */
 } nexus_channel_info, *nexus_channel_info_t;
 
 /*
@@ -1553,7 +1560,7 @@ struct sk_stats_flow_adv {
 	pid_t           sfa_owner_pid;          /* owner process */
 
 	uint32_t        sfa_entries_count;      /* number of flow adv entries */
-	struct sk_stats_flow_adv_ent    sfa_entries[0]; /* flow adv entries */
+	struct sk_stats_flow_adv_ent    sfa_entries[__counted_by(sfa_entries_count)]; /* flow adv entries */
 };
 
 /*

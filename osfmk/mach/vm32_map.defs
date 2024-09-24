@@ -67,6 +67,10 @@ subsystem
 #endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  map 3800;
 
+#if KERNEL_SERVER
+#define VM_KERNEL_SERVER 1
+#endif
+
 serverprefix vm32_;
 
 #include <mach/std_types.defs>
@@ -89,14 +93,14 @@ routine region(
 
 routine allocate(
 		target_task	: vm_task_entry_t;
-	inout	address		: vm32_address_t;
-		size		: vm32_size_t;
+	inout	address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
 		flags		: int);
 
 routine deallocate(
 		target_task	: vm_task_entry_t;
-		address		: vm32_address_t;
-		size		: vm32_size_t);
+		address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t));
 
 routine protect(
 		target_task	: vm_task_entry_t;
@@ -113,8 +117,8 @@ routine inherit(
 
 routine read(
 		target_task	: vm_map_read_t;
-		address		: vm32_address_t;
-		size		: vm32_size_t;
+		address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
 	out	data		: pointer_t);
 
 routine read_list(
@@ -124,21 +128,21 @@ routine read_list(
 
 routine write(
 		target_task	: vm_map_t;
-		address		: vm32_address_t;
+		address		: VM_USE_TMPTYPE(vm32_address_t);
 		data		: pointer_t);
 
 routine copy(
 		target_task	: vm_map_t;
-		source_address	: vm32_address_t;
-		size		: vm32_size_t;
-		dest_address	: vm32_address_t);
+		source_address	: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
+		dest_address	: VM_USE_TMPTYPE(vm32_address_t));
 
 routine read_overwrite(
 		target_task	: vm_map_read_t;
-		address		: vm32_address_t;
-		size		: vm32_size_t;
-		data		: vm32_address_t;
-	out	outsize		: vm32_size_t);
+		address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
+		data		: VM_USE_TMPTYPE(vm32_address_t);
+	out	outsize		: VM_USE_TMPTYPE(vm32_size_t));
 
 
 routine msync(
@@ -155,16 +159,16 @@ routine behavior_set(
 
 routine map(
 		target_task	: vm_task_entry_t;
-	inout	address		: vm32_address_t;
-		size		: vm32_size_t;
-		mask		: vm32_address_t;
+	inout	address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
+		mask		: VM_USE_TMPTYPE(vm32_address_t);
 		flags		: int;
 		object		: mem_entry_name_port_t;
-		offset		: vm32_offset_t;
+		offset		: VM_USE_TMPTYPE(vm32_offset_t);
 		copy		: boolean_t;
-		cur_protection	: vm_prot_t;
-		max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+		cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 routine machine_attribute(
 		target_task	: vm_map_t;
@@ -175,16 +179,16 @@ routine machine_attribute(
 
 routine remap(
 		target_task	: vm_map_t;
-	inout	target_address	: vm32_address_t;
-		size		: vm32_size_t;
-		mask		: vm32_address_t;
+	inout	target_address	: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
+		mask		: VM_USE_TMPTYPE(vm32_address_t);
 		anywhere	: boolean_t;
 		src_task	: vm_map_t;
-		src_address	: vm32_address_t;
+		src_address	: VM_USE_TMPTYPE(vm32_address_t);
 		copy		: boolean_t;
-	out	cur_protection	: vm_prot_t;
-	out	max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+	out	cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+	out	max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 routine _task_wire(
 		target_task	: vm_map_t;
@@ -192,9 +196,9 @@ routine _task_wire(
 
 routine make_memory_entry(
 		target_task	:vm_map_t;
-	inout	size		:vm32_size_t;
-		offset		:vm32_offset_t;
-		permission	:vm_prot_t;
+	inout	size		:VM_USE_TMPTYPE(vm32_size_t);
+		offset		:VM_USE_TMPTYPE(vm32_offset_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 	out	object_handle	:mem_entry_name_port_move_send_t;
 		parent_entry	:mem_entry_name_port_t);
 
@@ -248,9 +252,9 @@ routine region_64(
 
 routine make_memory_entry_64(
 		target_task	:vm_map_t;
-	inout	size		:memory_object_size_t;
-		offset		:memory_object_offset_t;
-		permission	:vm_prot_t;
+	inout	size		:VM_USE_TMPTYPE(memory_object_size_t);
+		offset		:VM_USE_TMPTYPE(memory_object_offset_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 	out	object_handle	:mach_port_move_send_t;
 		parent_entry	:mem_entry_name_port_t);
 
@@ -258,16 +262,16 @@ routine make_memory_entry_64(
 
 routine map_64(
 		target_task	: vm_task_entry_t;
-	inout	address		: vm32_address_t;
-		size		: vm32_size_t;
-		mask		: vm32_address_t;
+	inout	address		: VM_USE_TMPTYPE(vm32_address_t);
+		size		: VM_USE_TMPTYPE(vm32_size_t);
+		mask		: VM_USE_TMPTYPE(vm32_address_t);
 		flags		: int;
 		object		: mem_entry_name_port_t;
-		offset		: memory_object_offset_t;
+		offset		: VM_USE_TMPTYPE(memory_object_offset_t);
 		copy		: boolean_t;
-		cur_protection	: vm_prot_t;
-		max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+		cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 skip; /* was vm_map_get_upl */
 skip; /* was vm_upl_map */

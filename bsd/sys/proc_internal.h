@@ -248,9 +248,13 @@ struct  sigacts {
 
 #define PROC_NULL ((struct proc *)NULL)
 
-/*
+/*!
+ * @struct proc
+ *
+ * @brief
  * Description of a process.
  *
+ * @discussion
  * This structure contains the information needed to manage a thread of
  * control, known in UN*X as a process; it has references to substructures
  * containing descriptions of things that the process uses, but may share
@@ -258,6 +262,11 @@ struct  sigacts {
  * are always addressible except for those marked "(PROC ONLY)" below,
  * which might be addressible only on a processor on which the process
  * is running.
+ *
+ * The lifetime of a @c proc struct begins from forkproc() and ends at
+ * proc_free(). Do not modify the @c proc struct or rely on its fields
+ * being properly initialized before forkproc(). For corpses, forkproc()
+ * is not called and the @c proc struct is never initialized.
  */
 struct proc {
 	union {
@@ -820,6 +829,11 @@ extern kauth_cred_t proc_ucred_unsafe(proc_t p) __exported;
 __private_extern__ int proc_core_name(const char *format, const char *name, uid_t uid, pid_t pid,
     char *cr_name, size_t cr_name_len);
 #endif
+/* proc_best_name_for_pid finds a process with a given pid and copies its best name of
+ * the executable (32-byte name if it exists, otherwise the 16-byte name) to
+ * the passed in buffer. The size of the buffer is to be passed in as well.
+ */
+extern void proc_best_name_for_pid(int pid, char * buf, int size);
 extern int isinferior(struct proc *, struct proc *);
 __private_extern__ struct proc *pzfind(pid_t);  /* Find zombie by id. */
 __private_extern__ struct proc *proc_find_zombref(pid_t);       /* Find zombie by id. */
@@ -930,7 +944,7 @@ extern proc_t task_get_proc_raw(task_t task);
 extern void proc_ref_hold_proc_task_struct(proc_t proc);
 extern void proc_release_proc_task_struct(proc_t proc);
 extern void task_ref_hold_proc_task_struct(task_t task);
-extern void task_release_proc_task_struct(task_t task);
+extern void task_release_proc_task_struct(task_t task, proc_ro_t proc_ro);
 extern void proc_setpidversion(proc_t, int);
 extern uint64_t proc_getcsflags(proc_t);
 extern void proc_csflags_update(proc_t, uint64_t);
@@ -945,9 +959,9 @@ extern void proc_set_trampact(proc_t, int, user_addr_t);
 extern void proc_set_sigact_trampact(proc_t, int, user_addr_t, user_addr_t);
 extern void proc_reset_sigact(proc_t, sigset_t);
 extern void proc_setexecutableuuid(proc_t, const uuid_t);
-extern const unsigned char *proc_executableuuid_addr(proc_t);
-extern void proc_getresponsibleuuid(proc_t, unsigned char *, unsigned long);
-extern void proc_setresponsibleuuid(proc_t target_proc, unsigned char *responsible_uuid, unsigned long size);
+extern const unsigned char *__counted_by(sizeof(uuid_t)) proc_executableuuid_addr(proc_t);
+extern void proc_getresponsibleuuid(proc_t target_proc, unsigned char *__counted_by(size)responsible_uuid, unsigned long size);
+extern void proc_setresponsibleuuid(proc_t target_proc, unsigned char *__counted_by(size)responsible_uuid, unsigned long size);
 
 #pragma mark - process iteration
 

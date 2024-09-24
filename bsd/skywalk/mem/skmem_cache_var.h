@@ -33,13 +33,14 @@
 #include <skywalk/core/skywalk_var.h>
 #include <skywalk/os_channel_private.h>
 #include <kern/cpu_number.h>
+#include <machine/machine_routines.h>
 
 /*
  * Buffer control.
  */
 struct skmem_bufctl {
 	SLIST_ENTRY(skmem_bufctl) bc_link;      /* bufctl linkage */
-	void                    *bc_addr;       /* buffer obj address */
+	void                    *__sized_by(bc_lim) bc_addr;       /* buffer obj address */
 	void                    *bc_addrm;      /* mirrored buffer obj addr */
 	struct skmem_slab       *bc_slab;       /* controlling slab */
 	uint32_t                bc_lim;         /* buffer obj limit */
@@ -59,9 +60,10 @@ struct skmem_bufctl {
  */
 struct skmem_bufctl_audit {
 	SLIST_ENTRY(skmem_bufctl) bc_link;      /* bufctl linkage */
-	void                    *bc_addr;       /* buffer address */
+	void                    *__sized_by(bc_lim) bc_addr;       /* buffer address */
 	void                    *bc_addrm;      /* mirrored buffer address */
 	struct skmem_slab       *bc_slab;       /* controlling slab */
+	uint32_t                bc_lim;         /* buffer obj limit */
 	uint32_t                bc_flags;       /* SKMEM_BUFCTL_* flags */
 	uint32_t                bc_idx;         /* buffer index within slab */
 	volatile uint32_t       bc_usecnt;      /* outstanding use */
@@ -117,7 +119,8 @@ struct skmem_magtype {
 struct skmem_mag {
 	SLIST_ENTRY(skmem_mag)  mg_link;        /* magazine linkage */
 	struct skmem_magtype    *mg_magtype;    /* magazine type */
-	void                    *mg_round[1];   /* one or more objs */
+	size_t                  mg_count;       /* # of mg_round array elements */
+	void                    *mg_round[__counted_by(mg_count)];   /* one or more objs */
 };
 
 #define SKMEM_MAG_SIZE(n)       \
@@ -158,7 +161,7 @@ struct skmem_cpu_cache {
  * available only at constructor time.
  */
 struct skmem_obj_info {
-	void                    *oi_addr;       /* object address */
+	void                    *__sized_by(oi_size) oi_addr;       /* object address */
 	struct skmem_bufctl     *oi_bc;         /* buffer control (master) */
 	uint32_t                oi_size;        /* actual object size */
 	obj_idx_t               oi_idx_reg;     /* object idx within region */
@@ -216,6 +219,10 @@ typedef void (*skmem_slab_free_fn_t)(struct skmem_cache *, void *);
  * Cache.
  */
 struct skmem_cache {
+#if KASAN
+	void            *skm_start;
+	uint32_t        skm_align[0];
+#endif
 	/*
 	 * Commonly-accessed elements during alloc and free.
 	 */
@@ -246,7 +253,8 @@ struct skmem_cache {
 	size_t          skm_hash_limit;         /* hash table size limit */
 	size_t          skm_hash_shift;         /* get to interesting bits */
 	size_t          skm_hash_mask;          /* hash table mask */
-	struct skmem_bufctl_bkt *skm_hash_table; /* alloc'd buffer htable */
+	size_t          skm_hash_size;
+	struct skmem_bufctl_bkt *__counted_by(skm_hash_size) skm_hash_table; /* alloc'd buffer htable */
 	TAILQ_HEAD(, skmem_slab) skm_sl_partial_list; /* partially-allocated */
 	TAILQ_HEAD(, skmem_slab) skm_sl_empty_list;   /* fully-allocated */
 	struct skmem_region *skm_region;        /* region source for slabs */
@@ -291,7 +299,8 @@ struct skmem_cache {
 	struct thread    *skm_rs_owner;         /* resize owner */
 	uint32_t        skm_rs_busy;            /* prevent resizing */
 	uint32_t        skm_rs_want;            /* # of threads blocked */
-	struct skmem_cpu_cache  skm_cpu_cache[1]
+	size_t          skm_cpu_cache_count;
+	struct skmem_cpu_cache  skm_cpu_cache[__counted_by(skm_cpu_cache_count)]
 	__attribute__((aligned(CHANNEL_CACHE_ALIGN_MAX)));
 };
 
@@ -370,6 +379,35 @@ skmem_bufctl_unuse(struct skmem_bufctl *bc)
 	return new;
 }
 
+extern struct skmem_cache *skmem_slab_cache;    /* cache for skmem_slab */
+extern struct skmem_cache *skmem_bufctl_cache;  /* cache for skmem_bufctl */
+extern unsigned int bc_size;                    /* size of bufctl */
+extern int skmem_slab_alloc_locked(struct skmem_cache *,
+    struct skmem_obj_info *, struct skmem_obj_info *, uint32_t);
+extern void skmem_slab_free_locked(struct skmem_cache *, void *);
+extern int skmem_slab_alloc_pseudo_locked(struct skmem_cache *,
+    struct skmem_obj_info *, struct skmem_obj_info *, uint32_t);
+extern void skmem_slab_free_pseudo_locked(struct skmem_cache *, void *);
+extern void skmem_slab_free(struct skmem_cache *, void *);
+extern void skmem_slab_batch_free(struct skmem_cache *, struct skmem_obj *);
+extern uint32_t skmem_slab_batch_alloc(struct skmem_cache *, struct skmem_obj **,
+    uint32_t, uint32_t);
+extern int skmem_slab_alloc(struct skmem_cache *, struct skmem_obj_info *,
+    struct skmem_obj_info *, uint32_t);
+extern void skmem_audit_bufctl(struct skmem_bufctl *);
+#define SKM_SLAB_LOCK(_skm)                     \
+	lck_mtx_lock(&(_skm)->skm_sl_lock)
+#define SKM_SLAB_LOCK_ASSERT_HELD(_skm)         \
+	LCK_MTX_ASSERT(&(_skm)->skm_sl_lock, LCK_MTX_ASSERT_OWNED)
+#define SKM_SLAB_LOCK_ASSERT_NOTHELD(_skm)      \
+	LCK_MTX_ASSERT(&(_skm)->skm_sl_lock, LCK_MTX_ASSERT_NOTOWNED)
+#define SKM_SLAB_UNLOCK(_skm)                   \
+	lck_mtx_unlock(&(_skm)->skm_sl_lock)
+#define SKMEM_CACHE_HASH_INDEX(_a, _s, _m)      (((_a) >> (_s)) & (_m))
+#define SKMEM_CACHE_HASH(_skm, _buf)                                     \
+	(&(_skm)->skm_hash_table[SKMEM_CACHE_HASH_INDEX((uintptr_t)_buf, \
+	(_skm)->skm_hash_shift, (_skm)->skm_hash_mask)])
+
 extern void skmem_cache_pre_init(void);
 extern void skmem_cache_init(void);
 extern void skmem_cache_fini(void);
@@ -377,11 +415,30 @@ extern struct skmem_cache *skmem_cache_create(const char *, size_t, size_t,
     skmem_ctor_fn_t, skmem_dtor_fn_t, skmem_reclaim_fn_t, void *,
     struct skmem_region *, uint32_t);
 extern void skmem_cache_destroy(struct skmem_cache *);
-extern void *skmem_cache_alloc(struct skmem_cache *, uint32_t);
+
 extern uint32_t skmem_cache_batch_alloc(struct skmem_cache *,
-    struct skmem_obj **list, uint32_t, uint32_t);
+    struct skmem_obj **list, size_t objsize, uint32_t, uint32_t);
+
+/*
+ * XXX -fbounds-safety: Sometimes we use skmem_cache_alloc to allocate a struct
+ * with a flexible array (e.g. struct skmem_mag). For those, we can't have the
+ * alloc function return void *__single, because we lose bounds information.
+ */
+static inline void *__header_indexable
+skmem_cache_alloc(struct skmem_cache *skm, uint32_t skmflag)
+{
+	struct skmem_obj *__single buf;
+
+	(void) skmem_cache_batch_alloc(skm, &buf, skm->skm_objsize, 1, skmflag);
+
+	/* This is one of the few places where using __unsafe_forge is okay */
+	return __unsafe_forge_bidi_indexable(void *, buf, buf ? skm->skm_objsize : 0);
+}
+
 extern void skmem_cache_free(struct skmem_cache *, void *);
+extern void skmem_cache_free_nocache(struct skmem_cache *, void *);
 extern void skmem_cache_batch_free(struct skmem_cache *, struct skmem_obj *);
+extern void skmem_cache_batch_free_nocache(struct skmem_cache *, struct skmem_obj *);
 extern void skmem_cache_reap_now(struct skmem_cache *, boolean_t);
 extern void skmem_cache_reap(void);
 extern void skmem_reap_caches(boolean_t);

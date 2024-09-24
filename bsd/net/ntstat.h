@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -62,10 +62,11 @@ enum{
 	, NSTAT_EVENT_SRC_FLOW_STATE_OUTBOUND    = 0x00002000
 	, NSTAT_EVENT_SRC_FLOW_UUID_ASSIGNED     = 0x00004000
 	, NSTAT_EVENT_SRC_FLOW_UUID_CHANGED      = 0x00008000
-	, NSTAT_EVENT_SRC_ATTRIBUTION_CHANGE     = 0x00010000
 #if (DEBUG || DEVELOPMENT)
+	, NSTAT_EVENT_SRC_RESERVED_1             = 0x00010000
 	, NSTAT_EVENT_SRC_RESERVED_2             = 0x00020000
 #endif /* (DEBUG || DEVELOPMENT) */
+	, NSTAT_EVENT_SRC_PREV_EVENT_DISCARDED   = 0x80000000
 };
 
 typedef struct nstat_counts {
@@ -117,7 +118,7 @@ typedef struct nstat_sysinfo_counts {
 	/* Counters */
 	u_int32_t       nstat_sysinfo_len;
 	u_int32_t       pad;
-	u_int8_t        nstat_sysinfo_keyvals[];
+	nstat_sysinfo_keyval        nstat_sysinfo_keyvals[];
 }  nstat_sysinfo_counts;
 
 enum{
@@ -334,36 +335,42 @@ enum{
 #pragma mark -- Network Statistics Providers --
 
 
-// Interface properties
+// Interface properties.  These are constrained to fit in a 32 bit word
 
-#define NSTAT_IFNET_IS_UNKNOWN_TYPE      0x0001
-#define NSTAT_IFNET_IS_LOOPBACK          0x0002
-#define NSTAT_IFNET_IS_CELLULAR          0x0004
-#define NSTAT_IFNET_IS_WIFI              0x0008
-#define NSTAT_IFNET_IS_WIRED             0x0010
-#define NSTAT_IFNET_IS_AWDL              0x0020
-#define NSTAT_IFNET_IS_EXPENSIVE         0x0040
-#define NSTAT_IFNET_IS_VPN               0x0080 /* Reserved, currently unused */
-#define NSTAT_IFNET_VIA_CELLFALLBACK     0x0100
-#define NSTAT_IFNET_IS_COMPANIONLINK     0x0200
-#define NSTAT_IFNET_IS_CONSTRAINED       0x0400
+#define NSTAT_IFNET_IS_UNKNOWN_TYPE                 0x00000001
+#define NSTAT_IFNET_IS_LOOPBACK                     0x00000002
+#define NSTAT_IFNET_IS_CELLULAR                     0x00000004
+#define NSTAT_IFNET_IS_WIFI                         0x00000008
+#define NSTAT_IFNET_IS_WIRED                        0x00000010
+#define NSTAT_IFNET_IS_AWDL                         0x00000020
+#define NSTAT_IFNET_IS_EXPENSIVE                    0x00000040
+#define NSTAT_IFNET_IS_VPN                          0x00000080
+#define NSTAT_IFNET_VIA_CELLFALLBACK                0x00000100
+#define NSTAT_IFNET_IS_COMPANIONLINK                0x00000200
+#define NSTAT_IFNET_IS_CONSTRAINED                  0x00000400
+
 // The following local and non-local flags are set only if fully known
 // They are mutually exclusive but there is no guarantee that one or the other will be set
-#define NSTAT_IFNET_IS_LOCAL             0x0800
-#define NSTAT_IFNET_IS_NON_LOCAL         0x1000
-// Temporary properties of use for bringing up userland providers
-#define NSTAT_IFNET_ROUTE_VALUE_UNOBTAINABLE      0x2000
-#define NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE 0x4000
-#define NSTAT_IFNET_IS_LLW               0x8000
-#define NSTAT_IFNET_IS_WIFI_INFRA        0x10000
+#define NSTAT_IFNET_IS_LOCAL                        0x00000800
+#define NSTAT_IFNET_IS_NON_LOCAL                    0x00001000
+
+// Properties relating to userland providers
+#define NSTAT_IFNET_ROUTE_VALUE_UNOBTAINABLE        0x00002000
+#define NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE   0x00004000
+
+// Additional interface properties
+#define NSTAT_IFNET_IS_LLW                          0x00008000
+#define NSTAT_IFNET_IS_WIFI_INFRA                   0x00010000
+#define NSTAT_IFNET_PEEREGRESSINTERFACE_IS_CELLULAR 0x00020000
+#define NSTAT_IFNET_IS_COMPANIONLINK_BT             0x00040000
 
 // Not interface properties, but used for filtering in similar fashion
-#define NSTAT_NECP_CONN_HAS_NET_ACCESS   0x01000000
+#define NSTAT_NECP_CONN_HAS_NET_ACCESS              0x01000000
 
 // Not interface properties but conveniently handled in the same flags word
-#define NSTAT_SOURCE_IS_LISTENER         0x02000000
-#define NSTAT_SOURCE_IS_INBOUND          0x04000000
-#define NSTAT_SOURCE_IS_OUTBOUND         0x08000000
+#define NSTAT_SOURCE_IS_LISTENER                    0x02000000
+#define NSTAT_SOURCE_IS_INBOUND                     0x04000000
+#define NSTAT_SOURCE_IS_OUTBOUND                    0x08000000
 
 
 typedef enum {
@@ -404,6 +411,13 @@ typedef struct nstat_tcp_add_param {
 		struct sockaddr_in6     v6;
 	} remote;
 } nstat_tcp_add_param;
+
+typedef struct nstat_interface_counts {
+	u_int64_t       nstat_rxpackets;
+	u_int64_t       nstat_rxbytes;
+	u_int64_t       nstat_txpackets;
+	u_int64_t       nstat_txbytes;
+} nstat_interface_counts;
 
 #define NSTAT_MAX_DOMAIN_NAME_LENGTH           256 /* As per RFC 2181 for full domain name */
 #define NSTAT_MAX_DOMAIN_OWNER_LENGTH          256
@@ -742,7 +756,7 @@ typedef struct nstat_sysinfo_add_param {
 	u_int32_t       flags;
 } nstat_sysinfo_add_param;
 
-#define NSTAT_SYSINFO_MBUF_STATS        0x0001
+/* 0x0001 is unused */
 #define NSTAT_SYSINFO_TCP_STATS         0x0002
 #define NSTAT_SYSINFO_IFNET_ECN_STATS   0x0003
 #define NSTAT_SYSINFO_LIM_STATS         0x0004  /* Low Internet mode stats */
@@ -797,10 +811,11 @@ enum{
 	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV  = 3
 	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN    = 4
 	, NSTAT_EXTENDED_UPDATE_TYPE_FUUID              = 5
+	, NSTAT_EXTENDED_UPDATE_TYPE_BLUETOOTH_COUNTS   = 6
 };
 
 #define NSTAT_EXTENDED_UPDATE_TYPE_MIN  NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN
-#define NSTAT_EXTENDED_UPDATE_TYPE_MAX  NSTAT_EXTENDED_UPDATE_TYPE_FUUID
+#define NSTAT_EXTENDED_UPDATE_TYPE_MAX  NSTAT_EXTENDED_UPDATE_TYPE_BLUETOOTH_COUNTS
 
 
 #define NSTAT_EXTENDED_UPDATE_FLAG_MASK    0x00ffffffull    /* Maximum of 24 extension types allowed due to restrictions on specifying via filter flags */
@@ -824,27 +839,39 @@ enum{
 #define NSTAT_FILTER_ACCEPT_FLOWSWITCH_ERR   0x0000000000004000ull
 #define NSTAT_FILTER_ACCEPT_WIFI_LLW         0x0000000000008000ull
 #define NSTAT_FILTER_ACCEPT_WIFI_INFRA       0x0000000000010000ull
-#define NSTAT_FILTER_IFNET_FLAGS             0x000000000001FFFFull
+#define NSTAT_FILTER_ACCEPT_PEERIFEGRESS_CELL 0x0000000000020000ull
+#define NSTAT_FILTER_ACCEPT_COMPANIONLINK_BT 0x0000000000040000ull
+#define NSTAT_FILTER_IFNET_FLAGS             0x000000000007FFFFull
 
-#define NSTAT_FILTER_UDP_INTERFACE_ATTACH    0x0000000000020000ull
+#define NSTAT_FILTER_UDP_INTERFACE_ATTACH    0x0000000000020000ull  // Subject to removal, do not use
 #define NSTAT_FILTER_UDP_FLAGS               0x0000000000020000ull
 
-#define NSTAT_FILTER_TCP_INTERFACE_ATTACH    0x0000000000040000ull
+#define NSTAT_FILTER_TCP_INTERFACE_ATTACH    0x0000000000040000ull  // Subject to removal, do not use
 #define NSTAT_FILTER_TCP_NO_EARLY_CLOSE      0x0000000000080000ull
 #define NSTAT_FILTER_TCP_FLAGS               0x00000000000C0000ull
 
 #define NSTAT_FILTER_SUPPRESS_SRC_ADDED      0x0000000000100000ull
-#define NSTAT_FILTER_REQUIRE_SRC_ADDED       0x0000000000200000ull
+#define NSTAT_FILTER_USE_UPDATE_FOR_ADD      0x0000000000200000ull
 #define NSTAT_FILTER_PROVIDER_NOZEROBYTES    0x0000000000400000ull
+#define NSTAT_FILTER_PROVIDER_NOZERODELTAS   0x0000000000800000ull
 
 #define NSTAT_FILTER_CONN_HAS_NET_ACCESS     0x0000000001000000ull
 #define NSTAT_FILTER_CONN_FLAGS              0x0000000001000000ull
+
+#define NSTAT_FILTER_SOURCE_IS_LISTENER      0x0000000002000000ull  // NSTAT_SOURCE_IS_LISTENER
+#define NSTAT_FILTER_SOURCE_IS_INBOUND       0x0000000004000000ull  // NSTAT_SOURCE_IS_INBOUND
+#define NSTAT_FILTER_SOURCE_IS_OUTBOUND      0x0000000008000000ull  // NSTAT_SOURCE_IS_OUTBOUND
+#define NSTAT_FILTER_SOURCE_ROLE_FLAGS       0x000000000E000000ull  // All three of the above
 
 /* In this context, boring == no change from previous report */
 #define NSTAT_FILTER_SUPPRESS_BORING_CLOSE   0x0000000010000000ull  /* No final update, only NSTAT_MSG_TYPE_SRC_REMOVED */
 #define NSTAT_FILTER_SUPPRESS_BORING_POLL    0x0000000020000000ull  /* Only for poll-all, not poll specific source */
 #define NSTAT_FILTER_SUPPRESS_BORING_FLAGS   (NSTAT_FILTER_SUPPRESS_BORING_CLOSE|NSTAT_FILTER_SUPPRESS_BORING_POLL)
 
+#define NSTAT_FILTER_FLAGS_RESERVED_30       0x0000000040000000ull
+#define NSTAT_FILTER_FLAGS_RESERVED_31       0x0000000080000000ull
+
+/* The filtering for specific user is a speculative option that hasn't been exploited.  It may be removed */
 #define NSTAT_FILTER_SPECIFIC_USER_BY_PID    0x0000000100000000ull
 #define NSTAT_FILTER_SPECIFIC_USER_BY_EPID   0x0000000200000000ull
 #define NSTAT_FILTER_SPECIFIC_USER_BY_UUID   0x0000000400000000ull
@@ -853,7 +880,10 @@ enum{
 
 #define NSTAT_FILTER_INITIAL_PROPERTIES      0x0000001000000000ull  /* For providers that give "properties" on open, apply the filter to the properties */
                                                                     /* and permanently discard unless the filter allows through */
-#define NSTAT_FILTER_FLAGS_RESERVED          0x000000E000000000ul
+#define NSTAT_FILTER_USE_LARGE_BUFFERS       0x0000002000000000ull  /* Not really a filter, place here until we have other mechanisms to pass this */
+#define NSTAT_FILTER_DELIVER_ONCE            0x0000004000000000ull  /* Single shot delivery */
+#define NSTAT_FILTER_VERSION_2_PROTOCOL      0x0000008000000000ull
+
 
 #define NSTAT_FILTER_IFNET_AND_CONN_FLAGS    (NSTAT_FILTER_IFNET_FLAGS|NSTAT_FILTER_CONN_FLAGS)
 
@@ -861,15 +891,67 @@ enum{
 #define NSTAT_EXTENSION_FILTER_NECP_TLV                 (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
 #define NSTAT_EXTENSION_FILTER_ORIGINAL_NECP_TLV        (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
 #define NSTAT_EXTENSION_FILTER_ORIGINAL_DOMAIN_INFO     (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
+#define NSTAT_EXTENSION_FILTER_BLUETOOTH_COUNTS         (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_BLUETOOTH_COUNTS + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
 #define NSTAT_EXTENSION_FILTER_MASK                     (NSTAT_EXTENDED_UPDATE_FLAG_MASK << NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT)
 
+// Version one is constrained to use only the following
+#define NSTAT_FILTER_FLAGS_V1_USAGE     \
+    (NSTAT_FILTER_ACCEPT_UNKNOWN|       \
+    NSTAT_FILTER_ACCEPT_LOOPBACK|       \
+    NSTAT_FILTER_ACCEPT_CELLULAR|       \
+    NSTAT_FILTER_ACCEPT_WIFI|           \
+    NSTAT_FILTER_ACCEPT_WIRED|          \
+    NSTAT_FILTER_ACCEPT_AWDL|           \
+    NSTAT_FILTER_ACCEPT_EXPENSIVE|      \
+    NSTAT_FILTER_ACCEPT_CELLFALLBACK|   \
+    NSTAT_FILTER_ACCEPT_COMPANIONLINK|  \
+    NSTAT_FILTER_ACCEPT_IS_CONSTRAINED| \
+    NSTAT_FILTER_ACCEPT_IS_LOCAL|       \
+    NSTAT_FILTER_ACCEPT_IS_NON_LOCAL)
+
+
+// A note on the header flags
+//
+// NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE was used to indicate that user level code could cope with
+// multiple counts or descriptor messages within a single overall message on the control socket.
+// This ability is now mandatory for user level clients.  They may or may not choose to still set
+// NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE, but they must support aggregate responses
+//
+// For messages from the client, NSTAT_MSG_HDR_FLAG_CONTINUATION was used to indicate that the results
+// of any NSTAT_SRC_REF_ALL poll could be returned in fragments, each fragment except the last one
+// having NSTAT_MSG_HDR_FLAG_CONTINUATION set and each intermediate fragment intended to elicit
+// a further NSTAT_SRC_REF_ALL poll with the same context as the initial one.  This pacing is intended
+// to prevent overload on what amounts to a producer/consumer interface.  This style is now mandatory,
+// whether or not NSTAT_MSG_HDR_FLAG_CONTINUATION is set, any polls may result in data being returned
+// in fragments which each contain just a portion of the requested counts/descriptors/updates.
+// The user level clients may choose whether or not to set NSTAT_MSG_HDR_FLAG_CONTINUATION in any polls
+// but they must support getting poll responses in multiple chunks
+//
 enum{
 	NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE   = 1 << 0,
 	NSTAT_MSG_HDR_FLAG_CONTINUATION         = 1 << 1,
 	NSTAT_MSG_HDR_FLAG_CLOSING              = 1 << 2,
 	NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_DROP    = 1 << 3,
 	NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_FILTER  = 1 << 4,
+	NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_GONE    = 1 << 6,
 };
+
+#define DEFINE_NTSTAT_DATA_ACCESSOR(NTSTAT_TYPE)                            \
+static inline                                                               \
+__attribute__((always_inline))                                              \
+__attribute__((overloadable))                                               \
+uint8_t * __header_indexable                                                \
+nstat_get_data(NTSTAT_TYPE *__header_indexable desc)                        \
+{                                                                           \
+    if (desc) {                                                             \
+	_Pragma("clang diagnostic push");                                       \
+	_Pragma("clang diagnostic ignored \"-Wunsafe-buffer-usage\"");          \
+	return (uint8_t *)desc + sizeof(NTSTAT_TYPE);                           \
+	_Pragma("clang diagnostic pop");                                        \
+    } else {                                                                \
+	return NULL;                                                            \
+    }                                                                       \
+}
 
 typedef struct nstat_msg_hdr {
 	u_int64_t       context __attribute__((aligned(sizeof(u_int64_t))));
@@ -895,6 +977,7 @@ typedef struct nstat_msg_add_src {
 	NSTAT_ADD_SRC_FIELDS;
 	u_int8_t        param[];
 } nstat_msg_add_src_req;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_add_src)
 
 typedef struct nstat_msg_add_src_header {
 	NSTAT_ADD_SRC_FIELDS;
@@ -904,8 +987,8 @@ typedef struct nstat_msg_add_src_convenient {
 	nstat_msg_add_src_header        hdr;
 	union {
 		nstat_route_add_param   route;
-		nstat_tcp_add_param             tcp;
-		nstat_udp_add_param             udp;
+		nstat_tcp_add_param     tcp;
+		nstat_udp_add_param     udp;
 		nstat_ifnet_add_param   ifnet;
 		nstat_sysinfo_add_param sysinfo;
 	};
@@ -946,17 +1029,18 @@ typedef struct nstat_msg_set_filter {
 	u_int8_t                reserved[4];
 } nstat_msg_set_filter;
 
-#define NSTAT_SRC_DESCRIPTION_FIELDS                                                                                            \
-	nstat_msg_hdr		hdr;                                                                                                            \
-	nstat_src_ref_t		srcref __attribute__((aligned(sizeof(u_int64_t))));                     \
-	nstat_event_flags_t	event_flags __attribute__((aligned(sizeof(u_int64_t))));        \
-	nstat_provider_id_t	provider;                                                                                                       \
+#define NSTAT_SRC_DESCRIPTION_FIELDS                                                \
+	nstat_msg_hdr		hdr;                                                        \
+	nstat_src_ref_t		srcref __attribute__((aligned(sizeof(u_int64_t))));         \
+	nstat_event_flags_t	event_flags __attribute__((aligned(sizeof(u_int64_t))));    \
+	nstat_provider_id_t	provider;                                                   \
 	u_int8_t			reserved[4]
 
 typedef struct nstat_msg_src_description {
 	NSTAT_SRC_DESCRIPTION_FIELDS;
 	u_int8_t        data[];
 } nstat_msg_src_description;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_description)
 
 typedef struct nstat_msg_src_description_header {
 	NSTAT_SRC_DESCRIPTION_FIELDS;
@@ -988,18 +1072,19 @@ typedef struct nstat_msg_src_counts {
 	nstat_counts            counts;
 } nstat_msg_src_counts;
 
-#define NSTAT_SRC_UPDATE_FIELDS                                                                                                         \
-	nstat_msg_hdr		hdr;                                                                                                            \
-	nstat_src_ref_t		srcref __attribute__((aligned(sizeof(u_int64_t))));                     \
-	nstat_event_flags_t	event_flags __attribute__((aligned(sizeof(u_int64_t))));        \
-	nstat_counts		counts;                                                                                                         \
-	nstat_provider_id_t	provider;                                                                                                       \
+#define NSTAT_SRC_UPDATE_FIELDS                                                     \
+	nstat_msg_hdr		hdr;                                                        \
+	nstat_src_ref_t		srcref __attribute__((aligned(sizeof(u_int64_t))));         \
+	nstat_event_flags_t	event_flags __attribute__((aligned(sizeof(u_int64_t))));    \
+	nstat_counts		counts;                                                     \
+	nstat_provider_id_t	provider;                                                   \
 	u_int8_t			reserved[4]
 
 typedef struct nstat_msg_src_update {
 	NSTAT_SRC_UPDATE_FIELDS;
 	u_int8_t        data[];
 } nstat_msg_src_update;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_update)
 
 typedef struct nstat_msg_src_update_hdr {
 	NSTAT_SRC_UPDATE_FIELDS;
@@ -1048,34 +1133,39 @@ typedef struct nstat_msg_src_extended_item {
 	nstat_msg_src_extended_item_hdr         hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_item;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_extended_item)
 
 typedef struct nstat_msg_src_extended_tcp_update {
-	nstat_msg_src_update_hdr                hdr;
+	NSTAT_SRC_UPDATE_FIELDS;
 	nstat_tcp_descriptor                    tcp;
 	nstat_msg_src_extended_item_hdr         extension_hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_tcp_update;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_extended_tcp_update)
 
 typedef struct nstat_msg_src_extended_udp_update {
-	nstat_msg_src_update_hdr                hdr;
+	NSTAT_SRC_UPDATE_FIELDS;
 	nstat_udp_descriptor                    udp;
 	nstat_msg_src_extended_item_hdr         extension_hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_udp_update;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_extended_udp_update)
 
 typedef struct nstat_msg_src_extended_quic_update {
-	nstat_msg_src_update_hdr                hdr;
+	NSTAT_SRC_UPDATE_FIELDS;
 	nstat_quic_descriptor                   quic;
 	nstat_msg_src_extended_item_hdr         extension_hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_quic_update;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_extended_quic_update)
 
 typedef struct nstat_msg_src_extended_conn_update {
-	nstat_msg_src_update_hdr                hdr;
+	NSTAT_SRC_UPDATE_FIELDS;
 	nstat_connection_descriptor             conn;
 	nstat_msg_src_extended_item_hdr         extension_hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_conn_update;
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_src_extended_conn_update)
 
 /* While the only type of extended update is for domain information, we can fully define the structure */
 typedef struct nstat_msg_src_tcp_update_domain_extension {
@@ -1118,6 +1208,16 @@ typedef struct nstat_msg_sysinfo_counts {
 	nstat_sysinfo_counts    counts;
 }  nstat_msg_sysinfo_counts;
 
+DEFINE_NTSTAT_DATA_ACCESSOR(struct nstat_msg_sysinfo_counts)
+
+static inline
+__attribute__((always_inline))
+struct nstat_sysinfo_keyval * __header_indexable
+nstat_sysinfo_get_keyvals(struct nstat_msg_sysinfo_counts *__header_indexable counts)
+{
+	return (struct nstat_sysinfo_keyval *)(void *)nstat_get_data(counts);
+}
+
 #pragma mark -- Statitiscs about Network Statistics --
 
 struct nstat_stats {
@@ -1137,6 +1237,37 @@ struct nstat_stats {
 	u_int32_t nstat_accumulate_msg_failures;
 	u_int32_t nstat_control_cleanup_source_failures;
 	u_int32_t nstat_handle_msg_failures;
+};
+
+/*
+ * Structure with information that gives insight into forward progress on an
+ * interface, exported to user-land via sysctl(3).
+ */
+struct nstat_progress_indicators {
+	u_int32_t       np_numflows;            /* Total number of flows */
+	u_int32_t       np_conn_probe_fails;    /* Count of connection failures */
+	u_int32_t       np_read_probe_fails;    /* Count of read probe failures */
+	u_int32_t       np_write_probe_fails;   /* Count of write failures */
+	u_int32_t       np_recentflows;         /* Total of "recent" flows */
+	u_int32_t       np_recentflows_unacked; /* Total of "recent" flows with unacknowledged data */
+	u_int64_t       np_recentflows_rxbytes; /* Total of "recent" flows received bytes */
+	u_int64_t       np_recentflows_txbytes; /* Total of "recent" flows transmitted bytes */
+	u_int64_t       np_recentflows_rxooo;   /* Total of "recent" flows received out of order bytes */
+	u_int64_t       np_recentflows_rxdup;   /* Total of "recent" flows received duplicate bytes */
+	u_int64_t       np_recentflows_retx;    /* Total of "recent" flows retransmitted bytes */
+	u_int64_t       np_reserved1;           /* Expansion */
+	u_int64_t       np_reserved2;           /* Expansion */
+	u_int64_t       np_reserved3;           /* Expansion */
+	u_int64_t       np_reserved4;           /* Expansion */
+};
+
+struct nstat_progress_req {
+	u_int64_t       np_ifindex;                 /* Interface index for progress indicators */
+	u_int64_t       np_recentflow_maxduration;  /* In mach_absolute_time, max duration for flow to be counted as "recent" */
+	u_int64_t       np_filter_flags;            /* Optional additional filtering, values are interface properties per ntstat.h */
+	u_int64_t       np_transport_protocol_mask; /* Transport protocol (currently supports TCP and QUIC) */
+#define PR_PROTO_TCP         0x1
+#define PR_PROTO_QUIC        0x2
 };
 
 #endif /* PRIVATE */
@@ -1272,10 +1403,6 @@ typedef struct nstat_sysinfo_data {
 	} u;
 } nstat_sysinfo_data;
 
-#pragma mark -- Generic Network Statistics Provider --
-
-typedef void *  nstat_provider_cookie_t;
-
 #pragma mark -- Route Statistics Gathering Functions --
 struct rtentry;
 
@@ -1322,7 +1449,6 @@ void nstat_ifnet_threshold_reached(unsigned int ifindex);
 void nstat_sysinfo_send_data(struct nstat_sysinfo_data *);
 
 int ntstat_tcp_progress_enable(struct sysctl_req *req);
-int ntstat_tcp_progress_indicators(struct sysctl_req *req);
 
 #if SKYWALK
 
@@ -1360,9 +1486,9 @@ typedef bool (userland_stats_request_vals_fn)(userland_stats_provider_context *c
 // Netstats can also request "extension" items, specified by the allowed_extensions flag
 // The return value is the amount of space currently required for the extension
 typedef size_t (userland_stats_request_extension_fn)(userland_stats_provider_context *ctx,
-    int requested_extension,    /* The extension to be returned */
-    void *buf,                  /* If not NULL, the address for the extension to be returned in */
-    size_t buf_size);           /* The size of the buffer space, typically matching the return from a previous call with null buffer pointer */
+    int requested_extension,        /* The extension to be returned */
+    void *__sized_by(buf_size)buf,  /* If not NULL, the address for the extension to be returned in */
+    size_t buf_size);               /* The size of the buffer space, typically matching the return from a previous call with null buffer pointer */
 
 // Things get started with a call to netstats to say that there’s a new connection:
 nstat_userland_context ntstat_userland_stats_open(userland_stats_provider_context *ctx,
@@ -1380,12 +1506,20 @@ void nstats_userland_stats_defunct_for_process(int pid);
 
 errno_t nstat_userland_mark_rnf_override(uuid_t fuuid, bool rnf_override);
 
+typedef struct nstat_flow_data {
+	nstat_counts        counts;
+	union {
+		nstat_udp_descriptor    udp_descriptor;
+		nstat_tcp_descriptor    tcp_descriptor;
+	} flow_descriptor;
+} nstat_flow_data;
 
 // Servicing a sysctl for information of TCP or UDP flows
 int ntstat_userland_count(short proto);
-int nstat_userland_get_snapshot(short proto, void **snapshotp, int *countp);
-int nstat_userland_list_snapshot(short proto, struct sysctl_req *req, void *userlandsnapshot, int nuserland);
+int nstat_userland_get_snapshot(short proto, void *__sized_by(*snapshot_size) * snapshotp, size_t *snapshot_size, int *countp);
+int nstat_userland_list_snapshot(short proto, struct sysctl_req *req, void *__sized_by(nuserland * sizeof(nstat_flow_data)) userlandsnapshot, int nuserland);
 void nstat_userland_release_snapshot(void *snapshot, int nuserland);
+
 #if NTSTAT_SUPPORTS_STANDALONE_SYSCTL
 int ntstat_userland_list_n(short proto, struct sysctl_req *req);
 #endif
@@ -1413,7 +1547,7 @@ typedef bool (nstat_provider_request_vals_fn)(nstat_provider_context ctx,
 // The return value is the amount of space currently required for the extension
 typedef size_t (nstat_provider_request_extensions_fn)(nstat_provider_context ctx,
     int requested_extension,    /* The extension to be returned */
-    void *buf,                  /* If not NULL, the address for the extension to be returned in */
+    void *__sized_by (buf_size)buf,                  /* If not NULL, the address for the extension to be returned in */
     size_t buf_size);           /* The size of the buffer space, typically matching the return from a previous call with null buffer pointer */
 
 // Things get started with a call to netstats to say that there’s a new item to become a netstats source
@@ -1428,7 +1562,6 @@ void nstat_provider_stats_close(nstat_context nstat_ctx);
 
 // Events that cause a significant change may be reported via a flags word
 void nstat_provider_stats_event(nstat_context nstat_ctx, uint64_t event);
-
 
 // locked_add_64 uses atomic operations on 32bit so the 64bit
 // value can be properly read. The values are only ever incremented

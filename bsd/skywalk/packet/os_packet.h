@@ -542,7 +542,12 @@ typedef void (*pbuf_seg_dtor_fn_t)(const kern_pbufpool_t,
 typedef void (*pbuf_ctx_retain_fn_t)(void *const ctx);
 typedef void (*pbuf_ctx_release_fn_t)(void *const ctx);
 
-typedef uint8_t pbufpool_name_t[64];
+/*
+ * XXX Not sure why this was uint8_t. For -fbounds-safety, it's easier to use
+ * char. Current kexts seem to always cast this to char * anyway. This did not
+ * break IOSkywalkFamily.
+ */
+typedef char pbufpool_name_t[64];
 
 /*
  * Kernel packet buffer pool init.
@@ -746,9 +751,10 @@ extern void kern_packet_set_group_end(const kern_packet_t);
 extern boolean_t kern_packet_get_group_end(const kern_packet_t);
 extern errno_t kern_packet_set_expire_time(const kern_packet_t, const uint64_t);
 extern errno_t kern_packet_get_expire_time(const kern_packet_t, uint64_t *);
-extern errno_t kern_packet_set_token(const kern_packet_t, const void *,
-    const uint16_t);
-extern errno_t kern_packet_get_token(const kern_packet_t, void *, uint16_t *);
+extern errno_t kern_packet_set_token(const kern_packet_t,
+    const void *__sized_by(len), const uint16_t len);
+extern errno_t kern_packet_get_token(const kern_packet_t, void *__sized_by(*len),
+    uint16_t *len);
 extern errno_t kern_packet_get_packetid(const kern_packet_t, packet_id_t *);
 extern errno_t kern_packet_set_vlan_tag(const kern_packet_t, const uint16_t,
     const boolean_t);
@@ -820,13 +826,13 @@ extern void kern_packet_get_chain_counts(const kern_packet_t, uint32_t *,
  * Misc.
  */
 extern uint32_t kern_inet_checksum(const void *, uint32_t, uint32_t);
-extern uint32_t kern_copy_and_inet_checksum(const void *, void *,
-    uint32_t, uint32_t);
+extern uint32_t kern_copy_and_inet_checksum(const void *__sized_by(len), void *__sized_by(len),
+    uint32_t len, uint32_t);
 extern void kern_packet_set_trace_id(const kern_packet_t, packet_trace_id_t);
 extern packet_trace_id_t kern_packet_get_trace_id(const kern_packet_t);
 extern void kern_packet_trace_event(const kern_packet_t, uint32_t);
-extern errno_t kern_packet_copy_bytes(const kern_packet_t, size_t, size_t,
-    void*);
+extern errno_t kern_packet_copy_bytes(const kern_packet_t, size_t, size_t len,
+    void *__sized_by(len));
 
 /*
  * Buflets.
@@ -858,20 +864,22 @@ extern errno_t kern_pbufpool_get_memory_info(const kern_pbufpool_t pbufpool,
 extern errno_t kern_pbufpool_alloc(const kern_pbufpool_t pbufpool,
     const uint32_t bufcnt, kern_packet_t *packet);
 extern errno_t kern_pbufpool_alloc_batch(const kern_pbufpool_t pbufpool,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size);
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size) array, uint32_t *size);
 extern errno_t kern_pbufpool_alloc_batch_callback(
-	const kern_pbufpool_t pbufpool, const uint32_t bufcnt, kern_packet_t *array,
-	uint32_t *size, alloc_cb_func_t cb, const void *ctx);
+	const kern_pbufpool_t pbufpool, const uint32_t bufcnt,
+	kern_packet_t *__counted_by(*size) array, uint32_t *size,
+	alloc_cb_func_t cb, const void *ctx);
 extern errno_t kern_pbufpool_alloc_nosleep(const kern_pbufpool_t pbufpool,
     const uint32_t bufcnt, kern_packet_t *packet);
 extern errno_t kern_pbufpool_alloc_batch_nosleep(const kern_pbufpool_t pbufpool,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size);
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size) array, uint32_t *size);
 extern errno_t kern_pbufpool_alloc_batch_nosleep_callback(
 	const kern_pbufpool_t pbufpool, const uint32_t bufcnt,
-	kern_packet_t *array, uint32_t *size, alloc_cb_func_t cb, const void *ctx);
+	kern_packet_t *__counted_by(*size) array, uint32_t *size,
+	alloc_cb_func_t cb, const void *ctx);
 extern void kern_pbufpool_free(const kern_pbufpool_t pbufpool, kern_packet_t);
 extern void kern_pbufpool_free_batch(const kern_pbufpool_t pbufpool,
-    kern_packet_t *array, uint32_t size);
+    kern_packet_t *__counted_by(size) array, uint32_t size);
 extern void kern_pbufpool_free_chain(const kern_pbufpool_t pbufpool,
     kern_packet_t chain);
 extern errno_t kern_pbufpool_alloc_buffer(const kern_pbufpool_t pbufpool,

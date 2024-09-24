@@ -43,6 +43,39 @@ nx_netif_mbuf_to_kpkt(struct nexus_adapter *, struct mbuf *);
 
 #define SK_IFCAP_CSUM   (IFCAP_HWCSUM|IFCAP_CSUM_PARTIAL|IFCAP_CSUM_ZERO_INVERT)
 
+static  bool
+nx_netif_host_is_gso_needed(struct nexus_adapter *na)
+{
+	struct nx_netif *nif = ((struct nexus_netif_adapter *)na)->nifna_netif;
+
+	/*
+	 * Don't enable for Compat netif.
+	 */
+	if (na->na_type != NA_NETIF_HOST) {
+		return false;
+	}
+	/*
+	 * Don't enable if netif is not plumbed under a flowswitch.
+	 */
+	if (!NA_KERNEL_ONLY(na)) {
+		return false;
+	}
+	/*
+	 * Don't enable If HW TSO is enabled.
+	 */
+	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) ||
+	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0)) {
+		return false;
+	}
+	/*
+	 * Don't enable if TX aggregation is disabled.
+	 */
+	if (sk_fsw_tx_agg_tcp == 0) {
+		return false;
+	}
+	return true;
+}
+
 static void
 nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 {
@@ -98,6 +131,10 @@ nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 					ifp->if_capabilities |= IFCAP_TSO;
 					ifp->if_capenable |= IFCAP_TSO;
 				}
+
+				if (!nx_netif_host_is_gso_needed(na)) {
+					if_set_eflags(ifp, IFEF_SENDLIST);
+				}
 			} else {                                /* compat */
 				ifp->if_hwassist |=
 				    (nif->nif_hwassist &
@@ -111,6 +148,9 @@ nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 			}
 		}
 	} else {
+		if (NA_KERNEL_ONLY(na) && na->na_type == NA_NETIF_HOST) {
+			if_clear_eflags(ifp, IFEF_SENDLIST);
+		}
 		/* Unset any capabilities previously set by Skywalk */
 		ifp->if_hwassist &= ~(IFNET_CHECKSUMF | IFNET_MULTIPAGES);
 		ifp->if_capabilities &= ~SK_IFCAP_CSUM;
@@ -131,39 +171,6 @@ nx_netif_host_adjust_if_capabilities(struct nexus_adapter *na, bool activate)
 	}
 
 	ifnet_lock_done(ifp);
-}
-
-static  bool
-nx_netif_host_is_gso_needed(struct nexus_adapter *na)
-{
-	struct nx_netif *nif = ((struct nexus_netif_adapter *)na)->nifna_netif;
-
-	/*
-	 * Don't enable for Compat netif.
-	 */
-	if (na->na_type != NA_NETIF_HOST) {
-		return false;
-	}
-	/*
-	 * Don't enable if netif is not plumbed under a flowswitch.
-	 */
-	if (!NA_KERNEL_ONLY(na)) {
-		return false;
-	}
-	/*
-	 * Don't enable If HW TSO is enabled.
-	 */
-	if (((nif->nif_hwassist & IFNET_TSO_IPV4) != 0) ||
-	    ((nif->nif_hwassist & IFNET_TSO_IPV6) != 0)) {
-		return false;
-	}
-	/*
-	 * Don't enable if TX aggregation is disabled.
-	 */
-	if (sk_fsw_tx_agg_tcp == 0) {
-		return false;
-	}
-	return true;
 }
 
 int
@@ -382,7 +389,14 @@ nx_netif_host_catch_tx(struct nexus_adapter *na, bool activate)
 static int
 get_af_from_mbuf(struct mbuf *m)
 {
-	uint8_t *pkt_hdr;
+	/*
+	 * -fbounds-safety: Although m_pkthdr.pkt_hdr is a void * without
+	 * annotations, here we can just mark the uint8_t *pkt_hdr as __single
+	 * becase we don't do any arithmetic and the only place we dereference
+	 * it is to read the ip version, where having the bounds of a single
+	 * 8-bit size is enough.
+	 */
+	uint8_t *__single pkt_hdr;
 	uint8_t ipv;
 	struct mbuf *m0;
 	int af;
@@ -418,68 +432,96 @@ done:
  * and enqueued to the classq of a Skywalk native interface.
  */
 int
-nx_netif_host_output(struct ifnet *ifp, struct mbuf *m)
+nx_netif_host_output(struct ifnet *ifp, struct mbuf *m_chain)
 {
 	struct nx_netif *nif = NA(ifp)->nifna_netif;
+	struct __kern_channel_ring *currentkring = NULL;
 	struct kern_nexus *nx = nif->nif_nx;
 	struct nexus_adapter *hwna = nx_port_get_na(nx, NEXUS_PORT_NET_IF_DEV);
 	struct nexus_adapter *hostna = nx_port_get_na(nx, NEXUS_PORT_NET_IF_HOST);
-	struct __kern_channel_ring *kring;
-	uint32_t sc_idx = MBUF_SCIDX(m_get_service_class(m));
 	struct netif_stats *nifs = &NX_NETIF_PRIVATE(hwna->na_nx)->nif_stats;
-	struct __kern_packet *kpkt;
+	struct mbuf *m_head = m_chain, *m = NULL, *drop_list = NULL, *free_list = NULL;
+	struct __kern_packet *pkt_chain_head, *pkt_chain_tail;
+	struct netif_qset *__single qset = NULL;
+	struct pktq pkt_q;
 	uint64_t qset_id;
-	errno_t error = ENOBUFS;
+	bool qset_id_valid = false;
 	boolean_t pkt_drop = FALSE;
+	uint32_t n_pkts = 0, n_bytes = 0;
+	errno_t error = 0;
 
-	/*
-	 * nx_netif_host_catch_tx() must only be steering the output
-	 * packets here only for native interfaces, otherwise we must
-	 * not get here for compat.
-	 */
 	ASSERT(ifp->if_eflags & IFEF_SKYWALK_NATIVE);
-	ASSERT(m->m_nextpkt == NULL);
 	ASSERT(hostna->na_type == NA_NETIF_HOST);
-	ASSERT(sc_idx < KPKT_SC_MAX_CLASSES);
 
-	kring = &hwna->na_tx_rings[hwna->na_kring_svc_lut[sc_idx]];
-	KDBG((SK_KTRACE_NETIF_HOST_ENQUEUE | DBG_FUNC_START), SK_KVA(kring));
-	if (__improbable(!NA_IS_ACTIVE(hwna) || !NA_IS_ACTIVE(hostna))) {
-		STATS_INC(nifs, NETIF_STATS_DROP_NA_INACTIVE);
-		SK_ERR("\"%s\" (0x%llx) not in skywalk mode anymore",
-		    hwna->na_name, SK_KVA(hwna));
-		error = ENXIO;
-		pkt_drop = TRUE;
-		goto done;
-	}
-	/*
-	 * Drop if the kring no longer accepts packets.
-	 */
-	if (__improbable(KR_DROP(&hostna->na_rx_rings[0]) || KR_DROP(kring))) {
-		STATS_INC(nifs, NETIF_STATS_DROP_KRDROP_MODE);
-		/* not a serious error, so no need to be chatty here */
-		SK_DF(SK_VERB_NETIF,
-		    "kr \"%s\" (0x%llx) krflags 0x%b or %s in drop mode",
-		    kring->ckr_name, SK_KVA(kring), kring->ckr_flags,
-		    CKRF_BITS, ifp->if_xname);
-		error = ENXIO;
-		pkt_drop = TRUE;
-		goto done;
-	}
-	if (__improbable(((unsigned)m_pktlen(m) + ifp->if_tx_headroom) >
-	    kring->ckr_max_pkt_len)) { /* too long for us */
-		STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
-		SK_ERR("\"%s\" (0x%llx) from_host, drop packet size %u > %u",
-		    hwna->na_name, SK_KVA(hwna), m_pktlen(m),
-		    kring->ckr_max_pkt_len);
-		pkt_drop = TRUE;
-		goto done;
-	}
-	/*
-	 * Convert mbuf to packet and enqueue it.
-	 */
-	kpkt = nx_netif_mbuf_to_kpkt(hwna, m);
-	if (__probable(kpkt != NULL)) {
+	KPKTQ_INIT(&pkt_q);
+	while (m_head) {
+		struct __kern_channel_ring *kring;
+
+		pkt_drop = FALSE;
+		m = m_head;
+		m_head = m_head->m_nextpkt;
+		m->m_nextpkt = NULL;
+
+		uint32_t sc_idx = MBUF_SCIDX(m_get_service_class(m));
+		struct __kern_packet *kpkt;
+
+		/*
+		 * nx_netif_host_catch_tx() must only be steering the output
+		 * packets here only for native interfaces, otherwise we must
+		 * not get here for compat.
+		 */
+
+		ASSERT(sc_idx < KPKT_SC_MAX_CLASSES);
+		kring = &hwna->na_tx_rings[hwna->na_kring_svc_lut[sc_idx]];
+		if (currentkring != kring) {
+			if (currentkring != NULL) {
+				KDBG((SK_KTRACE_NETIF_HOST_ENQUEUE | DBG_FUNC_END), SK_KVA(currentkring),
+				    error);
+			}
+			currentkring = kring;
+			KDBG((SK_KTRACE_NETIF_HOST_ENQUEUE | DBG_FUNC_START), SK_KVA(currentkring));
+		}
+		if (__improbable(!NA_IS_ACTIVE(hwna) || !NA_IS_ACTIVE(hostna))) {
+			STATS_INC(nifs, NETIF_STATS_DROP_NA_INACTIVE);
+			SK_ERR("\"%s\" (0x%llx) not in skywalk mode anymore",
+			    hwna->na_name, SK_KVA(hwna));
+			error = ENXIO;
+			pkt_drop = TRUE;
+			goto out;
+		}
+		/*
+		 * Drop if the kring no longer accepts packets.
+		 */
+		if (__improbable(KR_DROP(&hostna->na_rx_rings[0]) || KR_DROP(kring))) {
+			STATS_INC(nifs, NETIF_STATS_DROP_KRDROP_MODE);
+			/* not a serious error, so no need to be chatty here */
+			SK_DF(SK_VERB_NETIF,
+			    "kr \"%s\" (0x%llx) krflags 0x%b or %s in drop mode",
+			    kring->ckr_name, SK_KVA(kring), kring->ckr_flags,
+			    CKRF_BITS, ifp->if_xname);
+			error = ENXIO;
+			pkt_drop = TRUE;
+			goto out;
+		}
+		if (__improbable(((unsigned)m_pktlen(m) + ifp->if_tx_headroom) >
+		    kring->ckr_max_pkt_len)) {     /* too long for us */
+			STATS_INC(nifs, NETIF_STATS_DROP_BADLEN);
+			SK_ERR("\"%s\" (0x%llx) from_host, drop packet size %u > %u",
+			    hwna->na_name, SK_KVA(hwna), m_pktlen(m),
+			    kring->ckr_max_pkt_len);
+			pkt_drop = TRUE;
+			goto out;
+		}
+		/*
+		 * Convert mbuf to packet and enqueue it.
+		 */
+		kpkt = nx_netif_mbuf_to_kpkt(hwna, m);
+		if (kpkt == NULL) {
+			error = ENOBUFS;
+			pkt_drop = TRUE;
+			goto out;
+		}
+
 		if ((m->m_pkthdr.pkt_flags & PKTF_SKIP_PKTAP) == 0 &&
 		    pktap_total_tap_count != 0) {
 			int af = get_af_from_mbuf(m);
@@ -490,41 +532,88 @@ nx_netif_host_output(struct ifnet *ifp, struct mbuf *m)
 		}
 		if (NX_LLINK_PROV(nif->nif_nx) &&
 		    ifp->if_traffic_rule_count > 0 &&
+		    !qset_id_valid &&
 		    nxctl_inet_traffic_rule_find_qset_id_with_pkt(ifp->if_xname,
 		    kpkt, &qset_id) == 0) {
-			struct netif_qset *qset;
-
+			qset_id_valid = true;
 			/*
 			 * This always returns a qset because if the qset id
 			 * is invalid the default qset is returned.
 			 */
 			qset = nx_netif_find_qset(nif, qset_id);
 			ASSERT(qset != NULL);
+		}
+		if (qset != NULL) {
 			kpkt->pkt_qset_idx = qset->nqs_idx;
-			error = ifnet_enqueue_ifcq_pkt(ifp, qset->nqs_ifcq, kpkt,
-			    false, &pkt_drop);
+		}
+
+		if (!netif_chain_enqueue_enabled(ifp)) {
+			if (qset != NULL) {
+				error = ifnet_enqueue_ifcq_pkt(ifp,
+				    qset->nqs_ifcq, kpkt,
+				    false, &pkt_drop);
+				nx_netif_qset_release(&qset);
+			} else {
+				/* callee consumes packet */
+				error = ifnet_enqueue_pkt(ifp, kpkt, false, &pkt_drop);
+			}
+
+			if (pkt_drop) {
+				STATS_INC(nifs, NETIF_STATS_TX_DROP_ENQ_AQM);
+			}
+		} else {
+			KPKTQ_ENQUEUE(&pkt_q, kpkt);
+			n_pkts++;
+			n_bytes += m->m_pkthdr.len;
+		}
+out:
+		/* always free mbuf (even in the success case) */
+		m->m_nextpkt = free_list;
+		free_list = m;
+
+		if (__improbable(pkt_drop)) {
+			STATS_INC(nifs, NETIF_STATS_DROP);
+		}
+
+		if (__improbable(error)) {
+			break;
+		}
+	}
+
+	if (currentkring != NULL) {
+		KDBG((SK_KTRACE_NETIF_HOST_ENQUEUE | DBG_FUNC_END), SK_KVA(currentkring),
+		    error);
+	}
+
+	if (__probable(!KPKTQ_EMPTY(&pkt_q))) {
+		pkt_chain_head = KPKTQ_FIRST(&pkt_q);
+		pkt_chain_tail = KPKTQ_LAST(&pkt_q);
+		if (qset != NULL) {
+			error = ifnet_enqueue_ifcq_pkt_chain(ifp, qset->nqs_ifcq,
+			    pkt_chain_head, pkt_chain_tail, n_pkts, n_bytes, false, &pkt_drop);
 			nx_netif_qset_release(&qset);
 		} else {
 			/* callee consumes packet */
-			error = ifnet_enqueue_pkt(ifp, kpkt, false, &pkt_drop);
+			error = ifnet_enqueue_pkt_chain(ifp, pkt_chain_head, pkt_chain_tail,
+			    n_pkts, n_bytes, false, &pkt_drop);
 		}
-		netif_transmit(ifp, NETIF_XMIT_FLAG_HOST);
 		if (pkt_drop) {
-			STATS_INC(nifs, NETIF_STATS_TX_DROP_ENQ_AQM);
+			STATS_ADD(nifs, NETIF_STATS_TX_DROP_ENQ_AQM, n_pkts);
+			STATS_ADD(nifs, NETIF_STATS_DROP, n_pkts);
 		}
-	} else {
-		error = ENOBUFS;
-		pkt_drop = TRUE;
-	}
-done:
-	/* always free mbuf (even in the success case) */
-	m_freem(m);
-	if (__improbable(pkt_drop)) {
-		STATS_INC(nifs, NETIF_STATS_DROP);
 	}
 
-	KDBG((SK_KTRACE_NETIF_HOST_ENQUEUE | DBG_FUNC_END), SK_KVA(kring),
-	    error);
+	if (error) {
+		drop_list = m_head;
+		while (m_head != NULL) {
+			m_head = m_head->m_nextpkt;
+			STATS_INC(nifs, NETIF_STATS_DROP);
+		}
+		m_freem_list(drop_list);
+	}
+	m_freem_list(free_list);
+
+	netif_transmit(ifp, NETIF_XMIT_FLAG_HOST);
 
 	return error;
 }
@@ -532,13 +621,20 @@ done:
 static inline int
 get_l2_hlen(struct mbuf *m, uint8_t *l2len)
 {
-	char *pkt_hdr;
+	/*
+	 * -fbounds-safety: Although m_pkthdr.pkt_hdr is a void * without
+	 * annotations, here we mark char *pkt_hdr as __single because we don't
+	 * dereference this pointer, and we're mostly just using this pointer
+	 * for comparisons.
+	 */
+	char *__single pkt_hdr;
 	struct mbuf *m0;
 	uint64_t len = 0;
 
 	pkt_hdr = m->m_pkthdr.pkt_hdr;
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
-		if (pkt_hdr >= m_mtod_current(m0) && pkt_hdr < m_mtod_current(m0) + m0->m_len) {
+		if (pkt_hdr >= m_mtod_current(m0) &&
+		    pkt_hdr < m_mtod_current(m0) + m0->m_len) {
 			break;
 		}
 		len += m0->m_len;
@@ -564,12 +660,15 @@ nx_netif_mbuf_to_kpkt_log(struct __kern_packet *kpkt, uint32_t len,
     uint32_t poff)
 {
 	uint8_t *baddr;
+	uint32_t pkt_len;
+
 	MD_BUFLET_ADDR_ABS(kpkt, baddr);
+	pkt_len = __packet_get_real_data_length(kpkt);
 	SK_DF(SK_VERB_HOST | SK_VERB_TX, "mlen %u dplen %u"
 	    " hr %u l2 %u poff %u", len, kpkt->pkt_length,
 	    kpkt->pkt_headroom, kpkt->pkt_l2_len, poff);
 	SK_DF(SK_VERB_HOST | SK_VERB_TX | SK_VERB_DUMP, "%s",
-	    sk_dump("buf", baddr, kpkt->pkt_length, 128, NULL, 0));
+	    sk_dump("buf", baddr, pkt_len, 128, NULL, 0));
 }
 #endif /* SK_LOG */
 

@@ -28,6 +28,6 @@ tests()
 	}
 }
 
-T_DECL(ctor_nullptr, "intrusive_shared_ptr.ctor.nullptr") {
+T_DECL(ctor_nullptr, "intrusive_shared_ptr.ctor.nullptr", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

@@ -37,7 +37,7 @@ simple_test_execution(__unused struct test_case *test_case, void *param)
 
 
 T_DECL(diag_mem_threshold_simple_test,
-    "Simple test, set a limit and wait for exception")
+    "Simple test, set a limit and wait for exception", T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_mem_threshold_simple_test);
 }

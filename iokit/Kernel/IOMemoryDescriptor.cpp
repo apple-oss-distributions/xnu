@@ -62,25 +62,23 @@
 
 __BEGIN_DECLS
 #include <vm/pmap.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 #include <mach/memory_object_types.h>
 #include <device/device_port.h>
 
 #include <mach/vm_prot.h>
 #include <mach/mach_vm.h>
 #include <mach/memory_entry.h>
-#include <vm/vm_fault.h>
+#include <mach/mach_host.h>
+#include <vm/vm_fault_xnu.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_memory_entry.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_iokit.h>
+#include <vm/vm_map_xnu.h>
 
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern void ipc_port_release_send(ipc_port_t port);
-
-extern kern_return_t
-mach_memory_entry_ownership(
-	ipc_port_t      entry_port,
-	task_t          owner,
-	int             ledger_tag,
-	int             ledger_flags);
 
 __END_DECLS
 
@@ -882,7 +880,7 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 		vmk_flags.vmkf_range_id = KMEM_RANGE_ID_DATA;
 	}
 
-	err = vm_map_enter_mem_object(map, &addr, size,
+	err = mach_vm_map_kernel(map, &addr, size,
 #if __ARM_MIXED_PAGE_SIZE__
 	    // TODO4K this should not be necessary...
 	    (vm_map_offset_t)((ref->options & kIOMapAnywhere) ? max(PAGE_MASK, vm_map_page_mask(map)) : 0),
@@ -1179,7 +1177,7 @@ IOGeneralMemoryDescriptor::memoryReferenceMap(
 				currentPageIndex += nb_pages;
 				assert(currentPageIndex <= _pages);
 			} else {
-				err = vm_map_enter_mem_object(map,
+				err = mach_vm_map_kernel(map,
 				    &mapAddr,
 				    chunk, 0 /* mask */,
 				    vmk_flags,
@@ -1491,7 +1489,7 @@ IOGeneralMemoryDescriptor::memoryReferenceMapNew(
 #if LOGUNALIGN
 				printf("mapAddr i %qx chunk %qx\n", mapAddr, chunk);
 #endif
-				err = vm_map_enter_mem_object(map,
+				err = mach_vm_map_kernel(map,
 				    &mapAddrOut,
 				    chunk, 0 /* mask */,
 				    vmk_flags,
@@ -3032,7 +3030,9 @@ IOGeneralMemoryDescriptor::dmaCommandOperation(DMACommandOps op, void *vData, UI
 		}
 		IOMDDMAMapArgs * data = (IOMDDMAMapArgs *) vData;
 
-		err = md->dmaUnmap(data->fMapper, data->fCommand, data->fOffset, data->fAlloc, data->fAllocLength);
+		if (_pages) {
+			err = md->dmaUnmap(data->fMapper, data->fCommand, data->fOffset, data->fAlloc, data->fAllocLength);
+		}
 
 		return kIOReturnSuccess;
 	}
@@ -4825,6 +4825,72 @@ IOGeneralMemoryDescriptor::complete(IODirection forDirection)
 	return kIOReturnSuccess;
 }
 
+IOOptionBits
+IOGeneralMemoryDescriptor::memoryReferenceCreateOptions(IOOptionBits options, IOMemoryMap * mapping)
+{
+	IOOptionBits createOptions = 0;
+
+	if (!(kIOMap64Bit & options)) {
+		panic("IOMemoryDescriptor::makeMapping !64bit");
+	}
+	if (!(kIOMapReadOnly & options)) {
+		createOptions |= kIOMemoryReferenceWrite;
+#if DEVELOPMENT || DEBUG
+		if ((kIODirectionOut == (kIODirectionOutIn & _flags))
+		    && (!reserved || (reserved->creator != mapping->fAddressTask))) {
+			OSReportWithBacktrace("warning: creating writable mapping from IOMemoryDescriptor(kIODirectionOut) - use kIOMapReadOnly or change direction");
+		}
+#endif
+	}
+	return createOptions;
+}
+
+/*
+ * Attempt to create any kIOMemoryMapCopyOnWrite named entry needed ahead of the global
+ * lock taken in IOMemoryDescriptor::makeMapping() since it may allocate real pages on
+ * creation.
+ */
+
+IOMemoryMap *
+IOGeneralMemoryDescriptor::makeMapping(
+	IOMemoryDescriptor *    owner,
+	task_t                  __intoTask,
+	IOVirtualAddress        __address,
+	IOOptionBits            options,
+	IOByteCount             __offset,
+	IOByteCount             __length )
+{
+	IOReturn err = kIOReturnSuccess;
+	IOMemoryMap * mapping;
+
+	if ((kIOMemoryMapCopyOnWrite & _flags) && _task && !_memRef) {
+		struct IOMemoryReference * newRef;
+		err = memoryReferenceCreate(memoryReferenceCreateOptions(options, (IOMemoryMap *) __address), &newRef);
+		if (kIOReturnSuccess == err) {
+			if (!OSCompareAndSwapPtr(NULL, newRef, &_memRef)) {
+				memoryReferenceFree(newRef);
+			}
+		}
+	}
+	if (kIOReturnSuccess != err) {
+		return NULL;
+	}
+	mapping = IOMemoryDescriptor::makeMapping(
+		owner, __intoTask, __address, options, __offset, __length);
+
+#if IOTRACKING
+	if ((mapping == (IOMemoryMap *) __address)
+	    && (0 == (kIOMapStatic & mapping->fOptions))
+	    && (NULL == mapping->fSuperMap)
+	    && ((kIOTracking & gIOKitDebug) || _task)) {
+		// only dram maps in the default on development case
+		IOTrackingAddUser(gIOMapTracking, &mapping->fTracking, mapping->fLength);
+	}
+#endif /* IOTRACKING */
+
+	return mapping;
+}
+
 IOReturn
 IOGeneralMemoryDescriptor::doMap(
 	vm_map_t                __addressMap,
@@ -4887,17 +4953,7 @@ IOGeneralMemoryDescriptor::doMap(
 	}
 
 	if (!_memRef) {
-		IOOptionBits createOptions = 0;
-		if (!(kIOMapReadOnly & options)) {
-			createOptions |= kIOMemoryReferenceWrite;
-#if DEVELOPMENT || DEBUG
-			if ((kIODirectionOut == (kIODirectionOutIn & _flags))
-			    && (!reserved || (reserved->creator != mapping->fAddressTask))) {
-				OSReportWithBacktrace("warning: creating writable mapping from IOMemoryDescriptor(kIODirectionOut) - use kIOMapReadOnly or change direction");
-			}
-#endif
-		}
-		err = memoryReferenceCreate(createOptions, &_memRef);
+		err = memoryReferenceCreate(memoryReferenceCreateOptions(options, mapping), &_memRef);
 		if (kIOReturnSuccess != err) {
 			traceInterval.setEndArg1(err);
 			DEBUG4K_ERROR("map %p err 0x%x\n", __addressMap, err);
@@ -4971,12 +5027,6 @@ IOGeneralMemoryDescriptor::doMap(
 		if (err) {
 			DEBUG4K_ERROR("map %p err 0x%x\n", mapping->fAddressMap, err);
 		}
-#if IOTRACKING
-		if ((err == KERN_SUCCESS) && ((kIOTracking & gIOKitDebug) || _task)) {
-			// only dram maps in the default on developement case
-			IOTrackingAddUser(gIOMapTracking, &mapping->fTracking, mapping->fLength);
-		}
-#endif /* IOTRACKING */
 		if ((err == KERN_SUCCESS) && pager) {
 			err = populateDevicePager(pager, mapping->fAddressMap, mapping->fAddress, offset, length, options);
 

@@ -156,6 +156,7 @@ __BEGIN_DECLS
 #define DBG_MACH_RESOURCE       0x25 // tracing limits, etc
 #define DBG_MACH_EXCLAVES       0x2A // Exclaves
 #define DBG_MACH_EXCLAVES_SCHEDULER 0x2B // Exclaves Scheduler
+#define DBG_MACH_EPOCH_SYNC     0x2C // Epoch Sync
 #define DBG_MACH_VM             0x30 // Virtual Memory
 #define DBG_MACH_LEAKS          0x31 // alloc/free
 #define DBG_MACH_WORKINGSET     0x32 // private subclass for working set related debugging
@@ -232,7 +233,7 @@ __BEGIN_DECLS
 #define MACH_SCHED_MAINTENANCE     0x1f /* periodic maintenance thread */
 #define MACH_DISPATCH              0x20 /* context switch completed */
 #define MACH_QUANTUM_HANDOFF       0x21 /* quantum handoff occurred */
-#define MACH_MULTIQ_DEQUEUE        0x22 /* Result of multiq dequeue */
+/* unused  MACH_MULTIQ_DEQUEUE        0x22 was: Result of multiq dequeue */
 #define MACH_SCHED_THREAD_SWITCH   0x23 /* attempt direct context switch to hinted thread */
 #define MACH_SCHED_SMT_BALANCE     0x24 /* SMT load balancing ASTs */
 #define MACH_REMOTE_DEFERRED_AST   0x25 /* Deferred AST started against remote processor */
@@ -288,6 +289,7 @@ __BEGIN_DECLS
 #define MACH_SCHED_WI_EXTERNAL_WAKEUP    0x61 /* WI thread woken by a thread outside its same work interval */
 #define MACH_SCHED_AST_CHECK             0x62 /* run ast check interrupt handler */
 #define MACH_SCHED_PREEMPT_TIMER_ACTIVE  0x63 /* preempt timer is armed */
+#define MACH_PROCESSOR_SHUTDOWN          0x64 /* processor was shut down */
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
 #define MACH_SCHED_CLUTCH_ROOT_BUCKET_STATE     0x0 /* __unused */
@@ -322,23 +324,103 @@ __BEGIN_DECLS
 #define KCOV_STKSZ_THRESHOLD_BELOW           0x1 /* thread stack is below threshold */
 #define KCOV_STKSZ_DELTA                     0X2 /* thread stack change is larger than delta. */
 
-/* Variants for MACH_MULTIQ_DEQUEUE */
-#define MACH_MULTIQ_BOUND     1
-#define MACH_MULTIQ_GROUP     2
-#define MACH_MULTIQ_GLOBAL    3
+/* Codes for Mach Virtual Memory (DBG_MACH_VM) */
 
-/* Arguments for vm_fault (DBG_MACH_VM) */
-#define DBG_ZERO_FILL_FAULT           1
-#define DBG_PAGEIN_FAULT              2
-#define DBG_COW_FAULT                 3
-#define DBG_CACHE_HIT_FAULT           4
-#define DBG_NZF_PAGE_FAULT            5
-#define DBG_GUARD_FAULT               6
-#define DBG_PAGEINV_FAULT             7
-#define DBG_PAGEIND_FAULT             8
-#define DBG_COMPRESSOR_FAULT          9
-#define DBG_COMPRESSOR_SWAPIN_FAULT  10
-#define DBG_COR_FAULT                11
+#define DBG_VM_VNODE_PAGEOUT                0x001
+#define DBG_VM_FAULT_INTERNAL               0x002
+
+#define DBG_VM_PURGEABLE_TOKEN_ADD          0x040
+#define DBG_VM_PURGEABLE_TOKEN_DELETE       0x041
+#define DBG_VM_PURGEABLE_TOKEN_RIPEN        0x042
+#define DBG_VM_PURGEABLE_OBJECT_ADD         0x048
+#define DBG_VM_PURGEABLE_OBJECT_REMOVE      0x049
+#define DBG_VM_PURGEABLE_OBJECT_PURGE       0x04a
+#define DBG_VM_PURGEABLE_OBJECT_PURGE_ALL   0x04b
+#define DBG_VM_PURGEABLE_OBJECT_PURGE_ONE   0x04c
+#define DBG_VM_PURGEABLE_OBJECT_PURGE_LOOP  0x04e
+
+#define DBG_VM_MAP_PARTIAL_REAP             0x054
+#define DBG_VM_MAP_WILLNEED                 0x055
+
+#define DBG_VM_FAULT_CHECK_ZFDELAY          0x100
+#define DBG_VM_FAULT_COWDELAY               0x101
+#define DBG_VM_FAULT_ZFDELAY                0x102
+#define DBG_VM_FAULT_COMPRESSORDELAY        0x103
+
+#define DBG_VM_PAGEOUT_SCAN                 0x104
+#define DBG_VM_PAGEOUT_BALANCE              0x105
+#define DBG_VM_PAGEOUT_FREELIST             0x106
+#define DBG_VM_PAGEOUT_PURGEONE             0x107
+#define DBG_VM_PAGEOUT_CACHE_EVICT          0x108
+#define DBG_VM_PAGEOUT_THREAD_BLOCK         0x109
+#define DBG_VM_PAGEOUT_JETSAM               0x10A
+#define DBG_VM_INFO1                        0x10B
+#define DBG_VM_INFO2                        0x10C
+#define DBG_VM_INFO3                        0x10D
+#define DBG_VM_INFO4                        0x10E
+#define DBG_VM_INFO5                        0x10F
+#define DBG_VM_INFO6                        0x110
+#define DBG_VM_INFO7                        0x111
+#define DBG_VM_INFO8                        0x112
+#define DBG_VM_INFO9                        0x113
+#define DBG_VM_INFO10                       0x114
+
+#define DBG_VM_UPL_PAGE_WAIT                0x120
+#define DBG_VM_IOPL_PAGE_WAIT               0x121
+#define DBG_VM_PAGE_WAIT_BLOCK              0x122
+#define DBG_VM_PAGE_SLEEP                   0x123
+#define DBG_VM_PAGE_EXPEDITE                0x124
+#define DBG_VM_PAGE_EXPEDITE_NO_MEMORY      0x125
+#define DBG_VM_PAGE_GRAB                    0x126
+#define DBG_VM_PAGE_RELEASE                 0x127
+#define DBG_VM_COMPRESSOR_COMPACT_AND_SWAP  0x128
+#define DBG_VM_COMPRESSOR_DELAYED_COMPACT   0x129
+#define DBG_VM_OBJECT_SLEEP                 0x12a
+#define DBG_VM_PAGE_WAKEUP                  0x12b
+#define DBG_VM_PAGE_WAKEUP_DONE             0x12c
+
+#define DBG_VM_PRESSURE_EVENT               0x130
+#define DBG_VM_EXECVE                       0x131
+#define DBG_VM_WAKEUP_COMPACTOR_SWAPPER     0x132
+#define DBG_VM_UPL_REQUEST                  0x133
+#define DBG_VM_IOPL_REQUEST                 0x134
+#define DBG_VM_KERN_REQUEST                 0x135
+
+#define DBG_VM_DATA_WRITE                   0x140
+#define DBG_VM_PRESSURE_LEVEL_CHANGE        0x141
+#define DBG_VM_PHYS_WRITE_ACCT              0x142
+
+#define DBG_VM_MAP_LOOKUP_ENTRY_FAILURE     0x143
+
+/*
+ * Codes for Working Set Measurement (DBG_MACH_WORKINGSET)
+ */
+#define VM_DISCONNECT_ALL_PAGE_MAPPINGS         0x00
+#define VM_DISCONNECT_TASK_PAGE_MAPPINGS        0x01
+#define VM_REAL_FAULT_ADDR_INTERNAL             0x02
+#define VM_REAL_FAULT_ADDR_PURGABLE             0x03
+#define VM_REAL_FAULT_ADDR_EXTERNAL             0x04
+#define VM_REAL_FAULT_ADDR_SHAREDCACHE          0x05
+#define VM_REAL_FAULT_FAST                      0x06
+#define VM_REAL_FAULT_SLOW                      0x07
+#define VM_MAP_LOOKUP_OBJECT                    0x08
+
+/*
+ * Fault Type Enumeration (DBG_MACH_WORKINGSET)
+ * NB: These are *not* trace codes. They comprise an enumeration passed as an
+ * argument to real_fault events.
+ */
+#define DBG_ZERO_FILL_FAULT             0x01
+#define DBG_PAGEIN_FAULT                0x02
+#define DBG_COW_FAULT                   0x03
+#define DBG_CACHE_HIT_FAULT             0x04
+#define DBG_NZF_PAGE_FAULT              0x05
+#define DBG_GUARD_FAULT                 0x06
+#define DBG_PAGEINV_FAULT               0x07
+#define DBG_PAGEIND_FAULT               0x08
+#define DBG_COMPRESSOR_FAULT            0x09
+#define DBG_COMPRESSOR_SWAPIN_FAULT     0x0a
+#define DBG_COR_FAULT                   0x0b
 
 /* Codes for IPC (DBG_MACH_IPC) */
 #define MACH_TASK_SUSPEND                       0x0     /* Suspended a task */
@@ -355,6 +437,8 @@ __BEGIN_DECLS
 #define MACH_IPC_KMSG_LINK                      0xb     /* link a kernel kmsg pointer to user mach_msg_header_t */
 #define MACH_IPC_PORT_ENTRY_MODIFY              0xc     /* A port space gained or lost a port right (reference) */
 #define MACH_IPC_DESTROY_GUARDED_DESC           0xd     /* Unable to receive a guarded descriptor */
+#define MACH_THREAD_SUSPEND                     0xe     /* Suspended a thread */
+#define MACH_THREAD_RESUME                      0xf     /* Resumed a thread */
 
 /* Codes for Exclaves (DBG_MACH_EXCLAVES) */
 #define MACH_EXCLAVES_SWITCH                    0x0     /* Exclaves world switch (entry/return) */
@@ -372,7 +456,18 @@ __BEGIN_DECLS
 #define MACH_EXCLAVES_SCHEDULER_SUSPENDED       0x5     /* Exclaves scheduler Suspended response */
 #define MACH_EXCLAVES_SCHEDULER_RESUMED         0x6     /* Exclaves scheduler Resumed response */
 #define MACH_EXCLAVES_SCHEDULER_INTERRUPTED     0x7     /* Exclaves scheduler Interrupted response */
+#define MACH_EXCLAVES_SCHEDULER_NOTHING_SCHEDULED 0x8   /* Exclaves scheduler NothingScheduled response */
+#define MACH_EXCLAVES_SCHEDULER_ALL_EXCLAVES_BOOTED 0x9 /* Exclaves scheduler AllExclavesBooted response */
+#define MACH_EXCLAVES_SCHEDULER_EARLY_ALLOC     0xa     /* Exclaves scheduler PmmEarlyAlloc response */
 
+/* Codes for Epoch Sync (DBG_MACH_EPOCH_SYNC) */
+#define MACH_EPOCH_SYNC_WAIT_STALE          0x0
+#define MACH_EPOCH_SYNC_WAIT                0x1
+#define MACH_EPOCH_SYNC_WAKE_NO_WAITERS     0x2
+#define MACH_EPOCH_SYNC_WAKE_ONE            0x3
+#define MACH_EPOCH_SYNC_WAKE_ALL            0x4
+#define MACH_EPOCH_SYNC_WAKE_ONE_WITH_OWNER 0x5
+#define MACH_EPOCH_SYNC_WAKE_THREAD         0x6
 
 /* Codes for thread groups (DBG_MACH_THREAD_GROUP) */
 #define MACH_THREAD_GROUP_NEW           0x0
@@ -1076,6 +1171,7 @@ __BEGIN_DECLS
 #define MEMSTAT_CODE(code) BSDDBG_CODE(DBG_BSD_MEMSTAT, code)
 
 #define VM_RECLAIM_CODE(code) MACHDBG_CODE(DBG_MACH_VM_RECLAIM, code)
+#define VMDBG_CODE(code) MACHDBG_CODE(DBG_MACH_VM, code)
 
 #define PMAP_CODE(code) MACHDBG_CODE(DBG_MACH_PMAP, code)
 
@@ -1117,6 +1213,8 @@ __BEGIN_DECLS
 #define DECR_TIMER_RESCAN       MACHDBG_CODE(DBG_MACH_EXCP_DECI,15)
 #define DECR_TIMER_PAUSE        MACHDBG_CODE(DBG_MACH_EXCP_DECI,17)
 #define DECR_TIMER_POSTPONE     MACHDBG_CODE(DBG_MACH_EXCP_DECI,18)
+#define DECR_TIMER_SHUTDOWN     MACHDBG_CODE(DBG_MACH_EXCP_DECI,19)
+#define DECR_TIMER_EXPIRE_LOCAL MACHDBG_CODE(DBG_MACH_EXCP_DECI,20)
 
 #endif // __APPLE_API_UNSTABLE
 

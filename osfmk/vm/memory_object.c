@@ -88,20 +88,23 @@
 #include <kern/ipc_mig.h>
 #include <kern/misc_protos.h>
 
-#include <vm/vm_object.h>
-#include <vm/vm_fault.h>
-#include <vm/memory_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_fault_internal.h>
+#include <vm/memory_object_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_pageout_internal.h>
 #include <vm/pmap.h>            /* For pmap_clear_modify */
 #include <vm/vm_kern.h>         /* For kernel_map, vm_move */
-#include <vm/vm_map.h>          /* For vm_map_pageable */
+#include <vm/vm_map_xnu.h>          /* For vm_map_pageable */
 #include <vm/vm_purgeable_internal.h>   /* Needed by some vm_page.h macros */
 #include <vm/vm_shared_region.h>
+#include <vm/vm_memory_entry_xnu.h>
 
 #include <vm/vm_external.h>
 
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_iokit.h>
+#include <vm/vm_ubc.h>
 
 memory_object_default_t memory_manager_default = MEMORY_OBJECT_DEFAULT_NULL;
 LCK_MTX_DECLARE(memory_manager_default_lock, &vm_object_lck_grp);
@@ -581,7 +584,7 @@ vm_object_update_extent(
 				break;
 
 			case MEMORY_OBJECT_LOCK_RESULT_MUST_BLOCK:
-				PAGE_SLEEP(object, m, THREAD_UNINT);
+				vm_page_sleep(object, m, THREAD_UNINT, LCK_SLEEP_EXCLUSIVE);
 				continue;
 
 			case MEMORY_OBJECT_LOCK_RESULT_MUST_RETURN:
@@ -835,7 +838,7 @@ RETRY_COW_OF_LOCK_REQUEST:
 					}
 					vm_page_unlock_queues();
 				}
-				PAGE_WAKEUP_DONE(page);
+				vm_page_wakeup_done(copy_object, page);
 				break;
 			case VM_FAULT_RETRY:
 				prot =  VM_PROT_WRITE | VM_PROT_READ;
@@ -1592,6 +1595,11 @@ memory_object_range_op(
 
 	object = memory_object_control_to_vm_object(control);
 	if (object == VM_OBJECT_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (offset_end - offset_beg > (uint32_t) -1) {
+		/* range is too big and would overflow "*range" */
 		return KERN_INVALID_ARGUMENT;
 	}
 

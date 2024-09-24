@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -426,13 +426,13 @@ SYSCTL_NODE(_kern_skywalk, OID_AUTO, mem, CTLFLAG_RW | CTLFLAG_LOCKED,
 
 /* system-wide sysctls region */
 static struct skmem_region *sk_sys_region;
-static void             *sk_sys_obj;
-static uint32_t         sk_sys_objsize;
+uint32_t sk_sys_objsize;
+void *__sized_by_or_null(sk_sys_objsize) sk_sys_obj;
 
 static void skmem_sys_region_init(void);
 static void skmem_sys_region_fini(void);
 
-static char *skmem_dump_buf;
+static char *__indexable skmem_dump_buf;
 #define SKMEM_DUMP_BUF_SIZE         2048        /* size of dump buffer */
 
 static int __skmem_inited = 0;
@@ -518,7 +518,15 @@ skmem_dispatch(thread_call_t tcall, void (*func)(void), uint64_t delay)
 static void
 skmem_sys_region_init(void)
 {
-	struct skmem_region_params srp;
+	/*
+	 * XXX -fbounds-safety: Previously the following error was generated:
+	 * error: pointer 'srp.srp_name' with '__terminated_by' attribute must
+	 * be initialized. The suggested solution is to set it to {}, until
+	 * rdar://110645872 is resolved.
+	 */
+	struct skmem_region_params srp = {};
+	uint32_t msize = 0;
+	void *__sized_by(msize) maddr = NULL;
 
 	VERIFY(__skmem_inited);
 	VERIFY(sk_sys_region == NULL);
@@ -532,7 +540,7 @@ skmem_sys_region_init(void)
 	    SKMEM_REGION_CR_NOREDIRECT));
 
 	srp.srp_r_obj_cnt = 1;
-	srp.srp_r_obj_size = sk_sys_objsize = SK_SYS_OBJSIZE_DEFAULT;
+	srp.srp_r_obj_size = SK_SYS_OBJSIZE_DEFAULT;
 	skmem_region_params_config(&srp);
 
 	_CASSERT(SK_SYS_OBJSIZE_DEFAULT >= sizeof(skmem_sysctl));
@@ -543,8 +551,9 @@ skmem_sys_region_init(void)
 		__builtin_unreachable();
 	}
 
-	sk_sys_obj = skmem_region_alloc(sk_sys_region, NULL, NULL,
-	    NULL, SKMEM_SLEEP);
+	sk_sys_obj = skmem_region_alloc(sk_sys_region, &maddr, NULL,
+	    NULL, SKMEM_SLEEP, sk_sys_region->skr_c_obj_size, &msize);
+	sk_sys_objsize = SK_SYS_OBJSIZE_DEFAULT;
 	if (sk_sys_obj == NULL) {
 		panic("failed to allocate global sysctls object (%u bytes)",
 		    sk_sys_objsize);
@@ -561,6 +570,7 @@ skmem_sys_region_fini(void)
 	if (sk_sys_region != NULL) {
 		skmem_region_free(sk_sys_region, sk_sys_obj, NULL);
 		sk_sys_obj = NULL;
+		sk_sys_objsize = 0;
 		skmem_region_release(sk_sys_region);
 		sk_sys_region = NULL;
 	}
@@ -573,8 +583,8 @@ skmem_get_sysctls_region(void)
 	return sk_sys_region;
 }
 
-void *
-skmem_get_sysctls_obj(size_t *size)
+void *__sized_by(sk_sys_objsize)
+skmem_get_sysctls_obj(size_t * size)
 {
 	if (size != NULL) {
 		*size = sk_sys_objsize;

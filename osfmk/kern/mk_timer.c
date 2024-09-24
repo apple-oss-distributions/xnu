@@ -50,10 +50,11 @@
 struct mk_timer {
 	decl_simple_lock_data(, lock);
 	thread_call_data_t      mkt_thread_call;
-	uint32_t                is_dead:1,
-	    is_armed:1;
+	bool                    is_dead;
+	bool                    is_armed;
 	int                     active;
-	ipc_port_t              port;
+	ipc_port_t XNU_PTRAUTH_SIGNED_PTR("mk_timer.port") port;
+	ipc_kmsg_t XNU_PTRAUTH_SIGNED_PTR("mk_timer.prealloc") prealloc;
 };
 
 static ZONE_DEFINE_TYPE(mk_timer_zone, "mk_timer",
@@ -64,27 +65,6 @@ static void mk_timer_expire(void *p0, void *p1);
 
 IPC_KOBJECT_DEFINE(IKOT_TIMER,
     .iko_op_destroy = mk_timer_port_destroy);
-
-__abortlike
-static void
-ipc_kobject_mktimer_require_panic(
-	ipc_port_t                  port)
-{
-	panic("port %p / mktimer %p: circularity check failed",
-	    port, ipc_kobject_get_raw(port, IKOT_TIMER));
-}
-
-void
-ipc_kobject_mktimer_require_locked(
-	ipc_port_t                  port)
-{
-	struct mk_timer *timer;
-
-	timer = ipc_kobject_get_locked(port, IKOT_TIMER);
-	if (timer->port != port) {
-		ipc_kobject_mktimer_require_panic(port);
-	}
-}
 
 mach_port_name_t
 mk_timer_create_trap(
@@ -106,29 +86,41 @@ mk_timer_create_trap(
 	/* Pre-allocate a kmsg for the timer messages */
 	kmsg = ipc_kmsg_alloc(sizeof(mk_timer_expire_msg_t), 0, 0,
 	    IPC_KMSG_ALLOC_KERNEL | IPC_KMSG_ALLOC_ZERO |
-	    IPC_KMSG_ALLOC_SAVED | IPC_KMSG_ALLOC_NOFAIL);
-	static_assert(sizeof(mk_timer_expire_msg_t) < IKM_SAVED_MSG_SIZE);
-
+	    IPC_KMSG_ALLOC_ALL_INLINE | IPC_KMSG_ALLOC_NOFAIL |
+	    IPC_KMSG_ALLOC_USE_KEEP_ALIVE);
 	init_flags = IPC_PORT_INIT_MESSAGE_QUEUE;
 	result = ipc_port_alloc(myspace, init_flags, &name, &port);
 	if (result != KERN_SUCCESS) {
 		zfree(mk_timer_zone, timer);
-		ipc_kmsg_free(kmsg);
+		ipc_kmsg_keep_alive_abandon(kmsg);
 		return MACH_PORT_NULL;
 	}
 
-	/* Associate the pre-allocated kmsg with the port */
-	ipc_kmsg_set_prealloc(kmsg, port);
-
 	/* port locked, receive right at user-space */
+	port->ip_immovable_receive = true;
 	ipc_kobject_upgrade_mktimer_locked(port, (ipc_kobject_t)timer);
 
 	/* make a (naked) send right for the timer to keep */
 	timer->port = ipc_port_make_send_any_locked(port);
 
+	/* Associate the pre-allocated kmsg with the port */
+	timer->prealloc = kmsg;
+
 	ip_mq_unlock(port);
 
 	return name;
+}
+
+static void
+mk_timer_unlock_and_destroy(struct mk_timer *timer, ipc_port_t port)
+{
+	ipc_kmsg_t kmsg = timer->prealloc;
+
+	simple_unlock(&timer->lock);
+
+	zfree(mk_timer_zone, timer);
+	ipc_kmsg_keep_alive_abandon(kmsg);
+	ipc_port_release_send(port);
 }
 
 static void
@@ -144,18 +136,14 @@ mk_timer_port_destroy(
 	if (thread_call_cancel(&timer->mkt_thread_call)) {
 		timer->active--;
 	}
-	timer->is_armed = FALSE;
+	timer->is_armed = false;
 
-	timer->is_dead = TRUE;
+	timer->is_dead = true;
 	if (timer->active == 0) {
+		mk_timer_unlock_and_destroy(timer, port);
+	} else {
 		simple_unlock(&timer->lock);
-		zfree(mk_timer_zone, timer);
-
-		ipc_port_release_send(port);
-		return;
 	}
-
-	simple_unlock(&timer->lock);
 }
 
 static void
@@ -163,49 +151,45 @@ mk_timer_expire(
 	void                    *p0,
 	__unused void           *p1)
 {
-	struct mk_timer* timer = p0;
+	struct mk_timer *timer = p0;
+	ipc_kmsg_t kmsg;
+	ipc_port_t port;
 
 	simple_lock(&timer->lock, LCK_GRP_NULL);
 
-	if (timer->active > 1) {
-		timer->active--;
-		simple_unlock(&timer->lock);
-		return;
-	}
-
-	ipc_port_t port = timer->port;
+	port = timer->port;
+	kmsg = timer->prealloc;
 	assert(port != IP_NULL);
-	assert(timer->active == 1);
+	assert(timer->active > 0);
 
 	while (timer->is_armed && timer->active == 1) {
-		mk_timer_expire_msg_t           msg;
-
-		timer->is_armed = FALSE;
+		timer->is_armed = false;
 		simple_unlock(&timer->lock);
 
-		msg.header.msgh_bits =
-		    MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
-		msg.header.msgh_remote_port = port;
-		msg.header.msgh_local_port = MACH_PORT_NULL;
-		msg.header.msgh_voucher_port = MACH_PORT_NULL;
-		msg.header.msgh_id = 0;
+		if (ipc_kmsg_keep_alive_try_reusing(kmsg)) {
+			mk_timer_expire_msg_t *msg;
 
-		msg.unused[0] = msg.unused[1] = msg.unused[2] = 0;
+			msg = __container_of(ikm_header(kmsg),
+			    mk_timer_expire_msg_t, header);
+			bzero(msg, sizeof(mk_timer_expire_msg_t));
+			msg->header.msgh_bits =
+			    MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND, 0, 0, 0);
+			msg->header.msgh_size = sizeof(mk_timer_expire_msg_t);
+			msg->header.msgh_remote_port = port;
 
-		(void) mach_msg_send_from_kernel_proper(&msg.header, sizeof(msg));
+			kernel_mach_msg_send_kmsg(kmsg);
+		}
 
 		simple_lock(&timer->lock, LCK_GRP_NULL);
 	}
 
-	if (--timer->active == 0 && timer->is_dead) {
+	timer->active -= 1;
+
+	if (timer->active == 0 && timer->is_dead) {
+		mk_timer_unlock_and_destroy(timer, port);
+	} else {
 		simple_unlock(&timer->lock);
-		zfree(mk_timer_zone, timer);
-
-		ipc_port_release_send(port);
-		return;
 	}
-
-	simple_unlock(&timer->lock);
 }
 
 /*
@@ -291,7 +275,7 @@ mk_timer_arm_trap_internal(mach_port_name_t name, uint64_t expire_time, uint64_t
 		ip_mq_unlock(port);
 
 		if (!timer->is_dead) {
-			timer->is_armed = TRUE;
+			timer->is_armed = true;
 
 			if (expire_time > mach_absolute_time()) {
 				uint32_t tcflags = THREAD_CALL_DELAY_USER_NORMAL;
@@ -377,7 +361,7 @@ mk_timer_cancel_trap(
 			if (thread_call_cancel(&timer->mkt_thread_call)) {
 				timer->active--;
 			}
-			timer->is_armed = FALSE;
+			timer->is_armed = false;
 		}
 
 		simple_unlock(&timer->lock);

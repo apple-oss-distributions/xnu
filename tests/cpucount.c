@@ -41,7 +41,8 @@ T_GLOBAL_META(
 	T_META_ALL_VALID_ARCHS(true),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("scheduler"),
-	T_META_OWNER("jarrad")
+	T_META_OWNER("jarrad"),
+	T_META_TAG_VM_NOT_PREFERRED
 	);
 
 #define KERNEL_BOOTARGS_MAX_SIZE 1024
@@ -438,4 +439,70 @@ T_DECL(check_cpu_topology,
 		IOObjectRelease(cpu_service);
 	}
 	T_PASS("All cluster IDs match with IORegistry");
+}
+
+T_DECL(hw_perflevels_order_and_cpu_counts,
+    "check that perflevel sysctls return the correct order and with expected cpu counts",
+    XNU_T_META_SOC_SPECIFIC)
+{
+	int ret;
+	char sysctlname[256];
+
+	/* Check perflevel count */
+	int level_count = 0;
+	ret = sysctlbyname("hw.nperflevels", &level_count, &(size_t){ sizeof(level_count) }, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "hw.nperflevels");
+	T_EXPECT_GE(level_count, 1, "valid hw.nperflevels: %d", level_count);
+
+	/* Check perflevel names */
+	char perflevel_name[level_count][128];
+	int efficient_pos = -1;
+	int performance_pos = -1;
+	int standard_pos = -1;
+	for (int p = 0; p < level_count; p++) {
+		snprintf(sysctlname, sizeof(sysctlname), "hw.perflevel%d.name", p);
+		ret = sysctlbyname(sysctlname, perflevel_name[p], &(size_t){ sizeof(perflevel_name[p]) }, NULL, 0);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, sysctlname);
+		if (strcmp(perflevel_name[p], "Efficiency") == 0) {
+			efficient_pos = p;
+		} else if (strcmp(perflevel_name[p], "Performance") == 0) {
+			performance_pos = p;
+		} else if (strcmp(perflevel_name[p], "Standard") == 0) {
+			standard_pos = p;
+		}
+	}
+	T_ASSERT_TRUE((efficient_pos >= 0) || (performance_pos >= 0) || (standard_pos >= 0),
+	    "valid perflevels detected (\"Efficient\" %d, \"Performance\" %d, \"Standard\" %d)",
+	    efficient_pos, performance_pos, standard_pos);
+	if (standard_pos >= 0) {
+		T_ASSERT_EQ(level_count, 1, "single \"Standard\" perflevel");
+	}
+	if (efficient_pos >= 0) {
+		T_ASSERT_EQ(efficient_pos, level_count - 1, "\"Efficiency\" is the highest index perflevel");
+	}
+	if (performance_pos >= 0) {
+		T_ASSERT_EQ(performance_pos, 0, "\"Performance\" is the lowest index perflevel");
+	}
+
+	/*
+	 * Check that certain variants of CPU counts sum up to the expected total
+	 * across all perflevels.
+	 */
+	const int num_cpu_count_variants = 2;
+	char *cpu_count_variants[num_cpu_count_variants] = {"physicalcpu_max", "logicalcpu_max"};
+	for (int v = 0; v < num_cpu_count_variants; v++) {
+		unsigned int total_amount = 0;
+		snprintf(sysctlname, sizeof(sysctlname), "hw.%s", cpu_count_variants[v]);
+		ret = sysctlbyname(sysctlname, &total_amount, &(size_t){ sizeof(total_amount) }, NULL, 0);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, sysctlname);
+		unsigned int amount_from_perflevels = 0;
+		for (int p = 0; p < level_count; p++) {
+			unsigned int perflevel_amount = 0;
+			snprintf(sysctlname, sizeof(sysctlname), "hw.perflevel%d.%s", p, cpu_count_variants[v]);
+			ret = sysctlbyname(sysctlname, &perflevel_amount, &(size_t){ sizeof(perflevel_amount) }, NULL, 0);
+			T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, sysctlname);
+			amount_from_perflevels += perflevel_amount;
+		}
+		T_EXPECT_EQ(total_amount, amount_from_perflevels, "all %u %s accounted for", total_amount, cpu_count_variants[v]);
+	}
 }

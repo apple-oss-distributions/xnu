@@ -66,6 +66,7 @@ struct kdp_fault_result {
 __options_closed_decl(kdp_fault_flags_t, uint32_t, {
 	KDP_FAULT_FLAGS_NONE = 0x0,
 	KDP_FAULT_FLAGS_ENABLE_FAULTING = 0x1, /* try faulting if pages are not resident */
+	KDP_FAULT_FLAGS_MULTICPU = 0x2, /* multicpu kdp context */
 });
 
 __options_closed_decl(kdp_traverse_mappings_flags_t, uint32_t, {

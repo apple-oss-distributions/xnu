@@ -137,6 +137,8 @@
 #include <kern/exc_guard.h>
 #include <os/log.h>
 #include <sys/kdebug_triage.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
@@ -185,7 +187,7 @@ extern void gather_populate_corpse_crashinfo(void *p, task_t task,
 extern void *proc_find(int pid);
 extern int proc_rele(void *p);
 extern task_t proc_get_task_raw(void *proc);
-extern char *proc_best_name(struct proc *proc);
+extern const char *proc_best_name(struct proc *proc);
 
 
 /*
@@ -207,7 +209,6 @@ total_corpses_count(void)
 	return gate.corpses;
 }
 
-extern char *proc_best_name(struct proc *);
 extern int proc_pid(struct proc *);
 
 /*
@@ -845,7 +846,7 @@ task_map_kcdata_64(
 	mach_vm_offset_t udata_ptr;
 
 	kr = mach_vm_allocate_kernel(task->map, &udata_ptr, (size_t)kcd_size,
-	    VM_FLAGS_ANYWHERE, tag);
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = tag));
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}

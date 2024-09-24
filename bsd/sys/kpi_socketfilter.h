@@ -54,6 +54,7 @@
 
 #include <sys/kernel_types.h>
 #include <sys/kpi_socket.h>
+#include <sys/ioccom.h>
 
 #ifndef PRIVATE
 #include <Availability.h>
@@ -455,7 +456,7 @@ typedef errno_t (*sf_listen_func)(void *cookie, socket_t so);
  *                       this error.
  */
 typedef errno_t (*sf_ioctl_func)(void *cookie, socket_t so,
-    unsigned long request, const char* argp);
+    unsigned long request, const char*__sized_by(IOCPARM_LEN(request)) argp);
 
 /*!
  *       @typedef sf_accept_func
@@ -723,7 +724,7 @@ __NKE_API_DEPRECATED;
  *       @param length The number of bytes to copy.
  *       @result An errno error or zero upon success.
  */
-extern errno_t sockopt_copyin(sockopt_t sopt, void *data, size_t length)
+extern errno_t sockopt_copyin(sockopt_t sopt, void *__sized_by(length) data, size_t length)
 __NKE_API_DEPRECATED;
 
 /*!
@@ -734,7 +735,7 @@ __NKE_API_DEPRECATED;
  *       @param length The number of bytes to copy.
  *       @result An errno error or zero upon success.
  */
-extern errno_t sockopt_copyout(sockopt_t sopt, void *data, size_t length)
+extern errno_t sockopt_copyout(sockopt_t sopt, void *__sized_by(length) data, size_t length)
 __NKE_API_DEPRECATED;
 
 #undef __NKE_API_DEPRECATED

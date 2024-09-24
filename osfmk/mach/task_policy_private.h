@@ -99,8 +99,9 @@ struct task_effective_policy {
 	    tep_qos_clamp           :3,             /* task qos clamp (applies to qos-disabled threads too) */
 	    tep_qos_ceiling         :3,             /* task qos ceiling (applies to only qos-participating threads) */
 	    tep_adaptive_bg         :1,             /* task is bg solely due to the adaptive daemon clamp */
+	    tep_coalition_bg        :1,             /* task is bg due to coalition suppresssion */
 
-	    tep_reserved            :30;
+	    tep_reserved            :29;
 };
 
 /*

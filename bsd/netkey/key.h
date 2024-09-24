@@ -64,17 +64,14 @@ extern struct secasvar *key_alloc_outbound_sav_for_interface(ifnet_t interface, 
     struct sockaddr *dst);
 extern int key_checkrequest(struct ipsecrequest *isr, struct secasindex *,
     struct secasvar **sav);
-extern struct secasvar *key_allocsa(u_int, caddr_t, caddr_t,
-    uint32_t, u_int, u_int32_t);
-struct secasvar *
-key_allocsa_extended(u_int family, caddr_t src, caddr_t dst, uint32_t dst_ifscope,
+struct secasvar *key_allocsa(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
     u_int proto, u_int32_t spi, ifnet_t interface);
-extern bool key_checksa_present(u_int family, caddr_t src, caddr_t dst, u_int16_t src_port, u_int16_t dst_port, uint32_t src_ifscope, uint32_t dst_ifscope);
+extern bool key_checksa_present(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst);
 extern u_int16_t key_natt_get_translated_port(struct secasvar *);
 extern void key_freesp(struct secpolicy *, int);
 extern void key_freesav(struct secasvar *, int);
 extern struct secpolicy *key_newsp(void);
-extern struct secpolicy *key_msg2sp(struct sadb_x_policy *, size_t, int *);
+extern struct secpolicy *key_msg2sp(struct sadb_x_policy *__sized_by(len), size_t len, int *);
 extern struct mbuf *key_sp2msg(struct secpolicy *);
 extern int key_ismyaddr(struct sockaddr *);
 extern int key_spdacquire(struct secpolicy *);
@@ -97,7 +94,7 @@ extern void key_delsp_for_ipsec_if(ifnet_t ipsec_if);
 struct ifnet;
 struct ifnet_keepalive_offload_frame;
 extern u_int32_t key_fill_offload_frames_for_savs(struct ifnet *,
-    struct ifnet_keepalive_offload_frame *frames_array, u_int32_t, size_t);
+    struct ifnet_keepalive_offload_frame *__counted_by(frames_count)frames_array, u_int32_t frames_count, size_t);
 
 extern bool key_custom_ipsec_token_is_valid(void *);
 extern int key_reserve_custom_ipsec(void **, union sockaddr_in_4_6 *, union sockaddr_in_4_6 *, u_int8_t proto);

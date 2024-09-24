@@ -25,6 +25,6 @@ tests()
 	}
 }
 
-T_DECL(for_loop, "bounded_array_ref.for_loop") {
+T_DECL(for_loop, "bounded_array_ref.for_loop", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

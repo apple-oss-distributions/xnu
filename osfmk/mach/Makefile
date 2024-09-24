@@ -9,13 +9,11 @@ include $(MakeInc_def)
 INSTINC_SUBDIRS = machine
 INSTINC_SUBDIRS_X86_64 = i386
 INSTINC_SUBDIRS_X86_64H = i386
-INSTINC_SUBDIRS_ARM = arm arm64
 INSTINC_SUBDIRS_ARM64 = arm arm64
 
 EXPINC_SUBDIRS = machine
 EXPINC_SUBDIRS_X86_64 = i386
 EXPINC_SUBDIRS_X86_64H = i386
-EXPINC_SUBDIRS_ARM = arm arm64
 EXPINC_SUBDIRS_ARM64 = arm arm64
 
 MIG_TYPES = \
@@ -28,6 +26,7 @@ MIG_DEFS =	\
 	clock.defs \
 	clock_priv.defs \
 	clock_reply.defs \
+	doubleagent_mig.defs \
 	exc.defs \
 	host_notify_reply.defs \
 	host_priv.defs \
@@ -75,6 +74,7 @@ MIG_USHDRS = \
 	audit_triggers_server.h \
 	clock_reply_server.h \
 	coalition_notification_server.h \
+	doubleagent_mig_server.h \
 	exc_server.h \
 	fairplayd_notification_server.h \
 	arcade_upcall_server.h \
@@ -121,11 +121,11 @@ else
 EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
 endif
 
-# machine.h is covered by machine/mach_machine.modulemap.
 DATAFILES = $(sort \
 	audit_triggers_types.h \
         boolean.h \
         clock_types.h \
+        doubleagent_types.h \
         dyld_kernel.h \
         error.h \
 	exception.h \
@@ -185,18 +185,13 @@ DATAFILES = $(sort \
 	${MIG_TYPES} \
 	${MIG_DEFS})
 
-# mach.modulemap additionally includes headers installed by Libsyscall
-# ../../libsyscall/xcodescripts/mach_install_mig.sh: MIGS, MACH_HDRS.
-# mach.modulemap additionally includes hv_kern_types.h from ../arm64/hv
-# and sdt.h from ../../bsd/sys
-MODULEMAPFILES = \
-	mach.modulemap
+KERNELFILES = \
+	mach_interface.h \
+	vm_types_unsafe.h
 
 INSTALL_MI_LIST	= \
 	bootstrap.h \
 	${DATAFILES}
-
-INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
 EXCLAVES_DATAFILES = \
 	exclaves.h \
@@ -207,6 +202,8 @@ PRIVATE_DATAFILES = $(sort \
 	bootstrap.h \
 	coalition.h \
 	coalition_notification.defs \
+	doubleagent_mig.defs \
+	doubleagent_types.h \
 	fairplayd_notification.defs \
 	iocompressionstats_notification.defs \
 	arcade_register.defs \
@@ -242,11 +239,6 @@ PRIVATE_DATAFILES = $(sort \
 	${EXTRA_PRIVATE_DATAFILES} \
 	${MIG_PRIVATE_DEFS})
 
-# mach_private.modulemap additionally includes headers installed by Libsyscall
-# ../../libsyscall/xcodescripts/mach_install_mig.sh: MIGS_PRIVATE, MACH_PRIVATE_HDRS
-PRIVATE_MODULEMAPFILES = \
-	mach_private.modulemap
-
 INSTALL_MI_LCL_LIST = $(sort \
 	coalition.h \
 	mach_time_private.h \
@@ -258,22 +250,18 @@ INSTALL_MI_LCL_LIST = $(sort \
 	${EXCLAVES_DATAFILES} \
 	${EXTRA_PRIVATE_DATAFILES})
 
-INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
-
 INSTALL_SF_MI_LCL_LIST = ${INSTALL_MI_LIST} ${PRIVATE_DATAFILES}
 
 INSTALL_KF_MI_LIST = $(sort \
-	mach_interface.h \
-	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${EXTRA_PRIVATE_DATAFILES}))
+	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${KERNELFILES} ${EXTRA_PRIVATE_DATAFILES}))
 
 INSTALL_KF_MI_LCL_LIST = $(sort \
 	coalition.h \
-	mach_interface.h \
 	mach_time_private.h \
 	task_policy_private.h \
 	thread_policy_private.h \
 	${EXCLAVES_DATAFILES} \
-	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${EXTRA_PRIVATE_DATAFILES}))
+	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES} ${KERNELFILES} ${EXTRA_PRIVATE_DATAFILES}))
 
 INSTALL_MI_GEN_LIST =
 
@@ -281,7 +269,6 @@ INSTALL_MI_DIR = mach
 
 EXPORT_MI_LIST	= $(sort \
 	coalition.h \
-	mach_interface.h \
 	mach_time_private.h \
 	memory_object_control.h \
 	resource_monitors.h \
@@ -291,6 +278,7 @@ EXPORT_MI_LIST	= $(sort \
 	sfi_class.h \
 	${EXCLAVES_DATAFILES} \
 	${DATAFILES} \
+	${KERNELFILES} \
 	${EXTRA_PRIVATE_DATAFILES})
 
 EXPORT_MI_GEN_LIST = \
@@ -325,8 +313,6 @@ ${MIG_USHDRS} : \
 
 INCFLAGS_MAKEFILE= -I..
 
-MIGKSFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1 -mach_msg2
-MIGKUFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024
 #
 # MIG-generated headers that are traditionally used by kernel
 # level code.
@@ -336,6 +322,7 @@ MIGKUFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024
 MIG_KUHDRS = \
 	audit_triggers.h \
 	clock_reply.h \
+	doubleagent_mig.h \
 	exc.h \
 	host_notify_reply.h \
 	ktrace_background.h \
@@ -352,6 +339,7 @@ MIG_KUSRC = \
 	audit_triggers_user.c \
 	clock_reply_user.c \
 	coalition_notification_user.c \
+	doubleagent_mig_user.c \
 	exc_user.c \
 	fairplayd_notification_user.c \
 	arcade_upcall_user.c \
@@ -399,7 +387,6 @@ MIG_KSSRC = \
 	mach_eventlink_server.c \
 	exc_server.c \
 	host_priv_server.c \
-	host_security_server.c \
 	mach_exc_server.c \
 	mach_host_server.c \
 	mach_notify_server.c \

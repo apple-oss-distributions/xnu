@@ -116,7 +116,7 @@ tests()
 	}
 }
 
-T_DECL(discard_bounds, "bounded_ptr.discard_bounds") {
+T_DECL(discard_bounds, "bounded_ptr.discard_bounds", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

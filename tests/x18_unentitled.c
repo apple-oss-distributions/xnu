@@ -36,7 +36,8 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("arm"),
 	T_META_OWNER("joster"),
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED);
 
 T_DECL(x18_unentitled,
     "Test that x18 is trashed when unentitled.")

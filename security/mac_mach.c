@@ -199,11 +199,10 @@ mac_task_check_set_task_special_port(struct task *task, struct task *target, int
 
 	assert(task == current_task());
 
-	/*
-	 * task_set_special_port() is a CONTROL level interface, so we are guaranteed
-	 * by MIG intrans that target is not a corpse.
-	 */
-	assert(!task_is_a_corpse(target));
+	/* disallow setting task special ports for corpse */
+	if (task_is_a_corpse(target)) {
+		return EPERM;
+	}
 
 	struct proc *targetp = mac_task_get_proc(target);
 	if (targetp == NULL) {
@@ -215,6 +214,78 @@ mac_task_check_set_task_special_port(struct task *task, struct task *target, int
 
 	MAC_CHECK(proc_check_set_task_special_port,
 	    current_cached_proc_cred(PROC_NULL), &pident, which, port);
+
+	return error;
+}
+
+int
+mac_task_check_set_task_exception_ports(struct task *task, struct task *target, unsigned int exception_mask, int new_behavior)
+{
+#pragma unused(task)
+	int error = 0;
+	int exception;
+	kauth_cred_t cred = current_cached_proc_cred(PROC_NULL);
+
+	assert(task == current_task());
+
+	/* disallow setting task exception ports for corpse */
+	if (task_is_a_corpse(target)) {
+		return EPERM;
+	}
+
+	struct proc *targetp = mac_task_get_proc(target);
+	if (targetp == NULL) {
+		return ESRCH;
+	}
+
+	struct proc_ident pident = proc_ident(targetp);
+	proc_rele(targetp);
+
+	for (exception = FIRST_EXCEPTION; exception < EXC_TYPES_COUNT; exception++) {
+		if (exception_mask & (1 << exception)) {
+			MAC_CHECK(proc_check_set_task_exception_port,
+			    cred, &pident, exception, new_behavior);
+			if (error) {
+				break;
+			}
+		}
+	}
+
+	return error;
+}
+
+int
+mac_task_check_set_thread_exception_ports(struct task *task, struct task *target, unsigned int exception_mask, int new_behavior)
+{
+#pragma unused(task)
+	int error = 0;
+	int exception;
+	kauth_cred_t cred = current_cached_proc_cred(PROC_NULL);
+
+	assert(task == current_task());
+
+	/* disallow setting thread exception ports for corpse */
+	if (task_is_a_corpse(target)) {
+		return EPERM;
+	}
+
+	struct proc *targetp = mac_task_get_proc(target);
+	if (targetp == NULL) {
+		return ESRCH;
+	}
+
+	struct proc_ident pident = proc_ident(targetp);
+	proc_rele(targetp);
+
+	for (exception = FIRST_EXCEPTION; exception < EXC_TYPES_COUNT; exception++) {
+		if (exception_mask & (1 << exception)) {
+			MAC_CHECK(proc_check_set_thread_exception_port,
+			    cred, &pident, exception, new_behavior);
+			if (error) {
+				break;
+			}
+		}
+	}
 
 	return error;
 }

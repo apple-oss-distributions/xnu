@@ -47,7 +47,7 @@ RB_GENERATE_PREV(flow_entry_id_tree, flow_entry, fe_id_link, fe_id_cmp);
 
 os_refgrp_decl(static, flow_entry_refgrp, "flow_entry", NULL);
 
-KALLOC_TYPE_DECLARE(sk_fed_zone);
+static SKMEM_TYPE_DEFINE(sk_fed_zone, struct flow_entry_dead);
 
 const struct flow_key fk_mask_2tuple
 __sk_aligned(16) =
@@ -220,7 +220,7 @@ flow_entry_add_child(struct flow_entry *parent_fe, struct flow_entry *child_fe)
 		return false;
 	}
 
-	struct flow_entry *fe, *tfe;
+	struct flow_entry *__single fe, *__single tfe;
 	TAILQ_FOREACH_SAFE(fe, &parent_fe->fe_child_list, fe_child_link, tfe) {
 		if (!fe_id_cmp(fe, child_fe)) {
 			lck_rw_unlock_exclusive(&parent_fe->fe_child_list_lock);
@@ -257,7 +257,7 @@ flow_entry_remove_all_children(struct flow_entry *parent_fe, struct nx_flowswitc
 
 	lck_rw_lock_exclusive(&parent_fe->fe_child_list_lock);
 
-	struct flow_entry *fe, *tfe;
+	struct flow_entry *__single fe, *__single tfe;
 	TAILQ_FOREACH_SAFE(fe, &parent_fe->fe_child_list, fe_child_link, tfe) {
 		if (!(fe->fe_flags & FLOWENTF_NONVIABLE)) {
 			/*
@@ -295,6 +295,7 @@ flow_entry_set_demux_patterns(struct flow_entry *fe, struct nx_flow_req *req)
 
 	fe->fe_demux_patterns = sk_alloc_type_array(struct kern_flow_demux_pattern, req->nfr_flow_demux_count,
 	    Z_WAITOK | Z_NOFAIL, skmem_tag_flow_demux);
+	fe->fe_demux_pattern_count = req->nfr_flow_demux_count;
 
 	for (int i = 0; i < req->nfr_flow_demux_count; i++) {
 		bcopy(&req->nfr_flow_demux_patterns[i], &fe->fe_demux_patterns[i].fdp_demux_pattern,
@@ -309,8 +310,6 @@ flow_entry_set_demux_patterns(struct flow_entry *fe, struct nx_flow_req *req)
 			VERIFY(0);
 		}
 	}
-
-	fe->fe_demux_pattern_count = req->nfr_flow_demux_count;
 }
 
 static int
@@ -409,8 +408,8 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 {
 	SK_LOG_VAR(char dbgbuf[FLOWENTRY_DBGBUF_SIZE]);
 	nexus_port_t nx_port = req->nfr_nx_port;
-	struct flow_entry *fe = NULL;
-	struct flow_entry *parent_fe = NULL;
+	struct flow_entry *__single fe = NULL;
+	struct flow_entry *__single parent_fe = NULL;
 	flowadv_idx_t fadv_idx = FLOWADV_IDX_NONE;
 	struct nexus_adapter *dev_na;
 	struct nx_netif *nif;
@@ -459,8 +458,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	    (flow_owner_flowadv_index_alloc(fo, &fadv_idx) != 0)) {
 		SK_ERR("failed to alloc flowadv index for flow %s",
 		    sk_uuid_unparse(req->nfr_flow_uuid, dbgbuf));
-		/* XXX: what is the most appropriate error code ? */
-		err = ENOSPC;
+		err = ENOMEM;
 		goto done;
 	}
 
@@ -633,6 +631,7 @@ flow_entry_alloc(struct flow_owner *fo, struct nx_flow_req *req, int *perr)
 	fe_stats_init(fe);
 	flow_stats_retain(fe->fe_stats);
 	req->nfr_flow_stats = fe->fe_stats;
+	fe->fe_rx_worker_tid = 0;
 
 #if SK_LOG
 	SK_DF(SK_VERB_FLOW, "allocated entry \"%s\" fe 0x%llx flags 0x%b "
@@ -740,7 +739,7 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 	}
 
 	RB_REMOVE(flow_entry_id_tree, &fo->fo_flow_entry_id_head, fe);
-	struct flow_entry *tfe = fe;
+	struct flow_entry *__single tfe = fe;
 	flow_entry_release(&tfe);
 
 	ASSERT(!(fe->fe_flags & FLOWENTF_DESTROYED));
@@ -748,7 +747,17 @@ flow_entry_destroy(struct flow_owner *fo, struct flow_entry *fe, bool nolinger,
 
 	if (fe->fe_transport_protocol == IPPROTO_QUIC) {
 		if (!nolinger && close_params != NULL) {
-			flow_track_abort_quic(fe, close_params);
+			/*
+			 * -fbounds-safety: We can't annotate close_params (last
+			 * argument of this function) with
+			 * __sized_by(QUIC_STATELESS_RESET_TOKEN_SIZE) because
+			 * there are callsites that pass NULL to this. Until
+			 * __sized_by_or_null is available (rdar://75598414),
+			 * forge this for now.
+			 */
+			uint8_t *quic_close_params = __unsafe_forge_bidi_indexable(uint8_t *,
+			    close_params, QUIC_STATELESS_RESET_TOKEN_SIZE);
+			flow_track_abort_quic(fe, quic_close_params);
 		}
 		flow_entry_release(&fe);
 	} else if (nolinger || !(fe->fe_flags & FLOWENTF_WAIT_CLOSE)) {
@@ -796,13 +805,14 @@ flow_entry_release(struct flow_entry **pfe)
 			ASSERT(fe->fe_qset == NULL);
 		}
 		if (fe->fe_demux_patterns != NULL) {
-			sk_free_type_array(struct kern_flow_demux_pattern,
+			sk_free_type_array_counted_by(struct kern_flow_demux_pattern,
 			    fe->fe_demux_pattern_count, fe->fe_demux_patterns);
 			fe->fe_demux_patterns = NULL;
 			fe->fe_demux_pattern_count = 0;
 		}
 		if (fe->fe_demux_pkt_data != NULL) {
-			sk_free_data(fe->fe_demux_pkt_data, FLOW_DEMUX_MAX_LEN);
+			size_t demux_pkt_data_size = FLOW_DEMUX_MAX_LEN;
+			sk_free_data_sized_by(fe->fe_demux_pkt_data, demux_pkt_data_size);
 			fe->fe_demux_pkt_data = NULL;
 		}
 		fe_free(fe);
@@ -840,7 +850,7 @@ fe_stats_init(struct flow_entry *fe)
 	bzero(sf, sizeof(*sf));
 	uuid_copy(sf->sf_nx_uuid, fsw->fsw_nx->nx_uuid);
 	uuid_copy(sf->sf_uuid, fe->fe_uuid);
-	(void) strlcpy(sf->sf_if_name, fsw->fsw_flow_mgr->fm_name, IFNAMSIZ);
+	(void) strbufcpy(sf->sf_if_name, fsw->fsw_flow_mgr->fm_name);
 	sf->sf_if_index = fsw->fsw_ifp->if_index;
 	sf->sf_pid = fe->fe_pid;
 	sf->sf_epid = fe->fe_epid;
@@ -972,6 +982,7 @@ fe_alloc(boolean_t can_block)
 
 	os_ref_init(&fe->fe_refcnt, &flow_entry_refgrp);
 
+	lck_mtx_init(&fe->fe_rx_pktq_lock, &nexus_lock_group, &nexus_lock_attr);
 	KPKTQ_INIT(&fe->fe_rx_pktq);
 	KPKTQ_INIT(&fe->fe_tx_pktq);
 
@@ -1026,7 +1037,7 @@ fe_id_cmp(const struct flow_entry *a, const struct flow_entry *b)
 #if SK_LOG
 SK_NO_INLINE_ATTRIBUTE
 char *
-fk_as_string(const struct flow_key *fk, char *dst, size_t dsz)
+fk_as_string(const struct flow_key *fk, char *__counted_by(dsz)dst, size_t dsz)
 {
 	int af;
 	char src_s[MAX_IPv6_STR_LEN];
@@ -1047,7 +1058,7 @@ fk_as_string(const struct flow_key *fk, char *dst, size_t dsz)
 
 SK_NO_INLINE_ATTRIBUTE
 char *
-fe_as_string(const struct flow_entry *fe, char *dst, size_t dsz)
+fe_as_string(const struct flow_entry *fe, char *__counted_by(dsz)dst, size_t dsz)
 {
 	char keybuf[FLOWKEY_DBGBUF_SIZE]; /* just for debug message */
 	uuid_string_t uuidstr;

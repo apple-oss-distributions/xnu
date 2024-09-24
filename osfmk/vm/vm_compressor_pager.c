@@ -70,10 +70,12 @@
 #include <mach/upl.h>
 
 #include <vm/memory_object.h>
-#include <vm/vm_compressor_pager.h>
+#include <vm/vm_compressor_pager_internal.h>
 #include <vm/vm_external.h>
+#include <vm/vm_fault.h>
 #include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_object_internal.h>
 
 #include <sys/kdebug_triage.h>
 
@@ -135,7 +137,7 @@ struct {
 	uint64_t        transfer;
 } compressor_pager_stats;
 
-typedef int compressor_slot_t;
+typedef int compressor_slot_t; /* stand-in for c_slot_mapping */
 
 typedef struct compressor_pager {
 	/* mandatory generic header */
@@ -188,7 +190,7 @@ LCK_GRP_DECLARE(compressor_pager_lck_grp, "compressor_pager");
 /* forward declarations */
 unsigned int compressor_pager_slots_chunk_free(compressor_slot_t *chunk,
     int num_slots,
-    int flags,
+    vm_compressor_options_t flags,
     int *failures);
 void compressor_pager_slot_lookup(
 	compressor_pager_t      pager,
@@ -232,7 +234,7 @@ compressor_pager_num_chunks(
 
 	num_chunks = pager->cpgr_num_slots / COMPRESSOR_SLOTS_PER_CHUNK;
 	if (num_chunks * COMPRESSOR_SLOTS_PER_CHUNK < pager->cpgr_num_slots) {
-		num_chunks++;
+		num_chunks++;  /* do the equivalent of ceil() instead of trunc() for the above division */
 	}
 	return num_chunks;
 }
@@ -554,6 +556,7 @@ compressor_memory_object_create(
 
 	num_chunks = compressor_pager_num_chunks(pager);
 	if (num_chunks > 1) {
+		/* islots points to an array of chunks pointer. every chunk has 512/sizeof(int)=128 slot_mapping */
 		pager->cpgr_slots.cpgr_islots = kalloc_type(compressor_slot_t *,
 		    num_chunks, Z_WAITOK | Z_ZERO);
 	} else if (pager->cpgr_num_slots > 2) {
@@ -581,7 +584,7 @@ unsigned int
 compressor_pager_slots_chunk_free(
 	compressor_slot_t       *chunk,
 	int                     num_slots,
-	int                     flags,
+	vm_compressor_options_t flags,
 	int                     *failures)
 {
 	int i;
@@ -612,12 +615,13 @@ compressor_pager_slots_chunk_free(
 	return num_slots_freed;
 }
 
+/* check if this pager has a slot_mapping spot for this page, if so give its position, if not, make place for it */
 void
 compressor_pager_slot_lookup(
 	compressor_pager_t      pager,
 	boolean_t               do_alloc,
 	memory_object_offset_t  offset,
-	compressor_slot_t       **slot_pp)
+	compressor_slot_t       **slot_pp /* OUT */)
 {
 	unsigned int            num_chunks;
 	uint32_t                page_num;
@@ -626,6 +630,7 @@ compressor_pager_slot_lookup(
 	compressor_slot_t       *chunk;
 	compressor_slot_t       *t_chunk;
 
+	/* offset is relative to the pager, first page of the first vm_object that created the pager has an offset of 0 */
 	page_num = (uint32_t)(offset / PAGE_SIZE);
 	if (page_num != (offset / PAGE_SIZE)) {
 		/* overflow */
@@ -744,10 +749,10 @@ vm_compressor_pager_put(
 	memory_object_t                 mem_obj,
 	memory_object_offset_t          offset,
 	ppnum_t                         ppnum,
-	bool                            unmodified,
 	void                            **current_chead,
 	char                            *scratch_buf,
-	int                             *compressed_count_delta_p)
+	int                             *compressed_count_delta_p, /* OUT */
+	vm_compressor_options_t         flags)
 {
 	compressor_pager_t      pager;
 	compressor_slot_t       *slot_p;
@@ -766,13 +771,15 @@ vm_compressor_pager_put(
 
 	compressor_pager_lookup(mem_obj, pager);
 
-	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
-		/* overflow */
-		panic("%s: offset 0x%llx overflow",
-		    __FUNCTION__, (uint64_t) offset);
+	uint32_t dummy_conv;
+	if (os_convert_overflow(offset / PAGE_SIZE, &dummy_conv)) {
+		/* overflow, page number doesn't fit in a uint32 */
+		panic("%s: offset 0x%llx overflow", __FUNCTION__, (uint64_t) offset);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	/* we're looking for the slot_mapping that corresponds to the offset, which vm_compressor_put() is then going to
+	 * set a value into after it allocates the slot. if the slot_mapping doesn't exist, this will create it */
 	compressor_pager_slot_lookup(pager, TRUE, offset, &slot_p);
 
 	if (slot_p == NULL) {
@@ -787,7 +794,7 @@ vm_compressor_pager_put(
 		 * the "backing_object" had some pages paged out and the
 		 * "object" had an equivalent page resident.
 		 */
-		vm_compressor_free(slot_p, (unmodified ? C_PAGE_UNMODIFIED : 0));
+		vm_compressor_free(slot_p, flags);
 		*compressed_count_delta_p -= 1;
 	}
 
@@ -797,7 +804,7 @@ vm_compressor_pager_put(
 	 * disconnected.
 	 */
 
-	if (vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf, unmodified)) {
+	if (vm_compressor_put(ppnum, slot_p, current_chead, scratch_buf, flags)) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
 	*compressed_count_delta_p += 1;
@@ -812,7 +819,7 @@ vm_compressor_pager_get(
 	memory_object_offset_t  offset,
 	ppnum_t                 ppnum,
 	int                     *my_fault_type,
-	int                     flags,
+	vm_compressor_options_t flags,
 	int                     *compressed_count_delta_p)
 {
 	compressor_pager_t      pager;
@@ -957,7 +964,7 @@ vm_compressor_pager_state_get(
 unsigned int
 vm_compressor_pager_reap_pages(
 	memory_object_t         mem_obj,
-	int                     flags)
+	vm_compressor_options_t flags)
 {
 	compressor_pager_t      pager;
 	unsigned int            num_chunks;
@@ -1148,6 +1155,7 @@ vm_compressor_pager_get_count(
 	return pager->cpgr_num_slots_occupied;
 }
 
+/* Add page count to the counter in the pager */
 void
 vm_compressor_pager_count(
 	memory_object_t mem_obj,
@@ -1233,6 +1241,43 @@ vm_compressor_pager_inject_error(memory_object_t mem_obj,
 	}
 
 	return result;
+}
+
+
+/*
+ * Write debugging information about the pager to the given buffer
+ * returns: true on success, false if there was not enough space
+ * argument size - in: bytes free in the buffer, out: bytes written
+ */
+kern_return_t
+vm_compressor_pager_dump(memory_object_t mem_obj,     /* IN */
+    __unused char *buf,                               /* IN buffer to write to */
+    __unused size_t *size,                           /* IN-OUT */
+    bool *is_compressor,                              /* OUT */
+    unsigned int *slot_count)                         /* OUT */
+{
+	compressor_pager_t pager = NULL;
+	compressor_pager_lookup(mem_obj, pager);
+
+	*size = 0;
+	if (pager == NULL) {
+		*is_compressor = false;
+		*slot_count = 0;
+		return KERN_SUCCESS;
+	}
+	*is_compressor = true;
+	*slot_count = pager->cpgr_num_slots_occupied;
+
+	/*
+	 *  size_t insize = *size;
+	 *  unsigned int needed_size = 0; // pager->cpgr_num_slots_occupied * sizeof(compressor_slot_t) / sizeof(int);
+	 *  if (needed_size > insize) {
+	 *       return KERN_NO_SPACE;
+	 *  }
+	 *  TODO: not fully implemented yet, need to dump out the mappings
+	 * size = 0;
+	 */
+	return KERN_SUCCESS;
 }
 
 #endif

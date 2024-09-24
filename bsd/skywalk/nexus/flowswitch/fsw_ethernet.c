@@ -50,7 +50,7 @@ static void fsw_ethernet_frame(struct nx_flowswitch *, struct flow_route *,
 static sa_family_t fsw_ethernet_demux(struct nx_flowswitch *,
     struct __kern_packet *);
 
-extern struct rtstat rtstat;
+extern struct rtstat_64 rtstat;
 
 int
 fsw_ethernet_setup(struct nx_flowswitch *fsw, struct ifnet *ifp)
@@ -110,6 +110,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	boolean_t reattach_mbuf = FALSE;
 	boolean_t probing;
 	int err = 0;
+	uint64_t pkt_mflags_restore;  /* Save old mbuf flags to restore in error cases */
 
 	ASSERT(fr != NULL);
 	ASSERT(ifp != NULL);
@@ -184,6 +185,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 			if (pkt->pkt_pflags & PKT_F_MBUF_DATA) {
 				reattach_mbuf = TRUE;
 				m = pkt->pkt_mbuf;
+				pkt_mflags_restore = (pkt->pkt_pflags & PKT_F_MBUF_MASK);
 				KPKT_CLEAR_MBUF_DATA(pkt);
 			} else {
 				m = fsw_classq_kpkt_to_mbuf(fsw, pkt);
@@ -223,7 +225,10 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	if (__probable((fr->fr_flags & FLOWRTF_HAS_LLINFO) &&
 	    SDL(tgt_rt->rt_gateway)->sdl_alen == ETHER_ADDR_LEN)) {
 		VERIFY(m == NULL);
-		FLOWRT_UPD_ETH_DST(fr, LLADDR(SDL(tgt_rt->rt_gateway)));
+		/* XXX Remove explicit __bidi_indexable once rdar://119193012 lands */
+		struct sockaddr_dl *__bidi_indexable sdl =
+		    (struct sockaddr_dl *__bidi_indexable) SDL(tgt_rt->rt_gateway);
+		FLOWRT_UPD_ETH_DST(fr, LLADDR(sdl));
 		os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 		/* if we're not probing, then we're done */
 		if (!(probing = (fr->fr_want_probe != 0))) {
@@ -294,7 +299,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 	}
 
 	case AF_INET6: {
-		struct llinfo_nd6 *ln = tgt_rt->rt_llinfo;
+		struct llinfo_nd6 *__single ln = tgt_rt->rt_llinfo;
 
 		/*
 		 * Check if the route is down.  RTF_LLINFO is set during
@@ -360,8 +365,13 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 				    sk_sa_ntop(SA(&fr->fr_faddr), dst_s,
 				    sizeof(dst_s)), ifp->if_xname);
 				/* copy permanent address into the flow route */
-				FLOWRT_UPD_ETH_DST(fr,
-				    LLADDR(SDL(tgt_rt->rt_gateway)));
+				/*
+				 * XXX Remove explicit __bidi_indexable once
+				 * rdar://119193012 lands
+				 */
+				struct sockaddr_dl *__bidi_indexable sdl =
+				    (struct sockaddr_dl *__bidi_indexable) SDL(tgt_rt->rt_gateway);
+				FLOWRT_UPD_ETH_DST(fr, LLADDR(sdl));
 				os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 				VERIFY(err == 0);
 			}
@@ -411,7 +421,7 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 
 			/* XXX Refactor this to use same src ip */
 			nd6_ns_output(tgt_rt->rt_ifp, NULL,
-			    &SIN6(rt_key(tgt_rt))->sin6_addr, NULL, NULL);
+			    &SIN6(rt_key(tgt_rt))->sin6_addr, NULL, NULL, 0);
 
 			lck_mtx_lock(rnh_lock);
 			nd6_sched_timeout(NULL, NULL);
@@ -425,7 +435,13 @@ fsw_ethernet_resolve(struct nx_flowswitch *fsw, struct flow_route *fr,
 			 * The neighbor cache entry has been resolved;
 			 * copy the address into the flow route.
 			 */
-			FLOWRT_UPD_ETH_DST(fr, LLADDR(SDL(tgt_rt->rt_gateway)));
+			/*
+			 * XXX Remove explicit __bidi_indexable once
+			 * rdar://119193012 lands
+			 */
+			struct sockaddr_dl *__bidi_indexable sdl =
+			    (struct sockaddr_dl *__bidi_indexable) SDL(tgt_rt->rt_gateway);
+			FLOWRT_UPD_ETH_DST(fr, LLADDR(sdl));
 			os_atomic_or(&fr->fr_flags, (FLOWRTF_RESOLVED | FLOWRTF_HAS_LLINFO), relaxed);
 			RT_UNLOCK(tgt_rt);
 			VERIFY(err == 0);
@@ -450,7 +466,7 @@ done:
 	if (m != NULL) {
 		if (reattach_mbuf) {
 			pkt->pkt_mbuf = m;
-			pkt->pkt_pflags |= PKT_F_MBUF_DATA;
+			pkt->pkt_pflags |= pkt_mflags_restore;
 		} else {
 			m_freem_list(m);
 		}
@@ -514,8 +530,9 @@ fsw_ethernet_frame(struct nx_flowswitch *fsw, struct flow_route *fr,
 	if ((pkt->pkt_pflags & PKT_F_MBUF_DATA) != 0) {
 		/* frame and fix up mbuf */
 		struct mbuf *m = pkt->pkt_mbuf;
-		sk_copy64_16((uint64_t *)(void *)&fr->fr_eth_padded,
-		    (uint64_t *)(void *)(m->m_data - FSW_ETHER_LEN_PADDED));
+		void *buf = m_mtod_current(m) - FSW_ETHER_LEN_PADDED;
+
+		sk_copy64_16((uint64_t *)(void *)&fr->fr_eth_padded, buf);
 		ASSERT((uintptr_t)m->m_data ==
 		    (uintptr_t)mbuf_datastart(m) + FSW_ETHER_FRAME_HEADROOM);
 		m->m_data -= ETHER_HDR_LEN;

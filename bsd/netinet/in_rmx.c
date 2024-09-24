@@ -113,9 +113,9 @@ static int in_ifadownkill(struct radix_node *, void *);
  */
 static struct radix_node *
 in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
-    struct radix_node *treenodes)
+    struct radix_node *rn)
 {
-	struct rtentry *rt = (struct rtentry *)treenodes;
+	rtentry_ref_t rt = RT(rn);
 	struct sockaddr_in *sin = SIN(rt_key(rt));
 	struct radix_node *ret;
 	char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
@@ -181,9 +181,9 @@ in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		}
 	}
 
-	ret = rn_addroute(v_arg, n_arg, head, treenodes);
+	ret = rn_addroute(v_arg, n_arg, head, rt->rt_nodes);
 	if (ret == NULL && (rt->rt_flags & RTF_HOST)) {
-		struct rtentry *rt2;
+		rtentry_ref_t rt2;
 		/*
 		 * We are trying to add a host route, but can't.
 		 * Find out if it is because of an
@@ -226,8 +226,7 @@ in_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 				(void) rtrequest_locked(RTM_DELETE, rt_key(rt2),
 				    rt2->rt_gateway, rt_mask(rt2),
 				    rt2->rt_flags, NULL);
-				ret = rn_addroute(v_arg, n_arg, head,
-				    treenodes);
+				ret = rn_addroute(v_arg, n_arg, head, rt->rt_nodes);
 			} else {
 				RT_UNLOCK(rt2);
 			}
@@ -272,7 +271,7 @@ in_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 	rn = rn_delete(v_arg, netmask_arg, head);
 	if (rt_verbose > 0 && rn != NULL) {
 		char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
-		struct rtentry *rt = (struct rtentry *)rn;
+		rtentry_ref_t rt = RT(rn);
 
 		RT_LOCK(rt);
 		rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
@@ -290,7 +289,7 @@ in_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 struct radix_node *
 in_validate(struct radix_node *rn)
 {
-	struct rtentry *rt = (struct rtentry *)rn;
+	rtentry_ref_t rt = RT(rn);
 
 	RT_LOCK_ASSERT_HELD(rt);
 
@@ -340,9 +339,10 @@ in_matroute_args(void *v_arg, struct radix_node_head *head,
 	struct radix_node *rn = rn_match_args(v_arg, head, f, w);
 
 	if (rn != NULL) {
-		RT_LOCK_SPIN((struct rtentry *)rn);
+		rtentry_ref_t rt = RT(rn);
+		RT_LOCK_SPIN(rt);
 		in_validate(rn);
-		RT_UNLOCK((struct rtentry *)rn);
+		RT_UNLOCK(rt);
 	}
 	return rn;
 }
@@ -374,7 +374,7 @@ in_clsroute(struct radix_node *rn, struct radix_node_head *head)
 {
 #pragma unused(head)
 	char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
-	struct rtentry *rt = (struct rtentry *)rn;
+	rtentry_ref_t rt = RT(rn);
 	boolean_t verbose = (rt_verbose > 1);
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
@@ -445,7 +445,7 @@ in_clsroute(struct radix_node *rn, struct radix_node_head *head)
 		rt->rt_flags |= RTPRF_OURS;
 		rt_setexpire(rt, timenow + rtq_reallyold);
 
-		if (rt_verbose > 1) {
+		if (rt_verbose > 2) {
 			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s invalidated, "
 			    "flags=0x%x, expire=T+%u\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
@@ -465,6 +465,7 @@ struct rtqk_arg {
 	uint32_t found;
 	uint64_t nextstop;
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct rtqk_arg, rtqk_arg, __CCT_REF);
 
 /*
  * Get rid of old routes.  When draining, this deletes everything, even when
@@ -474,8 +475,8 @@ struct rtqk_arg {
 static int
 in_rtqkill(struct radix_node *rn, void *rock)
 {
-	struct rtqk_arg *ap = rock;
-	struct rtentry *rt = (struct rtentry *)rn;
+	rtqk_arg_ref_t ap = rock;
+	rtentry_ref_t rt = RT(rn);
 	boolean_t verbose = (rt_verbose > 1);
 	uint64_t timenow;
 	int err;
@@ -685,10 +686,12 @@ in_rtqdrain(void)
 int
 in_inithead(void **head, int off)
 {
-	struct radix_node_head *rnh;
+	radix_node_head_ref_t rnh;
+
+	void *__single *__single inet_rt_table = (void *__single *__single)&rt_tables[AF_INET];
 
 	/* If called from route_init(), make sure it is exactly once */
-	VERIFY(head != (void **)&rt_tables[AF_INET] || *head == NULL);
+	VERIFY(head != inet_rt_table || *head == NULL);
 
 	if (!rn_inithead(head, off)) {
 		return 0;
@@ -700,10 +703,10 @@ in_inithead(void **head, int off)
 	 * this also takes care of the case when we're called more than
 	 * once from anywhere but route_init().
 	 */
-	if (head != (void **)&rt_tables[AF_INET]) {
+	if (head != inet_rt_table) {
 		return 1;     /* only do this for the real routing table */
 	}
-	rnh = *head;
+	rnh = *(void * __single * __single)head;
 	rnh->rnh_addaddr = in_addroute;
 	rnh->rnh_deladdr = in_deleteroute;
 	rnh->rnh_matchaddr = in_matroute;
@@ -726,13 +729,14 @@ struct in_ifadown_arg {
 	struct ifaddr *ifa;
 	int del;
 };
+__CCT_DECLARE_CONSTRAINED_PTR_TYPE(struct in_ifadown_arg, in_ifadown_arg, __CCT_REF);
 
 static int
 in_ifadownkill(struct radix_node *rn, void *xap)
 {
 	char dbuf[MAX_IPv4_STR_LEN], gbuf[MAX_IPv4_STR_LEN];
-	struct in_ifadown_arg *ap = xap;
-	struct rtentry *rt = (struct rtentry *)rn;
+	in_ifadown_arg_ref_t ap = xap;
+	rtentry_ref_t rt = RT(rn);
 	boolean_t verbose = (rt_verbose > 1);
 	int err;
 

@@ -63,7 +63,7 @@ tests()
 	}
 }
 
-T_DECL(reinterpret_cast_, "bounded_ptr.reinterpret_cast") {
+T_DECL(reinterpret_cast_, "bounded_ptr.reinterpret_cast", T_META_TAG_VM_PREFERRED) {
 	tests</*stored*/ Derived, /*from*/ Derived, /*to*/ Base>();
 	tests</*stored*/ Derived, /*from*/ Derived const, /*to*/ Base const>();
 	tests</*stored*/ Derived, /*from*/ Derived volatile, /*to*/ Base volatile>();

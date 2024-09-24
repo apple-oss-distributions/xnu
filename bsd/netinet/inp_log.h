@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -35,7 +35,9 @@
 
 extern int inp_log_privacy;
 
-void inp_log_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fbuf, socklen_t fbuflen);
+void inp_log_addresses(struct inpcb *inp, char *__sized_by(lbuflen) lbuf,
+    socklen_t lbuflen, char *__sized_by(fbuflen) fbuf,
+    socklen_t fbuflen);
 
 #endif /* BSD_KERNEL_PRIVATE */
 

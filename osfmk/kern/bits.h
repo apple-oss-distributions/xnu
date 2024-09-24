@@ -37,7 +37,7 @@
 #else
 #include <assert.h>
 #include <stdlib.h>
-#define kalloc_data(x) malloc(x)
+#define kalloc_data(x, y) malloc(x)
 #define kfree_data(x, y) free(x)
 #endif
 #include <stdbool.h>

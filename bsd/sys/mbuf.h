@@ -156,7 +156,7 @@ struct m_hdr {
 struct m_tag {
 	uint64_t               m_tag_cookie;   /* Error checking */
 	SLIST_ENTRY(m_tag)     m_tag_link;     /* List of packet tags */
-	void                   *m_tag_data;
+	void                   *__sized_by(m_tag_len) m_tag_data;
 	uint16_t               m_tag_type;     /* Module specific type */
 	uint16_t               m_tag_len;      /* Length of data */
 	uint32_t               m_tag_id;       /* Module ID */
@@ -1158,8 +1158,7 @@ struct name {                                                   \
  */
 #define MBUFQ_LAST(head)                                        \
 	(((head)->mq_last == &MBUFQ_FIRST(head)) ? NULL :       \
-	((struct mbuf *)(void *)((char *)(head)->mq_last -      \
-	     __builtin_offsetof(struct mbuf, m_nextpkt))))
+	__container_of((head)->mq_last, struct mbuf, m_nextpkt))
 
 #if (DEBUG || DEVELOPMENT)
 #define MBUFQ_ADD_CRUMB_MULTI(_q, _h, _t, _f) do {              \
@@ -1405,6 +1404,8 @@ struct mbuf;
 #define M_COPYM_MUST_MOVE_HDR   4       /* MUST move pkthdr from old to new */
 
 extern void m_freem(struct mbuf *) __XNU_INTERNAL(m_freem);
+extern void m_drop(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
+extern void m_drop_list(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
 extern u_int64_t mcl_to_paddr(char *);
 extern void m_adj(struct mbuf *, int);
 extern void m_cat(struct mbuf *, struct mbuf *);
@@ -1669,7 +1670,6 @@ __private_extern__ void mbuf_drain(boolean_t);
  *
  * By default packet tags are allocated via kalloc except on Intel that still
  * uses the legacy implementation of using mbufs for packet tags.
- * This can be overidden via the boot-args 'mb_tag_mbuf'
  *
  * When kalloc is used for allocation, packet tags returned by m_tag_allocate have
  * the default memory alignment implemented by kalloc.

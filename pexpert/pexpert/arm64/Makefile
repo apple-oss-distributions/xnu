@@ -11,14 +11,16 @@ PRIVATE_DATAFILES = boot.h
 PRIVATE_KERNELFILES = \
 	AIC.h \
 	apple_arm64_common.h \
+	apple_arm64_cpu.h \
 	apple_arm64_regs.h \
 	vhe_disable.h \
 	board_config.h \
 	boot.h \
 	H13.h \
 	H14.h \
-	VMAPPLE.h \
-	BCM2837.h
+	H15.h \
+	H16.h \
+	VMAPPLE.h
 
 
 # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).

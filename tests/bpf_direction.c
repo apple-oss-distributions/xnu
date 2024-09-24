@@ -73,7 +73,7 @@ test_set_direction(int fd, u_int direction)
 	T_ASSERT_EQ(get_direction, direction, "get_direction %d == direction %d", get_direction, direction);
 }
 
-T_DECL(bpf_direction, "test BPF set and grep direction")
+T_DECL(bpf_direction, "test BPF set and grep direction", T_META_TAG_VM_PREFERRED)
 {
 	int fd = bpf_new();
 	T_ASSERT_POSIX_SUCCESS(fd, "bpf open fd %d", fd);
@@ -95,14 +95,14 @@ T_DECL(bpf_direction, "test BPF set and grep direction")
 
 #else /* BIOCSETDIRECTION */
 
-T_DECL(bpf_direction, "test BPF set and grep direction")
+T_DECL(bpf_direction, "test BPF set and grep direction", T_META_TAG_VM_PREFERRED)
 {
 	T_SKIP("BIOCSETDIRECTION is not defined");
 }
 
 #endif /* BIOCSETDIRECTION */
 
-T_DECL(bpf_seesent, "test BIOCGSEESENT and BIOCSSEESENT")
+T_DECL(bpf_seesent, "test BIOCGSEESENT and BIOCSSEESENT", T_META_TAG_VM_PREFERRED)
 {
 	int fd = bpf_new();
 	T_ASSERT_POSIX_SUCCESS(fd, "bpf open fd %d", fd);

@@ -402,47 +402,47 @@ test_exc_reply_type(ReplyType reply_type)
 }
 
 T_DECL(mach_exc_ReplyNoError, "exception server reply with no error",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithNoError);
 }
 T_DECL(mach_exc_ReplyWithReplyPort, "exception server reply with reply port",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithReplyPort);
 }
 T_DECL(mach_exc_ReplyWithReplyPortMove, "exception server reply with reply port as MOVE_SEND",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithReplyPortMove);
 }
 T_DECL(mach_exc_ReplyWithReplyPortCplxBit, "exception server reply with reply port and complex bit set",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithReplyPortCplxBit);
 }
 T_DECL(mach_exc_ReplyWithReplyPortMoveCplxBit, "exception server reply with reply port as MOVE_SEND and complex bit set",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithReplyPortMoveCplxBit);
 }
 T_DECL(mach_exc_ReplyWithOOLPort, "exception server reply with OOL port descriptor",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithPortDesc);
 }
 T_DECL(mach_exc_ReplyWithOOLDesc, "exception server reply with OOL memory descriptor",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithOOLDesc);
 }
 T_DECL(mach_exc_ReplyWithVoucher, "exception server reply with a voucher",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithVoucher);
 }
 T_DECL(mach_exc_ReplyWithVoucherGarbage, "exception server reply with bits in msgh_voucher_port",
-    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"))
+    T_META_CHECK_LEAKS(false), T_META_IGNORECRASHES(".*mach_exception_reply.*"), T_META_TAG_VM_PREFERRED)
 {
 	test_exc_reply_type(ReplyWithVoucherGarbage);
 }

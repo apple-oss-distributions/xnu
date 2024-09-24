@@ -93,7 +93,6 @@
 #include <sys/socket.h>
 #include <sys/protosw.h>
 #include <sys/kernel.h>
-#include <sys/sysctl.h>
 #include <sys/mcache.h>
 
 #include <libkern/libkern.h>
@@ -101,6 +100,7 @@
 
 #include <net/if.h>
 #include <net/route.h>
+#include <net/net_sysctl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -431,22 +431,14 @@ static int
 sysctl_igmp_ifinfo SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp)
-	int                     *name;
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 1, name, namelen);
 	int                      error;
-	u_int                    namelen;
 	struct ifnet            *ifp;
 	struct igmp_ifinfo      *igi;
 	struct igmp_ifinfo_u    igi_u;
 
-	name = (int *)arg1;
-	namelen = arg2;
-
 	if (req->newptr != USER_ADDR_NULL) {
 		return EPERM;
-	}
-
-	if (namelen != 1) {
-		return EINVAL;
 	}
 
 	IGMP_LOCK();

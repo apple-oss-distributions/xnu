@@ -54,6 +54,10 @@
 #define HAS_AMDSCR               1 /* Supports AMDSCR_EL1 system register */
 #define HAS_HCR_TSC_RW           1 /* HCR_EL2.TSC is writable */
 #define HAS_CPU_DPE_COUNTER      1 /* Has a hardware counter for digital power estimation */
+#define HAS_GUARDED_IO_FILTER    1 /* Has a guarded runtime dedicated to the fine-grained IO access filter */
+#define HAS_SPECRES              1 /* Supports SPECRES. */
+#define HAS_ERRATA_123855614     1
+#define HAS_BTI                  1 /* Supports Branch Target Identification (ARMv8.5) */
 
 #define CPU_HAS_APPLE_PAC                    1
 #define HAS_UNCORE_CTRS                      1

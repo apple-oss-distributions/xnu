@@ -57,6 +57,19 @@ struct task_filter_ro_data {
 	uint8_t *__unsafe_indexable mach_kobj_filter_mask; /* Mach kobject filter bitmask (len: mach_kobj_count bits) */
 };
 
+/*!
+ * @struct proc_ro
+ *
+ * @brief
+ * Store read-only data associated to a task and/or proc
+ *
+ * @discussion
+ * The lifetime of a @c proc_ro structure is 1:1 with that
+ * of a @c proc_t or a @c task_t. @c proc_t and @c task_t
+ * point to the same @c proc_ro, except for corpses which
+ * have an invalid and uninitialized @c proc_t, and the
+ * proc_data field is uninitalized.
+ */
 struct proc_ro {
 	struct proc *pr_proc;
 	struct task *pr_task;

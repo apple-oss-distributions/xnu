@@ -166,12 +166,12 @@ extern void             pmap_disable_user_jop(
 
 extern void *pmap_steal_memory(vm_size_t size, vm_size_t alignment); /* Early memory allocation */
 extern void *pmap_steal_freeable_memory(vm_size_t size); /* Early memory allocation */
-extern void *pmap_steal_zone_memory(vm_size_t size, vm_size_t alignment); /* Early zone memory allocation */
 
 extern uint_t pmap_free_pages(void); /* report remaining unused physical pages */
 #if defined(__arm__) || defined(__arm64__)
 extern uint_t pmap_free_pages_span(void); /* report phys address range of unused physical pages */
 #endif /* defined(__arm__) || defined(__arm64__) */
+
 
 extern void pmap_startup(vm_offset_t *startp, vm_offset_t *endp); /* allocate vm_page structs */
 
@@ -369,12 +369,72 @@ extern void             pmap_unmap_compressor_page(
 	ppnum_t,
 	void*);
 
-#if defined(__arm__) || defined(__arm64__)
-extern  bool       pmap_batch_set_cache_attributes(
-	upl_page_info_array_t,
-	unsigned int,
+/**
+ * The following declarations are meant to provide a uniform interface by which the VM layer can
+ * pass batches of pages to the pmap layer directly, in the various page list formats natively
+ * used by the VM.  If a new type of list is to be added, the various structures and iterator
+ * functions below should be updated to understand it, and then it should "just work" with the
+ * pmap layer.
+ */
+
+/* The various supported page list types. */
+__enum_decl(unified_page_list_type_t, uint8_t, {
+	/* Universal page list array, essentially an array of ppnum_t. */
+	UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY,
+	/**
+	 * Singly-linked list of vm_page_t, using vmp_snext field.
+	 * This is typically used to construct local lists of pages to be freed.
+	 */
+	UNIFIED_PAGE_LIST_TYPE_VM_PAGE_LIST,
+	/* Doubly-linked queue of vm_page_t's associated with a VM object, using vmp_listq field. */
+	UNIFIED_PAGE_LIST_TYPE_VM_PAGE_OBJ_Q,
+	/* Doubly-linked queue of vm_page_t's in a FIFO queue or global free list, using vmp_pageq field. */
+	UNIFIED_PAGE_LIST_TYPE_VM_PAGE_FIFO_Q,
+});
+
+/* Uniform data structure encompassing the various page list types handled by the VM layer. */
+typedef struct {
+	union {
+		/* Base address and size (in pages) of UPL array for type UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY */
+		struct {
+			upl_page_info_array_t upl_info;
+			unsigned int upl_size;
+		} upl;
+		/* Head of singly-linked vm_page_t list for UNIFIED_PAGE_LIST_TYPE_VM_PAGE_LIST */
+		vm_page_t page_slist;
+		/* Head of queue for UNIFIED_PAGE_LIST_TYPE_VM_PAGE_OBJ_Q and UNIFIED_PAGE_LIST_TYPE_VM_PAGE_FIFO_Q */
+		void *pageq; /* vm_page_queue_head_t* */
+	};
+	unified_page_list_type_t type;
+} unified_page_list_t;
+
+/* Uniform data structure representing an iterator position within a unified_page_list_t object. */
+typedef struct {
+	/* Pointer to list structure from which this iterator was created. */
+	const unified_page_list_t *list;
+	union {
+		/* Position within UPL array, for UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY */
+		unsigned int upl_index;
+		/* Position within page list or page queue, for all other types */
+		vm_page_t pageq_pos;
+	};
+} unified_page_list_iterator_t;
+
+extern void unified_page_list_iterator_init(
+	const unified_page_list_t *page_list,
+	unified_page_list_iterator_t *iter);
+
+extern void unified_page_list_iterator_next(unified_page_list_iterator_t *iter);
+
+extern bool unified_page_list_iterator_end(const unified_page_list_iterator_t *iter);
+
+extern ppnum_t unified_page_list_iterator_page(
+	const unified_page_list_iterator_t *iter,
+	bool *is_fictitious);
+
+extern void pmap_batch_set_cache_attributes(
+	const unified_page_list_t *,
 	unsigned int);
-#endif
 extern void pmap_sync_page_data_phys(ppnum_t pa);
 extern void pmap_sync_page_attributes_phys(ppnum_t pa);
 
@@ -469,40 +529,27 @@ extern kern_return_t(pmap_attribute)(           /* Get/Set special memory
 	MACRO_BEGIN                                                             \
 	        if (!batch_pmap_op) {                                           \
 	                pmap_set_cache_attributes(VM_PAGE_GET_PHYS_PAGE(mem), cache_attr); \
-	                object->set_cache_attr = TRUE;                          \
+	                (object)->set_cache_attr = TRUE;                        \
 	        }                                                               \
 	MACRO_END
 #endif  /* PMAP_SET_CACHE_ATTR */
 
 #ifndef PMAP_BATCH_SET_CACHE_ATTR
-#if     defined(__arm__) || defined(__arm64__)
 #define PMAP_BATCH_SET_CACHE_ATTR(object, user_page_list,                   \
 	    cache_attr, num_pages, batch_pmap_op)                               \
 	MACRO_BEGIN                                                             \
 	        if ((batch_pmap_op)) {                                          \
-	                (void)pmap_batch_set_cache_attributes(                  \
-	                                (user_page_list),                       \
-	                                (num_pages),                            \
+	                const unified_page_list_t __pmap_batch_list = {         \
+	                        .upl = {.upl_info = (user_page_list),           \
+	                                .upl_size = (num_pages),},              \
+	                        .type = UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY,       \
+	                };                                                      \
+	                pmap_batch_set_cache_attributes(                        \
+	                                &__pmap_batch_list,                     \
 	                                (cache_attr));                          \
 	                (object)->set_cache_attr = TRUE;                        \
 	        }                                                               \
 	MACRO_END
-#else
-#define PMAP_BATCH_SET_CACHE_ATTR(object, user_page_list,                   \
-	    cache_attr, num_pages, batch_pmap_op)                               \
-	MACRO_BEGIN                                                             \
-	        if ((batch_pmap_op)) {                                          \
-	                unsigned int __page_idx=0;                              \
-	                while (__page_idx < (num_pages)) {                      \
-	                        pmap_set_cache_attributes(                      \
-	                                user_page_list[__page_idx].phys_addr,   \
-	                                (cache_attr));                          \
-	                        __page_idx++;                                   \
-	                }                                                       \
-	                (object)->set_cache_attr = TRUE;                        \
-	        }                                                               \
-	MACRO_END
-#endif
 #endif  /* PMAP_BATCH_SET_CACHE_ATTR */
 
 /*
@@ -860,6 +907,15 @@ extern int pmap_cs_configuration(void);
 
 #if XNU_KERNEL_PRIVATE
 
+typedef enum {
+	PMAP_FEAT_UEXEC = 1
+} pmap_feature_flags_t;
+
+#if defined(__x86_64__)
+
+extern bool             pmap_supported_feature(pmap_t pmap, pmap_feature_flags_t feat);
+
+#endif
 #if defined(__arm64__)
 
 /**
@@ -869,6 +925,9 @@ extern bool
 pmap_performs_stage2_translations(const pmap_t pmap);
 
 #endif /* defined(__arm64__) */
+
+extern ppnum_t          kernel_pmap_present_mapping(uint64_t vaddr, uint64_t * pvincr, uintptr_t * pvphysaddr);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #if CONFIG_SPTM
@@ -924,6 +983,15 @@ extern kern_return_t
 pmap_txm_get_trust_level_kdp(
 	pmap_t pmap,
 	CSTrust_t *trust_level);
+
+/**
+ * Get the address range of the JIT region within the pmap, if any.
+ */
+kern_return_t
+pmap_txm_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end);
 
 /**
  * Take a shared lock on the pmap in order to enforce safe concurrency for

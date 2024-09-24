@@ -62,7 +62,11 @@ void ml_cpu_signal_deferred_adjust_timer(uint64_t nanosecs);
 uint64_t ml_cpu_signal_deferred_get_timer(void);
 void ml_cpu_signal_deferred(unsigned int cpu_id);
 void ml_cpu_signal_retract(unsigned int cpu_id);
-bool ml_cpu_signal_is_enabled(void);
+
+#ifdef XNU_KERNEL_PRIVATE
+extern void ml_wait_for_cpu_signal_to_enable(void);
+extern void assert_ml_cpu_signal_is_enabled(bool enabled);
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* Initialize Interrupts */
 void    ml_init_interrupt(void);
@@ -261,13 +265,15 @@ ex_cb_action_t ex_cb_invoke(
 	vm_offset_t         far);
 
 typedef enum {
-	CLUSTER_TYPE_SMP,
-	CLUSTER_TYPE_E,
-	CLUSTER_TYPE_P,
+	CLUSTER_TYPE_SMP = 0,
+	CLUSTER_TYPE_E   = 1,
+	CLUSTER_TYPE_P   = 2,
 	MAX_CPU_TYPES,
 } cluster_type_t;
 
+#ifdef XNU_KERNEL_PRIVATE
 void ml_parse_cpu_topology(void);
+#endif /* XNU_KERNEL_PRIVATE */
 
 unsigned int ml_get_cpu_count(void);
 
@@ -330,139 +336,9 @@ typedef struct ml_cpu_info ml_cpu_info_t;
 
 cluster_type_t ml_get_boot_cluster_type(void);
 
-/*!
- * @typedef ml_topology_cpu_t
- * @brief Describes one CPU core in the topology.
- *
- * @field cpu_id            Logical CPU ID: 0, 1, 2, 3, 4, ...
- *                          Dynamically assigned by XNU so it might not match EDT.  No holes.
- * @field phys_id           Physical CPU ID (EDT: reg).  Same as MPIDR[15:0], i.e.
- *                          (cluster_id << 8) | core_number_within_cluster
- * @field cluster_id        Logical Cluster ID: 0, 1, 2, 3, 4, ...
- *                          Dynamically assigned by XNU so it might not match EDT.  No holes.
- * @field die_id            Die ID (EDT: die-id)
- * @field cluster_type      The type of CPUs found in this cluster.
- * @field l2_access_penalty Indicates that the scheduler should try to de-prioritize a core because
- *                          L2 accesses are slower than on the boot processor.
- * @field l2_cache_size     Size of the L2 cache, in bytes.  0 if unknown or not present.
- * @field l2_cache_id       l2-cache-id property read from EDT.
- * @field l3_cache_size     Size of the L3 cache, in bytes.  0 if unknown or not present.
- * @field l3_cache_id       l3-cache-id property read from EDT.
- * @field cpu_IMPL_regs     IO-mapped virtual address of cpuX_IMPL (implementation-defined) register block.
- * @field cpu_IMPL_pa       Physical address of cpuX_IMPL register block.
- * @field cpu_IMPL_len      Length of cpuX_IMPL register block.
- * @field cpu_UTTDBG_regs   IO-mapped virtual address of cpuX_UTTDBG register block.
- * @field cpu_UTTDBG_pa     Physical address of cpuX_UTTDBG register block, if set in DT, else zero
- * @field cpu_UTTDBG_len    Length of cpuX_UTTDBG register block, if set in DT, else zero
- * @field coresight_regs    IO-mapped virtual address of CoreSight debug register block.
- * @field coresight_pa      Physical address of CoreSight register block.
- * @field coresight_len     Length of CoreSight register block.
- * @field die_cluster_id    Physical cluster ID within the local die (EDT: die-cluster-id)
- * @field cluster_core_id   Physical core ID within the local cluster (EDT: cluster-core-id)
- */
-typedef struct ml_topology_cpu {
-	unsigned int                    cpu_id;
-	uint32_t                        phys_id;
-	unsigned int                    cluster_id;
-	unsigned int                    die_id;
-	cluster_type_t                  cluster_type;
-	uint32_t                        l2_access_penalty;
-	uint32_t                        l2_cache_size;
-	uint32_t                        l2_cache_id;
-	uint32_t                        l3_cache_size;
-	uint32_t                        l3_cache_id;
-	vm_offset_t                     cpu_IMPL_regs;
-	uint64_t                        cpu_IMPL_pa;
-	uint64_t                        cpu_IMPL_len;
-	vm_offset_t                     cpu_UTTDBG_regs;
-	uint64_t                        cpu_UTTDBG_pa;
-	uint64_t                        cpu_UTTDBG_len;
-	vm_offset_t                     coresight_regs;
-	uint64_t                        coresight_pa;
-	uint64_t                        coresight_len;
-	unsigned int                    die_cluster_id;
-	unsigned int                    cluster_core_id;
-} ml_topology_cpu_t;
-
-/*!
- * @typedef ml_topology_cluster_t
- * @brief Describes one cluster in the topology.
- *
- * @field cluster_id        Cluster ID (EDT: cluster-id)
- * @field cluster_type      The type of CPUs found in this cluster.
- * @field num_cpus          Total number of usable CPU cores in this cluster.
- * @field first_cpu_id      The cpu_id of the first CPU in the cluster.
- * @field cpu_mask          A bitmask representing the cpu_id's that belong to the cluster.  Example:
- *                          If the cluster contains CPU4 and CPU5, cpu_mask will be 0x30.
- * @field acc_IMPL_regs     IO-mapped virtual address of acc_IMPL (implementation-defined) register block.
- * @field acc_IMPL_pa       Physical address of acc_IMPL register block.
- * @field acc_IMPL_len      Length of acc_IMPL register block.
- * @field cpm_IMPL_regs     IO-mapped virtual address of cpm_IMPL (implementation-defined) register block.
- * @field cpm_IMPL_pa       Physical address of cpm_IMPL register block.
- * @field cpm_IMPL_len      Length of cpm_IMPL register block.
- */
-typedef struct ml_topology_cluster {
-	unsigned int                    cluster_id;
-	cluster_type_t                  cluster_type;
-	unsigned int                    num_cpus;
-	unsigned int                    first_cpu_id;
-	uint64_t                        cpu_mask;
-	vm_offset_t                     acc_IMPL_regs;
-	uint64_t                        acc_IMPL_pa;
-	uint64_t                        acc_IMPL_len;
-	vm_offset_t                     cpm_IMPL_regs;
-	uint64_t                        cpm_IMPL_pa;
-	uint64_t                        cpm_IMPL_len;
-} ml_topology_cluster_t;
-
-// Bump this version number any time any ml_topology_* struct changes, so
-// that KPI users can check whether their headers are compatible with
-// the running kernel.
-#define CPU_TOPOLOGY_VERSION 1
-
-/*!
- * @typedef ml_topology_info_t
- * @brief Describes the CPU topology for all APs in the system.  Populated from EDT and read-only at runtime.
- * @discussion This struct only lists CPU cores that are considered usable by both iBoot and XNU.  Some
- *             physically present CPU cores may be considered unusable due to configuration options like
- *             the "cpus=" boot-arg.  Cores that are disabled in hardware will not show up in EDT at all, so
- *             they also will not be present in this struct.
- *
- * @field version           Version of the struct (set to CPU_TOPOLOGY_VERSION).
- * @field num_cpus          Total number of usable CPU cores.
- * @field max_cpu_id        The highest usable logical CPU ID.
- * @field num_clusters      Total number of AP CPU clusters on the system (usable or not).
- * @field max_cluster_id    The highest cluster ID found in EDT.
- * @field cpus              List of |num_cpus| entries.
- * @field clusters          List of |num_clusters| entries.
- * @field boot_cpu          Points to the |cpus| entry for the boot CPU.
- * @field boot_cluster      Points to the |clusters| entry which contains the boot CPU.
- * @field chip_revision     Silicon revision reported by iBoot, which comes from the
- *                          SoC-specific fuse bits.  See CPU_VERSION_xx macros for definitions.
- */
-typedef struct ml_topology_info {
-	unsigned int                    version;
-	unsigned int                    num_cpus;
-	unsigned int                    max_cpu_id;
-	unsigned int                    num_clusters;
-	unsigned int                    max_cluster_id;
-	unsigned int                    max_die_id;
-	ml_topology_cpu_t               *cpus;
-	ml_topology_cluster_t           *clusters;
-	ml_topology_cpu_t               *boot_cpu;
-	ml_topology_cluster_t           *boot_cluster;
-	unsigned int                    chip_revision;
-	unsigned int                    cluster_types;
-	unsigned int                    cluster_type_num_cpus[MAX_CPU_TYPES];
-	unsigned int                    cluster_type_num_clusters[MAX_CPU_TYPES];
-} ml_topology_info_t;
-
-/*!
- * @function ml_get_topology_info
- * @result A pointer to the read-only topology struct.  Does not need to be freed.  Returns NULL
- *         if the struct hasn't been initialized or the feature is unsupported.
- */
-const ml_topology_info_t *ml_get_topology_info(void);
+#ifdef KERNEL_PRIVATE
+#include "cpu_topology.h"
+#endif /* KERNEL_PRIVATE */
 
 /*!
  * @function ml_map_cpu_pio
@@ -556,7 +432,8 @@ void ml_panic_trap_to_debugger(const char *panic_format_str,
     unsigned int reason,
     void *ctx,
     uint64_t panic_options_mask,
-    unsigned long panic_caller);
+    unsigned long panic_caller,
+    const char *panic_initiator);
 #endif /* XNU_KERNEL_PRIVATE */
 
 /* Initialize Interrupts */
@@ -863,6 +740,8 @@ vm_map_offset_t ml_get_max_offset(
 extern void     ml_cpu_init_completed(void);
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
+extern int      ml_find_next_up_processor(void);
+
 /*
  * The update to CPU counts needs to be separate from other actions
  * in ml_cpu_up() and ml_cpu_down()
@@ -925,6 +804,8 @@ unsigned long           monitor_call(uintptr_t callnum, uintptr_t arg1,
 #if __ARM_KERNEL_PROTECT__
 extern void set_vbar_el1(uint64_t);
 #endif /* __ARM_KERNEL_PROTECT__ */
+
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 extern  uint32_t        arm_debug_read_dscr(void);
@@ -938,15 +819,12 @@ extern int      be_tracing(void);
  * to wake it up as needed, where "as needed" is defined as "all other CPUs have
  * called the broadcast func". Look around the kernel for examples, or instead use
  * cpu_broadcast_xcall_simple() which does indeed act like you would expect, given
- * the prototype. cpu_broadcast_immediate_xcall has the same caveats and has a similar
- * _simple() wrapper
+ * the prototype.
  */
 typedef void (*broadcastFunc) (void *);
 unsigned int cpu_broadcast_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
 unsigned int cpu_broadcast_xcall_simple(boolean_t, broadcastFunc, void *);
 __result_use_check kern_return_t cpu_xcall(int, broadcastFunc, void *);
-unsigned int cpu_broadcast_immediate_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
-unsigned int cpu_broadcast_immediate_xcall_simple(boolean_t, broadcastFunc, void *);
 __result_use_check kern_return_t cpu_immediate_xcall(int, broadcastFunc, void *);
 
 #ifdef  KERNEL_PRIVATE
@@ -1390,7 +1268,96 @@ uint8_t ml_task_get_disable_user_jop(task_t task);
 void ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop);
 void ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop);
 void ml_thread_set_jop_pid(thread_t thread, task_t task);
-void *ml_auth_ptr_unchecked(void *ptr, unsigned key, uint64_t modifier);
+
+#if !__has_ptrcheck
+
+/*
+ * There are two implementations of _ml_auth_ptr_unchecked().  Non-FPAC CPUs
+ * take a fast path that directly auths the pointer, relying on the CPU to
+ * poison invald pointers without trapping.  FPAC CPUs take a slower path which
+ * emulates a non-trapping auth using strip + sign + compare, and manually
+ * poisons the output when necessary.
+ *
+ * The FPAC implementation is also safe for non-FPAC CPUs, but less efficient;
+ * guest kernels need to use it because it does not know at compile time whether
+ * the host CPU supports FPAC.
+ */
+
+#if __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM
+void *
+ml_poison_ptr(void *ptr, ptrauth_key key);
+
+/*
+ * ptrauth_sign_unauthenticated() reimplemented using asm volatile, forcing the
+ * compiler to assume this operation has side-effects and cannot be reordered
+ */
+#define ptrauth_sign_volatile(__value, __suffix, __data)                \
+	({                                                              \
+	        void *__ret = __value;                                  \
+	        asm volatile (                                          \
+	                "pac" #__suffix "	%[value], %[data]"      \
+	                : [value] "+r"(__ret)                           \
+	                : [data] "r"(__data)                            \
+	        );                                                      \
+	        __ret;                                                  \
+	})
+
+#define ml_auth_ptr_unchecked_for_key(_ptr, _suffix, _key, _modifier)                           \
+	do {                                                                                    \
+	        void *stripped = ptrauth_strip(_ptr, _key);                                     \
+	        void *reauthed = ptrauth_sign_volatile(stripped, _suffix, _modifier);           \
+	        if (__probable(_ptr == reauthed)) {                                             \
+	                _ptr = stripped;                                                        \
+	        } else {                                                                        \
+	                _ptr = ml_poison_ptr(stripped, _key);                                   \
+	        }                                                                               \
+	} while (0)
+
+#define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
+	ml_auth_ptr_unchecked_for_key(_ptr, _suffix, ptrauth_key_as ## _suffix, _modifier)
+#else
+#define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
+	asm volatile ("aut" #_suffix " %[ptr], %[modifier]" : [ptr] "+r"(_ptr) : [modifier] "r"(_modifier));
+#endif /* __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM */
+
+/**
+ * Authenticates a signed pointer without trapping on failure.
+ *
+ * @warning This function must be called with interrupts disabled.
+ *
+ * @warning Pointer authentication failure should normally be treated as a fatal
+ * error.  This function is intended for a handful of callers that cannot panic
+ * on failure, and that understand the risks in handling a poisoned return
+ * value.  Other code should generally use the trapping variant
+ * ptrauth_auth_data() instead.
+ *
+ * @param ptr the pointer to authenticate
+ * @param key which key to use for authentication
+ * @param modifier a modifier to mix into the key
+ * @return an authenticated version of ptr, possibly with poison bits set
+ */
+static inline OS_ALWAYS_INLINE void *
+ml_auth_ptr_unchecked(void *ptr, ptrauth_key key, uint64_t modifier)
+{
+	switch (key & 0x3) {
+	case ptrauth_key_asia:
+		_ml_auth_ptr_unchecked(ptr, ia, modifier);
+		break;
+	case ptrauth_key_asib:
+		_ml_auth_ptr_unchecked(ptr, ib, modifier);
+		break;
+	case ptrauth_key_asda:
+		_ml_auth_ptr_unchecked(ptr, da, modifier);
+		break;
+	case ptrauth_key_asdb:
+		_ml_auth_ptr_unchecked(ptr, db, modifier);
+		break;
+	}
+
+	return ptr;
+}
+
+#endif /* !__has_ptrcheck */
 
 uint64_t ml_enable_user_jop_key(uint64_t user_jop_key);
 
@@ -1439,6 +1406,9 @@ extern void ml_expect_fault_pc_begin(expected_fault_handler_t, uintptr_t);
 extern void ml_expect_fault_end(void);
 #endif /* __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE) */
 
+#if defined(HAS_OBJC_BP_HELPER) && defined(XNU_KERNEL_PRIVATE)
+kern_return_t objc_bp_assist_cfg(uint64_t adr, uint64_t ctl);
+#endif /* defined(HAS_OBJC_BP_HELPER) && defined(XNU_KERNEL_PRIVATE) */
 
 extern uint32_t phy_read_panic;
 extern uint32_t phy_write_panic;
@@ -1467,6 +1437,26 @@ void ml_report_minor_badness(uint32_t badness_id);
  * @return The original PC of the interrupted CPU.
  */
 uint64_t ml_get_backtrace_pc(struct arm_saved_state *state);
+
+/**
+ * Returns whether a secure hibernation flow is supported.
+ *
+ * @note Hibernation itself might still be supported even if this function
+ *       returns false. This function just denotes whether a hibernation process
+ *       which securely hashes and stores the hibernation image is supported.
+ *
+ * @return True if the kernel supports a secure hibernation process, false
+ *         otherwise.
+ */
+bool ml_is_secure_hib_supported(void);
+
+/**
+ * Returns whether the task should use 1 GHz timebase.
+ *
+ * @return True if the task should use 1 GHz timebase, false
+ *         otherwise.
+ */
+bool ml_task_uses_1ghz_timebase(const task_t task);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE

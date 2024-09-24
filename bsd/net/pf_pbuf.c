@@ -309,7 +309,7 @@ pbuf_resize_segment(pbuf_t *pbuf, int off, int olen, int nlen)
 void *
 pbuf_contig_segment(pbuf_t *pbuf, int off, int len)
 {
-	void *rv = NULL;
+	void *__single rv = NULL;
 
 	VERIFY(off >= 0);
 	VERIFY(len >= 0);
@@ -322,7 +322,7 @@ pbuf_contig_segment(pbuf_t *pbuf, int off, int len)
 	 * PF expects this behaviour so it's not a real problem.
 	 */
 	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
-		struct mbuf *n;
+		struct mbuf *__single n;
 		int moff;
 
 		n = m_pulldown(pbuf->pb_mbuf, off, len, &moff);
@@ -335,12 +335,12 @@ pbuf_contig_segment(pbuf_t *pbuf, int off, int len)
 
 		pbuf_sync(pbuf);
 
-		rv = (void *)(mtod(n, uint8_t *) + moff);
+		rv = (void *__single)(mtod(n, uint8_t *) + moff);
 	} else if (pbuf->pb_type == PBUF_TYPE_MEMORY) {
 		/*
 		 * This always succeeds since memory pbufs are fully contig.
 		 */
-		rv = (void *)(uintptr_t)(((uint8_t *)pbuf->pb_data)[off]);
+		rv = (void *__single)(((uint8_t *)pbuf->pb_data) + off);
 	} else {
 		panic("%s: bad pb_type: %d", __func__, pbuf->pb_type);
 	}
@@ -349,11 +349,12 @@ pbuf_contig_segment(pbuf_t *pbuf, int off, int len)
 }
 
 void
-pbuf_copy_back(pbuf_t *pbuf, int off, int len, void *src)
+pbuf_copy_back(pbuf_t *pbuf, int off, int len, void *__sized_by(src_buflen)src, size_t src_buflen)
 {
 	VERIFY(off >= 0);
 	VERIFY(len >= 0);
 	VERIFY((u_int)(off + len) <= pbuf->pb_packet_len);
+	VERIFY((size_t)len <= src_buflen);
 
 	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
 		m_copyback(pbuf->pb_mbuf, off, len, src);
@@ -367,11 +368,12 @@ pbuf_copy_back(pbuf_t *pbuf, int off, int len, void *src)
 }
 
 void
-pbuf_copy_data(pbuf_t *pbuf, int off, int len, void *dst)
+pbuf_copy_data(pbuf_t *pbuf, int off, int len, void *__sized_by(dst_buflen)dst, size_t dst_buflen)
 {
 	VERIFY(off >= 0);
 	VERIFY(len >= 0);
 	VERIFY((u_int)(off + len) <= pbuf->pb_packet_len);
+	VERIFY((size_t)len <= dst_buflen);
 
 	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
 		m_copydata(pbuf->pb_mbuf, off, len, dst);
@@ -408,7 +410,8 @@ pbuf_inet6_cksum(const pbuf_t *pbuf, uint32_t nxt, uint32_t off, uint32_t len)
 	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
 		sum = inet6_cksum(pbuf->pb_mbuf, nxt, off, len);
 	} else if (pbuf->pb_type == PBUF_TYPE_MEMORY) {
-		sum = inet6_cksum_buffer(pbuf->pb_data, nxt, off, len);
+		sum = inet6_cksum_buffer(pbuf->pb_data, nxt, off, len,
+		    pbuf->pb_contig_len);
 	} else {
 		panic("%s: bad pb_type: %d", __func__, pbuf->pb_type);
 	}

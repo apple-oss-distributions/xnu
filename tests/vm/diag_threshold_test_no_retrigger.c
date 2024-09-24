@@ -48,7 +48,7 @@ diag_threshold_test_no_retrigger_execution(struct test_case *test_case, void *pa
 }
 
 T_DECL(diag_threshold_test_no_retrigger_test,
-    "Set a limit, consume memory, free, and expect no other exception")
+    "Set a limit, consume memory, free, and expect no other exception", T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_threshold_test_no_retrigger_test);
 }

@@ -106,7 +106,6 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, kcov_init);
 void
 kcov_start_cpu(int cpuid)
 {
-	printf("KCOV: Enabling coverage tracking on cpu %d\n", cpuid);
 	/* No need to use atomics as we don't need to be so precise here. */
 	cpu_kcov_data(cpuid)->kcd_enabled = 1;
 }

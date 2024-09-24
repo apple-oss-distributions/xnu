@@ -49,7 +49,7 @@
 #include <arm64/proc_reg.h>
 #include <mach/processor_info.h>
 #include <vm/pmap.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <pexpert/arm/protos.h>
 #include <pexpert/device_tree.h>
@@ -93,6 +93,10 @@ vm_address_t   start_cpu_paddr;
 #if __ARM_KERNEL_PROTECT__
 extern void exc_vectors_table;
 #endif /* __ARM_KERNEL_PROTECT__ */
+
+#if APPLEVIRTUALPLATFORM
+extern vm_offset_t reset_vector_vaddr;
+#endif /* APPLEVIRTUALPLATFORM */
 
 #if APPLEVIRTUALPLATFORM
 extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep, unsigned int cpu, uint64_t entry_pa);
@@ -273,7 +277,7 @@ configure_coresight_registers(cpu_data_t *cdp)
 	 */
 	if (cdp->cpu_regmap_paddr || coresight_regs) {
 		for (i = 0; i < CORESIGHT_REGIONS; ++i) {
-			if (i == CORESIGHT_CTI) {
+			if (i == CORESIGHT_CTI || i == CORESIGHT_PMU) {
 				continue;
 			}
 			/* Skip debug-only registers on production chips */
@@ -289,7 +293,7 @@ configure_coresight_registers(cpu_data_t *cdp)
 					cdp->coresight_base[i] = (vm_offset_t)ml_io_map(addr, CORESIGHT_SIZE);
 				}
 			}
-			/* Unlock EDLAR, CTILAR, PMLAR */
+			/* Unlock EDLAR (CTI and PMU are skipped above). */
 			if (i != CORESIGHT_UTT) {
 				*(volatile uint32_t *)(cdp->coresight_base[i] + ARM_DEBUG_OFFSET_DBGLAR) = ARM_DBG_LOCK_ACCESS_KEY;
 			}
@@ -322,7 +326,7 @@ cpu_sleep(void)
 #else
 	cpu_data_ptr->cpu_reset_handler = (uintptr_t) start_cpu_paddr;
 #endif
-	cpu_data_ptr->cpu_flags |= SleepState;
+	os_atomic_or(&cpu_data_ptr->cpu_flags, SleepState, relaxed);
 
 	if (cpu_data_ptr->cpu_user_debug != NULL) {
 		arm_debug_set(NULL);
@@ -349,10 +353,10 @@ cpu_sleep(void)
 		__builtin_arm_dsb(DSB_ISH);
 		CleanPoU_Dcache();
 #if APPLEVIRTUALPLATFORM
-		arm64_prepare_for_sleep(deep_sleep, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
-#else
+		arm64_prepare_for_sleep(deep_sleep, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));
+#else /* APPLEVIRTUALPLATFORM */
 		arm64_prepare_for_sleep(deep_sleep);
-#endif
+#endif /* APPLEVIRTUALPLATFORM */
 	}
 #else
 	PE_cpu_machine_quiesce(cpu_data_ptr->cpu_id);
@@ -415,12 +419,7 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
 		 * interrupts.
 		 */
 		irqc = nirqc = os_atomic_load(&cdp->cpu_stat.irq_ex_cnt_wake, relaxed);
-		/* Unmask IRQ+FIQ. Mirrors mask used by machine_idle()
-		 * with ASYNCF omission. Consider that this could
-		 * delay recognition of an async abort, including
-		 * those triggered by ISRs
-		 */
-		__builtin_arm_wsr("DAIFClr", (DAIFSC_IRQF | DAIFSC_FIQF));
+		__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
 	}
 
 	while ((ipending = (cpu_interrupt_is_pending())) == false) {
@@ -467,11 +466,7 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
 	}
 
 	if (unmask) {
-		/* Re-mask IRQ+FIQ
-		 * Mirrors mask used by machine_idle(), with ASYNCF
-		 * omission
-		 */
-		__builtin_arm_wsr64("DAIFSet", (DAIFSC_IRQF | DAIFSC_FIQF));
+		__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);
 		/* Refetch SW interrupt counter with IRQs masked
 		 * It is important that this routine accurately flags
 		 * any observed interrupts via its return value,
@@ -768,28 +763,7 @@ cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 	    VM_KERN_MEMORY_STACK);
 
 	cpu_data_ptr->excepstack_top = exc_stack + PAGE_SIZE + EXCEPSTACK_SIZE;
-}
-
-void
-cpu_data_free(cpu_data_t *cpu_data_ptr)
-{
-	if ((cpu_data_ptr == NULL) || (cpu_data_ptr == &BootCpuData)) {
-		return;
-	}
-
-	int cpu_number = cpu_data_ptr->cpu_number;
-
-	if (CpuDataEntries[cpu_number].cpu_data_vaddr == cpu_data_ptr) {
-		CpuDataEntries[cpu_number].cpu_data_vaddr = NULL;
-		CpuDataEntries[cpu_number].cpu_data_paddr = 0;
-		__builtin_arm_dmb(DMB_ISH); // Ensure prior stores to cpu array are visible
-	}
-	kmem_free(kernel_map,
-	    cpu_data_ptr->intstack_top - INTSTACK_SIZE - PAGE_SIZE,
-	    INTSTACK_SIZE + 2 * PAGE_SIZE);
-	kmem_free(kernel_map,
-	    cpu_data_ptr->excepstack_top - EXCEPSTACK_SIZE - PAGE_SIZE,
-	    EXCEPSTACK_SIZE + 2 * PAGE_SIZE);
+	cpu_data_ptr->excepstackptr = (void *)cpu_data_ptr->excepstack_top;
 }
 
 void
@@ -797,7 +771,7 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 {
 	uint32_t i;
 
-	cpu_data_ptr->cpu_flags = 0;
+	os_atomic_store(&cpu_data_ptr->cpu_flags, 0, relaxed);
 	cpu_data_ptr->cpu_int_state = 0;
 	cpu_data_ptr->cpu_pending_ast = AST_NONE;
 	cpu_data_ptr->cpu_cache_dispatch = NULL;
@@ -864,7 +838,7 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 #endif
 }
 
-kern_return_t
+void
 cpu_data_register(cpu_data_t *cpu_data_ptr)
 {
 	int     cpu = cpu_data_ptr->cpu_number;
@@ -878,7 +852,6 @@ cpu_data_register(cpu_data_t *cpu_data_ptr)
 	__builtin_arm_dmb(DMB_ISH); // Ensure prior stores to cpu data are visible
 	CpuDataEntries[cpu].cpu_data_vaddr = cpu_data_ptr;
 	CpuDataEntries[cpu].cpu_data_paddr = (void *)ml_vtophys((vm_offset_t)cpu_data_ptr);
-	return KERN_SUCCESS;
 }
 
 #if defined(KERNEL_INTEGRITY_CTRR)
@@ -899,7 +872,7 @@ init_ctrr_cluster_states(void)
 }
 #endif
 
-kern_return_t
+void
 cpu_start(int cpu)
 {
 	cpu_data_t *cpu_data_ptr = CpuDataEntries[cpu].cpu_data_vaddr;
@@ -910,6 +883,7 @@ cpu_start(int cpu)
 	}
 
 	if (cpu == cpu_number()) {
+		/* Current CPU is already running, just needs initialization */
 		cpu_machine_init();
 		configure_coresight_registers(cpu_data_ptr);
 	} else {
@@ -930,8 +904,9 @@ cpu_start(int cpu)
 		}
 		cpu_data_ptr->cpu_active_thread = first_thread;
 		first_thread->machine.CpuDatap = cpu_data_ptr;
-		first_thread->machine.pcpu_data_base =
-		    (char *)cpu_data_ptr - __PERCPU_ADDR(cpu_data);
+		first_thread->machine.pcpu_data_base_and_cpu_number =
+		    ml_make_pcpu_base_and_cpu_number((char *)cpu_data_ptr - __PERCPU_ADDR(cpu_data),
+		    cpu_data_ptr->cpu_number);
 
 		configure_coresight_registers(cpu_data_ptr);
 
@@ -954,9 +929,11 @@ cpu_start(int cpu)
 			lck_spin_unlock(&ctrr_cpu_start_lck);
 			break;
 		case CTRR_LOCKING:
-			assert_wait(&ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id], THREAD_UNINT);
-			lck_spin_unlock(&ctrr_cpu_start_lck);
-			thread_block(THREAD_CONTINUE_NULL);
+
+			lck_spin_sleep(&ctrr_cpu_start_lck, LCK_SLEEP_UNLOCK,
+			    &ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id],
+			    THREAD_UNINT | THREAD_WAIT_NOREPORT);
+
 			assert(ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] != CTRR_LOCKING);
 			break;
 		default:         // CTRR_LOCKED
@@ -965,10 +942,10 @@ cpu_start(int cpu)
 		}
 #endif
 #endif /* CONFIG_SPTM */
-		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
-	}
 
-	return KERN_SUCCESS;
+		PE_cpu_start_internal(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
+
+	}
 }
 
 
@@ -986,7 +963,7 @@ cpu_timebase_init(boolean_t from_boot)
 		cdp->cpu_tbd_hardware_val = (void *)rtclock_timebase_val;
 	}
 
-	if (!from_boot && (cdp == &BootCpuData)) {
+	if (!from_boot && (cdp == &BootCpuData) && ml_is_quiescing()) {
 		/*
 		 * When we wake from sleep, we have no guarantee about the state
 		 * of the hardware timebase.  It may have kept ticking across sleep, or
@@ -1112,10 +1089,18 @@ ml_arm_sleep(void)
 #endif /* CONFIG_CPU_COUNTERS */
 		/* ARM64-specific preparation */
 #if APPLEVIRTUALPLATFORM
-		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
-#else
+		extern bool test_sleep_in_vm;
+		if (test_sleep_in_vm) {
+			/*
+			 * Until sleep is supported on APPLEVIRTUALPLATFORM, use this
+			 * trick for testing sleep - just jump straight to the CPU resume point.
+			 */
+			arm_init_cpu(cpu_data_ptr, 0);
+		}
+		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));
+#else /* APPLEVIRTUALPLATFORM */
 		arm64_prepare_for_sleep(true);
-#endif
+#endif /* APPLEVIRTUALPLATFORM */
 	} else {
 #if __ARM_GLOBAL_SLEEP_BIT__
 		/*
@@ -1146,10 +1131,10 @@ ml_arm_sleep(void)
 
 		/* ARM64-specific preparation */
 #if APPLEVIRTUALPLATFORM
-		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
-#else
+		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys(reset_vector_vaddr));
+#else /* APPLEVIRTUALPLATFORM */
 		arm64_prepare_for_sleep(true);
-#endif
+#endif /* APPLEVIRTUALPLATFORM */
 	}
 }
 

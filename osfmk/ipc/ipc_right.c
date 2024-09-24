@@ -413,6 +413,31 @@ ipc_right_reverse(
 }
 
 /*
+ *	Routine:	ipc_right_request_cancel
+ *	Purpose:
+ *		Cancel a notification request and return the send-once right.
+ *		Afterwards, entry->ie_request == 0.
+ *	Conditions:
+ *		The space must be write-locked; the port must be locked.
+ *		The port must be active.
+ */
+
+static inline ipc_port_t
+ipc_right_request_cancel(
+	ipc_port_t              port,
+	mach_port_name_t        name,
+	ipc_entry_t             entry)
+{
+	ipc_port_request_index_t request = entry->ie_request;
+
+	if (request != IE_REQ_NONE) {
+		entry->ie_request = IE_REQ_NONE;
+		return ipc_port_request_cancel(port, name, request);
+	}
+	return IP_NULL;
+}
+
+/*
  *	Routine:	ipc_right_dnrequest
  *	Purpose:
  *		Make a dead-name request, returning the previously
@@ -440,7 +465,6 @@ ipc_right_request_alloc(
 	ipc_port_t              notify,
 	ipc_port_t              *previousp)
 {
-	ipc_port_request_index_t prev_request;
 	ipc_port_t previous = IP_NULL;
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -458,10 +482,8 @@ ipc_right_request_alloc(
 
 		/* space is write-locked and active */
 
-		prev_request = entry->ie_request;
-
 		/* if nothing to do or undo, we're done */
-		if (notify == IP_NULL && prev_request == IE_REQ_NONE) {
+		if (notify == IP_NULL && entry->ie_request == IE_REQ_NONE) {
 			is_write_unlock(space);
 			*previousp = IP_NULL;
 			return KERN_SUCCESS;
@@ -477,12 +499,14 @@ ipc_right_request_alloc(
 			if (!ipc_right_check(space, port, name, entry, IPC_OBJECT_COPYIN_FLAGS_NONE)) {
 				/* port is locked and active */
 
+				/*
+				 * No matter what, we need to cancel any
+				 * previous request.
+				 */
+				previous = ipc_right_request_cancel(port, name, entry);
+
 				/* if no new request, just cancel previous */
 				if (notify == IP_NULL) {
-					if (prev_request != IE_REQ_NONE) {
-						previous = ipc_port_request_cancel(port, name, prev_request);
-						entry->ie_request = IE_REQ_NONE;
-					}
 					ip_mq_unlock(port);
 					ipc_entry_modified(space, name, entry);
 					is_write_unlock(space);
@@ -495,11 +519,8 @@ ipc_right_request_alloc(
 				 */
 				if (options == (IPR_SOR_SPARM_MASK | IPR_SOR_SPREQ_MASK) &&
 				    ((entry->ie_bits & MACH_PORT_TYPE_SEND_ONCE) ||
-				    ip_in_space(port, ipc_space_kernel) || !ip_full(port))) {
-					if (prev_request != IE_REQ_NONE) {
-						previous = ipc_port_request_cancel(port, name, prev_request);
-						entry->ie_request = IE_REQ_NONE;
-					}
+				    ip_in_space(port, ipc_space_kernel) ||
+				    !ip_full(port))) {
 					ip_mq_unlock(port);
 					ipc_entry_modified(space, name, entry);
 					is_write_unlock(space);
@@ -509,13 +530,11 @@ ipc_right_request_alloc(
 				}
 
 				/*
-				 * If there is a previous request, free it.  Any subsequent
-				 * allocation cannot fail, thus assuring an atomic swap.
+				 * If there was a previous request, freeing it
+				 * above guarantees that the subsequent
+				 * allocation will find a slot and succeed,
+				 * thus assuring an atomic swap.
 				 */
-				if (prev_request != IE_REQ_NONE) {
-					previous = ipc_port_request_cancel(port, name, prev_request);
-				}
-
 #if IMPORTANCE_INHERITANCE
 				will_arm = port->ip_sprequests == 0 &&
 				    options == (IPR_SOR_SPARM_MASK | IPR_SOR_SPREQ_MASK);
@@ -597,39 +616,6 @@ ipc_right_request_alloc(
 
 	*previousp = previous;
 	return KERN_SUCCESS;
-}
-
-/*
- *	Routine:	ipc_right_request_cancel
- *	Purpose:
- *		Cancel a notification request and return the send-once right.
- *		Afterwards, entry->ie_request == 0.
- *	Conditions:
- *		The space must be write-locked; the port must be locked.
- *		The port and space must be active.
- */
-
-ipc_port_t
-ipc_right_request_cancel(
-	ipc_space_t                     space,
-	ipc_port_t                      port,
-	mach_port_name_t                name,
-	ipc_entry_t                     entry)
-{
-	ipc_port_t previous;
-
-	require_ip_active(port);
-	assert(is_active(space));
-	assert(port == ip_object_to_port(entry->ie_object));
-
-	if (entry->ie_request == IE_REQ_NONE) {
-		return IP_NULL;
-	}
-
-	previous = ipc_port_request_cancel(port, name, entry->ie_request);
-	entry->ie_request = IE_REQ_NONE;
-	ipc_entry_modified(space, name, entry);
-	return previous;
 }
 
 /*
@@ -817,16 +803,7 @@ ipc_right_terminate(
 			break;
 		}
 
-		/*
-		 * same as ipc_right_request_cancel(),
-		 * except for calling ipc_entry_modified()
-		 * as the space is now table-less.
-		 */
-		if (entry->ie_request != IE_REQ_NONE) {
-			request = ipc_port_request_cancel(port, name,
-			    entry->ie_request);
-			entry->ie_request = IE_REQ_NONE;
-		}
+		request = ipc_right_request_cancel(port, name, entry);
 
 		if (type & MACH_PORT_TYPE_SEND) {
 			ip_srights_dec(port);
@@ -991,8 +968,7 @@ ipc_right_destroy(
 		}
 
 
-		request = ipc_right_request_cancel_macro(space, port,
-		    name, entry);
+		request = ipc_right_request_cancel(port, name, entry);
 		assert(!ip_is_pinned(port));
 		ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 
@@ -1137,8 +1113,7 @@ dead_name:
 		 */
 		port->ip_reply_context = 0;
 
-		request = ipc_right_request_cancel_macro(space, port,
-		    name, entry);
+		request = ipc_right_request_cancel(port, name, entry);
 		assert(!ip_is_pinned(port));
 		ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 
@@ -1182,8 +1157,7 @@ dead_name:
 				nsrequest = ipc_notify_no_senders_prepare(port);
 			}
 
-			request = ipc_right_request_cancel_macro(space, port,
-			    name, entry);
+			request = ipc_right_request_cancel(port, name, entry);
 			ipc_hash_delete(space, ip_to_object(port), name, entry);
 			ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 			ip_mq_unlock(port);
@@ -1417,8 +1391,7 @@ ipc_right_delta(
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_RECEIVE);
 			assert(IE_BITS_UREFS(bits) == 0);
 
-			request = ipc_right_request_cancel_macro(space, port,
-			    name, entry);
+			request = ipc_right_request_cancel(port, name, entry);
 			assert(!ip_is_pinned(port));
 			ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 		}
@@ -1471,7 +1444,7 @@ ipc_right_delta(
 		 */
 		port->ip_reply_context = 0;
 
-		request = ipc_right_request_cancel_macro(space, port, name, entry);
+		request = ipc_right_request_cancel(port, name, entry);
 		assert(!ip_is_pinned(port));
 		ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 
@@ -1644,8 +1617,7 @@ ipc_right_delta(
 				assert(IE_BITS_TYPE(bits) ==
 				    MACH_PORT_TYPE_SEND);
 
-				request = ipc_right_request_cancel_macro(space, port,
-				    name, entry);
+				request = ipc_right_request_cancel(port, name, entry);
 				ipc_hash_delete(space, ip_to_object(port),
 				    name, entry);
 				assert(!ip_is_pinned(port));
@@ -1867,8 +1839,7 @@ ipc_right_destruct(
 	} else {
 		assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_RECEIVE);
 		assert(IE_BITS_UREFS(bits) == 0);
-		request = ipc_right_request_cancel_macro(space, port,
-		    name, entry);
+		request = ipc_right_request_cancel(port, name, entry);
 		assert(!ip_is_pinned(port));
 		ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 	}
@@ -2302,8 +2273,7 @@ ipc_right_copyin(
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_RECEIVE);
 			assert(IE_BITS_UREFS(bits) == 0);
 
-			request = ipc_right_request_cancel_macro(space, port,
-			    name, entry);
+			request = ipc_right_request_cancel(port, name, entry);
 			assert(!ip_is_pinned(port));
 			ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 		}
@@ -2465,8 +2435,7 @@ ipc_right_copyin(
 					return KERN_INVALID_CAPABILITY;
 				}
 
-				request = ipc_right_request_cancel_macro(space, port,
-				    name, entry);
+				request = ipc_right_request_cancel(port, name, entry);
 				ipc_hash_delete(space, ip_to_object(port),
 				    name, entry);
 				ipc_entry_dealloc(space, ip_to_object(port),
@@ -2542,7 +2511,7 @@ ipc_right_copyin(
 		assert(IE_BITS_UREFS(bits) == 1);
 		assert(port->ip_sorights > 0);
 
-		request = ipc_right_request_cancel_macro(space, port, name, entry);
+		request = ipc_right_request_cancel(port, name, entry);
 		assert(!ip_is_pinned(port));
 		ipc_entry_dealloc(space, ip_to_object(port), name, entry);
 		ip_mq_unlock(port);
@@ -2703,8 +2672,7 @@ ipc_right_copyin_two_move_sends(
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND);
 
 			/* ... that we steal from the entry when it dies */
-			request = ipc_right_request_cancel_macro(space, port,
-			    name, entry);
+			request = ipc_right_request_cancel(port, name, entry);
 			ipc_hash_delete(space, ip_to_object(port),
 			    name, entry);
 			ipc_entry_dealloc(space, ip_to_object(port),
@@ -3034,7 +3002,7 @@ ipc_right_copyout(
 			if (kn != ITH_KNOTE_PSEUDO) {
 				port->ip_immovable_receive = 1;
 			}
-			port->ip_context = current_thread()->ith_msg_addr;
+			port->ip_context = current_thread()->ith_recv_bufs.recv_msg_addr;
 			*context = port->ip_context;
 			*guard_flags = *guard_flags & ~MACH_MSG_GUARD_FLAGS_UNGUARDED_ON_SEND;
 		}

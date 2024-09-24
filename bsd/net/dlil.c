@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -50,9 +50,12 @@
 #include <net/route.h>
 #include <net/if_var.h>
 #include <net/dlil.h>
+#include <net/dlil_sysctl.h>
+#include <net/dlil_var_private.h>
 #include <net/if_arp.h>
 #include <net/iptap.h>
 #include <net/pktap.h>
+#include <net/droptap.h>
 #include <net/nwk_wq.h>
 #include <sys/kern_event.h>
 #include <sys/kdebug.h>
@@ -78,9 +81,9 @@
 #include <net/classq/classq_sfb.h>
 #include <net/flowhash.h>
 #include <net/ntstat.h>
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 #include <skywalk/lib/net_filter_event.h>
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */
 #include <net/net_api_stats.h>
 #include <net/if_ports_used.h>
 #include <net/if_vlan_var.h>
@@ -150,15 +153,6 @@
 #define DBG_FNC_DLIL_INPUT      DLILDBG_CODE(DBG_DLIL_STATIC, (1 << 8))
 #define DBG_FNC_DLIL_OUTPUT     DLILDBG_CODE(DBG_DLIL_STATIC, (2 << 8))
 #define DBG_FNC_DLIL_IFOUT      DLILDBG_CODE(DBG_DLIL_STATIC, (3 << 8))
-
-#define MAX_FRAME_TYPE_SIZE 4 /* LONGWORDS */
-#define MAX_LINKADDR        4 /* LONGWORDS */
-
-#if 1
-#define DLIL_PRINTF     printf
-#else
-#define DLIL_PRINTF     kprintf
-#endif
 
 #define IF_DATA_REQUIRE_ALIGNED_64(f)   \
 	_CASSERT(!(offsetof(struct if_data_internal, f) % sizeof (u_int64_t)))
@@ -363,7 +357,7 @@ static void if_flt_monitor_unbusy(struct ifnet *);
 static void if_flt_monitor_enter(struct ifnet *);
 static void if_flt_monitor_leave(struct ifnet *);
 static int dlil_interface_filters_input(struct ifnet *, struct mbuf **,
-    char **, protocol_family_t);
+    char **, protocol_family_t, boolean_t);
 static int dlil_interface_filters_output(struct ifnet *, struct mbuf **,
     protocol_family_t);
 static struct ifaddr *dlil_alloc_lladdr(struct ifnet *,
@@ -482,27 +476,6 @@ static void ifp_src_route6_copyin(struct ifnet *, struct route_in6 *);
 
 static errno_t if_mcasts_update_async(struct ifnet *);
 
-static int sysctl_rxpoll SYSCTL_HANDLER_ARGS;
-static int sysctl_rxpoll_mode_holdtime SYSCTL_HANDLER_ARGS;
-static int sysctl_rxpoll_sample_holdtime SYSCTL_HANDLER_ARGS;
-static int sysctl_rxpoll_interval_time SYSCTL_HANDLER_ARGS;
-static int sysctl_rxpoll_wlowat SYSCTL_HANDLER_ARGS;
-static int sysctl_rxpoll_whiwat SYSCTL_HANDLER_ARGS;
-static int sysctl_sndq_maxlen SYSCTL_HANDLER_ARGS;
-static int sysctl_rcvq_maxlen SYSCTL_HANDLER_ARGS;
-static int sysctl_rcvq_burst_limit SYSCTL_HANDLER_ARGS;
-static int sysctl_rcvq_trim_pct SYSCTL_HANDLER_ARGS;
-static int sysctl_hwcksum_dbg_mode SYSCTL_HANDLER_ARGS;
-static int sysctl_hwcksum_dbg_partial_rxoff_forced SYSCTL_HANDLER_ARGS;
-static int sysctl_hwcksum_dbg_partial_rxoff_adj SYSCTL_HANDLER_ARGS;
-
-struct chain_len_stats tx_chain_len_stats;
-static int sysctl_tx_chain_len_stats SYSCTL_HANDLER_ARGS;
-
-#if TEST_INPUT_THREAD_TERMINATION
-static int sysctl_input_thread_termination_spin SYSCTL_HANDLER_ARGS;
-#endif /* TEST_INPUT_THREAD_TERMINATION */
-
 /* The following are protected by dlil_ifnet_lock */
 static TAILQ_HEAD(, ifnet) ifnet_detaching_head;
 static u_int32_t ifnet_detaching_cnt;
@@ -565,293 +538,14 @@ int dlil_lladdr_ckreq = 0;
 #endif /* XNU_TARGET_OS_OSX */
 #endif /* CONFIG_MACF */
 
-#if DEBUG
-int dlil_verbose = 1;
-#else
-int dlil_verbose = 0;
-#endif /* DEBUG */
-#if IFNET_INPUT_SANITY_CHK
-/* sanity checking of input packet lists received */
-static u_int32_t dlil_input_sanity_check = 0;
-#endif /* IFNET_INPUT_SANITY_CHK */
 /* rate limit debug messages */
 struct timespec dlil_dbgrate = { .tv_sec = 1, .tv_nsec = 0 };
-
-SYSCTL_DECL(_net_link_generic_system);
-
-SYSCTL_INT(_net_link_generic_system, OID_AUTO, dlil_verbose,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &dlil_verbose, 0, "Log DLIL error messages");
-
-#define IF_SNDQ_MINLEN  32
-u_int32_t if_sndq_maxlen = IFQ_MAXLEN;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, sndq_maxlen,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_sndq_maxlen, IFQ_MAXLEN,
-    sysctl_sndq_maxlen, "I", "Default transmit queue max length");
-
-#define IF_RCVQ_MINLEN  32
-#define IF_RCVQ_MAXLEN  256
-u_int32_t if_rcvq_maxlen = IF_RCVQ_MAXLEN;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rcvq_maxlen,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rcvq_maxlen, IFQ_MAXLEN,
-    sysctl_rcvq_maxlen, "I", "Default receive queue max length");
-
-/*
- * Protect against possible memory starvation that may happen
- * when the driver is pushing data faster than the AP can process.
- *
- * If at any point during DLIL input phase any of the input queues
- * exceeds the burst limit, DLIL will start to trim the queue,
- * by returning mbufs in the input queue to the cache from which
- * the mbufs were originally allocated, starting from the oldest
- * mbuf and continuing until the new limit (see below) is reached.
- *
- * In order to avoid a steplocked equilibrium, the trimming
- * will continue PAST the burst limit, until the corresponding
- * input queue is reduced to `if_rcvq_trim_pct' %.
- *
- * For example, if the input queue limit is 1024 packets,
- * and the trim percentage (`if_rcvq_trim_pct') is 80 %,
- * the trimming will continue until the queue contains 819 packets
- * (1024 * 80 / 100 == 819).
- *
- * Setting the burst limit too low can hurt the throughput,
- * while setting the burst limit too high can defeat the purpose.
- */
-#define IF_RCVQ_BURST_LIMIT_MIN         1024
-#define IF_RCVQ_BURST_LIMIT_DEFAULT     8192
-#define IF_RCVQ_BURST_LIMIT_MAX         32768
-uint32_t if_rcvq_burst_limit = IF_RCVQ_BURST_LIMIT_DEFAULT;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rcvq_burst_limit,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rcvq_burst_limit, IF_RCVQ_BURST_LIMIT_DEFAULT,
-    sysctl_rcvq_burst_limit, "I", "Upper memory limit for inbound data");
-
-#define IF_RCVQ_TRIM_PCT_MIN            20
-#define IF_RCVQ_TRIM_PCT_DEFAULT        80
-#define IF_RCVQ_TRIM_PCT_MAX            100
-uint32_t if_rcvq_trim_pct = IF_RCVQ_TRIM_PCT_DEFAULT;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rcvq_trim_pct,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rcvq_trim_pct, IF_RCVQ_TRIM_PCT_DEFAULT,
-    sysctl_rcvq_trim_pct, "I",
-    "Percentage (0 - 100) of the queue limit to keep after detecting an overflow burst");
-
-#define IF_RXPOLL_DECAY         2       /* ilog2 of EWMA decay rate (4) */
-u_int32_t if_rxpoll_decay = IF_RXPOLL_DECAY;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, rxpoll_decay,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_decay, IF_RXPOLL_DECAY,
-    "ilog2 of EWMA decay rate of avg inbound packets");
-
-#define IF_RXPOLL_MODE_HOLDTIME_MIN     (10ULL * 1000 * 1000)   /* 10 ms */
-#define IF_RXPOLL_MODE_HOLDTIME         (1000ULL * 1000 * 1000) /* 1 sec */
-static u_int64_t if_rxpoll_mode_holdtime = IF_RXPOLL_MODE_HOLDTIME;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll_freeze_time,
-    CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_mode_holdtime,
-    IF_RXPOLL_MODE_HOLDTIME, sysctl_rxpoll_mode_holdtime,
-    "Q", "input poll mode freeze time");
-
-#define IF_RXPOLL_SAMPLETIME_MIN        (1ULL * 1000 * 1000)    /* 1 ms */
-#define IF_RXPOLL_SAMPLETIME            (10ULL * 1000 * 1000)   /* 10 ms */
-static u_int64_t if_rxpoll_sample_holdtime = IF_RXPOLL_SAMPLETIME;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll_sample_time,
-    CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_sample_holdtime,
-    IF_RXPOLL_SAMPLETIME, sysctl_rxpoll_sample_holdtime,
-    "Q", "input poll sampling time");
-
-static u_int64_t if_rxpoll_interval_time = IF_RXPOLL_INTERVALTIME;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll_interval_time,
-    CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_interval_time,
-    IF_RXPOLL_INTERVALTIME, sysctl_rxpoll_interval_time,
-    "Q", "input poll interval (time)");
-
-#define IF_RXPOLL_INTERVAL_PKTS 0       /* 0 (disabled) */
-u_int32_t if_rxpoll_interval_pkts = IF_RXPOLL_INTERVAL_PKTS;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, rxpoll_interval_pkts,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_interval_pkts,
-    IF_RXPOLL_INTERVAL_PKTS, "input poll interval (packets)");
-
-#define IF_RXPOLL_WLOWAT        10
-static u_int32_t if_sysctl_rxpoll_wlowat = IF_RXPOLL_WLOWAT;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll_wakeups_lowat,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_sysctl_rxpoll_wlowat,
-    IF_RXPOLL_WLOWAT, sysctl_rxpoll_wlowat,
-    "I", "input poll wakeup low watermark");
-
-#define IF_RXPOLL_WHIWAT        100
-static u_int32_t if_sysctl_rxpoll_whiwat = IF_RXPOLL_WHIWAT;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll_wakeups_hiwat,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_sysctl_rxpoll_whiwat,
-    IF_RXPOLL_WHIWAT, sysctl_rxpoll_whiwat,
-    "I", "input poll wakeup high watermark");
-
-static u_int32_t if_rxpoll_max = 0;                     /* 0 (automatic) */
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, rxpoll_max,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll_max, 0,
-    "max packets per poll call");
-
-u_int32_t if_rxpoll = 1;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, rxpoll,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &if_rxpoll, 0,
-    sysctl_rxpoll, "I", "enable opportunistic input polling");
-
-#if TEST_INPUT_THREAD_TERMINATION
-static u_int32_t if_input_thread_termination_spin = 0;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, input_thread_termination_spin,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &if_input_thread_termination_spin, 0,
-    sysctl_input_thread_termination_spin,
-    "I", "input thread termination spin limit");
-#endif /* TEST_INPUT_THREAD_TERMINATION */
-
-static u_int32_t cur_dlil_input_threads = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, dlil_input_threads,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &cur_dlil_input_threads, 0,
-    "Current number of DLIL input threads");
-
-#if IFNET_INPUT_SANITY_CHK
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, dlil_input_sanity_check,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &dlil_input_sanity_check, 0,
-    "Turn on sanity checking in DLIL input");
-#endif /* IFNET_INPUT_SANITY_CHK */
-
-static u_int32_t if_flowadv = 1;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, flow_advisory,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &if_flowadv, 1,
-    "enable flow-advisory mechanism");
-
-static u_int32_t if_delaybased_queue = 1;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, delaybased_queue,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &if_delaybased_queue, 1,
-    "enable delay based dynamic queue sizing");
-
-static uint64_t hwcksum_in_invalidated = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_in_invalidated, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_in_invalidated, "inbound packets with invalidated hardware cksum");
-
-uint32_t hwcksum_dbg = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, hwcksum_dbg,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &hwcksum_dbg, 0,
-    "enable hardware cksum debugging");
-
-u_int32_t ifnet_start_delayed = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, start_delayed,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ifnet_start_delayed, 0,
-    "number of times start was delayed");
-
-u_int32_t ifnet_delay_start_disabled = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, start_delay_disabled,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ifnet_delay_start_disabled, 0,
-    "number of times start was delayed");
 
 static inline void
 ifnet_delay_start_disabled_increment(void)
 {
 	OSIncrementAtomic(&ifnet_delay_start_disabled);
 }
-
-#define HWCKSUM_DBG_PARTIAL_FORCED      0x1     /* forced partial checksum */
-#define HWCKSUM_DBG_PARTIAL_RXOFF_ADJ   0x2     /* adjust start offset */
-#define HWCKSUM_DBG_FINALIZE_FORCED     0x10    /* forced finalize */
-#define HWCKSUM_DBG_MASK \
-	(HWCKSUM_DBG_PARTIAL_FORCED | HWCKSUM_DBG_PARTIAL_RXOFF_ADJ |   \
-	HWCKSUM_DBG_FINALIZE_FORCED)
-
-static uint32_t hwcksum_dbg_mode = 0;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, hwcksum_dbg_mode,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &hwcksum_dbg_mode,
-    0, sysctl_hwcksum_dbg_mode, "I", "hardware cksum debugging mode");
-
-static uint64_t hwcksum_dbg_partial_forced = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_partial_forced, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_partial_forced, "packets forced using partial cksum");
-
-static uint64_t hwcksum_dbg_partial_forced_bytes = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_partial_forced_bytes, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_partial_forced_bytes, "bytes forced using partial cksum");
-
-static uint32_t hwcksum_dbg_partial_rxoff_forced = 0;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_partial_rxoff_forced, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &hwcksum_dbg_partial_rxoff_forced, 0,
-    sysctl_hwcksum_dbg_partial_rxoff_forced, "I",
-    "forced partial cksum rx offset");
-
-static uint32_t hwcksum_dbg_partial_rxoff_adj = 0;
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, hwcksum_dbg_partial_rxoff_adj,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &hwcksum_dbg_partial_rxoff_adj,
-    0, sysctl_hwcksum_dbg_partial_rxoff_adj, "I",
-    "adjusted partial cksum rx offset");
-
-static uint64_t hwcksum_dbg_verified = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_verified, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_verified, "packets verified for having good checksum");
-
-static uint64_t hwcksum_dbg_bad_cksum = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_bad_cksum, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_bad_cksum, "packets with bad hardware calculated checksum");
-
-static uint64_t hwcksum_dbg_bad_rxoff = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_bad_rxoff, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_bad_rxoff, "packets with invalid rxoff");
-
-static uint64_t hwcksum_dbg_adjusted = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_adjusted, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_adjusted, "packets with rxoff adjusted");
-
-static uint64_t hwcksum_dbg_finalized_hdr = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_finalized_hdr, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_finalized_hdr, "finalized headers");
-
-static uint64_t hwcksum_dbg_finalized_data = 0;
-SYSCTL_QUAD(_net_link_generic_system, OID_AUTO,
-    hwcksum_dbg_finalized_data, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &hwcksum_dbg_finalized_data, "finalized payloads");
-
-uint32_t hwcksum_tx = 1;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, hwcksum_tx,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &hwcksum_tx, 0,
-    "enable transmit hardware checksum offload");
-
-uint32_t hwcksum_rx = 1;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, hwcksum_rx,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &hwcksum_rx, 0,
-    "enable receive hardware checksum offload");
-
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, tx_chain_len_stats,
-    CTLFLAG_RD | CTLFLAG_LOCKED, 0, 9,
-    sysctl_tx_chain_len_stats, "S", "");
-
-uint32_t tx_chain_len_count = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, tx_chain_len_count,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &tx_chain_len_count, 0, "");
-
-static uint32_t threshold_notify = 1;           /* enable/disable */
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, threshold_notify,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &threshold_notify, 0, "");
-
-static uint32_t threshold_interval = 2;         /* in seconds */
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, threshold_interval,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &threshold_interval, 0, "");
-
-#if (DEVELOPMENT || DEBUG)
-static int sysctl_get_kao_frames SYSCTL_HANDLER_ARGS;
-SYSCTL_NODE(_net_link_generic_system, OID_AUTO, get_kao_frames,
-    CTLFLAG_RD | CTLFLAG_LOCKED, sysctl_get_kao_frames, "");
-#endif /* DEVELOPMENT || DEBUG */
-
-struct net_api_stats net_api_stats;
-SYSCTL_STRUCT(_net, OID_AUTO, api_stats, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &net_api_stats, net_api_stats, "");
-
-uint32_t net_wake_pkt_debug = 0;
-SYSCTL_UINT(_net_link_generic_system, OID_AUTO, wake_pkt_debug,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &net_wake_pkt_debug, 0, "");
 
 static void log_hexdump(void *data, size_t len);
 
@@ -884,12 +578,10 @@ ifnet_filter_update_tso(struct ifnet *ifp, boolean_t filter_enable)
 
 #if SKYWALK
 
-#if defined(XNU_TARGET_OS_OSX)
 static bool net_check_compatible_if_filter(struct ifnet *ifp);
-#endif /* XNU_TARGET_OS_OSX */
 
 /* if_attach_nx flags defined in os_skywalk_private.h */
-static unsigned int if_attach_nx = IF_ATTACH_NX_DEFAULT;
+unsigned int if_attach_nx = IF_ATTACH_NX_DEFAULT;
 unsigned int if_enable_fsw_ip_netagent =
     ((IF_ATTACH_NX_DEFAULT & IF_ATTACH_NX_FSW_IP_NETAGENT) != 0);
 unsigned int if_enable_fsw_transport_netagent =
@@ -901,69 +593,6 @@ unsigned int if_netif_all =
 /* Configure flowswitch to use max mtu sized buffer */
 static bool fsw_use_max_mtu_buffer = false;
 
-#if (DEVELOPMENT || DEBUG)
-static int
-if_attach_nx_sysctl SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	unsigned int new_value;
-	int changed;
-	int error = sysctl_io_number(req, if_attach_nx, sizeof(if_attach_nx),
-	    &new_value, &changed);
-	if (error) {
-		return error;
-	}
-	if (changed) {
-		if ((new_value & IF_ATTACH_NX_FSW_TRANSPORT_NETAGENT) !=
-		    (if_attach_nx & IF_ATTACH_NX_FSW_TRANSPORT_NETAGENT)) {
-			return ENOTSUP;
-		}
-		if_attach_nx = new_value;
-	}
-	return 0;
-}
-
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, if_attach_nx,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, &if_attach_nx_sysctl, "IU", "attach nexus");
-
-#endif /* DEVELOPMENT || DEBUG */
-
-static int
-if_enable_fsw_transport_netagent_sysctl SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	unsigned int new_value;
-	int changed;
-	int error;
-
-	error = sysctl_io_number(req, if_enable_fsw_transport_netagent,
-	    sizeof(if_enable_fsw_transport_netagent),
-	    &new_value, &changed);
-	if (error == 0 && changed != 0) {
-		if (new_value != 0 && new_value != 1) {
-			/* only allow 0 or 1 */
-			error = EINVAL;
-		} else if ((if_attach_nx & IF_ATTACH_NX_FSW_TRANSPORT_NETAGENT) != 0) {
-			/* netagent can be enabled/disabled */
-			if_enable_fsw_transport_netagent = new_value;
-			if (new_value == 0) {
-				kern_nexus_deregister_netagents();
-			} else {
-				kern_nexus_register_netagents();
-			}
-		} else {
-			/* netagent can't be enabled */
-			error = ENOTSUP;
-		}
-	}
-	return error;
-}
-
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, enable_netagent,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, &if_enable_fsw_transport_netagent_sysctl, "IU",
-    "enable flowswitch netagent");
 
 static void dlil_detach_flowswitch_nexus(if_nexus_flowswitch_t nexus_fsw);
 
@@ -1271,9 +900,12 @@ dlil_siocgifdevmtu(struct ifnet * ifp, struct ifdevmtu * ifdm_p)
 static inline void
 _dlil_adjust_large_buf_size_for_tso(ifnet_t ifp, uint32_t *large_buf_size)
 {
-#ifdef XNU_TARGET_OS_OSX
 	uint32_t tso_v4_mtu = 0;
 	uint32_t tso_v6_mtu = 0;
+
+	if (!kernel_is_macos_or_server()) {
+		return;
+	}
 
 	if (!dlil_is_native_netif_nexus(ifp)) {
 		return;
@@ -1299,9 +931,6 @@ _dlil_adjust_large_buf_size_for_tso(ifnet_t ifp, uint32_t *large_buf_size)
 		*large_buf_size = MAX(*large_buf_size, sk_fsw_gso_mtu);
 	}
 	*large_buf_size = MIN(NX_FSW_MAX_LARGE_BUFSIZE, *large_buf_size);
-#else
-#pragma unused(ifp, large_buf_size)
-#endif /* XNU_TARGET_OS_OSX */
 }
 
 static inline int
@@ -1508,7 +1137,7 @@ dlil_attach_flowswitch_nexus(ifnet_t ifp)
 
 #if (DEVELOPMENT || DEBUG)
 	if (skywalk_netif_direct_allowed(if_name(ifp))) {
-		DLIL_PRINTF("skip attaching fsw to %s", if_name(ifp));
+		DLIL_PRINTF("skip attaching fsw to %s\n", if_name(ifp));
 		return FALSE;
 	}
 #endif /* (DEVELOPMENT || DEBUG) */
@@ -1518,7 +1147,7 @@ dlil_attach_flowswitch_nexus(ifnet_t ifp)
 	 * legacy model (IFNET_INIT_LEGACY)
 	 */
 	if ((ifp->if_eflags & IFEF_TXSTART) == 0) {
-		DLIL_PRINTF("skip attaching fsw to %s using legacy TX model",
+		DLIL_PRINTF("skip attaching fsw to %s using legacy TX model\n",
 		    if_name(ifp));
 		return FALSE;
 	}
@@ -1645,38 +1274,6 @@ ifnet_detach_flowswitch_nexus(ifnet_t ifp)
 	ifnet_lock_done(ifp);
 	return dlil_detach_nexus(__func__, nexus_fsw.if_fsw_provider,
 	           nexus_fsw.if_fsw_instance, nexus_fsw.if_fsw_device);
-}
-
-boolean_t
-ifnet_attach_netif_nexus(ifnet_t ifp)
-{
-	boolean_t       nexus_attached;
-	if_nexus_netif  nexus_netif;
-
-	if (!IF_FULLY_ATTACHED(ifp)) {
-		return FALSE;
-	}
-	nexus_attached = dlil_attach_netif_nexus_common(ifp, &nexus_netif);
-	if (nexus_attached) {
-		ifnet_lock_exclusive(ifp);
-		ifp->if_nx_netif = nexus_netif;
-		ifnet_lock_done(ifp);
-	}
-	return nexus_attached;
-}
-
-boolean_t
-ifnet_detach_netif_nexus(ifnet_t ifp)
-{
-	if_nexus_netif  nexus_netif;
-
-	ifnet_lock_exclusive(ifp);
-	nexus_netif = ifp->if_nx_netif;
-	bzero(&ifp->if_nx_netif, sizeof(ifp->if_nx_netif));
-	ifnet_lock_done(ifp);
-
-	return dlil_detach_nexus(__func__, nexus_netif.if_nif_provider,
-	           nexus_netif.if_nif_instance, nexus_netif.if_nif_attach);
 }
 
 void
@@ -2469,30 +2066,6 @@ done:
 	return error;
 }
 
-#if TEST_INPUT_THREAD_TERMINATION
-static int
-sysctl_input_thread_termination_spin SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint32_t i;
-	int err;
-
-	i = if_input_thread_termination_spin;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (net_rxpoll == 0) {
-		return ENXIO;
-	}
-
-	if_input_thread_termination_spin = i;
-	return err;
-}
-#endif /* TEST_INPUT_THREAD_TERMINATION */
-
 static void
 dlil_clean_threading_info(struct dlil_threading_info *inp)
 {
@@ -2578,11 +2151,14 @@ dlil_affinity_set(struct thread *tp, u_int32_t tag)
 	           (thread_policy_t)&policy, THREAD_AFFINITY_POLICY_COUNT);
 }
 
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 static void
 dlil_filter_event(struct eventhandler_entry_arg arg __unused,
     enum net_filter_event_subsystems state)
 {
+	evhlog(debug, "%s: eventhandler saw event type=net_filter_event_state event_code=0x%d",
+	    __func__, state);
+
 	bool old_if_enable_fsw_transport_netagent = if_enable_fsw_transport_netagent;
 	if ((state & ~NET_FILTER_EVENT_PF_PRIVATE_PROXY) == 0) {
 		if_enable_fsw_transport_netagent = 1;
@@ -2595,7 +2171,7 @@ dlil_filter_event(struct eventhandler_entry_arg arg __unused,
 		necp_update_all_clients();
 	}
 }
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */
 
 void
 dlil_init(void)
@@ -2795,11 +2371,9 @@ dlil_init(void)
 	    !if_enable_fsw_transport_netagent) {
 		kprintf("SK: netagent is force-disabled\n");
 	}
-#ifdef XNU_TARGET_OS_OSX
-	if (if_enable_fsw_transport_netagent) {
+	if (kernel_is_macos_or_server() && if_enable_fsw_transport_netagent) {
 		net_filter_event_register(dlil_filter_event);
 	}
-#endif /* XNU_TARGET_OS_OSX */
 
 #if (DEVELOPMENT || DEBUG)
 	(void) PE_parse_boot_argn("fsw_use_max_mtu_buffer",
@@ -2858,6 +2432,9 @@ dlil_init(void)
 
 	/* Initialize the pktap virtual interface */
 	pktap_init();
+
+	/* Initialize droptap interface */
+	droptap_init();
 
 	/* Initialize the service class to dscp map */
 	net_qos_map_init();
@@ -3021,10 +2598,12 @@ dlil_attach_filter(struct ifnet *ifp, const struct iff_filter *if_filter,
 	if_flt_monitor_leave(ifp);
 	lck_mtx_unlock(&ifp->if_flt_lock);
 
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
-	    net_check_compatible_if_filter(NULL));
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#if SKYWALK
+	if (kernel_is_macos_or_server()) {
+		net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
+		    net_check_compatible_if_filter(NULL));
+	}
+#endif /* SKYWALK */
 
 	if (dlil_verbose) {
 		DLIL_PRINTF("%s: %s filter attached\n", if_name(ifp),
@@ -3098,6 +2677,14 @@ dlil_detach_filter_internal(interface_filter_t  filter, int detached)
 				if ((filter->filt_flags & DLIL_IFF_TSO) == 0) {
 					ifnet_filter_update_tso(ifp, FALSE);
 				}
+				/*
+				 * When we remove the bridge's interface filter,
+				 * clear the field in the ifnet.
+				 */
+				if ((filter->filt_flags & DLIL_IFF_BRIDGE)
+				    != 0) {
+					ifp->if_bridge = NULL;
+				}
 				if_flt_monitor_leave(ifp);
 				lck_mtx_unlock(&ifp->if_flt_lock);
 				goto destroy;
@@ -3149,10 +2736,12 @@ destroy:
 	if (filter->filt_flags & DLIL_IFF_INTERNAL) {
 		VERIFY(OSDecrementAtomic64(&net_api_stats.nas_iflt_attach_os_count) > 0);
 	}
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
-	net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
-	    net_check_compatible_if_filter(NULL));
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#if SKYWALK
+	if (kernel_is_macos_or_server()) {
+		net_filter_event_mark(NET_FILTER_EVENT_INTERFACE,
+		    net_check_compatible_if_filter(NULL));
+	}
+#endif /* SKYWALK */
 
 	/* Free the filter */
 	zfree(dlif_filt_zone, filter);
@@ -3437,7 +3026,7 @@ dlil_input_thread_cont(void *v, wait_result_t wres)
 		 * safeguards if we deal with long chains of packets.
 		 */
 		if (__probable(m != NULL)) {
-			dlil_input_packet_list_extended(NULL, m,
+			dlil_input_packet_list_extended(ifp, m,
 			    m_cnt, ifp->if_poll_mode);
 		}
 
@@ -3758,7 +3347,7 @@ skip:
 		 * safeguards if we deal with long chains of packets.
 		 */
 		if (__probable(m != NULL)) {
-			dlil_input_packet_list_extended(NULL, m, m_cnt, mode);
+			dlil_input_packet_list_extended(ifp, m, m_cnt, mode);
 		}
 
 		lck_mtx_lock_spin(&inp->dlth_lock);
@@ -4083,8 +3672,18 @@ ifnet_input_common(struct ifnet *ifp, struct mbuf *m_head, struct mbuf *m_tail,
 	_s.packets_in = m_cnt;
 	_s.bytes_in = m_size;
 
+	if (ifp->if_xflags & IFXF_DISABLE_INPUT) {
+		m_freem_list(m_head);
+
+		os_atomic_add(&ifp->if_data.ifi_ipackets, _s.packets_in, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, _s.bytes_in, relaxed);
+
+		goto done;
+	}
+
 	err = (*input_func)(ifp, m_head, m_tail, s, poll, current_thread());
 
+done:
 	if (ifp != lo_ifp) {
 		/* Release the IO refcnt */
 		ifnet_datamov_end(ifp);
@@ -4511,7 +4110,7 @@ dlil_input_sync(struct dlil_threading_info *inp,
 	 * safeguards if we deal with long chains of packets.
 	 */
 	if (head.cp_mbuf != NULL) {
-		dlil_input_packet_list_extended(NULL, head.cp_mbuf,
+		dlil_input_packet_list_extended(ifp, head.cp_mbuf,
 		    m_cnt, ifp->if_poll_mode);
 	}
 
@@ -5414,7 +5013,7 @@ ifnet_enqueue_ifclassq(struct ifnet *ifp, struct ifclassq *ifcq,
 					return ENOMEM;
 				}
 			}
-			eh = (struct ether_header *)mbuf_data(p->cp_mbuf);
+			eh = mtod(p->cp_mbuf, struct ether_header *);
 			etype = ntohs(eh->ether_type);
 			if (etype == ETHERTYPE_IP) {
 				hlen = sizeof(struct ether_header) +
@@ -5442,8 +5041,7 @@ ifnet_enqueue_ifclassq(struct ifnet *ifp, struct ifclassq *ifcq,
 					return ENOMEM;
 				}
 
-				eh = (struct ether_header *)mbuf_data(
-					p->cp_mbuf);
+				eh = mtod(p->cp_mbuf, struct ether_header *);
 			}
 			mcast_buf = (uint8_t *)(eh + 1);
 			/*
@@ -6045,7 +5643,8 @@ packet_has_vlan_tag(struct mbuf * m)
 
 static int
 dlil_interface_filters_input(struct ifnet *ifp, struct mbuf **m_p,
-    char **frame_header_p, protocol_family_t protocol_family)
+    char **frame_header_p, protocol_family_t protocol_family,
+    boolean_t skip_bridge)
 {
 	boolean_t               is_vlan_packet = FALSE;
 	struct ifnet_filter     *filter;
@@ -6071,7 +5670,11 @@ dlil_interface_filters_input(struct ifnet *ifp, struct mbuf **m_p,
 		    (filter->filt_flags & DLIL_IFF_INTERNAL) == 0) {
 			continue;
 		}
-
+		/* the bridge has already seen the packet */
+		if (skip_bridge &&
+		    (filter->filt_flags & DLIL_IFF_BRIDGE) != 0) {
+			continue;
+		}
 		if (!filter->filt_skip && filter->filt_input != NULL &&
 		    (filter->filt_protocol == 0 ||
 		    filter->filt_protocol == protocol_family)) {
@@ -6301,6 +5904,22 @@ dlil_input_packet_list_extended(struct ifnet *ifp, struct mbuf *m,
 	return dlil_input_packet_list_common(ifp, m, cnt, mode, TRUE);
 }
 
+static inline mbuf_t
+handle_bridge_early_input(ifnet_t ifp, mbuf_t m, u_int32_t cnt)
+{
+	lck_mtx_lock_spin(&ifp->if_flt_lock);
+	if_flt_monitor_busy(ifp);
+	lck_mtx_unlock(&ifp->if_flt_lock);
+
+	if (ifp->if_bridge != NULL) {
+		m = bridge_early_input(ifp, m, cnt);
+	}
+	lck_mtx_lock_spin(&ifp->if_flt_lock);
+	if_flt_monitor_unbusy(ifp);
+	lck_mtx_unlock(&ifp->if_flt_lock);
+	return m;
+}
+
 static void
 dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
     u_int32_t cnt, ifnet_model_t mode, boolean_t ext)
@@ -6315,6 +5934,7 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 	mbuf_t *pkt_next = NULL;
 	u_int32_t poll_thresh = 0, poll_ival = 0;
 	int iorefcnt = 0;
+	boolean_t skip_bridge_filter = FALSE;
 
 	KERNEL_DEBUG(DBG_FNC_DLIL_INPUT | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
@@ -6322,7 +5942,11 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 	    (poll_ival = if_rxpoll_interval_pkts) > 0) {
 		poll_thresh = cnt;
 	}
-
+	if (bridge_enable_early_input != 0 &&
+	    ifp != NULL && ifp->if_bridge != NULL) {
+		m = handle_bridge_early_input(ifp, m, cnt);
+		skip_bridge_filter = TRUE;
+	}
 	while (m != NULL) {
 		struct if_proto *ifproto = NULL;
 		uint32_t pktf_mask;     /* pkt flags to preserve */
@@ -6391,6 +6015,11 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 			}
 			protocol_family = 0;
 		}
+		/* check for an updated frame header */
+		if (m->m_pkthdr.pkt_hdr != NULL) {
+			frame_header = m->m_pkthdr.pkt_hdr;
+			m->m_pkthdr.pkt_hdr = NULL;
+		}
 
 #if (DEVELOPMENT || DEBUG)
 		/*
@@ -6430,8 +6059,10 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 		}
 
 		/* Translate the packet if it is received on CLAT interface */
-		if (protocol_family == PF_INET6 && IS_INTF_CLAT46(ifp)
-		    && dlil_is_clat_needed(protocol_family, m)) {
+		if ((m->m_flags & M_PROMISC) == 0 &&
+		    protocol_family == PF_INET6 &&
+		    IS_INTF_CLAT46(ifp) &&
+		    dlil_is_clat_needed(protocol_family, m)) {
 			char *data = NULL;
 			struct ether_header eh;
 			struct ether_header *ehp = NULL;
@@ -6447,7 +6078,7 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 				bcopy(frame_header, (caddr_t)&eh, ETHER_HDR_LEN);
 			}
 			error = dlil_clat64(ifp, &protocol_family, &m);
-			data = (char *) mbuf_data(m);
+			data = mtod(m, char*);
 			if (error != 0) {
 				m_freem(m);
 				ip6stat.ip6s_clat464_in_drop++;
@@ -6541,7 +6172,7 @@ skip_clat:
 
 		/* run interface filters */
 		error = dlil_interface_filters_input(ifp, &m,
-		    &frame_header, protocol_family);
+		    &frame_header, protocol_family, skip_bridge_filter);
 		if (error != 0) {
 			if (error != EJUSTRETURN) {
 				m_freem(m);
@@ -6549,20 +6180,26 @@ skip_clat:
 			goto next;
 		}
 		/*
-		 * A VLAN interface receives VLAN-tagged packets by attaching
-		 * its PF_VLAN protocol to a parent interface. When a VLAN
-		 * interface is a member of a bridge, the parent interface
-		 * receives VLAN-tagged M_PROMISC packets. A VLAN-tagged
-		 * M_PROMISC packet must be processed by the VLAN protocol
-		 * so that it can be sent up the stack via
-		 * dlil_input_packet_list(). That allows the bridge interface's
-		 * input filter, attached to the VLAN interface, to process
-		 * the packet.
+		 * A VLAN and Bond interface receives packets by attaching
+		 * a "protocol" to the underlying interface.
+		 * A promiscuous packet needs to be delivered to the
+		 * VLAN or Bond interface since:
+		 * - Bond interface member may not support setting the
+		 *   MAC address, so packets are inherently "promiscuous"
+		 * - A VLAN or Bond interface could be members of a bridge,
+		 *   where promiscuous packets correspond to other
+		 *   devices that the bridge forwards packets to/from
 		 */
-		if (protocol_family != PF_VLAN &&
-		    (m->m_flags & M_PROMISC) != 0) {
-			m_freem(m);
-			goto next;
+		if ((m->m_flags & M_PROMISC) != 0) {
+			switch (protocol_family) {
+			case PF_VLAN:
+			case PF_BOND:
+				/* VLAN and Bond get promiscuous packets */
+				break;
+			default:
+				m_freem(m);
+				goto next;
+			}
 		}
 
 		/* Lookup the protocol attachment to this interface */
@@ -6900,13 +6537,13 @@ dlil_output_dtrace(ifnet_t ifp, protocol_family_t proto_family, mbuf_t  m)
  */
 errno_t
 dlil_output(ifnet_t ifp, protocol_family_t proto_family, mbuf_t packetlist,
-    void *route, const struct sockaddr *dest, int raw, struct flowadv *adv)
+    void *route, const struct sockaddr *dest, int flags, struct flowadv *adv)
 {
 	char *frame_type = NULL;
 	char *dst_linkaddr = NULL;
 	int retval = 0;
-	char frame_type_buffer[MAX_FRAME_TYPE_SIZE * 4];
-	char dst_linkaddr_buffer[MAX_LINKADDR * 4];
+	char frame_type_buffer[DLIL_MAX_FRAME_TYPE_BUFFER_SIZE];
+	char dst_linkaddr_buffer[DLIL_MAX_LINKADDR_BUFFER_SIZE];
 	struct if_proto *proto = NULL;
 	mbuf_t  m = NULL;
 	mbuf_t  send_head = NULL;
@@ -6922,6 +6559,7 @@ dlil_output(ifnet_t ifp, protocol_family_t proto_family, mbuf_t packetlist,
 	struct sockaddr_in6 dest6;
 	struct rtentry *rt = NULL;
 	u_int16_t m_loop_set = 0;
+	bool raw = (flags & DLIL_OUTPUT_FLAGS_RAW) != 0;
 
 	KERNEL_DEBUG(DBG_FNC_DLIL_OUTPUT | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
@@ -6946,7 +6584,7 @@ dlil_output(ifnet_t ifp, protocol_family_t proto_family, mbuf_t packetlist,
 	frame_type = frame_type_buffer;
 	dst_linkaddr = dst_linkaddr_buffer;
 
-	if (raw == 0) {
+	if (flags == DLIL_OUTPUT_FLAGS_NONE) {
 		ifnet_lock_shared(ifp);
 		/* callee holds a proto refcnt upon success */
 		proto = find_attached_proto(ifp, proto_family);
@@ -7034,7 +6672,7 @@ preout_again:
 	/*
 	 * This path gets packet chain going to the same destination.
 	 * The pre output routine is used to either trigger resolution of
-	 * the next hop or retreive the next hop's link layer addressing.
+	 * the next hop or retrieve the next hop's link layer addressing.
 	 * For ex: ether_inet(6)_pre_output routine.
 	 *
 	 * If the routine returns EJUSTRETURN, it implies that packet has
@@ -7048,7 +6686,7 @@ preout_again:
 	 * Else if there is no error the retrieved information is used for
 	 * all the packets in the chain.
 	 */
-	if (raw == 0) {
+	if (flags == DLIL_OUTPUT_FLAGS_NONE) {
 		proto_media_preout preoutp = (proto->proto_kpi == kProtoKPI_v1 ?
 		    proto->kpi.v1.pre_output : proto->kpi.v2.pre_output);
 		retval = 0;
@@ -7077,7 +6715,7 @@ preout_again:
 		 * used by the netif gso logic to retrieve the ip header
 		 * for the TCP packets, offloaded for TSO processing.
 		 */
-		if ((raw != 0) && (ifp->if_family == IFNET_FAMILY_ETHERNET)) {
+		if (raw && (ifp->if_family == IFNET_FAMILY_ETHERNET)) {
 			uint8_t vlan_encap_len = 0;
 
 			if ((m->m_pkthdr.csum_flags & CSUM_VLAN_ENCAP_PRESENT) != 0) {
@@ -7113,12 +6751,12 @@ preout_again:
 		}
 
 #if CONFIG_DTRACE
-		if (!raw) {
+		if (flags == DLIL_OUTPUT_FLAGS_NONE) {
 			dlil_output_dtrace(ifp, proto_family, m);
 		}
 #endif /* CONFIG_DTRACE */
 
-		if (raw == 0 && ifp->if_framer != NULL) {
+		if (flags == DLIL_OUTPUT_FLAGS_NONE && ifp->if_framer != NULL) {
 			int rcvif_set = 0;
 
 			/*
@@ -7177,12 +6815,14 @@ preout_again:
 		/*
 		 * Let interface filters (if any) do their thing ...
 		 */
-		retval = dlil_interface_filters_output(ifp, &m, proto_family);
-		if (retval != 0) {
-			if (retval != EJUSTRETURN) {
-				m_freem(m);
+		if ((flags & DLIL_OUTPUT_FLAGS_SKIP_IF_FILTERS) == 0) {
+			retval = dlil_interface_filters_output(ifp, &m, proto_family);
+			if (retval != 0) {
+				if (retval != EJUSTRETURN) {
+					m_freem(m);
+				}
+				goto next;
 			}
-			goto next;
 		}
 		/*
 		 * Strip away M_PROTO1 bit prior to sending packet
@@ -7457,9 +7097,9 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	struct ip *iph = NULL;
 	struct in_addr osrc, odst;
 	uint8_t proto = 0;
-	struct in6_ifaddr *ia6_clat_src = NULL;
+	struct in6_addr src_storage = {};
 	struct in6_addr *src = NULL;
-	struct in6_addr dst;
+	struct sockaddr_in6 dstsock = {};
 	int error = 0;
 	uint16_t off = 0;
 	uint16_t tot_len = 0;
@@ -7504,30 +7144,34 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	}
 
 	/*
+	 * Translate IPv4 destination to IPv6 destination by using the
+	 * prefixes learned through prior PLAT discovery.
+	 */
+	if ((error = nat464_synthesize_ipv6(ifp, &odst, &dstsock.sin6_addr)) != 0) {
+		ip6stat.ip6s_clat464_out_v6synthfail_drop++;
+		goto cleanup;
+	}
+
+	dstsock.sin6_len = sizeof(struct sockaddr_in6);
+	dstsock.sin6_family = AF_INET6;
+
+	/*
 	 * Retrive the local IPv6 CLAT46 address reserved for stateless
 	 * translation.
 	 */
-	ia6_clat_src = in6ifa_ifpwithflag(ifp, IN6_IFF_CLAT46);
-	if (ia6_clat_src == NULL) {
+	src = in6_selectsrc_core(&dstsock, 0, ifp, 0, &src_storage, NULL, &error,
+	    NULL, NULL, TRUE);
+
+	if (src == NULL) {
 		ip6stat.ip6s_clat464_out_nov6addr_drop++;
 		error = -1;
 		goto cleanup;
 	}
 
-	src = &ia6_clat_src->ia_addr.sin6_addr;
-
-	/*
-	 * Translate IPv4 destination to IPv6 destination by using the
-	 * prefixes learned through prior PLAT discovery.
-	 */
-	if ((error = nat464_synthesize_ipv6(ifp, &odst, &dst)) != 0) {
-		ip6stat.ip6s_clat464_out_v6synthfail_drop++;
-		goto cleanup;
-	}
 
 	/* Translate the IP header part first */
 	error = (nat464_translate_46(pbuf, off, iph->ip_tos, iph->ip_p,
-	    iph->ip_ttl, *src, dst, tot_len) == NT_NAT64) ? 0 : -1;
+	    iph->ip_ttl, src_storage, dstsock.sin6_addr, tot_len) == NT_NAT64) ? 0 : -1;
 
 	iph = NULL;     /* Invalidate iph as pbuf has been modified */
 
@@ -7559,10 +7203,6 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	}
 
 cleanup:
-	if (ia6_clat_src != NULL) {
-		ifa_remref(&ia6_clat_src->ia_ifa);
-	}
-
 	if (pbuf_is_valid(pbuf)) {
 		*m = pbuf->pb_mbuf;
 		pbuf->pb_mbuf = NULL;
@@ -8184,7 +7824,7 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	    IN_LINKLOCAL(ntohl(target_sin->sin_addr.s_addr)) &&
 	    ipv4_ll_arp_aware != 0 && arpop == ARPOP_REQUEST &&
 	    !_is_announcement(sender_sin, target_sin)) {
-		ifnet_t         *ifp_list;
+		ifnet_t         *__counted_by(count) ifp_list;
 		u_int32_t       count;
 		u_int32_t       ifp_on;
 
@@ -8244,7 +7884,7 @@ dlil_send_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 					result = new_result;
 				}
 			}
-			ifnet_list_free(ifp_list);
+			ifnet_list_free_counted_by(ifp_list, count);
 		}
 	} else {
 		result = dlil_send_arp_internal(ifp, arpop, sender_hw,
@@ -9280,6 +8920,7 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	VERIFY(ifp->if_delegated.subfamily == 0);
 	VERIFY(ifp->if_delegated.expensive == 0);
 	VERIFY(ifp->if_delegated.constrained == 0);
+	VERIFY(ifp->if_delegated.ultra_constrained == 0);
 
 	VERIFY(ifp->if_agentids == NULL);
 	VERIFY(ifp->if_agentcount == 0);
@@ -9928,7 +9569,7 @@ ifnet_detach_final(struct ifnet *ifp)
 	ifp->if_agentcount = 0;
 
 #if SKYWALK
-	VERIFY(SLIST_EMPTY(&ifp->if_netns_tokens));
+	VERIFY(LIST_EMPTY(&ifp->if_netns_tokens));
 #endif /* SKYWALK */
 	/* Drain and destroy send queue */
 	ifclassq_teardown(ifp->if_snd);
@@ -10169,6 +9810,7 @@ ifnet_detach_final(struct ifnet *ifp)
 	VERIFY(ifp->if_delegated.subfamily == 0);
 	VERIFY(ifp->if_delegated.expensive == 0);
 	VERIFY(ifp->if_delegated.constrained == 0);
+	VERIFY(ifp->if_delegated.ultra_constrained == 0);
 
 	/* QoS marking get cleared */
 	if_clear_eflags(ifp, IFEF_QOSMARKING_ENABLED);
@@ -10518,7 +10160,7 @@ dlil_if_acquire(u_int32_t family, const void *uniqueid,
 	ifp1->if_desc.ifd_desc = dlifp1->dl_if_descstorage;
 
 #if SKYWALK
-	SLIST_INIT(&ifp1->if_netns_tokens);
+	LIST_INIT(&ifp1->if_netns_tokens);
 #endif /* SKYWALK */
 
 	if ((ret = dlil_alloc_local_stats(ifp1)) != 0) {
@@ -10593,11 +10235,7 @@ _dlil_if_release(ifnet_t ifp, bool clear_in_use)
 	}
 
 	ifnet_lock_exclusive(ifp);
-	if (ifp->if_broadcast.length > sizeof(ifp->if_broadcast.u.buffer)) {
-		kfree_data(ifp->if_broadcast.u.ptr, ifp->if_broadcast.length);
-		ifp->if_broadcast.length = 0;
-		ifp->if_broadcast.u.ptr = NULL;
-	}
+	kfree_data_counted_by(ifp->if_broadcast.ptr, ifp->if_broadcast.length);
 	lck_mtx_lock(&dlifp->dl_if_lock);
 	strlcpy(dlifp->dl_if_namestorage, ifp->if_name, IFNAMSIZ);
 	ifp->if_name = dlifp->dl_if_namestorage;
@@ -11080,238 +10718,6 @@ uuid_get_ethernet(u_int8_t *node)
 	return ret;
 }
 
-static int
-sysctl_rxpoll SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint32_t i;
-	int err;
-
-	i = if_rxpoll;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (net_rxpoll == 0) {
-		return ENXIO;
-	}
-
-	if_rxpoll = i;
-	return err;
-}
-
-static int
-sysctl_rxpoll_mode_holdtime SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint64_t q;
-	int err;
-
-	q = if_rxpoll_mode_holdtime;
-
-	err = sysctl_handle_quad(oidp, &q, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (q < IF_RXPOLL_MODE_HOLDTIME_MIN) {
-		q = IF_RXPOLL_MODE_HOLDTIME_MIN;
-	}
-
-	if_rxpoll_mode_holdtime = q;
-
-	return err;
-}
-
-static int
-sysctl_rxpoll_sample_holdtime SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint64_t q;
-	int err;
-
-	q = if_rxpoll_sample_holdtime;
-
-	err = sysctl_handle_quad(oidp, &q, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (q < IF_RXPOLL_SAMPLETIME_MIN) {
-		q = IF_RXPOLL_SAMPLETIME_MIN;
-	}
-
-	if_rxpoll_sample_holdtime = q;
-
-	return err;
-}
-
-static int
-sysctl_rxpoll_interval_time SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint64_t q;
-	int err;
-
-	q = if_rxpoll_interval_time;
-
-	err = sysctl_handle_quad(oidp, &q, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (q < IF_RXPOLL_INTERVALTIME_MIN) {
-		q = IF_RXPOLL_INTERVALTIME_MIN;
-	}
-
-	if_rxpoll_interval_time = q;
-
-	return err;
-}
-
-static int
-sysctl_rxpoll_wlowat SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint32_t i;
-	int err;
-
-	i = if_sysctl_rxpoll_wlowat;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (i == 0 || i >= if_sysctl_rxpoll_whiwat) {
-		return EINVAL;
-	}
-
-	if_sysctl_rxpoll_wlowat = i;
-	return err;
-}
-
-static int
-sysctl_rxpoll_whiwat SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	uint32_t i;
-	int err;
-
-	i = if_sysctl_rxpoll_whiwat;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (i <= if_sysctl_rxpoll_wlowat) {
-		return EINVAL;
-	}
-
-	if_sysctl_rxpoll_whiwat = i;
-	return err;
-}
-
-static int
-sysctl_sndq_maxlen SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int i, err;
-
-	i = if_sndq_maxlen;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (i < IF_SNDQ_MINLEN) {
-		i = IF_SNDQ_MINLEN;
-	}
-
-	if_sndq_maxlen = i;
-	return err;
-}
-
-static int
-sysctl_rcvq_maxlen SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int i, err;
-
-	i = if_rcvq_maxlen;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (i < IF_RCVQ_MINLEN) {
-		i = IF_RCVQ_MINLEN;
-	}
-
-	if_rcvq_maxlen = i;
-	return err;
-}
-
-static int
-sysctl_rcvq_burst_limit SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int i, err;
-
-	i = if_rcvq_burst_limit;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-/*
- * Safeguard the burst limit to "sane" values on customer builds.
- */
-#if !(DEVELOPMENT || DEBUG)
-	if (i < IF_RCVQ_BURST_LIMIT_MIN) {
-		i = IF_RCVQ_BURST_LIMIT_MIN;
-	}
-
-	if (IF_RCVQ_BURST_LIMIT_MAX < i) {
-		i = IF_RCVQ_BURST_LIMIT_MAX;
-	}
-#endif
-
-	if_rcvq_burst_limit = i;
-	return err;
-}
-
-static int
-sysctl_rcvq_trim_pct SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int i, err;
-
-	i = if_rcvq_burst_limit;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (IF_RCVQ_TRIM_PCT_MAX < i) {
-		i = IF_RCVQ_TRIM_PCT_MAX;
-	}
-
-	if (i < IF_RCVQ_TRIM_PCT_MIN) {
-		i = IF_RCVQ_TRIM_PCT_MIN;
-	}
-
-	if_rcvq_trim_pct = i;
-	return err;
-}
-
 int
 dlil_node_present(struct ifnet *ifp, struct sockaddr *sa,
     int32_t rssi, int lqm, int npm, u_int8_t srvinfo[48])
@@ -11435,7 +10841,7 @@ dlil_node_present_v2(struct ifnet *ifp, struct sockaddr *sa, struct sockaddr_dl 
 	return ret;
 }
 
-const void * __indexable
+const void *
 dlil_ifaddr_bytes(const struct sockaddr_dl *sdl, size_t *sizep,
     kauth_cred_t *credp)
 {
@@ -11791,7 +11197,7 @@ ifnet_flowid(struct ifnet *ifp, uint32_t *flowid)
 errno_t
 ifnet_disable_output(struct ifnet *ifp)
 {
-	int err;
+	int err = 0;
 
 	if (ifp == NULL) {
 		return EINVAL;
@@ -11800,11 +11206,14 @@ ifnet_disable_output(struct ifnet *ifp)
 		return ENXIO;
 	}
 
-	if ((err = ifnet_fc_add(ifp)) == 0) {
-		lck_mtx_lock_spin(&ifp->if_start_lock);
+	lck_mtx_lock(&ifp->if_start_lock);
+	if (ifp->if_start_flags & IFSF_FLOW_RESUME_PENDING) {
+		ifp->if_start_flags &= ~(IFSF_FLOW_RESUME_PENDING | IFSF_FLOW_CONTROLLED);
+	} else if ((err = ifnet_fc_add(ifp)) == 0) {
 		ifp->if_start_flags |= IFSF_FLOW_CONTROLLED;
-		lck_mtx_unlock(&ifp->if_start_lock);
 	}
+	lck_mtx_unlock(&ifp->if_start_lock);
+
 	return err;
 }
 
@@ -11839,6 +11248,11 @@ ifnet_flowadv(uint32_t flowhash)
 	/* flow hash gets recalculated per attach, so check */
 	if (ifnet_is_attached(ifp, 1)) {
 		if (ifp->if_flowhash == flowhash) {
+			lck_mtx_lock_spin(&ifp->if_start_lock);
+			if ((ifp->if_start_flags & IFSF_FLOW_CONTROLLED) == 0) {
+				ifp->if_start_flags |= IFSF_FLOW_RESUME_PENDING;
+			}
+			lck_mtx_unlock(&ifp->if_start_lock);
 			(void) ifnet_enable_output(ifp);
 		}
 		ifnet_decr_iorefcnt(ifp);
@@ -12370,96 +11784,6 @@ dlil_input_cksum_dbg(struct ifnet *ifp, struct mbuf *m, char *frame_header,
 	}
 }
 
-static int
-sysctl_hwcksum_dbg_mode SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	u_int32_t i;
-	int err;
-
-	i = hwcksum_dbg_mode;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (hwcksum_dbg == 0) {
-		return ENODEV;
-	}
-
-	if ((i & ~HWCKSUM_DBG_MASK) != 0) {
-		return EINVAL;
-	}
-
-	hwcksum_dbg_mode = (i & HWCKSUM_DBG_MASK);
-
-	return err;
-}
-
-static int
-sysctl_hwcksum_dbg_partial_rxoff_forced SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	u_int32_t i;
-	int err;
-
-	i = hwcksum_dbg_partial_rxoff_forced;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (!(hwcksum_dbg_mode & HWCKSUM_DBG_PARTIAL_FORCED)) {
-		return ENODEV;
-	}
-
-	hwcksum_dbg_partial_rxoff_forced = i;
-
-	return err;
-}
-
-static int
-sysctl_hwcksum_dbg_partial_rxoff_adj SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	u_int32_t i;
-	int err;
-
-	i = hwcksum_dbg_partial_rxoff_adj;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL) {
-		return err;
-	}
-
-	if (!(hwcksum_dbg_mode & HWCKSUM_DBG_PARTIAL_RXOFF_ADJ)) {
-		return ENODEV;
-	}
-
-	hwcksum_dbg_partial_rxoff_adj = i;
-
-	return err;
-}
-
-static int
-sysctl_tx_chain_len_stats SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	int err;
-
-	if (req->oldptr == USER_ADDR_NULL) {
-	}
-	if (req->newptr != USER_ADDR_NULL) {
-		return EPERM;
-	}
-	err = SYSCTL_OUT(req, &tx_chain_len_stats,
-	    sizeof(struct chain_len_stats));
-
-	return err;
-}
-
 #if DEBUG || DEVELOPMENT
 /* Blob for sum16 verification */
 static uint8_t sumdata[] = {
@@ -12692,107 +12016,6 @@ ifnet_notify_data_threshold(struct ifnet *ifp)
 	}
 }
 
-#if (DEVELOPMENT || DEBUG)
-/*
- * The sysctl variable name contains the input parameters of
- * ifnet_get_keepalive_offload_frames()
- *  ifp (interface index): name[0]
- *  frames_array_count:    name[1]
- *  frame_data_offset:     name[2]
- * The return length gives used_frames_count
- */
-static int
-sysctl_get_kao_frames SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp)
-	int *name = (int *)arg1;
-	u_int namelen = arg2;
-	int idx;
-	ifnet_t ifp = NULL;
-	u_int32_t frames_array_count;
-	size_t frame_data_offset;
-	u_int32_t used_frames_count;
-	struct ifnet_keepalive_offload_frame *frames_array = NULL;
-	int error = 0;
-	u_int32_t i;
-
-	/*
-	 * Only root can get look at other people TCP frames
-	 */
-	error = proc_suser(current_proc());
-	if (error != 0) {
-		goto done;
-	}
-	/*
-	 * Validate the input parameters
-	 */
-	if (req->newptr != USER_ADDR_NULL) {
-		error = EPERM;
-		goto done;
-	}
-	if (namelen != 3) {
-		error = EINVAL;
-		goto done;
-	}
-	if (req->oldptr == USER_ADDR_NULL) {
-		error = EINVAL;
-		goto done;
-	}
-	if (req->oldlen == 0) {
-		error = EINVAL;
-		goto done;
-	}
-	idx = name[0];
-	frames_array_count = name[1];
-	frame_data_offset = name[2];
-
-	/* Make sure the passed buffer is large enough */
-	if (frames_array_count * sizeof(struct ifnet_keepalive_offload_frame) >
-	    req->oldlen) {
-		error = ENOMEM;
-		goto done;
-	}
-
-	ifnet_head_lock_shared();
-	if (!IF_INDEX_IN_RANGE(idx)) {
-		ifnet_head_done();
-		error = ENOENT;
-		goto done;
-	}
-	ifp = ifindex2ifnet[idx];
-	ifnet_head_done();
-
-	frames_array = (struct ifnet_keepalive_offload_frame *)kalloc_data(
-		frames_array_count * sizeof(struct ifnet_keepalive_offload_frame),
-		Z_WAITOK);
-	if (frames_array == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
-
-	error = ifnet_get_keepalive_offload_frames(ifp, frames_array,
-	    frames_array_count, frame_data_offset, &used_frames_count);
-	if (error != 0) {
-		DLIL_PRINTF("%s: ifnet_get_keepalive_offload_frames error %d\n",
-		    __func__, error);
-		goto done;
-	}
-
-	for (i = 0; i < used_frames_count; i++) {
-		error = SYSCTL_OUT(req, frames_array + i,
-		    sizeof(struct ifnet_keepalive_offload_frame));
-		if (error != 0) {
-			goto done;
-		}
-	}
-done:
-	if (frames_array != NULL) {
-		kfree_data(frames_array, frames_array_count *
-		    sizeof(struct ifnet_keepalive_offload_frame));
-	}
-	return error;
-}
-#endif /* DEVELOPMENT || DEBUG */
 
 void
 ifnet_update_stats_per_flow(struct ifnet_stats_per_flow *ifs,
@@ -12887,7 +12110,7 @@ log_hexdump(void *data, size_t len)
 	}
 }
 
-#if SKYWALK && defined(XNU_TARGET_OS_OSX)
+#if SKYWALK
 static bool
 net_check_compatible_if_filter(struct ifnet *ifp)
 {
@@ -12902,7 +12125,7 @@ net_check_compatible_if_filter(struct ifnet *ifp)
 	}
 	return true;
 }
-#endif /* SKYWALK && XNU_TARGET_OS_OSX */
+#endif /* SKYWALK */
 
 #define DUMP_BUF_CHK() {        \
 	clen -= k;              \

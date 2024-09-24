@@ -118,7 +118,7 @@ listener_thread(void *unused)
 	}
 }
 
-T_DECL(v4mappedv6_recvpktinfo, "Test setting and using IPV6_RECVPKTINFO on a v4-mapped-v6 address socket")
+T_DECL(v4mappedv6_recvpktinfo, "Test setting and using IPV6_RECVPKTINFO on a v4-mapped-v6 address socket", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t t;
 	sem_init(&mutex, 0, 1);

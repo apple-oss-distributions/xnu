@@ -77,7 +77,7 @@ pty_master(void)
 
 T_DECL(pty_master_teardown,
     "try removing a TTY master out from under a PTY slave holding a kevent",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	__block pid_t master_pid;
 	char buf[16] = "";
@@ -229,7 +229,7 @@ redispatch(dispatch_group_t grp, dispatch_source_type_t type, int fd)
 }
 
 T_DECL(attach_while_tty_wakeups,
-    "try to attach knotes while a TTY is getting wakeups")
+    "try to attach knotes while a TTY is getting wakeups", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_group_t grp = dispatch_group_create();
 
@@ -255,7 +255,7 @@ T_DECL(attach_while_tty_wakeups,
 }
 
 T_DECL(master_read_data_set,
-    "check that the data is set on read sources of master fds")
+    "check that the data is set on read sources of master fds", T_META_TAG_VM_PREFERRED)
 {
 	int master = -1, slave = -1;
 

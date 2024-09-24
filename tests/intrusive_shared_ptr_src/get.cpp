@@ -44,7 +44,7 @@ tests()
 	static_assert(!can_call_get_on_temporary<T>(int{}), "");
 }
 
-T_DECL(get, "intrusive_shared_ptr.get") {
+T_DECL(get, "intrusive_shared_ptr.get", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

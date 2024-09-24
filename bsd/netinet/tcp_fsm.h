@@ -139,7 +139,7 @@ int     tcp_acounts[TCP_NSTATES][PRU_NREQ];
 #endif
 
 #ifdef  TCPSTATES
-char *tcpstates[] = {
+static char *tcpstates[] = {
 	"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD",
 	"ESTABLISHED", "CLOSE_WAIT", "FIN_WAIT_1", "CLOSING",
 	"LAST_ACK", "FIN_WAIT_2", "TIME_WAIT"

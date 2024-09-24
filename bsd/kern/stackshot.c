@@ -32,11 +32,21 @@
 #include <pexpert/device_tree.h>
 #include <pexpert/pexpert.h>
 #include <os/log.h>
+#include <vm/vm_kern_xnu.h>
 #include <IOKit/IOBSD.h>
 
 extern uint32_t stackshot_estimate_adj;
 EXPERIMENT_FACTOR_UINT(_kern, stackshot_estimate_adj, &stackshot_estimate_adj, 0, 100,
     "adjust stackshot estimates up by this percentage");
+
+extern unsigned int stackshot_single_thread;
+
+#if DEVELOPMENT || DEBUG
+SYSCTL_UINT(_kern, OID_AUTO, stackshot_single_thread, CTLFLAG_RW | CTLFLAG_LOCKED, &stackshot_single_thread, 1, "Single-threaded stackshots");
+#else
+SYSCTL_UINT(_kern, OID_AUTO, stackshot_single_thread, CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, &stackshot_single_thread, 1, "Single-threaded stackshots");
+#endif
+
 
 #define SSHOT_ANALYTICS_PERIOD_HOURS       1
 
@@ -46,8 +56,13 @@ enum stackshot_report_setting {
 	STACKSHOT_REPORT_ALL = 2,       /* always report */
 };
 
+#if XNU_TARGET_OS_XR
+#define STACKSHOT_ENTITLEMENT_REPORT STACKSHOT_REPORT_ALL
+#define STACKSHOT_ENTITLEMENT_REFUSE true
+#else
 #define STACKSHOT_ENTITLEMENT_REPORT STACKSHOT_REPORT_ALL
 #define STACKSHOT_ENTITLEMENT_REFUSE false
+#endif
 /*
  * Controls for Stackshot entitlement; changable with boot args
  *    stackshot_entitlement_report=0 or 1 or 2  (send CoreAnalytics when called without entitlement(1) or always(2))
@@ -620,3 +635,91 @@ kern_stack_snapshot_with_reason(__unused char *reason)
 	kr = kern_stack_snapshot_internal(STACKSHOT_CONFIG_TYPE, &config, sizeof(stackshot_config_t), FALSE);
 	return stackshot_kern_return_to_bsd_error(kr);
 }
+
+#if DEBUG || DEVELOPMENT
+static int
+stackshot_dirty_buffer_test(__unused int64_t in, int64_t *out)
+{
+	uint64_t ss_flags = STACKSHOT_KCDATA_FORMAT | STACKSHOT_NO_IO_STATS | STACKSHOT_SAVE_KEXT_LOADINFO | STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY | STACKSHOT_THREAD_WAITINFO | STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL;
+	unsigned ss_bytes = 0;
+	vm_offset_t buf = 0;
+	kern_return_t kr;
+
+	// 8MB buffer
+	kr = kmem_alloc(kernel_map, &buf, 8 * 1024 * 1024, KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG);
+	if (kr != KERN_SUCCESS) {
+		printf("stackshot_dirty_buffer_test: kmem_alloc returned %d\n", kr);
+		goto err;
+	}
+	// scribble pattern into buffer for easy identification
+	memset((char *)buf, 0xAA, 8 * 1024 * 1024);
+
+	kr = stack_snapshot_from_kernel(0, (char *)buf, 8 * 1024 * 1024, ss_flags, 0, 0, &ss_bytes);
+	if (kr != KERN_SUCCESS) {
+		printf("stackshot_dirty_buffer_test: stackshot returned %d\n", kr);
+		goto err;
+	}
+
+	if (ss_bytes == 0) {
+		*out = -2;
+		printf("stackshot_dirty_buffer_test: stackshot was empty but did not fail\n");
+		goto end;
+	}
+
+	printf("stackshot_dirty_buffer_test: captured %u bytes\n", ss_bytes);
+
+err:
+	*out = (kr == KERN_SUCCESS) ? 1 : -1;
+end:
+	if (buf != 0) {
+		kmem_free(kernel_map, buf, 8 * 1024 * 1024);
+	}
+	return KERN_SUCCESS;
+}
+SYSCTL_TEST_REGISTER(stackshot_dirty_buffer, stackshot_dirty_buffer_test);
+
+static int
+stackshot_kernel_initiator_test(int64_t in, int64_t *out)
+{
+	kern_return_t kr = KERN_SUCCESS;
+	vm_offset_t buf = 0;
+	uint64_t ss_flags = STACKSHOT_KCDATA_FORMAT | STACKSHOT_NO_IO_STATS | STACKSHOT_SAVE_KEXT_LOADINFO | STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY | STACKSHOT_THREAD_WAITINFO | STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL;
+	unsigned ss_bytes = 0;
+	if (in == 1) {
+		kr = kmem_alloc(kernel_map, &buf, 8 * 1024 * 1024, KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG);
+		if (kr != KERN_SUCCESS) {
+			printf("stackshot_kernel_initiator_test: kmem_alloc returned %d\n", kr);
+			goto err;
+		}
+
+		kr = stack_snapshot_from_kernel(0, (char *)buf, 8 * 1024 * 1024, ss_flags, 0, 0, &ss_bytes);
+		if (kr != KERN_SUCCESS) {
+			printf("stackshot_kernel_initiator_test: stackshot returned %d\n", kr);
+			goto err;
+		}
+
+		if (ss_bytes == 0) {
+			*out = -2;
+			printf("stackshot_kernel_initiator_test: stackshot was empty but did not fail\n");
+			goto end;
+		}
+	} else if (in == 2) {
+		kr = kern_stack_snapshot_with_reason("");
+		if (kr != KERN_SUCCESS) {
+			printf("stackshot_kernel_initiator_test: kern_stack_snapshot_with_reason failed: %d\n", kr);
+			goto err;
+		}
+	} else {
+		return KERN_NOT_SUPPORTED;
+	}
+
+err:
+	*out = (kr == KERN_SUCCESS) ? 1 : -1;
+end:
+	if (buf != 0) {
+		kmem_free(kernel_map, buf, 8 * 1024 * 1024);
+	}
+	return KERN_SUCCESS;
+}
+SYSCTL_TEST_REGISTER(stackshot_kernel_initiator, stackshot_kernel_initiator_test);
+#endif /* DEBUG || DEVELOPMENT */

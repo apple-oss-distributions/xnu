@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -221,7 +221,7 @@ int
 in6_cga_start(const struct in6_cga_nodecfg *cfg)
 {
 	struct iovec privkey, pubkey;
-	const struct in6_cga_prepare *prepare;
+	const struct in6_cga_prepare *__single prepare;
 	caddr_t pubkeycopy, privkeycopy;
 
 	VERIFY(cfg != NULL);
@@ -258,14 +258,16 @@ in6_cga_start(const struct in6_cga_nodecfg *cfg)
 		return ENOMEM;
 	}
 
-	bcopy(privkey.iov_base, privkeycopy, privkey.iov_len);
+	bcopy(__unsafe_forge_bidi_indexable(void *, privkey.iov_base, privkey.iov_len), privkeycopy, privkey.iov_len);
+
 	privkey.iov_base = privkeycopy;
 	if (in6_cga.cga_privkey.iov_base != NULL) {
 		kfree_data(in6_cga.cga_privkey.iov_base, in6_cga.cga_privkey.iov_len);
 	}
 	in6_cga.cga_privkey = privkey;
 
-	bcopy(pubkey.iov_base, pubkeycopy, pubkey.iov_len);
+	bcopy(__unsafe_forge_bidi_indexable(void *, pubkey.iov_base, pubkey.iov_len), pubkeycopy, pubkey.iov_len);
+
 	pubkey.iov_base = pubkeycopy;
 	if (in6_cga.cga_pubkey.iov_base != NULL) {
 		kfree_data(in6_cga.cga_pubkey.iov_base, in6_cga.cga_pubkey.iov_len);
@@ -295,57 +297,12 @@ in6_cga_stop(void)
 	return 0;
 }
 
-ssize_t
-in6_cga_parameters_prepare(void *output, size_t max,
-    const struct in6_addr *prefix, u_int8_t collisions,
-    const struct in6_cga_modifier *modifier)
-{
-	caddr_t cursor;
-
-	in6_cga_node_lock_assert(LCK_MTX_ASSERT_OWNED);
-
-	if (in6_cga.cga_pubkey.iov_len == 0) {
-		/* No public key */
-		return EINVAL;
-	}
-
-	if (output == NULL ||
-	    max < in6_cga.cga_pubkey.iov_len + sizeof(modifier->octets) + 9) {
-		/* Output buffer error */
-		return EINVAL;
-	}
-
-	cursor = output;
-	if (modifier == NULL) {
-		modifier = &in6_cga.cga_prepare.cga_modifier;
-	}
-	if (prefix == NULL) {
-		static const struct in6_addr llprefix = {{{ 0xfe, 0x80 }}};
-		prefix = &llprefix;
-	}
-
-	bcopy(&modifier->octets, cursor, sizeof(modifier->octets));
-	cursor += sizeof(modifier->octets);
-
-	*cursor++ = (char) collisions;
-
-	bcopy(&prefix->s6_addr[0], cursor, 8);
-	cursor += 8;
-
-	bcopy(in6_cga.cga_pubkey.iov_base, cursor, in6_cga.cga_pubkey.iov_len);
-	cursor += in6_cga.cga_pubkey.iov_len;
-
-	/* FUTURE: Extension fields */
-
-	return (ssize_t)(cursor - (caddr_t)output);
-}
-
 int
 in6_cga_generate(struct in6_cga_prepare *prepare, u_int8_t collisions,
     struct in6_addr *in6, struct ifnet *ifp)
 {
 	int error;
-	const struct iovec *pubkey;
+	const struct iovec *__single pubkey;
 
 	in6_cga_node_lock_assert(LCK_MTX_ASSERT_OWNED);
 	VERIFY(in6 != NULL);

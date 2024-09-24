@@ -31,6 +31,7 @@
 #if CONFIG_EXCLAVES
 
 #include <mach/kern_return.h>
+#include <vm/pmap.h>
 
 __BEGIN_DECLS
 
@@ -52,6 +53,9 @@ exclaves_panic_thread_wait(void);
 
 extern kern_return_t
 exclaves_panic_thread_setup(void);
+
+void
+handle_response_panic_buffer_address(pmap_paddr_t address);
 
 __END_DECLS
 

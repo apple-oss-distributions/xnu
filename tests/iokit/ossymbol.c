@@ -24,7 +24,7 @@ run_sysctl_test(const char *t, int64_t value)
 	return result;
 }
 
-T_DECL(symbol_basic, "Basic tests around OSSymbols")
+T_DECL(symbol_basic, "Basic tests around OSSymbols", T_META_TAG_VM_NOT_PREFERRED)
 {
 	for (ssize_t size = 32; size <= 32 * 64 * 64; size *= 64) {
 		T_EXPECT_EQ(1ll,

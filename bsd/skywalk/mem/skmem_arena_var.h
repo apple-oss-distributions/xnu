@@ -159,7 +159,8 @@ struct skmem_arena_nexus {
 	 * the object that we allocate from that region.  An arena contains
 	 * at most one monolithic stats region.
 	 */
-	void                    *arn_stats_obj; /* adapter stats object */
+	void                    *__sized_by(arn_stats_obj_size)arn_stats_obj;
+	size_t                  arn_stats_obj_size;
 
 	/*
 	 * Flow advisory.
@@ -169,7 +170,8 @@ struct skmem_arena_nexus {
 	 * the object that we allocate from that region.  An arena contains
 	 * at most one monolithic flow advisory region.
 	 */
-	struct __flowadv_entry  *arn_flowadv_obj;
+	struct __flowadv_entry  *__counted_by(arn_flowadv_entries)arn_flowadv_obj;
+	size_t                  arn_flowadv_entries;
 
 	/*
 	 * Nexus advisory.

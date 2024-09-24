@@ -52,6 +52,7 @@
  */
 
 #define EXC_ARM_UNDEFINED       1       /* Undefined */
+#define EXC_ARM_SME_DISALLOWED  2       /* Current thread state prohibits use of SME resources */
 
 /*
  *      EXC_ARITHMETIC

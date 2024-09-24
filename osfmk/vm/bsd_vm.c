@@ -49,20 +49,19 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
+#include <vm/vm_pageout_internal.h>
+#include <vm/memory_object_internal.h>
 #include <vm/vm_pageout.h>
-#include <vm/memory_object.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
 #include <vm/vm_purgeable_internal.h>
+#include <vm/vm_ubc.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_object_internal.h>
 
 #include <sys/kdebug_triage.h>
 
 /* BSD VM COMPONENT INTERFACES */
-int
-get_map_nentries(
-	vm_map_t);
-
 int
 get_map_nentries(
 	vm_map_t map)
@@ -225,7 +224,7 @@ memory_object_control_uiomove(
 				if (cur_run) {
 					break;
 				}
-				PAGE_SLEEP(object, dst_page, THREAD_UNINT);
+				vm_page_sleep(object, dst_page, THREAD_UNINT, LCK_SLEEP_EXCLUSIVE);
 				continue;
 			}
 			if (dst_page->vmp_laundry) {
@@ -317,7 +316,7 @@ memory_object_control_uiomove(
 				VM_PAGE_CONSUME_CLUSTERED(dst_page);
 			}
 
-			PAGE_WAKEUP_DONE(dst_page);
+			vm_page_wakeup_done(object, dst_page);
 		}
 		orig_offset = 0;
 	}
@@ -325,6 +324,17 @@ memory_object_control_uiomove(
 	return retval;
 }
 
+
+bool
+memory_object_is_vnode_pager(
+	memory_object_t mem_obj)
+{
+	if (mem_obj != NULL &&
+	    mem_obj->mo_pager_ops == &vnode_pager_ops) {
+		return true;
+	}
+	return false;
+}
 
 /*
  *
@@ -830,7 +840,7 @@ vnode_pager_cluster_read(
 /*
  *       if(kret == PAGER_ABSENT) {
  *       Need to work out the defs here, 1 corresponds to PAGER_ABSENT
- *       defined in bsd/vm/vm_pager.h  However, we should not be including
+ *       defined in bsd/vm/vm_pager_xnu.h  However, we should not be including
  *       that file here it is a layering violation.
  */
 	if (kret == 1) {
@@ -927,7 +937,7 @@ vnode_pager_lookup_vnode(
 
 #include <sys/bsdtask_info.h>
 
-static int fill_vnodeinfoforaddr( vm_map_entry_t entry, uintptr_t * vnodeaddr, uint32_t * vid);
+static int fill_vnodeinfoforaddr( vm_map_entry_t entry, uintptr_t * vnodeaddr, uint32_t * vid, bool *is_map_shared);
 
 int
 fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *pinfo, uintptr_t *vnodeaddr, uint32_t  *vid)
@@ -1055,10 +1065,6 @@ fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *
 
 	vm_map_region_walk(map, start, entry, VME_OFFSET(entry), entry->vme_end - start, &extended, TRUE, VM_REGION_EXTENDED_INFO_COUNT);
 
-	if (extended.external_pager && extended.ref_count == 2 && extended.share_mode == SM_SHARED) {
-		extended.share_mode = SM_PRIVATE;
-	}
-
 	top.private_pages_resident = 0;
 	top.shared_pages_resident = 0;
 	vm_map_region_top_walk(entry, &top);
@@ -1083,7 +1089,7 @@ fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *
 	if ((vnodeaddr != 0) && (entry->is_sub_map == 0)) {
 		*vnodeaddr = (uintptr_t)0;
 
-		if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid) == 0) {
+		if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid, NULL) == 0) {
 			vm_map_unlock_read(map);
 			vm_map_deallocate(map);
 			return 1;
@@ -1129,7 +1135,7 @@ fill_procregioninfo_onlymappedvnodes(task_t task, uint64_t arg, struct proc_regi
 		*vid = 0;
 
 		if (entry->is_sub_map == 0) {
-			if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid)) {
+			if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid, NULL)) {
 				pinfo->pri_offset = VME_OFFSET(entry);
 				pinfo->pri_protection = entry->protection;
 				pinfo->pri_max_protection = entry->max_protection;
@@ -1173,14 +1179,31 @@ fill_procregioninfo_onlymappedvnodes(task_t task, uint64_t arg, struct proc_regi
 	return 0;
 }
 
+extern int vnode_get(struct vnode *vp);
 int
-find_region_details(task_t task, vm_map_offset_t offset,
-    uintptr_t *vnodeaddr, uint32_t *vid,
-    uint64_t *start, uint64_t *len)
+task_find_region_details(
+	task_t task,
+	vm_map_offset_t offset,
+	find_region_details_options_t options,
+	uintptr_t *vp_p,
+	uint32_t *vid_p,
+	bool *is_map_shared_p,
+	uint64_t *start_p,
+	uint64_t *len_p)
 {
 	vm_map_t        map;
-	vm_map_entry_t  tmp_entry, entry;
-	int             rc = 0;
+	vm_map_entry_t  entry;
+	int             rc;
+
+	rc = 0;
+	*vp_p = 0;
+	*vid_p = 0;
+	*is_map_shared_p = false;
+	*start_p = 0;
+	*len_p = 0;
+	if (options & ~FIND_REGION_DETAILS_OPTIONS_ALL) {
+		return 0;
+	}
 
 	task_lock(task);
 	map = task->map;
@@ -1192,31 +1215,47 @@ find_region_details(task_t task, vm_map_offset_t offset,
 	task_unlock(task);
 
 	vm_map_lock_read(map);
-	if (!vm_map_lookup_entry_allow_pgz(map, offset, &tmp_entry)) {
-		if ((entry = tmp_entry->vme_next) == vm_map_to_entry(map)) {
-			rc = 0;
+	if (!vm_map_lookup_entry_allow_pgz(map, offset, &entry)) {
+		if (options & FIND_REGION_DETAILS_AT_OFFSET) {
+			/* no mapping at this offset */
 			goto ret;
 		}
-	} else {
-		entry = tmp_entry;
+		/* check next entry */
+		entry = entry->vme_next;
+		if (entry == vm_map_to_entry(map)) {
+			/* no next entry */
+			goto ret;
+		}
 	}
 
-	while (entry != vm_map_to_entry(map)) {
-		*vnodeaddr = 0;
-		*vid = 0;
-		*start = 0;
-		*len = 0;
-
-		if (entry->is_sub_map == 0) {
-			if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid)) {
-				*start = entry->vme_start;
-				*len = entry->vme_end - entry->vme_start;
-				rc = 1;
-				goto ret;
+	for (;
+	    entry != vm_map_to_entry(map);
+	    entry = entry->vme_next) {
+		if (entry->is_sub_map) {
+			/* fallthru to check next entry */
+		} else if (fill_vnodeinfoforaddr(entry, vp_p, vid_p, is_map_shared_p)) {
+			if ((options & FIND_REGION_DETAILS_GET_VNODE) &&
+			    vnode_get((struct vnode *)*vp_p)) {
+				/* tried but could not get an iocount */
+				*vp_p = 0;
+				*vid_p = 0;
+				if (options & FIND_REGION_DETAILS_AT_OFFSET) {
+					/* done */
+					break;
+				}
+				/* check next entry */
+				continue;
 			}
+			*start_p = entry->vme_start;
+			*len_p = entry->vme_end - entry->vme_start;
+			rc = 1; /* success */
+			break;
 		}
-
-		entry = entry->vme_next;
+		if (options & FIND_REGION_DETAILS_AT_OFFSET) {
+			/* no file mapping at this offset: done */
+			break;
+		}
+		/* check next entry */
 	}
 
 ret:
@@ -1229,7 +1268,8 @@ static int
 fill_vnodeinfoforaddr(
 	vm_map_entry_t                  entry,
 	uintptr_t * vnodeaddr,
-	uint32_t * vid)
+	uint32_t * vid,
+	bool *is_map_shared)
 {
 	vm_object_t     top_object, object;
 	memory_object_t memory_object;
@@ -1286,6 +1326,9 @@ fill_vnodeinfoforaddr(
 			vm_object_unlock(object);
 			return 0;
 		}
+	}
+	if (is_map_shared) {
+		*is_map_shared = (shadow_depth == 0);
 	}
 	vm_object_unlock(object);
 	return 1;

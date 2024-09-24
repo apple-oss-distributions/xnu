@@ -131,6 +131,7 @@
 #include <kern/policy_internal.h>
 #include <kern/exc_guard.h>
 #include <kern/backtrace.h>
+#include <vm/vm_map_xnu.h>
 
 #include <vm/vm_protos.h>
 #include <os/log.h>
@@ -228,26 +229,6 @@ kern_return_t sys_perf_notify(thread_t thread, int pid);
 kern_return_t task_exception_notify(exception_type_t exception,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode, bool fatal);
 void    delay(int);
-
-#if __has_feature(ptrauth_calls)
-int exit_with_pac_exception(proc_t p, exception_type_t exception, mach_exception_code_t code,
-    mach_exception_subcode_t subcode);
-#endif /* __has_feature(ptrauth_calls) */
-
-int exit_with_guard_exception(proc_t p, mach_exception_data_type_t code,
-    mach_exception_data_type_t subcode);
-int exit_with_port_space_exception(proc_t p, mach_exception_data_type_t code,
-    mach_exception_data_type_t subcode);
-static int exit_with_mach_exception(proc_t p, os_reason_t reason, exception_type_t exception,
-    mach_exception_code_t code, mach_exception_subcode_t subcode);
-
-#if CONFIG_EXCLAVES
-int
-exit_with_exclave_exception(proc_t p);
-#endif /* CONFIG_EXCLAVES */
-
-int
-exit_with_jit_exception(proc_t p);
 
 #if DEVELOPMENT || DEBUG
 static LCK_GRP_DECLARE(proc_exit_lpexit_spin_lock_grp, "proc_exit_lpexit_spin");
@@ -843,6 +824,17 @@ populate_corpse_crashinfo(proc_t p, task_t corpse_task, struct rusage_superset *
 		kcdata_memcpy(crash_info_ptr, uaddr, &trust, sizeof(trust));
 	}
 
+	uint64_t jit_start_addr = 0;
+	uint64_t jit_end_addr = 0;
+	kern_return_t ret = get_jit_address_range_kdp(get_task_pmap(corpse_task), (uintptr_t*)&jit_start_addr, (uintptr_t*)&jit_end_addr);
+	if (KERN_SUCCESS == ret) {
+		struct crashinfo_jit_address_range range = {};
+		range.start_address = jit_start_addr;
+		range.end_address = jit_end_addr;
+		if (KERN_SUCCESS == kcdata_get_memory_addr(crash_info_ptr, TASK_CRASHINFO_JIT_ADDRESS_RANGE, sizeof(struct crashinfo_jit_address_range), &uaddr)) {
+			kcdata_memcpy(crash_info_ptr, uaddr, &range, sizeof(range));
+		}
+	}
 
 	if (p->p_exit_reason != OS_REASON_NULL && reason == OS_REASON_NULL) {
 		reason = p->p_exit_reason;
@@ -1864,12 +1856,13 @@ proc_handle_critical_exit(proc_t p, int rv)
 	proc_crash_coredump(p);
 
 	sync(p, (void *)NULL, (int *)NULL);
+	const uint64_t panic_options_mask = DEBUGGER_OPTION_INITPROC_PANIC | DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC;
 
 	if (p->p_exit_reason == OS_REASON_NULL) {
-		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
+		panic_with_options(0, NULL, panic_options_mask, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
 		    prefix_str, WTERMSIG(rv), WEXITSTATUS(rv), ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""));
 	} else {
-		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s %s -- exit reason namespace %d subcode 0x%llx description: %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
+		panic_with_options(0, NULL, panic_options_mask, "%s %s -- exit reason namespace %d subcode 0x%llx description: %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
 		    ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""),
 		    prefix_str, p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
 		    exit_reason_desc ? exit_reason_desc : "none");
@@ -1942,7 +1935,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 
 #if (DEVELOPMENT || DEBUG)
 		if (p->p_pid <= exception_log_max_pid) {
-			char *proc_name = proc_best_name(p);
+			const char *proc_name = proc_best_name(p);
 			if (PROC_HAS_EXITREASON(p)) {
 				record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_PROCESS, "process exit",
 				    "pid: %d -- process name: %s -- exit reason namespace: %d -- subcode: 0x%llx -- description: %s",
@@ -3522,77 +3515,88 @@ kdp_wait4_find_process(thread_t thread, __unused event64_t wait_event, thread_wa
 	waitinfo->owner = args->pid;
 }
 
-int
-exit_with_guard_exception(
-	proc_t p,
-	mach_exception_data_type_t code,
-	mach_exception_data_type_t subcode)
-{
-	os_reason_t reason = os_reason_create(OS_REASON_GUARD, (uint64_t)code);
-	assert(reason != OS_REASON_NULL);
-
-	return exit_with_mach_exception(p, reason, EXC_GUARD, code, subcode);
-}
-
-#if __has_feature(ptrauth_calls)
-int
-exit_with_pac_exception(proc_t p, exception_type_t exception, mach_exception_code_t code,
-    mach_exception_subcode_t subcode)
-{
-	os_reason_t reason = os_reason_create(OS_REASON_PAC_EXCEPTION, (uint64_t)code);
-	assert(reason != OS_REASON_NULL);
-
-	return exit_with_mach_exception(p, reason, exception, code, subcode);
-}
-#endif /* __has_feature(ptrauth_calls) */
-
-int
-exit_with_port_space_exception(proc_t p, mach_exception_data_type_t code,
-    mach_exception_data_type_t subcode)
-{
-	os_reason_t reason = os_reason_create(OS_REASON_PORT_SPACE, (uint64_t)code);
-	assert(reason != OS_REASON_NULL);
-
-	return exit_with_mach_exception(p, reason, EXC_RESOURCE, code, subcode);
-}
-
 static int
-exit_with_mach_exception(proc_t p, os_reason_t reason, exception_type_t exception, mach_exception_code_t code,
-    mach_exception_subcode_t subcode)
+exit_with_exception_internal(
+	struct proc *p,
+	exception_info_t exception,
+	uint32_t flags)
 {
-	thread_t self = current_thread();
-	struct uthread *ut = get_bsdthread_info(self);
+	os_reason_t reason = OS_REASON_NULL;
+	struct uthread *ut = NULL;
 
-	ut->uu_exception = exception;
-	ut->uu_code = code;
-	ut->uu_subcode = subcode;
+	if (p == PROC_NULL) {
+		panic("exception type %d without a valid proc",
+		    exception.os_reason);
+	}
 
-	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
-	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), NULL,
-	           TRUE, FALSE, 0, reason);
+	if (!(flags & PX_DEBUG_NO_HONOR)
+	    && address_space_debugged(p) == KERN_SUCCESS) {
+		return 0;
+	}
+
+	if ((flags & PX_KTRIAGE)) {
+		/* Leave a ktriage record */
+		ktriage_record(
+			thread_tid(current_thread()),
+			KDBG_TRIAGE_EVENTID(
+				exception.kt_info.kt_subsys,
+				KDBG_TRIAGE_RESERVED,
+				exception.kt_info.kt_error),
+			0);
+	}
+
+	if ((flags & PX_PSIGNAL)) {
+		int signal = (exception.signal > 0) ? exception.signal : SIGKILL;
+
+		printf("[%s%s] sending signal %d to process\n", proc_best_name(p),
+		    (signal == SIGKILL) ? ": killed" : "", signal);
+		psignal(p, signal);
+		return 0;
+	} else {
+		assert(exception.exception_type > 0);
+
+		reason = os_reason_create(
+			exception.os_reason,
+			(uint64_t)exception.mx_code);
+		assert(reason != OS_REASON_NULL);
+		reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
+
+		if (!(flags & PX_NO_EXCEPTION_UTHREAD)) {
+			ut = get_bsdthread_info(current_thread());
+			ut->uu_exception = exception.exception_type;
+			ut->uu_code = exception.mx_code;
+			ut->uu_subcode = exception.mx_subcode;
+		}
+
+		printf("[%s: killed] sending signal %d and force exiting process\n",
+		    proc_best_name(p), SIGKILL);
+		return exit_with_reason(p, W_EXITCODE(0, SIGKILL), NULL,
+		           FALSE, FALSE, 0, reason);
+	}
 }
+
+/*
+ * Use a separate function call for mach and exclave exceptions so that we
+ * see the exception's origin show up clearly in the backtrace on dev kernels.
+ */
+
+int
+exit_with_mach_exception(
+	struct proc *p,
+	exception_info_t exception,
+	uint32_t flags)
+{
+	return exit_with_exception_internal(p, exception, flags);
+}
+
 
 #if CONFIG_EXCLAVES
 int
-exit_with_exclave_exception(proc_t p)
+exit_with_exclave_exception(
+	struct proc *p,
+	exception_info_t exception,
+	uint32_t flags)
 {
-	/* Using OS_REASON_GUARD for now */
-	os_reason_t reason = os_reason_create(OS_REASON_GUARD, (uint64_t)GUARD_REASON_EXCLAVES);
-	assert(reason != OS_REASON_NULL);
-	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
-
-	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, TRUE, FALSE,
-	           0, reason);
+	return exit_with_exception_internal(p, exception, flags);
 }
 #endif /* CONFIG_EXCLAVES */
-
-int
-exit_with_jit_exception(proc_t p)
-{
-	os_reason_t reason = os_reason_create(OS_REASON_GUARD, (uint64_t)GUARD_REASON_JIT);
-	assert(reason != OS_REASON_NULL);
-	reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
-
-	return exit_with_reason(p, W_EXITCODE(0, SIGKILL), (int *)NULL, TRUE, FALSE,
-	           0, reason);
-}

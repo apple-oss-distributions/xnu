@@ -33,7 +33,7 @@
 #include <mach/mach_vm.h>
 #include <mach/semaphore.h>
 #include <mach/task.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <vm/vm_protos.h>
 #include <sys/errno.h>
@@ -108,7 +108,7 @@ copyio_test_run_in_thread(copyio_thread_fn_t fn, struct copyio_test_data *data)
 static void
 copyio_test_protect(struct copyio_test_data *data, vm_prot_t prot)
 {
-	kern_return_t ret = mach_vm_protect(data->user_map, data->user_addr, copyio_test_buf_size, false, prot);
+	__assert_only kern_return_t ret = mach_vm_protect(data->user_map, data->user_addr, copyio_test_buf_size, false, prot);
 	assert(ret == KERN_SUCCESS);
 }
 
@@ -515,7 +515,8 @@ copyio_test(void)
 	data.user_map = get_task_map_reference(proc_task(proc));
 
 	user_addr = data.user_addr;
-	ret = mach_vm_allocate_kernel(data.user_map, &user_addr, copyio_test_buf_size + PAGE_SIZE, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+	ret = mach_vm_allocate_kernel(data.user_map, &user_addr,
+	    copyio_test_buf_size + PAGE_SIZE, VM_MAP_KERNEL_FLAGS_ANYWHERE());
 	if (ret) {
 		T_FAIL("mach_vm_allocate_kernel(user_addr) failed: %d", ret);
 		goto err_user_alloc;
@@ -523,7 +524,8 @@ copyio_test(void)
 	data.user_addr = (user_addr_t)user_addr;
 
 	user_addr = get_map_max(data.user_map) - PAGE_SIZE;
-	ret = mach_vm_allocate_kernel(data.user_map, &user_addr, PAGE_SIZE, VM_FLAGS_FIXED, VM_KERN_MEMORY_NONE);
+	ret = mach_vm_allocate_kernel(data.user_map, &user_addr, PAGE_SIZE,
+	    VM_MAP_KERNEL_FLAGS_FIXED());
 	if (ret) {
 		T_FAIL("mach_vm_allocate_kernel(user_lastpage_addr) failed: %d", ret);
 		goto err_user_lastpage_alloc;
@@ -535,10 +537,12 @@ copyio_test(void)
 
 	vm_prot_t cur_protection, max_protection;
 	mach_vm_offset_t kern_addr = 0;
-	ret = mach_vm_remap_kernel(kernel_map, &kern_addr, copyio_test_buf_size, VM_PROT_READ | VM_PROT_WRITE, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE,
-	    data.user_map, data.user_addr, false, &cur_protection, &max_protection, VM_INHERIT_NONE);
+	ret = mach_vm_remap(kernel_map, &kern_addr, copyio_test_buf_size,
+	    VM_PROT_READ | VM_PROT_WRITE, VM_FLAGS_ANYWHERE,
+	    data.user_map, data.user_addr, false,
+	    &cur_protection, &max_protection, VM_INHERIT_NONE);
 	if (ret) {
-		T_FAIL("mach_vm_remap_kernel() failed: %d", ret);
+		T_FAIL("mach_vm_remap() failed: %d", ret);
 		goto err_kern_remap;
 	}
 	data.kern_addr = (void *)kern_addr;

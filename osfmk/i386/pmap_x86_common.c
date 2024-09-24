@@ -29,8 +29,9 @@
 #include <mach_assert.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_page_internal.h>
 #include <kern/ledger.h>
 #include <kern/zalloc_internal.h>
 #include <i386/pmap_internal.h>

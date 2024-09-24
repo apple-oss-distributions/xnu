@@ -18,7 +18,8 @@ T_DECL(anon_max_size, "Test an ALLOC_MAX_SIZE allocation",
     T_META_NAMESPACE("xnu.vm"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("VM"),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1))
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_address_t vm_addr;

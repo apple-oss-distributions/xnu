@@ -62,7 +62,7 @@
 #include <mach/vm_param.h>
 #include <mach/vm_map.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <machine/cpu_capabilities.h>
 #include <libsa/types.h>
@@ -155,8 +155,6 @@ static const size_t PUBLIC_KEY_RESERVED_LENGTH = roundup(4096, KERN_COREDUMP_BEG
 static void *kdp_core_public_key = NULL;
 static lck_mtx_t *kdp_core_encryption_stage_lock = NULL;
 static bool kdp_core_is_initializing_encryption_stage = false;
-
-static bool kern_dump_should_enforce_encryption(void);
 #endif // CONFIG_KDP_COREDUMP_ENCRYPTION
 
 static lck_mtx_t *kdp_core_lz4_stage_lock = NULL;
@@ -484,18 +482,7 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 				m = VM_PAGE_NULL;
 				// avail_end is not a valid physical address,
 				// so phystokv(avail_end) may not produce the expected result.
-#if CONFIG_SPTM
-				/**
-				 * The physical aperture in SPTM systems includes mappings to IO memory,
-				 * following the last page of managed memory. Rather than calculating the
-				 * end of the physical aperture as a function of the amount of managed memory,
-				 * simply advance [vcur] to the point advertised by the SPTM as the end of
-				 * the physical aperture.
-				 */
-				vcur = SPTMArgs->physmap_end;
-#else
 				vcur = phystokv(avail_start) + (avail_end - avail_start);
-#endif
 			} else {
 				m = (vm_page_t)vm_page_queue_next(&m->vmp_listq);
 				vcur = phystokv(ptoa(ppn));
@@ -1439,7 +1426,7 @@ kdp_core_init_output_stages(void)
 
 #ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
 
-static bool
+bool
 kern_dump_should_enforce_encryption(void)
 {
 	static int enforce_encryption = -1;

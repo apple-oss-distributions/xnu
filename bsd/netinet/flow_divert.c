@@ -76,15 +76,15 @@
 #define FLOW_DIVERT_CONNECT_STARTED             0x00000001
 #define FLOW_DIVERT_READ_CLOSED                 0x00000002
 #define FLOW_DIVERT_WRITE_CLOSED                0x00000004
-#define FLOW_DIVERT_TUNNEL_RD_CLOSED    0x00000008
-#define FLOW_DIVERT_TUNNEL_WR_CLOSED    0x00000010
-#define FLOW_DIVERT_HAS_HMAC            0x00000040
-#define FLOW_DIVERT_NOTIFY_ON_RECEIVED  0x00000080
-#define FLOW_DIVERT_IMPLICIT_CONNECT    0x00000100
-#define FLOW_DIVERT_DID_SET_LOCAL_ADDR  0x00000200
-#define FLOW_DIVERT_HAS_TOKEN           0x00000400
-#define FLOW_DIVERT_SHOULD_SET_LOCAL_ADDR 0x00000800
-#define FLOW_DIVERT_FLOW_IS_TRANSPARENT   0x00001000
+#define FLOW_DIVERT_TUNNEL_RD_CLOSED            0x00000008
+#define FLOW_DIVERT_TUNNEL_WR_CLOSED            0x00000010
+#define FLOW_DIVERT_HAS_HMAC                    0x00000040
+#define FLOW_DIVERT_NOTIFY_ON_RECEIVED          0x00000080
+#define FLOW_DIVERT_IMPLICIT_CONNECT            0x00000100
+#define FLOW_DIVERT_DID_SET_LOCAL_ADDR          0x00000200
+#define FLOW_DIVERT_HAS_TOKEN                   0x00000400
+#define FLOW_DIVERT_SHOULD_SET_LOCAL_ADDR       0x00000800
+#define FLOW_DIVERT_FLOW_IS_TRANSPARENT         0x00001000
 
 #define FDLOG(level, pcb, format, ...) \
 	os_log_with_type(OS_LOG_DEFAULT, flow_divert_syslog_type_to_oslog_type(level), "(%u): " format "\n", (pcb)->hash, __VA_ARGS__)
@@ -103,23 +103,17 @@
 #define FDGRP_RETAIN(grp)  if ((grp) != NULL) OSIncrementAtomic(&(grp)->ref_count)
 #define FDGRP_RELEASE(grp) if ((grp) != NULL && 1 == OSDecrementAtomic(&(grp)->ref_count)) flow_divert_group_destroy(grp)
 
-#define FDLOCK(pcb)                                             lck_mtx_lock(&(pcb)->mtx)
-#define FDUNLOCK(pcb)                                   lck_mtx_unlock(&(pcb)->mtx)
+#define FDLOCK(pcb)                             lck_mtx_lock(&(pcb)->mtx)
+#define FDUNLOCK(pcb)                           lck_mtx_unlock(&(pcb)->mtx)
 
 #define FD_CTL_SENDBUFF_SIZE                    (128 * 1024)
 
-#define GROUP_BIT_CTL_ENQUEUE_BLOCKED   0
+#define GROUP_BIT_CTL_ENQUEUE_BLOCKED           0
 
-#define GROUP_COUNT_MAX                                 31
+#define GROUP_COUNT_MAX                         31
 #define FLOW_DIVERT_MAX_NAME_SIZE               4096
 #define FLOW_DIVERT_MAX_KEY_SIZE                1024
 #define FLOW_DIVERT_MAX_TRIE_MEMORY             (1024 * 1024)
-
-struct flow_divert_trie_node {
-	uint16_t start;
-	uint16_t length;
-	uint16_t child_map;
-};
 
 #define CHILD_MAP_SIZE                  256
 #define NULL_TRIE_IDX                   0xffff
@@ -138,7 +132,7 @@ static LCK_RW_DECLARE_ATTR(g_flow_divert_group_lck, &flow_divert_mtx_grp,
 
 static TAILQ_HEAD(_flow_divert_group_list, flow_divert_group) g_flow_divert_in_process_group_list;
 
-static struct flow_divert_group         **g_flow_divert_groups  = NULL;
+static struct flow_divert_group         **g_flow_divert_groups __indexable = NULL;
 static uint32_t                         g_active_group_count    = 0;
 
 static  errno_t                         g_init_result           = 0;
@@ -171,10 +165,10 @@ static boolean_t
 flow_divert_is_sockaddr_valid(struct sockaddr *addr);
 
 static int
-flow_divert_append_target_endpoint_tlv(mbuf_t connect_packet, struct sockaddr *toaddr);
+flow_divert_append_target_endpoint_tlv(mbuf_ref_t connect_packet, struct sockaddr *toaddr);
 
 struct sockaddr *
-flow_divert_get_buffered_target_address(mbuf_t buffer);
+flow_divert_get_buffered_target_address(mbuf_ref_t buffer);
 
 static void
 flow_divert_disconnect_socket(struct socket *so, bool is_connected, bool delay_if_needed);
@@ -405,7 +399,7 @@ flow_divert_pcb_destroy(struct flow_divert_pcb *fd_cb)
 		mbuf_freem(fd_cb->connect_packet);
 	}
 	if (fd_cb->app_data != NULL) {
-		kfree_data(fd_cb->app_data, fd_cb->app_data_length);
+		kfree_data_sized_by(fd_cb->app_data, fd_cb->app_data_length);
 	}
 	if (fd_cb->original_remote_endpoint != NULL) {
 		free_sockaddr(fd_cb->original_remote_endpoint);
@@ -428,7 +422,7 @@ flow_divert_pcb_remove(struct flow_divert_pcb *fd_cb)
 }
 
 static int
-flow_divert_packet_init(struct flow_divert_pcb *fd_cb, uint8_t packet_type, mbuf_t *packet)
+flow_divert_packet_init(struct flow_divert_pcb *fd_cb, uint8_t packet_type, mbuf_ref_t *packet)
 {
 	struct flow_divert_packet_header        hdr;
 	int                                     error           = 0;
@@ -455,7 +449,7 @@ flow_divert_packet_init(struct flow_divert_pcb *fd_cb, uint8_t packet_type, mbuf
 }
 
 static int
-flow_divert_packet_append_tlv(mbuf_t packet, uint8_t type, uint32_t length, const void *value)
+flow_divert_packet_append_tlv(mbuf_ref_t packet, uint8_t type, uint32_t length, const void *value)
 {
 	uint32_t        net_length      = htonl(length);
 	int                     error           = 0;
@@ -482,12 +476,12 @@ flow_divert_packet_append_tlv(mbuf_t packet, uint8_t type, uint32_t length, cons
 }
 
 static int
-flow_divert_packet_find_tlv(mbuf_t packet, int offset, uint8_t type, int *err, int next)
+flow_divert_packet_find_tlv(mbuf_ref_t packet, int offset, uint8_t type, int *err, int next)
 {
-	size_t          cursor                  = offset;
-	int                     error                   = 0;
-	uint32_t        curr_length;
-	uint8_t         curr_type;
+	size_t      cursor      = offset;
+	int         error       = 0;
+	uint32_t    curr_length = 0;
+	uint8_t     curr_type   = 0;
 
 	*err = 0;
 
@@ -519,11 +513,11 @@ flow_divert_packet_find_tlv(mbuf_t packet, int offset, uint8_t type, int *err, i
 }
 
 static int
-flow_divert_packet_get_tlv(mbuf_t packet, int offset, uint8_t type, size_t buff_len, void *buff, uint32_t *val_size)
+flow_divert_packet_get_tlv(mbuf_ref_t packet, int offset, uint8_t type, size_t buff_len, void *buff __sized_by(buff_len), uint32_t *val_size)
 {
-	int                     error           = 0;
-	uint32_t        length;
-	int                     tlv_offset;
+	int         error      = 0;
+	uint32_t    length     = 0;
+	int         tlv_offset = 0;
 
 	tlv_offset = flow_divert_packet_find_tlv(packet, offset, type, &error, 0);
 	if (tlv_offset < 0) {
@@ -561,9 +555,9 @@ flow_divert_packet_get_tlv(mbuf_t packet, int offset, uint8_t type, size_t buff_
 }
 
 static int
-flow_divert_packet_compute_hmac(mbuf_t packet, struct flow_divert_group *group, uint8_t *hmac)
+flow_divert_packet_compute_hmac(mbuf_ref_t packet, struct flow_divert_group *group, uint8_t *hmac)
 {
-	mbuf_t  curr_mbuf       = packet;
+	mbuf_ref_t  curr_mbuf       = packet;
 
 	if (g_crypto_funcs == NULL || group->token_key == NULL) {
 		return ENOPROTOOPT;
@@ -583,14 +577,14 @@ flow_divert_packet_compute_hmac(mbuf_t packet, struct flow_divert_group *group, 
 }
 
 static int
-flow_divert_packet_verify_hmac(mbuf_t packet, uint32_t ctl_unit)
+flow_divert_packet_verify_hmac(mbuf_ref_t packet, uint32_t ctl_unit)
 {
 	int error = 0;
 	struct flow_divert_group *group = NULL;
 	int hmac_offset;
 	uint8_t packet_hmac[SHA_DIGEST_LENGTH];
 	uint8_t computed_hmac[SHA_DIGEST_LENGTH];
-	mbuf_t tail;
+	mbuf_ref_t tail;
 
 	group = flow_divert_group_lookup(ctl_unit, NULL);
 	if (group == NULL) {
@@ -647,9 +641,7 @@ flow_divert_add_data_statistics(struct flow_divert_pcb *fd_cb, size_t data_len, 
 {
 	struct inpcb *inp = NULL;
 	struct ifnet *ifp = NULL;
-	Boolean cell = FALSE;
-	Boolean wifi = FALSE;
-	Boolean wired = FALSE;
+	stats_functional_type ifnet_count_type = stats_functional_type_none;
 
 	inp = sotoinpcb(fd_cb->so);
 	if (inp == NULL) {
@@ -662,17 +654,15 @@ flow_divert_add_data_statistics(struct flow_divert_pcb *fd_cb, size_t data_len, 
 		ifp = inp->in6p_last_outifp;
 	}
 	if (ifp != NULL) {
-		cell = IFNET_IS_CELLULAR(ifp);
-		wifi = (!cell && IFNET_IS_WIFI(ifp));
-		wired = (!wifi && IFNET_IS_WIRED(ifp));
+		ifnet_count_type = IFNET_COUNT_TYPE(ifp);
 	}
 
 	if (send) {
-		INP_ADD_STAT(inp, cell, wifi, wired, txpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, wired, txbytes, data_len);
+		INP_ADD_STAT(inp, ifnet_count_type, txpackets, 1);
+		INP_ADD_STAT(inp, ifnet_count_type, txbytes, data_len);
 	} else {
-		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, data_len);
+		INP_ADD_STAT(inp, ifnet_count_type, rxpackets, 1);
+		INP_ADD_STAT(inp, ifnet_count_type, rxbytes, data_len);
 	}
 	inp_set_activity_bitmap(inp);
 }
@@ -909,7 +899,7 @@ flow_divert_trie_insert(struct flow_divert_trie *trie, uint16_t string_start, si
 
 #define APPLE_WEBCLIP_ID_PREFIX "com.apple.webapp"
 static uint16_t
-flow_divert_trie_search(struct flow_divert_trie *trie, const uint8_t *string_bytes)
+flow_divert_trie_search(struct flow_divert_trie *trie, const uint8_t *string_bytes __sized_by(string_bytes_count), __unused size_t string_bytes_count)
 {
 	uint16_t current = trie->root;
 	uint16_t string_idx = 0;
@@ -929,7 +919,7 @@ flow_divert_trie_search(struct flow_divert_trie *trie, const uint8_t *string_byt
 			if (string_bytes[string_idx] == '\0') {
 				return current; /* Got an exact match */
 			} else if (string_idx == strlen(APPLE_WEBCLIP_ID_PREFIX) &&
-			    0 == strncmp((const char *)string_bytes, APPLE_WEBCLIP_ID_PREFIX, string_idx)) {
+			    0 == strlcmp((const char *)string_bytes, APPLE_WEBCLIP_ID_PREFIX, string_idx)) {
 				return current; /* Got an apple webclip id prefix match */
 			} else if (TRIE_NODE(trie, current).child_map != NULL_TRIE_IDX) {
 				next = TRIE_CHILD(trie, current, string_bytes[string_idx]);
@@ -942,10 +932,11 @@ flow_divert_trie_search(struct flow_divert_trie *trie, const uint8_t *string_byt
 }
 
 struct uuid_search_info {
-	uuid_t target_uuid;
-	char *found_signing_id;
-	boolean_t found_multiple_signing_ids;
-	proc_t found_proc;
+	uuid_t      target_uuid;
+	char        *found_signing_id __sized_by(found_signing_id_size);
+	boolean_t   found_multiple_signing_ids;
+	proc_t      found_proc;
+	size_t      found_signing_id_size;
 };
 
 static int
@@ -964,8 +955,7 @@ flow_divert_find_proc_by_uuid_callout(proc_t p, void *arg)
 			uuid_unparse(info->target_uuid, uuid_str);
 			FDLOG(LOG_WARNING, &nil_pcb, "Found multiple processes with UUID %s with different signing identifiers", uuid_str);
 		}
-		kfree_data(info->found_signing_id, strlen(info->found_signing_id) + 1);
-		info->found_signing_id = NULL;
+		kfree_data_sized_by(info->found_signing_id, info->found_signing_id_size);
 	}
 
 	if (result == PROC_RETURNED_DONE) {
@@ -987,16 +977,18 @@ flow_divert_find_proc_by_uuid_filter(proc_t p, void *arg)
 		return include;
 	}
 
-	include = (uuid_compare(proc_executableuuid_addr(p), info->target_uuid) == 0);
+	const unsigned char * p_uuid = proc_executableuuid_addr(p);
+	include = (uuid_compare(p_uuid, info->target_uuid) == 0);
 	if (include) {
-		const char *signing_id = cs_identity_get(p);
+		const char *signing_id __null_terminated = cs_identity_get(p);
 		if (signing_id != NULL) {
 			FDLOG(LOG_INFO, &nil_pcb, "Found process %d with signing identifier %s", proc_getpid(p), signing_id);
 			size_t signing_id_size = strlen(signing_id) + 1;
 			if (info->found_signing_id == NULL) {
 				info->found_signing_id = kalloc_data(signing_id_size, Z_WAITOK);
-				memcpy(info->found_signing_id, signing_id, signing_id_size);
-			} else if (memcmp(signing_id, info->found_signing_id, signing_id_size)) {
+				info->found_signing_id_size = signing_id_size;
+				strlcpy(info->found_signing_id, signing_id, signing_id_size);
+			} else if (strlcmp(info->found_signing_id, signing_id, info->found_signing_id_size)) {
 				info->found_multiple_signing_ids = TRUE;
 			}
 		} else {
@@ -1029,12 +1021,12 @@ flow_divert_find_proc_by_uuid(uuid_t uuid)
 }
 
 static int
-flow_divert_add_proc_info(struct flow_divert_pcb *fd_cb, proc_t proc, const char *signing_id, mbuf_t connect_packet, bool is_effective)
+flow_divert_add_proc_info(struct flow_divert_pcb *fd_cb, proc_t proc, const char *signing_id __null_terminated, mbuf_ref_t connect_packet, bool is_effective)
 {
 	int error = 0;
 	uint8_t *cdhash = NULL;
 	audit_token_t audit_token = {};
-	const char *proc_cs_id = signing_id;
+	const char *proc_cs_id __null_terminated = signing_id;
 
 	proc_lock(proc);
 
@@ -1050,7 +1042,8 @@ flow_divert_add_proc_info(struct flow_divert_pcb *fd_cb, proc_t proc, const char
 		lck_rw_lock_shared(&fd_cb->group->lck);
 		if (!(fd_cb->group->flags & FLOW_DIVERT_GROUP_FLAG_NO_APP_MAP)) {
 			if (proc_cs_id != NULL) {
-				uint16_t result = flow_divert_trie_search(&fd_cb->group->signing_id_trie, (const uint8_t *)proc_cs_id);
+				size_t proc_cs_id_size = strlen(proc_cs_id) + 1;
+				uint16_t result = flow_divert_trie_search(&fd_cb->group->signing_id_trie, (const uint8_t *)__unsafe_null_terminated_to_indexable(proc_cs_id), proc_cs_id_size);
 				if (result == NULL_TRIE_IDX) {
 					FDLOG(LOG_WARNING, fd_cb, "%s did not match", proc_cs_id);
 					error = EPERM;
@@ -1076,7 +1069,7 @@ flow_divert_add_proc_info(struct flow_divert_pcb *fd_cb, proc_t proc, const char
 		error = flow_divert_packet_append_tlv(connect_packet,
 		    (is_effective ? FLOW_DIVERT_TLV_SIGNING_ID : FLOW_DIVERT_TLV_APP_REAL_SIGNING_ID),
 		    (uint32_t)strlen(proc_cs_id),
-		    proc_cs_id);
+		    __terminated_by_to_indexable(proc_cs_id));
 		if (error != 0) {
 			FDLOG(LOG_ERR, fd_cb, "failed to append the signing ID: %d", error);
 			goto done;
@@ -1097,7 +1090,7 @@ flow_divert_add_proc_info(struct flow_divert_pcb *fd_cb, proc_t proc, const char
 		FDLOG0(LOG_ERR, fd_cb, "failed to get the cdhash");
 	}
 
-	task_t task = proc_task(proc);
+	task_t task __single = proc_task(proc);
 	if (task != TASK_NULL) {
 		mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
 		kern_return_t rc = task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&audit_token, &count);
@@ -1119,7 +1112,7 @@ done:
 }
 
 static int
-flow_divert_add_all_proc_info(struct flow_divert_pcb *fd_cb, struct socket *so, proc_t proc, const char *signing_id, mbuf_t connect_packet)
+flow_divert_add_all_proc_info(struct flow_divert_pcb *fd_cb, struct socket *so, proc_t proc, const char *signing_id __null_terminated, mbuf_ref_t connect_packet)
 {
 	int error = 0;
 	proc_t effective_proc = PROC_NULL;
@@ -1142,8 +1135,11 @@ flow_divert_add_all_proc_info(struct flow_divert_pcb *fd_cb, struct socket *so, 
 	if (so->so_flags & SOF_DELEGATED) {
 		if (proc_getpid(real_proc) != so->e_pid) {
 			effective_proc = proc_find(so->e_pid);
-		} else if (uuid_compare(proc_executableuuid_addr(real_proc), so->e_uuid)) {
-			effective_proc = flow_divert_find_proc_by_uuid(so->e_uuid);
+		} else {
+			const unsigned char * real_proc_uuid = proc_executableuuid_addr(real_proc);
+			if (uuid_compare(real_proc_uuid, so->e_uuid)) {
+				effective_proc = flow_divert_find_proc_by_uuid(so->e_uuid);
+			}
 		}
 	}
 
@@ -1199,7 +1195,7 @@ done:
 }
 
 static int
-flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet)
+flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet)
 {
 	int             error;
 
@@ -1242,9 +1238,9 @@ flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet)
 }
 
 static void
-flow_divert_append_domain_name(char *domain_name, void *ctx)
+flow_divert_append_domain_name(char *domain_name __null_terminated, void *ctx)
 {
-	mbuf_t packet = (mbuf_t)ctx;
+	mbuf_ref_t packet = (mbuf_ref_t)ctx;
 	size_t domain_name_length = 0;
 
 	if (packet == NULL || domain_name == NULL) {
@@ -1253,7 +1249,7 @@ flow_divert_append_domain_name(char *domain_name, void *ctx)
 
 	domain_name_length = strlen(domain_name);
 	if (domain_name_length > 0 && domain_name_length < FLOW_DIVERT_MAX_NAME_SIZE) {
-		int error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_TARGET_HOSTNAME, (uint32_t)domain_name_length, domain_name);
+		int error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_TARGET_HOSTNAME, (uint32_t)domain_name_length, __terminated_by_to_indexable(domain_name));
 		if (error) {
 			FDLOG(LOG_ERR, &nil_pcb, "Failed to append %s: %d", domain_name, error);
 		}
@@ -1261,19 +1257,19 @@ flow_divert_append_domain_name(char *domain_name, void *ctx)
 }
 
 static int
-flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr *to, struct socket *so, proc_t p, mbuf_t *out_connect_packet)
+flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr *to, struct socket *so, proc_t p, mbuf_ref_t *out_connect_packet)
 {
-	int                     error                   = 0;
-	int                     flow_type               = 0;
-	char                    *signing_id = NULL;
-	uint32_t                sid_size = 0;
-	mbuf_t                  connect_packet = NULL;
-	cfil_sock_id_t          cfil_sock_id            = CFIL_SOCK_ID_NONE;
-	const void              *cfil_id                = NULL;
-	size_t                  cfil_id_size            = 0;
-	struct inpcb            *inp = sotoinpcb(so);
-	struct ifnet *ifp = NULL;
-	uint32_t flags = 0;
+	int                     error           = 0;
+	int                     flow_type       = 0;
+	char *                  signing_id __indexable = NULL;
+	uint32_t                sid_size        = 0;
+	mbuf_ref_t              connect_packet  = NULL;
+	cfil_sock_id_t          cfil_sock_id    = CFIL_SOCK_ID_NONE;
+	const void              *cfil_id        = NULL;
+	size_t                  cfil_id_size    = 0;
+	struct inpcb            *inp            = sotoinpcb(so);
+	struct ifnet            *ifp            = NULL;
+	uint32_t                flags           = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_CONNECT, &connect_packet);
 	if (error) {
@@ -1291,7 +1287,8 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 		}
 	}
 
-	error = flow_divert_add_all_proc_info(fd_cb, so, p, signing_id, connect_packet);
+	// TODO: remove ternary operator after rdar://121487109 is fixed
+	error = flow_divert_add_all_proc_info(fd_cb, so, p, NULL == signing_id ? NULL : __unsafe_null_terminated_from_indexable(signing_id), connect_packet);
 
 	if (signing_id != NULL) {
 		kfree_data(signing_id, sid_size + 1);
@@ -1353,6 +1350,14 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 	} else if (inp->inp_vflag & INP_IPV6) {
 		ifp = inp->in6p_last_outifp;
 	}
+	if ((inp->inp_flags & INP_BOUND_IF) ||
+	    ((inp->inp_vflag & INP_IPV6) && !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) ||
+	    ((inp->inp_vflag & INP_IPV4) && inp->inp_laddr.s_addr != INADDR_ANY)) {
+		flags |= FLOW_DIVERT_TOKEN_FLAG_BOUND;
+		if (ifp == NULL) {
+			ifp = inp->inp_boundifp;
+		}
+	}
 	if (ifp != NULL) {
 		uint32_t flow_if_index = ifp->if_index;
 		error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_OUT_IF_INDEX,
@@ -1364,12 +1369,6 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 
 	if (so->so_flags1 & SOF1_DATA_IDEMPOTENT) {
 		flags |= FLOW_DIVERT_TOKEN_FLAG_TFO;
-	}
-
-	if ((inp->inp_flags & INP_BOUND_IF) ||
-	    ((inp->inp_vflag & INP_IPV6) && !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) ||
-	    ((inp->inp_vflag & INP_IPV4) && inp->inp_laddr.s_addr != INADDR_ANY)) {
-		flags |= FLOW_DIVERT_TOKEN_FLAG_BOUND;
 	}
 
 	if (flags != 0) {
@@ -1413,9 +1412,9 @@ done:
 static int
 flow_divert_send_connect_packet(struct flow_divert_pcb *fd_cb)
 {
-	int error = 0;
-	mbuf_t connect_packet = fd_cb->connect_packet;
-	mbuf_t saved_connect_packet = NULL;
+	int             error                   = 0;
+	mbuf_ref_t      connect_packet          = fd_cb->connect_packet;
+	mbuf_ref_t      saved_connect_packet    = NULL;
 
 	if (connect_packet != NULL) {
 		error = mbuf_copym(connect_packet, 0, mbuf_pkthdr_len(connect_packet), MBUF_DONTWAIT, &saved_connect_packet);
@@ -1445,9 +1444,9 @@ done:
 static int
 flow_divert_send_connect_result(struct flow_divert_pcb *fd_cb)
 {
-	int             error                   = 0;
-	mbuf_t  packet                  = NULL;
-	int             rbuff_space             = 0;
+	int             error       = 0;
+	mbuf_ref_t      packet      = NULL;
+	int             rbuff_space = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_CONNECT_RESULT, &packet);
 	if (error) {
@@ -1491,9 +1490,9 @@ done:
 static int
 flow_divert_send_close(struct flow_divert_pcb *fd_cb, int how)
 {
-	int             error   = 0;
-	mbuf_t  packet  = NULL;
-	uint32_t        zero    = 0;
+	int         error   = 0;
+	mbuf_ref_t  packet  = NULL;
+	uint32_t    zero    = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_CLOSE, &packet);
 	if (error) {
@@ -1586,11 +1585,11 @@ flow_divert_send_close_if_needed(struct flow_divert_pcb *fd_cb)
 }
 
 static errno_t
-flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len)
+flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_ref_t data, size_t data_len)
 {
-	mbuf_t packet = NULL;
-	mbuf_t last = NULL;
-	int error = 0;
+	mbuf_ref_t  packet = NULL;
+	mbuf_ref_t  last   = NULL;
+	int         error  = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_DATA, &packet);
 	if (error || packet == NULL) {
@@ -1625,11 +1624,11 @@ done:
 }
 
 static errno_t
-flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_len, struct sockaddr *toaddr, Boolean is_fragment, size_t datagram_size)
+flow_divert_send_datagram_packet(struct flow_divert_pcb *fd_cb, mbuf_ref_t data, size_t data_len, struct sockaddr *toaddr, Boolean is_fragment, size_t datagram_size)
 {
-	mbuf_t packet = NULL;
-	mbuf_t last = NULL;
-	int error = 0;
+	mbuf_ref_t  packet = NULL;
+	mbuf_ref_t  last   = NULL;
+	int         error  = 0;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_DATA, &packet);
 	if (error || packet == NULL) {
@@ -1685,13 +1684,13 @@ done:
 }
 
 static errno_t
-flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datagram, size_t datagram_len, struct sockaddr *toaddr)
+flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_ref_t datagram, size_t datagram_len, struct sockaddr *toaddr)
 {
-	mbuf_t next_data = datagram;
-	size_t remaining_len = datagram_len;
-	mbuf_t remaining_data = NULL;
-	int error = 0;
-	bool first = true;
+	mbuf_ref_t  next_data       = datagram;
+	size_t      remaining_len   = datagram_len;
+	mbuf_ref_t  remaining_data  = NULL;
+	int         error           = 0;
+	bool        first           = true;
 
 	while (remaining_len > 0 && next_data != NULL) {
 		size_t to_send = remaining_len;
@@ -1729,10 +1728,10 @@ flow_divert_send_fragmented_datagram(struct flow_divert_pcb *fd_cb, mbuf_t datag
 static void
 flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 {
-	size_t  to_send;
-	size_t  sent    = 0;
-	int             error   = 0;
-	mbuf_t  buffer;
+	size_t      to_send;
+	size_t      sent    = 0;
+	int         error   = 0;
+	mbuf_ref_t  buffer;
 
 	to_send = fd_cb->so->so_snd.sb_cc;
 	buffer = fd_cb->so->so_snd.sb_mb;
@@ -1749,8 +1748,8 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 
 	if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
 		while (sent < to_send) {
-			mbuf_t  data;
-			size_t  data_len;
+			mbuf_ref_t  data;
+			size_t      data_len;
 
 			data_len = to_send - sent;
 			if (data_len > FLOW_DIVERT_CHUNK_SIZE) {
@@ -1776,9 +1775,9 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 		sbdrop(&fd_cb->so->so_snd, (int)sent);
 		sowwakeup(fd_cb->so);
 	} else if (SOCK_TYPE(fd_cb->so) == SOCK_DGRAM) {
-		mbuf_t data;
-		mbuf_t m;
-		size_t data_len;
+		mbuf_ref_t  data;
+		mbuf_ref_t  m;
+		size_t      data_len;
 
 		while (buffer) {
 			struct sockaddr *toaddr = flow_divert_get_buffered_target_address(buffer);
@@ -1839,7 +1838,7 @@ move_on:
 }
 
 static int
-flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t data_size, struct sockaddr *toaddr)
+flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_ref_t data, size_t data_size, struct sockaddr *toaddr)
 {
 	size_t to_send = data_size;
 	int error = 0;
@@ -1854,10 +1853,9 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t dat
 
 	if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
 		size_t sent = 0;
-		mbuf_t remaining_data = data;
+		mbuf_ref_t remaining_data = data;
 		size_t remaining_size = data_size;
-		mbuf_t pkt_data = NULL;
-
+		mbuf_ref_t pkt_data = NULL;
 		while (sent < to_send && remaining_data != NULL && remaining_size > 0) {
 			size_t  pkt_data_len;
 
@@ -1973,8 +1971,8 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t dat
 static int
 flow_divert_send_read_notification(struct flow_divert_pcb *fd_cb)
 {
-	int error = 0;
-	mbuf_t packet = NULL;
+	int         error  = 0;
+	mbuf_ref_t  packet = NULL;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_READ_NOTIFY, &packet);
 	if (error) {
@@ -1998,8 +1996,8 @@ done:
 static int
 flow_divert_send_traffic_class_update(struct flow_divert_pcb *fd_cb, int traffic_class)
 {
-	int             error           = 0;
-	mbuf_t  packet          = NULL;
+	int         error  = 0;
+	mbuf_ref_t  packet = NULL;
 
 	error = flow_divert_packet_init(fd_cb, FLOW_DIVERT_PKT_PROPERTIES_UPDATE, &packet);
 	if (error) {
@@ -2221,7 +2219,7 @@ static void
 flow_divert_disable(struct flow_divert_pcb *fd_cb)
 {
 	struct socket *so = NULL;
-	mbuf_t  buffer;
+	mbuf_ref_t buffer;
 	int error = 0;
 	proc_t last_proc = NULL;
 	struct sockaddr *remote_endpoint = fd_cb->original_remote_endpoint;
@@ -2285,8 +2283,8 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 
 	/* Send any buffered data using the original protocol */
 	if (SOCK_TYPE(so) == SOCK_STREAM) {
-		mbuf_t data_to_send = NULL;
-		size_t data_len = so->so_snd.sb_cc;
+		mbuf_ref_t  data_to_send = NULL;
+		size_t      data_len     = so->so_snd.sb_cc;
 
 		error = mbuf_copym(buffer, 0, data_len, MBUF_DONTWAIT, &data_to_send);
 		if (error) {
@@ -2319,8 +2317,8 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 
 		/* Flush the send buffer, moving all records to a temporary queue */
 		while (sb->sb_mb != NULL) {
-			mbuf_t record = sb->sb_mb;
-			mbuf_t m = record;
+			mbuf_ref_t record = sb->sb_mb;
+			mbuf_ref_t m = record;
 			sb->sb_mb = sb->sb_mb->m_nextpkt;
 			while (m != NULL) {
 				sbfree(sb, m);
@@ -2332,12 +2330,12 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 		SB_EMPTY_FIXUP(sb);
 
 		while (!MBUFQ_EMPTY(&send_queue)) {
-			mbuf_t next_record = MBUFQ_FIRST(&send_queue);
-			mbuf_t addr = NULL;
-			mbuf_t control = NULL;
-			mbuf_t last_control = NULL;
-			mbuf_t data = NULL;
-			mbuf_t m = next_record;
+			mbuf_ref_t next_record = MBUFQ_FIRST(&send_queue);
+			mbuf_ref_t addr = NULL;
+			mbuf_ref_t control = NULL;
+			mbuf_ref_t last_control = NULL;
+			mbuf_ref_t data = NULL;
+			mbuf_ref_t m = next_record;
 			struct sockaddr *to_endpoint = NULL;
 
 			MBUFQ_DEQUEUE(&send_queue, next_record);
@@ -2414,11 +2412,11 @@ done:
 static void
 flow_divert_scope(struct flow_divert_pcb *fd_cb, int out_if_index, bool derive_new_address)
 {
-	struct socket *so = NULL;
-	struct inpcb *inp = NULL;
-	struct ifnet *current_ifp = NULL;
-	struct ifnet *new_ifp = NULL;
-	int error = 0;
+	struct socket           *so             = NULL;
+	struct inpcb            *inp            = NULL;
+	struct ifnet            *current_ifp    = NULL;
+	struct ifnet * __single new_ifp         = NULL;
+	int                     error           = 0;
 
 	so = fd_cb->so;
 	if (so == NULL) {
@@ -2489,16 +2487,16 @@ flow_divert_scope(struct flow_divert_pcb *fd_cb, int out_if_index, bool derive_n
 }
 
 static void
-flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offset)
+flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, int offset)
 {
-	uint32_t                                        connect_error = 0;
-	uint32_t                                        ctl_unit                        = 0;
-	int                                                     error                           = 0;
-	union sockaddr_in_4_6 local_endpoint = {};
+	uint32_t              connect_error   = 0;
+	uint32_t              ctl_unit        = 0;
+	int                   error           = 0;
+	union sockaddr_in_4_6 local_endpoint  = {};
 	union sockaddr_in_4_6 remote_endpoint = {};
-	int                                                     out_if_index            = 0;
-	uint32_t                                        send_window;
-	uint32_t                                        app_data_length         = 0;
+	int                   out_if_index    = 0;
+	uint32_t              send_window     = 0;
+	uint32_t              app_data_length = 0;
 
 	memset(&local_endpoint, 0, sizeof(local_endpoint));
 	memset(&remote_endpoint, 0, sizeof(remote_endpoint));
@@ -2523,12 +2521,12 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 		FDLOG0(LOG_INFO, fd_cb, "No control unit provided in the connect result");
 	}
 
-	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_LOCAL_ADDR, sizeof(local_endpoint), &(local_endpoint.sa), NULL);
+	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_LOCAL_ADDR, sizeof(local_endpoint), &(local_endpoint.sin6), NULL);
 	if (error) {
 		FDLOG0(LOG_INFO, fd_cb, "No local address provided");
 	}
 
-	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_REMOTE_ADDR, sizeof(remote_endpoint), &(remote_endpoint.sa), NULL);
+	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_REMOTE_ADDR, sizeof(remote_endpoint), &(remote_endpoint.sin6), NULL);
 	if (error) {
 		FDLOG0(LOG_INFO, fd_cb, "No remote address provided");
 	}
@@ -2604,14 +2602,14 @@ flow_divert_handle_connect_result(struct flow_divert_pcb *fd_cb, mbuf_t packet, 
 		}
 
 		if (app_data_length > 0) {
-			uint8_t *app_data = NULL;
+			uint8_t * app_data = NULL;
 			app_data = kalloc_data(app_data_length, Z_WAITOK);
 			if (app_data != NULL) {
 				error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_APP_DATA, app_data_length, app_data, NULL);
 				if (error == 0) {
 					FDLOG(LOG_INFO, fd_cb, "Got %u bytes of app data from the connect result", app_data_length);
 					if (fd_cb->app_data != NULL) {
-						kfree_data(fd_cb->app_data, fd_cb->app_data_length);
+						kfree_data_sized_by(fd_cb->app_data, fd_cb->app_data_length);
 					}
 					fd_cb->app_data = app_data;
 					fd_cb->app_data_length = app_data_length;
@@ -2721,7 +2719,7 @@ done:
 }
 
 static void
-flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offset)
+flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, int offset)
 {
 	uint32_t        close_error                     = 0;
 	int                     error                   = 0;
@@ -2772,7 +2770,7 @@ done:
 	FDUNLOCK(fd_cb);
 }
 
-static mbuf_t
+static mbuf_ref_t
 flow_divert_create_control_mbuf(struct flow_divert_pcb *fd_cb)
 {
 	struct inpcb *inp = sotoinpcb(fd_cb->so);
@@ -2796,13 +2794,13 @@ flow_divert_create_control_mbuf(struct flow_divert_pcb *fd_cb)
 }
 
 static int
-flow_divert_handle_data(struct flow_divert_pcb *fd_cb, mbuf_t packet, size_t offset)
+flow_divert_handle_data(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, size_t offset)
 {
 	int error = 0;
 
 	FDLOCK(fd_cb);
 	if (fd_cb->so != NULL) {
-		mbuf_t  data            = NULL;
+		mbuf_ref_t data = NULL;
 		size_t  data_size;
 		struct sockaddr_storage remote_address;
 		boolean_t got_remote_sa = FALSE;
@@ -2870,8 +2868,8 @@ flow_divert_handle_data(struct flow_divert_pcb *fd_cb, mbuf_t packet, size_t off
 			appended = (sbappendstream(&fd_cb->so->so_rcv, data) != 0);
 			append_success = TRUE;
 		} else {
-			struct sockaddr *append_sa = NULL;
-			mbuf_t mctl;
+			struct sockaddr * __single append_sa = NULL;
+			mbuf_ref_t mctl;
 
 			if (got_remote_sa == TRUE) {
 				error = flow_divert_dup_addr(remote_address.ss_family, (struct sockaddr *)&remote_address, &append_sa);
@@ -2915,7 +2913,7 @@ done:
 }
 
 static void
-flow_divert_handle_read_notification(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offset)
+flow_divert_handle_read_notification(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, int offset)
 {
 	uint32_t        read_count              = 0;
 	int             error                   = 0;
@@ -2946,7 +2944,7 @@ done:
 }
 
 static void
-flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, int offset)
+flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_ref_t packet, int offset)
 {
 	int error         = 0;
 	uint32_t key_size = 0;
@@ -2979,21 +2977,18 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, in
 	}
 
 	if (group->token_key != NULL) {
-		kfree_data(group->token_key, group->token_key_size);
-		group->token_key = NULL;
+		kfree_data_sized_by(group->token_key, group->token_key_size);
 	}
 
 	group->token_key = kalloc_data(key_size, Z_WAITOK);
+	group->token_key_size = key_size;
 	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_TOKEN_KEY, key_size, group->token_key, NULL);
 	if (error) {
 		FDLOG(LOG_ERR, &nil_pcb, "failed to get the token key: %d", error);
-		kfree_data(group->token_key, key_size);
-		group->token_key = NULL;
+		kfree_data_sized_by(group->token_key, group->token_key_size);
 		lck_rw_done(&group->lck);
 		return;
 	}
-
-	group->token_key_size = key_size;
 
 	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_FLAGS, sizeof(flags), &flags, NULL);
 	if (!error) {
@@ -3010,11 +3005,11 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, in
 }
 
 static void
-flow_divert_handle_properties_update(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offset)
+flow_divert_handle_properties_update(struct flow_divert_pcb *fd_cb, mbuf_ref_t packet, int offset)
 {
-	int                                                     error                           = 0;
-	int                                                     out_if_index            = 0;
-	uint32_t                                        app_data_length         = 0;
+	int         error           = 0;
+	int         out_if_index    = 0;
+	uint32_t    app_data_length = 0;
 
 	FDLOG0(LOG_INFO, fd_cb, "received a properties update");
 
@@ -3043,13 +3038,13 @@ flow_divert_handle_properties_update(struct flow_divert_pcb *fd_cb, mbuf_t packe
 		}
 
 		if (app_data_length > 0) {
-			uint8_t *app_data = NULL;
+			uint8_t * app_data __indexable = NULL;
 			app_data = kalloc_data(app_data_length, Z_WAITOK);
 			if (app_data != NULL) {
 				error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_APP_DATA, app_data_length, app_data, NULL);
 				if (error == 0) {
 					if (fd_cb->app_data != NULL) {
-						kfree_data(fd_cb->app_data, fd_cb->app_data_length);
+						kfree_data_sized_by(fd_cb->app_data, fd_cb->app_data_length);
 					}
 					fd_cb->app_data = app_data;
 					fd_cb->app_data_length = app_data_length;
@@ -3068,27 +3063,27 @@ done:
 }
 
 static void
-flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet, int offset)
+flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_ref_t packet, int offset)
 {
-	size_t bytes_mem_size;
-	size_t child_maps_mem_size;
-	size_t nodes_mem_size;
-	size_t trie_memory_size = 0;
-	int cursor;
-	int error = 0;
+	size_t                  bytes_mem_size      = 0;
+	size_t                  child_maps_mem_size = 0;
+	size_t                  nodes_mem_size      = 0;
+	size_t                  trie_memory_size    = 0;
+	int                     cursor              = 0;
+	int                     error               = 0;
 	struct flow_divert_trie new_trie;
-	int insert_error = 0;
-	int prefix_count = -1;
-	int signing_id_count = 0;
-	size_t bytes_count = 0;
-	size_t nodes_count = 0;
-	size_t maps_count = 0;
+	int                     insert_error        = 0;
+	int                     prefix_count        = -1;
+	int                     signing_id_count    = 0;
+	size_t                  bytes_count         = 0;
+	size_t                  nodes_count         = 0;
+	size_t                  maps_count          = 0;
 
 	lck_rw_lock_exclusive(&group->lck);
 
 	/* Re-set the current trie */
 	if (group->signing_id_trie.memory != NULL) {
-		kfree_data_addr(group->signing_id_trie.memory);
+		kfree_data_sized_by(group->signing_id_trie.memory, group->signing_id_trie.memory_size);
 	}
 	memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
 	group->signing_id_trie.root = NULL_TRIE_IDX;
@@ -3166,6 +3161,7 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 	}
 
 	new_trie.memory = kalloc_data(trie_memory_size, Z_WAITOK);
+	new_trie.memory_size = trie_memory_size;
 	if (new_trie.memory == NULL) {
 		FDLOG(LOG_ERR, &nil_pcb, "Failed to allocate %lu bytes of memory for the signing ID trie",
 		    nodes_mem_size + child_maps_mem_size + bytes_mem_size);
@@ -3173,20 +3169,23 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 		return;
 	}
 
-	new_trie.bytes_count = (uint16_t)bytes_count;
-	new_trie.nodes_count = (uint16_t)nodes_count;
-	new_trie.child_maps_count = (uint16_t)maps_count;
-
 	/* Initialize the free lists */
 	new_trie.nodes = (struct flow_divert_trie_node *)new_trie.memory;
+	new_trie.nodes_count = (uint16_t)nodes_count;
+
 	new_trie.nodes_free_next = 0;
 	memset(new_trie.nodes, 0, nodes_mem_size);
 
 	new_trie.child_maps = (uint16_t *)(void *)((uint8_t *)new_trie.memory + nodes_mem_size);
+	new_trie.child_maps_count = (uint16_t)maps_count;
+	new_trie.child_maps_size = child_maps_mem_size;
+
 	new_trie.child_maps_free_next = 0;
 	memset(new_trie.child_maps, 0xff, child_maps_mem_size);
 
 	new_trie.bytes = (uint8_t *)(void *)((uint8_t *)new_trie.memory + nodes_mem_size + child_maps_mem_size);
+	new_trie.bytes_count = (uint16_t)bytes_count;
+
 	new_trie.bytes_free_next = 0;
 	memset(new_trie.bytes, 0, bytes_mem_size);
 
@@ -3227,7 +3226,7 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 	if (!insert_error) {
 		group->signing_id_trie = new_trie;
 	} else {
-		kfree_data(new_trie.memory, trie_memory_size);
+		kfree_data_sized_by(new_trie.memory, new_trie.memory_size);
 	}
 
 	lck_rw_done(&group->lck);
@@ -3237,7 +3236,7 @@ static void
 flow_divert_handle_flow_states_request(struct flow_divert_group *group)
 {
 	struct flow_divert_pcb *fd_cb;
-	mbuf_t packet = NULL;
+	mbuf_ref_t packet = NULL;
 	SLIST_HEAD(, flow_divert_pcb) tmp_list;
 	int error = 0;
 	uint32_t ctl_unit = 0;
@@ -3297,11 +3296,11 @@ flow_divert_handle_flow_states_request(struct flow_divert_group *group)
 }
 
 static int
-flow_divert_input(mbuf_t packet, struct flow_divert_group *group)
+flow_divert_input(mbuf_ref_t packet, struct flow_divert_group *group)
 {
-	struct flow_divert_packet_header        hdr;
-	int                                                                     error           = 0;
-	struct flow_divert_pcb                          *fd_cb;
+	struct flow_divert_packet_header    hdr;
+	int                                 error  = 0;
+	struct flow_divert_pcb              *fd_cb;
 
 	if (mbuf_pkthdr_len(packet) < sizeof(hdr)) {
 		FDLOG(LOG_ERR, &nil_pcb, "got a bad packet, length (%lu) < sizeof hdr (%lu)", mbuf_pkthdr_len(packet), sizeof(hdr));
@@ -3522,7 +3521,7 @@ flow_divert_rcvd(struct socket *so, int flags __unused)
 }
 
 static int
-flow_divert_append_target_endpoint_tlv(mbuf_t connect_packet, struct sockaddr *toaddr)
+flow_divert_append_target_endpoint_tlv(mbuf_ref_t connect_packet, struct sockaddr *toaddr)
 {
 	int error = 0;
 	int port  = 0;
@@ -3554,7 +3553,7 @@ done:
 }
 
 struct sockaddr *
-flow_divert_get_buffered_target_address(mbuf_t buffer)
+flow_divert_get_buffered_target_address(mbuf_ref_t buffer)
 {
 	if (buffer != NULL && buffer->m_type == MT_SONAME) {
 		struct sockaddr *toaddr = mtod(buffer, struct sockaddr *);
@@ -3678,12 +3677,12 @@ flow_divert_ctloutput(struct socket *so, struct sockopt *sopt)
 static errno_t
 flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t p, bool implicit)
 {
-	struct flow_divert_pcb  *fd_cb  = so->so_fd_pcb;
-	int                                             error   = 0;
-	struct inpcb                    *inp    = sotoinpcb(so);
-	struct sockaddr_in              *sinp;
-	mbuf_t                                  connect_packet = NULL;
-	int                                             do_send = 1;
+	struct flow_divert_pcb  *fd_cb          = so->so_fd_pcb;
+	int                     error           = 0;
+	struct inpcb            *inp            = sotoinpcb(so);
+	struct sockaddr_in      *sinp;
+	mbuf_ref_t              connect_packet  = NULL;
+	int                     do_send         = 1;
 
 	if (!SO_IS_DIVERTED(so)) {
 		return EINVAL;
@@ -3716,7 +3715,7 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 
 	if (fd_cb->connect_packet == NULL) {
 		struct sockaddr_in sin = {};
-		struct ifnet *ifp = NULL;
+		struct ifnet * __single ifp = NULL;
 
 		if (to == NULL) {
 			FDLOG0(LOG_ERR, fd_cb, "No destination address available when creating connect packet");
@@ -3979,11 +3978,11 @@ flow_divert_connectx6_out(struct socket *so, struct sockaddr *src __unused,
 }
 
 static errno_t
-flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr *to, mbuf_t control, struct proc *p)
+flow_divert_data_out(struct socket *so, int flags, mbuf_ref_t data, struct sockaddr *to, mbuf_ref_t control, struct proc *p)
 {
 	struct flow_divert_pcb  *fd_cb  = so->so_fd_pcb;
-	int                                             error   = 0;
-	struct inpcb *inp;
+	int                     error   = 0;
+	struct inpcb            *inp;
 #if CONTENT_FILTER
 	struct m_tag *cfil_tag = NULL;
 #endif
@@ -4011,7 +4010,7 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 	 * retrieve the CFIL saved remote address from the mbuf and use it.
 	 */
 	if (to == NULL && CFIL_DGRAM_FILTERED(so)) {
-		struct sockaddr *cfil_faddr = NULL;
+		struct sockaddr * __single cfil_faddr = NULL;
 		cfil_tag = cfil_dgram_get_socket_state(data, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			to = (struct sockaddr *)(void *)cfil_faddr;
@@ -4125,7 +4124,7 @@ flow_divert_set_udp_protosw(struct socket *so)
 }
 
 errno_t
-flow_divert_implicit_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr *to, mbuf_t control, struct proc *p)
+flow_divert_implicit_data_out(struct socket *so, int flags, mbuf_ref_t data, struct sockaddr *to, mbuf_ref_t control, struct proc *p)
 {
 	struct flow_divert_pcb  *fd_cb  = so->so_fd_pcb;
 	struct inpcb *inp;
@@ -4226,12 +4225,12 @@ flow_divert_pcb_init(struct socket *so)
 errno_t
 flow_divert_token_set(struct socket *so, struct sockopt *sopt)
 {
-	uint32_t ctl_unit = 0;
-	uint32_t key_unit = 0;
-	uint32_t aggregate_unit = 0;
-	int error = 0;
-	int hmac_error = 0;
-	mbuf_t token = NULL;
+	uint32_t        ctl_unit        = 0;
+	uint32_t        key_unit        = 0;
+	uint32_t        aggregate_unit  = 0;
+	int             error           = 0;
+	int             hmac_error      = 0;
+	mbuf_ref_t      token           = NULL;
 
 	if (so->so_flags & SOF_FLOW_DIVERT) {
 		error = EALREADY;
@@ -4344,12 +4343,12 @@ done:
 errno_t
 flow_divert_token_get(struct socket *so, struct sockopt *sopt)
 {
-	uint32_t                                        ctl_unit;
-	int                                                     error                                           = 0;
-	uint8_t                                         hmac[SHA_DIGEST_LENGTH];
-	struct flow_divert_pcb          *fd_cb                                          = so->so_fd_pcb;
-	mbuf_t                                          token                                           = NULL;
-	struct flow_divert_group        *control_group                          = NULL;
+	uint32_t                    ctl_unit;
+	int                         error                   = 0;
+	uint8_t                     hmac[SHA_DIGEST_LENGTH];
+	struct flow_divert_pcb      *fd_cb                  = so->so_fd_pcb;
+	mbuf_ref_t                  token                   = NULL;
+	struct flow_divert_group    *control_group          = NULL;
 
 	if (!SO_IS_DIVERTED(so)) {
 		error = EINVAL;
@@ -4438,14 +4437,12 @@ flow_divert_group_destroy(struct flow_divert_group *group)
 
 	if (group->token_key != NULL) {
 		memset(group->token_key, 0, group->token_key_size);
-		kfree_data(group->token_key, group->token_key_size);
-		group->token_key = NULL;
-		group->token_key_size = 0;
+		kfree_data_sized_by(group->token_key, group->token_key_size);
 	}
 
 	/* Re-set the current trie */
 	if (group->signing_id_trie.memory != NULL) {
-		kfree_data_addr(group->signing_id_trie.memory);
+		kfree_data_sized_by(group->signing_id_trie.memory, group->signing_id_trie.memory_size);
 	}
 	memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
 	group->signing_id_trie.root = NULL_TRIE_IDX;
@@ -4564,8 +4561,8 @@ flow_divert_kctl_connect(kern_ctl_ref kctlref __unused, struct sockaddr_ctl *sac
 static errno_t
 flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *unitinfo)
 {
-	struct flow_divert_group        *group  = NULL;
-	errno_t                                         error   = 0;
+	struct flow_divert_group    *group  = NULL;
+	errno_t                     error   = 0;
 
 	if (unitinfo == NULL) {
 		return 0;
@@ -4627,7 +4624,7 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 }
 
 static errno_t
-flow_divert_kctl_send(__unused kern_ctl_ref kctlref, uint32_t unit, __unused void *unitinfo, mbuf_t m, __unused int flags)
+flow_divert_kctl_send(__unused kern_ctl_ref kctlref, uint32_t unit, __unused void *unitinfo, mbuf_ref_t m, __unused int flags)
 {
 	errno_t error = 0;
 	struct flow_divert_group *group = flow_divert_group_lookup(unit, NULL);
@@ -4655,7 +4652,7 @@ flow_divert_kctl_rcvd(__unused kern_ctl_ref kctlref, uint32_t unit, __unused voi
 		lck_rw_lock_exclusive(&group->lck);
 
 		while (!MBUFQ_EMPTY(&group->send_queue)) {
-			mbuf_t next_packet;
+			mbuf_ref_t next_packet;
 			FDLOG0(LOG_DEBUG, &nil_pcb, "trying ctl_enqueuembuf again");
 			next_packet = MBUFQ_FIRST(&group->send_queue);
 			int error = ctl_enqueuembuf(g_flow_divert_kctl_ref, group->ctl_unit, next_packet, CTL_DATA_EOR);
@@ -4757,9 +4754,9 @@ flow_divert_init(void)
 	 * real protocol; if they do, it is a bug and we should panic.
 	 */
 	g_flow_divert_in_protosw.pr_filter_head.tqh_first =
-	    (struct socket_filter *)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter *, (uintptr_t)0xdeadbeefdeadbeef);
 	g_flow_divert_in_protosw.pr_filter_head.tqh_last =
-	    (struct socket_filter **)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter **, (uintptr_t)0xdeadbeefdeadbeef);
 
 	/* UDP */
 	g_udp_protosw = pffindproto(AF_INET, IPPROTO_UDP, SOCK_DGRAM);
@@ -4787,9 +4784,9 @@ flow_divert_init(void)
 	 * real protocol; if they do, it is a bug and we should panic.
 	 */
 	g_flow_divert_in_udp_protosw.pr_filter_head.tqh_first =
-	    (struct socket_filter *)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter *, (uintptr_t)0xdeadbeefdeadbeef);
 	g_flow_divert_in_udp_protosw.pr_filter_head.tqh_last =
-	    (struct socket_filter **)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter **, (uintptr_t)0xdeadbeefdeadbeef);
 
 	g_tcp6_protosw = (struct ip6protosw *)pffindproto(AF_INET6, IPPROTO_TCP, SOCK_STREAM);
 
@@ -4815,9 +4812,9 @@ flow_divert_init(void)
 	 * real protocol; if they do, it is a bug and we should panic.
 	 */
 	g_flow_divert_in6_protosw.pr_filter_head.tqh_first =
-	    (struct socket_filter *)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter *, (uintptr_t)0xdeadbeefdeadbeef);
 	g_flow_divert_in6_protosw.pr_filter_head.tqh_last =
-	    (struct socket_filter **)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter **, (uintptr_t)0xdeadbeefdeadbeef);
 
 	/* UDP6 */
 	g_udp6_protosw = (struct ip6protosw *)pffindproto(AF_INET6, IPPROTO_UDP, SOCK_DGRAM);
@@ -4845,9 +4842,9 @@ flow_divert_init(void)
 	 * real protocol; if they do, it is a bug and we should panic.
 	 */
 	g_flow_divert_in6_udp_protosw.pr_filter_head.tqh_first =
-	    (struct socket_filter *)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter *, (uintptr_t)0xdeadbeefdeadbeef);
 	g_flow_divert_in6_udp_protosw.pr_filter_head.tqh_last =
-	    (struct socket_filter **)(uintptr_t)0xdeadbeefdeadbeef;
+	    __unsafe_forge_single(struct socket_filter **, (uintptr_t)0xdeadbeefdeadbeef);
 
 	TAILQ_INIT(&g_flow_divert_in_process_group_list);
 

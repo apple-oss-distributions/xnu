@@ -2018,3 +2018,31 @@ mbuf_set_keepalive_flag(mbuf_t m, boolean_t is_keepalive)
 
 	return 0;
 }
+
+errno_t
+mbuf_get_wake_packet_flag(mbuf_t m, boolean_t *is_wake_packet)
+{
+	if (m == NULL || is_wake_packet == NULL || !(m->m_flags & M_PKTHDR)) {
+		return EINVAL;
+	}
+
+	*is_wake_packet = (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT);
+
+	return 0;
+}
+
+errno_t
+mbuf_set_wake_packet_flag(mbuf_t m, boolean_t is_wake_packet)
+{
+	if (m == NULL || !(m->m_flags & M_PKTHDR)) {
+		return EINVAL;
+	}
+
+	if (is_wake_packet) {
+		m->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+	} else {
+		m->m_pkthdr.pkt_flags &= ~PKTF_WAKE_PKT;
+	}
+
+	return 0;
+}

@@ -832,6 +832,28 @@ vfs_vnodecovered(mount_t mp)
 	}
 }
 
+int
+vfs_setdevvp(mount_t mp, vnode_t devvp)
+{
+	if (mp == NULL) {
+		return 0;
+	}
+
+	if (devvp) {
+		if (devvp->v_type != VBLK) {
+			return EINVAL;
+		}
+
+		if (major(devvp->v_rdev) >= nblkdev) {
+			return ENXIO;
+		}
+	}
+
+	mp->mnt_devvp = devvp;
+
+	return 0;
+}
+
 /*
  * Returns device vnode backing a mountpoint with an iocount (if valid vnode exists).
  * The iocount must be released with vnode_put().  Note that this KPI is subtle
@@ -1327,7 +1349,7 @@ vfs_context_can_break_leases(vfs_context_t ctx)
 	return true;
 }
 
-boolean_t
+bool
 vfs_context_allow_fs_blksize_nocache_write(vfs_context_t ctx)
 {
 	uthread_t uth;
@@ -1335,20 +1357,38 @@ vfs_context_allow_fs_blksize_nocache_write(vfs_context_t ctx)
 	proc_t p;
 
 	if ((ctx == NULL) || (t = VFS_CONTEXT_GET_THREAD(ctx)) == NULL) {
-		return FALSE;
+		return false;
 	}
 
 	uth = get_bsdthread_info(t);
 	if (uth && (uth->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES)) {
-		return TRUE;
+		return true;
 	}
 
 	p = (proc_t)get_bsdthreadtask_info(t);
 	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE)) {
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
+}
+
+boolean_t
+vfs_context_skip_mtime_update(vfs_context_t ctx)
+{
+	proc_t p = vfs_context_proc(ctx);
+	thread_t t = vfs_context_thread(ctx);
+	uthread_t ut = t ? get_bsdthread_info(t) : NULL;
+
+	if (ut && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE)) {
+		return true;
+	}
+
+	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE)) {
+		return true;
+	}
+
+	return false;
 }
 
 /*
@@ -1580,7 +1620,9 @@ vfs_context_create_with_proc(proc_t p)
 
 	cred = kauth_cred_proc_ref(p);
 
-	VFS_CONTEXT_SET_REFERENCED_THREAD(newcontext, thread);
+	if (thread != NULL) {
+		VFS_CONTEXT_SET_REFERENCED_THREAD(newcontext, thread);
+	}
 	newcontext->vc_ucred = cred;
 
 	return newcontext;
@@ -4511,16 +4553,24 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 
 #if CONFIG_MACF
 	if (_err == 0) {
-		mac_vnode_notify_rename(
-			ctx,                        /* ctx */
-			*fvpp,                      /* fvp */
-			fdvp,                       /* fdvp */
-			fcnp,                       /* fcnp */
-			*tvpp,                      /* tvp */
-			tdvp,                       /* tdvp */
-			tcnp,                       /* tcnp */
-			(flags & VFS_RENAME_SWAP)   /* swap */
-			);
+		if (flags & VFS_RENAME_SWAP) {
+			mac_vnode_notify_rename_swap(
+				ctx,                        /* ctx */
+				fdvp,                       /* fdvp */
+				*fvpp,                      /* fvp */
+				fcnp,                       /* fcnp */
+				tdvp,                       /* tdvp */
+				*tvpp,                      /* tvp */
+				tcnp                        /* tcnp */
+				);
+		} else {
+			mac_vnode_notify_rename(
+				ctx,                        /* ctx */
+				*fvpp,                      /* fvp */
+				tdvp,                       /* tdvp */
+				tcnp                        /* tcnp */
+				);
+		}
 	}
 #endif
 
@@ -5125,6 +5175,7 @@ xattrfile_remove(vnode_t dvp, const char * basename, vfs_context_t ctx, int forc
 	}
 
 	xvp = nd.ni_vp;
+	dvp = nd.ni_dvp;
 	nameidone(&nd);
 	if (xvp->v_type != VREG) {
 		goto out1;

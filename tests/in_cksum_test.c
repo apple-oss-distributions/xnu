@@ -220,14 +220,14 @@ static uint8_t pkt49479689[] = {
 /*000005d0*/ 0x56, 0xf1, 0x6b, 0xd0,                                                                          // |V.k.|
 };
 
-T_DECL(in_cksum_49479689a, "tests os_cpu_in_cksum with known problem packet in various random segmentation and memory alignment")
+T_DECL(in_cksum_49479689a, "tests os_cpu_in_cksum with known problem packet in various random segmentation and memory alignment", T_META_TAG_VM_NOT_PREFERRED)
 {
 	uint16_t dsum = dumb_in_cksum(pkt49479689, sizeof(pkt49479689));
 	T_ASSERT_EQ(ntohs(dsum), (uint16_t)0xa32b, "verifying dumb chksum");
 	test_checksum(pkt49479689, sizeof(pkt49479689));
 }
 
-T_DECL(in_cksum_49479689b, "tests os_cpu_in_cksum with many random packets in various random segmentation and memory alignment")
+T_DECL(in_cksum_49479689b, "tests os_cpu_in_cksum with many random packets in various random segmentation and memory alignment", T_META_TAG_VM_NOT_PREFERRED)
 {
 	for (int i = 0; i < 100; i++) {
 		test_one_random_packet(4096);

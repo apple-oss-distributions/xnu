@@ -603,12 +603,12 @@ ptcclose(dev_t dev, __unused int flags, __unused int fmt, __unused proc_t p)
 
 	tty_unlock(tp);
 
-	pty_free_ioctl(dev, PF_OPEN_M);
 #if CONFIG_MACF
 	if (driver->mac_notify) {
 		mac_pty_notify_close(p, tp, dev, NULL);
 	}
 #endif
+	pty_free_ioctl(dev, PF_OPEN_M);
 
 	return 0;
 }
@@ -1125,6 +1125,21 @@ ptyioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
 				pti->pt_flags |= PF_UNLOCKED;
 			}
 			error = 0;
+			goto out;
+
+		case FIONBIO:           /* set/clear non-blocking i/o */
+		case FIOASYNC:
+			/*
+			 * These probably come from sys_fcntl_nocancel().  Nothing specific
+			 * to serial devices here, so they should be allowed even if the
+			 * replica is closed.  The implementation in ttioctl_locked() is
+			 * safe to call in this case.  Bypass the line discipline's l_ioctl
+			 * implementation in case it is not.  In practice l_ioctl is
+			 * completely unused anyway (existing line disciplines set it to
+			 * l_noioctl, and the loadable line discipline mechanism is used
+			 * nowhere and not exposed to third parties).
+			 */
+			error = ttioctl_locked(tp, cmd, data, flag, p);
 			goto out;
 		}
 

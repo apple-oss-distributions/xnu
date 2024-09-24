@@ -49,6 +49,7 @@
 #include <sys/kauth.h>
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <mach/sdt.h>
 #include <os/hash.h>
@@ -135,7 +136,7 @@ do { \
 
 extern "C" {
 #include <mach/mach_traps.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 } /* extern "C" */
 
 struct IOMachPortHashList;
@@ -1024,8 +1025,7 @@ IOServiceUserNotification::handler( void * ref,
 		msgSize = (mach_msg_size_t)(sizeof(PingMsgKdata) + payloadSize);
 
 		kr = kernel_mach_msg_send_with_builder_internal(0, payloadSize,
-		    (MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE),
-		    MACH_MSG_TIMEOUT_NONE, NULL,
+		    MACH_SEND_KERNEL_IMPORTANCE, MACH_MSG_TIMEOUT_NONE, NULL,
 		    ^(mach_msg_header_t *hdr, __assert_only mach_msg_descriptor_t *descs, void *payload){
 			PingMsgUdata *udata = (PingMsgUdata *)payload;
 
@@ -1203,8 +1203,7 @@ IOServiceMessageUserNotification::handler( void * ref,
 	thisPort = iokit_port_for_object( this, IKOT_IOKIT_OBJECT, NULL );
 
 	kr = kernel_mach_msg_send_with_builder_internal(1, payloadSize,
-	    (MACH_SEND_MSG | MACH_SEND_ALWAYS | MACH_SEND_IMPORTANCE),
-	    MACH_MSG_TIMEOUT_NONE, NULL,
+	    MACH_SEND_KERNEL_IMPORTANCE, MACH_MSG_TIMEOUT_NONE, NULL,
 	    ^(mach_msg_header_t *hdr, mach_msg_descriptor_t *descs, void *payload){
 		mach_msg_port_descriptor_t *port_desc = (mach_msg_port_descriptor_t *)descs;
 		PingMsgUdata *udata = (PingMsgUdata *)payload;
@@ -2339,15 +2338,15 @@ IOUserClient::_sendAsyncResult64(OSAsyncReference64 reference,
 
 	if ((options & kIOUserNotifyOptionCanDrop) != 0) {
 		kr = mach_msg_send_from_kernel_with_options( &replyMsg.msgHdr,
-		    replyMsg.msgHdr.msgh_size, MACH_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
+		    replyMsg.msgHdr.msgh_size, MACH64_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
 	} else {
 		/* Fail on full queue. */
-		kr = mach_msg_send_from_kernel_proper( &replyMsg.msgHdr,
+		kr = mach_msg_send_from_kernel(&replyMsg.msgHdr,
 		    replyMsg.msgHdr.msgh_size);
 	}
 	if ((KERN_SUCCESS != kr) && (MACH_SEND_TIMED_OUT != kr) && !(kIOUCAsyncErrorLoggedFlag & reference[0])) {
 		reference[0] |= kIOUCAsyncErrorLoggedFlag;
-		IOLog("%s: mach_msg_send_from_kernel_proper(0x%x)\n", __PRETTY_FUNCTION__, kr );
+		IOLog("%s: mach_msg_send_from_kernel(0x%x)\n", __PRETTY_FUNCTION__, kr );
 	}
 	return kr;
 }
@@ -6267,7 +6266,8 @@ is_io_catalog_get_data(
 		unsigned int size;
 
 		size = s->getLength();
-		kr = mach_vm_allocate_kernel(kernel_map, &data, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+		kr = mach_vm_allocate_kernel(kernel_map, &data, size,
+		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_IOKIT));
 		if (kr == kIOReturnSuccess) {
 			bcopy(s->text(), (void *)data, size);
 			kr = vm_map_copyin(kernel_map, data, size, true, &copy);

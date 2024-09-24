@@ -207,10 +207,18 @@ mach_right_send_once_valid(mach_right_send_once_t mrso)
  * @const MACH_RIGHT_RECV_UNGUARDED
  * The given context should not serve as a guard for the underlying port's
  * destruction.
+ *
+ * @const MACH_RIGHT_RECV_FLAG_STRICT
+ * Apply strict guarding for the constructed Mach port.
+ *
+ * @const MACH_RIGHT_RECV_FLAG_IMMOVABLE
+ * The constructed Mach port's receive right will be immovable.
  */
 OS_ENUM(mach_right_flags, uint64_t,
     MACH_RIGHT_RECV_FLAG_INIT = 0,
     MACH_RIGHT_RECV_FLAG_UNGUARDED = (1 << 0),
+    MACH_RIGHT_RECV_FLAG_STRICT = (1 << 1),
+    MACH_RIGHT_RECV_FLAG_IMMOVABLE = (1 << 2),
     );
 
 /*!

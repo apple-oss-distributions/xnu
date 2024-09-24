@@ -30,8 +30,4 @@
 
 #include <sys/cdefs.h>
 
-#if __has_include(<mach/mach_right_private.h>)
-#include <mach/mach_right_private.h>
-#endif
-
 #endif // __MACH_RIGHT_H

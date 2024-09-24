@@ -68,7 +68,7 @@ class IOKitSmartPointer(NativePointer):
 
     def GetPointerSBValue(self, sbvalue):
         sbv = sbvalue.GetChildMemberWithName('ptr_')
-        return super(IOKitSmartPointer, self).GetPointerSBValue(sbv)
+        return super().GetPointerSBValue(sbv)
 
 
 ######################################
@@ -1785,8 +1785,13 @@ def showpreoslog(cmd_args=None):
     err = lldb.SBError()
     if preoslog.wrapped > 0:
         print(preoslog.data.GetString(err, preoslog.offset + 1))
-    print(preoslog.data.GetString(err, 0))
+    
+    print(preoslog.data.GetString(err, 0).encode(errors='backslashreplace').decode())
     print("-----preoslog log end-------")
+
+    if not err.success:
+        raise RuntimeError(f"SBError when retreiving preoslog data: {err.GetDescription()}")
+        
     return True
 
 @lldb_command('showeventsources')
@@ -1807,3 +1812,93 @@ def ShowEventSources(cmd_args=None):
         print("{}: {} [{}]".format(idx, GetObjectSummary(event), "enabled" if enabled else "disabled"))
         event = event.eventChainNext
         idx += 1
+
+def GetRegionProp(propertyTable, pattern):
+    """ Returns the list corresponding to a given pattern from a registry entry's property table
+        Returns empty list if the key is not found
+        The property that is being searched for is specified as a string in pattern
+    """
+    if not propertyTable:
+        return None
+
+    count = unsigned(propertyTable.count)
+    result = []
+    res = None
+    idx = 0
+    while idx < count:
+        res = re.search(pattern, str(propertyTable.dictionary[idx].key.string))
+        if res:
+            result.append(res.group())
+        idx += 1
+
+    return result
+
+@lldb_command("showcarveouts")
+def ShowCarveouts(cmd_args=None):
+    """
+    Scan IODeviceTree for every object in carveout-memory-map and print the memory carveouts.
+    syntax: (lldb) showcarveouts
+    """
+    edt_plane = GetRegistryPlane("IODeviceTree")
+    if edt_plane is None:
+        print("Couldn't obtain a pointer to IODeviceTree")
+        return None
+
+    # Registry API functions operate on "plane" global variable
+    global plane
+    prev_plane = plane
+    plane = edt_plane
+
+    chosen = FindRegistryObjectRecurse(kern.globals.gRegistryRoot, "chosen")
+    if chosen is None:
+        print("Couldn't obtain /chosen IORegistryEntry")
+        return None
+
+    memory_map = FindRegistryObjectRecurse(chosen, "carveout-memory-map")
+    if memory_map is None:
+        print("Couldn't obtain memory-map from /chosen/carveout-memory-map")
+        return None
+
+    plane = prev_plane
+
+    """
+    Dynamically populated by iBoot to store memory region description
+    region-id-<n>: <region n base> <region n size>
+    region-name-id-<n>: <region n name>
+    """
+    name_prop_list = []
+    range_prop_list = []
+    region_id_list = []
+    region_name_id_list = []
+
+    region_id = re.compile(r"region-id-\d+")
+    region_id_list = GetRegionProp(memory_map.fPropertyTable, region_id);
+    region_name_id = re.compile(r"region-name-id-\d+")
+    region_name_id_list = GetRegionProp(memory_map.fPropertyTable, region_name_id);
+
+    for names in region_name_id_list:
+        mm_entry = LookupKeyInOSDict(memory_map.fPropertyTable, names, CompareStringToOSSymbol)
+        if mm_entry is None:
+            print("Couldn't find " + names + " entry in carveout-memory-map", file=sys.stderr)
+            continue
+        data = cast(mm_entry.data, "char *")
+        string = "{:<32s}: "
+        name_prop_list.append( string.format(data) );
+
+    for ids in region_id_list:
+        mm_entry = LookupKeyInOSDict(memory_map.fPropertyTable, ids, CompareStringToOSSymbol)
+        if mm_entry is None:
+            print("Couldn't find " + ids + " entry in carveout-memory-map")
+            continue
+
+        data = cast(mm_entry.data, "dtptr_t *")
+        paddr = unsigned(data[0])
+        size = unsigned(data[1])
+
+        string = "0x{:x}-0x{:x} (size: 0x{:x})"
+        range_prop_list.append( string.format(paddr, paddr+size, size) );
+
+    for namep, rangep in zip(name_prop_list, range_prop_list):
+        print(namep, rangep)
+
+    return True

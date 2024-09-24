@@ -426,6 +426,11 @@
 #define F_TRANSFEREXTENTS       110      /* Transfer allocated extents beyond leof to a different file */
 
 #define F_ATTRIBUTION_TAG       111      /* Based on flags, query/set/delete a file's attribution tag */
+#if PRIVATE
+#define F_NOCACHE_EXT           112      /* turn data caching off/on for this fd and relax size and alignment restrictions for write */
+#endif
+
+#define F_ADDSIGS_MAIN_BINARY   113             /* add detached signatures for main binary -- development only */
 
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000

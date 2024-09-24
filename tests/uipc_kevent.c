@@ -134,7 +134,7 @@ test_kevent_lowat(int type)
 	close(kq);
 }
 
-T_DECL(uipc_kevent, "Tests the UNIX Domain kevent filter", T_META_CHECK_LEAKS(false))
+T_DECL(uipc_kevent, "Tests the UNIX Domain kevent filter", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if 0
 	test_kevent(SOCK_STREAM);

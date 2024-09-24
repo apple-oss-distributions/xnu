@@ -388,7 +388,7 @@ disable_timer_coalescing(void)
 
 T_DECL(kqueue_timer_tests,
     "Tests assorted kqueue operations for timer-related events",
-    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1))
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1), T_META_TAG_VM_PREFERRED)
 {
 	/*
 	 * Since we're trying to test timers here, disable timer coalescing

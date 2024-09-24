@@ -12,7 +12,7 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(thread_request_83476290,
-    "test that mach_msg_trap causes a thread request")
+    "test that mach_msg_trap causes a thread request", T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t mp, rp;
 	kern_return_t kr;

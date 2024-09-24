@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -623,6 +623,36 @@ failed:
 	inet_socket_close(&client);
 	inet_socket_close(&server);
 	return success;
+}
+
+void
+inet_test_traffic(uint8_t af, inet_address_t server,
+    const char * server_ifname, int server_if_index,
+    const char * client_ifname, int client_if_index)
+{
+	inet_endpoint   endpoint;
+	/* do TCP first because TCP is reliable and will populate ND cache */
+	uint8_t         protos[] = { IPPROTO_TCP, IPPROTO_UDP, 0 };
+
+	bzero(&endpoint, sizeof(endpoint));
+	endpoint.af = af;
+	endpoint.addr = *server;
+	endpoint.port = 1;
+	for (uint8_t * proto = protos; *proto != 0; proto++) {
+		bool    success;
+
+		T_LOG("%s: %s %s server %s client %s",
+		    __func__, af_get_str(af),
+		    ipproto_get_str(*proto),
+		    server_ifname, client_ifname);
+		endpoint.proto = *proto;
+		success = inet_transfer_local(&endpoint, server_if_index,
+		    client_if_index);
+		T_ASSERT_TRUE(success,
+		    "inet_transfer_local(): %s",
+		    inet_transfer_error_string());
+	}
+	return;
 }
 
 const char *

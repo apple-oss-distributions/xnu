@@ -141,7 +141,7 @@ __sk_copy32_8(uint32_t *__counted_by(2)src, uint32_t *__counted_by(2)dst)
  * Copy 16-bytes total, 64-bit aligned, scalar.
  */
 static inline void
-__sk_copy64_16(uint64_t *__counted_by(2)src, uint64_t *__counted_by(2)dst)
+__sk_copy64_16(uint64_t *__counted_by(2) src, uint64_t *__counted_by(2) dst)
 {
 	dst[0] = src[0]; /* [#0*8] */
 	dst[1] = src[1]; /* [#1*8] */
@@ -152,7 +152,7 @@ __sk_copy64_16(uint64_t *__counted_by(2)src, uint64_t *__counted_by(2)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy32_16(uint32_t *__counted_by(4)src, uint32_t *__counted_by(4)dst)
+__sk_copy32_16(uint32_t *__counted_by(4) src, uint32_t *__counted_by(4) dst)
 {
 	dst[0] = src[0]; /* [#0*4] */
 	dst[1] = src[1]; /* [#1*4] */
@@ -165,7 +165,7 @@ __sk_copy32_16(uint32_t *__counted_by(4)src, uint32_t *__counted_by(4)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy64_20(uint64_t *__sized_by(20)src, uint64_t *__sized_by(20)dst)
+__sk_copy64_20(uint64_t *__sized_by(20) src, uint64_t *__sized_by(20) dst)
 {
 	dst[0] = src[0]; /* [#0*8] */
 	dst[1] = src[1]; /* [#1*8] */
@@ -177,7 +177,7 @@ __sk_copy64_20(uint64_t *__sized_by(20)src, uint64_t *__sized_by(20)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy64_24(uint64_t *__counted_by(3)src, uint64_t *__counted_by(3)dst)
+__sk_copy64_24(uint64_t *__counted_by(3) src, uint64_t *__counted_by(3) dst)
 {
 	dst[0] = src[0]; /* [#0*8] */
 	dst[1] = src[1]; /* [#1*8] */
@@ -189,7 +189,7 @@ __sk_copy64_24(uint64_t *__counted_by(3)src, uint64_t *__counted_by(3)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy64_32(uint64_t *__counted_by(4)src, uint64_t *__counted_by(4)dst)
+__sk_copy64_32(uint64_t *__counted_by(4) src, uint64_t *__counted_by(4) dst)
 {
 	dst[0] = src[0]; /* [#0*8] */
 	dst[1] = src[1]; /* [#1*8] */
@@ -202,7 +202,7 @@ __sk_copy64_32(uint64_t *__counted_by(4)src, uint64_t *__counted_by(4)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
+__sk_copy32_32(uint32_t *__counted_by(8) src, uint32_t *__counted_by(8) dst)
 {
 	dst[0] = src[0]; /* [#0*4] */
 	dst[1] = src[1]; /* [#1*4] */
@@ -219,7 +219,7 @@ __sk_copy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_copy64_40(uint64_t *__counted_by(5)src, uint64_t *__counted_by(5)dst)
+__sk_copy64_40(uint64_t *__sized_by(40) src, uint64_t *__sized_by(40) dst)
 {
 	dst[0] = src[0]; /* [#0*8] */
 	dst[1] = src[1]; /* [#1*8] */
@@ -234,7 +234,7 @@ __sk_copy64_40(uint64_t *__counted_by(5)src, uint64_t *__counted_by(5)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy64_16(uint64_t *src, uint64_t *dst)
+__sk_vcopy64_16(uint64_t *__counted_by(2) src, uint64_t *__counted_by(2) dst)
 {
 	/* no need to save/restore registers on arm64 (SPILL_REGISTERS) */
 	/* BEGIN CSTYLED */
@@ -242,7 +242,7 @@ __sk_vcopy64_16(uint64_t *src, uint64_t *dst)
                 "ldr	q0, [%[src]]		\n\t"
                 "str	q0, [%[dst]]		\n\t"
                 :
-                : [src] "r" (src), [dst] "r" (dst)
+                : [src] "r" ((uint64_t *__unsafe_indexable)src), [dst] "r" ((uint64_t *__unsafe_indexable)dst)
                 : "v0", "memory"
         );
 	/* END CSTYLED */
@@ -253,7 +253,7 @@ __sk_vcopy64_16(uint64_t *src, uint64_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy32_16(uint32_t *src, uint32_t *dst)
+__sk_vcopy32_16(uint32_t *__counted_by(4) src, uint32_t *__counted_by(4) dst)
 {
 	/* use SIMD unaligned move on arm64 */
 	__sk_vcopy64_16((uint64_t *)(void *)src, (uint64_t *)(void *)dst);
@@ -264,7 +264,7 @@ __sk_vcopy32_16(uint32_t *src, uint32_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy64_20(uint64_t *src, uint64_t *dst)
+__sk_vcopy64_20(uint64_t *__sized_by(20) src, uint64_t *__sized_by(20) dst)
 {
 	/*
 	 * Load/store 16 + 4 bytes;
@@ -277,7 +277,7 @@ __sk_vcopy64_20(uint64_t *src, uint64_t *dst)
                 "ldr	s0, [%[src], #16]	\n\t"
                 "str	s0, [%[dst], #16]	\n\t"
                 :
-                : [src] "r" (src), [dst] "r" (dst)
+                : [src] "r" ((uint64_t *__unsafe_indexable)src), [dst] "r" ((uint64_t *__unsafe_indexable)dst)
                 : "v0", "memory"
         );
 	/* END CSTYLED */
@@ -288,7 +288,7 @@ __sk_vcopy64_20(uint64_t *src, uint64_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy64_24(uint64_t *src, uint64_t *dst)
+__sk_vcopy64_24(uint64_t *__counted_by(3) src, uint64_t *__counted_by(3) dst)
 {
 	/*
 	 * Use 16-bytes load/store and 8-bytes load/store on arm64;
@@ -301,7 +301,7 @@ __sk_vcopy64_24(uint64_t *src, uint64_t *dst)
                 "ldr	d0, [%[src], #16]	\n\t"
                 "str	d0, [%[dst], #16]	\n\t"
                 :
-                : [src] "r" (src), [dst] "r" (dst)
+                : [src] "r" ((uint64_t *__unsafe_indexable)src), [dst] "r" ((uint64_t *__unsafe_indexable)dst)
                 : "v0", "memory"
         );
 	/* END CSTYLED */
@@ -312,7 +312,7 @@ __sk_vcopy64_24(uint64_t *src, uint64_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy64_32(uint64_t *src, uint64_t *dst)
+__sk_vcopy64_32(uint64_t *__counted_by(4) src, uint64_t *__counted_by(4) dst)
 {
 	/* no need to save/restore registers on arm64 (SPILL_REGISTERS) */
 	/* BEGIN CSTYLED */
@@ -320,7 +320,7 @@ __sk_vcopy64_32(uint64_t *src, uint64_t *dst)
                 "ldp	q0, q1, [%[src]]	\n\t"
                 "stp	q0, q1, [%[dst]]	\n\t"
                 :
-                : [src] "r" (src), [dst] "r" (dst)
+                : [src] "r" ((uint64_t *__unsafe_indexable)src), [dst] "r" ((uint64_t *__unsafe_indexable)dst)
                 : "v0", "v1", "memory"
         );
 	/* END CSTYLED */
@@ -331,7 +331,7 @@ __sk_vcopy64_32(uint64_t *src, uint64_t *dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
+__sk_vcopy32_32(uint32_t *__counted_by(8) src, uint32_t *__counted_by(8) dst)
 {
 	/* use SIMD unaligned move on arm64 */
 	__sk_vcopy64_32((uint64_t *)(void *)src, (uint64_t *)(void *)dst);
@@ -342,7 +342,7 @@ __sk_vcopy32_32(uint32_t *__counted_by(8)src, uint32_t *__counted_by(8)dst)
  */
 __attribute__((always_inline))
 static inline void
-__sk_vcopy64_40(uint64_t *src, uint64_t *dst)
+__sk_vcopy64_40(uint64_t *__sized_by(40) src, uint64_t *__sized_by(40) dst)
 {
 	/*
 	 * Use 32-bytes load/store pair and 8-bytes load/store on arm64;
@@ -355,7 +355,7 @@ __sk_vcopy64_40(uint64_t *src, uint64_t *dst)
                 "ldr	d0, [%[src], #32]	\n\t"
                 "str	d0, [%[dst], #32]	\n\t"
                 :
-                : [src] "r" (src), [dst] "r" (dst)
+                : [src] "r" ((uint64_t *__unsafe_indexable)src), [dst] "r" ((uint64_t *__unsafe_indexable)dst)
                 : "v0", "v1", "memory"
         );
 	/* END CSTYLED */
@@ -512,8 +512,16 @@ sk_copy64_4x(uint32_t *__sized_by(l)src, uint32_t *__sized_by(l)dst, size_t l)
 #endif /* (!DEVELOPMENT && !DEBUG! */
 		int i;
 
+		/*
+		 * Clang is unable to optimize away bounds checks in the presence of
+		 * divisions in the loop bound at this time. However, the caller
+		 * already bounds-checked that each of `src` and `dst` have `l` bytes
+		 * at them each. It's therefore safe to copy that many bytes.
+		 */
+		uint32_t *__unsafe_indexable src_unsafe = src;
+		uint32_t *__unsafe_indexable dst_unsafe = dst;
 		for (i = 0; i < l / 4; i++) {
-			dst[i] = src[i]; /* [#i*4] */
+			dst_unsafe[i] = src_unsafe[i]; /* [#i*4] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -534,8 +542,16 @@ sk_copy64_8x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 #endif /* (!DEVELOPMENT && !DEBUG! */
 		int i;
 
+		/*
+		 * Clang is unable to optimize away bounds checks in the presence of
+		 * divisions in the loop bound at this time. However, the caller
+		 * already bounds-checked that each of `src` and `dst` have `l` bytes
+		 * at them each. It's therefore safe to copy that many bytes.
+		 */
+		uint64_t *__unsafe_indexable src_unsafe = src;
+		uint64_t *__unsafe_indexable dst_unsafe = dst;
 		for (i = 0; i < l / 8; i++) {
-			dst[i] = src[i]; /* [#i*8] */
+			dst_unsafe[i] = src_unsafe[i]; /* [#i*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -556,12 +572,20 @@ sk_copy64_32x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 #endif /* (!DEVELOPMENT && !DEBUG! */
 		int n, i;
 
+		/*
+		 * Clang is unable to optimize away bounds checks in the presence of
+		 * divisions in the loop bound at this time. However, the caller
+		 * already bounds-checked that each of `src` and `dst` have `l` bytes
+		 * at them each. It's therefore safe to copy that many bytes.
+		 */
+		uint64_t *__unsafe_indexable src_unsafe = src;
+		uint64_t *__unsafe_indexable dst_unsafe = dst;
 		for (n = 0; n < l / 32; n++) {
 			i = n * 4;
-			dst[i] = src[i];         /* [#(i+0)*8] */
-			dst[i + 1] = src[i + 1]; /* [#(i+1)*8] */
-			dst[i + 2] = src[i + 2]; /* [#(i+2)*8] */
-			dst[i + 3] = src[i + 3]; /* [#(i+3)*8] */
+			dst_unsafe[i] = src_unsafe[i];         /* [#(i+0)*8] */
+			dst_unsafe[i + 1] = src_unsafe[i + 1]; /* [#(i+1)*8] */
+			dst_unsafe[i + 2] = src_unsafe[i + 2]; /* [#(i+2)*8] */
+			dst_unsafe[i + 3] = src_unsafe[i + 3]; /* [#(i+3)*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -582,16 +606,24 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 #endif /* (!DEVELOPMENT && !DEBUG! */
 		int n, i;
 
+		/*
+		 * Clang is unable to optimize away bounds checks in the presence of
+		 * divisions in the loop bound at this time. However, the caller
+		 * already bounds-checked that each of `src` and `dst` have `l` bytes
+		 * at them each. It's therefore safe to copy that many bytes.
+		 */
+		uint64_t *__unsafe_indexable src_unsafe = src;
+		uint64_t *__unsafe_indexable dst_unsafe = dst;
 		for (n = 0; n < l / 64; n++) {
 			i = n * 8;
-			dst[i] = src[i];         /* [#(i+0)*8] */
-			dst[i + 1] = src[i + 1]; /* [#(i+1)*8] */
-			dst[i + 2] = src[i + 2]; /* [#(i+2)*8] */
-			dst[i + 3] = src[i + 3]; /* [#(i+3)*8] */
-			dst[i + 4] = src[i + 4]; /* [#(i+4)*8] */
-			dst[i + 5] = src[i + 5]; /* [#(i+5)*8] */
-			dst[i + 6] = src[i + 6]; /* [#(i+6)*8] */
-			dst[i + 7] = src[i + 7]; /* [#(i+7)*8] */
+			dst_unsafe[i] = src_unsafe[i];         /* [#(i+0)*8] */
+			dst_unsafe[i + 1] = src_unsafe[i + 1]; /* [#(i+1)*8] */
+			dst_unsafe[i + 2] = src_unsafe[i + 2]; /* [#(i+2)*8] */
+			dst_unsafe[i + 3] = src_unsafe[i + 3]; /* [#(i+3)*8] */
+			dst_unsafe[i + 4] = src_unsafe[i + 4]; /* [#(i+4)*8] */
+			dst_unsafe[i + 5] = src_unsafe[i + 5]; /* [#(i+5)*8] */
+			dst_unsafe[i + 6] = src_unsafe[i + 6]; /* [#(i+6)*8] */
+			dst_unsafe[i + 7] = src_unsafe[i + 7]; /* [#(i+7)*8] */
 		}
 	} else {
 		(void) memcpy((void *)dst, (void *)src, l);
@@ -651,10 +683,9 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
  */
 #define _sk_alloc_type(probename, type, flags, name)                    \
 ({                                                                      \
-	void *ret;                                                      \
-                                                                        \
 	/* XXX Modify this to use KT_PRIV_ACCT later  */                \
-	ret = kalloc_type_tag(type, Z_ZERO | (flags), (name)->tag);     \
+	__auto_type ret = kalloc_type_tag(type, Z_ZERO | (flags),       \
+	    (name)->tag);                                               \
 	DTRACE_SKYWALK3(probename, char *, #type, int, (flags),         \
 	    void *, ret);                                               \
 	ret;                                                            \
@@ -662,10 +693,8 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define _sk_alloc_type_array(probename, type, count, flags, name)       \
 ({                                                                      \
-	void *ret;                                                      \
-                                                                        \
-	ret = kalloc_type_tag(type, (count), Z_ZERO | (flags),          \
-	    (name)->tag);                                               \
+	__auto_type ret = kalloc_type_tag(type, (count),                \
+	    Z_ZERO | (flags), (name)->tag);                             \
 	DTRACE_SKYWALK4(probename, char *, #type, size_t, (count),      \
 	    int, (flags), void *, ret);                                 \
 	ret;                                                            \
@@ -673,9 +702,7 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define _sk_alloc_type_hash(probename, heap, size, flags, name)         \
 ({                                                                      \
-	void *ret;                                                      \
-                                                                        \
-	ret = kalloc_type_var_impl((heap), (size),                      \
+	__auto_type ret = kalloc_type_var_impl((heap), (size),          \
 	    __zone_flags_mix_tag((flags) | Z_ZERO, (name)->tag), NULL); \
 	DTRACE_SKYWALK4(probename, char *, (heap)->kt_name + 5,         \
 	    size_t, (size), int, (flags), void *, ret);                 \
@@ -684,10 +711,8 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define _sk_realloc_type_array(probename, type, oldcount, newcount, elem, flags, name) \
 ({                                                                      \
-	void *ret;                                                      \
-                                                                        \
-	ret = krealloc_type_tag(type, (oldcount), (newcount), (elem),   \
-	    Z_ZERO | (flags), (name)->tag);                             \
+	__auto_type ret = krealloc_type_tag(type, (oldcount),           \
+	    (newcount), (elem), Z_ZERO | (flags), (name)->tag);         \
 	DTRACE_SKYWALK5(probename, void *, (elem), size_t, (oldcount),  \
 	    size_t, (newcount), int, (flags), void *, ret);             \
 	ret;                                                            \
@@ -695,10 +720,8 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define _sk_alloc_type_header_array(probename, htype, type, count, flags, name) \
 ({                                                                      \
-	void *ret;                                                      \
-                                                                        \
-	ret = kalloc_type_tag(htype, type, (count), Z_ZERO | (flags),   \
-	    (name)->tag);                                               \
+	__auto_type ret = kalloc_type_tag(htype, type, (count),         \
+	    Z_ZERO | (flags), (name)->tag);                             \
 	DTRACE_SKYWALK5(probename, char *, #htype, char *, #type,       \
 	    size_t, (count), int, (flags), void *, ret);                \
 	ret;                                                            \
@@ -715,6 +738,13 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 	DTRACE_SKYWALK3(probename, char *, #type, size_t, (count),      \
 	    void *, (elem));                                            \
 	kfree_type(type, (count), (elem));                              \
+}
+
+#define _sk_free_type_array_counted_by(probename, type, count, elem)    \
+{                                                                       \
+	DTRACE_SKYWALK3(probename, char *, #type, size_t, (count),      \
+	    void *, (elem));                                            \
+	kfree_type_counted_by(type, (count), (elem));                   \
 }
 
 #define _sk_free_type_hash(probename, heap, size, elem)                 \
@@ -758,6 +788,12 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 	kfree_data((elem), (size));                                     \
 }
 
+#define _sk_free_data_sized_by(probename, elem, size)                   \
+{                                                                       \
+	DTRACE_SKYWALK2(probename, void *, (elem), size_t, (size));     \
+	kfree_data_sized_by((elem), (size));                            \
+}
+
 #define sk_alloc_type(type, flags, tag)                                 \
 	_sk_alloc_type(sk_alloc_type, type, flags, tag)
 
@@ -781,6 +817,9 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 #define sk_free_type_array(type, count, elem)                           \
 	_sk_free_type_array(sk_free_type_array, type, count, elem)
 
+#define sk_free_type_array_counted_by(type, count, elem)                \
+	_sk_free_type_array_counted_by(sk_free_type_array_counted_by, type, count, elem)
+
 #define sk_free_type_hash(heap, size, elem)                             \
 	_sk_free_type_hash(sk_free_type_hash, heap, size, elem)
 
@@ -797,6 +836,9 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define sk_free_data(elem, size)                                        \
 	_sk_free_data(sk_free_data, elem, size)
+
+#define sk_free_data_sized_by(elem, size)                               \
+	_sk_free_data_sized_by(sk_free_data_sized_by, elem, size)
 
 /*
  * The skn_ variants are meant to be used if you need to use two or more
@@ -827,6 +869,10 @@ sk_copy64_64x(uint64_t *__sized_by(l)src, uint64_t *__sized_by(l)dst, size_t l)
 
 #define skn_free_type_array(name, type, count, elem)                    \
 	_sk_free_type_array(sk_free_type_array_ ## name, type, count,   \
+	elem)
+
+#define skn_free_type_array_counted_by(name, type, count, elem)         \
+	_sk_free_type_array_counted_by(sk_free_type_array_ ## name, type, count,   \
 	elem)
 
 #define skn_free_type_hash(name, heap, size, elem)                      \

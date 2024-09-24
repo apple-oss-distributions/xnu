@@ -24,7 +24,7 @@ static_assert(POLL_TIMEOUT_MS > (SLEEP_TIME_SECS * 1000),
  * See <rdar://problem/28372390>.
  */
 T_DECL(sleep_with_no_fds,
-    "poll() called with no fds provided should act like sleep")
+    "poll() called with no fds provided should act like sleep", T_META_TAG_VM_PREFERRED)
 {
 	uint64_t begin_time, sleep_time, poll_time;
 	struct pollfd pfd = { .fd = 0, .events = 0, .revents = 0 };
@@ -50,7 +50,7 @@ T_DECL(sleep_with_no_fds,
  * See <rdar://problem/28539155>.
  */
 T_DECL(directories,
-    "poll() with directories should return an error")
+    "poll() with directories should return an error", T_META_TAG_VM_PREFERRED)
 {
 	int file, dir, pipes[2];
 	struct pollfd pfd[] = {
@@ -159,7 +159,7 @@ leak_thread(void *ptr)
 	return NULL;
 }
 
-T_DECL(poll_dont_leak_kernel_pointers, "poll and proc_pidinfo should not leak kernel pointers")
+T_DECL(poll_dont_leak_kernel_pointers, "poll and proc_pidinfo should not leak kernel pointers", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t thr;
 	pthread_create(&thr, NULL, *leak_thread, (void *) NULL);

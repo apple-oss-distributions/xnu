@@ -70,7 +70,6 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/protosw.h>
-#include <sys/sysctl.h>
 #include <sys/tree.h>
 #include <sys/mcache.h>
 
@@ -82,6 +81,7 @@
 #include <net/if_dl.h>
 #include <net/net_api_stats.h>
 #include <net/route.h>
+#include <net/net_sysctl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -327,9 +327,11 @@ imo_grow(struct ip_moptions *imo, uint16_t newmax)
 
 	imo->imo_membership = nmships;
 	nmships = NULL;
+	imo->imo_max_memberships = newmax;
+
 	imo->imo_mfilters = nmfilters;
 	nmfilters = NULL;
-	imo->imo_max_memberships = newmax;
+	imo->imo_max_filters = newmax;
 
 	return 0;
 
@@ -798,13 +800,17 @@ imf_graft(struct in_mfilter *imf, const uint8_t st1,
     const struct sockaddr_in *psin)
 {
 	struct in_msource       *lims;
+	struct ip_msource       *__single lims_forged;
 
 	lims = inms_alloc(Z_WAITOK);
 	lims->ims_haddr = ntohl(psin->sin_addr.s_addr);
 	lims->imsl_st[0] = MCAST_UNDEFINED;
 	lims->imsl_st[1] = st1;
+
+	/* Removal of __unsafe_forge_single tracked by rdar://121702748 */
+	lims_forged = __unsafe_forge_single(struct ip_msource *, lims);
 	RB_INSERT(ip_msource_tree, &imf->imf_sources,
-	    (struct ip_msource *)lims);
+	    lims_forged);
 	++imf->imf_nsrc;
 
 	return lims;
@@ -1708,6 +1714,7 @@ inp_findmoptions(struct inpcb *inp)
 	imo->imo_num_memberships = 0;
 	imo->imo_max_memberships = IP_MIN_MEMBERSHIPS;
 	imo->imo_membership = immp;
+	imo->imo_max_filters = IP_MIN_MEMBERSHIPS;
 	imo->imo_mfilters = imfp;
 
 	/* Initialize per-group source filters. */
@@ -3194,28 +3201,20 @@ static int
 sysctl_ip_mcast_filters SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp)
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 2, name, namelen);
 
 	struct in_addr                   src = {}, group;
 	struct ifnet                    *ifp;
 	struct in_multi                 *inm;
 	struct in_multistep             step;
 	struct ip_msource               *ims;
-	int                             *name;
 	int                              retval = 0;
-	u_int                            namelen;
 	uint32_t                         fmode, ifindex;
-
-	namelen = (u_int)arg2;
 
 	if (req->newptr != USER_ADDR_NULL) {
 		return EPERM;
 	}
 
-	if (namelen != 2) {
-		return EINVAL;
-	}
-
-	name = __unsafe_forge_bidi_indexable(int *, arg1, namelen * sizeof(int));
 	ifindex = name[0];
 	ifnet_head_lock_shared();
 	if (!IF_INDEX_IN_RANGE(ifindex)) {

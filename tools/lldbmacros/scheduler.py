@@ -43,7 +43,10 @@ def ShowInterrupts(cmd_args=None):
             cpu_data_entry = Cast(element, 'cpu_data_t *')
             print("CPU {} IRQ: {:d}\n".format(y, cpu_data_entry.cpu_stat.irq_ex_cnt))
             print("CPU {} IPI: {:d}\n".format(y, cpu_data_entry.cpu_stat.ipi_cnt))
-            print("CPU {} PMI: {:d}\n".format(y, cpu_data_entry.cpu_monotonic.mtc_npmis))
+            try:
+                print("CPU {} PMI: {:d}\n".format(y, cpu_data_entry.cpu_monotonic.mtc_npmis))
+            except AttributeError:
+                pass
             print("CPU {} TMR: {:d}\n".format(y, cpu_data_entry.cpu_stat.timer_cnt))
             x = x + 1
         y = y + 1
@@ -568,35 +571,6 @@ def int32(n):
 
 # Macro: showallprocessors
 
-def ShowGroupSetSummary(runq, task_map):
-    """ Internal function to print summary of group run queue
-        params: runq - value representing struct run_queue *
-    """
-
-    print("    runq: count {: <10d} highq: {: <10d} urgency {: <10d}\n".format(runq.count, int32(runq.highq), runq.urgency))
-
-    runq_queue_i = 0
-    runq_queue_count = sizeof(runq.queues) // sizeof(runq.queues[0])
-
-    for runq_queue_i in range(runq_queue_count) :
-        runq_queue_head = addressof(runq.queues[runq_queue_i])
-        runq_queue_p = runq_queue_head.next
-
-        if unsigned(runq_queue_p) != unsigned(runq_queue_head):
-            runq_queue_this_count = 0
-
-            for entry in ParanoidIterateLinkageChain(runq_queue_head, "sched_entry_t", "entry_links", circleQueue=True):
-                runq_queue_this_count += 1
-
-            print("      Queue [{: <#012x}] Priority {: <3d} count {:d}\n".format(runq_queue_head, runq_queue_i, runq_queue_this_count))
-            for entry in ParanoidIterateLinkageChain(runq_queue_head, "sched_entry_t", "entry_links", circleQueue=True):
-                group_addr = unsigned(entry) - (sizeof(dereference(entry)) * unsigned(entry.sched_pri))
-                group = kern.GetValueFromAddress(unsigned(group_addr), 'sched_group_t')
-                task = task_map.get(unsigned(group), 0x0)
-                if task == 0x0 :
-                    print("Cannot find task for group: {: <#012x}".format(group))
-                print("\tEntry [{: <#012x}] Priority {: <3d} Group {: <#012x} Task {: <#012x}\n".format(unsigned(entry), entry.sched_pri, unsigned(group), unsigned(task)))
-
 @lldb_command('showrunq')
 def ShowRunq(cmd_args=None):
     """  Routine to print information of a runq
@@ -652,30 +626,10 @@ def ShowRTRunQSummary(rt_runq):
             for rt_runq_thread in ParanoidIterateLinkageChain(rt_pri_rq.pri_queue, "thread_t", "runq_links", circleQueue=False):
                 print("\t" + GetThreadSummary(rt_runq_thread) + "\n")
 
-def ShowGrrrSummary(grrr_runq):
-    """ Internal function to print summary of grrr_run_queue
-        params: grrr_runq - value representing struct grrr_run_queue *
-    """
-    print("    GRRR Info: Count {: <10d} Weight {: <10d} Current Group {: <#012x}\n".format(grrr_runq.count,
-        grrr_runq.weight, grrr_runq.current_group))
-    grrr_group_i = 0
-    grrr_group_count = sizeof(grrr_runq.groups) // sizeof(grrr_runq.groups[0])
-    for grrr_group_i in range(grrr_group_count) :
-        grrr_group = addressof(grrr_runq.groups[grrr_group_i])
-        if grrr_group.count > 0:
-            print("      Group {: <3d} [{: <#012x}] ".format(grrr_group.index, grrr_group))
-            print("Count {:d} Weight {:d}\n".format(grrr_group.count, grrr_group.weight))
-            grrr_group_client_head = addressof(grrr_group.clients)
-            print(GetThreadSummary.header)
-            for thread in ParanoidIterateLinkageChain(grrr_group_client_head, "thread_t", "runq_links", circleQueue=True):
-                print("\t" + GetThreadSummary(thread) + "\n")
-                if config['verbosity'] > vHUMAN :
-                    print("\t" + GetThreadBackTrace(thread, prefix="\t\t") + "\n")
-
 def ShowActiveThread(processor):
     if (processor.active_thread != 0) :
-        print("\t" + GetThreadSummary.header + "\n")
-        print("\t" + GetThreadSummary(processor.active_thread) + "\n")
+        print("\t" + GetThreadSummary.header)
+        print("\t" + GetThreadSummary(processor.active_thread))
 
 @lldb_command('showallprocessors')
 @lldb_command('showscheduler')
@@ -684,24 +638,13 @@ def ShowScheduler(cmd_args=None):
          Usage: showscheduler
     """
     node = addressof(kern.globals.pset_node0)
-    show_grrr = 0
     show_priority_runq = 0
     show_priority_pset_runq = 0
-    show_group_pset_runq = 0
     show_clutch = 0
     show_edge = 0
     sched_string = str(kern.globals.sched_string)
 
-    if sched_string == "traditional":
-        show_priority_runq = 1
-    elif sched_string == "traditional_with_pset_runqueue":
-        show_priority_pset_runq = 1
-    elif sched_string == "grrr":
-        show_grrr = 1
-    elif sched_string == "multiq":
-        show_priority_runq = 1
-        show_group_pset_runq = 1
-    elif sched_string == "dualq":
+    if sched_string == "dualq":
         show_priority_pset_runq = 1
         show_priority_runq = 1
     elif sched_string == "amp":
@@ -709,8 +652,10 @@ def ShowScheduler(cmd_args=None):
         show_priority_runq = 1
     elif sched_string == "clutch":
         show_clutch = 1
+        show_priority_runq = 1
     elif sched_string == "edge":
         show_edge = 1
+        show_priority_runq = 1
     else :
         print("Unknown sched_string {:s}".format(sched_string))
 
@@ -732,19 +677,6 @@ def ShowScheduler(cmd_args=None):
     processor_dispatching = GetEnumValue('processor_state_t::PROCESSOR_DISPATCHING')
     processor_running     = GetEnumValue('processor_state_t::PROCESSOR_RUNNING')
 
-    if show_group_pset_runq:
-        if hasattr(kern.globals, "multiq_sanity_check"):
-            print("multiq scheduler config: deep-drain {g.deep_drain:d}, ceiling {g.drain_ceiling:d}, depth limit {g.drain_depth_limit:d}, band limit {g.drain_band_limit:d}, sanity check {g.multiq_sanity_check:d}\n".format(g=kern.globals))
-        else:
-            print("multiq scheduler config: deep-drain {g.deep_drain:d}, ceiling {g.drain_ceiling:d}, depth limit {g.drain_depth_limit:d}, band limit {g.drain_band_limit:d}\n".format(g=kern.globals))
-
-        # Create a group->task mapping
-        task_map = {}
-        for task in kern.tasks:
-            task_map[unsigned(task.sched_group)] = task
-        for task in kern.terminated_tasks:
-            task_map[unsigned(task.sched_group)] = task
-
     print()
 
     while node != 0:
@@ -762,17 +694,6 @@ def ShowScheduler(cmd_args=None):
                 runq = kern.GetValueFromAddress(unsigned(addressof(pset.pset_runq)), 'struct run_queue *')
                 ShowRunQSummary(runq)
 
-            if show_group_pset_runq:
-                print("Main Runq:\n")
-                runq = kern.GetValueFromAddress(unsigned(addressof(pset.pset_runq)), 'struct run_queue *')
-                ShowGroupSetSummary(runq, task_map)
-                print("All Groups:\n")
-                # TODO: Possibly output task header for each group
-                for group in IterateQueue(kern.globals.sched_groups, "sched_group_t", "sched_groups"):
-                    if (group.runq.count != 0) :
-                        task = task_map.get(unsigned(group), "Unknown task!")
-                        print("Group {: <#012x} Task {: <#012x}\n".format(unsigned(group), unsigned(task)))
-                        ShowRunQSummary(group.runq)
             print()
 
             processor_array = kern.globals.processor_array
@@ -782,15 +703,13 @@ def ShowScheduler(cmd_args=None):
             for cpuid in IterateBitmap(active_bitmap):
                 processor = processor_array[cpuid]
                 if processor != 0:
-                    print("    " + GetProcessorSummary(processor))
+                    print("    " + GetProcessorSummary(processor), end='')
                     ShowActiveThread(processor)
 
                     if show_priority_runq:
                         runq = processor.runq
-                        ShowRunQSummary(runq)
-                    if show_grrr:
-                        grrr_runq = processor.grrr_runq
-                        ShowGrrrSummary(grrr_runq)
+                        if runq.count != 0:
+                            ShowRunQSummary(runq)
             print()
 
 
@@ -799,11 +718,13 @@ def ShowScheduler(cmd_args=None):
             for cpuid in IterateBitmap(idle_bitmap):
                 processor = processor_array[cpuid]
                 if processor != 0:
-                    print("    " + GetProcessorSummary(processor))
+                    print("    " + GetProcessorSummary(processor), end='')
                     ShowActiveThread(processor)
 
                     if show_priority_runq:
-                        ShowRunQSummary(processor.runq)
+                        runq = processor.runq
+                        if runq.count != 0:
+                            ShowRunQSummary(runq)
             print()
 
 
@@ -812,11 +733,13 @@ def ShowScheduler(cmd_args=None):
             for cpuid in IterateBitmap(idle_bitmap):
                 processor = processor_array[cpuid]
                 if processor != 0:
-                    print("    " + GetProcessorSummary(processor))
+                    print("    " + GetProcessorSummary(processor), end='')
                     ShowActiveThread(processor)
 
                     if show_priority_runq:
-                        print(ShowRunQSummary(processor.runq))
+                        runq = processor.runq
+                        if runq.count != 0:
+                            ShowRunQSummary(runq)
             print()
 
 
@@ -828,19 +751,19 @@ def ShowScheduler(cmd_args=None):
             for cpuid in IterateBitmap(other_bitmap):
                 processor = processor_array[cpuid]
                 if processor != 0:
-                    print("    " + GetProcessorSummary(processor))
+                    print("    " + GetProcessorSummary(processor), end='')
                     ShowActiveThread(processor)
 
                     if show_priority_runq:
-                        ShowRunQSummary(processor.runq)
+                        runq = processor.runq
+                        if runq.count != 0:
+                            ShowRunQSummary(runq)
             print()
 
             if show_clutch or show_edge:
-                cluster_type = "SMP"
-                if pset.pset_type == 1:
-                    cluster_type = "E"
-                elif pset.pset_type == 2:
-                    cluster_type = "P"
+                cluster_type = 'SMP'
+                if pset.pset_cluster_type != 0:
+                    cluster_type = GetEnumName('pset_cluster_type_t', pset.pset_cluster_type, 'PSET_AMP_')
                 print("=== Clutch Scheduler Hierarchy Pset{:d} (Type: {:s}) ] ===\n\n".format(pset.pset_cluster_id, cluster_type))
                 ShowSchedClutchForPset(pset)
 
@@ -866,10 +789,23 @@ def ShowScheduler(cmd_args=None):
                 first = False
             print("\t" + GetThreadSummary(thread))
 
+    def dump_thread_exception_queue(name, head):
+        head = addressof(head)
+        print("\n{:s}: ({:<#012x})\n".format(name, head))
+        first = True
+        for exception_elt in IterateMPSCQueue(head.mpd_queue, 'struct thread_exception_elt', 'link'):
+            if first:
+                print("\t" + GetThreadSummary.header)
+                first = False
+            thread = exception_elt.exception_thread
+            print("\t" + GetThreadSummary(thread))
+
     dump_mpsc_thread_queue("Terminate Queue", kern.globals.thread_terminate_queue)
     dump_mpsc_thread_queue("Waiting For Kernel Stacks Queue", kern.globals.thread_stack_queue)
-    dump_mpsc_thread_queue("Thread Exception Queue", kern.globals.thread_exception_queue)
+    dump_thread_exception_queue("Thread Exception Queue", kern.globals.thread_exception_queue)
     dump_mpsc_thread_queue("Thread Deallocate Queue", kern.globals.thread_deallocate_queue)
+
+    print(kern.globals.pcs)
 
     print()
 
@@ -961,8 +897,8 @@ def ParanoidIterateLinkageChain(queue_head, element_type, field_name, field_ofst
                     print("Corrupt prev pointer: queue_head {:>#18x} link: {:>#18x} next: {:>#18x} prev: {:>#18x} prev link: {:>#18x} ".format(
                             queue_head, link, link.next, link.prev, last_link))
 
-            addr = unsigned(link) - unsigned(elem_ofst);
-            obj = kern.GetValueFromAddress(addr, element_type)
+            addr = unsigned(link) - unsigned(elem_ofst)
+            obj = kern.GetValueFromAddress(addr, element_type.name)
             if ParanoidIterateLinkageChain.enable_debug :
                 print("yielding link: {:>#18x} next: {:>#18x} prev: {:>#18x} addr: {:>#18x} obj: {:>#18x}".format(link, link.next, link.prev, addr, obj))
             yield obj

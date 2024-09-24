@@ -9,7 +9,7 @@
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(static_binary,
-    "Verify that static binaries have CS_NO_UNTRUSTED_HELPERS set") {
+    "Verify that static binaries have CS_NO_UNTRUSTED_HELPERS set", T_META_TAG_VM_PREFERRED) {
 	int ret;
 	pid_t pid;
 	char *launch_argv[] = {"./static_binary", NULL};

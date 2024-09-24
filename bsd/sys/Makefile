@@ -45,18 +45,14 @@ DATAFILES = $(sort \
 	ttydefaults.h types.h ubc.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
 	user.h utfconv.h utsname.h vadvise.h vcmd.h \
 	vm.h vmmeter.h vmparam.h vnode_if.h vsock.h vstat.h wait.h xattr.h \
-	_select.h _structs.h _types.h _endian.h domain.h protosw.h \
+	_select.h _structs.h _types.h _endian.h __endian.h domain.h protosw.h \
 	spawn.h timex.h commpage.h log_data.h \
 	$(EXTRA_DATAFILES))
-
-MODULEMAPFILES = \
-	darwin_cdefs.modulemap \
-	darwin_posix_sys_types.modulemap
 
 # Installs header file for DriverKit drivers -
 #	  $(DSTROOT)/System/DriverKit/System/usr/include/
 DRIVERKIT_DATAFILES = \
-	cdefs.h _types.h _endian.h time.h
+	cdefs.h _types.h _endian.h __endian.h time.h
 
 # Installs header file for Apple internal use in user level -
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
@@ -64,15 +60,18 @@ DRIVERKIT_DATAFILES = \
 # from other projects in sys/.
 PRIVATE_DATAFILES = $(sort \
 	attr.h \
+	attr_private.h \
 	cdefs.h \
 	clonefile.h \
 	coalition.h \
+	coalition_private.h \
 	codesign.h \
 	constrained_ctypes.h \
 	content_protection.h \
 	crossarch.h \
 	csr.h \
 	decmpfs.h \
+	dirent_private.h \
 	disk.h \
 	disklabel.h \
 	domain.h \
@@ -84,6 +83,7 @@ PRIVATE_DATAFILES = $(sort \
 	fsctl.h \
 	fsevents.h \
 	fsgetpath.h \
+	fsgetpath_private.h \
 	fslog.h \
 	guarded.h \
 	imgsrc.h \
@@ -115,8 +115,10 @@ PRIVATE_DATAFILES = $(sort \
 	shm_internal.h \
 	snapshot.h \
 	socket.h \
+	socket_private.h \
 	socketvar.h \
 	sockio.h \
+	sockio_private.h \
 	spawn.h \
 	spawn_internal.h \
 	stackshot.h \
@@ -159,7 +161,7 @@ KERNELFILES = \
 	sysctl.h syslimits.h syslog.h systm.h sys_domain.h  time.h \
 	types.h ubc.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
 	utfconv.h unicode.h vm.h vmparam.h vnode.h vnode_if.h vsock.h xattr.h \
-	_select.h _structs.h _types.h _endian.h protosw.h domain.h \
+	_select.h _structs.h _types.h _endian.h __endian.h protosw.h domain.h \
 	kpi_mbuf.h kpi_socket.h kpi_socketfilter.h \
 	ttycom.h termios.h msg.h \
 	wait.h \
@@ -171,11 +173,13 @@ KERNELFILES = \
 #	  $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
 PRIVATE_KERNELFILES = \
 	acct.h \
+	attr_private.h \
 	codesign.h \
 	cprotect.h \
 	content_protection.h \
 	csr.h \
 	decmpfs.h \
+	dirent_private.h \
 	disktab.h \
 	eventhandler.h \
 	event_log.h \
@@ -205,6 +209,8 @@ PRIVATE_KERNELFILES = \
 	sem_internal.h \
 	shm_internal.h \
 	signalvar.h \
+	socket_private.h \
+	sockio_private.h \
 	stackshot.h \
 	timeb.h times.h \
 	tprintf.h \
@@ -249,12 +255,11 @@ XNU_ONLY_EXPORTS = \
 	vnode_internal.h \
 	vsock_domain.h \
 	code_signing_internal.h \
-	trusted_execution_monitor.h
+	trusted_execution_monitor.h \
+	coalition.h
 
 # /usr/include
 INSTALL_MI_LIST	= ${DATAFILES}
-
-INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
 INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
@@ -272,10 +277,10 @@ EXPORT_MI_DIR = sys
 
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
-	codesign.h content_protection.h csr.h decmpfs.h event_private.h fsevents.h guarded.h \
-	kdebug_private.h kern_memorystatus.h preoslog.h proc_info_private.h \
-	reason.h resource_private.h stackshot.h work_interval.h event_log.h code_signing.h \
-	${EXTRA_PRIVATE_DATAFILES})
+	attr_private.h coalition_private.h code_signing.h codesign.h content_protection.h csr.h decmpfs.h dirent_private.h \
+	event_log.h event_private.h fsevents.h fsgetpath_private.h guarded.h kdebug_private.h \
+	kern_memorystatus.h preoslog.h proc_info_private.h reason.h resource_private.h \
+	socket_private.h sockio_private.h stackshot.h work_interval.h ${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
 INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
@@ -344,6 +349,20 @@ $(TRACE_CODES_DEST): $(OBJROOT)/trace.codes
 	$(_v)$(INSTALL) $(INSTALL_FLAGS) $(OBJROOT)/trace.codes $@
 
 do_textfiles_install_mi:: $(TRACE_CODES_DEST)
+
+ARIADNE_PLISTS = \
+	xnu_exclaves.plist \
+	xnu_epoch_sync.plist
+
+ARIADNE_PLISTS_SRC = $(patsubst %,$(SRCROOT)/bsd/kern/ariadne_plists/%,$(ARIADNE_PLISTS))
+ARIADNE_PLISTS_DEST = $(patsubst %,$(DSTROOT)/$(INSTALL_ARIADNE_PLISTS_DIR)/%,$(ARIADNE_PLISTS))
+
+$(ARIADNE_PLISTS_DEST): $(ARIADNE_PLISTS_SRC)
+	$(_v)$(MKDIR) $(DSTROOT)/$(INSTALL_ARIADNE_PLISTS_DIR)
+	@$(LOG_INSTALL) "$(@F)"
+	$(_v)$(INSTALL) $(INSTALL_FLAGS) $< $@
+
+do_textfiles_install_mi:: $(ARIADNE_PLISTS_DEST)
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

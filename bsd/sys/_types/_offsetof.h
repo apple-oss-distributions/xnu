@@ -25,6 +25,39 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+#if defined(KERNEL)
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Xcode doesn't currently set up search paths correctly for Kernel extensions,
+ * so the clang headers are not seen in the correct order to use their types.
+ */
+#endif
+#define USE_CLANG_STDDEF 0
+#else
+#if defined(__has_feature) && __has_feature(modules)
+#define USE_CLANG_STDDEF 1
+#else
+#define USE_CLANG_STDDEF 0
+#endif
+#endif
+
+#if USE_CLANG_STDDEF
+
+#ifndef __OFFSETOF
+#define __OFFSETOF
+
+#define __need_offsetof
+#include <stddef.h>
+#undef __need_offsetof
+
+#endif /* __OFFSETOF */
+
+#else
+
 #ifndef offsetof
 #define offsetof(type, field) __offsetof(type, field)
 #endif /* offsetof */
+
+#endif
+
+#undef USE_CLANG_STDDEF

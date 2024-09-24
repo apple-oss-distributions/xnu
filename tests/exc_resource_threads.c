@@ -140,8 +140,8 @@ T_HELPER_DECL(exc_resource_helper, "exc_resource helper")
 T_DECL(exc_resource_threads, "Ensures that a process with a thread_limit set will receive an exc_resource when it crosses its thread limit",
     T_META_ASROOT(true),
     T_META_CHECK_LEAKS(false),
-    T_META_SYSCTL_INT("kern.exc_resource_threads_enabled=2")
-    )
+    T_META_SYSCTL_INT("kern.exc_resource_threads_enabled=2"),
+    T_META_TAG_VM_PREFERRED)
 {
 	pthread_t handle_thread;
 

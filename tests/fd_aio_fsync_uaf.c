@@ -45,7 +45,7 @@ attempt(int fd)
 	exit(0);
 }
 
-T_DECL(lio_listio_race_63669270, "test for the lightspeed/unc0ver UaF")
+T_DECL(lio_listio_race_63669270, "test for the lightspeed/unc0ver UaF", T_META_TAG_VM_PREFERRED)
 {
 	pid_t child;
 	int fd;

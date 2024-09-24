@@ -38,7 +38,7 @@ T_GLOBAL_META(
 	T_META_CHECK_LEAKS(false));
 
 
-T_DECL(mbuf_tag_test, "test mbuf packet tags ")
+T_DECL(mbuf_tag_test, "test mbuf packet tags ", T_META_TAG_VM_PREFERRED)
 {
 	size_t len;
 	int val;

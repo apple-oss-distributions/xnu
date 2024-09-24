@@ -997,17 +997,17 @@ esp_kpipe_output(struct secasvar *sav, kern_packet_t sph, kern_packet_t dph)
 	    SADB_X_EXT_NATT | SADB_X_EXT_NATT_MULTIPLEUSERS |
 	    SADB_X_EXT_CYCSEQ | SADB_X_EXT_PMASK)) == 0);
 
-	MD_BUFLET_ADDR(SK_PTR_ADDR_KPKT(sph), sbaddr);
-	kern_buflet_t sbuf = __packet_get_next_buflet(sph, NULL);
+	kern_buflet_t __single sbuf = __packet_get_next_buflet(sph, NULL);
 	VERIFY(sbuf != NULL);
 	slen = __buflet_get_data_length(sbuf);
+	sbaddr = ipsec_kern_buflet_to_buffer(sbuf);
 	slim = __buflet_get_data_limit(sbuf);
 	slim -= __buflet_get_data_offset(sbuf);
 
-	MD_BUFLET_ADDR(SK_PTR_ADDR_KPKT(dph), dbaddr);
-	kern_buflet_t dbuf = __packet_get_next_buflet(dph, NULL);
+	kern_buflet_t __single dbuf = __packet_get_next_buflet(dph, NULL);
 	VERIFY(dbuf != NULL);
 	dlen = __buflet_get_data_length(dbuf);
+	dbaddr = ipsec_kern_buflet_to_buffer(dbuf);
 	dlim = __buflet_get_data_limit(dbuf);
 	dlim -= __buflet_get_data_offset(dbuf);
 

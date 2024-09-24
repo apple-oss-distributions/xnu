@@ -35,7 +35,7 @@
 
 #define EXT_PANICLOG_ENABLE     1
 
-#define EXT_PANICLOG_VERSION    1
+#define EXT_PANICLOG_VERSION    2
 
 #define MAX_DATA_ID_SIZE    32
 
@@ -56,11 +56,23 @@
 
 #define EXTPANICLOG_ENTITLEMENT         "com.apple.private.allow-ext_paniclog"
 
-#if KERNEL_PRIVATE
+/*
+ * These flags are set internally and are passed along with each handle in
+ * the extensible paniclog to be processed by DumpPanic.
+ */
+OS_CLOSED_OPTIONS(ext_paniclog_flags, uint32_t,
+    EXT_PANICLOG_FLAGS_NONE = 0x0,
+    EXT_PANICLOG_FLAGS_ADD_SEPARATE_KEY = 0x1);
 
 OS_CLOSED_OPTIONS(ext_paniclog_create_options, uint32_t,
     EXT_PANICLOG_OPTIONS_NONE = 0x0,
-    EXT_PANICLOG_OPTIONS_WITH_BUFFER = 0x1);
+    EXT_PANICLOG_OPTIONS_WITH_BUFFER = 0x1,
+    /* Adds the 'data ID' as a key and handle data as its value directly
+     * in the paniclog instead of within the 'ExtensiblePaniclog' field
+     */
+    EXT_PANICLOG_OPTIONS_ADD_SEPARATE_KEY = 0x2);
+
+#if KERNEL_PRIVATE
 
 enum ext_paniclog_test_options {
 	EXT_PANICLOG_TEST_HANDLE_CREATE = 1,
@@ -71,6 +83,7 @@ enum ext_paniclog_test_options {
 	EXT_PANICLOG_TEST_MULTIPLE_HANDLES_PANIC,
 	EXT_PANICLOG_TEST_INSERT_DUMMY_HANDLES,
 	EXT_PANICLOG_TEST_INSERT_STRUCT_HANDLES,
+	EXT_PANICLOG_TEST_INSERT_DUMMY_HANDLES_AS_SEPARATE_FIELDS,
 	EXT_PANICLOG_TEST_END,
 };
 
@@ -82,12 +95,14 @@ typedef struct ext_paniclog_handle {
 	uint32_t max_len;
 	uint32_t used_len;
 	ext_paniclog_create_options_t options;
+	ext_paniclog_flags_t flags;
 	uint8_t active;
 } ext_paniclog_handle_t;
 
 typedef struct ext_paniclog_header {
 	uint32_t len;
 	uuid_t uuid;
+	ext_paniclog_flags_t flags;
 } ext_paniclog_header_t;
 
 void ext_paniclog_init(void);

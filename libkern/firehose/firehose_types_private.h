@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_APACHE_LICENSE_HEADER_START@
  *
@@ -242,6 +242,7 @@ OS_ENUM(_firehose_tracepoint_type_metadata, firehose_tracepoint_type_t,
     _firehose_tracepoint_type_metadata_subsystem            = 0x02,
     _firehose_tracepoint_type_metadata_kext                 = 0x03,
     _firehose_tracepoint_type_metadata_coprocessor          = 0x04,
+    _firehose_tracepoint_type_metadata_exclave              = 0x05,
     );
 
 /*!

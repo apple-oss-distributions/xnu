@@ -137,7 +137,7 @@ tests()
 	}
 }
 
-T_DECL(assign_move, "safe_allocation.assign.move") {
+T_DECL(assign_move, "safe_allocation.assign.move", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

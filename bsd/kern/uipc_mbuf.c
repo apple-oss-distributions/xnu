@@ -83,6 +83,8 @@
 #include <sys/filedesc.h>
 #include <sys/file_internal.h>
 
+#include <vm/vm_kern_xnu.h>
+
 #include <dev/random/randomdev.h>
 
 #include <kern/kern_types.h>
@@ -108,6 +110,8 @@
 #include <sys/mcache.h>
 #endif /* CONFIG_MBUF_MCACHE */
 #include <net/ntstat.h>
+
+#include <net/droptap.h>
 
 #if INET
 extern int dump_tcp_reass_qlen(char *, int);
@@ -532,8 +536,6 @@ static mcache_t *mcl_audit_con_cache; /* Audit contents cache */
 unsigned int mbuf_debug; /* patchable mbuf mcache flags */
 #endif /* CONFIG_MBUF_DEBUG */
 static unsigned int mb_normalized; /* number of packets "normalized" */
-
-extern unsigned int mb_tag_mbuf;
 
 #define MB_GROWTH_AGGRESSIVE    1       /* Threshold: 1/2 of total */
 #define MB_GROWTH_NORMAL        2       /* Threshold: 3/4 of total */
@@ -2535,8 +2537,6 @@ mbinit(void)
 	    (nmbclusters << MCLSHIFT) >> MBSHIFT,
 	    (nclusters << MCLSHIFT) >> MBSHIFT,
 	    (njcl << MCLSHIFT) >> MBSHIFT);
-
-	PE_parse_boot_argn("mb_tag_mbuf", &mb_tag_mbuf, sizeof(mb_tag_mbuf));
 }
 
 #if CONFIG_MBUF_MCACHE
@@ -6005,12 +6005,114 @@ simple_free:
 	return pktcount;
 }
 
+/*
+ * Wrapper around m_freem_list which captures the packet that's going to be
+ * dropped. If funcname is NULL, that means we do not want to store both
+ * function name and line number, and only the drop reason will be saved.
+ * Make sure to pass the direction flag (DROPTAP_FLAG_DIR_OUT,
+ * DROPTAP_FLAG_DIR_IN), or the packet will not be captured.
+ */
+void
+m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+    uint16_t linenum)
+{
+	struct mbuf *nextpkt;
+	struct ifnet *ifp = NULL;
+
+	if (m == NULL) {
+		return;
+	}
+
+	if (__probable(droptap_total_tap_count == 0)) {
+		m_freem_list(m);
+		return;
+	}
+
+	if (flags & DROPTAP_FLAG_DIR_OUT) {
+		while (m != NULL) {
+			uint16_t tmp_flags = flags;
+
+			nextpkt = m->m_nextpkt;
+			if (m->m_pkthdr.pkt_hdr == NULL) {
+				tmp_flags |= DROPTAP_FLAG_L2_MISSING;
+			}
+			droptap_output_mbuf(m, reason, funcname, linenum, tmp_flags,
+			    ifp);
+			m = nextpkt;
+		}
+	} else if (flags & DROPTAP_FLAG_DIR_IN) {
+		while (m != NULL) {
+			char *frame_header;
+			uint16_t tmp_flags = flags;
+
+			nextpkt = m->m_nextpkt;
+			ifp = m->m_pkthdr.rcvif;
+
+			if ((flags & DROPTAP_FLAG_L2_MISSING) == 0 &&
+			    m->m_pkthdr.pkt_hdr != NULL) {
+				frame_header = m->m_pkthdr.pkt_hdr;
+			} else {
+				frame_header = NULL;
+				tmp_flags |= DROPTAP_FLAG_L2_MISSING;
+			}
+
+			droptap_input_mbuf(m, reason, funcname, linenum, tmp_flags,
+			    ifp, frame_header);
+			m = nextpkt;
+		}
+	}
+	m_freem_list(m);
+}
+
 void
 m_freem(struct mbuf *m)
 {
 	while (m != NULL) {
 		m = m_free(m);
 	}
+}
+
+/*
+ * Wrapper around m_freem which captures the packet that's going to be dropped.
+ * If funcname is NULL, that means we do not want to store both function name
+ * and line number, and only the drop reason will be saved. Make sure to pass the
+ * direction flag (DROPTAP_FLAG_DIR_OUT, DROPTAP_FLAG_DIR_IN), or the packet will
+ * not be captured.
+ */
+void
+m_drop(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+    uint16_t linenum)
+{
+	struct ifnet *ifp = NULL;
+
+	if (m == NULL) {
+		return;
+	}
+
+	if (__probable(droptap_total_tap_count == 0)) {
+		m_freem(m);
+		return;
+	}
+
+	if (flags & DROPTAP_FLAG_DIR_OUT) {
+		droptap_output_mbuf(m, reason, funcname, linenum, flags, ifp);
+	} else if (flags & DROPTAP_FLAG_DIR_IN) {
+		char *frame_header;
+
+		ifp = m->m_pkthdr.rcvif;
+
+		if ((flags & DROPTAP_FLAG_L2_MISSING) == 0 &&
+		    m->m_pkthdr.pkt_hdr != NULL) {
+			frame_header = m->m_pkthdr.pkt_hdr;
+		} else {
+			frame_header = NULL;
+			flags |= DROPTAP_FLAG_L2_MISSING;
+		}
+
+		droptap_input_mbuf(m, reason, funcname, linenum, flags, ifp,
+		    frame_header);
+	}
+	m_freem(m);
 }
 
 /*

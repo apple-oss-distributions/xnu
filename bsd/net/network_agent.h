@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2014-2017, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -34,6 +34,7 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <uuid/uuid.h>
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <stdbool.h>
@@ -215,7 +216,7 @@ struct netagentlist_req {
 	u_int8_t        *data;
 };
 #ifdef BSD_KERNEL_PRIVATE
-int netagent_ioctl(u_long cmd, caddr_t data);
+int netagent_ioctl(u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data);
 
 struct netagent_req32 {
 	uuid_t          netagent_uuid;
@@ -255,7 +256,7 @@ extern errno_t netagent_set_flags(uuid_t uuid, u_int32_t flags);
 
 extern u_int32_t netagent_get_generation(uuid_t uuid);
 
-extern bool netagent_get_agent_domain_and_type(uuid_t uuid, char *domain, char *type);
+extern bool netagent_get_agent_domain_and_type(uuid_t uuid, char *domain __sized_by(NETAGENT_DOMAINSIZE), char *type __sized_by(NETAGENT_TYPESIZE));
 
 extern int netagent_kernel_trigger(uuid_t uuid);
 
@@ -267,7 +268,7 @@ extern int netagent_client_message_with_params(uuid_t agent_uuid,
     void *handle,
     u_int8_t message_type,
     struct necp_client_agent_parameters *parameters,
-    void **assigned_results,
+    void * __sized_by(*assigned_results_length) * assigned_results,
     size_t *assigned_results_length);
 
 extern int netagent_copyout(uuid_t uuid, user_addr_t user_addr, u_int32_t user_size);
@@ -291,7 +292,7 @@ struct netagent_nexus_agent {
 #define NETAGENT_EVENT_NEXUS_FLOW_REMOVE                        NETAGENT_MESSAGE_TYPE_CLOSE_NEXUS
 #define NETAGENT_EVENT_NEXUS_FLOW_ABORT                         NETAGENT_MESSAGE_TYPE_ABORT_NEXUS
 
-typedef errno_t (*netagent_event_f)(u_int8_t event, uuid_t necp_client_uuid, pid_t pid, void *necp_handle, void *context, struct necp_client_agent_parameters *parameters, void **assigned_results, size_t *assigned_results_length);
+typedef errno_t (*netagent_event_f)(u_int8_t event, uuid_t necp_client_uuid, pid_t pid, void *necp_handle, void *context, struct necp_client_agent_parameters *parameters, void * __sized_by (*assigned_results_length) *assigned_results, size_t *assigned_results_length);
 
 extern netagent_session_t netagent_create(netagent_event_f event_handler, void *handle);
 
@@ -305,7 +306,7 @@ extern errno_t netagent_unregister(netagent_session_t session);
 
 extern errno_t netagent_assign_nexus(netagent_session_t _session,
     uuid_t necp_client_uuid,
-    void *assign_message,
+    void *assign_message __sized_by(assigned_results_length),
     size_t assigned_results_length);                                                                      // Length of assigned_results_length
 
 extern errno_t netagent_update_flow_protoctl_event(netagent_session_t _session,

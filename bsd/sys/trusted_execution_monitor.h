@@ -38,7 +38,8 @@
 
 /* These are hidden behind MACH_KERNEL_PRIVATE in other files */
 typedef uint64_t pmap_paddr_t __kernel_ptr_semantics;
-pmap_paddr_t kvtophys_nofail(vm_offset_t va);
+extern vm_map_address_t phystokv(pmap_paddr_t pa);
+extern pmap_paddr_t kvtophys_nofail(vm_offset_t va);
 
 /*
  * The runtime lock used to enforce concurrency on all trust cache operations

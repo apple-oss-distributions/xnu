@@ -173,7 +173,7 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	ZC_PGZ_USE_GUARDS       = 0x0100000000000000,
 
 	/** Zone doesn't support TBI tagging */
-	ZC_NOTBITAG             = 0x0200000000000000,
+	ZC_NO_TBI_TAG             = 0x0200000000000000,
 
 	/** This zone will back a kalloc type */
 	ZC_KALLOC_TYPE          = 0x0400000000000000,
@@ -266,6 +266,24 @@ extern zone_t   zone_create(
 	const char             *name __unsafe_indexable,
 	vm_size_t               size,
 	zone_create_flags_t     flags);
+
+/*!
+ *
+ * @function zone_get_elem_size
+ *
+ * @abstract
+ * Get the intrinsic size of one element allocated by the given zone.
+ *
+ * @discussion
+ * All zones are created to allocate elements of a fixed size, but the size is
+ * not always a compile-time constant. @c zone_get_elem_size can be used to
+ * retrieve the size of elements allocated by this zone at runtime.
+ *
+ * @param zone			the zone to inspect
+ *
+ * @returns			the size of elements allocated by this zone
+ */
+extern vm_size_t    zone_get_elem_size(zone_t zone);
 
 /*!
  * @function zone_create_ro
@@ -713,6 +731,19 @@ __zalloc_flags(
 		__builtin_assume(addr != NULL);
 	}
 	return addr;
+}
+
+__attribute__((malloc))
+static inline void *__header_indexable
+zalloc_flags_buf(
+	zone_t          zone,
+	zalloc_flags_t  flags)
+{
+	void *__unsafe_indexable addr = __zalloc_flags(zone, flags);
+	if (flags & Z_NOFAIL) {
+		__builtin_assume(addr != NULL);
+	}
+	return __unsafe_forge_bidi_indexable(void *, addr, zone_get_elem_size(zone));
 }
 
 #if XNU_KERNEL_PRIVATE && ZALLOC_TYPE_SAFE
@@ -2596,6 +2627,9 @@ extern vm_offset_t __pgz_decode_allow_invalid(
 
 #endif
 #if DEBUG || DEVELOPMENT
+/* zone_max_zone is here (but not zalloc_internal.h) for the BSD kernel */
+extern unsigned int zone_max_zones(void);
+
 extern size_t zone_pages_wired;
 extern size_t zone_guard_pages;
 #endif /* DEBUG || DEVELOPMENT */
@@ -2614,6 +2648,34 @@ extern uint32_t                 zone_map_jetsam_limit;
 extern kern_return_t zone_map_jetsam_set_limit(uint32_t value);
 
 extern zone_t percpu_u64_zone;
+
+/*!
+ * @function mach_memory_info_sample
+ *
+ * @abstract
+ * Helper function for mach_memory_info() (MACH) and memorystatus_collect_jetsam_snapshot_zprint() (BSD)
+ * to collect wired memory information.
+ *
+ * @param names array with `*zonesCnt` elements.
+ * @param info array with `*zonesCnt` elements.
+ * @param coalesce array with `*zonesCnt` elements, must be set if `redact_info` is true.
+ * @param zonesCnt set to the allocated count of the above, and on return will be the actual count.
+ * @param memoryInfo optional, if set must have at least `vm_page_diagnose_estimate()` elements.
+ * @param memoryInfoCnt optional, if set must be the count of memoryInfo, otherwise if set to 0 then on return will be `vm_page_diagnose_estimate()`.
+ * @param redact_info if true sensitive information about zone allocations will be removed.
+ */
+extern kern_return_t
+mach_memory_info_sample(
+	mach_zone_name_t *names,
+	mach_zone_info_t *info,
+	int              *coalesce,
+	unsigned int     *zonesCnt,
+	mach_memory_info_t *memoryInfo,
+	unsigned int       memoryInfoCnt,
+	bool               redact_info);
+
+extern void     zone_gc_trim(void);
+extern void     zone_gc_drain(void);
 
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */

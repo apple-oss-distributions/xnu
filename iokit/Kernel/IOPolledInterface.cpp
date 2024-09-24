@@ -42,9 +42,6 @@
 
 #if defined(__arm64__)
 #include <pexpert/arm64/board_config.h>
-#if XNU_MONITOR_PPL_HIB
-#include <IOKit/SEPHibernator.h>
-#endif /* XNU_MONITOR_PPL_HIB */
 #endif /* defined(__arm64__) */
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -73,8 +70,6 @@ OSMetaClassDefineReservedUnused(IOPolledInterface, 15);
 #ifndef kIOMediaPreferredBlockSizeKey
 #define kIOMediaPreferredBlockSizeKey   "Preferred Block Size"
 #endif
-
-enum { kDefaultIOSize = 128 * 1024 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -211,7 +206,7 @@ IOPolledFilePollersOpen(IOPolledFileIOVars * filevars, uint32_t state, bool abor
 		ioBuffer = vars->ioBuffer;
 		if (!ioBuffer) {
 			vars->ioBuffer = ioBuffer = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut,
-			    2 * kDefaultIOSize, page_size);
+			    kDefaultIONumBuffers * kDefaultIOSize, page_size);
 			if (!ioBuffer) {
 				return kIOReturnNoMemory;
 			}

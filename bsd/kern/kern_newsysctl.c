@@ -78,6 +78,8 @@
 #include <sys/systm.h>
 #include <sys/sysproto.h>
 
+#include <vm/vm_pageout_xnu.h>
+
 #include <os/atomic_private.h>
 
 #include <security/audit/audit.h>
@@ -2258,14 +2260,6 @@ SYSCTL_PROC(_kern, OID_AUTO, test_ca_event, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_L
 
 
 #if DEVELOPMENT || DEBUG
-kern_return_t
-run_compressor_perf_test(
-	user_addr_t buf,
-	size_t buffer_size,
-	uint64_t *time,
-	uint64_t *bytes_compressed,
-	uint64_t *compressor_growth);
-
 struct perf_compressor_data {
 	user_addr_t buffer;
 	size_t buffer_size;

@@ -71,6 +71,7 @@
 #include <net/route.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <sys/ioccom.h>
 #ifdef KERNEL_PRIVATE
 #include <kern/locks.h>
 #endif /* KERNEL_PRIVATE */
@@ -138,7 +139,7 @@ struct if_packet_stats {
 struct if_description {
 	u_int32_t       ifd_maxlen; /* must be IF_DESCSIZE */
 	u_int32_t       ifd_len;    /* actual ifd_desc length */
-	u_int8_t        *ifd_desc;  /* ptr to desc buffer */
+	u_int8_t        *__sized_by(ifd_maxlen) ifd_desc;  /* ptr to desc buffer */
 };
 
 struct if_bandwidths {
@@ -506,6 +507,7 @@ extern bool management_data_unrestricted;
 extern bool management_control_unrestricted;
 extern bool if_management_interface_check_needed;
 extern int if_management_verbose;
+extern bool if_ultra_constrained_check_needed;
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -637,13 +639,15 @@ struct ifnet {
 	int             if_capabilities;        /* interface features & capabilities */
 	int             if_capenable;           /* enabled features & capabilities */
 
-	void            *if_linkmib;    /* link-type-specific MIB data */
+	void *__sized_by(if_linkmiblen) if_linkmib; /* link-type-specific MIB data */
 	uint32_t         if_linkmiblen;  /* length of above data */
 
 	struct if_data_internal if_data __attribute__((aligned(8)));
 
 	ifnet_family_t          if_family;      /* value assigned by Apple */
 	ifnet_subfamily_t       if_subfamily;   /* value assigned by Apple */
+	u_int32_t               peer_egress_functional_type; /* value assigned by Apple */
+
 	uintptr_t               if_family_cookie;
 	volatile dlil_input_func if_input_dlil;
 	volatile dlil_output_func if_output_dlil;
@@ -772,10 +776,7 @@ struct ifnet {
 
 	struct {
 		u_int32_t       length;
-		union {
-			u_char  buffer[8];
-			u_char  *ptr;
-		} u;
+		u_char *__sized_by(length) ptr;
 	} if_broadcast;
 
 #if PF
@@ -869,10 +870,11 @@ struct ifnet {
 		u_int32_t       family;         /* delegated i/f family */
 		u_int32_t       subfamily;      /* delegated i/f sub-family */
 		uint32_t        expensive:1,    /* delegated i/f expensive? */
-		    constrained:1;              /* delegated i/f constrained? */
+		    constrained:1,              /* delegated i/f constrained? */
+		    ultra_constrained:1;      /* delegated i/f ultra constrained? */
 	} if_delegated;
 
-	uuid_t                  *if_agentids;   /* network agents attached to interface */
+	uuid_t                  *if_agentids __counted_by(if_agentcount);   /* network agents attached to interface */
 	u_int32_t               if_agentcount;
 
 	volatile uint32_t       if_low_power_gencnt;
@@ -907,7 +909,7 @@ struct ifnet {
 #if SKYWALK
 	/* Keeps track of local ports bound to this interface
 	 * Protected by the global lock in skywalk/netns/netns.c */
-	SLIST_HEAD(, ns_token) if_netns_tokens;
+	LIST_HEAD(, ns_token) if_netns_tokens;
 #endif /* SKYWALK */
 	struct if_lim_perf_stat if_lim_stat;
 
@@ -991,10 +993,10 @@ EVENTHANDLER_DECLARE(ifnet_event, ifnet_event_fn);
 /*
  * Valid values for if_start_flags
  */
-#define IFSF_FLOW_CONTROLLED    0x1     /* flow controlled */
-#define IFSF_TERMINATING        0x2     /* terminating */
-#define IFSF_NO_DELAY           0x4     /* no delay */
-
+#define IFSF_FLOW_CONTROLLED     0x1     /* flow controlled */
+#define IFSF_TERMINATING         0x2     /* terminating */
+#define IFSF_NO_DELAY            0x4     /* no delay */
+#define IFSF_FLOW_RESUME_PENDING 0x8     /* ignore next flow control event */
 /*
  * Structure describing a `cloning' interface.
  */
@@ -1003,8 +1005,8 @@ struct if_clone {
 	decl_lck_mtx_data(, ifc_mutex); /* To serialize clone create/delete */
 	u_int32_t       ifc_minifs;     /* minimum number of interfaces */
 	u_int32_t       ifc_maxunit;    /* maximum unit number */
-	unsigned char   *ifc_units;     /* bitmap to handle units */
 	u_int32_t       ifc_bmlen;      /* bitmap length */
+	unsigned char   *__counted_by(ifc_bmlen) ifc_units;     /* bitmap to handle units */
 	int             (*ifc_create)(struct if_clone *, u_int32_t, void *);
 	int             (*ifc_destroy)(struct ifnet *);
 	uint8_t         ifc_namelen;    /* length of name */
@@ -1317,6 +1319,14 @@ struct ifmultiaddr {
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_DEFAULT))
 
 /*
+ * Indicate whether or not the immediate interface is a companion link
+ * interface using Bluetooth
+ */
+#define IFNET_IS_COMPANION_LINK_BLUETOOTH(_ifp)             \
+    ((_ifp)->if_family == IFNET_FAMILY_IPSEC &&             \
+    (_ifp)->if_subfamily == IFNET_SUBFAMILY_BLUETOOTH)
+
+/*
  * Indicate whether or not the immediate interface, or the interface delegated
  * by it, is marked as expensive.  The delegated interface is set/cleared
  * along with the delegated ifp; we cache the flag for performance to avoid
@@ -1336,7 +1346,16 @@ struct ifmultiaddr {
 
 #define IFNET_IS_CONSTRAINED(_ifp)                                      \
     ((_ifp)->if_xflags & IFXF_CONSTRAINED ||                            \
-    (_ifp)->if_delegated.constrained)
+    (_ifp)->if_delegated.constrained ||                                 \
+    (_ifp)->if_xflags & IFXF_ULTRA_CONSTRAINED ||                       \
+    (_ifp)->if_delegated.ultra_constrained)
+
+#define IFNET_IS_ULTRA_CONSTRAINED(_ifp)                                \
+    ((_ifp)->if_xflags & IFXF_ULTRA_CONSTRAINED ||                      \
+    (_ifp)->if_delegated.ultra_constrained)
+
+#define IFNET_IS_VPN(_ifp)                                          \
+	((_ifp)->if_xflags & IFXF_IS_VPN)                               \
 
 /*
  * We don't support AWDL interface delegation.
@@ -1369,13 +1388,14 @@ struct ifmultiaddr {
     (_ifp)->if_subfamily == IFNET_SUBFAMILY_REDIRECT)
 
 extern int if_index;
+extern int if_indexcount;
 extern uint32_t ifindex2ifnetcount;
 extern struct ifnethead ifnet_head;
 extern struct ifnethead ifnet_ordered_head;
-extern struct ifnet **__counted_by(ifindex2ifnetcount) ifindex2ifnet;
+extern struct ifnet **__counted_by_or_null(ifindex2ifnetcount) ifindex2ifnet;
 extern u_int32_t if_sndq_maxlen;
 extern u_int32_t if_rcvq_maxlen;
-extern struct ifaddr **__counted_by(if_index) ifnet_addrs;
+extern struct ifaddr **__counted_by_or_null(if_indexcount) ifnet_addrs;
 extern lck_attr_t ifa_mtx_attr;
 extern lck_grp_t ifa_mtx_grp;
 extern lck_grp_t ifnet_lock_group;
@@ -1395,23 +1415,26 @@ extern void if_down(struct ifnet *);
 extern int if_down_all(void);
 extern void if_up(struct ifnet *);
 __private_extern__ void if_updown(struct ifnet *ifp, int up);
-extern int ifioctl(struct socket *, u_long, caddr_t, struct proc *);
-extern int ifioctllocked(struct socket *, u_long, caddr_t, struct proc *);
+extern int ifioctl(struct socket *, u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)), struct proc *);
+extern int ifioctllocked(struct socket *, u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)), struct proc *);
 extern struct ifnet *ifunit(const char *);
 extern struct ifnet *ifunit_ref(const char *);
-extern int ifunit_extract(const char *src, char *dst, size_t dstlen, int *unit);
+extern int ifunit_extract(const char *src, char *__counted_by(dstlen)dst, size_t dstlen, int *unit);
 extern struct ifnet *if_withname(struct sockaddr *);
 extern void if_qflush(struct ifnet *, struct ifclassq *, bool);
 extern void if_qflush_snd(struct ifnet *, bool);
 extern void if_qflush_sc(struct ifnet *, mbuf_svc_class_t, u_int32_t,
     u_int32_t *, u_int32_t *, int);
 
-extern struct if_clone *if_clone_lookup(const char *, u_int32_t *);
+extern struct if_clone *if_clone_lookup(const char *__counted_by(namelen) name, size_t namelen, u_int32_t *);
 extern int if_clone_attach(struct if_clone *);
 extern void if_clone_detach(struct if_clone *);
 extern u_int32_t if_functional_type(struct ifnet *, bool);
+extern u_int32_t if_peer_egress_functional_type(struct ifnet *, bool);
 
 extern errno_t if_mcasts_update(struct ifnet *);
+
+extern const char *intf_event2str(int);
 
 typedef enum {
 	IFNET_LCK_ASSERT_EXCLUSIVE,     /* RW: held as writer */
@@ -1420,8 +1443,20 @@ typedef enum {
 	IFNET_LCK_ASSERT_NOTOWNED       /* not held */
 } ifnet_lock_assert_t;
 
-#define IF_LLADDR(_ifp) \
-    (LLADDR(SDL(((_ifp)->if_lladdr)->ifa_addr)))
+static inline char *__header_indexable
+if_inline_lladdr(struct ifnet *ifp)
+{
+	// N.B.: unable to use SDL() from sockaddr_utils.h yet.
+	struct sockaddr *s = ifp->if_lladdr->ifa_addr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+	struct sockaddr_dl *dl = __unsafe_forge_bidi_indexable(struct sockaddr_dl *,
+	    s, s->sa_len);
+#pragma clang diagnostic pop
+
+	return LLADDR(dl);
+}
+#define IF_LLADDR(_ifp) if_inline_lladdr(_ifp)
 
 #define IF_INDEX_IN_RANGE(_ind_) ((_ind_) > 0 && \
     (unsigned int)(_ind_) <= (unsigned int)if_index)

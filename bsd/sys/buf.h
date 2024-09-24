@@ -328,6 +328,8 @@ errno_t buf_map(buf_t bp, caddr_t *io_addr);
  *  @abstract Get virtual mappings for buffer data.
  *  @discussion Similar to buf_map but the focus is on a range
  *  of the UPL. The b_uploffset and b_count control what part of the UPL will be mapped.
+ *  This function is paired with buf_unmap_range which must be called from the same
+ *  thread.
  *  @param bp Buffer whose mapping to find or create.
  *  @param io_addr Destination for mapping address.
  *  @return 0 for success, ENOMEM if unable to map the buffer.
@@ -339,6 +341,8 @@ errno_t buf_map_range(buf_t bp, caddr_t *io_addr);
  *  @abstract Get virtual mappings for buffer data.
  *  @discussion Similar to buf_map_range but also takes protection so that part of the UPL
  *  will be mapped with the requested protection.
+ *  This function is paired with buf_unmap_range which must be called from the same
+ *  thread.
  *  @param bp Buffer whose mapping to find or create.
  *  @param io_addr Destination for mapping address.
  *  @return 0 for success, ENOMEM if unable to map the buffer.
@@ -365,6 +369,8 @@ errno_t buf_unmap(buf_t bp);
  *  @abstract Release mappings for buffer data.
  *  @discussion Similar to buf_unmap but the focus is on a range
  *  of the UPL. The b_uploffset and b_count control what part of the UPL will be unmapped.
+ *  This function must be called from the same thread that called the corresponding
+ *  buf_map_range/buf_map_range_with_prot.
  *  @param bp Buffer whose mapping to find or create.
  *  @return 0 for success, EINVAL if unable to unmap buffer.
  */

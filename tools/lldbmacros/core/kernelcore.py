@@ -3,7 +3,7 @@
     It is very critical that you read coding guidelines in Section E in README file.
 """
 from .cvalue import value
-from . import collections as ccol
+from . import iterators as ccol
 from .caching import (
     LazyTarget,
     dyn_cached_property,
@@ -369,17 +369,45 @@ class KernelTarget(object):
 
         raise LookupError("Symbol not found: " + name)
 
-    def GetValueFromAddress(self, addr, type_str = 'void *'):
-        """ convert a address to value
+    def GetValueFromAddress(self, addr: int, type_str: str = 'void *') -> value:
+        """ convert an address to a value
             params:
                 addr - int : typically hex value like 0xffffff80008dc390
                 type_str - str: type to cast to. Default type will be void *
             returns:
                 value : a value object which has address as addr and type is type_str
         """
-        obj = value(self.globals.version.GetSBValue().CreateValueFromExpression(None,'(void *)'+str(addr)))
-        obj = cast(obj, type_str)
-        return obj
+        sbv = self.globals.version.GetSBValue().CreateValueFromExpression(None,f"({type_str}){str(addr)}")
+
+        wanted_type = gettype(type_str)
+        if sbv.GetType() != wanted_type:
+            sbv = sbv.Cast(wanted_type)
+
+        return value(sbv)
+
+    def CreateValueFromAddress(self, addr: int, type_str: str = 'void *') -> value:
+        """ convert an address to a value, using `GetValueFromAddress()`
+            params:
+                addr - int : typically hex value like 0xffffff80008dc390
+                type_str - str: type to cast to. Default type will be void *
+            returns:
+                value : a value object which has address as addr and type is type_str
+
+            There are 2 LLDB APIs to create SBValues for data in memory - `CreateValueFromExpression()` and `CreateValueFromAddress()`.
+            The former will parse an expression (like those used in an LLDB print command - `p/x *(vm_map_t)0xFOO_ADDR`).
+            The latter allows telling LLDB "Give me an SBValue that interprets the data begginning at FOO address as BAR type".
+
+            `CreateValueFromAddress()` is more performant, but can be clunkier to work with.
+            However, for simple use cases it can be just as convenient as `CreateValueFromExpression()`.
+            Just take heed that you probably don't want "an SBValue for a pointer to BAR type who's data is at address FOO",
+            rather "an SBValue for BAR type who's data is at address FOO".
+            
+            Where performance matters or there's no usability tradeoff, you're encouraged to use `CreateValueFromAddress()` over `GetValueFromAddress()`.
+            The poor, confusing naming is legacy :/
+
+        """
+        sbv = self.globals.version.GetSBValue().xCreateValueFromAddress(None, addr, gettype(type_str))
+        return value(sbv)
 
     def CreateTypedPointerFromAddress(self, addr, type_str = "char"):
         """ convert a address to pointer value

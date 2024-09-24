@@ -584,12 +584,14 @@ enum {
 
 // assertPMDriverCall() method
 enum {
-	kIOPMDriverCallMethodUnknown       = 0,
-	kIOPMDriverCallMethodSetPowerState = 1,
-	kIOPMDriverCallMethodWillChange    = 2,
-	kIOPMDriverCallMethodDidChange     = 3,
-	kIOPMDriverCallMethodChangeDone    = 4,
-	kIOPMDriverCallMethodSetAggressive = 5
+	kIOPMDriverCallMethodUnknown                         = 0,
+	kIOPMDriverCallMethodSetPowerState                   = 1,
+	kIOPMDriverCallMethodWillChange                      = 2,
+	kIOPMDriverCallMethodDidChange                       = 3,
+	kIOPMDriverCallMethodChangeDone                      = 4,
+	kIOPMDriverCallMethodSetAggressive                   = 5,
+	kIOPMDriverCallMethodMaxCapabilityForDomainState     = 6,
+	kIOPMDriverCallMethodInitialPowerStateForDomainState = 7
 };
 
 //******************************************************************************

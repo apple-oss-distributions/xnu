@@ -178,10 +178,6 @@ is_running_cpu_selected(command_buffer_element_t *command)
 
 
 // Pointers into debug_command_buffer for each operation. Assumes runtime will init them to zero.
-static command_buffer_element_t *cpu_halt;
-static command_buffer_element_t *enable_trace;
-static command_buffer_element_t *enable_alt_trace;
-static command_buffer_element_t *trace_halt;
 static command_buffer_element_t *enable_stop_clocks;
 static command_buffer_element_t *stop_clocks;
 
@@ -359,6 +355,7 @@ panic_trace_apply_stress_rack_policy(void)
 		(void)entryP;
 		if (PE_parse_boot_argn("panic_trace", NULL, 0)) {
 			// Prefer user specified boot-arg even when running on stress racks.
+			// Make an exception for devices with broken single-stepping.
 		} else {
 			panic_trace = 0;
 		}
@@ -423,11 +420,6 @@ PE_arm_debug_enable_trace(bool should_log)
 	if (should_log) {
 		panic_trace_log("%s enter", __FUNCTION__);
 	}
-	if (panic_trace & panic_trace_enabled) {
-		pe_run_debug_command(enable_trace);
-	} else if (panic_trace & panic_trace_alt_enabled) {
-		pe_run_debug_command(enable_alt_trace);
-	}
 	if (should_log) {
 		panic_trace_log("%s exit", __FUNCTION__);
 	}
@@ -462,7 +454,6 @@ PE_arm_panic_hook(const char *str __unused)
 		}
 
 		// Stop tracing to freeze the buffer and return to normal panic processing.
-		pe_run_debug_command(trace_halt);
 	}
 }
 #endif /* DEVELOPMENT || DEBUG */
@@ -544,12 +535,6 @@ pe_arm_init_debug(void *args)
 
 			if (panic_trace) {
 				kprintf("pe_arm_init_debug: panic_trace=%d\n", panic_trace);
-
-				// Prepare debug command buffers.
-				pe_init_debug_command(entryP, &cpu_halt, "cpu_halt");
-				pe_init_debug_command(entryP, &enable_trace, "enable_trace");
-				pe_init_debug_command(entryP, &enable_alt_trace, "enable_alt_trace");
-				pe_init_debug_command(entryP, &trace_halt, "trace_halt");
 
 				// start tracing now
 				PE_arm_debug_enable_trace(true);

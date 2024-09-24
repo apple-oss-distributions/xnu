@@ -106,6 +106,7 @@ catch_mach_exception_raise_state_identity(
 
 static exc_handler_callback_t exc_handler_callback;
 static exc_handler_protected_callback_t exc_handler_protected_callback;
+static exc_handler_state_protected_callback_t exc_handler_state_protected_callback;
 static exc_handler_backtrace_callback_t exc_handler_backtrace_callback;
 
 /**
@@ -124,6 +125,46 @@ catch_mach_exception_raise(
 	T_FAIL("Triggered catch_mach_exception_raise() which shouldn't happen...");
 	__builtin_unreachable();
 }
+
+kern_return_t
+catch_mach_exception_raise_state_identity_protected(
+	mach_port_t exception_port __unused,
+	uint64_t                  thread_id,
+	mach_port_t               task_id_token,
+	exception_type_t type,
+	exception_data_t codes,
+	mach_msg_type_number_t code_count,
+	int *flavor,
+	thread_state_t in_state,
+	mach_msg_type_number_t in_state_count,
+	thread_state_t out_state,
+	mach_msg_type_number_t *out_state_count)
+{
+	T_LOG("Caught a mach exception!\n");
+	/* There should only be two code values. */
+	T_QUIET; T_ASSERT_EQ(code_count, 2, "Two code values were provided with the mach exception");
+
+	/**
+	 * The code values should be 64-bit since MACH_EXCEPTION_CODES was specified
+	 * when setting the exception port.
+	 */
+	mach_exception_data_t codes_64 = (mach_exception_data_t)(void *)codes;
+	T_LOG("Mach exception codes[0]: %#llx, codes[1]: %#llx\n", codes_64[0], codes_64[1]);
+
+	/* Verify that we're receiving the expected thread state flavor. */
+	T_QUIET; T_ASSERT_EQ(*flavor, EXCEPTION_THREAD_STATE, "The thread state flavor is EXCEPTION_THREAD_STATE");
+	T_QUIET; T_ASSERT_EQ(in_state_count, EXCEPTION_THREAD_STATE_COUNT, "The thread state count is EXCEPTION_THREAD_STATE_COUNT");
+
+	*out_state_count = in_state_count; /* size of state object in 32-bit words */
+	memcpy((void*)out_state, (void*)in_state, in_state_count * 4);
+
+	exc_handler_state_protected_callback(task_id_token, thread_id, type, codes_64, in_state,
+	    in_state_count, out_state, out_state_count);
+
+	/* Return KERN_SUCCESS to tell the kernel to keep running the victim thread. */
+	return KERN_SUCCESS;
+}
+
 
 kern_return_t
 catch_mach_exception_raise_identity_protected(
@@ -341,6 +382,9 @@ _run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *cal
 	case EXCEPTION_STATE_IDENTITY:
 		exc_handler_callback = (exc_handler_callback_t)callback;
 		break;
+	case EXCEPTION_STATE_IDENTITY_PROTECTED:
+		exc_handler_state_protected_callback = (exc_handler_state_protected_callback_t)callback;
+		break;
 	case EXCEPTION_IDENTITY_PROTECTED:
 		exc_handler_protected_callback = (exc_handler_protected_callback_t)callback;
 		break;
@@ -365,19 +409,20 @@ _run_exception_handler(mach_port_t exc_port, void *preferred_callback, void *cal
 void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback)
 {
-	run_exception_handler_behavior64(exc_port, NULL, (void *)callback, EXCEPTION_STATE_IDENTITY);
+	run_exception_handler_behavior64(exc_port, NULL, (void *)callback, EXCEPTION_STATE_IDENTITY, true);
 }
 
 void
 run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback,
-    void *callback, exception_behavior_t behavior)
+    void *callback, exception_behavior_t behavior, bool run_once)
 {
 	if (((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY &&
-	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED) {
+	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_IDENTITY_PROTECTED &&
+	    ((unsigned int)behavior & ~MACH_EXCEPTION_MASK) != EXCEPTION_STATE_IDENTITY_PROTECTED) {
 		T_FAIL("Passed behavior (%d) is not supported by exc_helpers.", behavior);
 	}
 
-	_run_exception_handler(exc_port, (void *)preferred_callback, (void *)callback, true, behavior);
+	_run_exception_handler(exc_port, (void *)preferred_callback, (void *)callback, run_once, behavior);
 }
 
 void

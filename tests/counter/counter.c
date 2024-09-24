@@ -95,7 +95,7 @@ darwin_test_setup(void)
 	T_ATEND(darwin_test_fini_scalable_counter_test);
 }
 
-T_DECL(test_scalable_counters_single_threaded, "Test single threaded operations on scalable_counters", T_META_ASROOT(true))
+T_DECL(test_scalable_counters_single_threaded, "Test single threaded operations on scalable_counters", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	static int64_t kNumIterations = 100, i, expected_value = 0;
 	darwin_test_setup();
@@ -118,7 +118,7 @@ T_DECL(test_scalable_counters_single_threaded, "Test single threaded operations 
 	T_END;
 }
 
-T_DECL(test_static_counter, "Test staticly declared counter", T_META_ASROOT(true))
+T_DECL(test_static_counter, "Test staticly declared counter", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	static size_t kNumIterations = 100;
 	int64_t start_value;
@@ -131,7 +131,7 @@ T_DECL(test_static_counter, "Test staticly declared counter", T_META_ASROOT(true
 	T_END;
 }
 
-T_DECL(test_scalable_counters_multithreaded, "Test multi-threaded operations on scalable_counters", T_META_ASROOT(true))
+T_DECL(test_scalable_counters_multithreaded, "Test multi-threaded operations on scalable_counters", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	unsigned int kNumThreads = ncpu() * 5;
 	int ret;

@@ -60,6 +60,7 @@
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
 #endif /* HIBERNATION */
+#include <machine/machine_routines.h>
 #include <console/video_console.h>
 #include <sys/syslog.h>
 #include <sys/sysctl.h>
@@ -78,6 +79,7 @@
 #include <os/cpp_util.h>
 #include <os/atomic_private.h>
 #include <libkern/c++/OSBoundedArrayRef.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 
 #if DEVELOPMENT || DEBUG
 #include <os/system_event_log.h>
@@ -86,6 +88,7 @@
 __BEGIN_DECLS
 #include <mach/shared_region.h>
 #include <kern/clock.h>
+#include <vm/vm_pageout_xnu.h>
 __END_DECLS
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -1439,8 +1442,8 @@ update_aotmode(uint32_t mode)
 	result = gIOPMWorkLoop->runActionBlock(^IOReturn (void) {
 		unsigned int oldCount;
 
-		if (mode && !gRootDomain->_aotMetrics) {
-		        gRootDomain->_aotMetrics = IOMallocType(IOPMAOTMetrics);
+		if (mode) {
+		        gRootDomain->initAOTMetrics();
 		}
 
 		oldCount = gRootDomain->idleSleepPreventersCount();
@@ -1653,6 +1656,7 @@ IOPMrootDomain::start( IOService * nub )
 	userDisabledAllSleep = false;
 	systemBooting = true;
 	idleSleepEnabled = false;
+	idleSleepRevertible = true;
 	sleepSlider = 0;
 	idleSleepTimerPending = false;
 	wrangler = NULL;
@@ -1808,8 +1812,6 @@ IOPMrootDomain::start( IOService * nub )
 	gWillShutdownSysctlRegistered = true;
 
 #if HIBERNATION
-#if defined(__arm64__)
-#endif /* defined(__arm64__) */
 	IOHibernateSystemInit(this);
 #endif
 
@@ -3032,6 +3034,7 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 		isRTCAlarmWake          = false;
 		clamshellIgnoreClose    = false;
 		fullWakeReason = kFullWakeReasonNone;
+		idleSleepRevertible     = true;
 
 #if defined(__i386__) || defined(__x86_64__)
 		kdebugTrace(kPMLogSystemWake, 0, 0, 0);
@@ -3161,7 +3164,7 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 		// This check needs to be done after the epoch change is processed
 		// and before the changePowerStateWithTagToPriv() call below.
 		WAKEEVENT_LOCK();
-		aotShouldExit(false, false);
+		aotShouldExit(false);
 		WAKEEVENT_UNLOCK();
 
 		changePowerStateWithTagToPriv(getRUN_STATE(), kCPSReasonWake);
@@ -3642,6 +3645,7 @@ IOPMrootDomain::systemDidNotSleep( void )
 
 	preventTransitionToUserActive(false);
 	IOService::setAdvisoryTickleEnable( true );
+	idleSleepRevertible = true;
 
 	// After idle revert and cancel, send a did-change message to powerd
 	// to balance the previous will-change message. Kernel clients do not
@@ -4149,6 +4153,26 @@ hibernate_should_abort(void)
 }
 
 //******************************************************************************
+// scheduleImmediateDebugWake
+//
+// Schedule a wake with RTC to wake us back up immediately after we sleep.
+// Useful when a cancel request comes in past the revert point on the sleep path
+//******************************************************************************
+
+void
+IOPMrootDomain::scheduleImmediateDebugWake( void )
+{
+	OSSharedPtr<OSDictionary> dict = OSDictionary::withCapacity(1);
+	OSSharedPtr<OSNumber> secs = OSNumber::withNumber(1, 32);
+
+	if (dict && secs) {
+		dict->setObject(gIOPMSettingDebugWakeRelativeKey.get(), secs.get());
+		gRootDomain->setProperties(dict.get());
+		MSG("Reverting sleep with relative wake\n");
+	}
+}
+
+//******************************************************************************
 // willNotifyPowerChildren
 //
 // Called after all interested drivers have all acknowledged the power change,
@@ -4160,9 +4184,6 @@ hibernate_should_abort(void)
 void
 IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 {
-	OSSharedPtr<OSDictionary> dict;
-	OSSharedPtr<OSNumber> secs;
-
 	if (SLEEP_STATE == newPowerState) {
 		notifierThread = current_thread();
 		if (updateTasksSuspend(kTasksSuspendSuspended, kTasksSuspendNoChange)) {
@@ -4224,14 +4245,7 @@ IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 		// RTC alarm (even during hibernation) so we can immediately wake from regular S2R if needed.
 		if (gRootDomain->activitySinceSleep()) {
 #endif /* defined(__arm64__) && HIBERNATION */
-			dict = OSDictionary::withCapacity(1);
-			secs = OSNumber::withNumber(1, 32);
-
-			if (dict && secs) {
-				dict->setObject(gIOPMSettingDebugWakeRelativeKey.get(), secs.get());
-				gRootDomain->setProperties(dict.get());
-				MSG("Reverting sleep with relative wake\n");
-			}
+			scheduleImmediateDebugWake();
 		}
 
 		notifierThread = NULL;
@@ -6138,6 +6152,17 @@ IOPMrootDomain::overrideOurPowerChange(
 		return;
 	}
 
+#if HIBERNATION && defined(__arm64__)
+	if (lowBatteryCondition && (desiredPowerState < currentPowerState)) {
+		if (!ml_is_secure_hib_supported()) {
+			// If hibernation is unsupported, reject sleep requests to avoid
+			// racing with system shutdown.
+			*inOutChangeFlags |= kIOPMNotDone;
+			return;
+		}
+	}
+#endif /* HIBERNATION && defined(__arm64__) */
+
 	if (desiredPowerState < currentPowerState) {
 		if (CAP_CURRENT(kIOPMSystemCapabilityGraphics)) {
 			// Root domain is dropping power state from ON->SLEEP.
@@ -6460,7 +6485,7 @@ IOPMrootDomain::handleOurPowerChangeStart(
 	}
 	if (_aotNow && (ON_STATE == newPowerState)) {
 		WAKEEVENT_LOCK();
-		aotShouldExit(false, true);
+		aotShouldExit(true);
 		WAKEEVENT_UNLOCK();
 		aotExit(false);
 	}
@@ -7593,6 +7618,53 @@ IOPMrootDomain::checkSystemCanSustainFullWake( void )
 }
 
 //******************************************************************************
+// checkSystemCanAbortIdleSleep
+//******************************************************************************
+
+bool
+IOPMrootDomain::checkSystemCanAbortIdleSleep( void )
+{
+	bool abortableSleepType =  ((lastSleepReason == kIOPMSleepReasonIdle)
+	    || (lastSleepReason == 0));
+	return idleSleepRevertible && abortableSleepType;
+}
+
+//******************************************************************************
+// attemptIdleSleepAbort
+//******************************************************************************
+
+bool
+IOPMrootDomain::attemptIdleSleepAbort( void )
+{
+	if (!gIOPMWorkLoop->inGate()) {
+		bool ret = gIOPMWorkLoop->runAction(
+			OSMemberFunctionCast(IOWorkLoop::Action, this,
+			&IOPMrootDomain::attemptIdleSleepAbort),
+			this);
+		return ret;
+	}
+
+	bool canAbort = checkSystemCanAbortIdleSleep();
+	if (canAbort) {
+		cancelIdlePowerDownSync();
+	} else if (lastSleepReason == kIOPMSleepReasonIdle) {
+		scheduleImmediateDebugWake();
+	}
+
+	return canAbort;
+}
+
+//******************************************************************************
+// setIdleSleepRevertible
+//******************************************************************************
+
+void
+IOPMrootDomain::setIdleSleepRevertible( bool revertible )
+{
+	idleSleepRevertible = revertible;
+}
+
+//******************************************************************************
 // mustHibernate
 //******************************************************************************
 
@@ -7778,7 +7850,7 @@ IOPMrootDomain::setWakeTime(uint64_t wakeContinuousTime)
 
 // assumes WAKEEVENT_LOCK
 bool
-IOPMrootDomain::aotShouldExit(bool checkTimeSet, bool software)
+IOPMrootDomain::aotShouldExit(bool software)
 {
 	bool exitNow = false;
 	const char * reason = "";
@@ -7794,10 +7866,6 @@ IOPMrootDomain::aotShouldExit(bool checkTimeSet, bool software)
 	} else if (kIOPMWakeEventAOTExitFlags & _aotPendingFlags) {
 		exitNow = true;
 		reason = gWakeReasonString;
-	} else if (checkTimeSet && (kPMCalendarTypeInvalid == _aotWakeTimeCalendar.selector)) {
-		exitNow = true;
-		_aotMetrics->noTimeSetCount++;
-		reason = "flipbook expired";
 	} else if ((kIOPMAOTModeRespectTimers & _aotMode) && _calendarWakeAlarmUTC) {
 		clock_sec_t     sec;
 		clock_usec_t    usec;
@@ -7869,7 +7937,7 @@ IOPMrootDomain::aotEvaluate(IOTimerEventSource * timer)
 	IOLog("aotEvaluate(%d) 0x%x\n", (timer != NULL), _aotPendingFlags);
 
 	WAKEEVENT_LOCK();
-	exitNow = aotShouldExit(false, false);
+	exitNow = aotShouldExit(false);
 	if (timer != NULL) {
 		_aotTimerScheduled = false;
 	}
@@ -7914,7 +7982,7 @@ IOPMrootDomain::adjustPowerState( bool sleepASAP )
 			return;
 		}
 		WAKEEVENT_LOCK();
-		exitNow = aotShouldExit(true, false);
+		exitNow = aotShouldExit(false);
 		if (!exitNow
 		    && !_aotTimerScheduled
 		    && (kIOPMWakeEventAOTPossibleExit == (kIOPMWakeEventAOTPossibleFlags & _aotPendingFlags))) {
@@ -7984,6 +8052,8 @@ IOPMrootDomain::handleSetDisplayPowerOn(bool powerOn)
 	}
 }
 
+TUNABLE(bool, test_sleep_in_vm, "test_sleep_in_vm", false);
+
 //******************************************************************************
 // dispatchPowerEvent
 //
@@ -8014,7 +8084,12 @@ IOPMrootDomain::dispatchPowerEvent(
 
 			if (PE_get_default("sleep-disabled", &gSleepDisabledFlag, sizeof(gSleepDisabledFlag))) {
 				DLOG("Setting gSleepDisabledFlag to %u from device tree\n", gSleepDisabledFlag);
+				if (test_sleep_in_vm && gSleepDisabledFlag) {
+					DLOG("Clearing gSleepDisabledFlag due to test_sleep_in_vm boot-arg\n");
+					gSleepDisabledFlag = 0;
+				}
 			}
+
 			if (lowBatteryCondition || thermalEmergencyState) {
 				if (lowBatteryCondition) {
 					privateSleepSystem(kIOPMSleepReasonLowPower);
@@ -8367,8 +8442,27 @@ IOPMrootDomain::handlePowerNotification( UInt32 msg )
 	 */
 	if (msg & kIOPMPowerEmergency) {
 		DLOG("Received kIOPMPowerEmergency");
+#if HIBERNATION && defined(__arm64__)
+		if (!ml_is_secure_hib_supported()) {
+			// Wait for the next low battery notification if the system state is
+			// in transition.
+			if ((_systemTransitionType == kSystemTransitionNone) &&
+			    CAP_CURRENT(kIOPMSystemCapabilityCPU) &&
+			    !systemBooting && !systemShutdown && !gWillShutdown) {
+				// Setting lowBatteryCondition will prevent system sleep
+				lowBatteryCondition = true;
+
+				// Notify userspace to initiate system shutdown
+				messageClients(kIOPMMessageRequestSystemShutdown);
+			}
+		} else {
+			lowBatteryCondition = true;
+			privateSleepSystem(kIOPMSleepReasonLowPower);
+		}
+#else  /* HIBERNATION && defined(__arm64__) */
 		lowBatteryCondition = true;
 		privateSleepSystem(kIOPMSleepReasonLowPower);
+#endif /* HIBERNATION && defined(__arm64__) */
 	}
 
 	/*
@@ -10506,7 +10600,9 @@ IOPMrootDomain::createPMAssertion(
 	if (kIOReturnSuccess == ret) {
 #if (DEVELOPMENT || DEBUG)
 		if (_aotNow || (kIOLogPMRootDomain & gIOKitDebug)) {
-			OSReportWithBacktrace("PMRD: createPMAssertion(0x%qx) %s (%s)", newAssertion, ownerService->getName(), ownerDescription);
+			const char *serviceName = (ownerService && ownerService->reserved) ? ownerService->getName() : NULL;
+			OSReportWithBacktrace("PMRD: createPMAssertion(0x%qx) %s (%s)", newAssertion,
+			    serviceName, ownerDescription);
 		}
 #endif /* (DEVELOPMENT || DEBUG) */
 		return newAssertion;
@@ -10521,9 +10617,11 @@ IOPMrootDomain::releasePMAssertion(IOPMDriverAssertionID releaseAssertion)
 #if (DEVELOPMENT || DEBUG)
 	if (_aotNow || (kIOLogPMRootDomain & gIOKitDebug)) {
 		PMAssertStruct *details = pmAssertions->detailsForID(releaseAssertion, NULL);
-		if (details && details->ownerService && details->ownerString) {
-			OSReportWithBacktrace("PMRD: releasePMAssertion(0x%qx) %s (%s)", releaseAssertion,
-			    details->ownerService->getName(), details->ownerString->getCStringNoCopy());
+		if (details) {
+			const char *serviceName = (details->ownerService && details->ownerService->reserved) ?
+			    details->ownerService->getName() : NULL;
+			const char *ownerString = details->ownerString ? details->ownerString->getCStringNoCopy() : NULL;
+			OSReportWithBacktrace("PMRD: releasePMAssertion(0x%qx) %s (%s)", releaseAssertion, serviceName, ownerString);
 		} else {
 			OSReportWithBacktrace("PMRD: releasePMAssertion(0x%qx)", releaseAssertion);
 		}
@@ -10853,21 +10951,16 @@ IOPMrootDomain::claimSystemWakeEvent(
 
 	pmEventTimeStamp(&timestamp);
 
+	uint64_t args[3] = {};
+	strlcpy((char *)args, reason, sizeof(args));
+	kdebugTrace(kPMLogClaimSystemWake, args[0], args[1], args[2], device->getRegistryEntryID());
+
 	IOOptionBits        aotFlags = 0;
 	bool                needAOTEvaluate = FALSE;
 
 	if (kIOPMAOTModeAddEventFlags & _aotMode) {
-		if (!strcmp("hold", reason)
-		    || !strcmp("help", reason)
-		    || !strcmp("menu", reason)
-		    || !strcmp("stockholm", reason)
-		    || !strcmp("ringer", reason)
-		    || !strcmp("ringerab", reason)
-		    || !strcmp("smc0", reason)
-		    || !strcmp("AOP.RTPWakeupAP", reason)
-		    || !strcmp("AOP.RTP_AP_IRQ", reason)
-		    || !strcmp("BT.OutboxNotEmpty", reason)
-		    || !strcmp("WL.OutboxNotEmpty", reason)) {
+		// Only allow lingering in AOT_STATE for the two wake reasons used for the wrist raise gesture.
+		if (strcmp("AOP.OutboxNotEmpty", reason) && strcmp("spu_gesture", reason)) {
 			flags |= kIOPMWakeEventAOTExit;
 		}
 	}
@@ -10924,15 +11017,19 @@ IOPMrootDomain::claimSystemWakeEvent(
 	if (_aotNow && aotFlags) {
 		if (kIOPMWakeEventAOTPossibleExit & flags) {
 			_aotMetrics->possibleCount++;
+			_aotAnalytics->possibleCount++;
 		}
 		if (kIOPMWakeEventAOTConfirmedPossibleExit & flags) {
 			_aotMetrics->confirmedPossibleCount++;
+			_aotAnalytics->confirmedPossibleCount++;
 		}
 		if (kIOPMWakeEventAOTRejectedPossibleExit & flags) {
 			_aotMetrics->rejectedPossibleCount++;
+			_aotAnalytics->rejectedPossibleCount++;
 		}
 		if (kIOPMWakeEventAOTExpiredPossibleExit & flags) {
 			_aotMetrics->expiredPossibleCount++;
+			_aotAnalytics->expiredPossibleCount++;
 		}
 
 		_aotPendingFlags |= aotFlags;
@@ -11845,6 +11942,70 @@ IOPMrootDomain::getWatchdogTimeout()
 	}
 }
 
+static void
+reportAnalyticsTimerExpired(
+	thread_call_param_t us, thread_call_param_t )
+{
+	((IOPMrootDomain *)us)->reportAnalytics();
+}
+
+void
+IOPMrootDomain::initAOTMetrics()
+{
+	if (!_aotMetrics) {
+		_aotMetrics = IOMallocType(IOPMAOTMetrics);
+	}
+
+	if (!_aotAnalytics) {
+		_aotAnalytics = IOMallocType(IOPMAOTAnalytics);
+		analyticsThreadCall = thread_call_allocate_with_options(reportAnalyticsTimerExpired,
+		    (thread_call_param_t)this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+		scheduleAnalyticsThreadCall();
+	}
+}
+
+#define ANALYTICS_PERIOD_HOURS 24
+#define ANALYTICS_LEEWAY_MINUTES 5
+
+void
+IOPMrootDomain::scheduleAnalyticsThreadCall()
+{
+	uint64_t leeway, period, leeway_ns, period_ns, deadline;
+
+	period_ns = ANALYTICS_PERIOD_HOURS * 60 * 60 * NSEC_PER_SEC;
+	leeway_ns = ANALYTICS_LEEWAY_MINUTES * 60 * NSEC_PER_SEC;
+
+	nanoseconds_to_absolutetime(period_ns, &period);
+	nanoseconds_to_absolutetime(leeway_ns, &leeway);
+	deadline = mach_continuous_time() + period;
+	thread_call_enter_delayed_with_leeway(analyticsThreadCall, NULL, deadline, leeway, THREAD_CALL_CONTINUOUS);
+}
+
+CA_EVENT(aot_analytics,
+    CA_INT, possible_count,
+    CA_INT, confirmed_possible_count,
+    CA_INT, rejected_possible_count,
+    CA_INT, expired_possible_count);
+
+void
+IOPMrootDomain::reportAnalytics()
+{
+	if (_aotAnalytics) {
+		IOLog("IOPMAOTAnalytics possibleCount: %u, confirmedPossibleCount: %u, rejectedPossibleCount: %u, expiredPossibleCount: %u\n",
+		    _aotAnalytics->possibleCount, _aotAnalytics->confirmedPossibleCount, _aotAnalytics->rejectedPossibleCount, _aotAnalytics->expiredPossibleCount);
+
+		ca_event_t event = CA_EVENT_ALLOCATE(aot_analytics);
+		CA_EVENT_TYPE(aot_analytics) * e = (CA_EVENT_TYPE(aot_analytics) *)event->data;
+		e->possible_count = _aotAnalytics->possibleCount;
+		e->confirmed_possible_count = _aotAnalytics->confirmedPossibleCount;
+		e->rejected_possible_count = _aotAnalytics->rejectedPossibleCount;
+		e->expired_possible_count = _aotAnalytics->expiredPossibleCount;
+		CA_EVENT_SEND(event);
+
+		bzero(_aotAnalytics, sizeof(IOPMAOTAnalytics));
+		scheduleAnalyticsThreadCall();
+	}
+}
 
 #if defined(__i386__) || defined(__x86_64__) || (defined(__arm64__) && HIBERNATION)
 IOReturn

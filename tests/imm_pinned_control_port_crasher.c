@@ -448,8 +448,13 @@ main(int argc, char *argv[])
 	if (third_party_hardened) {
 		// Ensure that we can set this crasher as a non-platform binary
 		if (remove_platform_binary() != 0) {
-			printf("Failed to remove platform binary, exiting\n");
-			exit(1);
+			/*
+			 * CS_OPS_CLEARPLATFORM always fail on release build, and it can also
+			 * fail depending on global/mac policies of the BATS container (ref: csops_internal).
+			 * Skip instead of failing the test.
+			 */
+			printf("Failed to remove platform binary, skipping test\n");
+			exit(0);
 		}
 	}
 

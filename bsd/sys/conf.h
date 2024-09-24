@@ -102,7 +102,8 @@ typedef int  open_close_fcn_t(dev_t dev, int flags, int devtype,
 typedef struct tty *d_devtotty_t(dev_t dev);
 
 typedef void strategy_fcn_t(struct buf *bp);
-typedef int  ioctl_fcn_t(dev_t dev, u_long cmd, caddr_t data,
+typedef int  ioctl_fcn_t(dev_t dev, u_long cmd,
+    caddr_t __sized_by(IOCPARM_LEN(cmd)) data,
     int fflag, struct proc *p);
 typedef int  dump_fcn_t(void);     /* parameters vary by architecture */
 typedef int  psize_fcn_t(dev_t dev);

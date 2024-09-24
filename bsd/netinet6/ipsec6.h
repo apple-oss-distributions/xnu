@@ -65,7 +65,7 @@ struct inpcb;
 extern int ipsec6_in_reject_so(struct mbuf *, struct socket *);
 extern int ipsec6_delete_pcbpolicy(struct inpcb *);
 extern int ipsec6_set_policy(struct inpcb *inp, int optname,
-    caddr_t request, size_t len, int priv);
+    caddr_t __sized_by(len)request, size_t len, int priv);
 extern int ipsec6_in_reject(struct mbuf *, struct inpcb *);
 
 struct tcp6cb;

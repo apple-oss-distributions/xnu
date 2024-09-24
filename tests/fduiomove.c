@@ -10,7 +10,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.fd"),
 	T_META_RUN_CONCURRENTLY(true));
 
-T_DECL(fd_invalid_pread, "Test for 66711697: make sure we get EFAULT")
+T_DECL(fd_invalid_pread, "Test for 66711697: make sure we get EFAULT", T_META_TAG_VM_PREFERRED)
 {
 	int fd;
 	ssize_t rc;

@@ -468,7 +468,7 @@ def ShowNetNSTokens(cmd_args=None):
         return
 
     print(GetNsTokenSummary.header)
-    for nt in IterateListEntry(tokenhead, 'nt_ifp_link', list_prefix='s'):
+    for nt in IterateListEntry(tokenhead, 'nt_ifp_link', list_prefix=''):
         print(GetNsTokenSummary(nt))
 
 def IterateSTAILQ_HEAD(headval, element_name):
@@ -677,7 +677,7 @@ def GetSockAddr4(in_addr):
 
 def GetSockAddr6(in6_addr):
     addr = in6_addr.__u6_addr.__u6_addr8
-    addr_raw_string = ":".join(["{0:02x}{0:02x}".format(unsigned(addr[i]),
+    addr_raw_string = ":".join(["{0:02x}{1:02x}".format(unsigned(addr[i]),
         unsigned(addr[i+1])) for i in range(0, 16, 2)])
     return inet_ntop(AF_INET6, inet_pton(AF_INET6, addr_raw_string))
 
@@ -689,7 +689,7 @@ def FlowKeyStr(fk):
         src_str = GetSockAddr6(fk.fk_src._v6)
         dst_str = GetSockAddr6(fk.fk_dst._v6)
     else:
-        return "unkown ipver"
+        return "unknown ipver"
 
     return "src={},dst={},proto={},sport={},dport={}".format(src_str, dst_str,
             unsigned(fk.fk_proto), ntohs(fk.fk_sport), ntohs(fk.fk_dport))

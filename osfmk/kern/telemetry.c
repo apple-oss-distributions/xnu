@@ -49,7 +49,7 @@
 #include <pexpert/pexpert.h>
 
 #include <string.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_shared_region.h>
 
 #include <kperf/callstack.h>
@@ -71,6 +71,7 @@
 struct proc;
 extern int      proc_pid(struct proc *);
 extern char     *proc_name_address(void *p);
+extern char     *proc_longname_address(void *p);
 extern uint64_t proc_uniqueid(void *p);
 extern uint64_t proc_was_throttled(void *p);
 extern uint64_t proc_did_throttle(void *p);
@@ -654,8 +655,8 @@ telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 {
 	task_t                        task;
 
-	vm_size_t                     btcapacity     = 128;
-	uintptr_t                     frames_stack[btcapacity];
+	uintptr_t                     frames_stack[128];
+	vm_size_t                     btcapacity     = ARRAY_COUNT(frames_stack);
 	uint32_t                      btcount        = 0;
 	typedef uintptr_t             telemetry_user_frame_t __kernel_data_semantics;
 	telemetry_user_frame_t        *frames        = frames_stack;
@@ -1029,6 +1030,13 @@ copytobuffer:
 	tsnap->latency_qos = task_grab_latency_qos(task);
 
 	strlcpy(tsnap->p_comm, proc_name_address(p), sizeof(tsnap->p_comm));
+	const char *longname = proc_longname_address(p);
+	if (longname[0] != '\0') {
+		/*
+		 * XXX Stash the rest of the process's name in some unused fields.
+		 */
+		strlcpy((char *)tsnap->io_priority_count, &longname[16], sizeof(tsnap->io_priority_count));
+	}
 	if (user64_va) {
 		tsnap->ss_flags |= kUser64_p;
 	}
@@ -1472,7 +1480,7 @@ telemetry_backtrace_add_kernel(
 	return rc;
 }
 
-static void
+void
 telemetry_backtrace_to_string(
 	char        *buf,
 	size_t       buflen,

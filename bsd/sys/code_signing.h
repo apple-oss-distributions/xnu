@@ -31,29 +31,29 @@ __BEGIN_DECLS
 #pragma GCC diagnostic ignored "-Wnullability-completeness-on-arrays"
 
 typedef uint32_t code_signing_monitor_type_t;
-enum {
-	CS_MONITOR_TYPE_NONE = 0,
-	CS_MONITOR_TYPE_PPL = 1,
-	CS_MONITOR_TYPE_TXM = 2
-};
-
 typedef uint32_t code_signing_config_t;
-enum {
-	/* Exemptions */
-	CS_CONFIG_UNRESTRICTED_DEBUGGING = (1 << 0),
-	CS_CONFIG_ALLOW_ANY_SIGNATURE = (1 << 1),
-	CS_CONFIG_ENFORCEMENT_DISABLED = (1 << 2),
-	CS_CONFIG_GET_OUT_OF_MY_WAY = (1 << 3),
-	CS_CONFIG_INTEGRITY_SKIP = (1 << 4),
 
-	/* Features */
-	CS_CONFIG_MAP_JIT = (1 << 26),
-	CS_CONFIG_DEVELOPER_MODE_SUPPORTED = (1 << 27),
-	CS_CONFIG_COMPILATION_SERVICE = (1 << 28),
-	CS_CONFIG_LOCAL_SIGNING = (1 << 29),
-	CS_CONFIG_OOP_JIT = (1 << 30),
-	CS_CONFIG_CSM_ENABLED = (1 << 31),
-};
+/* Monitor Types */
+#define CS_MONITOR_TYPE_NONE (0)
+#define CS_MONITOR_TYPE_PPL  (1)
+#define CS_MONITOR_TYPE_TXM  (2)
+
+/* Config - Exemptions */
+#define CS_CONFIG_UNRESTRICTED_DEBUGGING (1 << 0)
+#define CS_CONFIG_ALLOW_ANY_SIGNATURE    (1 << 1)
+#define CS_CONFIG_ENFORCEMENT_DISABLED   (1 << 2)
+#define CS_CONFIG_GET_OUT_OF_MY_WAY      (1 << 3)
+#define CS_CONFIG_INTEGRITY_SKIP         (1 << 4)
+#define CS_CONFIG_RELAX_PROFILE_TRUST    (1 << 5)
+
+/* Config - Features */
+#define CS_CONFIG_REM_SUPPORTED            (1 << 25)
+#define CS_CONFIG_MAP_JIT                  (1 << 26)
+#define CS_CONFIG_DEVELOPER_MODE_SUPPORTED (1 << 27)
+#define CS_CONFIG_COMPILATION_SERVICE      (1 << 28)
+#define CS_CONFIG_LOCAL_SIGNING            (1 << 29)
+#define CS_CONFIG_OOP_JIT                  (1 << 30)
+#define CS_CONFIG_CSM_ENABLED              (1 << 31)
 
 #ifdef KERNEL_PRIVATE
 /* All definitions for XNU and kernel extensions */
@@ -87,9 +87,37 @@ typedef uint64_t image4_cs_trap_t;
 #define XNU_SUPPORTS_CE_ACCELERATION 1
 #define XNU_SUPPORTS_DISABLE_CODE_SIGNING_FEATURE 1
 #define XNU_SUPPORTS_IMAGE4_MONITOR_TRAP 1
+#define XNU_SUPPORTS_RESTRICTED_EXECUTION_MODE 1
+#define XNU_SUPPORTS_SECURE_CHANNEL_SHARED_PAGE 1
+#define XNU_SUPPORTS_CSM_DEVICE_STATE 1
+#define XNU_SUPPORTS_REGISTER_PROFILE 1
+
+/* Forward declarations */
+struct cs_blob;
 
 /* Local signing public key size */
 #define XNU_LOCAL_SIGNING_KEY_SIZE 97
+
+typedef struct _cs_profile_register_t {
+	/*
+	 * The kernel performs duduplication of registered provisioning profiles
+	 * in order to optimize the profile loading code-path. The profile Uuid
+	 * is used as the identifier.
+	 */
+	uuid_t uuid;
+
+	/*
+	 * Counter-signature of the profile used for verifying that the user has
+	 * opted to trust the profile. This is only required for certain kinds of
+	 * profiles.
+	 */
+	const void *sig_data;
+	size_t sig_size;
+
+	/* The profile data itself -- only DER profiles supported */
+	const void *data;
+	size_t size;
+} cs_profile_register_t;
 
 #if XNU_KERNEL_PRIVATE
 
@@ -135,7 +163,7 @@ static inline const img4_runtime_object_spec_t*
 image4_get_object_spec_from_index(
 	img4_runtime_object_spec_index_t obj_spec_index)
 {
-	const img4_runtime_object_spec_t *obj_spec = NULL;
+	const img4_runtime_object_spec_t *__single obj_spec = NULL;
 
 	switch (obj_spec_index) {
 	case IMG4_RUNTIME_OBJECT_SPEC_INDEX_SUPPLEMENTAL_ROOT:
@@ -184,6 +212,16 @@ disable_code_signing_feature(
 	code_signing_config_t feature);
 
 /**
+ * AppleSEPManager uses this API to obtain the physical page which must be mapped as
+ * the secure channel within the SEP. This API is only supported on systems which have
+ * the Trusted Execution Monitor system monitor.
+ */
+kern_return_t
+secure_channel_shared_page(
+	uint64_t *secure_channel_phys,
+	size_t *secure_channel_size);
+
+/**
  * Enable developer mode on the system. When the system contains a monitor environment,
  * developer mode is turned on by trapping into the appropriate monitor environment.
  */
@@ -203,6 +241,49 @@ disable_developer_mode(void);
  */
 bool
 developer_mode_state(void);
+
+/**
+ * Attempt to enable restricted execution mode on the system. Not all systems support
+ * restricted execution mode. If the call is successful, KERN_SUCCESS is returned, or
+ * an error.
+ */
+kern_return_t
+restricted_execution_mode_enable(void);
+
+/**
+ * Query the current state of restricted execution mode on the system. Not all systems
+ * support restricted execution mode. If REM is enabled, KERN_SUCCESS is returned. If
+ * REM is disabled, KERN_DENIED is returned. If REM is not supported on this platform,
+ * then KERN_NOT_SUPPORTED is returned.
+ */
+kern_return_t
+restricted_execution_mode_state(void);
+
+/**
+ * This function is called whem the kernel wants the code-signing monitor to update its
+ * device state which is provided by the SEP using an OOB buffer.
+ */
+void
+update_csm_device_state(void);
+
+/*
+ * This function called when the kernel wants the code-signing monitor to complete the
+ * functionality of a security boot mode.
+ */
+void
+complete_security_boot_mode(
+	uint32_t security_boot_mode);
+
+/*
+ * Register and attempt to associate a provisioning profile with the code signature
+ * attached to the csblob. This call is only relevant for systems which have a code
+ * signing monitor, but it is exported to kernel extensions since AMFI is the primary
+ * consumer.
+ */
+int
+csblob_register_profile(
+	struct cs_blob *csblob,
+	cs_profile_register_t *profile);
 
 /**
  * Wrapper function which is exposed to kernel extensions. This can be used to trigger
@@ -371,6 +452,16 @@ get_trust_level_kdp(
 	uint32_t *trust_level);
 
 /**
+ * Wrapper function that calls csm_get_jit_address_range_kdp if there is a CODE_SIGNING_MONITOR
+ * or returns KERN_NOT_SUPPORTED if there isn't one.
+ */
+kern_return_t
+get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end);
+
+/**
  * Check whether a particular proc is marked as debugged or not. For many use cases, this
  * is a stronger check than simply checking for the enablement of developer mode since
  * an address space can only be marked as debugged if developer mode is already enabled.
@@ -383,6 +474,8 @@ address_space_debugged(
 	const proc_t process);
 
 #if CODE_SIGNING_MONITOR
+
+struct vm_map_entry;
 
 /**
  * Check to see if the monitor is currently enforcing code signing protections or
@@ -428,6 +521,17 @@ csm_register_provisioning_profile(
 	const uuid_t profile_uuid,
 	const void *profile,
 	const size_t profile_size);
+
+/**
+ * Attempt to trust a provisioning profile with the monitor environment available on
+ * the system. The provided signature will be passed to the monitor as is, and the
+ * caller is responsible for de-allocation of the data, if required.
+ */
+kern_return_t
+csm_trust_provisioning_profile(
+	const uuid_t profile_uuid,
+	const void *sig_data,
+	size_t sig_size);
 
 /**
  * Associate a registered profile with a code signature object which is managed by
@@ -585,6 +689,26 @@ kern_return_t
 csm_get_trust_level_kdp(
 	pmap_t pmap,
 	uint32_t *trust_level);
+
+/**
+ * Acquire the address range for the JIT region for this address space.
+ *
+ * We expect this function to only be used for debugging purposes, and not for
+ * enforcing any security policies.
+ * This function should be careful that any code paths within it do not mutate the
+ * state of the system, and as a result, no code paths here should attempt to take
+ * locks of any kind.
+ * KERN_SUCCESS is returned if the address space has JIT capability and an address range
+ * was returned in the output arguments.
+ * KERN_NOT_FOUND is returned if the address space does not have JIT, or on systems where
+ * the code signing monitor does not track the JIT range.
+ * KERN_NOT_SUPPORTED is returned for environments where this call is not supported.
+ */
+kern_return_t
+csm_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end);
 
 /**
  * Certain address spaces are exempt from code signing enforcement. This function can be

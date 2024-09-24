@@ -31,7 +31,7 @@ T_GLOBAL_META(
 	        } \
 	}
 
-T_DECL(posix_spawn_platform_binary_latency, "posix_spawn platform binary latency") {
+T_DECL(posix_spawn_platform_binary_latency, "posix_spawn platform binary latency", T_META_TAG_VM_NOT_ELIGIBLE) {
 	{
 		dt_stat_time_t s = dt_stat_time_create("time");
 		SPAWN_MEASURE_LOOP(s);
@@ -62,7 +62,7 @@ T_DECL(posix_spawn_platform_binary_latency, "posix_spawn platform binary latency
 	        } \
 	}
 
-T_DECL(fork, "fork latency") {
+T_DECL(fork, "fork latency", T_META_TAG_VM_NOT_ELIGIBLE) {
 	{
 		dt_stat_time_t s = dt_stat_time_create("time");
 		FORK_MEASURE_LOOP(s);

@@ -43,6 +43,7 @@
 extern struct tcp_cc_algo tcp_cc_newreno;
 extern struct tcp_cc_algo tcp_cc_ledbat;
 extern struct tcp_cc_algo tcp_cc_cubic;
+extern struct tcp_cc_algo tcp_cc_prague;
 
  #define SET_SNDSB_IDEAL_SIZE(sndsb, size) \
 	sndsb->sb_idealsize = min(max(tcp_sendspace, tp->snd_ssthresh), \
@@ -66,6 +67,7 @@ tcp_cc_init(void)
 	tcp_cc_algo_list[TCP_CC_ALGO_NEWRENO_INDEX] = &tcp_cc_newreno;
 	tcp_cc_algo_list[TCP_CC_ALGO_BACKGROUND_INDEX] = &tcp_cc_ledbat;
 	tcp_cc_algo_list[TCP_CC_ALGO_CUBIC_INDEX] = &tcp_cc_cubic;
+	tcp_cc_algo_list[TCP_CC_ALGO_PRAGUE_INDEX] = &tcp_cc_prague;
 
 	tcp_ccdbg_control_register();
 }
@@ -216,6 +218,7 @@ void
 tcp_cc_allocate_state(struct tcpcb *tp)
 {
 	if ((tp->tcp_cc_index == TCP_CC_ALGO_CUBIC_INDEX ||
+	    tp->tcp_cc_index == TCP_CC_ALGO_PRAGUE_INDEX ||
 	    tp->tcp_cc_index == TCP_CC_ALGO_BACKGROUND_INDEX) &&
 	    tp->t_ccstate == NULL) {
 		tp->t_ccstate = &tp->_t_ccstate;

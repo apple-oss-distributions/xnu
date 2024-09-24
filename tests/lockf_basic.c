@@ -244,7 +244,7 @@ random_pause(void)
 
 T_DECL(lockf_basic,
     "Basic test of flock/POSIX/OFD advisory file locks",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	const char *tmpdir = dt_tmpdir();
 	lock_thread_state_t lts[4];

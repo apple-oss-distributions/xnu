@@ -1,6 +1,33 @@
+/*
+ * Copyright © 2017-2024 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
 /*!
  * @header
- * Umbrella header for Image4 trust evaluation API.
+ * Common header for Image4 trust evaluation API.
  */
 #ifndef __IMAGE4_API_H
 #define __IMAGE4_API_H
@@ -24,7 +51,20 @@
  * individual preprocessor macros in this header that declare new behavior as
  * required.
  */
-#define IMAGE4_API_VERSION (20231216u)
+#define IMAGE4_API_VERSION (20240503u)
+
+/*!
+ * @const IMAGE4_RESTRICTED_API_VERSION
+ * The restricted API version of the library. Restricted interfaces are
+ *
+ *     1. likely to be hacks,
+ *     2. not guaranteed to function correctly in all contexts, and
+ *     3. subject to a pre-arranged contract for deprecation and removal.
+ *
+ * The availability documentation for each restricted API will indicate the
+ * expiration version.
+ */
+#define IMAGE4_RESTRICTED_API_VERSION (1002u)
 
 #if __has_include(<os/base.h>)
 #include <os/base.h>
@@ -85,6 +125,28 @@ typedef int errno_t;
 #define API_AVAILABLE(...)
 #endif
 
+#if !defined(__ASSUME_PTR_ABI_SINGLE_BEGIN)
+#if __has_include(<ptrcheck.h>)
+#include <ptrcheck.h>
+#define __ASSUME_PTR_ABI_SINGLE_BEGIN __ptrcheck_abi_assume_single()
+#define __ASSUME_PTR_ABI_SINGLE_END __ptrcheck_abi_assume_unsafe_indexable()
+#else
+#define __ASSUME_PTR_ABI_SINGLE_BEGIN
+#define __ASSUME_PTR_ABI_SINGLE_END
+#endif
+#endif
+
+#if defined(__counted_by_or_null)
+#define __static_array_or_null(_S) _Nullable __counted_by_or_null(_S)
+#else
+#define __counted_by_or_null(_S)
+#define __static_array_or_null(_S) _Nullable _S
+#endif
+
+#if !defined(__sized_by_or_null)
+#define __sized_by_or_null(_S)
+#endif
+
 #if XNU_KERNEL_PRIVATE
 #if !defined(__IMAGE4_XNU_INDIRECT)
 #error "Please include <libkern/image4/dlxk.h> instead of this header"
@@ -102,6 +164,18 @@ typedef int errno_t;
 		tvos(17.4), \
 		watchos(10.4), \
 		bridgeos(8.3))
+
+/*!
+ * @const IMAGE4_API_AVAILABLE_FALL_2024
+ * APIs which first became available in the Fall 2024 set of releases.
+ */
+#define IMAGE4_API_AVAILABLE_FALL_2024 \
+	API_AVAILABLE( \
+		macos(15.0), \
+		ios(18.0), \
+		tvos(18.0), \
+		watchos(11.0), \
+		bridgeos(9.0))
 
 /*!
  * @const IMAGE4_XNU_AVAILABLE_DIRECT
@@ -122,6 +196,37 @@ typedef int errno_t;
 #define IMAGE4_XNU_AVAILABLE_INDIRECT(_s) typedef typeof(&_s) _s ## _dlxk_t
 #else
 #define IMAGE4_XNU_AVAILABLE_INDIRECT(_s)
+#endif
+
+/*!
+ * @const IMAGE4_XNU_RETIRED_DIRECT
+ * API symbol which has been retired.
+ */
+#if XNU_KERNEL_PRIVATE || IMAGE4_DLXK_AVAILABILITY
+#define IMAGE4_XNU_RETIRED_DIRECT(_s) typedef void * _ ## _s ## _dlxk_t
+#else
+#define IMAGE4_XNU_RETIRED_DIRECT(_s)
+#endif
+
+/*!
+ * @const IMAGE4_XNU_RETIRED_INDIRECT
+ * API symbol which has been retired.
+ */
+#if XNU_KERNEL_PRIVATE || IMAGE4_DLXK_AVAILABILITY
+#define IMAGE4_XNU_RETIRED_INDIRECT(_s) typedef void * _s ## _dlxk_t
+#else
+#define IMAGE4_XNU_RETIRED_INDIRECT(_s)
+#endif
+
+/*!
+ * @const image4_call_restricted
+ * Calls a restricted API.
+ */
+#if IMAGE4_RESTRICTED_API
+#define image4_call_restricted(_s, ...) image4_ ## _s(__VA_ARGS__)
+#else
+#define image4_call_restricted(_s, ...) \
+	image4_ ## _s(IMAGE4_RESTRICTED_API_VERSION, ## __VA_ARGS__)
 #endif
 
 #endif // __IMAGE4_API_H

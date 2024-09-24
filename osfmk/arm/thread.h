@@ -87,6 +87,9 @@ typedef arm_kernel_context_t machine_thread_kernel_state;
 #error Unknown arch
 #endif
 
+#if HAS_ARM_FEAT_SME
+#define HAVE_MACHINE_THREAD_MATRIX_STATE        1
+#endif
 
 
 /*
@@ -103,12 +106,20 @@ struct machine_thread {
 	unsigned int              reserved2;
 #endif
 
+	uint32_t                  arm_machine_flags;       /* thread flags (arm64/machine_machdep.h) */
 	arm_context_t *           contextData;             /* allocated user context */
 	arm_saved_state_t *       XNU_PTRAUTH_SIGNED_PTR("machine_thread.upcb") upcb;   /* pointer to user GPR state */
-	arm_neon_saved_state_t *  uNeon;                   /* pointer to user VFP state */
+	arm_neon_saved_state_t *  XNU_PTRAUTH_SIGNED_PTR("machine_thread.uNeon") uNeon; /* pointer to user VFP state */
 	arm_saved_state_t *       kpcb;                    /* pointer to kernel GPR state */
 
-	void *                    reserved3;
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+	union {
+		arm_state_hdr_t *umatrix_hdr;
+#if HAS_ARM_FEAT_SME
+		arm_sme_saved_state_t *usme;               /* pointer to user SME state */
+#endif
+	};
+#endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
 	long                      reserved4;
 	uint64_t                  recover_far;
@@ -116,8 +127,7 @@ struct machine_thread {
 	arm_debug_state_t        *DebugData;
 	vm_address_t              cthread_self;               /* for use of cthread package */
 
-	uint32_t                  recover_esr;
-	uint32_t                  arm_machine_flags;          /* thread flags (arm64/machine_machdep.h) */
+	uint64_t                  recover_esr;
 
 	void *                    XNU_PTRAUTH_SIGNED_PTR("machine_thread.kstackptr") kstackptr; /* top of kernel stack */
 	struct perfcontrol_state  perfctrl_state;
@@ -138,29 +148,42 @@ struct machine_thread {
 
 #if defined(CONFIG_XNUPOST)
 	volatile expected_fault_handler_t  expected_fault_handler;
-	volatile uintptr_t                 expected_fault_addr;
-	volatile uintptr_t                 expected_fault_pc;    /* PC at which an exception is expected to be thrown  (i.e. ELR_ELx) */
+	volatile uintptr_t                 expected_fault_addr;  /* Address due to which an exception is expected to be thrown (FAR_ELx) */
+	volatile uintptr_t                 expected_fault_pc;    /* PC at which an exception is expected to be thrown (ELR_ELx) */
 #endif
 
 	uint64_t                  reserved6;
-	vm_offset_t               pcpu_data_base;
+	union {
+		long              pcpu_data_base_and_cpu_number;
+		const uint16_t    cpu_number;
+	};
 	struct cpu_data *         CpuDatap;               /* current per cpu data */
 	unsigned int              preemption_count;       /* preemption count */
 	uint16_t                  exception_trace_code;
-	uint8_t                   reserved7;
-	bool                      reserved8;
+	bool                      reserved7;
 #if defined(HAS_APPLE_PAC)
 	uint64_t                  rop_pid;
 	uint64_t                  jop_pid;
 #else
+	uint64_t                  reserved8;
 	uint64_t                  reserved9;
-	uint64_t                  reserved10;
 #endif
 
-	uint64_t                  reserved11;
+	uint64_t                  reserved10;
 
+#if HAS_ARM_FEAT_SME
+	uint64_t                  tpidr2_el0;
+#else
+	uint64_t                  reserved12;
+#endif
 };
 #endif
+
+static inline long
+ml_make_pcpu_base_and_cpu_number(long base, uint16_t cpu)
+{
+	return (base << 16) | cpu;
+}
 
 extern struct arm_saved_state *    get_user_regs(thread_t);
 extern struct arm_saved_state *    find_user_regs(thread_t);
@@ -189,9 +212,22 @@ extern void *act_thread_csave(void);
 extern void act_thread_catt(void *ctx);
 extern void act_thread_cfree(void *ctx);
 
+#if MACH_KERNEL_PRIVATE
 
+#if HAS_ARM_FEAT_SME
+extern arm_sme_saved_state_t *machine_thread_get_sme_state(thread_t thread);
+extern kern_return_t machine_thread_sme_state_alloc(thread_t thread);
+extern void machine_thread_sme_state_free(thread_t thread);
+#endif
 
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+extern void machine_thread_matrix_state_dup(thread_t target);
+#endif
+#endif /* MACH_KERNEL_PRIVATE */
 
+#if HAS_APPLE_GENERIC_TIMER
+extern void agt_thread_bootstrap(void);
+#endif /* HAS_MACHINE_GENERIC_TIMER */
 /*
  * Return address of the function that called current function, given
  * address of the first parameter of current function.

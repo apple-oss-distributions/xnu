@@ -52,12 +52,14 @@
 #include <machine/config.h>
 #include <vm/pmap.h>
 #include <vm/vm_page.h>
-#include <vm/vm_shared_region.h>
-#include <vm/vm_map.h>
+#include <vm/vm_shared_region_xnu.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <sys/codesign.h>
 #include <sys/kdebug.h>
 #include <kern/coalition.h>
 #include <pexpert/device_tree.h>
+#include <pexpert/arm64/board_config.h>
 
 #include <IOKit/IOPlatformExpert.h>
 #if HIBERNATION
@@ -203,6 +205,7 @@ static const struct vm_reserved_region vm_reserved_regions[] = {
 };
 
 uint32_t get_arm_cpu_version(void);
+
 
 #if defined(HAS_IPI)
 static inline void
@@ -366,7 +369,7 @@ machine_idle(void)
 	/* Interrupts are expected to be masked on entry or re-entry via
 	 * Idle_load_context()
 	 */
-	assert((__builtin_arm_rsr("DAIF") & (DAIF_IRQF | DAIF_FIQF)) == (DAIF_IRQF | DAIF_FIQF));
+	assert((__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
 	/* Check for, and act on, a WFE recommendation.
 	 * Bypasses context spill/fill for a minor perf. increment.
 	 * May unmask and restore IRQ+FIQ mask.
@@ -378,7 +381,7 @@ machine_idle(void)
 		 */
 		Idle_context();
 	}
-	__builtin_arm_wsr("DAIFClr", (DAIFSC_IRQF | DAIFSC_FIQF));
+	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
 }
 
 void
@@ -420,7 +423,7 @@ ml_get_interrupts_enabled(void)
 	uint64_t        value;
 
 	MRS(value, "DAIF");
-	if (value & DAIF_IRQF) {
+	if ((value & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE) {
 		return FALSE;
 	}
 	return TRUE;
@@ -489,6 +492,9 @@ user_timebase_type(void)
 {
 #if HAS_ACNTVCT
 	return USER_TIMEBASE_NOSPEC_APPLE;
+#elif HAS_APPLE_GENERIC_TIMER
+	// Conveniently, AGTCNTVCTSS_EL0 and ACNTVCT_EL0 have identical encodings
+	return USER_TIMEBASE_NOSPEC_APPLE;
 #elif __ARM_ARCH_8_6__
 	return USER_TIMEBASE_NOSPEC;
 #else
@@ -532,11 +538,18 @@ set_invalidate_hmac_function(invalidate_fn_t fn)
 	invalidate_hmac_function = fn;
 }
 
+bool
+ml_is_secure_hib_supported(void)
+{
+	return false;
+}
+
 void
 machine_lockdown(void)
 {
 
 #if CONFIG_SPTM
+
 	/**
 	 * On devices that make use of the SPTM, the SPTM is responsible for
 	 * managing system register locks. Due to this, we skip the call to
@@ -599,8 +612,24 @@ machine_lockdown(void)
 #endif /* CONFIG_KERNEL_INTEGRITY */
 
 
+	/**
+	 * For platforms that use SEP-backed hibernation, invoke kext-provided
+	 * functionality to invalidate HMAC key in SIO used to sign a variety of
+	 * data (e.g., the RO region).
+	 *
+	 * Just for paranoia's sake, let's make it so that if an attacker is
+	 * capable of corrupting EDT early that they have to do so in a way that
+	 * prevents invaldidate_hmac_function from running properly yet still
+	 * makes it so that the invalidate HMAC function receives an OK
+	 * response, which seems hard.
+	 *
+	 * This only makes sense for PPL-based systems seeing as SPTM-based systems
+	 * will have iBoot invalidate Key1 for us.
+	 */
 	if (NULL != invalidate_hmac_function) {
+#if !defined(CONFIG_SPTM)
 		invalidate_hmac_function();
+#endif /* !defined(CONFIG_SPTM) */
 	}
 
 	lockdown_done = 1;
@@ -616,7 +645,7 @@ machine_boot_info(
 }
 
 void
-slave_machine_init(__unused void *param)
+machine_cpu_reinit(__unused void *param)
 {
 	cpu_machine_init();     /* Initialize the processor */
 	clock_init();           /* Init the clock */
@@ -703,16 +732,29 @@ STARTUP(TIMEOUTS, STARTUP_RANK_MIDDLE, ml_init_lock_timeout);
 
 /*
  * This is called when all of the ml_processor_info_t structures have been
- * initialized and all the processors have been started through processor_start().
+ * initialized and all the processors have been started through processor_boot().
  *
  * Required by the scheduler subsystem.
  */
 void
 ml_cpu_init_completed(void)
 {
-	if (SCHED(cpu_init_completed) != NULL) {
-		SCHED(cpu_init_completed)();
-	}
+	sched_cpu_init_completed();
+}
+
+/*
+ * This tracks which cpus are between ml_cpu_down and ml_cpu_up
+ */
+_Atomic uint64_t ml_cpu_up_processors = 0;
+
+void
+ml_cpu_up(void)
+{
+	cpu_data_t *cpu_data_ptr = getCpuDatap();
+
+	assert(!bit_test(os_atomic_load(&ml_cpu_up_processors, relaxed), cpu_data_ptr->cpu_number));
+
+	atomic_bit_set(&ml_cpu_up_processors, cpu_data_ptr->cpu_number, memory_order_relaxed);
 }
 
 /*
@@ -723,10 +765,6 @@ ml_cpu_init_completed(void)
  * because we don't update the counts when CLPC causes temporary
  * cluster powerdown events, as these must be transparent to the user.
  */
-void
-ml_cpu_up(void)
-{
-}
 
 void
 ml_cpu_up_update_counts(int cpu_id)
@@ -737,6 +775,23 @@ ml_cpu_up_update_counts(int cpu_id)
 
 	os_atomic_inc(&machine_info.physical_cpu, relaxed);
 	os_atomic_inc(&machine_info.logical_cpu, relaxed);
+}
+
+int
+ml_find_next_up_processor()
+{
+	if (BootCpuData.cpu_running) {
+		return BootCpuData.cpu_number;
+	}
+
+	int next_active_cpu = lsb_first(os_atomic_load(&ml_cpu_up_processors, relaxed));
+
+	if (next_active_cpu == -1) {
+		assertf(ml_is_quiescing(), "can only have no active CPUs in quiesce state");
+		next_active_cpu = BootCpuData.cpu_number;
+	}
+
+	return next_active_cpu;
 }
 
 /*
@@ -764,20 +819,54 @@ ml_cpu_down(void)
 	cpu_data_t *cpu_data_ptr = getCpuDatap();
 	cpu_data_ptr->cpu_running = FALSE;
 
-	if (cpu_data_ptr != &BootCpuData) {
+	assert((cpu_data_ptr->cpu_signal & SIGPdisabled) == 0);
+	assert(bit_test(os_atomic_load(&ml_cpu_up_processors, relaxed), cpu_data_ptr->cpu_number));
+
+	atomic_bit_clear(&ml_cpu_up_processors, cpu_data_ptr->cpu_number, memory_order_release);
+
+	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
 		/*
-		 * Move all of this cpu's timers to the master/boot cpu,
-		 * and poke it in case there's a sooner deadline for it to schedule.
+		 * This is the boot CPU powering down for S2R, don't try to migrate its timers,
+		 * because there is nobody else active to migrate it to.
 		 */
-		timer_queue_shutdown(&cpu_data_ptr->rtclock_timer.queue);
-		kern_return_t rv = cpu_xcall(BootCpuData.cpu_number, &timer_queue_expire_local, &ml_cpu_down);
+		assert3u(os_atomic_load(&ml_cpu_up_processors, relaxed), ==, 0);
+	} else if (cpu_data_ptr != &BootCpuData || (support_bootcpu_shutdown && !ml_is_quiescing())) {
+		int next_cpu = ml_find_next_up_processor();
+
+		cpu_data_t* new_cpu_datap = cpu_datap(next_cpu);
+
+		/*
+		 * Move all of this cpu's timers to another cpu that has not gone through ml_cpu_down,
+		 * and poke it in case there's a sooner deadline for it to schedule.
+		 *
+		 * This depends on ml_cpu_down never running concurrently, which is guaranteed by
+		 * the processor_updown_lock.
+		 */
+		timer_queue_shutdown(next_cpu, &cpu_data_ptr->rtclock_timer.queue,
+		    &new_cpu_datap->rtclock_timer.queue);
+
+		/*
+		 * Trigger timer_queue_expire_local to execute on the remote CPU.
+		 *
+		 * Because we have interrupts disabled here, we cannot use a
+		 * standard cpu_xcall, which would deadlock against the stackshot
+		 * IPI. This must be a fire-and-forget IPI.
+		 */
+		kern_return_t rv = cpu_signal(new_cpu_datap, SIGPTimerLocal, NULL, NULL);
+
 		if (rv != KERN_SUCCESS) {
-			panic("ml_cpu_down: IPI failure %d", rv);
+			panic("ml_cpu_down: cpu_signal of cpu %d failure %d", next_cpu, rv);
 		}
+	} else {
+		panic("boot cpu powering down with nowhere for its timers to go");
 	}
 
 	cpu_signal_handler_internal(TRUE);
+
+	/* There should be no more pending IPIs on this core. */
+	assert3u(getCpuDatap()->cpu_signal, ==, SIGPdisabled);
 }
+
 void
 ml_cpu_down_update_counts(int cpu_id)
 {
@@ -980,6 +1069,40 @@ ml_is_boot_cpu(const DTEntry entry)
 }
 
 static void
+ml_cluster_power_override(unsigned int *flag)
+{
+#if XNU_CLUSTER_POWER_DOWN
+	/*
+	 * Old method (H14/H15): enable CPD in the kernel build
+	 * For H16+, *flag may have be set to 1 through EDT
+	 */
+	*flag = 1;
+#endif
+
+	/*
+	 * If a boot-arg is set that allows threads to be bound
+	 * to a cpu or cluster, cluster_power_down must
+	 * default to false.
+	 */
+#ifdef CONFIG_XNUPOST
+	uint64_t kernel_post = 0;
+	PE_parse_boot_argn("kernPOST", &kernel_post, sizeof(kernel_post));
+	if (kernel_post != 0) {
+		*flag = 0;
+	}
+#endif
+	if (PE_parse_boot_argn("enable_skstb", NULL, 0)) {
+		*flag = 0;
+	}
+	if (PE_parse_boot_argn("enable_skstsct", NULL, 0)) {
+		*flag = 0;
+	}
+
+	/* Always let the user manually override, even if it's unsupported */
+	PE_parse_boot_argn("cluster_power", flag, sizeof(*flag));
+}
+
+static void
 ml_read_chip_revision(unsigned int *rev __unused)
 {
 	// The CPU_VERSION_* macros are only defined on APPLE_ARM64_ARCH_FAMILY builds
@@ -1061,8 +1184,8 @@ ml_parse_cpu_topology(void)
 		assert(cpu->cpu_id < MAX_CPUS);
 		topology_info.max_cpu_id = MAX(topology_info.max_cpu_id, cpu->cpu_id);
 
-		cpu->die_id = 0;
-		topology_info.max_die_id = 0;
+		cpu->die_id = (int)ml_readprop(child, "die-id", 0);
+		topology_info.max_die_id = MAX(topology_info.max_die_id, cpu->die_id);
 
 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
 
@@ -1082,6 +1205,10 @@ ml_parse_cpu_topology(void)
 			cpu->cluster_type = CLUSTER_TYPE_E;
 		} else if (cluster_type == 'P') {
 			cpu->cluster_type = CLUSTER_TYPE_P;
+		}
+
+		if (ml_readprop(child, "cluster-power-down", 0)) {
+			topology_info.cluster_power_down = 1;
 		}
 
 		topology_info.cluster_type_num_cpus[cpu->cluster_type]++;
@@ -1111,6 +1238,7 @@ ml_parse_cpu_topology(void)
 			topology_info.cluster_types |= (1 << cpu->cluster_type);
 
 			cluster->cluster_id = cpu->cluster_id;
+			cluster->die_id = cpu->die_id;
 			cluster->cluster_type = cpu->cluster_type;
 			cluster->first_cpu_id = cpu->cpu_id;
 			assert(cluster_phys_to_logical[phys_cluster_id] == -1);
@@ -1132,6 +1260,8 @@ ml_parse_cpu_topology(void)
 #endif
 
 		cpu->die_cluster_id = (int)ml_readprop(child, "die-cluster-id", MPIDR_CLUSTER_ID(cpu->phys_id));
+		cluster->die_cluster_id = cpu->die_cluster_id;
+
 		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", MPIDR_CPU_ID(cpu->phys_id));
 
 		cluster->num_cpus++;
@@ -1173,6 +1303,7 @@ ml_parse_cpu_topology(void)
 #endif
 	assert(topology_info.boot_cpu != NULL);
 	ml_read_chip_revision(&topology_info.chip_revision);
+	ml_cluster_power_override(&topology_info.cluster_power_down);
 
 	/*
 	 * Set TPIDR_EL0 to indicate the correct cpu number & cluster id,
@@ -1417,6 +1548,28 @@ ml_mcache_flush(void)
 }
 
 
+kern_return_t ml_mem_fault_report_enable_register(void);
+kern_return_t
+ml_mem_fault_report_enable_register(void)
+{
+	return KERN_SUCCESS;
+}
+
+kern_return_t ml_amcc_error_inject_register(void);
+kern_return_t
+ml_amcc_error_inject_register(void)
+{
+	return KERN_SUCCESS;
+}
+
+kern_return_t ml_dcs_error_inject_register(void);
+kern_return_t
+ml_dcs_error_inject_register(void)
+{
+	return KERN_SUCCESS;
+}
+
+
 extern lck_mtx_t pset_create_lock;
 
 kern_return_t
@@ -1444,6 +1597,12 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	} else {
 		this_cpu_datap = &BootCpuData;
 		is_boot_cpu = TRUE;
+		/*
+		 * Note that ml_processor_register happens for the boot cpu
+		 * *after* it starts running arbitrary threads, possibly
+		 * including *userspace*, depending on how long the CPU
+		 * services take to match.
+		 */
 	}
 
 	assert(in_processor_info->log_id <= (uint32_t)ml_get_max_cpu_number());
@@ -1452,10 +1611,7 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 
 	if (!is_boot_cpu) {
 		this_cpu_datap->cpu_number = (unsigned short)(in_processor_info->log_id);
-
-		if (cpu_data_register(this_cpu_datap) != KERN_SUCCESS) {
-			goto processor_register_error;
-		}
+		cpu_data_register(this_cpu_datap);
 		assert((this_cpu_datap->cpu_number & MACHDEP_TPIDR_CPUNUM_MASK) == this_cpu_datap->cpu_number);
 	}
 
@@ -1498,15 +1654,12 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	pset = pset_find(in_processor_info->cluster_id, NULL);
 	kprintf("[%d]%s>pset_find(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, in_processor_info->cluster_id, pset ? pset->pset_id : -1);
 	if (pset == NULL) {
+		pset_cluster_type_t pset_cluster_type = cluster_type_to_pset_cluster_type(this_cpu_datap->cpu_cluster_type);
+		pset_node_t pset_node = cluster_type_to_pset_node(this_cpu_datap->cpu_cluster_type);
+		pset = pset_create(pset_node, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
+		assert(pset != PROCESSOR_SET_NULL);
 #if __AMP__
-		pset_cluster_type_t pset_cluster_type = this_cpu_datap->cpu_cluster_type == CLUSTER_TYPE_E ? PSET_AMP_E : PSET_AMP_P;
-		pset = pset_create(ml_get_boot_cluster_type() == this_cpu_datap->cpu_cluster_type ? &pset_node0 : &pset_node1, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
-		assert(pset != PROCESSOR_SET_NULL);
 		kprintf("[%d]%s>pset_create(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, this_cpu_datap->cpu_cluster_id, pset->pset_id);
-#else /* __AMP__ */
-		pset_cluster_type_t pset_cluster_type = PSET_SMP;
-		pset = pset_create(&pset_node0, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
-		assert(pset != PROCESSOR_SET_NULL);
 #endif /* __AMP__ */
 	}
 	kprintf("[%d]%s>cpu_id %p cluster_id %d cpu_number %d is type %d\n", current_processor()->cpu_id, __FUNCTION__, in_processor_info->cpu_id, in_processor_info->cluster_id, this_cpu_datap->cpu_number, in_processor_info->cluster_type);
@@ -1539,10 +1692,20 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	}
 
 #if CONFIG_CPU_COUNTERS
-	if (kpc_register_cpu(this_cpu_datap) != TRUE) {
-		goto processor_register_error;
-	}
+	kpc_register_cpu(this_cpu_datap);
 #endif /* CONFIG_CPU_COUNTERS */
+
+#ifdef APPLEEVEREST
+	/**
+	 * H15 SoCs have PIO lockdown applied at early boot for secondary CPUs.
+	 * Save PIO lock base addreses.
+	 */
+	const uint32_t log_id = in_processor_info->log_id;
+	const unsigned int cluster_id = topology_info.cpus[log_id].cluster_id;
+	this_cpu_datap->cpu_reg_paddr = topology_info.cpus[log_id].cpu_IMPL_pa;
+	this_cpu_datap->acc_reg_paddr = topology_info.clusters[cluster_id].acc_IMPL_pa;
+	this_cpu_datap->cpm_reg_paddr = topology_info.clusters[cluster_id].cpm_IMPL_pa;
+#endif
 
 
 	if (!is_boot_cpu) {
@@ -1551,17 +1714,20 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 		OSIncrementAtomic((SInt32*)&real_ncpus);
 	}
 
+	os_atomic_or(&this_cpu_datap->cpu_flags, InitState, relaxed);
+
+#if !USE_APPLEARMSMP
+	/*
+	 * AppleARMCPU's external processor_start call is now a no-op, so
+	 * boot the processor directly when it's registered.
+	 *
+	 * It needs to be booted here for the boot processor to finish the
+	 * subsequent registerInterrupt operations and unblock the other cores.
+	 */
+	processor_boot(processor);
+#endif /* !USE_APPLEARMSMP */
+
 	return KERN_SUCCESS;
-
-processor_register_error:
-#if CONFIG_CPU_COUNTERS
-	kpc_unregister_cpu(this_cpu_datap);
-#endif /* CONFIG_CPU_COUNTERS */
-	if (!is_boot_cpu) {
-		cpu_data_free(this_cpu_datap);
-	}
-
-	return KERN_FAILURE;
 }
 
 void
@@ -1591,6 +1757,8 @@ void
 cause_ast_check(
 	processor_t processor)
 {
+	assert(processor != PROCESSOR_NULL);
+
 	if (current_processor() != processor) {
 		cpu_signal(processor_to_cpu_datap(processor), SIGPast, (void *)NULL, (void *)NULL);
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED, MACH_REMOTE_AST), processor->cpu_id, 1 /* ast */, 0, 0, 0);
@@ -2160,6 +2328,13 @@ ml_interrupt_prewarm(__unused uint64_t deadline)
 	return KERN_FAILURE;
 }
 
+#if HAS_APPLE_GENERIC_TIMER
+/* The kernel timer APIs always use the Apple timebase */
+#define KERNEL_TIMEBASE(reg)    "AGT"reg
+#else
+#define KERNEL_TIMEBASE(reg)    reg
+#endif
+
 /*
  * Assumes fiq, irq disabled.
  */
@@ -2174,7 +2349,7 @@ ml_set_decrementer(uint32_t dec_value)
 	if (cdp->cpu_set_decrementer_func) {
 		cdp->cpu_set_decrementer_func(dec_value);
 	} else {
-		__builtin_arm_wsr64("CNTV_TVAL_EL0", (uint64_t)dec_value);
+		__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTV_TVAL_EL0"), (uint64_t)dec_value);
 	}
 }
 
@@ -2185,7 +2360,7 @@ ml_set_decrementer(uint32_t dec_value)
 static inline uint64_t
 speculative_timebase(void)
 {
-	return __builtin_arm_rsr64("CNTVCT_EL0");
+	return __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTVCT_EL0"));
 }
 
 /**
@@ -2199,7 +2374,7 @@ nonspeculative_timebase(void)
 #if defined(HAS_ACNTVCT)
 	return __builtin_arm_rsr64("ACNTVCT_EL0");
 #elif __ARM_ARCH_8_6__
-	return __builtin_arm_rsr64("CNTVCTSS_EL0");
+	return __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTVCTSS_EL0"));
 #else
 	// ISB required by ARMV7C.b section B8.1.2 & ARMv8 section D6.1.2
 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
@@ -2304,7 +2479,7 @@ ml_get_decrementer(void)
 	} else {
 		uint64_t wide_val;
 
-		wide_val = __builtin_arm_rsr64("CNTV_TVAL_EL0");
+		wide_val = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTV_TVAL_EL0"));
 		dec = (uint32_t)wide_val;
 		assert(wide_val == (uint64_t)dec);
 	}
@@ -2315,7 +2490,7 @@ ml_get_decrementer(void)
 boolean_t
 ml_get_timer_pending(void)
 {
-	uint64_t cntv_ctl = __builtin_arm_rsr64("CNTV_CTL_EL0");
+	uint64_t cntv_ctl = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTV_CTL_EL0"));
 	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
 }
 
@@ -2361,13 +2536,11 @@ platform_syscall(arm_saved_state_t *state)
 static void
 _enable_timebase_event_stream(uint32_t bit_index)
 {
-	uint64_t cntkctl; /* One wants to use 32 bits, but "mrs" prefers it this way */
-
 	if (bit_index >= 64) {
 		panic("%s: invalid bit index (%u)", __FUNCTION__, bit_index);
 	}
 
-	__asm__ volatile ("mrs	%0, CNTKCTL_EL1" : "=r"(cntkctl));
+	uint64_t cntkctl = __builtin_arm_rsr64(KERNEL_TIMEBASE("CNTKCTL_EL1"));
 
 	cntkctl |= (bit_index << CNTKCTL_EL1_EVENTI_SHIFT);
 	cntkctl |= CNTKCTL_EL1_EVNTEN;
@@ -2381,7 +2554,14 @@ _enable_timebase_event_stream(uint32_t bit_index)
 		cntkctl |= (CNTKCTL_EL1_PL0PCTEN | CNTKCTL_EL1_PL0VCTEN);
 	}
 
-	__builtin_arm_wsr64("CNTKCTL_EL1", cntkctl);
+	__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTKCTL_EL1"), cntkctl);
+
+#if HAS_APPLE_GENERIC_TIMER
+	/* Enable EL0 access to the ARM timebase registers too */
+	uint64_t arm_cntkctl = __builtin_arm_rsr64("CNTKCTL_EL1");
+	arm_cntkctl |= (CNTKCTL_EL1_PL0PCTEN | CNTKCTL_EL1_PL0VCTEN);
+	__builtin_arm_wsr64("CNTKCTL_EL1", arm_cntkctl);
+#endif
 }
 
 /*
@@ -2392,9 +2572,12 @@ _enable_virtual_timer(void)
 {
 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
 
-	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
+	__builtin_arm_wsr64(KERNEL_TIMEBASE("CNTV_CTL_EL0"), cntvctl);
 	/* disable the physical timer as a precaution, as its registers reset to architecturally unknown values */
 	__builtin_arm_wsr64("CNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
+#if HAS_APPLE_GENERIC_TIMER
+	__builtin_arm_wsr64("AGTCNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
+#endif
 }
 
 void
@@ -2645,18 +2828,11 @@ ml_report_minor_badness(uint32_t __unused badness_id)
 	#endif
 }
 
-#if defined(HAS_APPLE_PAC)
-#if __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM
-/**
- * The ARMv8.6 implementation is also safe for non-FPAC CPUs, but less efficient;
- * guest kernels need to use it because it does not know at compile time whether
- * the host CPU supports FPAC.
- */
-
+#if HAS_APPLE_PAC && (__ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM)
 /**
  * Emulates the poisoning done by ARMv8.3-PAuth instructions on auth failure.
  */
-static void *
+void *
 ml_poison_ptr(void *ptr, ptrauth_key key)
 {
 	bool b_key = key & (1ULL << 0);
@@ -2683,77 +2859,7 @@ ml_poison_ptr(void *ptr, ptrauth_key key)
 	poisoned |= error_code << poison_shift;
 	return (void *)poisoned;
 }
-
-/*
- * ptrauth_sign_unauthenticated() reimplemented using asm volatile, forcing the
- * compiler to assume this operation has side-effects and cannot be reordered
- */
-#define ptrauth_sign_volatile(__value, __suffix, __data)                \
-	({                                                              \
-	        void *__ret = __value;                                  \
-	        asm volatile (                                          \
-	                "pac" #__suffix "	%[value], %[data]"          \
-	                : [value] "+r"(__ret)                           \
-	                : [data] "r"(__data)                            \
-	        );                                                      \
-	        __ret;                                                  \
-	})
-
-#define ml_auth_ptr_unchecked_for_key(_ptr, _suffix, _key, _modifier)                           \
-	do {                                                                                    \
-	        void *stripped = ptrauth_strip(_ptr, _key);                                     \
-	        void *reauthed = ptrauth_sign_volatile(stripped, _suffix, _modifier);           \
-	        if (__probable(_ptr == reauthed)) {                                             \
-	                _ptr = stripped;                                                        \
-	        } else {                                                                        \
-	                _ptr = ml_poison_ptr(stripped, _key);                                   \
-	        }                                                                               \
-	} while (0)
-
-#define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
-	ml_auth_ptr_unchecked_for_key(_ptr, _suffix, ptrauth_key_as ## _suffix, _modifier)
-#else
-#define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
-	asm volatile ("aut" #_suffix " %[ptr], %[modifier]" : [ptr] "+r"(_ptr) : [modifier] "r"(_modifier));
-#endif /* __ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM */
-
-/**
- * Authenticates a signed pointer without trapping on failure.
- *
- * @warning This function must be called with interrupts disabled.
- *
- * @warning Pointer authentication failure should normally be treated as a fatal
- * error.  This function is intended for a handful of callers that cannot panic
- * on failure, and that understand the risks in handling a poisoned return
- * value.  Other code should generally use the trapping variant
- * ptrauth_auth_data() instead.
- *
- * @param ptr the pointer to authenticate
- * @param key which key to use for authentication
- * @param modifier a modifier to mix into the key
- * @return an authenticated version of ptr, possibly with poison bits set
- */
-void *
-ml_auth_ptr_unchecked(void *ptr, ptrauth_key key, uint64_t modifier)
-{
-	switch (key & 0x3) {
-	case ptrauth_key_asia:
-		_ml_auth_ptr_unchecked(ptr, ia, modifier);
-		break;
-	case ptrauth_key_asib:
-		_ml_auth_ptr_unchecked(ptr, ib, modifier);
-		break;
-	case ptrauth_key_asda:
-		_ml_auth_ptr_unchecked(ptr, da, modifier);
-		break;
-	case ptrauth_key_asdb:
-		_ml_auth_ptr_unchecked(ptr, db, modifier);
-		break;
-	}
-
-	return ptr;
-}
-#endif /* defined(HAS_APPLE_PAC) */
+#endif /* HAS_APPLE_PAC && (__ARM_ARCH_8_6__ || APPLEVIRTUALPLATFORM) */
 
 #ifdef CONFIG_XNUPOST
 void
@@ -2982,4 +3088,27 @@ void
 ml_panic_on_invalid_new_cpsr(const arm_saved_state_t *ss, uint32_t cpsr)
 {
 	panic("attempt to set non-user CPSR %#010x on user saved-state %p", cpsr, ss);
+}
+
+
+/**
+ * Explicitly preallocates a floating point save area.
+ * This is a noop on ARM because preallocation isn't required at this time.
+ */
+void
+ml_fp_save_area_prealloc(void)
+{
+}
+
+
+void
+ml_task_post_signature_processing_hook(__unused task_t task)
+{
+	/**
+	 * Have an acquire barrier here to make sure the machine flags read that is going
+	 * to happen below is not speculated before the task->t_returnwaitflags earlier
+	 * in task_wait_to_return().
+	 */
+	os_atomic_thread_fence(acquire);
+
 }

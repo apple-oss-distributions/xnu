@@ -98,7 +98,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_bounded_ptr, "bounded_array_ref.ctor.bounded_ptr") {
+T_DECL(ctor_bounded_ptr, "bounded_array_ref.ctor.bounded_ptr", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

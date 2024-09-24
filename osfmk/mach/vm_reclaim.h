@@ -92,11 +92,13 @@ typedef struct mach_vm_reclaim_ringbuffer_v1_s {
 	uint64_t last_accounting_given_to_kernel;
 } *mach_vm_reclaim_ringbuffer_v1_t;
 
-kern_return_t mach_vm_reclaim_ringbuffer_init(mach_vm_reclaim_ringbuffer_v1_t ringbuffer);
+kern_return_t mach_vm_reclaim_ringbuffer_init(
+	mach_vm_reclaim_ringbuffer_v1_t ringbuffer);
 
 /*
  * Mark the given range as free.
  * Returns a unique identifier for the range that can be used by reclaim_mark_used
+ *
  * This will update the userspace reclaim buffer accounting, but will not
  * inform the kernel about the new bytes in the buffer. If the kernel should be informed,
  * should_update_kernel_accounting will be set to true and the caller should call
@@ -108,6 +110,32 @@ uint64_t mach_vm_reclaim_mark_free(
 	mach_vm_address_t start_addr,
 	uint32_t size,
 	mach_vm_reclaim_behavior_v1_t behavior,
+	bool *should_update_kernel_accounting);
+
+/*
+ * Mark the given range as free with a specific id.
+ *
+ * It is the callers responsibility to ensure that the ID is not currently in
+ * use (i.e. the caller has successfully called mach_vm_reclaim_mark_used() on
+ * this ID). Attempting to double-mark-free to the same reclaim ID is likely to
+ * result in a crash.
+ *
+ * Returns KERN_SUCCESS if the operation was successful. In the event that the
+ * ID is no longer available (because the kernel has reclaimed it), returns
+ * KERN_FAILURE.
+ *
+ * This will update the userspace reclaim buffer accounting, but will not
+ * inform the kernel about the new bytes in the buffer. If the kernel should be informed,
+ * should_update_kernel_accounting will be set to true and the caller should call
+ * mach_vm_reclaim_update_kernel_accounting. That syscall might reclaim the buffer, so
+ * this gives the caller an opportunity to first drop any locks.
+ */
+kern_return_t mach_vm_reclaim_mark_free_with_id(
+	mach_vm_reclaim_ringbuffer_v1_t buffer,
+	mach_vm_address_t start_addr,
+	uint32_t size,
+	mach_vm_reclaim_behavior_v1_t behavior,
+	uint64_t id,
 	bool *should_update_kernel_accounting);
 
 /*

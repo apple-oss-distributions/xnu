@@ -26,7 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 
 bool
 first_free_is_valid_ll(vm_map_t map)

@@ -41,7 +41,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 int proc_rlimit_control(pid_t pid, int flavor, void *arg);
 
 T_DECL(phys_footprint_interval_max,
-    "Validate physical footprint interval tracking")
+    "Validate physical footprint interval tracking", T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	struct rusage_info_v4 ru;

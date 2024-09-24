@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,6 +49,8 @@
 
 #include <darwintest.h>
 
+#include "net_test_lib.h"
+
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.net"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -62,103 +64,6 @@ static char f_addr_str[MAX_IPv6_STR_LEN];
 
 const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
 #define s6_addr32 __u6_addr.__u6_addr32
-
-#define RTM_BUFLEN (sizeof(struct rt_msghdr) + 6 * SOCK_MAXADDRLEN)
-
-#define ROUNDUP(a) \
-((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
-#define ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
-
-static bool
-has_v4_default_route(void)
-{
-	bool result = false;
-	struct rt_msghdr *rtm = NULL;
-	struct sockaddr_in sin = {};
-
-	sin.sin_len = sizeof(struct sockaddr_in);
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = INADDR_ANY;
-
-	T_QUIET; T_ASSERT_NOTNULL(rtm = (struct rt_msghdr *)calloc(1, RTM_BUFLEN), NULL);
-
-	rtm->rtm_msglen = sizeof(struct rt_msghdr) + sizeof(struct sockaddr_in);
-	rtm->rtm_version = RTM_VERSION;
-	rtm->rtm_type = RTM_GET;
-	rtm->rtm_flags = RTF_UP | RTF_STATIC | RTF_GATEWAY | RTF_HOST;
-	rtm->rtm_addrs = RTA_DST;
-	rtm->rtm_pid = getpid();
-	rtm->rtm_seq = 1;
-
-	uint8_t *cp = (unsigned char *)(rtm + 1);
-
-	bcopy(&sin, cp, sin.sin_len);
-	cp += ROUNDUP(sin.sin_len);
-
-	u_short len = (u_short)(cp - (uint8_t *)rtm);
-
-	rtm->rtm_msglen = len;
-
-	int fd;
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(fd = socket(PF_ROUTE, SOCK_RAW, 0), NULL);
-
-	ssize_t sent = send(fd, rtm, len, 0);
-	if (sent == len) {
-		result = true;
-	} else {
-		result = false;
-	}
-
-	(void) close(fd);
-	free(rtm);
-
-	return result;
-}
-
-static bool
-has_v6_default_route(void)
-{
-	bool result = false;
-	struct rt_msghdr *rtm = NULL;
-	struct sockaddr_in6 sin6 = {};
-
-	sin6.sin6_len = sizeof(struct sockaddr_in6);
-	sin6.sin6_family = AF_INET6;
-
-	T_QUIET; T_ASSERT_NOTNULL(rtm = (struct rt_msghdr *)calloc(1, RTM_BUFLEN), NULL);
-
-	rtm->rtm_msglen = sizeof(struct rt_msghdr) + sizeof(struct sockaddr_in);
-	rtm->rtm_version = RTM_VERSION;
-	rtm->rtm_type = RTM_GET;
-	rtm->rtm_flags = RTF_UP | RTF_STATIC | RTF_GATEWAY | RTF_HOST;
-	rtm->rtm_addrs = RTA_DST;
-	rtm->rtm_pid = getpid();
-	rtm->rtm_seq = 1;
-
-	uint8_t *cp = (unsigned char *)(rtm + 1);
-
-	bcopy(&sin6, cp, sin6.sin6_len);
-	cp += ROUNDUP(sin6.sin6_len);
-
-	u_short len = (u_short)(cp - (uint8_t *)rtm);
-
-	rtm->rtm_msglen = len;
-
-	int fd;
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(fd = socket(PF_ROUTE, SOCK_RAW, 0), NULL);
-
-	ssize_t sent = send(fd, rtm, len, 0);
-	if (sent == len) {
-		result = true;
-	} else {
-		result = false;
-	}
-
-	(void) close(fd);
-	free(rtm);
-
-	return result;
-}
 
 
 static void
@@ -182,8 +87,8 @@ udp_disconnect_v4(int client_fd, struct sockaddr_in *sin_null, int expected_erro
 {
 	if (expected_error == 0) {
 		socklen_t socklen;
-		struct sockaddr_in sin_local = {};
-		struct sockaddr_in sin_peer = {};
+		struct sockaddr_in sin_local = { 0 };
+		struct sockaddr_in sin_peer = { 0 };
 
 		// Disconnect
 		T_EXPECT_POSIX_FAILURE(connect(client_fd, (struct sockaddr *)sin_null, sizeof(struct sockaddr_in)), EADDRNOTAVAIL, NULL);
@@ -209,8 +114,8 @@ udp_connect_v4(int client_fd, struct sockaddr_in *sin_to)
 {
 	int listen_fd = -1;
 	socklen_t socklen;
-	struct sockaddr_in sin_local = {};
-	struct sockaddr_in sin_peer = {};
+	struct sockaddr_in sin_local = { 0 };
+	struct sockaddr_in sin_peer = { 0 };
 	struct sockaddr_in sin;
 
 	init_sin_address(&sin);
@@ -247,13 +152,13 @@ udp_connect_v4(int client_fd, struct sockaddr_in *sin_to)
 	T_ASSERT_POSIX_SUCCESS(close(listen_fd), NULL);
 }
 
-T_DECL(udp_disconnect_null_ipv4, "UDP connect with a IPv4 loopback address")
+T_DECL(udp_disconnect_null_ipv4, "UDP connect with a IPv4 loopback address", T_META_TAG_VM_PREFERRED)
 {
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr), 1, NULL);
 
-	struct sockaddr_in sin_null = {};
+	struct sockaddr_in sin_null = { 0 };
 	init_sin_address(&sin_null);
 
 	int s = -1;
@@ -272,8 +177,8 @@ udp_disconnect_v6(int client_fd,
 {
 	if (expected_error == 0) {
 		socklen_t socklen;
-		struct sockaddr_in6 sin6_local = {};
-		struct sockaddr_in6 sin6_peer = {};
+		struct sockaddr_in6 sin6_local = { 0 };
+		struct sockaddr_in6 sin6_peer = { 0 };
 
 		// Disconnect
 		T_EXPECT_POSIX_FAILURE(connect(client_fd, (struct sockaddr *)sin6_null, sizeof(struct sockaddr_in6)), EADDRNOTAVAIL, NULL);
@@ -300,8 +205,8 @@ udp_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to)
 	int listen_fd = -1;
 	socklen_t socklen;
 	int off = 0;
-	struct sockaddr_in6 sin6_local = {};
-	struct sockaddr_in6 sin6_peer = {};
+	struct sockaddr_in6 sin6_local = { 0 };
+	struct sockaddr_in6 sin6_peer = { 0 };
 	struct sockaddr_in6 sin6;
 
 	init_sin6_address(&sin6);
@@ -341,19 +246,19 @@ udp_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to)
 	T_ASSERT_POSIX_SUCCESS(close(listen_fd), NULL);
 }
 
-T_DECL(udp_disconnect_null_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address")
+T_DECL(udp_disconnect_null_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
-	if (!has_v6_default_route()) {
+	if (!has_ipv6_default_route()) {
 		T_SKIP("test require IPv4 default route");
 	}
 
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
 
-	struct sockaddr_in6 sin6_null = {};
+	struct sockaddr_in6 sin6_null = { 0 };
 	init_sin6_address(&sin6_null);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP), NULL);
@@ -365,17 +270,17 @@ T_DECL(udp_disconnect_null_ipv6, "UDP connect with IPv4 multicast mapped IPv6 ad
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(udp_disconnect_null_ipv4_mapped_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address")
+T_DECL(udp_disconnect_null_ipv4_mapped_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
-	if (!has_v4_default_route()) {
+	if (!has_ipv4_default_route()) {
 		T_SKIP("test require IPv4 default route");
 	}
 
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
 
-	struct sockaddr_in6 sin6_null = {};
+	struct sockaddr_in6 sin6_null = { 0 };
 	init_sin6_address(&sin6_null);
 
 	int s = -1;
@@ -388,20 +293,20 @@ T_DECL(udp_disconnect_null_ipv4_mapped_ipv6, "UDP connect with IPv4 multicast ma
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(udp_disconnect_mapped_ipv4_mapped_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address")
+T_DECL(udp_disconnect_mapped_ipv4_mapped_ipv6, "UDP connect with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
-	if (!has_v4_default_route()) {
+	if (!has_ipv4_default_route()) {
 		T_SKIP("test require IPv4 default route");
 	}
 
 	int s = -1;
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP), NULL);
 
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
 
-	struct sockaddr_in6 sin6_null = {};
+	struct sockaddr_in6 sin6_null = { 0 };
 	init_sin6_address(&sin6_null);
 	sin6_null.sin6_addr.s6_addr[10] = 0xff;
 	sin6_null.sin6_addr.s6_addr[11] = 0xff;

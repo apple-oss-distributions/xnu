@@ -200,7 +200,7 @@ change_rlimits(int limit_type, rlim_t amount, int action)
 }
 
 T_DECL(proc_rlimit,
-    "Test basic functionalities of the getrlimit and setrlimit")
+    "Test basic functionalities of the getrlimit and setrlimit", T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	struct rlimit lim;

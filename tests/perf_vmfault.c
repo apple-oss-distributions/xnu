@@ -415,13 +415,13 @@ setup_and_run_test(int fault_type, int threads)
 }
 
 T_DECL(read_soft_fault,
-    "Read soft faults (single thread)")
+    "Read soft faults (single thread)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	setup_and_run_test(SOFT_FAULT, 1);
 }
 
 T_DECL(read_soft_fault_multithreaded,
-    "Read soft faults (multi-threaded)")
+    "Read soft faults (multi-threaded)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	char *e;
 	int nthreads;
@@ -439,14 +439,14 @@ T_DECL(read_soft_fault_multithreaded,
 }
 
 T_DECL(zero_fill_fault,
-    "Zero fill faults (single thread)")
+    "Zero fill faults (single thread)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	setup_and_run_test(ZERO_FILL, 1);
 }
 
 T_DECL(zero_fill_fault_multithreaded,
     "Zero fill faults (multi-threaded)",
-    XNU_T_META_SOC_SPECIFIC)
+    XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	char *e;
 	int nthreads;

@@ -95,7 +95,7 @@ cfg_sk(int sk)
 	    "fcntl");
 }
 
-T_DECL(uipc_sosendcheck, "Tests the UNIX Domain poll filter", T_META_CHECK_LEAKS(false))
+T_DECL(uipc_sosendcheck, "Tests the UNIX Domain poll filter", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	int s[2];
 	T_ASSERT_POSIX_SUCCESS(socketpair(AF_UNIX, SOCK_STREAM, 0, s),

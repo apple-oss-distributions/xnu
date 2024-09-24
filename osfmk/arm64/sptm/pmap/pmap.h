@@ -54,9 +54,9 @@
 #include <arm64/sptm/pmap/pmap_public.h>
 #include <kern/ast.h>
 #include <mach/arm/thread_status.h>
+#include <os/refcnt.h>
 
 #include <arm64/tlb.h>
-#include <sys/trusted_execution_monitor.h>
 
 
 /* Shift for 2048 max virtual ASIDs (2048 pmaps). */
@@ -94,9 +94,15 @@
 #define MAX_HW_ASIDS ARM_MAX_ASIDS
 #endif /* __ARM_KERNEL_PROTECT__ */
 
-/* Maximum number of Virtual Machine IDs */
+/**
+ * Maximum number of Virtual Machine IDs.
+ *
+ * All even number physical VMIDs are reserved for SK usage. Thus only 128
+ * logical VMIDs are available. Software will convert the logical VMID to
+ * the proper odd numbered physical VMID when allocating/freeing VMIDs.
+ */
 #ifndef ARM_VMID_SHIFT
-#define ARM_VMID_SHIFT (8)
+#define ARM_VMID_SHIFT (7)
 #endif /* ARM_VMID_SHIFT */
 #define ARM_MAX_VMIDS  (1 << ARM_VMID_SHIFT)
 
@@ -243,6 +249,7 @@ extern uint64_t get_tcr(void);
 extern void set_tcr(uint64_t);
 extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
 
+
 extern pmap_paddr_t get_mmu_ttb(void);
 extern pmap_paddr_t mmu_kvtop(vm_offset_t va);
 extern pmap_paddr_t mmu_kvtop_wpreflight(vm_offset_t va);
@@ -329,9 +336,6 @@ struct pmap {
 	/* Global list of pmaps */
 	queue_chain_t pmaps;
 
-	/* Free list of translation table pages. */
-	tt_entry_t *tt_entry_free;
-
 	/* Information representing the "nested" (shared) region in this pmap. */
 	struct pmap      *nested_pmap;
 	vm_map_address_t nested_region_addr;
@@ -341,23 +345,31 @@ struct pmap {
 	bitmap_t         *nested_region_unnested_table_bitmap;
 
 	/* PMAP reference count */
-	_Atomic int32_t ref_count;
+	os_ref_atomic_t ref_count;
 
 	/* Number of pmaps that nested this pmap without bounds set. */
 	uint32_t nested_no_bounds_refcnt;
 
-	/**
-	 * Represents the address space identifier (ASID) or virtual
-	 * machine identifier (VMID) for this pmap.
-	 * The value 0 is reserved for the kernel pmap; this field will
-	 * also be 0 for nested pmaps as those pmaps are never directly
-	 * activated on a CPU.  This represents a virtual ASID/VMID that
-	 * is used to globally identify a host or guest address space on
-	 * the system.  Depending upon hardware configuration, this
-	 * identifier may have a 1:1 correspondence with the hardware
-	 * ASID or VMID.
-	 */
-	uint16_t asid;
+	union {
+		/**
+		 * Represents the address space identifier (ASID) for this pmap.
+		 * The value 0 is reserved for the kernel pmap; this field will
+		 * also be 0 for nested pmaps as those pmaps are never directly
+		 * activated on a CPU.  This represents a virtual ASID that
+		 * is used to globally identify an address space on
+		 * the system.  Depending upon hardware configuration, this
+		 * identifier may have a 1:1 correspondence with the hardware
+		 * ASID.
+		 */
+		uint16_t asid;
+
+		/**
+		 * Represents the virtual machine identifier (VMID) for this pmap.
+		 * The value 0 is reserved.
+		 */
+		uint16_t vmid;
+	};
+
 #if MACH_ASSERT
 	int pmap_pid;
 	char pmap_procname[17];
@@ -413,9 +425,9 @@ struct pmap {
 	 * TrustedExecutionMonitor manages its own address space data structure and
 	 * the PMAP is used as the owning structure for keeping this structure.
 	 */
-	decl_lck_rw_data(, txm_lck);
-	TXMAddressSpace_t *XNU_PTRAUTH_SIGNED_PTR("pmap.txm_addr_space") txm_addr_space;
-	CSTrust_t txm_trust_level;
+	uint32_t reserved7[4];
+	void *reserved8;
+	uint8_t reserved9;
 };
 
 #define PMAP_VASID(pmap) ((pmap)->asid)
@@ -438,6 +450,7 @@ extern pmap_paddr_t cpu_ttep; /* Physical translation table addr */
 
 extern void *ropagetable_begin;
 extern void *ropagetable_end;
+
 
 extern tt_entry_t *invalid_tte; /* Global invalid translation table */
 extern pmap_paddr_t invalid_ttep; /* Physical invalid translation table addr */
@@ -529,11 +542,15 @@ extern boolean_t pmap_bootloader_page(ppnum_t pn);
 
 extern boolean_t pmap_is_empty(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
 
+
 #define ARM_PMAP_MAX_OFFSET_DEFAULT 0x01
 #define ARM_PMAP_MAX_OFFSET_MIN     0x02
 #define ARM_PMAP_MAX_OFFSET_MAX     0x04
 #define ARM_PMAP_MAX_OFFSET_DEVICE  0x08
 #define ARM_PMAP_MAX_OFFSET_JUMBO   0x10
+#if XNU_PLATFORM_iPhoneOS && EXTENDED_USER_VA_SUPPORT
+#define ARM_PMAP_MAX_OFFSET_EXTRA_JUMBO 0x20
+#endif /* XNU_PLATFORM_iPhoneOS && EXTENDED_USER_VA_SUPPORT */
 
 extern vm_map_offset_t pmap_max_offset(boolean_t is64, unsigned int option);
 extern vm_map_offset_t pmap_max_64bit_offset(unsigned int option);
@@ -692,7 +709,7 @@ extern void pmap_nop(pmap_t);
 
 extern lck_grp_t pmap_lck_grp;
 
-extern void CleanPoC_DcacheRegion_Force_nopreempt_nohid(vm_offset_t va, size_t length);
+extern void CleanPoC_DcacheRegion_Force_nopreempt_nohid_nobarrier(vm_offset_t va, size_t length);
 
 #define pmap_force_dcache_clean(va, sz) CleanPoC_DcacheRegion_Force(va, sz)
 #define pmap_simple_lock(l)             simple_lock(l, &pmap_lck_grp)

@@ -82,8 +82,6 @@ struct route_old {
 #include <net/if_dl.h>
 #include <netinet/in_private.h>
 
-#include <sys/constrained_ctypes.h>
-
 extern boolean_t trigger_v6_defrtr_select;
 /*
  * Kernel resident routing tables.
@@ -156,8 +154,9 @@ struct route {
  */
 struct rtentry {
 	struct  radix_node rt_nodes[2]; /* tree glue, and other values */
-#define rt_key(r)       (SA(rn_get_key(&((r)->rt_nodes[0]))))
-#define rt_mask(r)      (SA(rn_get_mask(&((r)->rt_nodes[0]))))
+#define rt_node(r)      &((r)->rt_nodes[0])
+#define rt_key(r)       SA(rn_get_key(rt_node(r)))
+#define rt_mask(r)      SA(rn_get_mask(rt_node(r)))
 	/*
 	 * See bsd/net/route.c for synchronization notes.
 	 */
@@ -196,11 +195,18 @@ struct rtentry {
 	struct eventhandler_lists_ctxt rt_evhdlr_ctxt;
 };
 
-__CCT_DECLARE_CONSTRAINED_PTR_TYPES(struct rtentry, rtentry);
+static inline struct rtentry *
+__attribute__((always_inline)) __stateful_pure
+rn_rtentry(struct radix_node *rn)
+{
+	return __container_of(rn, struct rtentry, rt_nodes[0]);
+}
+/* Backward compatibility. */
+#define RT(r) rn_rtentry((r))
 
-#define rt_key_free(r) ({                                               \
+#define rt_key_free(r) ({                                       \
 	void *__r __single = rt_key(r);                         \
-	kheap_free_addr(KHEAP_DATA_BUFFERS, __r);       \
+	kheap_free_addr(KHEAP_DATA_BUFFERS, __r);               \
 })
 
 enum {
@@ -265,6 +271,38 @@ struct rt_reach_info {
 	int32_t         ri_npm;         /* node proximity metric */
 };
 
+
+/*
+ * Route address information with extra space for "tiny" socket addresses
+ * from the user space. A "tiny" socket address has the `sa_len' field
+ * smaller than the canonical sockaddr structure.
+ * To preserve the type and the bounds safety, such "tiny" addresses
+ * are copied to the `rtix_tiny_addr' field.
+ */
+struct rt_addrinfo_ext {
+	struct rt_addrinfo rtix_info;                    /* addr info containing sockaddr array */
+	struct sockaddr    rtix_tiny_addr[RTAX_MAX];     /* storage for the "tiny" sockaddr addresss */
+	uint8_t            rtix_next_tiny;               /* offset of the next "tiny" address */
+};
+
+/*
+ * The following is used internally when parsing routing
+ * messages to avoid potential boundary issues when
+ * using shorter structures.
+ */
+struct rt_msghdr_common {
+	u_short rtm_msglen;     /* to skip over non-understood messages */
+	u_char  rtm_version;    /* future binary compatibility */
+	u_char  rtm_type;       /* message type */
+	u_short rtm_index;      /* index for associated ifp */
+	int     rtm_flags;      /* flags, incl. kern & message, e.g. DONE */
+	int     rtm_addrs;      /* bitmask identifying sockaddrs in msg */
+	pid_t   rtm_pid;        /* identify sender */
+	int     rtm_seq;        /* for sender to identify action */
+	int     rtm_errno;      /* why failed */
+	int     rtm_use;        /* from rtentry */
+};
+
 /*
  * Extended routing message header (private).
  */
@@ -301,6 +339,18 @@ struct rt_msghdr_ext {
  */
 #define IFSCOPE_NONE    0
 #define IFSCOPE_UNKNOWN IFSCOPE_NONE
+
+/*
+ * Routing statistics.
+ */
+struct rtstat_64 {
+	uint64_t        rts_badredirect;        /* bogus redirect calls */
+	uint64_t        rts_dynamic;            /* routes created by redirects */
+	uint64_t        rts_newgateway;         /* routes modified by redirects */
+	uint64_t        rts_unreach;            /* lookups which failed */
+	uint64_t        rts_wildcard;           /* lookups satisfied by a wildcard */
+	uint64_t        rts_badrtgwroute;       /* route to gateway is not direct */
+};
 
 #ifdef BSD_KERNEL_PRIVATE
 /*
@@ -425,7 +475,7 @@ extern int rtunref(struct rtentry *);
 extern void rtsetifa(struct rtentry *, struct ifaddr *);
 extern int rtinit(struct ifaddr *, uint8_t, int);
 extern int rtinit_locked(struct ifaddr *, uint8_t, int);
-extern int rtioctl(unsigned long, caddr_t, struct proc *);
+extern int rtioctl(unsigned long req, caddr_t __sized_by(IOCPARM_LEN(req)), struct proc *);
 extern void rtredirect(struct ifnet *, struct sockaddr *, struct sockaddr *,
     struct sockaddr *, int, struct sockaddr *, struct rtentry **);
 extern int rtrequest(int, struct sockaddr *,
@@ -451,7 +501,7 @@ extern void rt_revalidate_gwroute(struct rtentry *, struct rtentry *);
 extern errno_t route_to_gwroute(const struct sockaddr *, struct rtentry *,
     struct rtentry **);
 extern void rt_setexpire(struct rtentry *, uint64_t);
-extern void rt_str(struct rtentry *, char *, uint32_t, char *, uint32_t);
+extern void rt_str(struct rtentry *, char *ds __sized_by(dslen), uint32_t dslen, char *gs __sized_by(gslen), uint32_t gslen);
 extern const char *rtm2str(int);
 extern void route_clear(struct route *);
 extern void route_copyin(struct route *, struct route *, size_t);
@@ -489,5 +539,6 @@ extern void route_event_init(struct route_event *p_route_ev, struct rtentry *rt,
 extern int route_event_walktree(struct radix_node *rn, void *arg);
 extern void route_event_enqueue_nwk_wq_entry(struct rtentry *, struct rtentry *,
     uint32_t, eventhandler_tag, boolean_t);
+
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NET_ROUTE_PRIVATE_H_ */

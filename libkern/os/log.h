@@ -229,13 +229,8 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded.  This string must be a constant string, not dynamically
  * generated.  Supports all standard printf types and %@ (objects).
  */
-#define os_log(log, format, ...) __extension__({                                                \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");             \
-    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;       \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                           \
-    _os_log_internal(&__dso_handle, log, OS_LOG_TYPE_DEFAULT, _os_log_fmt, ##__VA_ARGS__);      \
-    __asm__(""); /* avoid tailcall */                                                           \
-})
+#define os_log(log, format, ...) \
+    os_log_with_type(log, OS_LOG_TYPE_DEFAULT, format, ##__VA_ARGS__)
 
 /*!
  * @function os_log_info
@@ -264,13 +259,8 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded.  This string must be a constant string, not dynamically
  * generated.  Supports all standard printf types and %@ (objects).
  */
-#define os_log_info(log, format, ...) __extension__({                                       \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");         \
-    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;   \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                       \
-    _os_log_internal(&__dso_handle, log, OS_LOG_TYPE_INFO, _os_log_fmt, ##__VA_ARGS__);     \
-    __asm__(""); /* avoid tailcall */                                                       \
-})
+#define os_log_info(log, format, ...) \
+    os_log_with_type(log, OS_LOG_TYPE_INFO, format, ##__VA_ARGS__)
 
 /*!
  * @function os_log_debug
@@ -299,13 +289,8 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded.  This string must be a constant string, not dynamically
  * generated.  Supports all standard printf types and %@ (objects).
  */
-#define os_log_debug(log, format, ...) __extension__({                                          \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");             \
-    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;       \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                           \
-    _os_log_internal(&__dso_handle, log, OS_LOG_TYPE_DEBUG, _os_log_fmt, ##__VA_ARGS__);        \
-    __asm__(""); /* avoid tailcall */                                                           \
-})
+#define os_log_debug(log, format, ...) \
+    os_log_with_type(log, OS_LOG_TYPE_DEBUG, format, ##__VA_ARGS__)
 
 /*!
  * @function os_log_error
@@ -333,13 +318,8 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded.  This string must be a constant string, not dynamically
  * generated.  Supports all standard printf types and %@ (objects).
  */
-#define os_log_error(log, format, ...) __extension__({                                          \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");             \
-    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;       \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                           \
-    _os_log_internal(&__dso_handle, log, OS_LOG_TYPE_ERROR, _os_log_fmt, ##__VA_ARGS__);        \
-    __asm__(""); /* avoid tailcall */                                                           \
-})
+#define os_log_error(log, format, ...) \
+    os_log_with_type(log, OS_LOG_TYPE_ERROR, format, ##__VA_ARGS__)
 
 /*!
  * @function os_log_fault
@@ -370,13 +350,8 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded.  This string must be a constant string, not dynamically
  * generated.  Supports all standard printf types and %@ (objects).
  */
-#define os_log_fault(log, format, ...) __extension__({                                          \
-    _Static_assert(__builtin_constant_p(format), "format string must be constant");             \
-    __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;       \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                           \
-    _os_log_internal(&__dso_handle, log, OS_LOG_TYPE_FAULT, _os_log_fmt, ##__VA_ARGS__);        \
-    __asm__(""); /* avoid tailcall */                                                           \
-})
+#define os_log_fault(log, format, ...) \
+    os_log_with_type(log, OS_LOG_TYPE_FAULT, format, ##__VA_ARGS__)
 
 /*!
  * @function os_log_with_type
@@ -401,8 +376,11 @@ os_log_debug_enabled(os_log_t log);
 #define os_log_with_type(log, type, format, ...) __extension__({                            \
     _Static_assert(__builtin_constant_p(format), "format string must be constant");         \
     __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;   \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                       \
-    _os_log_internal(&__dso_handle, log, type, _os_log_fmt, ##__VA_ARGS__);                 \
+    if (0) {                                                                                \
+	_os_log_verify_format_str(format, ##__VA_ARGS__);                                   \
+    } else {                                                                                  \
+	_os_log_internal(&__dso_handle, log, type, _os_log_fmt, ##__VA_ARGS__);             \
+    }                                                                                       \
     __asm__(""); /* avoid tailcall */                                                       \
 })
 
@@ -430,11 +408,14 @@ os_log_debug_enabled(os_log_t log);
  * line is decoded. This string must be a constant string, not dynamically
  * generated. Supports all standard printf types.
  */
-#define os_log_at_time(log, type, ts, format, ...) __extension__({                       \
+#define os_log_at_time(log, type, ts, format, ...) __extension__({                          \
     _Static_assert(__builtin_constant_p(format), "format string must be constant");         \
     __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;   \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                       \
-    _os_log_at_time(&__dso_handle, log, type, ts, _os_log_fmt, ##__VA_ARGS__);       \
+    if (0) {                                                                                \
+	_os_log_verify_format_str(format, ##__VA_ARGS__);                                   \
+    } else {                                                                                  \
+	_os_log_at_time(&__dso_handle, log, type, ts, _os_log_fmt, ##__VA_ARGS__);          \
+    }                                                                                       \
     __asm__(""); /* avoid tailcall */                                                       \
 })
 
@@ -464,8 +445,11 @@ os_log_debug_enabled(os_log_t log);
 #define os_log_driverKit(out, log, type, format, ...) __extension__({                            \
     _Static_assert(__builtin_constant_p(format), "format string must be constant");         \
     __attribute__((section("__TEXT,__os_log"))) static const char _os_log_fmt[] = format;   \
-    _os_log_verify_format_str(format, ##__VA_ARGS__);                                       \
-    (*(out)) = _os_log_internal_driverKit(&__dso_handle, log, type, _os_log_fmt, ##__VA_ARGS__);                 \
+    if (0) {                                                                                \
+	_os_log_verify_format_str(format, ##__VA_ARGS__);                                   \
+    } else {                                                                                  \
+	(*(out)) = _os_log_internal_driverKit(&__dso_handle, log, type, _os_log_fmt, ##__VA_ARGS__);                 \
+    }                                                                                       \
     __asm__(""); /* avoid tailcall */                                                       \
 })
 

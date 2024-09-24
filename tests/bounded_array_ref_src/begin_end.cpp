@@ -42,6 +42,6 @@ tests()
 	}
 }
 
-T_DECL(begin_end, "bounded_array_ref.begin_end") {
+T_DECL(begin_end, "bounded_array_ref.begin_end", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

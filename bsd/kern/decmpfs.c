@@ -532,11 +532,7 @@ decmpfs_fetch_compressed_header(vnode_t vp, decmpfs_cnode *cp, decmpfs_header **
 		/* this file's xattr didn't have any extra data when we fetched it, so we can synthesize a header from the data in the cnode */
 
 		alloc_size = sizeof(decmpfs_header);
-		data = kalloc_data(sizeof(decmpfs_header), Z_WAITOK);
-		if (!data) {
-			err = ENOMEM;
-			goto out;
-		}
+		data = kalloc_data(sizeof(decmpfs_header), Z_WAITOK | Z_NOFAIL);
 		hdr = (decmpfs_header*)data;
 		hdr->attr_size = sizeof(decmpfs_disk_header);
 		hdr->compression_magic = DECMPFS_MAGIC;
@@ -569,10 +565,16 @@ decmpfs_fetch_compressed_header(vnode_t vp, decmpfs_cnode *cp, decmpfs_header **
 
 		/* allocation includes space for the extra attr_size field of a compressed_header */
 		data = (char *)kalloc_data(alloc_size, Z_WAITOK);
-		if (!data) {
-			err = ENOMEM;
-			goto out;
-		}
+		/*
+		 * we know the decmpfs sizes tend to be "small", and
+		 * vm_page_alloc_list() will actually wait for memory
+		 * for asks of less than 1/4th of the physical memory.
+		 *
+		 * This is important because decmpfs failures result
+		 * in pageins failing spuriously and eventually SIGBUS
+		 * errors for example when faulting in TEXT.
+		 */
+		assert(data);
 
 		/* read the xattr into our buffer, skipping over the attr_size field at the beginning */
 		attr_uio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_READ, &uio_buf[0], sizeof(uio_buf));
@@ -1844,10 +1846,10 @@ decompress:
 			if (cmp_state == FILE_IS_NOT_COMPRESSED) {
 				ErrorLogWithPath("cmp_state == FILE_IS_NOT_COMPRESSED\n");
 				/* the file was decompressed after we started reading it */
-				abort_read = 1; /* we're not going to commit our data */
 				*is_compressed = 0; /* instruct caller to fall back to its normal path */
 			}
 			kr = KERN_FAILURE;
+			abort_read = 1; /* we're not going to commit our data */
 			did_read = 0;
 		}
 
@@ -1864,47 +1866,49 @@ decompress:
 		}
 
 		kr = ubc_upl_unmap(upl);
-		if (kr == KERN_SUCCESS) {
-			if (abort_read) {
-				kr = commit_upl(upl, 0, curUplSize, UPL_ABORT_FREE_ON_EMPTY, 1);
-			} else {
-				VerboseLogWithPath("uioPos %lld uioRemaining %lld\n", (uint64_t)uioPos, (uint64_t)uioRemaining);
-				if (uioRemaining) {
-					off_t uplOff = uioPos - curUplPos;
-					if (uplOff < 0) {
-						ErrorLogWithPath("uplOff %lld should never be negative\n", (int64_t)uplOff);
-						err = EINVAL;
-					} else if (uplOff > INT_MAX) {
-						ErrorLogWithPath("uplOff %lld too large\n", (int64_t)uplOff);
-						err = EINVAL;
+		if (kr != KERN_SUCCESS) {
+			/* A failure to unmap here will eventually cause a panic anyway */
+			panic("ubc_upl_unmap returned error %d (kern_return_t)", (int)kr);
+		}
+
+		if (abort_read) {
+			kr = commit_upl(upl, 0, curUplSize, UPL_ABORT_FREE_ON_EMPTY, 1);
+		} else {
+			VerboseLogWithPath("uioPos %lld uioRemaining %lld\n", (uint64_t)uioPos, (uint64_t)uioRemaining);
+			if (uioRemaining) {
+				off_t uplOff = uioPos - curUplPos;
+				if (uplOff < 0) {
+					ErrorLogWithPath("uplOff %lld should never be negative\n", (int64_t)uplOff);
+					err = EINVAL;
+				} else if (uplOff > INT_MAX) {
+					ErrorLogWithPath("uplOff %lld too large\n", (int64_t)uplOff);
+					err = EINVAL;
+				} else {
+					off_t count = curUplPos + curUplSize - uioPos;
+					if (count < 0) {
+						/* this upl is entirely before the uio */
 					} else {
-						off_t count = curUplPos + curUplSize - uioPos;
-						if (count < 0) {
-							/* this upl is entirely before the uio */
-						} else {
-							if (count > uioRemaining) {
-								count = uioRemaining;
-							}
-							int icount = (count > INT_MAX) ? INT_MAX : (int)count;
-							int io_resid = icount;
-							err = cluster_copy_upl_data(uio, upl, (int)uplOff, &io_resid);
-							int copied = icount - io_resid;
-							VerboseLogWithPath("uplOff %lld count %lld copied %lld\n", (uint64_t)uplOff, (uint64_t)count, (uint64_t)copied);
-							if (err) {
-								ErrorLogWithPath("cluster_copy_upl_data err %d\n", err);
-							}
-							uioPos += copied;
-							uioRemaining -= copied;
+						if (count > uioRemaining) {
+							count = uioRemaining;
 						}
+						int icount = (count > INT_MAX) ? INT_MAX : (int)count;
+						int io_resid = icount;
+						err = cluster_copy_upl_data(uio, upl, (int)uplOff, &io_resid);
+						int copied = icount - io_resid;
+						VerboseLogWithPath("uplOff %lld count %lld copied %lld\n", (uint64_t)uplOff, (uint64_t)count, (uint64_t)copied);
+						if (err) {
+							ErrorLogWithPath("cluster_copy_upl_data err %d\n", err);
+						}
+						uioPos += copied;
+						uioRemaining -= copied;
 					}
 				}
-				kr = commit_upl(upl, 0, curUplSize, UPL_COMMIT_FREE_ON_EMPTY | UPL_COMMIT_INACTIVATE, 0);
-				if (err) {
-					goto out;
-				}
 			}
-		} else {
-			ErrorLogWithPath("ubc_upl_unmap error %d\n", (int)kr);
+			kr = commit_upl(upl, 0, curUplSize, UPL_COMMIT_FREE_ON_EMPTY | UPL_COMMIT_INACTIVATE, 0);
+		}
+
+		if (err) {
+			goto out;
 		}
 
 		uplRemaining -= curUplSize;

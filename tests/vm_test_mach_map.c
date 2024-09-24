@@ -381,7 +381,7 @@ done:
 
 T_DECL(memory_entry_tagging, "test mem entry tag for rdar://problem/23334087 \
     VM memory tags should be propagated through memory entries",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	test_memory_entry_tagging(0);
 	test_memory_entry_tagging(1);
@@ -389,7 +389,7 @@ T_DECL(memory_entry_tagging, "test mem entry tag for rdar://problem/23334087 \
 
 T_DECL(map_memory_entry, "test mapping mem entry for rdar://problem/22611816 \
     mach_make_memory_entry(MAP_MEM_VM_COPY) should never use a KERNEL_BUFFER \
-    copy", T_META_ALL_VALID_ARCHS(true))
+    copy", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	test_map_memory_entry();
 }
@@ -419,7 +419,7 @@ task_footprint(void)
 }
 
 T_DECL(purgeable_empty_to_volatile, "test task physical footprint when \
-    emptying, volatilizing purgeable vm")
+    emptying, volatilizing purgeable vm", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_address_t vm_addr;
@@ -578,7 +578,8 @@ get_reusable_size(uint64_t *reusable)
 T_DECL(madvise_shared, "test madvise shared for rdar://problem/2295713 logging \
     rethink needs madvise(MADV_FREE_HARDER)",
     T_META_RUN_CONCURRENTLY(false),
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	vm_address_t            vmaddr = 0, vmaddr2 = 0;
 	vm_size_t               vmsize, vmsize1, vmsize2;
@@ -707,7 +708,8 @@ done:
 T_DECL(madvise_purgeable_can_reuse, "test madvise purgeable can reuse for \
     rdar://problem/37476183 Preview Footprint memory regressions ~100MB \
     [ purgeable_malloc became eligible for reuse ]",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 #if defined(__x86_64__) || defined(__i386__)
 	if (COMM_PAGE_READ(uint64_t, CPU_CAPABILITIES64) & kIsTranslated) {
@@ -772,7 +774,7 @@ validate_memory_is_zero(
 	return true;
 }
 
-T_DECL(madvise_zero, "test madvise zero")
+T_DECL(madvise_zero, "test madvise zero", T_META_TAG_VM_PREFERRED)
 {
 	vm_address_t            vmaddr = 0;
 	vm_size_t               vmsize = PAGE_SIZE * 3;
@@ -793,7 +795,7 @@ T_DECL(madvise_zero, "test madvise zero")
 	}
 
 	memset((void *)vmaddr, 'A', vmsize);
-	ret = madvise(vmaddr, vmsize, MADV_FREE_REUSABLE);
+	ret = madvise((void*)vmaddr, vmsize, MADV_FREE_REUSABLE);
 	T_QUIET;
 	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_FREE_REUSABLE)");
 	if (T_RESULT == T_RESULT_FAIL) {
@@ -801,7 +803,7 @@ T_DECL(madvise_zero, "test madvise zero")
 	}
 
 	memset((void *)vmaddr, 'B', PAGE_SIZE);
-	ret = madvise(vmaddr, vmsize, MADV_ZERO);
+	ret = madvise((void*)vmaddr, vmsize, MADV_ZERO);
 	T_QUIET;
 	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_ZERO)");
 	if (T_RESULT == T_RESULT_FAIL) {
@@ -817,7 +819,7 @@ T_DECL(madvise_zero, "test madvise zero")
 	}
 
 	memset((void *)vmaddr, 'C', PAGE_SIZE);
-	ret = madvise(vmaddr, vmsize, MADV_PAGEOUT);
+	ret = madvise((void*)vmaddr, vmsize, MADV_PAGEOUT);
 	T_QUIET;
 	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_PAGEOUT)");
 	if (T_RESULT == T_RESULT_FAIL) {
@@ -827,16 +829,16 @@ T_DECL(madvise_zero, "test madvise zero")
 	/* wait for the pages to be (asynchronously) compressed */
 	T_QUIET; T_LOG("waiting for first page to be paged out");
 	do {
-		ret = mincore(vmaddr, 1, &vec);
+		ret = mincore((void*)vmaddr, 1, &vec);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore(1st)");
 	} while (vec & MINCORE_INCORE);
 	T_QUIET; T_LOG("waiting for last page to be paged out");
 	do {
-		ret = mincore((vmaddr + vmsize - 1), 1, (char *)&vec);
+		ret = mincore((void*)(vmaddr + vmsize - 1), 1, (char *)&vec);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore(last)");
 	} while (vec & MINCORE_INCORE);
 
-	ret = madvise(vmaddr, vmsize, MADV_ZERO);
+	ret = madvise((void*)vmaddr, vmsize, MADV_ZERO);
 	T_QUIET;
 	T_EXPECT_POSIX_SUCCESS(ret, "madvise(MADV_ZERO)");
 	if (T_RESULT == T_RESULT_FAIL) {
@@ -861,7 +863,8 @@ done:
 
 T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
     rdar://31075370",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2;
@@ -922,7 +925,8 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 
 T_DECL(copy_none_use_pmap, "test copy-on-write remapping of COPY_NONE vm \
     objects - rdar://35610377",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2, vmaddr3;
@@ -971,7 +975,8 @@ T_DECL(copy_none_use_pmap, "test copy-on-write remapping of COPY_NONE vm \
 
 T_DECL(purgable_deny, "test purgeable memory is not allowed to be converted to \
     non-purgeable - rdar://31990033",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t   kr;
 	vm_address_t    vmaddr;
@@ -996,7 +1001,7 @@ T_DECL(purgable_deny, "test purgeable memory is not allowed to be converted to \
 #define VMSIZE 0x10000
 
 T_DECL(vm_remap_zero, "test vm map of zero size - rdar://33114981",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2;
@@ -1048,7 +1053,8 @@ extern int __shared_region_check_np(uint64_t *);
 
 T_DECL(nested_pmap_trigger, "nested pmap should only be triggered from kernel \
     - rdar://problem/41481703",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	int                     ret;
 	kern_return_t           kr;
@@ -1095,7 +1101,7 @@ static const char *prot_str[] = { "---", "r--", "-w-", "rw-", "--x", "r-x", "-wx
 static const char *share_mode_str[] = { "---", "COW", "PRIVATE", "EMPTY", "SHARED", "TRUESHARED", "PRIVATE_ALIASED", "SHARED_ALIASED", "LARGE_PAGE" };
 
 T_DECL(shared_region_share_writable, "sharing a writable mapping of the shared region shoudl not give write access to shared region - rdar://problem/74469953",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	uint64_t sr_start;
@@ -1446,6 +1452,98 @@ skip_mem_entry_vm_share_ro:
 	}
 	T_PASS("mem_entry() read-only");
 
+	/* test mach_make_memory_entry_64(READ | WRITE | VM_PROT_IS_MASK) of RO */
+	before = *(uint32_t *)(uintptr_t)address;
+	remap_size = size;
+	mem_entry = MACH_PORT_NULL;
+	kr = mach_make_memory_entry_64(mach_task_self(),
+	    &remap_size,
+	    address,
+	    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_IS_MASK,
+	    &mem_entry,
+	    MACH_PORT_NULL);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_make_memory_entry_64(READ | WRITE | IS_MASK)");
+	remap_address = 0;
+	kr = mach_vm_map(mach_task_self(),
+	    &remap_address,
+	    remap_size,
+	    0,              /* mask */
+	    VM_FLAGS_ANYWHERE,
+	    mem_entry,
+	    0,              /* offset */
+	    FALSE,              /* copy */
+	    VM_PROT_READ | VM_PROT_WRITE,
+	    VM_PROT_READ | VM_PROT_WRITE,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_ASSERT_EQ(kr, KERN_INVALID_RIGHT, "vm_map(read/write)");
+	remap_address = 0;
+	kr = mach_vm_map(mach_task_self(),
+	    &remap_address,
+	    remap_size,
+	    0,              /* mask */
+	    VM_FLAGS_ANYWHERE,
+	    mem_entry,
+	    0,              /* offset */
+	    FALSE,              /* copy */
+	    VM_PROT_READ,
+	    VM_PROT_READ,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_map(read only)");
+	remap = *(uint32_t *)(uintptr_t)remap_address;
+	T_QUIET; T_ASSERT_EQ(remap, before, "remap matches original");
+	/* check that region is still nested */
+	tmp_address = address;
+	tmp_size = 0;
+	depth = 99;
+	count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	kr = mach_vm_region_recurse(mach_task_self(),
+	    &tmp_address,
+	    &tmp_size,
+	    &depth,
+	    (vm_region_recurse_info_t)&info,
+	    &count);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_region_recurse()");
+	T_LOG("0x%llx - 0x%llx depth:%d %s/%s %s 0x%x",
+	    tmp_address, tmp_address + tmp_size, depth,
+	    prot_str[info.protection],
+	    prot_str[info.max_protection],
+	    share_mode_str[info.share_mode],
+	    info.object_id);
+	T_QUIET; T_ASSERT_EQ(tmp_address, address, "address hasn't changed");
+//	T_QUIET; T_ASSERT_EQ(tmp_size, size, "size hasn't changed");
+//	T_QUIET; T_ASSERT_GT(depth, 0, "still nested");
+	T_QUIET; T_ASSERT_EQ(info.protection, VM_PROT_READ, "cur_prot still read-only");
+	if (depth > 0) {
+		T_QUIET; T_ASSERT_EQ(info.max_protection, VM_PROT_READ, "max_prot still read-only");
+	}
+	/* check that new mapping is a copy */
+	tmp_address = remap_address;
+	tmp_size = 0;
+	depth = 99;
+	count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	kr = mach_vm_region_recurse(mach_task_self(),
+	    &tmp_address,
+	    &tmp_size,
+	    &depth,
+	    (vm_region_recurse_info_t)&info,
+	    &count);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "vm_region_recurse()");
+	T_LOG("0x%llx - 0x%llx depth:%d %s/%s %s 0x%x",
+	    tmp_address, tmp_address + tmp_size, depth,
+	    prot_str[info.protection],
+	    prot_str[info.max_protection],
+	    share_mode_str[info.share_mode],
+	    info.object_id);
+	T_QUIET; T_ASSERT_EQ(tmp_address, remap_address, "address hasn't changed");
+//	T_QUIET; T_ASSERT_EQ(tmp_size, size, "size hasn't changed");
+	T_QUIET; T_ASSERT_EQ(depth, 0, "new mapping is unnested");
+	T_QUIET; T_ASSERT_EQ(info.protection, VM_PROT_READ, "new cur_prot read-only");
+	T_QUIET; T_ASSERT_EQ(info.max_protection, VM_PROT_READ, "new max_prot read-only");
+	/* cleanup */
+	kr = mach_vm_deallocate(mach_task_self(), remap_address, remap_size);
+	T_QUIET; T_EXPECT_MACH_SUCCESS(kr, "vm_deallocate()");
+	T_PASS("mem_entry(READ | WRITE | IS_MASK) read-only");
+
 
 	/*
 	 * Step 2 - check that one can not share write access with a writable
@@ -1763,7 +1861,7 @@ skip_mem_entry_vm_share_rw:
 }
 
 T_DECL(copyoverwrite_submap_protection, "test copywrite vm region submap \
-    protection", T_META_ALL_VALID_ARCHS(true))
+    protection", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr;
@@ -1839,7 +1937,7 @@ T_DECL(copyoverwrite_submap_protection, "test copywrite vm region submap \
 
 T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
     the shared region triggers code-signing violations",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	uint32_t *addr, before, after;
 	int retval;
@@ -1869,8 +1967,8 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 	after = *addr;
 	if (retval != 0) {
 		saved_errno = errno;
-		T_ASSERT_EQ(saved_errno, EACCES, "wire shared text error %d (%s), expected: %d",
-		    saved_errno, strerror(saved_errno), EACCES);
+		T_ASSERT_EQ(saved_errno, EPERM, "wire shared text error %d (%s), expected: %d",
+		    saved_errno, strerror(saved_errno), EPERM);
 	} else if (after != before) {
 		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
 	} else {
@@ -1883,8 +1981,8 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 	after = *addr;
 	if (retval != 0) {
 		saved_errno = errno;
-		T_ASSERT_EQ(saved_errno, EACCES, "wire shared text error %d (%s), expected: %d",
-		    saved_errno, strerror(saved_errno), EACCES);
+		T_ASSERT_EQ(saved_errno, EPERM, "wire shared text error %d (%s), expected: %d",
+		    saved_errno, strerror(saved_errno), EPERM);
 	} else if (after != before) {
 		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
 	} else {
@@ -1897,7 +1995,7 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 	after = *addr;
 	if (retval != 0) {
 		saved_errno = errno;
-		T_ASSERT_EQ(saved_errno, EACCES, "wire text error return error %d (%s)",
+		T_ASSERT_EQ(saved_errno, EPERM, "wire text error return error %d (%s)",
 		    saved_errno, strerror(saved_errno));
 	} else if (after != before) {
 		T_ASSERT_FAIL("text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
@@ -1907,7 +2005,7 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 }
 
 T_DECL(remap_comm_page, "test remapping of the commpage - rdar://93177124",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t           kr;
 	mach_vm_address_t       commpage_addr, remap_addr;

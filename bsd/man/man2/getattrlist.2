@@ -16,7 +16,7 @@
 .\"
 .\"     @(#)getattrlist.2
 .
-.Dd July 28, 2022
+.Dd March 28, 2024
 .Dt GETATTRLIST 2
 .Os Darwin
 .Sh NAME
@@ -1739,6 +1739,13 @@ for more details.
 If this bit is set, the file system supports establishing an owner relationship between
 a file (excluding small files) and a process on the first read/write/truncate/clone operation.
 See ATTR_CMNEXT_ATTRIBUTION_TAG for more details.
+.
+.It VOL_CAP_INT_PUNCHHOLE
+If this bit is set, the file system supports the
+.Dv F_PUNCHOLE operation.
+See
+.Xr fcntl 2
+for more details.
 .
 .El
 .Pp

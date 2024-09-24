@@ -26,7 +26,7 @@ do_child(int *pipefd)
 }
 
 T_DECL(task_info_28439149, "ensure that task_info has the correct permission",
-    T_META_CHECK_LEAKS(false), T_META_ASROOT(true))
+    T_META_CHECK_LEAKS(false), T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int pipefd[2];
 

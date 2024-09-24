@@ -93,6 +93,7 @@ enum kernel_brk_trap_comment {
 
 	/* Software defined       : [0xB000 ~ 0xBFFF] */
 	XNU_HARD_TRAP_START            = 0xB000,
+	XNU_HARD_TRAP_SAFE_UNLINK      = 0xBFFD, /* queue safe unlinking traps */
 	XNU_HARD_TRAP_STRING_CHK       = 0xBFFE, /* read traps in string.h */
 	XNU_HARD_TRAP_END              = 0xBFFF,
 
@@ -152,6 +153,12 @@ extern void telemetry_backtrace_add_kexts(
 	size_t                buflen,
 	uintptr_t            *frames,
 	uint32_t              framecnt);
+
+extern void telemetry_backtrace_to_string(
+	char                 *buf,
+	size_t                buflen,
+	uint32_t              tot,
+	uintptr_t            *frames);
 
 /* boolean_t must be used since variable is loaded from assembly. */
 extern volatile boolean_t telemetry_needs_record;

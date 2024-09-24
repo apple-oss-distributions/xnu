@@ -107,12 +107,12 @@
 
 #include <vm/pmap.h>
 #include <vm/pmap_cs.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <mach/vm_param.h>
 #include <mach/vm_prot.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_page_internal.h>
 
 #include <mach/machine/vm_param.h>
 #include <machine/thread.h>
@@ -2646,7 +2646,7 @@ dtrace_copyio_postflight(__unused addr64_t va)
 
 #include <mach_vm_debug.h>
 #if     MACH_VM_DEBUG
-#include <vm/vm_debug.h>
+#include <vm/vm_debug_internal.h>
 
 int
 pmap_list_resident_pages(

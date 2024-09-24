@@ -43,6 +43,7 @@ struct ifnet_interface_advisory;
 
 struct ifnet_traffic_descriptor_common;
 struct ifnet_traffic_rule_action;
+typedef uint64_t kern_packet_t;
 
 /*
  * Nexus terminology and overview.  The relationship between the objects are
@@ -856,6 +857,21 @@ typedef errno_t (*nxprov_tx_qset_notify_fn_t)(kern_nexus_provider_t
     nexus_prov, kern_nexus_t nexus, void *qset_ctx, uint32_t flags);
 
 /*
+ * @typedef nxprov_queue_tx_push_fn_t
+ * @abstract Nexus provider netif queue Tx push model callback.
+ * @param nexus_prov Nexus provider handle.
+ * @param nexus The nexus instance.
+ * @param queue_ctx The queue context retrieved from nxprov_queue_init_fn_t
+ *                  (provider owned).
+ * @param ph Chain of kern packet handles.
+ * @discussion If the provider consumes the entire chain, it must update ph
+ *      to NULL and if consumes only partially, then it must update ph to
+ *      the first unconsumed packet handle.
+ */
+typedef errno_t (*nxprov_queue_tx_push_fn_t)(kern_nexus_provider_t nexus_prov,
+    kern_nexus_t nexus, void *queue_ctx, kern_packet_t *ph,
+    uint32_t *pkt_count, uint32_t *byte_count);
+/*
  * Nexus provider initialization parameters specific to netif (version 2)
  */
 struct kern_nexus_netif_provider_init {
@@ -871,6 +887,7 @@ struct kern_nexus_netif_provider_init {
 	nxprov_queue_fini_fn_t        nxnpi_queue_fini;        /* required */
 	nxprov_tx_qset_notify_fn_t    nxnpi_tx_qset_notify;    /* required */
 	nxprov_capab_config_fn_t      nxnpi_config_capab;      /* required */
+	nxprov_queue_tx_push_fn_t     nxnpi_queue_tx_push;     /* required */
 };
 
 #define KERN_NEXUS_PROVIDER_VERSION_1         1
@@ -963,7 +980,7 @@ struct kern_nexus_netif_llink_init {
 	uint8_t         nli_num_qsets;
 	void            *nli_ctx;
 	kern_nexus_netif_llink_id_t nli_link_id;
-	struct kern_nexus_netif_llink_qset_init *nli_qsets;
+	struct kern_nexus_netif_llink_qset_init *__counted_by(nli_num_qsets) nli_qsets;
 };
 
 /*
@@ -1038,6 +1055,9 @@ extern void kern_nexus_stop(const kern_nexus_t nx);
 /*
  * Netif specific.
  */
+extern void kern_netif_increment_queue_stats(kern_netif_queue_t,
+    uint32_t, uint32_t);
+
 extern errno_t kern_netif_queue_tx_dequeue(kern_netif_queue_t, uint32_t,
     uint32_t, boolean_t *, uint64_t *);
 

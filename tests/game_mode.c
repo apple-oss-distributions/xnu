@@ -47,7 +47,8 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("scheduler"),
     T_META_OWNER("chimene"),
-    T_META_RUN_CONCURRENTLY(false));
+    T_META_RUN_CONCURRENTLY(false),
+    T_META_TAG_VM_PREFERRED);
 
 static void
 check_game_mode(bool expected_mode)

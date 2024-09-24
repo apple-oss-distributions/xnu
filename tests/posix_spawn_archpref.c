@@ -42,7 +42,7 @@ run_test(const char *name, cpu_type_t type, cpu_subtype_t subtype)
 	T_QUIET; T_ASSERT_EQ(ret, 0, "%s: posix_spawnattr_destroy", name);
 }
 
-T_DECL(posix_spawn_archpref, "verify posix_spawn_setarchpref_np can select slices")
+T_DECL(posix_spawn_archpref, "verify posix_spawn_setarchpref_np can select slices", T_META_TAG_VM_PREFERRED)
 {
 #if defined(__x86_64__)
 	run_test("x86_64", CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL);

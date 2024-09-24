@@ -489,9 +489,7 @@ def dereference(val):
     """
     if type(val) is value:
         sbv = val.GetSBValue()
-        if val.ptrpolicy:
-            sbv = val.ptrpolicy.GetPointerSBValue(sbv)
-            return value(sbv.Dereference())
+        return value(sbv.Dereference())
     raise TypeError('Cannot dereference this type.')
 
 
@@ -593,18 +591,41 @@ def gettype(target_type, target=None):
     basename = tmpname.rstrip(" *")
     ptrlevel = tmpname.count('*', len(basename))
 
-    # After the sort, the struct type with more fields will be at index [0].
-    # This heuristic helps selecting struct type with more fields
+    def resolve_pointee_type(t: lldb.SBType):
+        while t.IsPointerType():
+            t = t.GetPointeeType()
+        return t
+
+    def type_sort_heuristic(t: lldb.SBType) -> int:
+        """ prioritizes types with more fields, and prefers fields with complete
+        types
+            params:
+                t - lldb.SBType, type to score
+            returns:
+                int - heuristic score
+        """
+        # we care about the underlying type, not the pointer
+        resolved_type: lldb.SBType = resolve_pointee_type(t)
+        
+        # heuristic score
+        score = 0
+        for field in resolved_type.fields:
+            resolved_field_type = resolve_pointee_type(field.GetType())
+            score += 3 if resolved_field_type.IsTypeComplete() else 1
+
+        return score
+
+    type_arr = [t for t in target.chkFindTypes(basename)]
+    # After the sort, the best matching struct will be at index [0].
+    # This heuristic selects a struct type with more fields (with complete types)
     # compared to ones with "opaque" members
-    type_lst = target.chkFindTypes(basename)
-    type_arr = [type_lst.GetTypeAtIndex(i) for i in range(len(type_lst))]
-    type_arr.sort(reverse=True, key=lambda x: x.GetNumberOfFields())
+    type_arr.sort(reverse=True, key=type_sort_heuristic)
 
     for tyobj in type_arr:
         if want and tyobj.GetTypeClass() != want:
             continue
 
-        for i in range(ptrlevel):
+        for _ in range(ptrlevel):
             tyobj = tyobj.GetPointerType()
 
         return tyobj

@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <mach/mach_vm.h>
@@ -33,6 +34,9 @@
 #include <sys/code_signing.h>
 #include <sys/errno.h>
 #include <sys/stackshot.h>
+#if defined(__arm64__)
+#include <arm/cpu_internal.h>
+#endif /* __arm64__ */
 #ifdef IMPORTANCE_INHERITANCE
 #include <ipc/ipc_importance.h>
 #endif
@@ -52,6 +56,7 @@
 
 #include <string.h> /* bcopy */
 
+#include <kern/kern_stackshot.h>
 #include <kern/backtrace.h>
 #include <kern/coalition.h>
 #include <kern/exclaves_stackshot.h>
@@ -66,12 +71,13 @@
 #include <kern/clock.h>
 #include <kern/policy_internal.h>
 #include <kern/socd_client.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <kern/startup.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_fault.h>
-#include <vm/vm_shared_region.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_shared_region_xnu.h>
+#include <vm/vm_compressor_xnu.h>
 #include <libkern/OSKextLibPrivate.h>
 #include <os/log.h>
 
@@ -95,10 +101,29 @@
 #include <san/kasan.h>
 
 #if DEBUG || DEVELOPMENT
-# define STACKSHOT_COLLECTS_LATENCY_INFO 1
+#define STACKSHOT_COLLECTS_DIAGNOSTICS 1
+#define STACKSHOT_COLLECTS_LATENCY_INFO 1
 #else
-# define STACKSHOT_COLLECTS_LATENCY_INFO 0
+#define STACKSHOT_COLLECTS_DIAGNOSTICS 0
+#define STACKSHOT_COLLECTS_LATENCY_INFO 0
 #endif /* DEBUG || DEVELOPMENT */
+
+#if defined(__AMP__)
+#define STACKSHOT_NUM_WORKQUEUES 2
+#else /* __AMP__ */
+#define STACKSHOT_NUM_WORKQUEUES 1
+#endif
+
+#if defined(__arm64__)
+#define STACKSHOT_NUM_BUFFERS MAX_CPU_CLUSTERS
+#else /* __arm64__ */
+#define STACKSHOT_NUM_BUFFERS 1
+#endif /* __arm64__ */
+
+/* The number of threads which will land a task in the hardest workqueue. */
+#define STACKSHOT_HARDEST_THREADCOUNT 10
+
+TUNABLE_DEV_WRITEABLE(unsigned int, stackshot_single_thread, "stackshot_single_thread", 0);
 
 extern unsigned int not_in_kdp;
 
@@ -106,44 +131,276 @@ extern unsigned int not_in_kdp;
 typedef uint64_t unaligned_u64 __attribute__((aligned(1)));
 
 int kdp_snapshot                            = 0;
-static kern_return_t stack_snapshot_ret     = 0;
-static uint32_t stack_snapshot_bytes_traced = 0;
-static uint32_t stack_snapshot_bytes_uncompressed  = 0;
+
+#pragma mark ---Stackshot Struct Definitions---
+
+typedef struct linked_kcdata_descriptor {
+	struct kcdata_descriptor          kcdata;
+	struct linked_kcdata_descriptor  *next;
+} * linked_kcdata_descriptor_t;
+
+struct stackshot_workitem {
+	task_t                        sswi_task;
+	linked_kcdata_descriptor_t    sswi_data; /* The kcdata for this task. */
+	int                           sswi_idx;  /* The index of this job, used for ordering kcdata across multiple queues. */
+};
+
+struct stackshot_workqueue {
+	uint32_t _Atomic              sswq_num_items; /* Only modified by main CPU */
+	uint32_t _Atomic              sswq_cur_item; /* Modified by all CPUs */
+	size_t                        sswq_capacity; /* Constant after preflight */
+	bool _Atomic                  sswq_populated; /* Only modified by main CPU */
+	struct stackshot_workitem    *__counted_by(capacity) sswq_items;
+};
+
+struct freelist_entry {
+	struct freelist_entry        *fl_next; /* Next entry in the freelist */
+	size_t                        fl_size; /* Size of the entry (must be >= sizeof(struct freelist_entry)) */
+};
+
+struct stackshot_buffer {
+	void                         *ssb_ptr; /* Base of buffer */
+	size_t                        ssb_size;
+	size_t _Atomic                ssb_used;
+	struct freelist_entry        *ssb_freelist; /* First freelist entry */
+	int _Atomic                   ssb_freelist_lock;
+	size_t _Atomic                ssb_overhead; /* Total amount ever freed (even if re-allocated from freelist) */
+};
+
+struct kdp_snapshot_args {
+	int                           pid;
+	void                         *buffer;
+	struct kcdata_descriptor     *descriptor;
+	uint32_t                      buffer_size;
+	uint64_t                      flags;
+	uint64_t                      since_timestamp;
+	uint32_t                      pagetable_mask;
+};
+
+/*
+ * Keep a simple cache of the most recent validation done at a page granularity
+ * to avoid the expensive software KVA-to-phys translation in the VM.
+ */
+
+struct _stackshot_validation_state {
+	vm_offset_t last_valid_page_kva;
+	size_t last_valid_size;
+};
+
+/* CPU-local generation counts for PLH */
+struct _stackshot_plh_gen_state {
+	uint8_t                *pgs_gen;       /* last 'gen #' seen in */
+	int16_t                 pgs_curgen_min; /* min idx seen for this gen */
+	int16_t                 pgs_curgen_max; /* max idx seen for this gen */
+	uint8_t                 pgs_curgen;     /* current gen */
+};
+
+/*
+ * For port labels, we have a small hash table we use to track the
+ * struct ipc_service_port_label pointers we see along the way.
+ * This structure encapsulates the global state.
+ *
+ * The hash table is insert-only, similar to "intern"ing strings.  It's
+ * only used an manipulated in during the stackshot collection.  We use
+ * seperate chaining, with the hash elements and chains being int16_ts
+ * indexes into the parallel arrays, with -1 ending the chain.  Array indices are
+ * allocated using a bump allocator.
+ *
+ * The parallel arrays contain:
+ *      - plh_array[idx]	the pointer entered
+ *      - plh_chains[idx]	the hash chain
+ *      - plh_gen[idx]		the last 'generation #' seen
+ *
+ * Generation IDs are used to track entries looked up in the current
+ * task; 0 is never used, and the plh_gen array is cleared to 0 on
+ * rollover.
+ *
+ * The portlabel_ids we report externally are just the index in the array,
+ * plus 1 to avoid 0 as a value.  0 is NONE, -1 is UNKNOWN (e.g. there is
+ * one, but we ran out of space)
+ */
+struct port_label_hash {
+	int _Atomic             plh_lock;       /* lock for concurrent modifications to this plh */
+	uint16_t                plh_size;       /* size of allocations; 0 disables tracking */
+	uint16_t                plh_count;      /* count of used entries in plh_array */
+	struct ipc_service_port_label **plh_array; /* _size allocated, _count used */
+	int16_t                *plh_chains;    /* _size allocated */
+	int16_t                *plh_hash;      /* (1 << STACKSHOT_PLH_SHIFT) entry hash table: hash(ptr) -> array index */
+#if DEVELOPMENT || DEBUG
+	/* statistics */
+	uint32_t _Atomic        plh_lookups;    /* # lookups or inserts */
+	uint32_t _Atomic        plh_found;
+	uint32_t _Atomic        plh_found_depth;
+	uint32_t _Atomic        plh_insert;
+	uint32_t _Atomic        plh_insert_depth;
+	uint32_t _Atomic        plh_bad;
+	uint32_t _Atomic        plh_bad_depth;
+	uint32_t _Atomic        plh_lookup_send;
+	uint32_t _Atomic        plh_lookup_receive;
+#define PLH_STAT_OP(...)    (void)(__VA_ARGS__)
+#else /* DEVELOPMENT || DEBUG */
+#define PLH_STAT_OP(...)    (void)(0)
+#endif /* DEVELOPMENT || DEBUG */
+};
+
+#define plh_lock(plh) while(!os_atomic_cmpxchg(&(plh)->plh_lock, 0, 1, acquire)) { loop_wait(); }
+#define plh_unlock(plh) os_atomic_store(&(plh)->plh_lock, 0, release);
+
+#define STACKSHOT_PLH_SHIFT    7
+#define STACKSHOT_PLH_SIZE_MAX ((kdp_ipc_have_splabel)? 1024 : 0)
+size_t stackshot_port_label_size = (2 * (1u << STACKSHOT_PLH_SHIFT));
+#define STASKSHOT_PLH_SIZE(x) MIN((x), STACKSHOT_PLH_SIZE_MAX)
+
+struct stackshot_cpu_context {
+	bool                               scc_can_work; /* Whether the CPU can do more stackshot work */
+	bool                               scc_did_work; /* Whether the CPU actually did any stackshot work */
+	linked_kcdata_descriptor_t         scc_kcdata_head; /* See `linked_kcdata_alloc_callback */
+	linked_kcdata_descriptor_t         scc_kcdata_tail; /* See `linked_kcdata_alloc_callback */
+	uintptr_t                         *scc_stack_buffer; /* A buffer for stacktraces. */
+	struct stackshot_fault_stats       scc_fault_stats;
+	struct _stackshot_validation_state scc_validation_state;
+	struct _stackshot_plh_gen_state    scc_plh_gen;
+};
+
+/*
+ * When directly modifying the stackshot state, always use the macros below to
+ * work wth this enum - the higher order bits are used to store an error code
+ * in the case of SS_ERRORED.
+ *
+ *        +------------------------------------+-------------------+
+ *        |                                    |                   |
+ *        v                                    |                   |
+ * +-------------+     +----------+     +------------+     +------------+
+ * | SS_INACTIVE |---->| SS_SETUP |---->| SS_RUNNING |---->| SS_ERRORED |
+ * +-------------+     +----------+     +------------+     +------------+
+ *                         |  |                |                ^  |
+ *                         |  +----------------|----------------+  |
+ * +-------------+         |                   |                   |
+ * | SS_PANICKED |<--------+-------------------+                   |
+ * +-------------+                                                 |
+ *        ^                                                        |
+ *        |                                                        |
+ *        +--------------------------------------------------------+
+ */
+__enum_closed_decl(stackshot_state_t, uint, {
+	SS_INACTIVE = 0x0, /* -> SS_SETUP */
+	SS_SETUP    = 0x1, /* -> SS_RUNNING, SS_ERRORED, SS_PANICKED */
+	SS_RUNNING  = 0x2, /* -> SS_ERRORED, SS_PANICKED, SS_INACTIVE */
+	SS_ERRORED  = 0x3, /* -> SS_INACTIVE, SS_PANICKED */
+	SS_PANICKED = 0x4, /* -> N/A */
+	_SS_COUNT
+});
+
+static_assert(_SS_COUNT <= 0x5);
+/* Get the stackshot state ID from a stackshot_state_t. */
+#define SS_STATE(state) ((state) & 0x7u)
+/* Get the error code from a stackshot_state_t. */
+#define SS_ERRCODE(state) ((state) >> 3)
+/* Make a stackshot error state with a given code. */
+#define SS_MKERR(code) (((code) << 3) | SS_ERRORED)
+
+struct stackshot_context {
+	/* Constants & Arguments */
+	struct kdp_snapshot_args      sc_args;
+	int                           sc_calling_cpuid;
+	int                           sc_main_cpuid;
+	bool                          sc_enable_faulting;
+	uint64_t                      sc_microsecs; /* Timestamp */
+	bool                          sc_panic_stackshot;
+	size_t                        sc_min_kcdata_size;
+	bool                          sc_is_singlethreaded;
+
+	/* State & Errors */
+	stackshot_state_t _Atomic     sc_state; /* Only modified by calling CPU, main CPU, or panicking CPU. See comment above type definition for details. */
+	kern_return_t                 sc_retval; /* The return value of the main thread */
+	uint32_t _Atomic              sc_cpus_working;
+
+	/* KCData */
+	linked_kcdata_descriptor_t    sc_pretask_kcdata;
+	linked_kcdata_descriptor_t    sc_posttask_kcdata;
+	kcdata_descriptor_t           sc_finalized_kcdata;
+
+	/* Buffers & Queues */
+	struct stackshot_buffer       __counted_by(num_buffers) sc_buffers[STACKSHOT_NUM_BUFFERS];
+	size_t                        sc_num_buffers;
+	struct stackshot_workqueue    __counted_by(STACKSHOT_NUM_WORKQUEUES) sc_workqueues[STACKSHOT_NUM_WORKQUEUES];
+	struct port_label_hash        sc_plh;
+
+	/* Statistics */
+	struct stackshot_duration_v2  sc_duration;
+	uint32_t                      sc_bytes_traced;
+	uint32_t                      sc_bytes_uncompressed;
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	struct stackshot_latency_collection_v2 sc_latency;
+#endif
+};
+
+#define STACKSHOT_DEBUG_TRACEBUF_SIZE 16
+
+struct stackshot_trace_entry {
+	int               sste_line_no;
+	uint64_t          sste_timestamp;
+	mach_vm_address_t sste_data;
+};
+
+struct stackshot_trace_buffer {
+	uint64_t                     sstb_last_trace_timestamp;
+	size_t                       sstb_tail_idx;
+	size_t                       sstb_size;
+	struct stackshot_trace_entry __counted_by(STACKSHOT_DEBUG_TRACEBUF_SIZE) sstb_entries[STACKSHOT_DEBUG_TRACEBUF_SIZE];
+};
+
+#pragma mark ---Stackshot State and Data---
+
+/*
+ * Two stackshot states, one for panic and one for normal.
+ * That way, we can take a stackshot during a panic without clobbering state.
+ */
+#define STACKSHOT_CTX_IDX_NORMAL 0
+#define STACKSHOT_CTX_IDX_PANIC  1
+size_t cur_stackshot_ctx_idx   = STACKSHOT_CTX_IDX_NORMAL;
+struct stackshot_context stackshot_contexts[2] = {{0}, {0}};
+#define stackshot_ctx (stackshot_contexts[cur_stackshot_ctx_idx])
+#define stackshot_args (stackshot_ctx.sc_args)
+#define stackshot_flags (stackshot_args.flags)
+
+static struct {
+	uint64_t last_abs_start;      /* start time of last stackshot */
+	uint64_t last_abs_end;        /* end time of last stackshot */
+	uint64_t stackshots_taken;    /* total stackshots taken since boot */
+	uint64_t stackshots_duration; /* total abs time spent in stackshot_trap() since boot */
+} stackshot_stats = { 0 };
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+static struct stackshot_latency_cpu PERCPU_DATA(stackshot_cpu_latency_percpu);
+#define stackshot_cpu_latency (*PERCPU_GET(stackshot_cpu_latency_percpu))
+#endif
+
+static struct stackshot_cpu_context PERCPU_DATA(stackshot_cpu_ctx_percpu);
+#define stackshot_cpu_ctx (*PERCPU_GET(stackshot_cpu_ctx_percpu))
+
+static struct kcdata_descriptor PERCPU_DATA(stackshot_kcdata_percpu);
+#define stackshot_kcdata_p (PERCPU_GET(stackshot_kcdata_percpu))
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 static bool collect_latency_info = true;
 #endif
-static kcdata_descriptor_t stackshot_kcdata_p = NULL;
-static void *stack_snapshot_buf;
-static uint32_t stack_snapshot_bufsize;
-int stack_snapshot_pid;
-static uint64_t stack_snapshot_flags;
-static uint64_t stackshot_out_flags;
-static uint64_t stack_snapshot_delta_since_timestamp;
-static uint32_t stack_snapshot_pagetable_mask;
-static boolean_t panic_stackshot;
 
-static boolean_t stack_enable_faulting = FALSE;
-static struct stackshot_fault_stats fault_stats;
+static uint64_t stackshot_max_fault_time;
 
-static uint64_t stackshot_last_abs_start;       /* start time of last stackshot */
-static uint64_t stackshot_last_abs_end;         /* end time of last stackshot */
-static uint64_t stackshots_taken;               /* total stackshots taken since boot */
-static uint64_t stackshots_duration;            /* total abs time spent in stackshot_trap() since boot */
+#if STACKSHOT_COLLECTS_DIAGNOSTICS
+static struct stackshot_trace_buffer PERCPU_DATA(stackshot_trace_buffer);
+#endif
 
-/*
- * Experimentally, our current estimates are 40% short 77% of the time; adding
- * 75% to the estimate gets us into 99%+ territory.  In the longer run, we need
- * to make stackshot estimates use a better approach (rdar://78880038); this is
- * intended to be a short-term fix.
- */
-uint32_t stackshot_estimate_adj = 75; /* experiment factor: 0-100, adjust our estimate up by this amount */
+#pragma mark ---Stackshot Global State---
+
+uint32_t stackshot_estimate_adj = 25; /* experiment factor: 0-100, adjust our estimate up by this amount */
 
 static uint32_t stackshot_initial_estimate;
 static uint32_t stackshot_initial_estimate_adj;
 static uint64_t stackshot_duration_prior_abs;   /* prior attempts, abs */
 static unaligned_u64 * stackshot_duration_outer;
-static uint64_t stackshot_microsecs;
+static uint64_t stackshot_tries;
 
 void * kernel_stackshot_buf   = NULL; /* Pointer to buffer for stackshots triggered from the kernel and retrieved later */
 int kernel_stackshot_buf_size = 0;
@@ -158,17 +415,21 @@ static size_t stackshot_exclave_inspect_ctid_capacity = 0;
 static kern_return_t stackshot_exclave_kr = KERN_SUCCESS;
 #endif /* CONFIG_EXCLAVES */
 
+#if DEBUG || DEVELOPMENT
+TUNABLE(bool, disable_exclave_stackshot, "-disable_exclave_stackshot", false);
+#else
+const bool disable_exclave_stackshot = false;
+#endif
+
+#pragma mark ---Stackshot Static Function Declarations---
+
 __private_extern__ void stackshot_init( void );
-static boolean_t memory_iszero(void *addr, size_t size);
-uint32_t                get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj);
-kern_return_t           kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_config,
-    size_t stackshot_config_size, boolean_t stackshot_from_user);
-kern_return_t           do_stackshot(void *);
-void                    kdp_snapshot_preflight(int pid, void * tracebuf, uint32_t tracebuf_size, uint64_t flags, kcdata_descriptor_t data_p, uint64_t since_timestamp, uint32_t pagetable_mask);
-boolean_t               stackshot_thread_is_idle_worker_unsafe(thread_t thread);
-static int              kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags);
-uint32_t                kdp_stack_snapshot_bytes_traced(void);
-uint32_t                kdp_stack_snapshot_bytes_uncompressed(void);
+static boolean_t        memory_iszero(void *addr, size_t size);
+static void             stackshot_cpu_do_work(void);
+static kern_return_t    stackshot_finalize_kcdata(void);
+static kern_return_t    stackshot_finalize_singlethreaded_kcdata(void);
+static kern_return_t    stackshot_collect_kcdata(void);
+static int              kdp_stackshot_kcdata_format();
 static void             kdp_mem_and_io_snapshot(struct mem_and_io_snapshot *memio_snap);
 static vm_offset_t      stackshot_find_phys(vm_map_t map, vm_offset_t target_addr, kdp_fault_flags_t fault_flags, uint32_t *kdp_fault_result_flags);
 static boolean_t        stackshot_copyin(vm_map_t map, uint64_t uaddr, void *dest, size_t size, boolean_t try_fault, uint32_t *kdp_fault_result);
@@ -179,6 +440,8 @@ static void             stackshot_thread_wait_owner_info(thread_t thread, thread
 static int              stackshot_thread_has_valid_waitinfo(thread_t thread);
 static void             stackshot_thread_turnstileinfo(thread_t thread, thread_turnstileinfo_v2_t *tsinfo);
 static int              stackshot_thread_has_valid_turnstileinfo(thread_t thread);
+static uint32_t         get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj, uint64_t trace_flags, pid_t target_pid);
+static kern_return_t    kdp_snapshot_preflight_internal(struct kdp_snapshot_args args);
 
 #if CONFIG_COALITIONS
 static void             stackshot_coalition_jetsam_count(void *arg, int i, coalition_t coal);
@@ -190,7 +453,11 @@ static void             stackshot_thread_group_count(void *arg, int i, struct th
 static void             stackshot_thread_group_snapshot(void *arg, int i, struct thread_group *tg);
 #endif /* CONFIG_THREAD_GROUPS */
 
-extern uint32_t         workqueue_get_pwq_state_kdp(void *proc);
+extern uint64_t         workqueue_get_task_ss_flags_from_pwq_state_kdp(void *proc);
+
+static kcdata_descriptor_t linked_kcdata_alloc_callback(kcdata_descriptor_t descriptor, size_t min_size);
+
+#pragma mark ---Stackshot Externs---
 
 struct proc;
 extern int              proc_pid(struct proc *p);
@@ -208,6 +475,7 @@ extern uint64_t         proc_getcsflags_kdp(void * p);
 extern boolean_t        proc_binary_uuid_kdp(task_t task, uuid_t uuid);
 extern int              memorystatus_get_pressure_status_kdp(void);
 extern void             memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty, boolean_t *is_dirty_tracked, boolean_t *allow_idle_exit);
+extern void             panic_stackshot_release_lock(void);
 
 extern int count_busy_buffers(void); /* must track with declaration in bsd/sys/buf_internal.h */
 
@@ -221,7 +489,8 @@ extern kern_return_t kern_stack_snapshot_internal(int stackshot_config_version, 
 static size_t stackshot_plh_est_size(void);
 
 #if CONFIG_EXCLAVES
-static kern_return_t collect_exclave_threads(void);
+static kern_return_t collect_exclave_threads(uint64_t);
+static kern_return_t stackshot_setup_exclave_waitlist(void);
 #endif
 
 /*
@@ -245,6 +514,7 @@ static void _stackshot_validation_reset(void);
 static long _stackshot_strlen(const char *s, size_t maxlen);
 
 #define MAX_FRAMES 1000
+#define STACKSHOT_PAGETABLE_BUFSZ 4000
 #define MAX_LOADINFOS 500
 #define MAX_DYLD_COMPACTINFO (20 * 1024)  // max bytes of compactinfo to include per proc/shared region
 #define TASK_IMP_WALK_LIMIT 20
@@ -259,8 +529,8 @@ extern kdp_send_t    kdp_en_send_pkt;
 /*
  * Stackshot locking and other defines.
  */
-static LCK_GRP_DECLARE(stackshot_subsys_lck_grp, "stackshot_subsys_lock");
-static LCK_MTX_DECLARE(stackshot_subsys_mutex, &stackshot_subsys_lck_grp);
+LCK_GRP_DECLARE(stackshot_subsys_lck_grp, "stackshot_subsys_lock");
+LCK_MTX_DECLARE(stackshot_subsys_mutex, &stackshot_subsys_lck_grp);
 
 #define STACKSHOT_SUBSYS_LOCK() lck_mtx_lock(&stackshot_subsys_mutex)
 #define STACKSHOT_SUBSYS_TRY_LOCK() lck_mtx_try_lock(&stackshot_subsys_mutex)
@@ -281,14 +551,14 @@ SECURITY_READ_ONLY_LATE(static uint32_t) max_tracebuf_size = SANE_TRACEBUF_SIZE;
  */
 #define KDP_FAULT_PATH_MAX_TIME_PER_STACKSHOT_NSECS (3 * NSEC_PER_MSEC)
 
-#define STACKSHOT_SUPP_SIZE (16 * 1024) /* Minimum stackshot size */
-#define TASK_UUID_AVG_SIZE (16 * sizeof(uuid_t)) /* Average space consumed by UUIDs/task */
 
 #ifndef ROUNDUP
 #define ROUNDUP(x, y)            ((((x)+(y)-1)/(y))*(y))
 #endif
 
 #define STACKSHOT_QUEUE_LABEL_MAXSIZE  64
+
+#pragma mark ---Stackshot Useful Macros---
 
 #define kcd_end_address(kcd) ((void *)((uint64_t)((kcd)->kcd_addr_begin) + kcdata_memory_get_used_bytes((kcd))))
 #define kcd_max_address(kcd) ((void *)((kcd)->kcd_addr_begin + (kcd)->kcd_length))
@@ -298,13 +568,525 @@ SECURITY_READ_ONLY_LATE(static uint32_t) max_tracebuf_size = SANE_TRACEBUF_SIZE;
  */
 #define kcd_exit_on_error(action)                      \
 	do {                                               \
-	        if (KERN_SUCCESS != (error = (action))) {      \
-	                if (error == KERN_RESOURCE_SHORTAGE) {     \
-	                        error = KERN_INSUFFICIENT_BUFFER_SIZE; \
-	                }                                          \
-	                goto error_exit;                           \
-	        }                                              \
+	    if (KERN_SUCCESS != (error = (action))) {      \
+	        STACKSHOT_TRACE(error);                    \
+	        if (error == KERN_RESOURCE_SHORTAGE) {     \
+	            error = KERN_INSUFFICIENT_BUFFER_SIZE; \
+	        }                                          \
+	        goto error_exit;                           \
+	    }                                              \
 	} while (0); /* end kcd_exit_on_error */
+
+#if defined(__arm64__)
+#define loop_wait_noguard() __builtin_arm_wfe()
+#elif defined(__x86_64__)
+#define loop_wait_noguard() __builtin_ia32_pause()
+#else
+#define loop_wait_noguard()
+#endif /* __x86_64__ */
+
+#define loop_wait() { loop_wait_noguard(); stackshot_panic_guard(); }
+
+static inline void stackshot_panic_guard(void);
+
+static __attribute__((noreturn, noinline)) void
+stackshot_panic_spin(void)
+{
+	if (stackshot_cpu_ctx.scc_can_work) {
+		stackshot_cpu_ctx.scc_can_work = false;
+		os_atomic_dec(&stackshot_ctx.sc_cpus_working, acquire);
+	}
+	if (stackshot_ctx.sc_calling_cpuid == cpu_number()) {
+		while (os_atomic_load(&stackshot_ctx.sc_cpus_working, acquire) != 0) {
+			loop_wait_noguard();
+		}
+		panic_stackshot_release_lock();
+	}
+	while (1) {
+		loop_wait_noguard();
+	}
+}
+
+/**
+ * Immediately aborts if another CPU panicked during the stackshot.
+ */
+static inline void
+stackshot_panic_guard(void)
+{
+	if (__improbable(os_atomic_load(&stackshot_ctx.sc_state, relaxed) == SS_PANICKED)) {
+		stackshot_panic_spin();
+	}
+}
+
+/*
+ * Signal that we panicked during a stackshot by setting an atomic flag and
+ * waiting for others to coalesce before continuing the panic. Other CPUs will
+ * spin on this as soon as they see it set in order to prevent multiple
+ * concurrent panics. The calling CPU (i.e. the one holding the debugger lock)
+ * will release it for us in `stackshot_panic_spin` so we can continue
+ * panicking.
+ *
+ * This is called from panic_trap_to_debugger.
+ */
+void
+stackshot_cpu_signal_panic(void)
+{
+	stackshot_state_t o_state;
+	if (stackshot_active()) {
+		/* Check if someone else panicked before we did. */
+		o_state = os_atomic_xchg(&stackshot_ctx.sc_state, SS_PANICKED, seq_cst);
+		if (o_state == SS_PANICKED) {
+			stackshot_panic_spin();
+		}
+
+		/* We're the first CPU to panic - wait for everyone to coalesce. */
+		if (stackshot_cpu_ctx.scc_can_work) {
+			stackshot_cpu_ctx.scc_can_work = false;
+			os_atomic_dec(&stackshot_ctx.sc_cpus_working, acquire);
+		}
+		while (os_atomic_load(&stackshot_ctx.sc_cpus_working, seq_cst) != 0) {
+			loop_wait_noguard();
+		}
+	}
+}
+
+/*
+ * Sets the stackshot state to SS_ERRORED along with the error code.
+ * Only works if the current state is SS_RUNNING or SS_SETUP.
+ */
+static inline void
+stackshot_set_error(kern_return_t error)
+{
+	stackshot_state_t cur_state;
+	stackshot_state_t err_state = SS_MKERR(error);
+	if (__improbable(!os_atomic_cmpxchgv(&stackshot_ctx.sc_state, SS_RUNNING, err_state, &cur_state, seq_cst))) {
+		if (cur_state == SS_SETUP) {
+			os_atomic_cmpxchg(&stackshot_ctx.sc_state, SS_SETUP, err_state, seq_cst);
+		} else {
+			/* Our state is something other than SS_RUNNING or SS_SETUP... Check for panic. */
+			stackshot_panic_guard();
+		}
+	}
+}
+
+/* Returns an error code if the current stackshot context has errored out.
+ * Also functions as a panic guard.
+ */
+__result_use_check
+static inline kern_return_t
+stackshot_status_check(void)
+{
+	stackshot_state_t state = os_atomic_load(&stackshot_ctx.sc_state, relaxed);
+
+	/* Check for panic */
+	if (__improbable(SS_STATE(state) == SS_PANICKED)) {
+		stackshot_panic_spin();
+	}
+
+	/* Check for error */
+	if (__improbable(SS_STATE(state) == SS_ERRORED)) {
+		kern_return_t err = SS_ERRCODE(state);
+		assert(err != KERN_SUCCESS); /* SS_ERRORED should always store an associated error code. */
+		return err;
+	}
+
+	return KERN_SUCCESS;
+}
+
+#pragma mark ---Stackshot Tracing---
+
+#if STACKSHOT_COLLECTS_DIAGNOSTICS
+static void
+stackshot_trace(int line_no, mach_vm_address_t data)
+{
+	struct stackshot_trace_buffer *buffer = PERCPU_GET(stackshot_trace_buffer);
+	buffer->sstb_entries[buffer->sstb_tail_idx] = (struct stackshot_trace_entry) {
+		.sste_line_no = line_no,
+		.sste_timestamp = mach_continuous_time(),
+		.sste_data = data
+	};
+	buffer->sstb_tail_idx = (buffer->sstb_tail_idx + 1) % STACKSHOT_DEBUG_TRACEBUF_SIZE;
+	buffer->sstb_size = MIN(buffer->sstb_size + 1, STACKSHOT_DEBUG_TRACEBUF_SIZE);
+}
+#define STACKSHOT_TRACE(data) stackshot_trace(__LINE__, (mach_vm_address_t) (data))
+
+#else /* STACKSHOT_COLLECTS_DIAGNOSTICS */
+#define STACKSHOT_TRACE(data) ((void) data)
+#endif /* !STACKSHOT_COLLECTS_DIAGNOSTICS */
+
+#pragma mark ---Stackshot Buffer Management---
+
+#define freelist_lock(buffer) while(!os_atomic_cmpxchg(&buffer->ssb_freelist_lock, 0, 1, acquire)) { loop_wait(); }
+#define freelist_unlock(buffer) os_atomic_store(&buffer->ssb_freelist_lock, 0, release);
+
+/**
+ * Allocates some data from the shared stackshot buffer freelist.
+ * This should not be used directly, it is a last resort if we run out of space.
+ */
+static void *
+stackshot_freelist_alloc(
+	size_t size,
+	struct stackshot_buffer *buffer,
+	kern_return_t *error)
+{
+	struct freelist_entry **cur_freelist, **best_freelist = NULL, *ret = NULL;
+
+	freelist_lock(buffer);
+
+	cur_freelist = &buffer->ssb_freelist;
+
+	while (*cur_freelist != NULL) {
+		if (((*cur_freelist)->fl_size >= size) && ((best_freelist == NULL) || ((*best_freelist)->fl_size > (*cur_freelist)->fl_size))) {
+			best_freelist = cur_freelist;
+			if ((*best_freelist)->fl_size == size) {
+				break;
+			}
+		}
+		cur_freelist = &((*cur_freelist)->fl_next);
+	}
+
+	/* If we found a freelist entry, update the freelist */
+	if (best_freelist != NULL) {
+		os_atomic_sub(&buffer->ssb_overhead, size, relaxed);
+		ret = *best_freelist;
+
+		/* If there's enough unused space at the end of this entry, we should make a new one */
+		if (((*best_freelist)->fl_size - size) > sizeof(struct freelist_entry)) {
+			struct freelist_entry *new_freelist = (struct freelist_entry*) ((mach_vm_address_t) *best_freelist + size);
+			*new_freelist = (struct freelist_entry) {
+				.fl_next = (*best_freelist)->fl_next,
+				.fl_size = (*best_freelist)->fl_size - size
+			};
+			(*best_freelist)->fl_next = new_freelist;
+		}
+
+		/* Update previous entry with next or new entry */
+		*best_freelist = (*best_freelist)->fl_next;
+	}
+
+	freelist_unlock(buffer);
+
+	if (error != NULL) {
+		if (ret == NULL) {
+			*error = KERN_INSUFFICIENT_BUFFER_SIZE;
+		} else {
+			*error = KERN_SUCCESS;
+		}
+	}
+
+	return ret;
+}
+
+/**
+ * Allocates some data from the shared stackshot buffer.
+ * Should not be used directly - see the `stackshot_alloc` and
+ * `stackshot_alloc_arr` macros.
+ */
+static void *
+stackshot_buffer_alloc(
+	size_t size,
+	struct stackshot_buffer *buffer,
+	kern_return_t *error)
+{
+	size_t o_used, new_used;
+
+	stackshot_panic_guard();
+	assert(!stackshot_ctx.sc_is_singlethreaded);
+
+	os_atomic_rmw_loop(&buffer->ssb_used, o_used, new_used, relaxed, {
+		new_used = o_used + size;
+		if (new_used > buffer->ssb_size) {
+		        os_atomic_rmw_loop_give_up(return stackshot_freelist_alloc(size, buffer, error));
+		}
+	});
+
+	if (error != NULL) {
+		*error = KERN_SUCCESS;
+	}
+
+	return (void*) ((mach_vm_address_t) buffer->ssb_ptr + o_used);
+}
+
+/**
+ * Finds the best stackshot buffer to use (prefer our cluster's buffer)
+ * and allocates from it.
+ * Should not be used directly - see the `stackshot_alloc` and
+ * `stackshot_alloc_arr` macros.
+ */
+__result_use_check
+static void *
+stackshot_best_buffer_alloc(size_t size, kern_return_t *error)
+{
+#if defined(__AMP__)
+	kern_return_t err;
+	int           my_cluster;
+	void         *ret = NULL;
+#endif /* __AMP__ */
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_cpu_latency.total_buf += size;
+#endif
+
+#if defined(__AMP__)
+	/* First, try our cluster's buffer */
+	my_cluster = cpu_cluster_id();
+	ret = stackshot_buffer_alloc(size, &stackshot_ctx.sc_buffers[my_cluster], &err);
+
+	/* Try other buffers now. */
+	if (err != KERN_SUCCESS) {
+		for (size_t buf_idx = 0; buf_idx < stackshot_ctx.sc_num_buffers; buf_idx++) {
+			if (buf_idx == my_cluster) {
+				continue;
+			}
+
+			ret = stackshot_buffer_alloc(size, &stackshot_ctx.sc_buffers[buf_idx], &err);
+			if (err == KERN_SUCCESS) {
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+				stackshot_cpu_latency.intercluster_buf_used += size;
+#endif
+				break;
+			}
+		}
+	}
+
+	if (error != NULL) {
+		*error = err;
+	}
+
+	return ret;
+#else /* __AMP__ */
+	return stackshot_buffer_alloc(size, &stackshot_ctx.sc_buffers[0], error);
+#endif /* !__AMP__ */
+}
+
+/**
+ * Frees some data from the shared stackshot buffer and adds it to the freelist.
+ */
+static void
+stackshot_buffer_free(
+	void *ptr,
+	struct stackshot_buffer *buffer,
+	size_t size)
+{
+	stackshot_panic_guard();
+
+	/* This should never be called during a singlethreaded stackshot. */
+	assert(!stackshot_ctx.sc_is_singlethreaded);
+
+	os_atomic_add(&buffer->ssb_overhead, size, relaxed);
+
+	/* Make sure we have enough space for the freelist entry */
+	if (size < sizeof(struct freelist_entry)) {
+		return;
+	}
+
+	freelist_lock(buffer);
+
+	/* Create new freelist entry and push it to the front of the list */
+	*((struct freelist_entry*) ptr) = (struct freelist_entry) {
+		.fl_size = size,
+		.fl_next = buffer->ssb_freelist
+	};
+	buffer->ssb_freelist = ptr;
+
+	freelist_unlock(buffer);
+}
+
+/**
+ * Allocates some data from the stackshot buffer. Uses the bump allocator in
+ * multithreaded mode and endalloc in singlethreaded.
+ * err must ALWAYS be nonnull.
+ * Should not be used directly - see the macros in kern_stackshot.h.
+ */
+void *
+stackshot_alloc_with_size(size_t size, kern_return_t *err)
+{
+	void *ptr;
+	assert(err != NULL);
+	assert(stackshot_active());
+
+	stackshot_panic_guard();
+
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		ptr = kcdata_endalloc(stackshot_kcdata_p, size);
+		if (ptr == NULL) {
+			*err = KERN_INSUFFICIENT_BUFFER_SIZE;
+		}
+	} else {
+		ptr = stackshot_best_buffer_alloc(size, err);
+		if (ptr == NULL) {
+			/* We should always return an error if we return a null ptr */
+			assert3u(*err, !=, KERN_SUCCESS);
+		}
+	}
+
+	return ptr;
+}
+
+/**
+ * Initializes a new kcdata buffer somewhere in a linked kcdata list.
+ * Allocates a buffer for the kcdata from the shared stackshot buffer.
+ *
+ * See `linked_kcdata_alloc_callback` for the implementation details of
+ * linked kcdata for stackshot.
+ */
+__result_use_check
+static kern_return_t
+linked_kcdata_init(
+	linked_kcdata_descriptor_t descriptor,
+	size_t min_size,
+	unsigned int data_type,
+	unsigned int flags)
+{
+	void              *buf_ptr;
+	kern_return_t      error;
+	size_t             buf_size = MAX(min_size, stackshot_ctx.sc_min_kcdata_size);
+
+	buf_ptr = stackshot_alloc_arr(uint8_t, buf_size, &error);
+	if (error != KERN_SUCCESS) {
+		return error;
+	}
+
+	error = kcdata_memory_static_init(&descriptor->kcdata, (mach_vm_address_t) buf_ptr, data_type, buf_size, flags);
+	if (error != KERN_SUCCESS) {
+		return error;
+	}
+
+	descriptor->kcdata.kcd_alloc_callback = linked_kcdata_alloc_callback;
+
+	return KERN_SUCCESS;
+}
+
+static void
+stackshot_kcdata_free_unused(kcdata_descriptor_t descriptor)
+{
+	/*
+	 * If we have free space at the end of the kcdata, we can add it to the
+	 * freelist. We always add to *our* cluster's freelist, no matter where
+	 * the data was originally allocated.
+	 *
+	 * Important Note: We do not use kcdata_memory_get_used_bytes here because
+	 * that includes extra space for the end tag (which we do not care about).
+	 */
+	int    buffer;
+	size_t used_size = descriptor->kcd_addr_end - descriptor->kcd_addr_begin;
+	size_t free_size = (descriptor->kcd_length - used_size);
+	if (free_size > 0) {
+#if defined(__arm64__)
+		buffer = cpu_cluster_id();
+#else /* __arm64__ */
+		buffer = 0;
+#endif /* !__arm64__ */
+		stackshot_buffer_free((void*) descriptor->kcd_addr_end, &stackshot_ctx.sc_buffers[buffer], free_size);
+		descriptor->kcd_length = used_size;
+	}
+}
+
+/**
+ * The callback for linked kcdata, which is called when one of the kcdata
+ * buffers runs out of space. This allocates a new kcdata descriptor &
+ * buffer in the linked list and sets it up.
+ *
+ * When kcdata calls this callback, it takes the returned descriptor
+ * and copies it to its own descriptor (which will be the per-cpu kcdata
+ * descriptor, in the case of stackshot).
+ *
+ * --- Stackshot linked kcdata details ---
+ * The way stackshot allocates kcdata buffers (in a non-panic context) is via
+ * a basic bump allocator (see `stackshot_buffer_alloc`) and a linked list of
+ * kcdata structures. The kcdata are allocated with a reasonable size based on
+ * some system heuristics (or more if whatever is being pushed into the buffer
+ * is larger). When the current kcdata buffer runs out of space, it calls this
+ * callback, which allocates a new linked kcdata object at the tail of the
+ * current list.
+ *
+ * The per-cpu `stackshot_kcdata_p` descriptor is the "tail" of the list, but
+ * is not actually part of the linked list (this simplified implementation,
+ * since it didn't require changing every kcdata call & a bunch of
+ * kcdata code, since the current in-use descriptor is always in the same place
+ * this way). When it is filled up and this callback is called, the
+ * `stackshot_kcdata_p` descriptor is copied to the *actual* tail of the list
+ * (in stackshot_cpu_ctx.scc_kcdata_tail), and a new linked kcdata struct is
+ * allocated at the tail.
+ */
+static kcdata_descriptor_t
+linked_kcdata_alloc_callback(kcdata_descriptor_t descriptor, size_t min_size)
+{
+	kern_return_t error;
+	linked_kcdata_descriptor_t new_kcdata = NULL;
+
+	/* This callback should ALWAYS be coming from our per-cpu kcdata. If not, something has gone horribly wrong.*/
+	stackshot_panic_guard();
+	assert(descriptor == stackshot_kcdata_p);
+
+	/* Free the unused space in the buffer and copy it to the tail of the linked kcdata list. */
+	stackshot_kcdata_free_unused(descriptor);
+	stackshot_cpu_ctx.scc_kcdata_tail->kcdata = *descriptor;
+
+	/* Allocate another linked_kcdata and initialize it. */
+	new_kcdata = stackshot_alloc(struct linked_kcdata_descriptor, &error);
+	if (error != KERN_SUCCESS) {
+		return NULL;
+	}
+
+	/* It doesn't matter what we mark the data type as - we're throwing it away when weave the data together anyway. */
+	error = linked_kcdata_init(new_kcdata, min_size, KCDATA_BUFFER_BEGIN_STACKSHOT, descriptor->kcd_flags);
+	if (error != KERN_SUCCESS) {
+		return NULL;
+	}
+
+	bzero(descriptor, sizeof(struct kcdata_descriptor));
+	stackshot_cpu_ctx.scc_kcdata_tail->next = new_kcdata;
+	stackshot_cpu_ctx.scc_kcdata_tail = new_kcdata;
+
+	return &new_kcdata->kcdata;
+}
+
+/**
+ * Allocates a new linked kcdata list for the current CPU and sets it up.
+ * If there was a previous linked kcdata descriptor, you should call
+ * `stackshot_finalize_linked_kcdata` first, or otherwise save it somewhere.
+ */
+__result_use_check
+static kern_return_t
+stackshot_new_linked_kcdata(void)
+{
+	kern_return_t error;
+
+	stackshot_panic_guard();
+	assert(!stackshot_ctx.sc_panic_stackshot);
+
+	stackshot_cpu_ctx.scc_kcdata_head = stackshot_alloc(struct linked_kcdata_descriptor, &error);
+	if (error != KERN_SUCCESS) {
+		return error;
+	}
+
+	kcd_exit_on_error(linked_kcdata_init(stackshot_cpu_ctx.scc_kcdata_head, 0,
+	    KCDATA_BUFFER_BEGIN_STACKSHOT,
+	    KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER | KCFLAG_ALLOC_CALLBACK));
+
+	stackshot_cpu_ctx.scc_kcdata_tail = stackshot_cpu_ctx.scc_kcdata_head;
+	*stackshot_kcdata_p = stackshot_cpu_ctx.scc_kcdata_head->kcdata;
+
+error_exit:
+	return error;
+}
+
+/**
+ * Finalizes the current linked kcdata structure for the CPU by updating the
+ * tail of the list with the per-cpu kcdata descriptor.
+ */
+static void
+stackshot_finalize_linked_kcdata(void)
+{
+	stackshot_panic_guard();
+	assert(!stackshot_ctx.sc_panic_stackshot);
+	stackshot_kcdata_free_unused(stackshot_kcdata_p);
+	if (stackshot_cpu_ctx.scc_kcdata_tail != NULL) {
+		stackshot_cpu_ctx.scc_kcdata_tail->kcdata = *stackshot_kcdata_p;
+	}
+	*stackshot_kcdata_p = (struct kcdata_descriptor){};
+}
 
 /*
  * Initialize the mutex governing access to the stack snapshot subsystem
@@ -316,7 +1098,7 @@ stackshot_init(void)
 	mach_timebase_info_data_t timebase;
 
 	clock_timebase_info(&timebase);
-	fault_stats.sfs_system_max_fault_time = ((KDP_FAULT_PATH_MAX_TIME_PER_STACKSHOT_NSECS * timebase.denom) / timebase.numer);
+	stackshot_max_fault_time = ((KDP_FAULT_PATH_MAX_TIME_PER_STACKSHOT_NSECS * timebase.denom) / timebase.numer);
 
 	max_tracebuf_size = MAX(max_tracebuf_size, ((ROUNDUP(max_mem, GIGABYTES) / GIGABYTES) * TRACEBUF_SIZE_PER_GB));
 
@@ -325,7 +1107,7 @@ stackshot_init(void)
 
 /*
  * Called with interrupts disabled after stackshot context has been
- * initialized. Updates stack_snapshot_ret.
+ * initialized.
  */
 static kern_return_t
 stackshot_trap(void)
@@ -356,14 +1138,14 @@ stackshot_trap(void)
 	mp_rendezvous_lock();
 #endif
 
-	stackshot_last_abs_start = mach_absolute_time();
-	stackshot_last_abs_end = 0;
+	stackshot_stats.last_abs_start = mach_absolute_time();
+	stackshot_stats.last_abs_end = 0;
 
-	rv = DebuggerTrapWithState(DBOP_STACKSHOT, NULL, NULL, NULL, 0, NULL, FALSE, 0);
+	rv = DebuggerTrapWithState(DBOP_STACKSHOT, NULL, NULL, NULL, 0, NULL, FALSE, 0, NULL);
 
-	stackshot_last_abs_end = mach_absolute_time();
-	stackshots_taken++;
-	stackshots_duration += (stackshot_last_abs_end - stackshot_last_abs_start);
+	stackshot_stats.last_abs_end = mach_absolute_time();
+	stackshot_stats.stackshots_taken++;
+	stackshot_stats.stackshots_duration += (stackshot_stats.last_abs_end - stackshot_stats.last_abs_start);
 
 #if defined(__x86_64__)
 	mp_rendezvous_unlock();
@@ -376,26 +1158,11 @@ void
 stackshot_get_timing(uint64_t *last_abs_start, uint64_t *last_abs_end, uint64_t *count, uint64_t *total_duration)
 {
 	STACKSHOT_SUBSYS_LOCK();
-	*last_abs_start = stackshot_last_abs_start;
-	*last_abs_end = stackshot_last_abs_end;
-	*count = stackshots_taken;
-	*total_duration = stackshots_duration;
+	*last_abs_start = stackshot_stats.last_abs_start;
+	*last_abs_end = stackshot_stats.last_abs_end;
+	*count = stackshot_stats.stackshots_taken;
+	*total_duration = stackshot_stats.stackshots_duration;
 	STACKSHOT_SUBSYS_UNLOCK();
-}
-
-static kern_return_t
-finalize_kcdata(kcdata_descriptor_t kcdata)
-{
-	kern_return_t error = KERN_SUCCESS;
-
-	kcd_finalize_compression(kcdata);
-	kcd_exit_on_error(kcdata_add_uint64_with_description(kcdata, stackshot_out_flags, "stackshot_out_flags"));
-	kcd_exit_on_error(kcdata_write_buffer_end(kcdata));
-	stack_snapshot_bytes_traced = (uint32_t) kcdata_memory_get_used_bytes(kcdata);
-	stack_snapshot_bytes_uncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(kcdata);
-	kcdata_finish(kcdata);
-error_exit:
-	return error;
 }
 
 kern_return_t
@@ -403,6 +1170,16 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 {
 	kern_return_t error = KERN_SUCCESS;
 	boolean_t istate;
+	struct kdp_snapshot_args args;
+
+	args = (struct kdp_snapshot_args) {
+		.pid =               pid,
+		.buffer =            buf,
+		.buffer_size =       size,
+		.flags =             flags,
+		.since_timestamp =   delta_since_timestamp,
+		.pagetable_mask =    pagetable_mask
+	};
 
 #if DEVELOPMENT || DEBUG
 	if (kern_feature_override(KF_STACKSHOT_OVRD) == TRUE) {
@@ -412,6 +1189,9 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	if ((buf == NULL) || (size <= 0) || (bytes_traced == NULL)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+
+	/* zero caller's buffer to match KMA_ZERO in other path */
+	bzero(buf, size);
 
 	/* cap in individual stackshot to max_tracebuf_size */
 	if (size > max_tracebuf_size) {
@@ -431,22 +1211,18 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	assert(!stackshot_exclave_inspect_ctids);
 #endif
 
-	struct kcdata_descriptor kcdata;
-	uint32_t hdr_tag = (flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ?
-	    KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT : KCDATA_BUFFER_BEGIN_STACKSHOT;
-
-	error = kcdata_memory_static_init(&kcdata, (mach_vm_address_t)buf, hdr_tag, size,
-	    KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER);
-	if (error) {
-		goto out;
-	}
-
 	stackshot_initial_estimate = 0;
 	stackshot_duration_prior_abs = 0;
 	stackshot_duration_outer = NULL;
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_START,
 	    flags, size, pid, delta_since_timestamp);
+
+	/* Prepare the compressor for a stackshot */
+	error = vm_compressor_kdp_init();
+	if (error != KERN_SUCCESS) {
+		return error;
+	}
 
 	istate = ml_set_interrupts_enabled(FALSE);
 	uint64_t time_start      = mach_absolute_time();
@@ -455,14 +1231,15 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	SOCD_TRACE_XNU_START(STACKSHOT);
 
 	/* Preload trace parameters*/
-	kdp_snapshot_preflight(pid, buf, size, flags, &kcdata,
-	    delta_since_timestamp, pagetable_mask);
+	error = kdp_snapshot_preflight_internal(args);
 
 	/*
 	 * Trap to the debugger to obtain a coherent stack snapshot; this populates
 	 * the trace buffer
 	 */
-	error = stackshot_trap();
+	if (error == KERN_SUCCESS) {
+		error = stackshot_trap();
+	}
 
 	uint64_t time_end = mach_absolute_time();
 
@@ -474,12 +1251,34 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 #if CONFIG_EXCLAVES
 	/* stackshot trap should only finish successfully or with no pending Exclave threads */
 	assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
-	if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
-		error = collect_exclave_threads();
+#endif
+
+	/*
+	 * Stackshot is no longer active.
+	 * (We have to do this here for the special interrupt disable timeout case to work)
+	 */
+	os_atomic_store(&stackshot_ctx.sc_state, SS_INACTIVE, release);
+
+	/* Release kdp compressor buffers */
+	vm_compressor_kdp_teardown();
+
+	/* Collect multithreaded kcdata into one finalized buffer */
+	if (error == KERN_SUCCESS && !stackshot_ctx.sc_is_singlethreaded) {
+		error = stackshot_collect_kcdata();
+	}
+
+#if CONFIG_EXCLAVES
+	if (stackshot_exclave_inspect_ctids) {
+		error = collect_exclave_threads(flags);
 	}
 #endif /* CONFIG_EXCLAVES */
+
 	if (error == KERN_SUCCESS) {
-		error = finalize_kcdata(stackshot_kcdata_p);
+		if (!stackshot_ctx.sc_is_singlethreaded) {
+			error = stackshot_finalize_kcdata();
+		} else {
+			error = stackshot_finalize_singlethreaded_kcdata();
+		}
 	}
 
 	if (stackshot_duration_outer) {
@@ -489,14 +1288,7 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_END,
 	    error, (time_end - time_start), size, *bytes_traced);
-out:
-#if CONFIG_EXCLAVES
-	stackshot_exclave_inspect_ctids = NULL;
-	stackshot_exclave_inspect_ctid_capacity = 0;
-	stackshot_exclave_inspect_ctid_count = 0;
-#endif
 
-	stackshot_kcdata_p = NULL;
 	STACKSHOT_SUBSYS_UNLOCK();
 	return error;
 }
@@ -555,28 +1347,84 @@ exit:
 }
 #endif /* CONFIG_TELEMETRY */
 
-/*
- * Return the estimated size of a stackshot based on the
- * number of currently running threads and tasks.
- *
- * adj is an adjustment in units of percentage
- *
- * This function is mostly unhinged from reality; struct thread_snapshot and
- * struct task_stackshot are legacy, much larger versions of the structures we
- * actually use, and there's no accounting for how we actually generate
- * task & thread information.  rdar://78880038 intends to replace this all.
+/**
+ * Grabs the next work item from the stackshot work queue.
  */
-uint32_t
-get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj)
+static struct stackshot_workitem *
+stackshot_get_workitem(struct stackshot_workqueue *queue)
 {
-	vm_size_t thread_total;
-	vm_size_t task_total;
-	uint64_t size;
-	uint32_t estimated_size;
-	size_t est_thread_size = sizeof(struct thread_snapshot);
-	size_t est_task_size = sizeof(struct task_snapshot) + TASK_UUID_AVG_SIZE;
+	uint32_t old_count, new_count;
 
-	adj = MIN(adj, 100u);   /* no more than double our estimate */
+	/* note: this relies on give_up not performing the write, just bailing out immediately */
+	os_atomic_rmw_loop(&queue->sswq_cur_item, old_count, new_count, acq_rel, {
+		if (old_count >= os_atomic_load(&queue->sswq_num_items, relaxed)) {
+		        os_atomic_rmw_loop_give_up(return NULL);
+		}
+		new_count = old_count + 1;
+	});
+
+	return &queue->sswq_items[old_count];
+};
+
+/**
+ * Puts an item on the appropriate stackshot work queue.
+ * We don't need the lock for this, but only because it's
+ * only called by one writer..
+ *
+ * @returns
+ * true if the item fit in the queue, false if not.
+ */
+static kern_return_t
+stackshot_put_workitem(struct stackshot_workitem item)
+{
+	struct stackshot_workqueue *queue;
+
+	/* Put in higher queue if task has more threads, with highest queue having >= STACKSHOT_HARDEST_THREADCOUNT threads */
+	size_t queue_idx = ((item.sswi_task->thread_count * (STACKSHOT_NUM_WORKQUEUES - 1)) / STACKSHOT_HARDEST_THREADCOUNT);
+	queue_idx = MIN(queue_idx, STACKSHOT_NUM_WORKQUEUES - 1);
+
+	queue = &stackshot_ctx.sc_workqueues[queue_idx];
+
+	size_t num_items = os_atomic_load(&queue->sswq_num_items, relaxed);
+
+	if (num_items >= queue->sswq_capacity) {
+		return KERN_INSUFFICIENT_BUFFER_SIZE;
+	}
+
+	queue->sswq_items[num_items] = item;
+	os_atomic_inc(&queue->sswq_num_items, release);
+
+	return KERN_SUCCESS;
+}
+
+#define calc_num_linked_kcdata_frames(size, kcdata_size) (1 + ((size) - 1) / (kcdata_size))
+#define calc_linked_kcdata_size(size, kcdata_size) (calc_num_linked_kcdata_frames((size), (kcdata_size)) * ((kcdata_size) + sizeof(struct linked_kcdata_descriptor)))
+
+#define TASK_UUID_AVG_SIZE (16 * sizeof(uuid_t)) /* Average space consumed by UUIDs/task */
+#define TASK_SHARED_CACHE_AVG_SIZE (128) /* Average space consumed by task shared cache info */
+#define sizeof_if_traceflag(a, flag) (((trace_flags & (flag)) != 0) ? sizeof(a) : 0)
+
+#define FUDGED_SIZE(size, adj) (((size) * ((adj) + 100)) / 100)
+
+/*
+ * Return the estimated size of a single task (including threads)
+ * in a stackshot with the given flags.
+ */
+static uint32_t
+get_stackshot_est_tasksize(uint64_t trace_flags)
+{
+	size_t total_size;
+	size_t threads_per_task = (((threads_count + terminated_threads_count) - 1) / (tasks_count + terminated_tasks_count)) + 1;
+	size_t est_thread_size = sizeof(struct thread_snapshot_v4) + 42 * sizeof(uintptr_t);
+	size_t est_task_size = sizeof(struct task_snapshot_v2) +
+	    TASK_UUID_AVG_SIZE +
+	    TASK_SHARED_CACHE_AVG_SIZE +
+	    sizeof_if_traceflag(struct io_stats_snapshot, STACKSHOT_INSTRS_CYCLES) +
+	    sizeof_if_traceflag(uint32_t, STACKSHOT_ASID) +
+	    sizeof_if_traceflag(sizeof(uintptr_t) * STACKSHOT_PAGETABLE_BUFSZ, STACKSHOT_PAGE_TABLES) +
+	    sizeof_if_traceflag(struct instrs_cycles_snapshot_v2, STACKSHOT_INSTRS_CYCLES) +
+	    sizeof(struct stackshot_cpu_architecture) +
+	    sizeof(struct stackshot_task_codesigning_info);
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	if (collect_latency_info) {
@@ -585,17 +1433,412 @@ get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj)
 	}
 #endif
 
-	thread_total = (threads_count * est_thread_size);
-	task_total = (tasks_count  * est_task_size);
+	total_size = est_task_size + threads_per_task * est_thread_size;
 
-	size = thread_total + task_total + STACKSHOT_SUPP_SIZE;                 /* estimate */
-	size += (size * adj) / 100;                                                                     /* add adj */
-	size = MAX(size, prev_size_hint);                                                               /* allow hint to increase */
+	return total_size;
+}
+
+/*
+ * Return the estimated size of a stackshot based on the
+ * number of currently running threads and tasks.
+ *
+ * adj is an adjustment in units of percentage
+ */
+static uint32_t
+get_stackshot_estsize(
+	uint32_t prev_size_hint,
+	uint32_t adj,
+	uint64_t trace_flags,
+	pid_t target_pid)
+{
+	vm_size_t thread_and_task_total;
+	uint64_t  size;
+	uint32_t  estimated_size;
+	bool      process_scoped = ((target_pid != -1) && ((trace_flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) == 0));
+
+	/*
+	 * We use the estimated task size (with a fudge factor) as the default
+	 * linked kcdata buffer size in an effort to reduce overhead (ideally, we want
+	 * each task to only need a single kcdata buffer.)
+	 */
+	uint32_t est_task_size = get_stackshot_est_tasksize(trace_flags);
+	uint32_t est_kcdata_size = FUDGED_SIZE(est_task_size, adj);
+	uint64_t est_preamble_size = calc_linked_kcdata_size(8192 * 4, est_kcdata_size);
+	uint64_t est_postamble_size = calc_linked_kcdata_size(8192 * 2, est_kcdata_size);
+	uint64_t est_extra_size = 0;
+
+	adj = MIN(adj, 100u);   /* no more than double our estimate */
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	est_extra_size += real_ncpus * sizeof(struct stackshot_latency_cpu);
+	est_extra_size += sizeof(struct stackshot_latency_collection_v2);
+#endif
+
+	est_extra_size += real_ncpus * MAX_FRAMES * sizeof(uintptr_t); /* Stacktrace buffers */
+	est_extra_size += FUDGED_SIZE(tasks_count, 10) * sizeof(uintptr_t) * STACKSHOT_NUM_WORKQUEUES; /* Work queues */
+	est_extra_size += sizeof_if_traceflag(sizeof(uintptr_t) * STACKSHOT_PAGETABLE_BUFSZ * real_ncpus, STACKSHOT_PAGE_TABLES);
+
+	thread_and_task_total = calc_linked_kcdata_size(est_task_size, est_kcdata_size);
+	if (!process_scoped) {
+		thread_and_task_total *= tasks_count;
+	}
+	size = thread_and_task_total + est_preamble_size + est_postamble_size + est_extra_size; /* estimate */
+	size = FUDGED_SIZE(size, adj); /* add adj */
+	size = MAX(size, prev_size_hint); /* allow hint to increase */
 	size += stackshot_plh_est_size(); /* add space for the port label hash */
-	size = MIN(size, VM_MAP_TRUNC_PAGE(UINT32_MAX, PAGE_MASK));             /* avoid overflow */
+	size = MIN(size, VM_MAP_TRUNC_PAGE(UINT32_MAX, PAGE_MASK)); /* avoid overflow */
 	estimated_size = (uint32_t) VM_MAP_ROUND_PAGE(size, PAGE_MASK); /* round to pagesize */
 
 	return estimated_size;
+}
+
+/**
+ * Copies a linked list of kcdata structures into a final kcdata structure.
+ * Only used from stackshot_finalize_kcdata.
+ */
+__result_use_check
+static kern_return_t
+stackshot_copy_linked_kcdata(kcdata_descriptor_t final_kcdata, linked_kcdata_descriptor_t linked_kcdata)
+{
+	kern_return_t error = KERN_SUCCESS;
+
+	while (linked_kcdata) {
+		/* Walk linked kcdata list */
+		kcdata_descriptor_t cur_kcdata = &linked_kcdata->kcdata;
+		if ((cur_kcdata->kcd_addr_end - cur_kcdata->kcd_addr_begin) == 0) {
+			linked_kcdata = linked_kcdata->next;
+			continue;
+		}
+
+		/* Every item in the linked kcdata should have a header tag of type KCDATA_BUFFER_BEGIN_STACKSHOT. */
+		assert(((struct kcdata_item*) cur_kcdata->kcd_addr_begin)->type == KCDATA_BUFFER_BEGIN_STACKSHOT);
+		assert((final_kcdata->kcd_addr_begin + final_kcdata->kcd_length) > final_kcdata->kcd_addr_end);
+		size_t header_size = sizeof(kcdata_item_t) + kcdata_calc_padding(sizeof(kcdata_item_t));
+		size_t size = cur_kcdata->kcd_addr_end - cur_kcdata->kcd_addr_begin - header_size;
+		size_t free = (final_kcdata->kcd_length + final_kcdata->kcd_addr_begin) - final_kcdata->kcd_addr_end;
+		if (free < size) {
+			error = KERN_INSUFFICIENT_BUFFER_SIZE;
+			goto error_exit;
+		}
+
+		/* Just memcpy the data over (and compress if we need to.) */
+		kcdata_compression_window_open(final_kcdata);
+		error = kcdata_memcpy(final_kcdata, final_kcdata->kcd_addr_end, (void*) (cur_kcdata->kcd_addr_begin + header_size), size);
+		if (error != KERN_SUCCESS) {
+			goto error_exit;
+		}
+		final_kcdata->kcd_addr_end += size;
+		kcdata_compression_window_close(final_kcdata);
+
+		linked_kcdata = linked_kcdata->next;
+	}
+
+error_exit:
+	return error;
+}
+
+/**
+ * Copies the duration, latency, and diagnostic info into a final kcdata buffer.
+ * Only used by stackshot_finalize_kcdata and stackshot_finalize_singlethreaded_kcdata.
+ */
+__result_use_check
+static kern_return_t
+stackshot_push_duration_and_latency(kcdata_descriptor_t kcdata)
+{
+	kern_return_t error;
+	mach_vm_address_t out_addr;
+	bool use_fault_path = ((stackshot_flags & (STACKSHOT_ENABLE_UUID_FAULTING | STACKSHOT_ENABLE_BT_FAULTING)) != 0);
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	size_t            buffer_used = 0;
+	size_t            buffer_overhead = 0;
+#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
+
+	if (use_fault_path) {
+		struct stackshot_fault_stats stats = (struct stackshot_fault_stats) {
+			.sfs_pages_faulted_in = 0,
+			.sfs_time_spent_faulting = 0,
+			.sfs_system_max_fault_time = stackshot_max_fault_time,
+			.sfs_stopped_faulting = false
+		};
+		percpu_foreach_base(base) {
+			struct stackshot_cpu_context *cpu_ctx = PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu);
+			if (!cpu_ctx->scc_did_work) {
+				continue;
+			}
+			stats.sfs_pages_faulted_in += cpu_ctx->scc_fault_stats.sfs_pages_faulted_in;
+			stats.sfs_time_spent_faulting += cpu_ctx->scc_fault_stats.sfs_time_spent_faulting;
+			stats.sfs_stopped_faulting = stats.sfs_stopped_faulting || cpu_ctx->scc_fault_stats.sfs_stopped_faulting;
+		}
+		kcdata_push_data(kcdata, STACKSHOT_KCTYPE_STACKSHOT_FAULT_STATS,
+		    sizeof(struct stackshot_fault_stats), &stats);
+	}
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	int num_working_cpus = 0;
+	if (collect_latency_info) {
+		/* Add per-CPU latency info */
+		percpu_foreach(cpu_ctx, stackshot_cpu_ctx_percpu) {
+			if (cpu_ctx->scc_did_work) {
+				num_working_cpus++;
+			}
+		}
+		kcdata_compression_window_open(kcdata);
+		kcd_exit_on_error(kcdata_get_memory_addr_for_array(
+			    kcdata, STACKSHOT_KCTYPE_LATENCY_INFO_CPU, sizeof(struct stackshot_latency_cpu), num_working_cpus, &out_addr));
+		percpu_foreach_base(base) {
+			if (PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu)->scc_did_work) {
+				kcdata_memcpy(kcdata, out_addr, PERCPU_GET_WITH_BASE(base, stackshot_cpu_latency_percpu),
+				    sizeof(struct stackshot_latency_cpu));
+				out_addr += sizeof(struct stackshot_latency_cpu);
+			}
+		}
+		kcd_exit_on_error(kcdata_compression_window_close(kcdata));
+
+		/* Add up buffer info */
+		for (size_t buf_idx = 0; buf_idx < stackshot_ctx.sc_num_buffers; buf_idx++) {
+			struct stackshot_buffer *buf = &stackshot_ctx.sc_buffers[buf_idx];
+			buffer_used += os_atomic_load(&buf->ssb_used, relaxed);
+			buffer_overhead += os_atomic_load(&buf->ssb_overhead, relaxed);
+		}
+		stackshot_ctx.sc_latency.buffer_size = stackshot_ctx.sc_args.buffer_size;
+		stackshot_ctx.sc_latency.buffer_overhead = buffer_overhead;
+		stackshot_ctx.sc_latency.buffer_used = buffer_used;
+		stackshot_ctx.sc_latency.buffer_count = stackshot_ctx.sc_num_buffers;
+
+		/* Add overall latency info */
+		kcd_exit_on_error(kcdata_push_data(
+			    kcdata, STACKSHOT_KCTYPE_LATENCY_INFO,
+			    sizeof(stackshot_ctx.sc_latency), &stackshot_ctx.sc_latency));
+	}
+#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
+
+	if ((stackshot_flags & STACKSHOT_DO_COMPRESS) == 0) {
+		assert(!stackshot_ctx.sc_panic_stackshot);
+		kcd_exit_on_error(kcdata_get_memory_addr(kcdata, STACKSHOT_KCTYPE_STACKSHOT_DURATION,
+		    sizeof(struct stackshot_duration_v2), &out_addr));
+		struct stackshot_duration_v2 *duration_p = (void *) out_addr;
+		memcpy(duration_p, &stackshot_ctx.sc_duration, sizeof(*duration_p));
+		stackshot_duration_outer = (unaligned_u64 *) &duration_p->stackshot_duration_outer;
+		kcd_exit_on_error(kcdata_add_uint64_with_description(kcdata, stackshot_tries, "stackshot_tries"));
+	} else {
+		kcd_exit_on_error(kcdata_push_data(kcdata, STACKSHOT_KCTYPE_STACKSHOT_DURATION, sizeof(stackshot_ctx.sc_duration), &stackshot_ctx.sc_duration));
+		stackshot_duration_outer = NULL;
+	}
+
+error_exit:
+	return error;
+}
+
+/**
+ * Allocates the final kcdata buffer for a mulitithreaded stackshot,
+ * where all of the per-task kcdata (and exclave kcdata) will end up.
+ */
+__result_use_check
+static kern_return_t
+stackshot_alloc_final_kcdata(void)
+{
+	vm_offset_t   final_kcdata_buffer = 0;
+	kern_return_t error = KERN_SUCCESS;
+	uint32_t hdr_tag = (stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+	    : (stackshot_flags & STACKSHOT_DO_COMPRESS) ? KCDATA_BUFFER_BEGIN_COMPRESSED
+	    : KCDATA_BUFFER_BEGIN_STACKSHOT;
+
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		return KERN_SUCCESS;
+	}
+
+	if ((error = kmem_alloc(kernel_map, &final_kcdata_buffer, stackshot_args.buffer_size,
+	    KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG)) != KERN_SUCCESS) {
+		os_log_error(OS_LOG_DEFAULT, "stackshot: final allocation failed: %d, allocating %u bytes of %u max, try %llu\n", (int)error, stackshot_args.buffer_size, max_tracebuf_size, stackshot_tries);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	stackshot_ctx.sc_finalized_kcdata = kcdata_memory_alloc_init(final_kcdata_buffer, hdr_tag,
+	    stackshot_args.buffer_size, KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER);
+
+	if (stackshot_ctx.sc_finalized_kcdata == NULL) {
+		kmem_free(kernel_map, final_kcdata_buffer, stackshot_args.buffer_size);
+		return KERN_FAILURE;
+	}
+
+	return KERN_SUCCESS;
+}
+
+/**
+ * Frees the final kcdata buffer.
+ */
+static void
+stackshot_free_final_kcdata(void)
+{
+	if (stackshot_ctx.sc_is_singlethreaded || (stackshot_ctx.sc_finalized_kcdata == NULL)) {
+		return;
+	}
+
+	kmem_free(kernel_map, stackshot_ctx.sc_finalized_kcdata->kcd_addr_begin, stackshot_args.buffer_size);
+	kcdata_memory_destroy(stackshot_ctx.sc_finalized_kcdata);
+	stackshot_ctx.sc_finalized_kcdata = NULL;
+}
+
+/**
+ * Called once we exit the debugger trap to collate all of the separate linked
+ * kcdata lists into one kcdata buffer. The calling thread will run this, and
+ * it is guaranteed that nobody else is touching any stackshot state at this
+ * point. In the case of a panic stackshot, this is never called since we only
+ * use one thread.
+ *
+ * Called with interrupts enabled, stackshot subsys lock held.
+ */
+__result_use_check
+static kern_return_t
+stackshot_collect_kcdata(void)
+{
+	kern_return_t error = 0;
+	uint32_t      hdr_tag;
+
+	assert(!stackshot_ctx.sc_panic_stackshot && !stackshot_ctx.sc_is_singlethreaded);
+	LCK_MTX_ASSERT(&stackshot_subsys_mutex, LCK_MTX_ASSERT_OWNED);
+
+	/* Allocate our final kcdata buffer. */
+	kcd_exit_on_error(stackshot_alloc_final_kcdata());
+	assert(stackshot_ctx.sc_finalized_kcdata != NULL);
+
+	/* Setup compression if we need it. */
+	if (stackshot_flags & STACKSHOT_DO_COMPRESS) {
+		hdr_tag = (stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+		    : KCDATA_BUFFER_BEGIN_STACKSHOT;
+		kcd_exit_on_error(kcdata_init_compress(stackshot_ctx.sc_finalized_kcdata, hdr_tag, kdp_memcpy, KCDCT_ZLIB));
+	}
+
+	/* Copy over all of the pre task-iteration kcdata (to preserve order as if it were single-threaded) */
+	kcd_exit_on_error(stackshot_copy_linked_kcdata(stackshot_ctx.sc_finalized_kcdata, stackshot_ctx.sc_pretask_kcdata));
+
+	/* Set each queue's cur_item to 0. */
+	for (size_t i = 0; i < STACKSHOT_NUM_WORKQUEUES; i++) {
+		os_atomic_store(&stackshot_ctx.sc_workqueues[i].sswq_cur_item, 0, relaxed);
+	}
+
+	/*
+	 * Iterate over work queue(s) and copy the kcdata in.
+	 */
+	while (true) {
+		struct stackshot_workitem  *next_item = NULL;
+		struct stackshot_workqueue *next_queue = NULL;
+		for (size_t i = 0; i < STACKSHOT_NUM_WORKQUEUES; i++) {
+			struct stackshot_workqueue *queue = &stackshot_ctx.sc_workqueues[i];
+			size_t cur_item = os_atomic_load(&queue->sswq_cur_item, relaxed);
+
+			/* Check if we're done with this queue */
+			if (cur_item >= os_atomic_load(&queue->sswq_num_items, relaxed)) {
+				continue;
+			}
+
+			/* Check if this workitem should come next */
+			struct stackshot_workitem *item = &queue->sswq_items[cur_item];
+			if ((next_item == NULL) || (next_item->sswi_idx > item->sswi_idx)) {
+				next_item = item;
+				next_queue = queue;
+			}
+		}
+
+		/* Queues are empty. */
+		if (next_item == NULL) {
+			break;
+		}
+
+		assert(next_queue);
+		assert(next_item->sswi_data != NULL);
+
+		os_atomic_inc(&next_queue->sswq_cur_item, relaxed);
+		kcd_exit_on_error(stackshot_copy_linked_kcdata(stackshot_ctx.sc_finalized_kcdata, next_item->sswi_data));
+	}
+
+	/* Write post-task kcdata */
+	kcd_exit_on_error(stackshot_copy_linked_kcdata(stackshot_ctx.sc_finalized_kcdata, stackshot_ctx.sc_posttask_kcdata));
+error_exit:
+	if (error != KERN_SUCCESS) {
+		stackshot_free_final_kcdata();
+	}
+	return error;
+}
+
+
+/**
+ * Called at the very end of stackshot data generation, to write final timing
+ * data to the kcdata structure and close compression. Only called for
+ * multi-threaded stackshots; see stackshot_finalize_singlethreaded_kcata for
+ * single-threaded variant.
+ *
+ * Called with interrupts enabled, stackshot subsys lock held.
+ */
+__result_use_check
+static kern_return_t
+stackshot_finalize_kcdata(void)
+{
+	kern_return_t error = 0;
+
+	assert(!stackshot_ctx.sc_panic_stackshot && !stackshot_ctx.sc_is_singlethreaded);
+	LCK_MTX_ASSERT(&stackshot_subsys_mutex, LCK_MTX_ASSERT_OWNED);
+
+	assert(stackshot_ctx.sc_finalized_kcdata != NULL);
+
+	/* Write stackshot timing info */
+	kcd_exit_on_error(stackshot_push_duration_and_latency(stackshot_ctx.sc_finalized_kcdata));
+
+	/* Note: exactly 0 or 1 call to something pushing more data can be called after kcd_finalize_compression */
+	kcd_finalize_compression(stackshot_ctx.sc_finalized_kcdata);
+	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_ctx.sc_finalized_kcdata, stackshot_flags, "stackshot_out_flags"));
+	kcd_exit_on_error(kcdata_write_buffer_end(stackshot_ctx.sc_finalized_kcdata));
+
+	stackshot_ctx.sc_bytes_traced = (uint32_t) kcdata_memory_get_used_bytes(stackshot_ctx.sc_finalized_kcdata);
+	stackshot_ctx.sc_bytes_uncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(stackshot_ctx.sc_finalized_kcdata);
+
+	if (os_atomic_load(&stackshot_ctx.sc_retval, relaxed) == KERN_SUCCESS) {
+		/* releases and zeros done */
+		kcd_exit_on_error(kcdata_finish(stackshot_ctx.sc_finalized_kcdata));
+	}
+
+	memcpy(stackshot_args.buffer, (void*) stackshot_ctx.sc_finalized_kcdata->kcd_addr_begin, stackshot_args.buffer_size);
+
+	/* Fix duration_outer offset */
+	if (stackshot_duration_outer != NULL) {
+		stackshot_duration_outer = (unaligned_u64*) ((mach_vm_address_t) stackshot_args.buffer + ((mach_vm_address_t) stackshot_duration_outer - stackshot_ctx.sc_finalized_kcdata->kcd_addr_begin));
+	}
+
+error_exit:
+	stackshot_free_final_kcdata();
+	return error;
+}
+
+/**
+ * Finalizes the kcdata for a singlethreaded stackshot.
+ *
+ * May be called from interrupt/panic context.
+ */
+__result_use_check
+static kern_return_t
+stackshot_finalize_singlethreaded_kcdata(void)
+{
+	kern_return_t error;
+
+	assert(stackshot_ctx.sc_is_singlethreaded);
+
+	kcd_exit_on_error(stackshot_push_duration_and_latency(stackshot_ctx.sc_finalized_kcdata));
+	/* Note: exactly 0 or 1 call to something pushing more data can be called after kcd_finalize_compression */
+	kcd_finalize_compression(stackshot_ctx.sc_finalized_kcdata);
+	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_ctx.sc_finalized_kcdata, stackshot_flags, "stackshot_out_flags"));
+	kcd_exit_on_error(kcdata_write_buffer_end(stackshot_ctx.sc_finalized_kcdata));
+
+	stackshot_ctx.sc_bytes_traced = (uint32_t) kcdata_memory_get_used_bytes(stackshot_ctx.sc_finalized_kcdata);
+	stackshot_ctx.sc_bytes_uncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(stackshot_ctx.sc_finalized_kcdata);
+
+	kcd_exit_on_error(kcdata_finish(stackshot_ctx.sc_finalized_kcdata));
+
+	if (stackshot_ctx.sc_panic_stackshot) {
+		*stackshot_args.descriptor = *stackshot_ctx.sc_finalized_kcdata;
+	}
+
+error_exit:
+	return error;
 }
 
 /*
@@ -617,14 +1860,25 @@ stackshot_remap_buffer(void *stackshotbuf, uint32_t bytes_traced, uint64_t out_b
 {
 	int                     error = 0;
 	mach_vm_offset_t        stackshotbuf_user_addr = (mach_vm_offset_t)NULL;
-	vm_prot_t               cur_prot, max_prot;
+	vm_prot_t               cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
 
-	error = mach_vm_remap_kernel(get_task_map(current_task()), &stackshotbuf_user_addr, bytes_traced, 0,
-	    VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE, kernel_map, (mach_vm_offset_t)stackshotbuf, FALSE, &cur_prot, &max_prot, VM_INHERIT_DEFAULT);
+	error = mach_vm_remap(current_map(), &stackshotbuf_user_addr, bytes_traced, 0,
+	    VM_FLAGS_ANYWHERE, kernel_map, (mach_vm_offset_t)stackshotbuf, FALSE,
+	    &cur_prot, &max_prot, VM_INHERIT_DEFAULT);
 	/*
 	 * If the call to mach_vm_remap fails, we return the appropriate converted error
 	 */
 	if (error == KERN_SUCCESS) {
+		/* If the user addr somehow didn't get set, we should make sure that we fail, and (eventually)
+		 * panic on development kernels to find out why
+		 */
+		if (stackshotbuf_user_addr == (mach_vm_offset_t)NULL) {
+#if DEVELOPMENT || DEBUG
+			os_log_error(OS_LOG_DEFAULT, "stackshot: mach_vm_remap succeeded with NULL\n");
+#endif // DEVELOPMENT || DEBUG
+			return KERN_FAILURE;
+		}
+
 		/*
 		 * If we fail to copy out the address or size of the new buffer, we remove the buffer mapping that
 		 * we just made in the task's user space.
@@ -646,7 +1900,7 @@ stackshot_remap_buffer(void *stackshotbuf, uint32_t bytes_traced, uint64_t out_b
 #if CONFIG_EXCLAVES
 
 static kern_return_t
-stackshot_setup_exclave_waitlist(kcdata_descriptor_t kcdata)
+stackshot_setup_exclave_waitlist(void)
 {
 	kern_return_t error = KERN_SUCCESS;
 	size_t exclave_threads_max = exclaves_ipc_buffer_count();
@@ -659,9 +1913,8 @@ stackshot_setup_exclave_waitlist(kcdata_descriptor_t kcdata)
 			error = KERN_INVALID_ARGUMENT;
 			goto error;
 		}
-		stackshot_exclave_inspect_ctids = kcdata_endalloc(kcdata, waitlist_size);
+		stackshot_exclave_inspect_ctids = stackshot_alloc_with_size(waitlist_size, &error);
 		if (!stackshot_exclave_inspect_ctids) {
-			error = KERN_RESOURCE_SHORTAGE;
 			goto error;
 		}
 		stackshot_exclave_inspect_ctid_count = 0;
@@ -673,21 +1926,31 @@ error:
 }
 
 static kern_return_t
-collect_exclave_threads(void)
+collect_exclave_threads(uint64_t ss_flags)
 {
 	size_t i;
 	ctid_t ctid;
 	thread_t thread;
-	kern_return_t kr;
+	kern_return_t kr = KERN_SUCCESS;
 	STACKSHOT_SUBSYS_ASSERT_LOCKED();
 
 	lck_mtx_lock(&exclaves_collect_mtx);
+
+	if (stackshot_exclave_inspect_ctid_count == 0) {
+		/* Nothing to do */
+		goto out;
+	}
+
+	// When asking for ASIDs, make sure we get all exclaves asids and mappings as well
+	exclaves_stackshot_raw_addresses = (ss_flags & STACKSHOT_ASID);
+	exclaves_stackshot_all_address_spaces = (ss_flags & (STACKSHOT_ASID | STACKSHOT_EXCLAVES));
+
 	/* This error is intentionally ignored: we are now committed to collecting
 	 * these threads, or at least properly waking them. If this fails, the first
 	 * collected thread should also fail to append to the kcdata, and will abort
 	 * further collection, properly clearing the AST and waking these threads.
 	 */
-	kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
+	kcdata_add_container_marker(stackshot_ctx.sc_finalized_kcdata, KCDATA_TYPE_CONTAINER_BEGIN,
 	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
 
 	for (i = 0; i < stackshot_exclave_inspect_ctid_count; ++i) {
@@ -703,12 +1966,17 @@ collect_exclave_threads(void)
 		goto out;
 	}
 
-	kr = kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
+	kr = kcdata_add_container_marker(stackshot_ctx.sc_finalized_kcdata, KCDATA_TYPE_CONTAINER_END,
 	    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
 	if (kr != KERN_SUCCESS) {
 		goto out;
 	}
 out:
+	/* clear Exclave buffer now that it's been used */
+	stackshot_exclave_inspect_ctids = NULL;
+	stackshot_exclave_inspect_ctid_capacity = 0;
+	stackshot_exclave_inspect_ctid_count = 0;
+
 	lck_mtx_unlock(&exclaves_collect_mtx);
 	return kr;
 }
@@ -724,7 +1992,7 @@ stackshot_exclaves_process_stacktrace(const address_v__opt_s *_Nonnull st, void 
 		goto error_exit;
 	}
 
-	address__v_visit(&st->value, ^(size_t __unused i, const stackshot_address_s __unused item) {
+	address__v_visit(&st->value, ^(size_t __unused i, const stackshottypes_address_s __unused item) {
 		count++;
 	});
 
@@ -732,7 +2000,7 @@ stackshot_exclaves_process_stacktrace(const address_v__opt_s *_Nonnull st, void 
 	kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_IPCSTACKENTRY_ECSTACK,
 	    sizeof(exclave_ecstackentry_addr_t), count, (mach_vm_address_t*)&addr));
 
-	address__v_visit(&st->value, ^(size_t i, const stackshot_address_s item) {
+	address__v_visit(&st->value, ^(size_t i, const stackshottypes_address_s item) {
 		addr[i] = (exclave_ecstackentry_addr_t)item;
 	});
 
@@ -743,7 +2011,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_ipcstackentry(uint64_t index, const stackshot_ipcstackentry_s *_Nonnull ise, void *kcdata_ptr)
+stackshot_exclaves_process_ipcstackentry(uint64_t index, const stackshottypes_ipcstackentry_s *_Nonnull ise, void *kcdata_ptr)
 {
 	kern_return_t error = KERN_SUCCESS;
 
@@ -778,7 +2046,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_ipcstack(const stackshot_ipcstackentry_v__opt_s *_Nonnull ipcstack, void *kcdata_ptr)
+stackshot_exclaves_process_ipcstack(const stackshottypes_ipcstackentry_v__opt_s *_Nonnull ipcstack, void *kcdata_ptr)
 {
 	__block kern_return_t kr = KERN_SUCCESS;
 
@@ -786,7 +2054,7 @@ stackshot_exclaves_process_ipcstack(const stackshot_ipcstackentry_v__opt_s *_Non
 		goto error_exit;
 	}
 
-	stackshot_ipcstackentry__v_visit(&ipcstack->value, ^(size_t i, const stackshot_ipcstackentry_s *_Nonnull item) {
+	stackshottypes_ipcstackentry__v_visit(&ipcstack->value, ^(size_t i, const stackshottypes_ipcstackentry_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
 		        kr = stackshot_exclaves_process_ipcstackentry(i, item, kcdata_ptr);
 		}
@@ -822,13 +2090,13 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+stackshot_exclaves_process_textlayout_segments(const stackshottypes_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	__block struct exclave_textlayout_segment * info = NULL;
 
 	__block size_t count = 0;
-	stackshot_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshot_textsegment_s __unused *_Nonnull item) {
+	stackshottypes_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshottypes_textsegment_s __unused *_Nonnull item) {
 		count++;
 	});
 
@@ -840,9 +2108,13 @@ stackshot_exclaves_process_textlayout_segments(const stackshot_textlayout_s *_No
 	kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS,
 	    sizeof(struct exclave_textlayout_segment), count, (mach_vm_address_t*)&info));
 
-	stackshot_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshot_textsegment_s *_Nonnull item) {
+	stackshottypes_textsegment__v_visit(&tl->textsegments, ^(size_t __unused i, const stackshottypes_textsegment_s *_Nonnull item) {
 		memcpy(&info->layoutSegment_uuid, item->uuid, sizeof(uuid_t));
-		info->layoutSegment_loadAddress = item->loadaddress;
+		if (want_raw_addresses) {
+		        info->layoutSegment_loadAddress = item->rawloadaddress.has_value ? item->rawloadaddress.value: 0;
+		} else {
+		        info->layoutSegment_loadAddress = item->loadaddress;
+		}
 		info++;
 	});
 
@@ -853,7 +2125,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout_s *_Nonnull tl, void *kcdata_ptr)
+stackshot_exclaves_process_textlayout(uint64_t index, const stackshottypes_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	__block struct exclave_textlayout_info info = { 0 };
@@ -863,10 +2135,10 @@ stackshot_exclaves_process_textlayout(uint64_t index, const stackshot_textlayout
 
 	info.layout_id = tl->textlayoutid;
 
-	info.etl_flags = kExclaveTextLayoutLoadAddressesUnslid;
+	info.etl_flags = want_raw_addresses ? 0 : kExclaveTextLayoutLoadAddressesUnslid;
 
 	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO, sizeof(struct exclave_textlayout_info), &info));
-	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr));
+	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr, want_raw_addresses));
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
 	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
 error_exit:
@@ -874,7 +2146,7 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull as, void *kcdata_ptr)
+stackshot_exclaves_process_addressspace(const stackshottypes_addressspace_s *_Nonnull as, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	struct exclave_addressspace_info info = { 0 };
@@ -887,7 +2159,7 @@ stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull
 
 	info.eas_id = as->asid;
 
-	if (as->rawaddressslide.has_value) {
+	if (want_raw_addresses && as->rawaddressslide.has_value) {
 		info.eas_flags = kExclaveAddressSpaceHaveSlide;
 		info.eas_slide = as->rawaddressslide.value;
 	} else {
@@ -896,6 +2168,7 @@ stackshot_exclaves_process_addressspace(const stackshot_addressspace_s *_Nonnull
 	}
 
 	info.eas_layoutid = as->textlayoutid; // text layout for this address space
+	info.eas_asroot = as->asroot.has_value ? as->asroot.value : 0;
 
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
 	    STACKSHOT_KCCONTAINER_EXCLAVE_ADDRESSSPACE, as->asid));
@@ -920,10 +2193,10 @@ error_exit:
 }
 
 kern_return_t
-stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr);
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr, bool want_raw_addresses);
 
 kern_return_t
-stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr)
+stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, void *kcdata_ptr, bool want_raw_addresses)
 {
 	__block kern_return_t kr = KERN_SUCCESS;
 
@@ -933,15 +2206,15 @@ stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, 
 		}
 	});
 
-	stackshot_addressspace__v_visit(&result->addressspaces, ^(size_t __unused i, const stackshot_addressspace_s *_Nonnull item) {
+	stackshottypes_addressspace__v_visit(&result->addressspaces, ^(size_t __unused i, const stackshottypes_addressspace_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
-		        kr = stackshot_exclaves_process_addressspace(item, kcdata_ptr);
+		        kr = stackshot_exclaves_process_addressspace(item, kcdata_ptr, want_raw_addresses);
 		}
 	});
 
-	stackshot_textlayout__v_visit(&result->textlayouts, ^(size_t i, const stackshot_textlayout_s *_Nonnull item) {
+	stackshottypes_textlayout__v_visit(&result->textlayouts, ^(size_t i, const stackshottypes_textlayout_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
-		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr);
+		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr, want_raw_addresses);
 		}
 	});
 
@@ -949,17 +2222,17 @@ stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, 
 }
 
 kern_return_t
-stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result);
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, bool want_raw_addresses);
 
 kern_return_t
-stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result)
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, bool want_raw_addresses)
 {
 	kern_return_t kr = KERN_SUCCESS;
 	if (result == NULL) {
 		return collect_kr;
 	}
 
-	kr = stackshot_exclaves_process_stackshot(result, stackshot_kcdata_p);
+	kr = stackshot_exclaves_process_stackshot(result, stackshot_ctx.sc_finalized_kcdata, want_raw_addresses);
 
 	stackshot_exclave_kr = kr;
 
@@ -972,12 +2245,16 @@ commit_exclaves_ast(void)
 {
 	size_t i = 0;
 	thread_t thread = NULL;
+	size_t count;
 
 	assert(debug_mode_active());
 
-	if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
-		for (i = 0; i < stackshot_exclave_inspect_ctid_count; ++i) {
+	count = os_atomic_load(&stackshot_exclave_inspect_ctid_count, acquire);
+
+	if (stackshot_exclave_inspect_ctids) {
+		for (i = 0; i < count; ++i) {
 			thread = ctid_get_thread(stackshot_exclave_inspect_ctids[i]);
+			assert(thread);
 			thread_reference(thread);
 			os_atomic_or(&thread->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_STACKSHOT, relaxed);
 		}
@@ -991,11 +2268,10 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 {
 	int error = 0;
 	boolean_t prev_interrupt_state;
+	bool did_copyout = false;
 	uint32_t bytes_traced = 0;
 	uint32_t stackshot_estimate = 0;
-	uint32_t stackshotbuf_size = 0;
-	void * stackshotbuf = NULL;
-	kcdata_descriptor_t kcdata_p = NULL;
+	struct kdp_snapshot_args snapshot_args;
 
 	void * buf_to_free = NULL;
 	int size_to_free = 0;
@@ -1005,11 +2281,9 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	/* Parsed arguments */
 	uint64_t                out_buffer_addr;
 	uint64_t                out_size_addr;
-	int                     pid = -1;
-	uint64_t                flags;
-	uint64_t                since_timestamp;
 	uint32_t                size_hint = 0;
-	uint32_t                pagetable_mask = STACKSHOT_PAGETABLES_MASK_ALL;
+
+	snapshot_args.pagetable_mask = STACKSHOT_PAGETABLES_MASK_ALL;
 
 	if (stackshot_config == NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1031,9 +2305,9 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		stackshot_config_t *config = (stackshot_config_t *) stackshot_config;
 		out_buffer_addr = config->sc_out_buffer_addr;
 		out_size_addr = config->sc_out_size_addr;
-		pid = config->sc_pid;
-		flags = config->sc_flags;
-		since_timestamp = config->sc_delta_timestamp;
+		snapshot_args.pid = config->sc_pid;
+		snapshot_args.flags = config->sc_flags;
+		snapshot_args.since_timestamp = config->sc_delta_timestamp;
 		if (config->sc_size <= max_tracebuf_size) {
 			size_hint = config->sc_size;
 		}
@@ -1041,8 +2315,8 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		 * Retain the pre-sc_pagetable_mask behavior of STACKSHOT_PAGE_TABLES,
 		 * dump every level if the pagetable_mask is not set
 		 */
-		if (flags & STACKSHOT_PAGE_TABLES && config->sc_pagetable_mask) {
-			pagetable_mask = config->sc_pagetable_mask;
+		if (snapshot_args.flags & STACKSHOT_PAGE_TABLES && config->sc_pagetable_mask) {
+			snapshot_args.pagetable_mask = config->sc_pagetable_mask;
 		}
 		break;
 	default:
@@ -1054,53 +2328,60 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	 * internal/KEXT API.
 	 */
 	if (stackshot_from_user) {
-		if (flags & (STACKSHOT_TRYLOCK | STACKSHOT_SAVE_IN_KERNEL_BUFFER | STACKSHOT_FROM_PANIC)) {
+		if (snapshot_args.flags & (STACKSHOT_TRYLOCK | STACKSHOT_SAVE_IN_KERNEL_BUFFER | STACKSHOT_FROM_PANIC)) {
 			return KERN_NO_ACCESS;
 		}
 #if !DEVELOPMENT && !DEBUG
-		if (flags & (STACKSHOT_DO_COMPRESS)) {
+		if (snapshot_args.flags & (STACKSHOT_DO_COMPRESS)) {
 			return KERN_NO_ACCESS;
 		}
 #endif
 	} else {
-		if (!(flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
+		if (!(snapshot_args.flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
 			return KERN_NOT_SUPPORTED;
 		}
 	}
 
-	if (!((flags & STACKSHOT_KCDATA_FORMAT) || (flags & STACKSHOT_RETRIEVE_EXISTING_BUFFER))) {
+	if (!((snapshot_args.flags & STACKSHOT_KCDATA_FORMAT) || (snapshot_args.flags & STACKSHOT_RETRIEVE_EXISTING_BUFFER))) {
 		return KERN_NOT_SUPPORTED;
 	}
 
 	/* Compresssed delta stackshots or page dumps are not yet supported */
-	if (((flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) || (flags & STACKSHOT_PAGE_TABLES))
-	    && (flags & STACKSHOT_DO_COMPRESS)) {
+	if (((snapshot_args.flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) || (snapshot_args.flags & STACKSHOT_PAGE_TABLES))
+	    && (snapshot_args.flags & STACKSHOT_DO_COMPRESS)) {
 		return KERN_NOT_SUPPORTED;
 	}
 
 	/*
 	 * If we're not saving the buffer in the kernel pointer, we need a place to copy into.
 	 */
-	if ((!out_buffer_addr || !out_size_addr) && !(flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
+	if ((!out_buffer_addr || !out_size_addr) && !(snapshot_args.flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (since_timestamp != 0 && ((flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) == 0)) {
+	if (snapshot_args.since_timestamp != 0 && ((snapshot_args.flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) == 0)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/* EXCLAVES and SKIP_EXCLAVES conflict */
+	if ((snapshot_args.flags & (STACKSHOT_EXCLAVES | STACKSHOT_SKIP_EXCLAVES)) == (STACKSHOT_EXCLAVES | STACKSHOT_SKIP_EXCLAVES)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 #if CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS
 	if (!mt_core_supported) {
-		flags &= ~STACKSHOT_INSTRS_CYCLES;
+		snapshot_args.flags &= ~STACKSHOT_INSTRS_CYCLES;
 	}
 #else /* CONFIG_PERVASIVE_CPI && CONFIG_CPU_COUNTERS */
-	flags &= ~STACKSHOT_INSTRS_CYCLES;
+	snapshot_args.flags &= ~STACKSHOT_INSTRS_CYCLES;
 #endif /* !CONFIG_PERVASIVE_CPI || !CONFIG_CPU_COUNTERS */
 
 	STACKSHOT_TESTPOINT(TP_WAIT_START_STACKSHOT);
 	STACKSHOT_SUBSYS_LOCK();
 
-	if (flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER) {
+	stackshot_tries = 0;
+
+	if (snapshot_args.flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER) {
 		/*
 		 * Don't overwrite an existing stackshot
 		 */
@@ -1108,7 +2389,7 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 			error = KERN_MEMORY_PRESENT;
 			goto error_early_exit;
 		}
-	} else if (flags & STACKSHOT_RETRIEVE_EXISTING_BUFFER) {
+	} else if (snapshot_args.flags & STACKSHOT_RETRIEVE_EXISTING_BUFFER) {
 		if ((kernel_stackshot_buf == NULL) || (kernel_stackshot_buf_size <= 0)) {
 			error = KERN_NOT_IN_SET;
 			goto error_early_exit;
@@ -1121,6 +2402,7 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		 * and then clear the kernel stackshot pointer and associated size.
 		 */
 		if (error == KERN_SUCCESS) {
+			did_copyout = true;
 			buf_to_free = kernel_stackshot_buf;
 			size_to_free = (int) VM_MAP_ROUND_PAGE(kernel_stackshot_buf_size, PAGE_MASK);
 			kernel_stackshot_buf = NULL;
@@ -1130,7 +2412,7 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		goto error_early_exit;
 	}
 
-	if (flags & STACKSHOT_GET_BOOT_PROFILE) {
+	if (snapshot_args.flags & STACKSHOT_GET_BOOT_PROFILE) {
 		void *bootprofile = NULL;
 		uint32_t len = 0;
 #if CONFIG_TELEMETRY
@@ -1141,56 +2423,64 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 			goto error_early_exit;
 		}
 		error = stackshot_remap_buffer(bootprofile, len, out_buffer_addr, out_size_addr);
+		if (error == KERN_SUCCESS) {
+			did_copyout = true;
+		}
 		goto error_early_exit;
 	}
 
 	stackshot_duration_prior_abs = 0;
 	stackshot_initial_estimate_adj = os_atomic_load(&stackshot_estimate_adj, relaxed);
-	stackshotbuf_size = stackshot_estimate =
-	    get_stackshot_estsize(size_hint, stackshot_initial_estimate_adj);
+	snapshot_args.buffer_size = stackshot_estimate =
+	    get_stackshot_estsize(size_hint, stackshot_initial_estimate_adj, snapshot_args.flags, snapshot_args.pid);
 	stackshot_initial_estimate = stackshot_estimate;
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_START,
-	    flags, stackshotbuf_size, pid, since_timestamp);
+	    snapshot_args.flags, snapshot_args.buffer_size, snapshot_args.pid, snapshot_args.since_timestamp);
 	is_traced = true;
 
 #if CONFIG_EXCLAVES
 	assert(!stackshot_exclave_inspect_ctids);
 #endif
 
-	for (; stackshotbuf_size <= max_tracebuf_size; stackshotbuf_size <<= 1) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&stackshotbuf, stackshotbuf_size,
-		    KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+	for (; snapshot_args.buffer_size <= max_tracebuf_size; snapshot_args.buffer_size = MIN(snapshot_args.buffer_size << 1, max_tracebuf_size)) {
+		stackshot_tries++;
+		if ((error = kmem_alloc(kernel_map, (vm_offset_t *)&snapshot_args.buffer, snapshot_args.buffer_size,
+		    KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG)) != KERN_SUCCESS) {
+			os_log_error(OS_LOG_DEFAULT, "stackshot: initial allocation failed: %d, allocating %u bytes of %u max, try %llu\n", (int)error, snapshot_args.buffer_size, max_tracebuf_size, stackshot_tries);
 			error = KERN_RESOURCE_SHORTAGE;
 			goto error_exit;
 		}
 
-
-		uint32_t hdr_tag = (flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
-		    : (flags & STACKSHOT_DO_COMPRESS) ? KCDATA_BUFFER_BEGIN_COMPRESSED
+		uint32_t hdr_tag = (snapshot_args.flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+		    : (snapshot_args.flags & STACKSHOT_DO_COMPRESS) ? KCDATA_BUFFER_BEGIN_COMPRESSED
 		    : KCDATA_BUFFER_BEGIN_STACKSHOT;
-		kcdata_p = kcdata_memory_alloc_init((mach_vm_address_t)stackshotbuf, hdr_tag, stackshotbuf_size,
-		    KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER);
+		#pragma unused(hdr_tag)
 
 		stackshot_duration_outer = NULL;
 
 		/* if compression was requested, allocate the extra zlib scratch area */
-		if (flags & STACKSHOT_DO_COMPRESS) {
-			hdr_tag = (flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+		if (snapshot_args.flags & STACKSHOT_DO_COMPRESS) {
+			hdr_tag = (snapshot_args.flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
 			    : KCDATA_BUFFER_BEGIN_STACKSHOT;
-			error = kcdata_init_compress(kcdata_p, hdr_tag, kdp_memcpy, KCDCT_ZLIB);
 			if (error != KERN_SUCCESS) {
-				os_log(OS_LOG_DEFAULT, "failed to initialize compression: %d!\n",
+				os_log_error(OS_LOG_DEFAULT, "failed to initialize compression: %d!\n",
 				    (int) error);
 				goto error_exit;
 			}
+		}
+
+		/* Prepare the compressor for a stackshot */
+		error = vm_compressor_kdp_init();
+		if (error != KERN_SUCCESS) {
+			goto error_exit;
 		}
 
 		/*
 		 * Disable interrupts and save the current interrupt state.
 		 */
 		prev_interrupt_state = ml_set_interrupts_enabled(FALSE);
-		uint64_t time_start      = mach_absolute_time();
+		uint64_t time_start  = mach_absolute_time();
 
 		/* Emit a SOCD tracepoint that we are initiating a stackshot */
 		SOCD_TRACE_XNU_START(STACKSHOT);
@@ -1198,54 +2488,91 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		/*
 		 * Load stackshot parameters.
 		 */
-		kdp_snapshot_preflight(pid, stackshotbuf, stackshotbuf_size, flags, kcdata_p, since_timestamp,
-		    pagetable_mask);
+		error = kdp_snapshot_preflight_internal(snapshot_args);
 
-		error = stackshot_trap();
-
-		/* record the duration that interupts were disabled */
-		uint64_t time_end = mach_absolute_time();
+		if (error == KERN_SUCCESS) {
+			error = stackshot_trap();
+		}
 
 		/* Emit a SOCD tracepoint that we have completed the stackshot */
 		SOCD_TRACE_XNU_END(STACKSHOT);
 		ml_set_interrupts_enabled(prev_interrupt_state);
 
 #if CONFIG_EXCLAVES
-		/* trigger Exclave thread collection if any are queued */
+		/* stackshot trap should only finish successfully or with no pending Exclave threads */
 		assert(error == KERN_SUCCESS || stackshot_exclave_inspect_ctids == NULL);
-		if (stackshot_exclave_inspect_ctids && stackshot_exclave_inspect_ctid_count > 0) {
-			STACKSHOT_TESTPOINT(TP_START_COLLECTION);
-			error = collect_exclave_threads();
+#endif
+
+		/*
+		 * Stackshot is no longer active.
+		 * (We have to do this here for the special interrupt disable timeout case to work)
+		 */
+		os_atomic_store(&stackshot_ctx.sc_state, SS_INACTIVE, release);
+
+		/* Release compressor kdp buffers */
+		vm_compressor_kdp_teardown();
+
+		/* Record duration that interrupts were disabled */
+		uint64_t time_end = mach_absolute_time();
+		tot_interrupts_off_abs += (time_end - time_start);
+
+		/* Collect multithreaded kcdata into one finalized buffer */
+		if (error == KERN_SUCCESS && !stackshot_ctx.sc_is_singlethreaded) {
+			error = stackshot_collect_kcdata();
+		}
+
+#if CONFIG_EXCLAVES
+		if (stackshot_exclave_inspect_ctids) {
+			if (stackshot_exclave_inspect_ctid_count > 0) {
+				STACKSHOT_TESTPOINT(TP_START_COLLECTION);
+			}
+			error = collect_exclave_threads(snapshot_args.flags);
 		}
 #endif /* CONFIG_EXCLAVES */
 
-		if (stackshot_duration_outer) {
-			*stackshot_duration_outer = time_end - time_start;
+		if (error == KERN_SUCCESS) {
+			if (stackshot_ctx.sc_is_singlethreaded) {
+				error = stackshot_finalize_singlethreaded_kcdata();
+			} else {
+				error = stackshot_finalize_kcdata();
+			}
+
+			if ((error != KERN_SUCCESS) && (error != KERN_INSUFFICIENT_BUFFER_SIZE)) {
+				goto error_exit;
+			}
+			if (error == KERN_INSUFFICIENT_BUFFER_SIZE && snapshot_args.buffer_size == max_tracebuf_size) {
+				os_log_error(OS_LOG_DEFAULT, "stackshot: final buffer size was insufficient at maximum size\n");
+				error = KERN_RESOURCE_SHORTAGE;
+				goto error_exit;
+			}
 		}
-		tot_interrupts_off_abs += time_end - time_start;
+
+		/* record the duration that interupts were disabled + kcdata was being finalized */
+		if (stackshot_duration_outer) {
+			*stackshot_duration_outer = mach_absolute_time() - time_start;
+		}
 
 		if (error != KERN_SUCCESS) {
-			if (kcdata_p != NULL) {
-				kcdata_memory_destroy(kcdata_p);
-				kcdata_p = NULL;
-				stackshot_kcdata_p = NULL;
-			}
-			kmem_free(kernel_map, (vm_offset_t)stackshotbuf, stackshotbuf_size);
-			stackshotbuf = NULL;
+			os_log_error(OS_LOG_DEFAULT, "stackshot: debugger call failed: %d, try %llu, buffer %u estimate %u\n", (int)error, stackshot_tries, snapshot_args.buffer_size, stackshot_estimate);
+			kmem_free(kernel_map, (vm_offset_t)snapshot_args.buffer, snapshot_args.buffer_size);
+			snapshot_args.buffer = NULL;
 			if (error == KERN_INSUFFICIENT_BUFFER_SIZE) {
 				/*
 				 * If we didn't allocate a big enough buffer, deallocate and try again.
 				 */
 				KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD_SHORT) | DBG_FUNC_NONE,
-				    time_end - time_start, stackshot_estimate, stackshotbuf_size);
+				    time_end - time_start, stackshot_estimate, snapshot_args.buffer_size);
 				stackshot_duration_prior_abs += (time_end - time_start);
+				if (snapshot_args.buffer_size == max_tracebuf_size) {
+					os_log_error(OS_LOG_DEFAULT, "stackshot: initial buffer size was insufficient at maximum size\n");
+					error = KERN_RESOURCE_SHORTAGE;
+					goto error_exit;
+				}
 				continue;
 			} else {
 				goto error_exit;
 			}
 		}
-
-		kcd_exit_on_error(finalize_kcdata(stackshot_kcdata_p));
 
 		bytes_traced = kdp_stack_snapshot_bytes_traced();
 		if (bytes_traced <= 0) {
@@ -1253,63 +2580,63 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 			goto error_exit;
 		}
 
-		assert(bytes_traced <= stackshotbuf_size);
-		if (!(flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
-			error = stackshot_remap_buffer(stackshotbuf, bytes_traced, out_buffer_addr, out_size_addr);
+		if (!(snapshot_args.flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER)) {
+			error = stackshot_remap_buffer(snapshot_args.buffer, bytes_traced, out_buffer_addr, out_size_addr);
+			if (error == KERN_SUCCESS) {
+				did_copyout = true;
+			}
 			goto error_exit;
+		}
+
+		if (!(snapshot_args.flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT)) {
+			os_log_info(OS_LOG_DEFAULT, "stackshot: succeeded, traced %u bytes to %u buffer (estimate %u) try %llu\n", bytes_traced, snapshot_args.buffer_size, stackshot_estimate, stackshot_tries);
 		}
 
 		/*
 		 * Save the stackshot in the kernel buffer.
 		 */
-		kernel_stackshot_buf = stackshotbuf;
+		kernel_stackshot_buf = snapshot_args.buffer;
 		kernel_stackshot_buf_size =  bytes_traced;
 		/*
 		 * Figure out if we didn't use all the pages in the buffer. If so, we set buf_to_free to the beginning of
 		 * the next page after the end of the stackshot in the buffer so that the kmem_free clips the buffer and
 		 * update size_to_free for kmem_free accordingly.
 		 */
-		size_to_free = stackshotbuf_size - (int) VM_MAP_ROUND_PAGE(bytes_traced, PAGE_MASK);
+		size_to_free = snapshot_args.buffer_size - (int) VM_MAP_ROUND_PAGE(bytes_traced, PAGE_MASK);
 
 		assert(size_to_free >= 0);
 
 		if (size_to_free != 0) {
-			buf_to_free = (void *)((uint64_t)stackshotbuf + stackshotbuf_size - size_to_free);
+			buf_to_free = (void *)((uint64_t)snapshot_args.buffer + snapshot_args.buffer_size - size_to_free);
 		}
 
-		stackshotbuf = NULL;
-		stackshotbuf_size = 0;
+		snapshot_args.buffer = NULL;
+		snapshot_args.buffer_size = 0;
 		goto error_exit;
-	}
-
-	if (stackshotbuf_size > max_tracebuf_size) {
-		error = KERN_RESOURCE_SHORTAGE;
 	}
 
 error_exit:
 	if (is_traced) {
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_END,
-		    error, tot_interrupts_off_abs, stackshotbuf_size, bytes_traced);
+		    error, tot_interrupts_off_abs, snapshot_args.buffer_size, bytes_traced);
 	}
-
-#if CONFIG_EXCLAVES
-	stackshot_exclave_inspect_ctids = NULL;
-	stackshot_exclave_inspect_ctid_capacity = 0;
-	stackshot_exclave_inspect_ctid_count = 0;
-#endif
 
 error_early_exit:
-	if (kcdata_p != NULL) {
-		kcdata_memory_destroy(kcdata_p);
-		kcdata_p = NULL;
-		stackshot_kcdata_p = NULL;
-	}
-
-	if (stackshotbuf != NULL) {
-		kmem_free(kernel_map, (vm_offset_t)stackshotbuf, stackshotbuf_size);
+	if (snapshot_args.buffer != NULL) {
+		kmem_free(kernel_map, (vm_offset_t)snapshot_args.buffer, snapshot_args.buffer_size);
 	}
 	if (buf_to_free != NULL) {
 		kmem_free(kernel_map, (vm_offset_t)buf_to_free, size_to_free);
+	}
+
+	if (error == KERN_SUCCESS && !(snapshot_args.flags & STACKSHOT_SAVE_IN_KERNEL_BUFFER) && !did_copyout) {
+		/* If we return success, we must have done the copyout to userspace. If
+		 * we somehow did not, we need to indicate failure instead.
+		 */
+#if DEVELOPMENT || DEBUG
+		os_log_error(OS_LOG_DEFAULT, "stackshot: reached end without doing copyout\n");
+#endif // DEVELOPMENT || DEBUG
+		error = KERN_FAILURE;
 	}
 
 	STACKSHOT_SUBSYS_UNLOCK();
@@ -1319,55 +2646,160 @@ error_early_exit:
 }
 
 /*
- * Cache stack snapshot parameters in preparation for a trace.
+ * Set up state and parameters for a stackshot.
+ * (This runs on the calling CPU before other CPUs enter the debugger trap.)
+ * Called when interrupts are disabled, but we're not in the debugger trap yet.
+ */
+__result_use_check
+static kern_return_t
+kdp_snapshot_preflight_internal(struct kdp_snapshot_args args)
+{
+	kern_return_t error = KERN_SUCCESS;
+	uint64_t microsecs = 0, secs = 0;
+	bool is_panic = ((args.flags & STACKSHOT_FROM_PANIC) != 0);
+	bool process_scoped = (stackshot_args.pid != -1) &&
+	    ((stackshot_args.flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) == 0);
+	bool is_singlethreaded = stackshot_single_thread || (process_scoped || is_panic || ((args.flags & STACKSHOT_PAGE_TABLES) != 0));
+	clock_get_calendar_microtime((clock_sec_t *)&secs, (clock_usec_t *)&microsecs);
+
+	cur_stackshot_ctx_idx = (is_panic ? STACKSHOT_CTX_IDX_PANIC : STACKSHOT_CTX_IDX_NORMAL);
+
+	/* Setup overall state */
+	stackshot_ctx = (struct stackshot_context) {
+		.sc_args               = args,
+		.sc_state              = SS_SETUP,
+		.sc_bytes_traced       = 0,
+		.sc_bytes_uncompressed = 0,
+		.sc_microsecs          = microsecs + (secs * USEC_PER_SEC),
+		.sc_panic_stackshot    = is_panic,
+		.sc_is_singlethreaded  = is_singlethreaded,
+		.sc_cpus_working       = 0,
+		.sc_retval             = 0,
+		.sc_calling_cpuid      = cpu_number(),
+		.sc_main_cpuid         = is_singlethreaded ? cpu_number() : -1,
+		.sc_min_kcdata_size    = get_stackshot_est_tasksize(args.flags),
+		.sc_enable_faulting    = false,
+	};
+
+	if (!stackshot_ctx.sc_panic_stackshot) {
+#if defined(__AMP__)
+		/* On AMP systems, we want to split the buffers up by cluster to avoid cache line effects. */
+		stackshot_ctx.sc_num_buffers = is_singlethreaded ? 1 : ml_get_cluster_count();
+#else /* __AMP__ */
+		stackshot_ctx.sc_num_buffers = 1;
+#endif /* !__AMP__ */
+		size_t bufsz = args.buffer_size / stackshot_ctx.sc_num_buffers;
+		for (int buf_idx = 0; buf_idx < stackshot_ctx.sc_num_buffers; buf_idx++) {
+			stackshot_ctx.sc_buffers[buf_idx] = (struct stackshot_buffer) {
+				.ssb_ptr = (void*) ((mach_vm_address_t) args.buffer + (bufsz * buf_idx)),
+				.ssb_size = bufsz,
+				.ssb_used = 0,
+				.ssb_freelist = NULL,
+				.ssb_freelist_lock = 0,
+				.ssb_overhead = 0
+			};
+		}
+
+		/* Setup per-cpu state */
+		percpu_foreach_base(base) {
+			*PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu) = (struct stackshot_cpu_context) { 0 };
+		}
+
+		if (is_singlethreaded) {
+			/* If the stackshot is singlethreaded, set up the kcdata - we don't bother with linked-list kcdata in singlethreaded mode. */
+			uint32_t hdr_tag = (stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+			    : (stackshot_flags & STACKSHOT_DO_COMPRESS) ? KCDATA_BUFFER_BEGIN_COMPRESSED
+			    : KCDATA_BUFFER_BEGIN_STACKSHOT;
+			kcdata_memory_static_init(stackshot_kcdata_p, (mach_vm_address_t) stackshot_args.buffer, hdr_tag,
+			    stackshot_args.buffer_size, KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER);
+			if (stackshot_flags & STACKSHOT_DO_COMPRESS) {
+				hdr_tag = (stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) ? KCDATA_BUFFER_BEGIN_DELTA_STACKSHOT
+				    : KCDATA_BUFFER_BEGIN_STACKSHOT;
+				kcd_exit_on_error(kcdata_init_compress(stackshot_kcdata_p, hdr_tag, kdp_memcpy, KCDCT_ZLIB));
+			}
+			stackshot_cpu_ctx.scc_stack_buffer = kcdata_endalloc(stackshot_kcdata_p, sizeof(uintptr_t) * MAX_FRAMES);
+		}
+	} else {
+		/*
+		 * If this is a panic stackshot, we need to handle things differently.
+		 * The panic code hands us a kcdata descriptor to work with instead of
+		 * us making one ourselves.
+		 */
+		*stackshot_kcdata_p = *stackshot_args.descriptor;
+		stackshot_cpu_ctx = (struct stackshot_cpu_context) {
+			.scc_can_work = true,
+			.scc_stack_buffer = kcdata_endalloc(stackshot_kcdata_p, sizeof(uintptr_t) * MAX_FRAMES)
+		};
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+		*(PERCPU_GET(stackshot_trace_buffer)) = (struct stackshot_trace_buffer) {};
+#endif
+	}
+
+	/* Set up our cpu state */
+	stackshot_cpu_preflight();
+
+error_exit:
+	return error;
+}
+
+/*
+ * The old function signature for kdp_snapshot_preflight, used in the panic path.
+ * Called when interrupts are disabled, but we're not in the debugger trap yet.
  */
 void
 kdp_snapshot_preflight(int pid, void * tracebuf, uint32_t tracebuf_size, uint64_t flags,
     kcdata_descriptor_t data_p, uint64_t since_timestamp, uint32_t pagetable_mask)
 {
-	uint64_t microsecs = 0, secs = 0;
-	clock_get_calendar_microtime((clock_sec_t *)&secs, (clock_usec_t *)&microsecs);
+	__assert_only kern_return_t err;
+	err = kdp_snapshot_preflight_internal((struct kdp_snapshot_args) {
+		.pid = pid,
+		.buffer = tracebuf,
+		.buffer_size = tracebuf_size,
+		.flags = flags,
+		.descriptor = data_p,
+		.since_timestamp = since_timestamp,
+		.pagetable_mask = pagetable_mask
+	});
 
-	stackshot_microsecs = microsecs + (secs * USEC_PER_SEC);
-	stack_snapshot_pid = pid;
-	stack_snapshot_buf = tracebuf;
-	stack_snapshot_bufsize = tracebuf_size;
-	stack_snapshot_flags = flags;
-	stack_snapshot_delta_since_timestamp = since_timestamp;
-	stack_snapshot_pagetable_mask = pagetable_mask;
 
-	panic_stackshot = ((flags & STACKSHOT_FROM_PANIC) != 0);
+	/* This shouldn't ever return an error in the panic path. */
+	assert(err == KERN_SUCCESS);
+}
 
-	assert(data_p != NULL);
-	assert(stackshot_kcdata_p == NULL);
-	stackshot_kcdata_p = data_p;
-
-	stack_snapshot_bytes_traced = 0;
-	stack_snapshot_bytes_uncompressed = 0;
+static void
+stackshot_reset_state(void)
+{
+	stackshot_ctx = (struct stackshot_context) { 0 };
 }
 
 void
 panic_stackshot_reset_state(void)
 {
-	stackshot_kcdata_p = NULL;
+	stackshot_reset_state();
 }
 
 boolean_t
 stackshot_active(void)
 {
-	return stackshot_kcdata_p != NULL;
+	return os_atomic_load(&stackshot_ctx.sc_state, relaxed) != SS_INACTIVE;
+}
+
+boolean_t
+panic_stackshot_active(void)
+{
+	return os_atomic_load(&stackshot_contexts[STACKSHOT_CTX_IDX_PANIC].sc_state, relaxed) != SS_INACTIVE;
 }
 
 uint32_t
 kdp_stack_snapshot_bytes_traced(void)
 {
-	return stack_snapshot_bytes_traced;
+	return stackshot_ctx.sc_bytes_traced;
 }
 
 uint32_t
 kdp_stack_snapshot_bytes_uncompressed(void)
 {
-	return stack_snapshot_bytes_uncompressed;
+	return stackshot_ctx.sc_bytes_uncompressed;
 }
 
 static boolean_t
@@ -1382,35 +2814,28 @@ memory_iszero(void *addr, size_t size)
 	return TRUE;
 }
 
-/*
- * Keep a simple cache of the most recent validation done at a page granularity
- * to avoid the expensive software KVA-to-phys translation in the VM.
- */
-
-struct _stackshot_validation_state {
-	vm_offset_t last_valid_page_kva;
-	size_t last_valid_size;
-} g_validation_state;
-
 static void
 _stackshot_validation_reset(void)
 {
-	g_validation_state.last_valid_page_kva = -1;
-	g_validation_state.last_valid_size = 0;
+	percpu_foreach_base(base) {
+		struct stackshot_cpu_context *cpu_ctx = PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu);
+		cpu_ctx->scc_validation_state.last_valid_page_kva = -1;
+		cpu_ctx->scc_validation_state.last_valid_size = 0;
+	}
 }
 
 static bool
 _stackshot_validate_kva(vm_offset_t addr, size_t size)
 {
 	vm_offset_t page_addr = atop_kernel(addr);
-	if (g_validation_state.last_valid_page_kva == page_addr &&
-	    g_validation_state.last_valid_size <= size) {
+	if (stackshot_cpu_ctx.scc_validation_state.last_valid_page_kva == page_addr &&
+	    stackshot_cpu_ctx.scc_validation_state.last_valid_size <= size) {
 		return true;
 	}
 
 	if (ml_validate_nofault(addr, size)) {
-		g_validation_state.last_valid_page_kva = page_addr;
-		g_validation_state.last_valid_size = size;
+		stackshot_cpu_ctx.scc_validation_state.last_valid_page_kva = page_addr;
+		stackshot_cpu_ctx.scc_validation_state.last_valid_size = size;
 		return true;
 	}
 	return false;
@@ -1431,66 +2856,11 @@ _stackshot_strlen(const char *s, size_t maxlen)
 	return -1; /* failed before end of string */
 }
 
-/*
- * For port labels, we have a small hash table we use to track the
- * struct ipc_service_port_label pointers we see along the way.
- * This structure encapsulates the global state.
- *
- * The hash table is insert-only, similar to "intern"ing strings.  It's
- * only used an manipulated in during the stackshot collection.  We use
- * seperate chaining, with the hash elements and chains being int16_ts
- * indexes into the parallel arrays, with -1 ending the chain.  Array indices are
- * allocated using a bump allocator.
- *
- * The parallel arrays contain:
- *      - plh_array[idx]	the pointer entered
- *      - plh_chains[idx]	the hash chain
- *      - plh_gen[idx]		the last 'generation #' seen
- *
- * Generation IDs are used to track entries looked up in the current
- * task; 0 is never used, and the plh_gen array is cleared to 0 on
- * rollover.
- *
- * The portlabel_ids we report externally are just the index in the array,
- * plus 1 to avoid 0 as a value.  0 is NONE, -1 is UNKNOWN (e.g. there is
- * one, but we ran out of space)
- */
-struct port_label_hash {
-	uint16_t                plh_size;       /* size of allocations; 0 disables tracking */
-	uint16_t                plh_count;      /* count of used entries in plh_array */
-	struct ipc_service_port_label **plh_array; /* _size allocated, _count used */
-	int16_t                *plh_chains;    /* _size allocated */
-	uint8_t                *plh_gen;       /* last 'gen #' seen in */
-	int16_t                *plh_hash;      /* (1 << STACKSHOT_PLH_SHIFT) entry hash table: hash(ptr) -> array index */
-	int16_t                 plh_curgen_min; /* min idx seen for this gen */
-	int16_t                 plh_curgen_max; /* max idx seen for this gen */
-	uint8_t                 plh_curgen;     /* current gen */
-#if DEVELOPMENT || DEBUG
-	/* statistics */
-	uint32_t                plh_lookups;    /* # lookups or inserts */
-	uint32_t                plh_found;
-	uint32_t                plh_found_depth;
-	uint32_t                plh_insert;
-	uint32_t                plh_insert_depth;
-	uint32_t                plh_bad;
-	uint32_t                plh_bad_depth;
-	uint32_t                plh_lookup_send;
-	uint32_t                plh_lookup_receive;
-#define PLH_STAT_OP(...)    (void)(__VA_ARGS__)
-#else /* DEVELOPMENT || DEBUG */
-#define PLH_STAT_OP(...)    (void)(0)
-#endif /* DEVELOPMENT || DEBUG */
-} port_label_hash;
-
-#define STACKSHOT_PLH_SHIFT    7
-#define STACKSHOT_PLH_SIZE_MAX ((kdp_ipc_have_splabel)? 1024 : 0)
-size_t stackshot_port_label_size = (2 * (1u << STACKSHOT_PLH_SHIFT));
-#define STASKSHOT_PLH_SIZE(x) MIN((x), STACKSHOT_PLH_SIZE_MAX)
 
 static size_t
 stackshot_plh_est_size(void)
 {
-	struct port_label_hash *plh = &port_label_hash;
+	struct port_label_hash *plh = &stackshot_ctx.sc_plh;
 	size_t size = STASKSHOT_PLH_SIZE(stackshot_port_label_size);
 
 	if (size == 0) {
@@ -1499,7 +2869,7 @@ stackshot_plh_est_size(void)
 #define SIZE_EST(x) ROUNDUP((x), sizeof (uintptr_t))
 	return SIZE_EST(size * sizeof(*plh->plh_array)) +
 	       SIZE_EST(size * sizeof(*plh->plh_chains)) +
-	       SIZE_EST(size * sizeof(*plh->plh_gen)) +
+	       SIZE_EST(size * sizeof(*stackshot_cpu_ctx.scc_plh_gen.pgs_gen) * real_ncpus) +
 	       SIZE_EST((1ul << STACKSHOT_PLH_SHIFT) * sizeof(*plh->plh_hash));
 #undef SIZE_EST
 }
@@ -1507,41 +2877,66 @@ stackshot_plh_est_size(void)
 static void
 stackshot_plh_reset(void)
 {
-	port_label_hash = (struct port_label_hash){.plh_size = 0};  /* structure assignment */
+	stackshot_ctx.sc_plh = (struct port_label_hash){.plh_size = 0};  /* structure assignment */
 }
 
-static void
-stackshot_plh_setup(kcdata_descriptor_t data)
+static kern_return_t
+stackshot_plh_setup(void)
 {
+	kern_return_t error;
+	size_t size;
+	bool percpu_alloc_failed = false;
 	struct port_label_hash plh = {
 		.plh_size = STASKSHOT_PLH_SIZE(stackshot_port_label_size),
 		.plh_count = 0,
-		.plh_curgen = 1,
-		.plh_curgen_min = STACKSHOT_PLH_SIZE_MAX,
-		.plh_curgen_max = 0,
 	};
+
 	stackshot_plh_reset();
-	size_t size = plh.plh_size;
-	if (size == 0) {
-		return;
+
+	percpu_foreach_base(base) {
+		struct stackshot_cpu_context *cpu_ctx = PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu);
+		cpu_ctx->scc_plh_gen = (struct _stackshot_plh_gen_state){
+			.pgs_gen = NULL,
+			.pgs_curgen = 1,
+			.pgs_curgen_min = STACKSHOT_PLH_SIZE_MAX,
+			.pgs_curgen_max = 0,
+		};
 	}
-	plh.plh_array = kcdata_endalloc(data, size * sizeof(*plh.plh_array));
-	plh.plh_chains = kcdata_endalloc(data, size * sizeof(*plh.plh_chains));
-	plh.plh_gen = kcdata_endalloc(data, size * sizeof(*plh.plh_gen));
-	plh.plh_hash = kcdata_endalloc(data, (1ul << STACKSHOT_PLH_SHIFT) * sizeof(*plh.plh_hash));
-	if (plh.plh_array == NULL || plh.plh_chains == NULL || plh.plh_gen == NULL || plh.plh_hash == NULL) {
-		PLH_STAT_OP(port_label_hash.plh_bad++);
-		return;
+
+	size = plh.plh_size;
+	if (size == 0) {
+		return KERN_SUCCESS;
+	}
+	plh.plh_array = stackshot_alloc_with_size(size * sizeof(*plh.plh_array), &error);
+	plh.plh_chains = stackshot_alloc_with_size(size * sizeof(*plh.plh_chains), &error);
+	percpu_foreach_base(base) {
+		struct stackshot_cpu_context *cpu_ctx = PERCPU_GET_WITH_BASE(base, stackshot_cpu_ctx_percpu);
+		cpu_ctx->scc_plh_gen.pgs_gen = stackshot_alloc_with_size(size * sizeof(*cpu_ctx->scc_plh_gen.pgs_gen), &error);
+		if (cpu_ctx->scc_plh_gen.pgs_gen == NULL) {
+			percpu_alloc_failed = true;
+			break;
+		}
+		for (int x = 0; x < size; x++) {
+			cpu_ctx->scc_plh_gen.pgs_gen[x] = 0;
+		}
+	}
+	plh.plh_hash = stackshot_alloc_with_size((1ul << STACKSHOT_PLH_SHIFT) * sizeof(*plh.plh_hash), &error);
+	if (error != KERN_SUCCESS) {
+		return error;
+	}
+	if (plh.plh_array == NULL || plh.plh_chains == NULL || percpu_alloc_failed || plh.plh_hash == NULL) {
+		PLH_STAT_OP(os_atomic_inc(&stackshot_ctx.sc_plh.plh_bad, relaxed));
+		return KERN_SUCCESS;
 	}
 	for (int x = 0; x < size; x++) {
 		plh.plh_array[x] = NULL;
 		plh.plh_chains[x] = -1;
-		plh.plh_gen[x] = 0;
 	}
 	for (int x = 0; x < (1ul << STACKSHOT_PLH_SHIFT); x++) {
 		plh.plh_hash[x] = -1;
 	}
-	port_label_hash = plh;  /* structure assignment */
+	stackshot_ctx.sc_plh = plh;  /* structure assignment */
+	return KERN_SUCCESS;
 }
 
 static int16_t
@@ -1569,25 +2964,27 @@ enum stackshot_plh_lookup_type {
 static void
 stackshot_plh_resetgen(void)
 {
-	struct port_label_hash *plh = &port_label_hash;
-	if (plh->plh_curgen_min == STACKSHOT_PLH_SIZE_MAX && plh->plh_curgen_max == 0) {
+	struct _stackshot_plh_gen_state *pgs = &stackshot_cpu_ctx.scc_plh_gen;
+	uint16_t plh_size = stackshot_ctx.sc_plh.plh_size;
+
+	if (pgs->pgs_curgen_min == STACKSHOT_PLH_SIZE_MAX && pgs->pgs_curgen_max == 0) {
 		return;  // no lookups, nothing using the current generation
 	}
-	plh->plh_curgen++;
-	plh->plh_curgen_min = STACKSHOT_PLH_SIZE_MAX;
-	plh->plh_curgen_max = 0;
-	if (plh->plh_curgen == 0) { // wrapped, zero the array and increment the generation
-		for (int x = 0; x < plh->plh_size; x++) {
-			plh->plh_gen[x] = 0;
+	pgs->pgs_curgen++;
+	pgs->pgs_curgen_min = STACKSHOT_PLH_SIZE_MAX;
+	pgs->pgs_curgen_max = 0;
+	if (pgs->pgs_curgen == 0) { // wrapped, zero the array and increment the generation
+		for (int x = 0; x < plh_size; x++) {
+			pgs->pgs_gen[x] = 0;
 		}
-		plh->plh_curgen = 1;
+		pgs->pgs_curgen = 1;
 	}
 }
 
 static int16_t
-stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_lookup_type type)
+stackshot_plh_lookup_locked(struct ipc_service_port_label *ispl, enum stackshot_plh_lookup_type type)
 {
-	struct port_label_hash *plh = &port_label_hash;
+	struct port_label_hash *plh = &stackshot_ctx.sc_plh;
 	int depth;
 	int16_t cur;
 	if (ispl == NULL) {
@@ -1595,15 +2992,15 @@ stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_loo
 	}
 	switch (type) {
 	case STACKSHOT_PLH_LOOKUP_SEND:
-		PLH_STAT_OP(plh->plh_lookup_send++);
+		PLH_STAT_OP(os_atomic_inc(&plh->plh_lookup_send, relaxed));
 		break;
 	case STACKSHOT_PLH_LOOKUP_RECEIVE:
-		PLH_STAT_OP(plh->plh_lookup_receive++);
+		PLH_STAT_OP(os_atomic_inc(&plh->plh_lookup_receive, relaxed));
 		break;
 	default:
 		break;
 	}
-	PLH_STAT_OP(plh->plh_lookups++);
+	PLH_STAT_OP(os_atomic_inc(&plh->plh_lookups, relaxed));
 	if (plh->plh_size == 0) {
 		return STACKSHOT_PORTLABELID_MISSING;
 	}
@@ -1613,22 +3010,26 @@ stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_loo
 	for (cur = plh->plh_hash[hash]; cur >= 0; cur = plh->plh_chains[cur]) {
 		/* cur must be in-range, and chain depth can never be above our # allocated */
 		if (cur >= plh->plh_count || depth > plh->plh_count || depth > plh->plh_size) {
-			PLH_STAT_OP((plh->plh_bad++), (plh->plh_bad_depth += depth));
+			PLH_STAT_OP(os_atomic_inc(&plh->plh_bad, relaxed));
+			PLH_STAT_OP(os_atomic_add(&plh->plh_bad_depth, depth, relaxed));
 			return STACKSHOT_PORTLABELID_MISSING;
 		}
 		assert(cur < plh->plh_count);
 		if (plh->plh_array[cur] == ispl) {
-			PLH_STAT_OP((plh->plh_found++), (plh->plh_found_depth += depth));
+			PLH_STAT_OP(os_atomic_inc(&plh->plh_found, relaxed));
+			PLH_STAT_OP(os_atomic_add(&plh->plh_found_depth, depth, relaxed));
 			goto found;
 		}
 		depth++;
 	}
 	/* not found in hash table, so alloc and insert it */
 	if (cur != -1) {
-		PLH_STAT_OP((plh->plh_bad++), (plh->plh_bad_depth += depth));
+		PLH_STAT_OP(os_atomic_inc(&plh->plh_bad, relaxed));
+		PLH_STAT_OP(os_atomic_add(&plh->plh_bad_depth, depth, relaxed));
 		return STACKSHOT_PORTLABELID_MISSING; /* bad end of chain */
 	}
-	PLH_STAT_OP((plh->plh_insert++), (plh->plh_insert_depth += depth));
+	PLH_STAT_OP(os_atomic_inc(&plh->plh_insert, relaxed));
+	PLH_STAT_OP(os_atomic_add(&plh->plh_insert_depth, depth, relaxed));
 	if (plh->plh_count >= plh->plh_size) {
 		return STACKSHOT_PORTLABELID_MISSING; /* no space */
 	}
@@ -1637,27 +3038,28 @@ stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_loo
 	plh->plh_array[cur] = ispl;
 	plh->plh_chains[cur] = plh->plh_hash[hash];
 	plh->plh_hash[hash] = cur;
-found:
-	plh->plh_gen[cur] = plh->plh_curgen;
-	if (plh->plh_curgen_min > cur) {
-		plh->plh_curgen_min = cur;
+found:  ;
+	struct _stackshot_plh_gen_state *pgs = &stackshot_cpu_ctx.scc_plh_gen;
+	pgs->pgs_gen[cur] = pgs->pgs_curgen;
+	if (pgs->pgs_curgen_min > cur) {
+		pgs->pgs_curgen_min = cur;
 	}
-	if (plh->plh_curgen_max < cur) {
-		plh->plh_curgen_max = cur;
+	if (pgs->pgs_curgen_max < cur) {
+		pgs->pgs_curgen_max = cur;
 	}
 	return cur + 1;   /* offset to avoid 0 */
 }
 
-// record any PLH referenced since the last stackshot_plh_resetgen() call
 static kern_return_t
-kdp_stackshot_plh_record(void)
+kdp_stackshot_plh_record_locked(void)
 {
 	kern_return_t error = KERN_SUCCESS;
-	struct port_label_hash *plh = &port_label_hash;
+	struct port_label_hash *plh = &stackshot_ctx.sc_plh;
+	struct _stackshot_plh_gen_state *pgs = &stackshot_cpu_ctx.scc_plh_gen;
 	uint16_t count = plh->plh_count;
-	uint8_t curgen = plh->plh_curgen;
-	int16_t curgen_min = plh->plh_curgen_min;
-	int16_t curgen_max = plh->plh_curgen_max;
+	uint8_t curgen = pgs->pgs_curgen;
+	int16_t curgen_min = pgs->pgs_curgen_min;
+	int16_t curgen_max = pgs->pgs_curgen_max;
 	if (curgen_min <= curgen_max && curgen_max < count &&
 	    count <= plh->plh_size && plh->plh_size <= STACKSHOT_PLH_SIZE_MAX) {
 		struct ipc_service_port_label **arr = plh->plh_array;
@@ -1670,7 +3072,7 @@ kdp_stackshot_plh_record(void)
 			};
 			const char *name = NULL;
 			long name_sz = 0;
-			if (plh->plh_gen[idx] != curgen) {
+			if (pgs->pgs_gen[idx] != curgen) {
 				continue;
 			}
 			if (_stackshot_validate_kva((vm_offset_t)ispl, ispl_size)) {
@@ -1693,15 +3095,36 @@ error_exit:
 	return error;
 }
 
+// record any PLH referenced since the last stackshot_plh_resetgen() call
+static kern_return_t
+kdp_stackshot_plh_record(void)
+{
+	kern_return_t error;
+	plh_lock(&stackshot_ctx.sc_plh);
+	error = kdp_stackshot_plh_record_locked();
+	plh_unlock(&stackshot_ctx.sc_plh);
+	return error;
+}
+
+static int16_t
+stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_lookup_type type)
+{
+	int16_t result;
+	plh_lock(&stackshot_ctx.sc_plh);
+	result = stackshot_plh_lookup_locked(ispl, type);
+	plh_unlock(&stackshot_ctx.sc_plh);
+	return result;
+}
+
 #if DEVELOPMENT || DEBUG
 static kern_return_t
 kdp_stackshot_plh_stats(void)
 {
 	kern_return_t error = KERN_SUCCESS;
-	struct port_label_hash *plh = &port_label_hash;
+	struct port_label_hash *plh = &stackshot_ctx.sc_plh;
 
-#define PLH_STAT(x) do { if (plh->x != 0) { \
-	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, plh->x, "stackshot_" #x)); \
+#define PLH_STAT(x) do { if (os_atomic_load(&plh->x, relaxed) != 0) { \
+	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, os_atomic_load(&plh->x, relaxed), "stackshot_" #x)); \
 } } while (0)
 	PLH_STAT(plh_size);
 	PLH_STAT(plh_lookups);
@@ -1770,7 +3193,7 @@ kcdata_get_task_ss_flags(task_t task)
 		ss_flags |= kTaskTALEngaged;
 	}
 
-	ss_flags |= (0x7 & workqueue_get_pwq_state_kdp(bsd_info)) << 17;
+	ss_flags |= workqueue_get_task_ss_flags_from_pwq_state_kdp(bsd_info);
 
 #if IMPORTANCE_INHERITANCE
 	if (task->task_imp_base) {
@@ -1898,6 +3321,7 @@ kcdata_record_uuid_info(kcdata_descriptor_t kcd, task_t task, uint64_t trace_fla
 	uint32_t uuid_info_count         = 0;
 	mach_vm_address_t uuid_info_addr = 0;
 	uint64_t uuid_info_timestamp     = 0;
+	#pragma unused(uuid_info_timestamp)
 	kdp_fault_result_flags_t kdp_fault_results = 0;
 
 
@@ -2219,6 +3643,28 @@ kcdata_record_task_codesigning_info(kcdata_descriptor_t kcd, task_t task)
 	}
 	return kcdata_push_data(kcd, STACKSHOT_KCTYPE_CODESIGNING_INFO, sizeof(struct stackshot_task_codesigning_info), &codesigning_info);
 }
+
+static kern_return_t
+kcdata_record_task_jit_address_range(kcdata_descriptor_t kcd, task_t task)
+{
+	uint64_t jit_start_addr = 0;
+	uint64_t jit_end_addr = 0;
+	struct crashinfo_jit_address_range range = {};
+	kern_return_t ret = 0;
+	pmap_t pmap = get_task_pmap(task);
+	if (task == kernel_task || NULL == pmap) {
+		return KERN_SUCCESS;
+	}
+	ret = get_jit_address_range_kdp(pmap, (uintptr_t*)&jit_start_addr, (uintptr_t*)&jit_end_addr);
+	if (KERN_SUCCESS == ret) {
+		range.start_address = jit_start_addr;
+		range.end_address = jit_end_addr;
+		return kcdata_push_data(kcd, TASK_CRASHINFO_JIT_ADDRESS_RANGE, sizeof(struct crashinfo_jit_address_range), &range);
+	} else {
+		return KERN_SUCCESS;
+	}
+}
+
 #if CONFIG_TASK_SUSPEND_STATS
 static kern_return_t
 kcdata_record_task_suspension_info(kcdata_descriptor_t kcd, task_t task)
@@ -2420,8 +3866,9 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 		// pagetable dumps can be large; reset the interrupt timeout to avoid a panic
 		ml_spin_debug_clear_self();
 #endif
+		assert(stackshot_ctx.sc_is_singlethreaded);
 		size_t bytes_dumped = 0;
-		error = pmap_dump_page_tables(task->map->pmap, kcd_end_address(kcd), kcd_max_address(kcd), stack_snapshot_pagetable_mask, &bytes_dumped);
+		error = pmap_dump_page_tables(task->map->pmap, kcd_end_address(kcd), kcd_max_address(kcd), stackshot_args.pagetable_mask, &bytes_dumped);
 		if (error != KERN_SUCCESS) {
 			goto error_exit;
 		} else {
@@ -2455,6 +3902,7 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 	kcd_exit_on_error(kcdata_record_task_cpu_architecture(kcd, task));
 	kcd_exit_on_error(kcdata_record_task_codesigning_info(kcd, task));
+	kcd_exit_on_error(kcdata_record_task_jit_address_range(kcd, task));
 
 #if CONFIG_TASK_SUSPEND_STATS
 	kcd_exit_on_error(kcdata_record_task_suspension_info(kcd, task));
@@ -2633,29 +4081,8 @@ _stackshot_backtrace_copy(void *vctx, void *dst, user_addr_t src, size_t size)
 	return 0;
 }
 
-#if CONFIG_EXCLAVES
-
-/* Return index of last xnu frame before secure world. Valid frame index is
- * always in range <0, nframes-1>. When frame is not found, return nframes
- * value. */
-static uint32_t
-kdp_exclave_stack_offset(uintptr_t * out_addr, size_t nframes)
-{
-	size_t i = 0;
-	while (i < nframes &&
-	    !((exclaves_enter_range_start < out_addr[i]) && (out_addr[i] <= exclaves_enter_range_end))
-	    && !((exclaves_upcall_range_start < out_addr[i]) && (out_addr[i] <= exclaves_upcall_range_end))
-	    ) {
-		i++;
-	}
-
-	return (uint32_t)i;
-}
-#endif /* CONFIG_EXCLAVES */
-
 static kern_return_t
-kcdata_record_thread_snapshot(
-	kcdata_descriptor_t kcd, thread_t thread, task_t task, uint64_t trace_flags, boolean_t have_pmap, boolean_t thread_on_core)
+kcdata_record_thread_snapshot(kcdata_descriptor_t kcd, thread_t thread, task_t task, uint64_t trace_flags, boolean_t have_pmap, boolean_t thread_on_core)
 {
 	boolean_t dispatch_p              = ((trace_flags & STACKSHOT_GET_DQ) != 0);
 	boolean_t active_kthreads_only_p  = ((trace_flags & STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY) != 0);
@@ -2773,16 +4200,18 @@ kcdata_record_thread_snapshot(
 		cur_thread_snap->ths_ss_flags |= kGlobalForcedIdle;
 	}
 #if CONFIG_EXCLAVES
-	if ((thread->th_exclaves_state & TH_EXCLAVES_RPC) && stackshot_exclave_inspect_ctids && !panic_stackshot) {
-		/* save exclave thread for later collection */
-		if (stackshot_exclave_inspect_ctid_count < stackshot_exclave_inspect_ctid_capacity) {
-			/* certain threads, like the collector, must never be inspected */
-			if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_NOINSPECT) == 0) {
-				stackshot_exclave_inspect_ctids[stackshot_exclave_inspect_ctid_count] = thread_get_ctid(thread);
-				stackshot_exclave_inspect_ctid_count += 1;
-				if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_STACKSHOT) != 0) {
-					panic("stackshot: trying to inspect already-queued thread");
-				}
+	/* save exclave thread for later collection */
+	if ((thread->th_exclaves_state & TH_EXCLAVES_RPC) && stackshot_exclave_inspect_ctids && !stackshot_ctx.sc_panic_stackshot) {
+		/* certain threads, like the collector, must never be inspected */
+		if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_NOINSPECT) == 0) {
+			uint32_t ctid_index = os_atomic_inc_orig(&stackshot_exclave_inspect_ctid_count, acq_rel);
+			if (ctid_index < stackshot_exclave_inspect_ctid_capacity) {
+				stackshot_exclave_inspect_ctids[ctid_index] = thread_get_ctid(thread);
+			} else {
+				os_atomic_store(&stackshot_exclave_inspect_ctid_count, stackshot_exclave_inspect_ctid_capacity, release);
+			}
+			if ((os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) & TH_EXCLAVES_INSPECTION_STACKSHOT) != 0) {
+				panic("stackshot: trying to inspect already-queued thread");
 			}
 		}
 	}
@@ -2865,21 +4294,12 @@ kcdata_record_thread_snapshot(
 		uint32_t user_ths_ss_flags = 0;
 
 		/*
-		 * This relies on knowing the "end" address points to the start of the
-		 * next elements data and, in the case of arrays, the elements.
+		 * We don't know how big the stacktrace will be, so read it into our
+		 * per-cpu buffer, then copy it to the kcdata.
 		 */
-		out_addr = (mach_vm_address_t)kcd_end_address(kcd);
-		mach_vm_address_t max_addr = (mach_vm_address_t)kcd_max_address(kcd);
-		assert(out_addr <= max_addr);
-		size_t avail_frames = (max_addr - out_addr) / sizeof(uintptr_t);
-		size_t max_frames = MIN(avail_frames, MAX_FRAMES);
-		if (max_frames == 0) {
-			error = KERN_RESOURCE_SHORTAGE;
-			goto error_exit;
-		}
 		struct _stackshot_backtrace_context ctx = {
 			.sbc_map = task->map,
-			.sbc_allow_faulting = stack_enable_faulting,
+			.sbc_allow_faulting = stackshot_ctx.sc_enable_faulting,
 			.sbc_prev_page = -1,
 			.sbc_prev_kva = -1,
 		};
@@ -2890,7 +4310,7 @@ kcdata_record_thread_snapshot(
 		};
 		struct backtrace_user_info info = BTUINFO_INIT;
 
-		saved_count = backtrace_user((uintptr_t *)out_addr, max_frames, &ctl,
+		saved_count = backtrace_user(stackshot_cpu_ctx.scc_stack_buffer, MAX_FRAMES, &ctl,
 		    &info);
 		if (saved_count > 0) {
 #if __LP64__
@@ -2898,14 +4318,9 @@ kcdata_record_thread_snapshot(
 #else // __LP64__
 #define STACKLR_WORDS STACKSHOT_KCTYPE_USER_STACKLR
 #endif // !__LP64__
-			mach_vm_address_t out_addr_array;
-			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd,
-			    STACKLR_WORDS, sizeof(uintptr_t), saved_count,
-			    &out_addr_array));
-			/*
-			 * Ensure the kcd_end_address (above) trick worked.
-			 */
-			assert(out_addr == out_addr_array);
+			/* Now, copy the stacktrace into kcdata. */
+			kcd_exit_on_error(kcdata_push_array(kcd, STACKLR_WORDS, sizeof(uintptr_t),
+			    saved_count, stackshot_cpu_ctx.scc_stack_buffer));
 			if (info.btui_info & BTI_64_BIT) {
 				user_ths_ss_flags |= kUser64_p;
 			}
@@ -2922,29 +4337,14 @@ kcdata_record_thread_snapshot(
 				uint32_t async_start_offset = info.btui_async_start_index;
 				kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_USER_ASYNC_START_INDEX,
 				    sizeof(async_start_offset), &async_start_offset));
-				out_addr = (mach_vm_address_t)kcd_end_address(kcd);
-				assert(out_addr <= max_addr);
-
-				avail_frames = (max_addr - out_addr) / sizeof(uintptr_t);
-				max_frames = MIN(avail_frames, MAX_FRAMES);
-				if (max_frames == 0) {
-					error = KERN_RESOURCE_SHORTAGE;
-					goto error_exit;
-				}
 				ctl.btc_frame_addr = info.btui_async_frame_addr;
 				ctl.btc_addr_offset = BTCTL_ASYNC_ADDR_OFFSET;
 				info = BTUINFO_INIT;
-				unsigned int async_count = backtrace_user((uintptr_t *)out_addr, max_frames, &ctl,
+				unsigned int async_count = backtrace_user(stackshot_cpu_ctx.scc_stack_buffer, MAX_FRAMES, &ctl,
 				    &info);
 				if (async_count > 0) {
-					mach_vm_address_t async_out_addr;
-					kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd,
-					    STACKSHOT_KCTYPE_USER_ASYNC_STACKLR64, sizeof(uintptr_t), async_count,
-					    &async_out_addr));
-					/*
-					 * Ensure the kcd_end_address (above) trick worked.
-					 */
-					assert(out_addr == async_out_addr);
+					kcd_exit_on_error(kcdata_push_array(kcd, STACKSHOT_KCTYPE_USER_ASYNC_STACKLR64,
+					    sizeof(uintptr_t), async_count, stackshot_cpu_ctx.scc_stack_buffer));
 					if ((info.btui_info & BTI_TRUNCATED) ||
 					    (ctx.sbc_flags & kThreadTruncatedBT)) {
 						user_ths_ss_flags |= kThreadTruncatedBT;
@@ -2970,7 +4370,6 @@ kcdata_record_thread_snapshot(
 	 */
 	if (thread->kernel_stack != 0) {
 		uint32_t kern_ths_ss_flags = 0;
-		out_addr = (mach_vm_address_t)kcd_end_address(kcd);
 #if defined(__LP64__)
 		uint32_t stack_kcdata_type = STACKSHOT_KCTYPE_KERN_STACKLR64;
 		extern int machine_trace_thread64(thread_t thread, char *tracepos,
@@ -2982,15 +4381,14 @@ kcdata_record_thread_snapshot(
 		    char *tracebound, int nframes, uint32_t *thread_trace_flags);
 		saved_count = machine_trace_thread(
 #endif
-			thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES,
+			thread, (char*) stackshot_cpu_ctx.scc_stack_buffer,
+			(char *) (stackshot_cpu_ctx.scc_stack_buffer + MAX_FRAMES), MAX_FRAMES,
 			&kern_ths_ss_flags);
 		if (saved_count > 0) {
 			int frame_size = sizeof(uintptr_t);
 #if defined(__LP64__)
 			cur_thread_snap->ths_ss_flags |= kKernel64_p;
 #endif
-			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, stack_kcdata_type,
-			    frame_size, saved_count / frame_size, &out_addr));
 #if CONFIG_EXCLAVES
 			if (thread->th_exclaves_state & TH_EXCLAVES_RPC) {
 				struct thread_exclaves_info info = { 0 };
@@ -3002,12 +4400,14 @@ kcdata_record_thread_snapshot(
 				if (thread->th_exclaves_state & TH_EXCLAVES_UPCALL) {
 					info.tei_flags |= kExclaveUpcallActive;
 				}
-				info.tei_scid = thread->th_exclaves_scheduling_context_id;
-				info.tei_thread_offset = kdp_exclave_stack_offset((uintptr_t *)out_addr, saved_count / frame_size);
+				info.tei_scid = thread->th_exclaves_ipc_ctx.scid;
+				info.tei_thread_offset = exclaves_stack_offset(stackshot_cpu_ctx.scc_stack_buffer, saved_count / frame_size, false);
 
 				kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO, sizeof(struct thread_exclaves_info), &info));
 			}
 #endif /* CONFIG_EXCLAVES */
+			kcd_exit_on_error(kcdata_push_array(kcd, stack_kcdata_type,
+			    frame_size, saved_count / frame_size, stackshot_cpu_ctx.scc_stack_buffer));
 		}
 		if (kern_ths_ss_flags & kThreadTruncatedBT) {
 			kern_ths_ss_flags |= kThreadTruncKernBT;
@@ -3133,7 +4533,7 @@ classify_thread(thread_t thread, boolean_t * thread_on_core_p, boolean_t collect
 	if (last_processor != PROCESSOR_NULL) {
 		/* Idle threads are always treated as on-core, since the processor state can change while they are running. */
 		thread_on_core = (thread == last_processor->idle_thread) ||
-		    ((last_processor->state == PROCESSOR_SHUTDOWN || last_processor->state == PROCESSOR_RUNNING) &&
+		    (last_processor->state == PROCESSOR_RUNNING &&
 		    last_processor->active_thread == thread);
 	}
 
@@ -3141,26 +4541,22 @@ classify_thread(thread_t thread, boolean_t * thread_on_core_p, boolean_t collect
 
 	/* Capture the full thread snapshot if this is not a delta stackshot or if the thread has run subsequent to the
 	 * previous full stackshot */
-	if (!collect_delta_stackshot || thread_on_core || (thread->last_run_time > stack_snapshot_delta_since_timestamp)) {
+	if (!collect_delta_stackshot || thread_on_core || (thread->last_run_time > stackshot_args.since_timestamp)) {
 		return tc_full_snapshot;
 	} else {
 		return tc_delta_snapshot;
 	}
 }
 
-struct stackshot_context {
-	int pid;
-	uint64_t trace_flags;
-	bool include_drivers;
-};
 
 static kern_return_t
-kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
+kdp_stackshot_record_task(task_t task)
 {
-	boolean_t active_kthreads_only_p  = ((ctx->trace_flags & STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY) != 0);
-	boolean_t save_donating_pids_p    = ((ctx->trace_flags & STACKSHOT_SAVE_IMP_DONATION_PIDS) != 0);
-	boolean_t collect_delta_stackshot = ((ctx->trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
-	boolean_t save_owner_info         = ((ctx->trace_flags & STACKSHOT_THREAD_WAITINFO) != 0);
+	boolean_t active_kthreads_only_p  = ((stackshot_flags & STACKSHOT_ACTIVE_KERNEL_THREADS_ONLY) != 0);
+	boolean_t save_donating_pids_p    = ((stackshot_flags & STACKSHOT_SAVE_IMP_DONATION_PIDS) != 0);
+	boolean_t collect_delta_stackshot = ((stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
+	boolean_t save_owner_info         = ((stackshot_flags & STACKSHOT_THREAD_WAITINFO) != 0);
+	boolean_t include_drivers         = ((stackshot_flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) != 0);
 
 	kern_return_t error = KERN_SUCCESS;
 	mach_vm_address_t out_addr = 0;
@@ -3183,7 +4579,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
 	uint64_t task_begin_cpu_cycle_count = 0;
-	if (!panic_stackshot) {
+	if (!stackshot_ctx.sc_panic_stackshot) {
 		task_begin_cpu_cycle_count = mt_cur_cpu_cycles();
 	}
 #endif
@@ -3228,7 +4624,11 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 	/* Trace everything, unless a process was specified. Add in driver tasks if requested. */
-	if ((ctx->pid == -1) || (ctx->pid == task_pid) || (ctx->include_drivers && task_is_driver(task))) {
+	if ((stackshot_args.pid == -1) || (stackshot_args.pid == task_pid) || (include_drivers && task_is_driver(task))) {
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+		stackshot_cpu_latency.tasks_processed++;
+#endif
+
 		/* add task snapshot marker */
 		kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
 		    container_type, task_uniqueid));
@@ -3272,7 +4672,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 		if (task_in_transition ||
 		    !collect_delta_stackshot ||
 		    (task_start_abstime == 0) ||
-		    (task_start_abstime > stack_snapshot_delta_since_timestamp) ||
+		    (task_start_abstime > stackshot_args.since_timestamp) ||
 		    some_thread_ran) {
 			/*
 			 * Collect full task information in these scenarios:
@@ -3285,22 +4685,22 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			 */
 
 			kcd_exit_on_error(kcdata_record_shared_cache_info(stackshot_kcdata_p, task, &task_snap_ss_flags));
-			kcd_exit_on_error(kcdata_record_uuid_info(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, &task_snap_ss_flags));
+			kcd_exit_on_error(kcdata_record_uuid_info(stackshot_kcdata_p, task, stackshot_flags, have_pmap, &task_snap_ss_flags));
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 			if (!task_in_transition) {
-				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags, &latency_info));
+				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, stackshot_flags, have_pmap, task_snap_ss_flags, &latency_info));
 			} else {
 				kcd_exit_on_error(kcdata_record_transitioning_task_snapshot(stackshot_kcdata_p, task, task_snap_ss_flags, transition_type));
 			}
 #else
 			if (!task_in_transition) {
-				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags));
+				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, stackshot_flags, have_pmap, task_snap_ss_flags));
 			} else {
 				kcd_exit_on_error(kcdata_record_transitioning_task_snapshot(stackshot_kcdata_p, task, task_snap_ss_flags, transition_type));
 			}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 		} else {
-			kcd_exit_on_error(kcdata_record_task_delta_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags));
+			kcd_exit_on_error(kcdata_record_task_delta_snapshot(stackshot_kcdata_p, task, stackshot_flags, have_pmap, task_snap_ss_flags));
 		}
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
@@ -3315,6 +4715,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			    num_delta_thread_snapshots, &out_addr));
 			delta_snapshots = (struct thread_delta_snapshot_v3 *)out_addr;
 		}
+
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 		latency_info.task_thread_count_loop_latency = mach_absolute_time();
@@ -3340,6 +4741,10 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			boolean_t thread_on_core;
 			enum thread_classification thread_classification = classify_thread(thread, &thread_on_core, collect_delta_stackshot);
 
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+			stackshot_cpu_latency.threads_processed++;
+#endif
+
 			switch (thread_classification) {
 			case tc_full_snapshot:
 				/* add thread marker */
@@ -3349,7 +4754,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 				/* thread snapshot can be large, including strings, avoid overflowing the stack. */
 				kcdata_compression_window_open(stackshot_kcdata_p);
 
-				kcd_exit_on_error(kcdata_record_thread_snapshot(stackshot_kcdata_p, thread, task, ctx->trace_flags, have_pmap, thread_on_core));
+				kcd_exit_on_error(kcdata_record_thread_snapshot(stackshot_kcdata_p, thread, task, stackshot_flags, have_pmap, thread_on_core));
 
 				kcd_exit_on_error(kcdata_compression_window_close(stackshot_kcdata_p));
 
@@ -3380,7 +4785,6 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 		latency_info.task_thread_count_loop_latency = mach_absolute_time() - latency_info.task_thread_count_loop_latency;
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
-
 
 		thread_waitinfo_v2_t *thread_waitinfo           = NULL;
 		thread_turnstileinfo_v2_t *thread_turnstileinfo = NULL;
@@ -3416,6 +4820,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 		queue_iterate(&task->threads, thread, thread_t, task_threads)
 		{
 			uint64_t thread_uniqueid;
+			#pragma unused(thread_uniqueid)
 
 			if (active_kthreads_only_p && thread->kernel_stack == 0) {
 				continue;
@@ -3463,25 +4868,22 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 
 #if IMPORTANCE_INHERITANCE
 		if (save_donating_pids_p) {
-			kcd_exit_on_error(
-				((((mach_vm_address_t)kcd_end_address(stackshot_kcdata_p) + (TASK_IMP_WALK_LIMIT * sizeof(int32_t))) <
-				(mach_vm_address_t)kcd_max_address(stackshot_kcdata_p))
-				? KERN_SUCCESS
-				: KERN_RESOURCE_SHORTAGE));
+			/* Ensure the buffer is big enough, since we're using the stack buffer for this. */
+			static_assert(TASK_IMP_WALK_LIMIT * sizeof(int32_t) <= MAX_FRAMES * sizeof(uintptr_t));
 			saved_count = task_importance_list_pids(task, TASK_IMP_LIST_DONATING_PIDS,
-			    (void *)kcd_end_address(stackshot_kcdata_p), TASK_IMP_WALK_LIMIT);
+			    (char*) stackshot_cpu_ctx.scc_stack_buffer, TASK_IMP_WALK_LIMIT);
 			if (saved_count > 0) {
 				/* Variable size array - better not have it on the stack. */
 				kcdata_compression_window_open(stackshot_kcdata_p);
-				kcd_exit_on_error(kcdata_get_memory_addr_for_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_DONATING_PIDS,
-				    sizeof(int32_t), saved_count, &out_addr));
+				kcd_exit_on_error(kcdata_push_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_DONATING_PIDS,
+				    sizeof(int32_t), saved_count, stackshot_cpu_ctx.scc_stack_buffer));
 				kcd_exit_on_error(kcdata_compression_window_close(stackshot_kcdata_p));
 			}
 		}
 #endif
 
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
-		if (!panic_stackshot) {
+		if (!stackshot_ctx.sc_panic_stackshot) {
 			kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, (mt_cur_cpu_cycles() - task_begin_cpu_cycle_count),
 			    "task_cpu_cycle_count"));
 		}
@@ -3523,7 +4925,7 @@ kdp_stackshot_shared_regions(uint64_t trace_flags)
 		if (!_stackshot_validate_kva((vm_offset_t)sr, sizeof(*sr))) {
 			break;
 		}
-		if (collect_delta_stackshot && sr->sr_install_time < stack_snapshot_delta_since_timestamp) {
+		if (collect_delta_stackshot && sr->sr_install_time < stackshot_args.since_timestamp) {
 			continue; // only include new shared caches in delta stackshots
 		}
 		uint32_t sharedCacheFlags = ((sr == primary_system_shared_region) ? kSharedCacheSystemPrimary : 0) |
@@ -3596,88 +4998,82 @@ error_exit:
 }
 
 static kern_return_t
-kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
+kdp_stackshot_kcdata_format(void)
 {
 	kern_return_t error        = KERN_SUCCESS;
 	mach_vm_address_t out_addr = 0;
-	uint64_t abs_time = 0, abs_time_end = 0;
+	uint64_t abs_time = 0;
 	uint64_t system_state_flags = 0;
 	task_t task = TASK_NULL;
 	mach_timebase_info_data_t timebase = {0, 0};
 	uint32_t length_to_copy = 0, tmp32 = 0;
 	abs_time = mach_absolute_time();
 	uint64_t last_task_start_time = 0;
-	uint64_t trace_flags = 0;
-
-	if (!trace_flags_p) {
-		panic("Invalid kdp_stackshot_kcdata_format trace_flags_p value");
-	}
-	trace_flags = *trace_flags_p;
-
-#if STACKSHOT_COLLECTS_LATENCY_INFO
-	struct stackshot_latency_collection latency_info;
-#endif
+	int cur_workitem_index = 0;
+	uint64_t tasks_in_stackshot = 0;
+	uint64_t threads_in_stackshot = 0;
 
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
 	uint64_t stackshot_begin_cpu_cycle_count = 0;
 
-	if (!panic_stackshot) {
+	if (!stackshot_ctx.sc_panic_stackshot) {
 		stackshot_begin_cpu_cycle_count = mt_cur_cpu_cycles();
 	}
 #endif
 
+	/* the CPU entering here is participating in the stackshot */
+	stackshot_cpu_ctx.scc_did_work = true;
+
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	collect_latency_info = trace_flags & STACKSHOT_DISABLE_LATENCY_INFO ? false : true;
+	collect_latency_info = stackshot_flags & STACKSHOT_DISABLE_LATENCY_INFO ? false : true;
 #endif
 	/* process the flags */
-	bool collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
-	bool use_fault_path          = ((trace_flags & (STACKSHOT_ENABLE_UUID_FAULTING | STACKSHOT_ENABLE_BT_FAULTING)) != 0);
-	stack_enable_faulting = (trace_flags & (STACKSHOT_ENABLE_BT_FAULTING));
+	bool collect_delta_stackshot = ((stackshot_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
+	bool collect_exclaves        = !disable_exclave_stackshot && ((stackshot_flags & STACKSHOT_SKIP_EXCLAVES) == 0);
+	stackshot_ctx.sc_enable_faulting = (stackshot_flags & (STACKSHOT_ENABLE_BT_FAULTING));
 
 	/* Currently we only support returning explicit KEXT load info on fileset kernels */
 	kc_format_t primary_kc_type = KCFormatUnknown;
 	if (PE_get_primary_kc_format(&primary_kc_type) && (primary_kc_type != KCFormatFileset)) {
-		trace_flags &= ~(STACKSHOT_SAVE_KEXT_LOADINFO);
-	}
-
-	struct stackshot_context ctx = {};
-	ctx.trace_flags = trace_flags;
-	ctx.pid = pid;
-	ctx.include_drivers = (pid == 0 && (trace_flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) != 0);
-
-	if (use_fault_path) {
-		fault_stats.sfs_pages_faulted_in = 0;
-		fault_stats.sfs_time_spent_faulting = 0;
-		fault_stats.sfs_stopped_faulting = (uint8_t) FALSE;
+		stackshot_flags &= ~(STACKSHOT_SAVE_KEXT_LOADINFO);
 	}
 
 	if (sizeof(void *) == 8) {
 		system_state_flags |= kKernel64_p;
 	}
 
-	if (stackshot_kcdata_p == NULL) {
-		error = KERN_INVALID_ARGUMENT;
-		goto error_exit;
-	}
-
-	_stackshot_validation_reset();
 #if CONFIG_EXCLAVES
-	if (!panic_stackshot) {
-		kcd_exit_on_error(stackshot_setup_exclave_waitlist(stackshot_kcdata_p)); /* Allocate list of exclave threads */
+	if (!stackshot_ctx.sc_panic_stackshot && collect_exclaves) {
+		kcd_exit_on_error(stackshot_setup_exclave_waitlist()); /* Allocate list of exclave threads */
 	}
-#endif
-	stackshot_plh_setup(stackshot_kcdata_p); /* set up port label hash */
-
+#else
+#pragma unused(collect_exclaves)
+#endif /* CONFIG_EXCLAVES */
 
 	/* setup mach_absolute_time and timebase info -- copy out in some cases and needed to convert since_timestamp to seconds for proc start time */
 	clock_timebase_info(&timebase);
 
 	/* begin saving data into the buffer */
-	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, trace_flags, "stackshot_in_flags"));
-	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, (uint32_t)pid, "stackshot_in_pid"));
+	if (stackshot_ctx.sc_bytes_uncompressed) {
+		stackshot_ctx.sc_bytes_uncompressed = 0;
+	}
+
+	/*
+	 * Setup pre-task linked kcdata buffer.
+	 * The idea here is that we want the kcdata to be in (roughly) the same order as it was
+	 * before we made this multithreaded, so we have separate buffers for pre and post task-iteration,
+	 * since that's the parallelized part.
+	 */
+	if (!stackshot_ctx.sc_is_singlethreaded) {
+		kcd_exit_on_error(stackshot_new_linked_kcdata());
+		stackshot_ctx.sc_pretask_kcdata = stackshot_cpu_ctx.scc_kcdata_head;
+	}
+
+	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, stackshot_flags, "stackshot_in_flags"));
+	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, (uint32_t)stackshot_flags, "stackshot_in_pid"));
 	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, system_state_flags, "system_state_flags"));
-	if (trace_flags & STACKSHOT_PAGE_TABLES) {
-		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stack_snapshot_pagetable_mask, "stackshot_pagetable_mask"));
+	if (stackshot_flags & STACKSHOT_PAGE_TABLES) {
+		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_args.pagetable_mask, "stackshot_pagetable_mask"));
 	}
 	if (stackshot_initial_estimate != 0) {
 		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_initial_estimate, "stackshot_size_estimate"));
@@ -3685,7 +5081,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 	}
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	latency_info.setup_latency = mach_absolute_time();
+	stackshot_ctx.sc_latency.setup_latency_mt = mach_absolute_time();
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 #if CONFIG_JETSAM
@@ -3703,6 +5099,8 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 		/* save boot-args and osversion string */
 		length_to_copy =  MIN((uint32_t)(strlen(version) + 1), OSVERSIZE);
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_OSVERSION, length_to_copy, (const void *)version));
+		length_to_copy = MIN((uint32_t)(strlen(osversion) + 1), OSVERSIZE);
+		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_OS_BUILD_VERSION, length_to_copy, (void *)osversion));
 
 
 		length_to_copy =  MIN((uint32_t)(strlen(PE_boot_args()) + 1), BOOT_LINE_LENGTH);
@@ -3710,17 +5108,17 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_TIMEBASE, sizeof(timebase), &timebase));
 	} else {
-		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_DELTA_SINCE_TIMESTAMP, sizeof(uint64_t), &stack_snapshot_delta_since_timestamp));
+		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_DELTA_SINCE_TIMESTAMP, sizeof(uint64_t), &stackshot_args.since_timestamp));
 	}
 
 	kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_MACH_ABSOLUTE_TIME, sizeof(uint64_t), &abs_time));
 
-	kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_USECS_SINCE_EPOCH, sizeof(uint64_t), &stackshot_microsecs));
+	kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_USECS_SINCE_EPOCH, sizeof(uint64_t), &stackshot_ctx.sc_microsecs));
 
-	kcd_exit_on_error(kdp_stackshot_shared_regions(trace_flags));
+	kcd_exit_on_error(kdp_stackshot_shared_regions(stackshot_flags));
 
 	/* Add requested information first */
-	if (trace_flags & STACKSHOT_GET_GLOBAL_MEM_STATS) {
+	if (stackshot_flags & STACKSHOT_GET_GLOBAL_MEM_STATS) {
 		struct mem_and_io_snapshot mais = {0};
 		kdp_mem_and_io_snapshot(&mais);
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_GLOBAL_MEM_STATS, sizeof(mais), &mais));
@@ -3733,18 +5131,18 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
 	uint64_t thread_group_begin_cpu_cycle_count = 0;
 
-	if (!panic_stackshot && (trace_flags & STACKSHOT_THREAD_GROUP)) {
+	if (!stackshot_ctx.sc_is_singlethreaded && (stackshot_flags & STACKSHOT_THREAD_GROUP)) {
 		thread_group_begin_cpu_cycle_count = mt_cur_cpu_cycles();
 	}
 #endif
 
 	/* Iterate over thread group names */
-	if (trace_flags & STACKSHOT_THREAD_GROUP) {
+	if (stackshot_flags & STACKSHOT_THREAD_GROUP) {
 		/* Variable size array - better not have it on the stack. */
 		kcdata_compression_window_open(stackshot_kcdata_p);
 
 		if (thread_group_iterate_stackshot(stackshot_thread_group_count, &num_thread_groups) != KERN_SUCCESS) {
-			trace_flags &= ~(STACKSHOT_THREAD_GROUP);
+			stackshot_flags &= ~(STACKSHOT_THREAD_GROUP);
 		}
 
 		if (num_thread_groups > 0) {
@@ -3761,26 +5159,33 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 	}
 
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
-	if (!panic_stackshot && (thread_group_begin_cpu_cycle_count != 0)) {
+	if (!stackshot_ctx.sc_panic_stackshot && (thread_group_begin_cpu_cycle_count != 0)) {
 		kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, (mt_cur_cpu_cycles() - thread_group_begin_cpu_cycle_count),
 		    "thread_groups_cpu_cycle_count"));
 	}
 #endif
 #else
-	trace_flags &= ~(STACKSHOT_THREAD_GROUP);
+	stackshot_flags &= ~(STACKSHOT_THREAD_GROUP);
 #endif /* CONFIG_THREAD_GROUPS */
 
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	latency_info.setup_latency = mach_absolute_time() - latency_info.setup_latency;
-	latency_info.total_task_iteration_latency = mach_absolute_time();
+	stackshot_ctx.sc_latency.setup_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.setup_latency_mt;
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_ctx.sc_latency.total_task_iteration_latency_mt = mach_absolute_time();
+	} else {
+		stackshot_ctx.sc_latency.task_queue_building_latency_mt = mach_absolute_time();
+	}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
-	bool const process_scoped = (ctx.pid != -1) && !ctx.include_drivers;
+	bool const process_scoped = (stackshot_args.pid != -1) &&
+	    ((stackshot_flags & STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL) == 0);
 
 	/* Iterate over tasks */
 	queue_iterate(&tasks, task, task_t, tasks)
 	{
+		stackshot_panic_guard();
+
 		if (collect_delta_stackshot) {
 			uint64_t abstime;
 			proc_starttime_kdp(get_bsdtask_info(task), NULL, NULL, &abstime);
@@ -3790,45 +5195,71 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 			}
 		}
 
-		if (process_scoped && (pid_from_task(task) != ctx.pid)) {
+		pid_t task_pid = pid_from_task(task);
+
+		if (process_scoped && (task_pid != stackshot_args.pid)) {
 			continue;
 		}
 
-		error = kdp_stackshot_record_task(&ctx, task);
-		if (error) {
-			goto error_exit;
-		} else if (process_scoped) {
+		if ((task->active && !task_is_a_corpse(task) && !task_is_a_corpse_fork(task)) ||
+		    (!queue_empty(&task->threads) && task_pid != -1)) {
+			tasks_in_stackshot++;
+			threads_in_stackshot += task->thread_count;
+		}
+
+		/* If this is a singlethreaded stackshot, don't use the work queues. */
+		if (stackshot_ctx.sc_is_singlethreaded) {
+			kcd_exit_on_error(kdp_stackshot_record_task(task));
+		} else {
+			kcd_exit_on_error(stackshot_put_workitem((struct stackshot_workitem) {
+				.sswi_task = task,
+				.sswi_data = NULL,
+				.sswi_idx = cur_workitem_index++
+			}));
+		}
+
+		if (process_scoped) {
 			/* Only targeting one process, we're done now. */
 			break;
 		}
 	}
 
-
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	latency_info.total_task_iteration_latency = mach_absolute_time() - latency_info.total_task_iteration_latency;
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_ctx.sc_latency.total_task_iteration_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.total_task_iteration_latency_mt;
+	} else {
+		stackshot_ctx.sc_latency.task_queue_building_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.task_queue_building_latency_mt;
+	}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
+
+	/* Setup post-task kcdata buffer */
+	if (!stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_finalize_linked_kcdata();
+		kcd_exit_on_error(stackshot_new_linked_kcdata());
+		stackshot_ctx.sc_posttask_kcdata = stackshot_cpu_ctx.scc_kcdata_head;
+	}
 
 #if CONFIG_COALITIONS
 	/* Don't collect jetsam coalition snapshots in delta stackshots - these don't change */
-	if (!collect_delta_stackshot || (last_task_start_time > stack_snapshot_delta_since_timestamp)) {
+	if (!collect_delta_stackshot || (last_task_start_time > stackshot_args.since_timestamp)) {
 		int num_coalitions = 0;
 		struct jetsam_coalition_snapshot *coalitions = NULL;
 
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
 		uint64_t coalition_begin_cpu_cycle_count = 0;
 
-		if (!panic_stackshot && (trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS)) {
+		if (!stackshot_ctx.sc_panic_stackshot && (stackshot_flags & STACKSHOT_SAVE_JETSAM_COALITIONS)) {
 			coalition_begin_cpu_cycle_count = mt_cur_cpu_cycles();
 		}
 #endif /* SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI */
 
 		/* Iterate over coalitions */
-		if (trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) {
+		if (stackshot_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) {
 			if (coalition_iterate_stackshot(stackshot_coalition_jetsam_count, &num_coalitions, COALITION_TYPE_JETSAM) != KERN_SUCCESS) {
-				trace_flags &= ~(STACKSHOT_SAVE_JETSAM_COALITIONS);
+				stackshot_flags &= ~(STACKSHOT_SAVE_JETSAM_COALITIONS);
 			}
 		}
-		if (trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) {
+		if (stackshot_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) {
 			if (num_coalitions > 0) {
 				/* Variable size array - better not have it on the stack. */
 				kcdata_compression_window_open(stackshot_kcdata_p);
@@ -3844,18 +5275,24 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 			}
 		}
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
-		if (!panic_stackshot && (coalition_begin_cpu_cycle_count != 0)) {
+		if (!stackshot_ctx.sc_panic_stackshot && (coalition_begin_cpu_cycle_count != 0)) {
 			kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, (mt_cur_cpu_cycles() - coalition_begin_cpu_cycle_count),
 			    "coalitions_cpu_cycle_count"));
 		}
 #endif /* SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI */
 	}
 #else
-	trace_flags &= ~(STACKSHOT_SAVE_JETSAM_COALITIONS);
+	stackshot_flags &= ~(STACKSHOT_SAVE_JETSAM_COALITIONS);
 #endif /* CONFIG_COALITIONS */
 
+	stackshot_panic_guard();
+
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	latency_info.total_terminated_task_iteration_latency = mach_absolute_time();
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_ctx.sc_latency.total_terminated_task_iteration_latency_mt = mach_absolute_time();
+	} else {
+		stackshot_ctx.sc_latency.terminated_task_queue_building_latency_mt = mach_absolute_time();
+	}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 	/*
@@ -3868,98 +5305,108 @@ kdp_stackshot_kcdata_format(int pid, uint64_t * trace_flags_p)
 	 */
 	queue_iterate(&terminated_tasks, task, task_t, tasks)
 	{
-		error = kdp_stackshot_record_task(&ctx, task);
-		if (error) {
-			goto error_exit;
+		stackshot_panic_guard();
+
+		if ((task->active && !task_is_a_corpse(task) && !task_is_a_corpse_fork(task)) ||
+		    (!queue_empty(&task->threads) && pid_from_task(task) != -1)) {
+			tasks_in_stackshot++;
+			threads_in_stackshot += task->thread_count;
+		}
+
+		/* Only use workqueues on non-panic and non-scoped stackshots. */
+		if (stackshot_ctx.sc_is_singlethreaded) {
+			kcd_exit_on_error(kdp_stackshot_record_task(task));
+		} else {
+			kcd_exit_on_error(stackshot_put_workitem((struct stackshot_workitem) {
+				.sswi_task = task,
+				.sswi_data = NULL,
+				.sswi_idx = cur_workitem_index++
+			}));
 		}
 	}
+
+	/* Mark the queue(s) as populated. */
+	for (size_t i = 0; i < STACKSHOT_NUM_WORKQUEUES; i++) {
+		os_atomic_store(&stackshot_ctx.sc_workqueues[i].sswq_populated, true, release);
+	}
+
 #if DEVELOPMENT || DEBUG
 	kcd_exit_on_error(kdp_stackshot_plh_stats());
 #endif /* DEVELOPMENT || DEBUG */
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-	latency_info.total_terminated_task_iteration_latency = mach_absolute_time() - latency_info.total_terminated_task_iteration_latency;
-#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
-
-	if (use_fault_path) {
-		kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_STACKSHOT_FAULT_STATS,
-		    sizeof(struct stackshot_fault_stats), &fault_stats);
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_ctx.sc_latency.total_terminated_task_iteration_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.total_terminated_task_iteration_latency_mt;
+	} else {
+		stackshot_ctx.sc_latency.terminated_task_queue_building_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.terminated_task_queue_building_latency_mt;
 	}
+#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	if (collect_latency_info) {
-		latency_info.latency_version = 1;
-		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_LATENCY_INFO, sizeof(latency_info), &latency_info));
+		stackshot_ctx.sc_latency.latency_version = 2;
+		stackshot_ctx.sc_latency.main_cpu_number = stackshot_ctx.sc_main_cpuid;
+		stackshot_ctx.sc_latency.calling_cpu_number = stackshot_ctx.sc_calling_cpuid;
 	}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
-	/* update timestamp of the stackshot */
-	abs_time_end = mach_absolute_time();
-	struct stackshot_duration_v2 stackshot_duration = {
-		.stackshot_duration         = (abs_time_end - abs_time),
-		.stackshot_duration_outer   = 0,
-		.stackshot_duration_prior   = stackshot_duration_prior_abs,
-	};
-
-	if ((trace_flags & STACKSHOT_DO_COMPRESS) == 0) {
-		kcd_exit_on_error(kcdata_get_memory_addr(stackshot_kcdata_p, STACKSHOT_KCTYPE_STACKSHOT_DURATION,
-		    sizeof(struct stackshot_duration_v2), &out_addr));
-		struct stackshot_duration_v2 *duration_p = (void *) out_addr;
-		kdp_memcpy(duration_p, &stackshot_duration, sizeof(*duration_p));
-		stackshot_duration_outer                   = (unaligned_u64 *)&duration_p->stackshot_duration_outer;
-	} else {
-		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_STACKSHOT_DURATION, sizeof(stackshot_duration), &stackshot_duration));
-		stackshot_duration_outer = NULL;
-	}
-
 #if SCHED_HYGIENE_DEBUG && CONFIG_PERVASIVE_CPI
-	if (!panic_stackshot) {
+	if (!stackshot_ctx.sc_panic_stackshot) {
 		kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, (mt_cur_cpu_cycles() - stackshot_begin_cpu_cycle_count),
 		    "stackshot_total_cpu_cycle_cnt"));
 	}
 #endif
 
+	kcdata_add_uint64_with_description(stackshot_kcdata_p, tasks_in_stackshot, "stackshot_tasks_count");
+	kcdata_add_uint64_with_description(stackshot_kcdata_p, threads_in_stackshot, "stackshot_threads_count");
+
+	stackshot_panic_guard();
+
+	if (!stackshot_ctx.sc_is_singlethreaded) {
+		/* Chip away at the queue. */
+		stackshot_finalize_linked_kcdata();
+		stackshot_cpu_do_work();
+		*stackshot_kcdata_p = stackshot_cpu_ctx.scc_kcdata_tail->kcdata;
+	}
+
 #if CONFIG_EXCLAVES
-	/* Avoid setting AST until as late as possible, in case the stackshot fails */
-	commit_exclaves_ast();
+	/* If this is the panic stackshot, check if Exclaves panic left its stackshot in the shared region */
+	if (stackshot_ctx.sc_panic_stackshot) {
+		struct exclaves_panic_stackshot excl_ss;
+		kdp_read_panic_exclaves_stackshot(&excl_ss);
+
+		if (excl_ss.stackshot_buffer != NULL && excl_ss.stackshot_buffer_size != 0) {
+			tb_error_t tberr = TB_ERROR_SUCCESS;
+			exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_FOUND;
+
+			/* this block does not escape, so this is okay... */
+			kern_return_t *error_in_block = &error;
+			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
+			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+			tberr = stackshot_stackshotresult__unmarshal(excl_ss.stackshot_buffer, excl_ss.stackshot_buffer_size, ^(stackshot_stackshotresult_s result){
+				*error_in_block = stackshot_exclaves_process_stackshot(&result, stackshot_kcdata_p, true);
+			});
+			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
+			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
+			if (tberr != TB_ERROR_SUCCESS) {
+				exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_DECODE_FAILED;
+			}
+		} else {
+			exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_NOT_FOUND;
+		}
+
+		/* check error from the block */
+		kcd_exit_on_error(error);
+	}
 #endif
 
-	*trace_flags_p = trace_flags;
-
+	/*  === END of populating stackshot data === */
 error_exit:;
-
-#if CONFIG_EXCLAVES
-	if (error != KERN_SUCCESS && stackshot_exclave_inspect_ctids) {
-		/* Clear inspection CTID list: no need to wait for these threads */
-		stackshot_exclave_inspect_ctid_count = 0;
-		stackshot_exclave_inspect_ctid_capacity = 0;
-		stackshot_exclave_inspect_ctids = NULL;
-	}
-#endif
-
-#if SCHED_HYGIENE_DEBUG
-	bool disable_interrupts_masked_check = kern_feature_override(
-		KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD) ||
-	    (trace_flags & STACKSHOT_DO_COMPRESS) != 0;
-
-#if STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED
-	disable_interrupts_masked_check = true;
-#endif /* STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED */
-
-	if (disable_interrupts_masked_check) {
-		ml_spin_debug_clear_self();
+	if (error != KERN_SUCCESS) {
+		stackshot_set_error(error);
 	}
 
-	if (!panic_stackshot && interrupt_masked_debug_mode) {
-		/*
-		 * Try to catch instances where stackshot takes too long BEFORE returning from
-		 * the debugger
-		 */
-		ml_handle_stackshot_interrupt_disabled_duration(current_thread());
-	}
-#endif /* SCHED_HYGIENE_DEBUG */
-	stackshot_plh_reset();
-	stack_enable_faulting = FALSE;
+	stackshot_panic_guard();
 
 	return error;
 }
@@ -4034,22 +5481,29 @@ stackshot_find_phys(vm_map_t map, vm_offset_t target_addr, kdp_fault_flags_t fau
 {
 	vm_offset_t result;
 	struct kdp_fault_result fault_results = {0};
-	if (fault_stats.sfs_stopped_faulting) {
+	if (stackshot_cpu_ctx.scc_fault_stats.sfs_stopped_faulting) {
 		fault_flags &= ~KDP_FAULT_FLAGS_ENABLE_FAULTING;
+	}
+	if (!stackshot_ctx.sc_panic_stackshot) {
+		fault_flags |= KDP_FAULT_FLAGS_MULTICPU;
 	}
 
 	result = kdp_find_phys(map, target_addr, fault_flags, &fault_results);
 
 	if ((fault_results.flags & KDP_FAULT_RESULT_TRIED_FAULT) || (fault_results.flags & KDP_FAULT_RESULT_FAULTED_IN)) {
-		fault_stats.sfs_time_spent_faulting += fault_results.time_spent_faulting;
+		stackshot_cpu_ctx.scc_fault_stats.sfs_time_spent_faulting += fault_results.time_spent_faulting;
 
-		if ((fault_stats.sfs_time_spent_faulting >= fault_stats.sfs_system_max_fault_time) && !panic_stackshot) {
-			fault_stats.sfs_stopped_faulting = (uint8_t) TRUE;
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+		stackshot_cpu_latency.faulting_time_mt += fault_results.time_spent_faulting;
+#endif
+
+		if ((stackshot_cpu_ctx.scc_fault_stats.sfs_time_spent_faulting >= stackshot_max_fault_time) && !stackshot_ctx.sc_panic_stackshot) {
+			stackshot_cpu_ctx.scc_fault_stats.sfs_stopped_faulting = (uint8_t) TRUE;
 		}
 	}
 
 	if (fault_results.flags & KDP_FAULT_RESULT_FAULTED_IN) {
-		fault_stats.sfs_pages_faulted_in++;
+		stackshot_cpu_ctx.scc_fault_stats.sfs_pages_faulted_in++;
 	}
 
 	if (kdp_fault_result_flags) {
@@ -4097,28 +5551,321 @@ kern_return_t
 do_stackshot(void *context)
 {
 #pragma unused(context)
+	kern_return_t error;
+	size_t queue_size;
+	uint64_t abs_time = mach_absolute_time(), abs_time_end = 0;
 	kdp_snapshot++;
 
-	stackshot_out_flags = stack_snapshot_flags;
+	_stackshot_validation_reset();
+	error = stackshot_plh_setup(); /* set up port label hash */
 
-	stack_snapshot_ret = kdp_stackshot_kcdata_format(stack_snapshot_pid, &stackshot_out_flags);
+	if (!stackshot_ctx.sc_is_singlethreaded) {
+		/* Set up queues. These numbers shouldn't change, but slightly fudge queue size just in case. */
+		queue_size = FUDGED_SIZE(tasks_count + terminated_tasks_count, 10);
+		for (size_t i = 0; i < STACKSHOT_NUM_WORKQUEUES; i++) {
+			stackshot_ctx.sc_workqueues[i] = (struct stackshot_workqueue) {
+				.sswq_items     = stackshot_alloc_arr(struct stackshot_workitem, queue_size, &error),
+				.sswq_capacity  = queue_size,
+				.sswq_num_items = 0,
+				.sswq_cur_item  = 0,
+				.sswq_populated = false
+			};
+			if (error != KERN_SUCCESS) {
+				break;
+			}
+		}
+	}
+
+	if (error != KERN_SUCCESS) {
+		stackshot_set_error(error);
+		return error;
+	}
+
+	/*
+	 * If no main CPU has been selected at this point, (since every CPU has
+	 * called stackshot_cpu_preflight by now), then there was no CLPC
+	 * recommended P-core available. In that case, we should volunteer ourself
+	 * to be the main CPU, because someone has to do it.
+	 */
+	if (stackshot_ctx.sc_main_cpuid == -1) {
+		os_atomic_cmpxchg(&stackshot_ctx.sc_main_cpuid, -1, cpu_number(), acquire);
+		stackshot_cpu_ctx.scc_can_work = true;
+	}
+
+	/* After this, auxiliary CPUs can begin work. */
+	os_atomic_store(&stackshot_ctx.sc_state, SS_RUNNING, release);
+
+	/* If we are the main CPU, populate the queues / do other main CPU work. */
+	if (stackshot_ctx.sc_panic_stackshot || (stackshot_ctx.sc_main_cpuid == cpu_number())) {
+		stackshot_ctx.sc_retval = kdp_stackshot_kcdata_format();
+	} else if (stackshot_cpu_ctx.scc_can_work) {
+		stackshot_cpu_do_work();
+	}
+
+	/* Wait for every CPU to finish. */
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_ctx.sc_latency.cpu_wait_latency_mt = mach_absolute_time();
+#endif
+	if (stackshot_cpu_ctx.scc_can_work) {
+		os_atomic_dec(&stackshot_ctx.sc_cpus_working, seq_cst);
+		stackshot_cpu_ctx.scc_can_work = false;
+	}
+	while (os_atomic_load(&stackshot_ctx.sc_cpus_working, seq_cst) != 0) {
+		loop_wait();
+	}
+	stackshot_panic_guard();
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_ctx.sc_latency.cpu_wait_latency_mt = mach_absolute_time() - stackshot_ctx.sc_latency.cpu_wait_latency_mt;
+#endif
+
+	/* update timestamp of the stackshot */
+	abs_time_end = mach_absolute_time();
+	stackshot_ctx.sc_duration = (struct stackshot_duration_v2) {
+		.stackshot_duration       = (abs_time_end - abs_time),
+		.stackshot_duration_outer = 0,
+		.stackshot_duration_prior = stackshot_duration_prior_abs,
+	};
+
+	stackshot_plh_reset();
+
+	/* Check interrupts disabled time. */
+#if SCHED_HYGIENE_DEBUG
+	bool disable_interrupts_masked_check = kern_feature_override(
+		KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD) ||
+	    (stackshot_flags & STACKSHOT_DO_COMPRESS) != 0;
+
+#if STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED
+	disable_interrupts_masked_check = true;
+#endif /* STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED */
+
+	if (disable_interrupts_masked_check) {
+		ml_spin_debug_clear_self();
+	}
+
+	if (!stackshot_ctx.sc_panic_stackshot && interrupt_masked_debug_mode) {
+		/*
+		 * Try to catch instances where stackshot takes too long BEFORE returning from
+		 * the debugger
+		 */
+		ml_handle_stackshot_interrupt_disabled_duration(current_thread());
+	}
+#endif /* SCHED_HYGIENE_DEBUG */
 
 	kdp_snapshot--;
-	return stack_snapshot_ret;
-}
 
-kern_return_t
-do_panic_stackshot(void *context);
+	/* If any other CPU had an error, make sure we return it */
+	if (stackshot_ctx.sc_retval == KERN_SUCCESS) {
+		stackshot_ctx.sc_retval = stackshot_status_check();
+	}
+
+#if CONFIG_EXCLAVES
+	/* Avoid setting AST until as late as possible, in case the stackshot fails */
+	if (!stackshot_ctx.sc_panic_stackshot && stackshot_ctx.sc_retval == KERN_SUCCESS) {
+		commit_exclaves_ast();
+	}
+	if (stackshot_ctx.sc_retval != KERN_SUCCESS && stackshot_exclave_inspect_ctids) {
+		/* Clear inspection CTID list: no need to wait for these threads */
+		stackshot_exclave_inspect_ctid_count = 0;
+		stackshot_exclave_inspect_ctid_capacity = 0;
+		stackshot_exclave_inspect_ctids = NULL;
+	}
+#endif
+
+	/* If this is a singlethreaded stackshot, the "final" kcdata buffer is just our CPU's kcdata buffer */
+	if (stackshot_ctx.sc_is_singlethreaded) {
+		stackshot_ctx.sc_finalized_kcdata = stackshot_kcdata_p;
+	}
+
+	return stackshot_ctx.sc_retval;
+}
 
 kern_return_t
 do_panic_stackshot(void *context)
 {
 	kern_return_t ret = do_stackshot(context);
-	kern_return_t error = finalize_kcdata(stackshot_kcdata_p);
+	if (ret != KERN_SUCCESS) {
+		goto out;
+	}
 
-	// Return ret if it's already an error, error otherwise.  Usually both
-	// are KERN_SUCCESS.
-	return (ret != KERN_SUCCESS) ? ret : error;
+	ret = stackshot_finalize_singlethreaded_kcdata();
+
+out:
+	return ret;
+}
+
+/*
+ * Set up needed state for this CPU before participating in a stackshot.
+ * Namely, we want to signal that we're available to do work.
+ * Called while interrupts are disabled & in the debugger trap.
+ */
+void
+stackshot_cpu_preflight(void)
+{
+	bool is_recommended, is_calling_cpu;
+	int my_cpu_no = cpu_number();
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_cpu_latency = (typeof(stackshot_cpu_latency)) {
+		.cpu_number            =  cpu_number(),
+#if defined(__AMP__)
+		.cluster_type          =  current_cpu_datap()->cpu_cluster_type,
+#else /* __AMP__ */
+		.cluster_type = CLUSTER_TYPE_SMP,
+#endif /* __AMP__ */
+		.faulting_time_mt      = 0,
+		.total_buf             = 0,
+		.intercluster_buf_used = 0
+	};
+#if CONFIG_PERVASIVE_CPI
+	mt_cur_cpu_cycles_instrs_speculative(&stackshot_cpu_latency.total_cycles, &stackshot_cpu_latency.total_instrs);
+#endif /* CONFIG_PERVASIVE_CPI */
+	stackshot_cpu_latency.init_latency_mt = stackshot_cpu_latency.total_latency_mt = mach_absolute_time();
+#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
+
+	is_recommended = current_processor()->is_recommended;
+
+	/* If this is a recommended P-core (or SMP), try making it the main CPU */
+	if (is_recommended
+#if defined(__AMP__)
+	    && current_cpu_datap()->cpu_cluster_type == CLUSTER_TYPE_P
+#endif /* __AMP__ */
+	    ) {
+		os_atomic_cmpxchg(&stackshot_ctx.sc_main_cpuid, -1, my_cpu_no, acquire);
+	}
+
+	is_calling_cpu = stackshot_ctx.sc_calling_cpuid == my_cpu_no;
+
+	stackshot_cpu_ctx.scc_did_work = false;
+	stackshot_cpu_ctx.scc_can_work = is_calling_cpu || (is_recommended && !stackshot_ctx.sc_is_singlethreaded);
+
+	if (stackshot_cpu_ctx.scc_can_work) {
+		os_atomic_inc(&stackshot_ctx.sc_cpus_working, relaxed);
+	}
+}
+
+__result_use_check
+static kern_return_t
+stackshot_cpu_work_on_queue(struct stackshot_workqueue *queue)
+{
+	struct stackshot_workitem     *cur_workitemp;
+	kern_return_t                  error = KERN_SUCCESS;
+
+	while (((cur_workitemp = stackshot_get_workitem(queue)) != NULL || !os_atomic_load(&queue->sswq_populated, acquire))) {
+		/* Check to make sure someone hasn't errored out or panicked. */
+		if (__improbable(stackshot_status_check() != KERN_SUCCESS)) {
+			return KERN_ABORTED;
+		}
+
+		if (cur_workitemp) {
+			kcd_exit_on_error(stackshot_new_linked_kcdata());
+			cur_workitemp->sswi_data = stackshot_cpu_ctx.scc_kcdata_head;
+			kcd_exit_on_error(kdp_stackshot_record_task(cur_workitemp->sswi_task));
+			stackshot_finalize_linked_kcdata();
+		} else {
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+			uint64_t time_begin = mach_absolute_time();
+#endif
+			loop_wait();
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+			stackshot_cpu_latency.workqueue_latency_mt += mach_absolute_time() - time_begin;
+#endif
+		}
+	}
+
+error_exit:
+	return error;
+}
+
+static void
+stackshot_cpu_do_work(void)
+{
+	kern_return_t                  error;
+
+	stackshot_cpu_ctx.scc_stack_buffer = stackshot_alloc_arr(uintptr_t, MAX_FRAMES, &error);
+	if (error != KERN_SUCCESS) {
+		goto error_exit;
+	}
+
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_cpu_latency.init_latency_mt = mach_absolute_time() - stackshot_cpu_latency.init_latency_mt;
+#endif
+
+	bool high_perf = true;
+
+#if defined(__AMP__)
+	if (current_cpu_datap()->cpu_cluster_type == CLUSTER_TYPE_E) {
+		high_perf = false;
+	}
+#endif /* __AMP__ */
+
+	if (high_perf) {
+		/* Non-E cores: Work from most difficult to least difficult */
+		for (size_t i = STACKSHOT_NUM_WORKQUEUES; i > 0; i--) {
+			kcd_exit_on_error(stackshot_cpu_work_on_queue(&stackshot_ctx.sc_workqueues[i - 1]));
+		}
+	} else {
+		/* E: Work from least difficult to most difficult */
+		for (size_t i = 0; i < STACKSHOT_NUM_WORKQUEUES; i++) {
+			kcd_exit_on_error(stackshot_cpu_work_on_queue(&stackshot_ctx.sc_workqueues[i]));
+		}
+	}
+#if STACKSHOT_COLLECTS_LATENCY_INFO
+	stackshot_cpu_latency.total_latency_mt = mach_absolute_time() - stackshot_cpu_latency.total_latency_mt;
+#if CONFIG_PERVASIVE_CPI
+	uint64_t cycles, instrs;
+	mt_cur_cpu_cycles_instrs_speculative(&cycles, &instrs);
+	stackshot_cpu_latency.total_cycles = cycles - stackshot_cpu_latency.total_cycles;
+	stackshot_cpu_latency.total_instrs = instrs - stackshot_cpu_latency.total_instrs;
+#endif /* CONFIG_PERVASIVE_CPI */
+#endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
+
+error_exit:
+	if (error != KERN_SUCCESS) {
+		stackshot_set_error(error);
+	}
+	stackshot_panic_guard();
+}
+
+/*
+ * This is where the other CPUs will end up when we take a stackshot.
+ * If they're available to do work, they'll do so here.
+ * Called with interrupts disabled & from the debugger trap.
+ */
+void
+stackshot_aux_cpu_entry(void)
+{
+	/*
+	 * This is where the other CPUs will end up when we take a stackshot.
+	 * Also, the main CPU will call this in the middle of its work to chip
+	 * away at the queue.
+	 */
+
+	/* Don't do work if we said we couldn't... */
+	if (!stackshot_cpu_ctx.scc_can_work) {
+		return;
+	}
+
+	/* Spin until we're ready to run. */
+	while (os_atomic_load(&stackshot_ctx.sc_state, acquire) == SS_SETUP) {
+		loop_wait();
+	}
+
+	/* Check to make sure the setup didn't error out or panic. */
+	if (stackshot_status_check() != KERN_SUCCESS) {
+		goto exit;
+	}
+
+	/* the CPU entering here is participating in the stackshot */
+	stackshot_cpu_ctx.scc_did_work = true;
+
+	if (stackshot_ctx.sc_main_cpuid == cpu_number()) {
+		stackshot_ctx.sc_retval = kdp_stackshot_kcdata_format();
+	} else {
+		stackshot_cpu_do_work();
+	}
+
+exit:
+	os_atomic_dec(&stackshot_ctx.sc_cpus_working, release);
 }
 
 boolean_t
@@ -4322,6 +6069,17 @@ stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_v2_t *waitinfo
 		break;
 	case kThreadWaitCompressor:
 		kdp_compressor_busy_find_owner(thread->wait_event, waitinfo_v1);
+		break;
+	case kThreadWaitPageBusy:
+		kdp_vm_page_sleep_find_owner(thread->wait_event, waitinfo_v1);
+		break;
+	case kThreadWaitPagingInProgress:
+	case kThreadWaitPagingActivity:
+	case kThreadWaitPagerInit:
+	case kThreadWaitPagerReady:
+	case kThreadWaitMemoryBlocked:
+	case kThreadWaitPageInThrottle:
+		kdp_vm_object_sleep_find_owner(thread->wait_event, waitinfo->wait_type, waitinfo_v1);
 		break;
 	default:
 		waitinfo->owner = 0;

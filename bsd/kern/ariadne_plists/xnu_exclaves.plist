@@ -1,0 +1,422 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<array>
+		<dict>
+			<key>Name</key>
+			<string>Exclaves</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Switch</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12a0001</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12a0002</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves XNU Proxy</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12a0005</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12a0006</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>XNU Proxy SCID</string>
+						<key>Arg2</key>
+						<string>Command</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves RPC</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12a0009</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12a000a</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>SCID</string>
+						<key>Arg2</key>
+						<string>Endpoint ID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Upcall</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12a000d</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12a000e</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>SCID</string>
+						<key>Arg2</key>
+						<string>Endpoint ID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Boot Task</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12a0011</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12a0012</string>
+				</dict>
+			</array>
+		</dict>
+
+		<dict>
+			<key>Name</key>
+			<string>Exclaves Scheduler</string>
+
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Yield</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0000</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Yielded To SCID</string>
+						<key>Arg2</key>
+						<string>Early Yield</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Spawned</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0004</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Spawned SCID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Terminated</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0008</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Terminated SCID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Wait</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b000d</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b000e</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Queue ID</string>
+						<key>Arg2</key>
+						<string>Epoch</string>
+						<key>Arg3</key>
+						<string>Owner CTID</string>
+						<key>Arg4</key>
+						<string>Interruptible</string>
+					</dict>
+					<key>ArgValueLabelsBegin</key>
+					<dict>
+						<key>Arg4</key>
+						<dict>
+							<key>0x0</key>
+							<string>None (Uninterruptible/Kernel)</string>
+							<key>0x1</key>
+							<string>Voluntary (Interruptible/Kernel)</string>
+							<key>0x2</key>
+							<string>Dynamic (Interruptible/User)</string>
+						</dict>
+					</dict>
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+					<key>ArgValueLabelsEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>-1</key>
+							<string>Waiting</string>
+							<key>0x0</key>
+							<string>Awakened</string>
+							<key>0x1</key>
+							<string>Timed Out</string>
+							<key>0x2</key>
+							<string>Interrupted</string>
+							<key>0x3</key>
+							<string>Restart</string>
+							<key>0xa</key>
+							<string>Not Waiting</string>
+						</dict>
+					</dict>
+				</dict>
+
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Wake</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0011</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b0012</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Queue ID</string>
+						<key>Arg2</key>
+						<string>Epoch</string>
+						<key>Arg3</key>
+						<string>Owner CTID</string>
+						<key>Arg4</key>
+						<string>Mode</string>
+					</dict>
+
+					<key>ArgValueLabelsBegin</key>
+					<dict>
+						<key>Arg4</key>
+						<dict>
+							<key>0x1</key>
+							<string>Wake One</string>
+							<key>0x2</key>
+							<string>Wake All</string>
+							<key>0x3</key>
+							<string>Wake One With Owner</string>
+							<key>0x4</key>
+							<string>Wake Thread</string>
+						</dict>
+					</dict>
+
+
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+					<key>ArgValueLabelsEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>-1</key>
+							<string>Waiting</string>
+							<key>0x0</key>
+							<string>Awakened</string>
+							<key>0x1</key>
+							<string>Timed Out</string>
+							<key>0x2</key>
+							<string>Interrupted</string>
+							<key>0x3</key>
+							<string>Restart</string>
+							<key>0xa</key>
+							<string>Not Waiting</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Suspended</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0015</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b0016</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Queue ID</string>
+						<key>Arg2</key>
+						<string>Epoch</string>
+					</dict>
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Resumed</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0019</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b001a</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Queue ID</string>
+						<key>Arg2</key>
+						<string>Epoch</string>
+						<key>Arg2</key>
+						<string>Target CTID</string>
+					</dict>
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+					<key>ArgValueLabelsEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>-1</key>
+							<string>Waiting</string>
+							<key>0x0</key>
+							<string>Awakened</string>
+							<key>0x1</key>
+							<string>Timed Out</string>
+							<key>0x2</key>
+							<string>Interrupted</string>
+							<key>0x3</key>
+							<string>Restart</string>
+							<key>0xa</key>
+							<string>Not Waiting</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Interrupted</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b001d</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b001e</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Queue ID</string>
+						<key>Arg2</key>
+						<string>Epoch</string>
+						<key>Arg2</key>
+						<string>Target CTID</string>
+					</dict>
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+					<key>ArgValueLabelsEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>-1</key>
+							<string>Waiting</string>
+							<key>0x0</key>
+							<string>Awakened</string>
+							<key>0x1</key>
+							<string>Timed Out</string>
+							<key>0x2</key>
+							<string>Interrupted</string>
+							<key>0x3</key>
+							<string>Restart</string>
+							<key>0xa</key>
+							<string>Not Waiting</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Nothing Scheduled</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0020</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler All Exclaves Booted</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0024</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Early Alloc</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0028</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Number of Pages</string>
+						<key>Arg2</key>
+						<string>Flags</string>
+						<key>Arg2</key>
+						<string>Target CTID</string>
+					</dict>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</plist>

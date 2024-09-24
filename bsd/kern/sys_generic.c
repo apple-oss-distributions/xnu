@@ -139,7 +139,6 @@
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcpip.h>
-#include <netinet/tcp_debug.h>
 /* for wait queue based select */
 #include <kern/waitq.h>
 #include <sys/vnode_internal.h>
@@ -2676,8 +2675,8 @@ SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cpu, CTLTYPE_INT | CTLFLAG_RW | C
     0, 0, sysctl_kern_sched_thread_bind_cpu, "I", "");
 
 #if __AMP__
+
 extern char sysctl_get_bound_cluster_type(void);
-extern void sysctl_thread_bind_cluster_type(char cluster_type);
 static int
 sysctl_kern_sched_thread_bind_cluster_type SYSCTL_HANDLER_ARGS
 {
@@ -2698,18 +2697,17 @@ sysctl_kern_sched_thread_bind_cluster_type SYSCTL_HANDLER_ARGS
 		goto out;
 	}
 
-	if (cluster_type != 'E' &&
-	    cluster_type != 'e' &&
-	    cluster_type != 'P' &&
-	    cluster_type != 'p') {
+	if (cluster_type != 'P' &&
+	    cluster_type != 'p' &&
+	    cluster_type != 'E' &&
+	    cluster_type != 'e') {
 		return EINVAL;
 	}
 
-	sysctl_thread_bind_cluster_type(cluster_type);
+	thread_bind_cluster_type(current_thread(), cluster_type, false);
 
 out:
-	cluster_type = sysctl_get_bound_cluster_type();
-	buff[0] = cluster_type;
+	buff[0] = sysctl_get_bound_cluster_type();
 
 	return SYSCTL_OUT(req, buff, 1);
 }
@@ -2799,10 +2797,6 @@ SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cluster_id, CTLTYPE_INT | CTLFLAG
 
 #if CONFIG_SCHED_EDGE
 
-extern int sched_edge_restrict_ut;
-SYSCTL_INT(_kern, OID_AUTO, sched_edge_restrict_ut, CTLFLAG_RW | CTLFLAG_LOCKED, &sched_edge_restrict_ut, 0, "Edge Scheduler Restrict UT Threads");
-extern int sched_edge_restrict_bg;
-SYSCTL_INT(_kern, OID_AUTO, sched_edge_restrict_bg, CTLFLAG_RW | CTLFLAG_LOCKED, &sched_edge_restrict_ut, 0, "Edge Scheduler Restrict BG Threads");
 extern int sched_edge_migrate_ipi_immediate;
 SYSCTL_INT(_kern, OID_AUTO, sched_edge_migrate_ipi_immediate, CTLFLAG_RW | CTLFLAG_LOCKED, &sched_edge_migrate_ipi_immediate, 0, "Edge Scheduler uses immediate IPIs for migration event based on execution latency");
 

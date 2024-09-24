@@ -28,7 +28,7 @@
 
 #include <kern/backtrace.h>
 #include <mach/sdt.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 #include <vm/vm_pageout.h> /* for vm_debug_events */
 #include <sys/code_signing.h>
 

@@ -64,7 +64,7 @@ OSDefineMetaClassAndStructors(IORegistryEntry, OSObject)
 struct IORegistryEntry::ExpansionData {
 	IORecursiveLock *        fLock;
 	uint64_t                 fRegistryEntryID;
-	SInt32                   fRegistryEntryGenerationCount;
+	SInt32                   fRegistryEntryParentGenerationCount;
 	OSObject       **_Atomic fIndexedProperties;
 };
 
@@ -192,9 +192,9 @@ IORegistryEntry::getGenerationCount( void )
 }
 
 SInt32
-IORegistryEntry::getRegistryEntryGenerationCount(void) const
+IORegistryEntry::getRegistryEntryParentGenerationCount(void) const
 {
-	return reserved->fRegistryEntryGenerationCount;
+	return reserved->fRegistryEntryParentGenerationCount;
 }
 
 const IORegistryPlane *
@@ -1726,7 +1726,9 @@ IORegistryEntry::makeLink( IORegistryEntry * to,
 			links->release();
 		}
 	}
-	reserved->fRegistryEntryGenerationCount++;
+	if (kParentSetIndex == relation) {
+		reserved->fRegistryEntryParentGenerationCount++;
+	}
 
 	return result;
 }
@@ -1748,7 +1750,9 @@ IORegistryEntry::breakLink( IORegistryEntry * to,
 			}
 		}
 	}
-	reserved->fRegistryEntryGenerationCount++;
+	if (kParentSetIndex == relation) {
+		reserved->fRegistryEntryParentGenerationCount++;
+	}
 }
 
 

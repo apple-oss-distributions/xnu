@@ -31,6 +31,7 @@
 
 #include <mach/coalition.h>
 #include <mach/machine.h>
+#include <mach/message.h>
 #include <stdint.h>
 #include <sys/cdefs.h>
 #include <sys/event_private.h>
@@ -103,6 +104,10 @@ struct proc_threadcounts {
 	struct proc_threadcounts_data ptc_counts[];
 };
 
+struct proc_delegated_signal_info {
+	audit_token_t instigator;
+	audit_token_t target;
+};
 
 #define PROC_FLAG_DARWINBG      0x8000  /* process in darwin background */
 #define PROC_FLAG_EXT_DARWINBG  0x10000 /* process in darwin background - external enforcement */
@@ -280,6 +285,8 @@ struct kevent_extinfo {
 #define PROC_INFO_CALL_TERMINATE_RSR         0x10
 #define PROC_INFO_CALL_SIGNAL_AUDITTOKEN     0x11
 #define PROC_INFO_CALL_TERMINATE_AUDITTOKEN  0x12
+#define PROC_INFO_CALL_DELEGATE_SIGNAL       0x13
+#define PROC_INFO_CALL_DELEGATE_TERMINATE    0x14
 
 /* __proc_info_extended_id() flags */
 #define PIF_COMPARE_IDVERSION           0x01
@@ -322,7 +329,7 @@ extern int fill_channelinfo(struct kern_channel * chan,
 extern int fill_procworkqueue(proc_t, struct proc_workqueueinfo *);
 extern boolean_t workqueue_get_pwq_exceeded(void *v, boolean_t *exceeded_total,
     boolean_t *exceeded_constrained);
-extern uint32_t workqueue_get_pwq_state_kdp(void *proc);
+extern uint64_t workqueue_get_task_ss_flags_from_pwq_state_kdp(void *proc);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

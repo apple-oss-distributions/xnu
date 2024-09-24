@@ -156,7 +156,7 @@ tests()
 	}
 }
 
-T_DECL(deref, "bounded_ptr.deref") {
+T_DECL(deref, "bounded_ptr.deref", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

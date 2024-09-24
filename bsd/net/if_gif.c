@@ -125,7 +125,7 @@ static int gif_encapcheck(const struct mbuf *, int, int, void *);
 static errno_t gif_output(ifnet_t ifp, mbuf_t m);
 static errno_t gif_input(ifnet_t ifp, protocol_family_t protocol_family,
     mbuf_t m, char *frame_header);
-static errno_t gif_ioctl(ifnet_t ifp, u_long cmd, void *data);
+static errno_t gif_ioctl(ifnet_t ifp, u_long cmd, void *__sized_by(IOCPARM_LEN(cmd)));
 
 static int ngif = 0;            /* number of interfaces */
 
@@ -177,7 +177,7 @@ gif_demux(
 	__unused char *frame_header,
 	protocol_family_t *protocol_family)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 
 	GIF_LOCK(sc);
 	/* Only one protocol may be attached to a gif interface. */
@@ -195,7 +195,7 @@ gif_add_proto(
 	__unused u_int32_t demux_count)
 {
 	/* Only one protocol may be attached at a time */
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 
 	GIF_LOCK(sc);
 	if (sc->gif_proto != 0) {
@@ -214,7 +214,7 @@ gif_del_proto(
 	ifnet_t ifp,
 	protocol_family_t protocol_family)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 
 	GIF_LOCK(sc);
 	if (sc->gif_proto == protocol_family) {
@@ -284,7 +284,7 @@ gif_set_bpf_tap(
 	bpf_tap_mode mode,
 	bpf_packet_func callback)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 
 	GIF_LOCK(sc);
 	sc->tap_mode = mode;
@@ -297,7 +297,7 @@ gif_set_bpf_tap(
 static void
 gif_detach(struct ifnet *ifp)
 {
-	struct gif_softc *sc = ifp->if_softc;
+	struct gif_softc *__single sc = ifp->if_softc;
 	lck_mtx_destroy(&sc->gif_lock, &gif_mtx_grp);
 	kfree_type(struct gif_softc, sc);
 	ifp->if_softc = NULL;
@@ -307,7 +307,7 @@ gif_detach(struct ifnet *ifp)
 static int
 gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 {
-	struct gif_softc *sc = NULL;
+	struct gif_softc *__single sc = NULL;
 	struct ifnet_init_eparams gif_init_params;
 	errno_t error = 0;
 
@@ -331,8 +331,8 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 	gif_init_params.ver = IFNET_INIT_CURRENT_VERSION;
 	gif_init_params.len = sizeof(gif_init_params);
 	gif_init_params.flags = IFNET_INIT_LEGACY;
+	gif_init_params.uniqueid_len = strbuflen(sc->gif_ifname);
 	gif_init_params.uniqueid = sc->gif_ifname;
-	gif_init_params.uniqueid_len = strlen(sc->gif_ifname);
 	gif_init_params.name = GIFNAME;
 	gif_init_params.unit = unit;
 	gif_init_params.type = IFT_GIF;
@@ -412,9 +412,9 @@ static int
 gif_remove(struct ifnet *ifp)
 {
 	int error = 0;
-	struct gif_softc *sc = NULL;
-	const struct encaptab *encap_cookie4 = NULL;
-	const struct encaptab *encap_cookie6 = NULL;
+	struct gif_softc *__single sc = NULL;
+	const struct encaptab *__single encap_cookie4 = NULL;
+	const struct encaptab *__single encap_cookie6 = NULL;
 
 	lck_mtx_lock(&gif_mtx);
 	sc = ifp->if_softc;
@@ -493,7 +493,7 @@ gif_encapcheck(
 {
 	int error = 0;
 	struct ip ip;
-	struct gif_softc *sc;
+	struct gif_softc *__single sc;
 
 	sc = (struct gif_softc *)arg;
 	if (sc == NULL) {
@@ -521,7 +521,7 @@ gif_encapcheck(
 		goto done;
 	}
 
-	mbuf_copydata((struct mbuf *)(size_t)m, 0, sizeof(ip), &ip);
+	mbuf_copydata(__DECONST(struct mbuf *, m), 0, sizeof(ip), &ip);
 
 	switch (ip.ip_v) {
 #if INET
@@ -553,7 +553,7 @@ gif_output(
 	ifnet_t ifp,
 	mbuf_t m)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 	struct sockaddr *gif_psrc;
 	struct sockaddr *gif_pdst;
 	int error = 0;
@@ -630,7 +630,7 @@ gif_input(
 	mbuf_t m,
 	__unused char *frame_header)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 
 	bpf_tap_in(ifp, 0, m, &sc->gif_proto, sizeof(sc->gif_proto));
 
@@ -659,18 +659,15 @@ gif_input(
 
 /* XXX how should we handle IPv6 scope on SIOC[GS]IFPHYADDR? */
 static errno_t
-gif_ioctl(
-	ifnet_t                 ifp,
-	u_long                  cmd,
-	void                    *data)
+gif_ioctl(ifnet_t ifp, u_long cmd, void *__sized_by(IOCPARM_LEN(cmd)) data)
 {
-	struct gif_softc *sc  = ifnet_softc(ifp);
-	struct ifreq *ifr = (struct ifreq *)data;
+	struct gif_softc *__single sc  = ifnet_softc(ifp);
+	struct ifreq *__single ifr = (struct ifreq *)data;
 	int error = 0, size;
 	struct sockaddr *dst = NULL, *src = NULL;
-	struct sockaddr *sa;
-	struct ifnet *ifp2;
-	struct gif_softc *sc2;
+	struct sockaddr *__single sa;
+	struct ifnet *__single ifp2;
+	struct gif_softc *__single sc2;
 
 	switch (cmd) {
 	case SIOCSIFADDR:
@@ -870,7 +867,7 @@ gif_ioctl(
 			GIF_UNLOCK(sc);
 			return ENOBUFS;
 		}
-		bcopy((caddr_t)src, (caddr_t)sa, src->sa_len);
+		SOCKADDR_COPY(src, sa, src->sa_len);
 		sc->gif_psrc = sa;
 
 		if (sc->gif_pdst) {
@@ -881,7 +878,7 @@ gif_ioctl(
 			GIF_UNLOCK(sc);
 			return ENOBUFS;
 		}
-		bcopy((caddr_t)dst, (caddr_t)sa, dst->sa_len);
+		SOCKADDR_COPY(dst, sa, dst->sa_len);
 		sc->gif_pdst = sa;
 		GIF_UNLOCK(sc);
 
@@ -940,7 +937,7 @@ gif_ioctl(
 			GIF_UNLOCK(sc);
 			return EINVAL;
 		}
-		bcopy((caddr_t)src, (caddr_t)dst, src->sa_len);
+		SOCKADDR_COPY(src, dst, src->sa_len);
 		GIF_UNLOCK(sc);
 		break;
 
@@ -977,7 +974,7 @@ gif_ioctl(
 			GIF_UNLOCK(sc);
 			return EINVAL;
 		}
-		bcopy((caddr_t)src, (caddr_t)dst, src->sa_len);
+		SOCKADDR_COPY(src, dst, src->sa_len);
 		GIF_UNLOCK(sc);
 		break;
 

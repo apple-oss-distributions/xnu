@@ -130,8 +130,9 @@ extern uint64_t         timer_queue_expire_with_options(
 	boolean_t);
 
 /* Shutdown a timer queue and reassign existing activities */
-extern void             timer_queue_shutdown(
-	mpqueue_head_t          *queue);
+extern void             timer_queue_shutdown(int target_cpu,
+    mpqueue_head_t          *queue,
+    mpqueue_head_t          *new_queue);
 
 /* Move timer requests from one queue to another */
 extern int              timer_queue_migrate(
@@ -164,7 +165,7 @@ extern void             timer_queue_trace(
 extern void             timer_queue_trace_cpu(int cpu);
 
 extern uint64_t         timer_sysctl_get(int oid);
-extern int              timer_sysctl_set(int oid, uint64_t value);
+extern kern_return_t    timer_sysctl_set(int oid, uint64_t value);
 
 #endif  /* MACH_KERNEL_PRIVATE */
 

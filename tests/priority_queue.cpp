@@ -24,7 +24,7 @@
 #include "../osfmk/kern/priority_queue.h"
 #include "../libkern/c++/priority_queue.cpp"
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED);
 
 static int
 compare_numbers_descending(const void * a, const void * b)

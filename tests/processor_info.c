@@ -15,7 +15,8 @@ T_DECL(processor_cpu_stat64,
     T_META_NAMESPACE("xnu.arm"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("arm"),
-    T_META_OWNER("mwm"))
+    T_META_OWNER("mwm"),
+    T_META_TAG_VM_PREFERRED)
 {
 #if !__arm64__
 	T_SKIP("processor statistics only available on ARM");
@@ -108,7 +109,7 @@ T_DECL(processor_cpu_stat64,
 
 
 T_DECL(processor_cpu_info_order,
-    "ensure host_processor_info iterates CPU in CPU ID order")
+    "ensure host_processor_info iterates CPU in CPU ID order", T_META_TAG_VM_PREFERRED)
 {
 	host_t host = mach_host_self();
 	host_t priv_port = MACH_PORT_NULL;

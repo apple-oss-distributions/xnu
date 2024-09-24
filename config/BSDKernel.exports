@@ -717,6 +717,7 @@ _vn_default_error
 _vn_getpath
 _vn_path_package_check
 _vn_rdwr
+_vn_rdwr_64
 _vn_revoke
 _vnode_addfsref
 _vnode_authattr

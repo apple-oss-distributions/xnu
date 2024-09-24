@@ -80,9 +80,6 @@ static SECURITY_READ_ONLY_LATE(cache_info_t *) cpuid_cache_info_boot_cpu;
 static cache_info_t cpuid_cache_info[MAX_CPU_TYPES] = { 0 };
 static _Atomic uint8_t cpuid_cache_info_bitmap = 0;
 
-static LCK_GRP_DECLARE(cpuid_grp, "cpuid");
-static LCK_RW_DECLARE(cpuid_cache_info_lck_rw, &cpuid_grp);
-
 /* Code */
 
 __private_extern__
@@ -171,23 +168,54 @@ cpuid_get_cpufamily(void)
 			break;
 		case CPU_PART_LIGHTNING:
 		case CPU_PART_THUNDER:
-#ifndef RC_HIDE_XNU_FIRESTORM
 		case CPU_PART_THUNDER_M10:
-#endif
 			cpufamily = CPUFAMILY_ARM_LIGHTNING_THUNDER;
 			break;
 		case CPU_PART_FIRESTORM_JADE_CHOP:
 		case CPU_PART_FIRESTORM_JADE_DIE:
 		case CPU_PART_ICESTORM_JADE_CHOP:
 		case CPU_PART_ICESTORM_JADE_DIE:
-#ifndef RC_HIDE_XNU_FIRESTORM
 		case CPU_PART_FIRESTORM:
 		case CPU_PART_ICESTORM:
 		case CPU_PART_FIRESTORM_TONGA:
 		case CPU_PART_ICESTORM_TONGA:
 			cpufamily = CPUFAMILY_ARM_FIRESTORM_ICESTORM;
 			break;
-#endif
+		case CPU_PART_BLIZZARD_STATEN:
+		case CPU_PART_AVALANCHE_STATEN:
+		case CPU_PART_BLIZZARD_RHODES_CHOP:
+		case CPU_PART_AVALANCHE_RHODES_CHOP:
+		case CPU_PART_BLIZZARD_RHODES_DIE:
+		case CPU_PART_AVALANCHE_RHODES_DIE:
+		case CPU_PART_BLIZZARD:
+		case CPU_PART_AVALANCHE:
+			cpufamily = CPUFAMILY_ARM_BLIZZARD_AVALANCHE;
+			break;
+		case CPU_PART_EVEREST:
+		case CPU_PART_SAWTOOTH:
+		case CPU_PART_SAWTOOTH_M11:
+			cpufamily = CPUFAMILY_ARM_EVEREST_SAWTOOTH;
+			break;
+		case CPU_PART_ECORE_IBIZA:
+		case CPU_PART_PCORE_IBIZA:
+			cpufamily = CPUFAMILY_ARM_IBIZA;
+			break;
+		case CPU_PART_ECORE_PALMA:
+		case CPU_PART_PCORE_PALMA:
+			cpufamily = CPUFAMILY_ARM_PALMA;
+			break;
+		case CPU_PART_ECORE_COLL:
+		case CPU_PART_PCORE_COLL:
+			cpufamily = CPUFAMILY_ARM_COLL;
+			break;
+		case CPU_PART_ECORE_LOBOS:
+		case CPU_PART_PCORE_LOBOS:
+			cpufamily = CPUFAMILY_ARM_LOBOS;
+			break;
+		case CPU_PART_ECORE_DONAN:
+		case CPU_PART_PCORE_DONAN:
+			cpufamily = CPUFAMILY_ARM_DONAN;
+			break;
 		default:
 			cpufamily = CPUFAMILY_UNKNOWN;
 			break;
@@ -221,10 +249,12 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_TEMPEST:
 	case CPU_PART_LIGHTNING:
 	case CPU_PART_THUNDER:
-#ifndef RC_HIDE_XNU_FIRESTORM
 	case CPU_PART_FIRESTORM:
 	case CPU_PART_ICESTORM:
-#endif
+	case CPU_PART_BLIZZARD:
+	case CPU_PART_AVALANCHE:
+	case CPU_PART_SAWTOOTH:
+	case CPU_PART_EVEREST:
 		cpusubfamily = CPUSUBFAMILY_ARM_HP;
 		break;
 	case CPU_PART_TYPHOON_CAPRI:
@@ -232,17 +262,32 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_HURRICANE_MYST:
 	case CPU_PART_VORTEX_ARUBA:
 	case CPU_PART_TEMPEST_ARUBA:
-#ifndef RC_HIDE_XNU_FIRESTORM
 	case CPU_PART_FIRESTORM_TONGA:
 	case CPU_PART_ICESTORM_TONGA:
-#endif
+	case CPU_PART_BLIZZARD_STATEN:
+	case CPU_PART_AVALANCHE_STATEN:
 		cpusubfamily = CPUSUBFAMILY_ARM_HG;
 		break;
 	case CPU_PART_TEMPEST_M9:
-#ifndef RC_HIDE_XNU_FIRESTORM
 	case CPU_PART_THUNDER_M10:
-#endif
+	case CPU_PART_SAWTOOTH_M11:
 		cpusubfamily = CPUSUBFAMILY_ARM_M;
+		break;
+	case CPU_PART_ECORE_IBIZA:
+	case CPU_PART_PCORE_IBIZA:
+		cpusubfamily = CPUSUBFAMILY_ARM_HG;
+		break;
+	case CPU_PART_ECORE_COLL:
+	case CPU_PART_PCORE_COLL:
+		cpusubfamily = CPUSUBFAMILY_ARM_HP;
+		break;
+	case CPU_PART_ECORE_PALMA:
+	case CPU_PART_PCORE_PALMA:
+		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
+		break;
+	case CPU_PART_ECORE_LOBOS:
+	case CPU_PART_PCORE_LOBOS:
+		cpusubfamily = CPUSUBFAMILY_ARM_HS;
 		break;
 	case CPU_PART_FIRESTORM_JADE_CHOP:
 	case CPU_PART_ICESTORM_JADE_CHOP:
@@ -251,6 +296,18 @@ cpuid_get_cpusubfamily(void)
 	case CPU_PART_FIRESTORM_JADE_DIE:
 	case CPU_PART_ICESTORM_JADE_DIE:
 		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
+		break;
+	case CPU_PART_BLIZZARD_RHODES_CHOP:
+	case CPU_PART_AVALANCHE_RHODES_CHOP:
+		cpusubfamily = CPUSUBFAMILY_ARM_HS;
+		break;
+	case CPU_PART_BLIZZARD_RHODES_DIE:
+	case CPU_PART_AVALANCHE_RHODES_DIE:
+		cpusubfamily = CPUSUBFAMILY_ARM_HC_HD;
+		break;
+	case CPU_PART_ECORE_DONAN:
+	case CPU_PART_PCORE_DONAN:
+		cpusubfamily = CPUSUBFAMILY_ARM_HG;
 		break;
 	default:
 		cpusubfamily = CPUSUBFAMILY_UNKNOWN;
@@ -401,10 +458,8 @@ do_cacheid(void)
 	if (cpuid_cache_info_p == cpuid_cache_info_boot_cpu) {
 		cpuid_cache_info_p->c_valid = true;
 	} else {
-		lck_rw_lock_exclusive(&cpuid_cache_info_lck_rw);
-		cpuid_cache_info_p->c_valid = true;
+		os_atomic_store(&cpuid_cache_info_p->c_valid, true, release);
 		thread_wakeup((event_t)&cpuid_cache_info_p->c_valid);
-		lck_rw_unlock_exclusive(&cpuid_cache_info_lck_rw);
 	}
 
 	kprintf("%s() - %u bytes %s cache (I:%u D:%u (%s)), %u-way assoc, %u bytes/line\n",
@@ -436,13 +491,17 @@ cache_info_type(cluster_type_t cluster_type)
 	 * cache_info_type() is callable.  Other clusters may not have completed
 	 * do_cacheid() yet.
 	 */
-	if (ret != cpuid_cache_info_boot_cpu) {
-		lck_rw_lock_shared(&cpuid_cache_info_lck_rw);
-		while (CC_UNLIKELY(!ret->c_valid)) {
-			lck_rw_sleep(&cpuid_cache_info_lck_rw, LCK_SLEEP_DEFAULT,
-			    (event_t)&ret->c_valid, THREAD_UNINT);
+	if (ret == cpuid_cache_info_boot_cpu) {
+		return ret;
+	}
+
+	while (!os_atomic_load(&ret->c_valid, acquire)) {
+		assert_wait((event_t)&ret->c_valid, THREAD_UNINT);
+		if (os_atomic_load(&ret->c_valid, relaxed)) {
+			clear_wait(current_thread(), THREAD_AWAKENED);
+		} else {
+			thread_block(THREAD_CONTINUE_NULL);
 		}
-		lck_rw_unlock_shared(&cpuid_cache_info_lck_rw);
 	}
 
 	return ret;

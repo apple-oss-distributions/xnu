@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -29,6 +29,7 @@
 #include <sys/queue.h>
 
 #define OS_LOG_XNU_SUBSYSTEM  "com.apple.xnu"
+#define OS_LOG_SUBSYSTEM      "com.apple.xnu.oslog"
 #define OS_LOG_MAX_SIZE_ORDER 10 // Maximum log size order (1024 bytes)
 
 __BEGIN_DECLS
@@ -75,8 +76,8 @@ __osloglike(3, 0);
  * A private interface allowing to emit already encoded log messages.
  */
 bool os_log_encoded_metadata(firehose_tracepoint_id_u, uint64_t, const void *, size_t);
-bool os_log_encoded_signpost(firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
-bool os_log_encoded_log(firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
+bool os_log_encoded_signpost(firehose_stream_t, firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
+bool os_log_encoded_log(firehose_stream_t, firehose_tracepoint_id_u, uint64_t, const void *, size_t, size_t);
 
 __END_DECLS
 

@@ -111,12 +111,22 @@ struct ndrv_demux_desc {
  *	demux_count	:	number of demux_list descriptors in demux_list; maximum of 10
  *	demux_list	:	pointer to array of demux descriptors
  */
+#ifdef BSD_KERNEL_PRIVATE
+struct ndrv_protocol_desc_kernel {
+	u_int32_t                           version;
+	u_int32_t                           protocol_family;
+	u_int32_t                           demux_count;
+	struct ndrv_demux_desc              *__counted_by(demux_count) demux_list;
+};
+#else
 struct ndrv_protocol_desc {
 	u_int32_t                           version;
 	u_int32_t                           protocol_family;
 	u_int32_t                           demux_count;
 	struct ndrv_demux_desc              *demux_list;
 };
+#endif
+
 
 #ifdef KERNEL_PRIVATE
 /* LP64 version of ndrv_protocol_desc.  all pointers

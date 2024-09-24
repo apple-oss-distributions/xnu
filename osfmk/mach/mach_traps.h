@@ -692,7 +692,7 @@ extern kern_return_t mk_timer_cancel_trap(
 struct _kernelrpc_mach_vm_allocate_trap_args {
 	PAD_ARG_(mach_port_name_t, target);     /* 1 word */
 	PAD_ARG_(user_addr_t, addr);            /* 1 word */
-	PAD_ARG_(mach_vm_size_t, size);         /* 2 words */
+	PAD_ARG_(mach_vm_size_ut, size);        /* 2 words */
 	PAD_ARG_(int, flags);                   /* 1 word */
 };                                              /* Total: 5 */
 
@@ -701,8 +701,8 @@ extern kern_return_t _kernelrpc_mach_vm_allocate_trap(
 
 struct _kernelrpc_mach_vm_deallocate_args {
 	PAD_ARG_(mach_port_name_t, target);     /* 1 word */
-	PAD_ARG_(mach_vm_address_t, address);   /* 2 words */
-	PAD_ARG_(mach_vm_size_t, size);         /* 2 words */
+	PAD_ARG_(mach_vm_address_ut, address);  /* 2 words */
+	PAD_ARG_(mach_vm_size_ut, size);        /* 2 words */
 };                                              /* Total: 5 */
 extern kern_return_t _kernelrpc_mach_vm_deallocate_trap(
 	struct _kernelrpc_mach_vm_deallocate_args *args);
@@ -728,11 +728,11 @@ extern kern_return_t _kernelrpc_mach_vm_protect_trap(
 struct _kernelrpc_mach_vm_map_trap_args {
 	PAD_ARG_(mach_port_name_t, target);
 	PAD_ARG_(user_addr_t, addr);
-	PAD_ARG_(mach_vm_size_t, size);
-	PAD_ARG_(mach_vm_offset_t, mask);
+	PAD_ARG_(mach_vm_size_ut, size);
+	PAD_ARG_(mach_vm_offset_ut, mask);
 	PAD_ARG_(int, flags);
 	PAD_ARG_8
-	    PAD_ARG_(vm_prot_t, cur_protection);
+	    PAD_ARG_(vm_prot_ut, cur_protection);
 };
 extern kern_return_t _kernelrpc_mach_vm_map_trap(
 	struct _kernelrpc_mach_vm_map_trap_args *args);

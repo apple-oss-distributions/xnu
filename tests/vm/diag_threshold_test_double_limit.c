@@ -47,7 +47,8 @@ double_limit_test_execution(struct test_case *test_case, void *param)
 }
 
 T_DECL(diag_mem_threshold_double_limit_test,
-    "Test on which the diagnostics limit limit is set twice and expects two exceptions"
+    "Test on which the diagnostics limit limit is set twice and expects two exceptions",
+    T_META_TAG_VM_PREFERRED
     )
 {
 	diag_mem_threshold_set_setup(&double_limit_test);

@@ -381,6 +381,12 @@ work_interval_release(struct work_interval *work_interval, __unused thread_work_
 	}
 }
 
+void
+kern_work_interval_release(struct work_interval *work_interval)
+{
+	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
+}
+
 #if CONFIG_SCHED_AUTO_JOIN
 
 /*
@@ -595,6 +601,12 @@ port_name_to_work_interval(mach_port_name_t     name,
 	return kr;
 }
 
+kern_return_t
+kern_port_name_to_work_interval(mach_port_name_t name,
+    struct work_interval **work_interval)
+{
+	return port_name_to_work_interval(name, work_interval);
+}
 
 /*
  * work_interval_port_no_senders
@@ -667,7 +679,7 @@ static const struct {
 	},
 
 	[WI_CLASS_APP_SUPPORT] = {
-		BASEPRI_DEFAULT,        // 31
+		BASEPRI_USER_INITIATED, // 37
 		TH_MODE_TIMESHARE,
 	},
 
@@ -708,29 +720,18 @@ work_interval_get_priority(thread_t thread)
 	return priority;
 }
 
-#if CONFIG_THREAD_GROUPS
-extern kern_return_t
-kern_work_interval_get_policy_from_port(mach_port_name_t port_name,
+kern_return_t
+kern_work_interval_get_policy(struct work_interval *work_interval,
     integer_t *policy,
-    integer_t *priority,
-    struct thread_group **tg)
+    integer_t *priority)
 {
-	assert((priority != NULL) && (policy != NULL) && (tg != NULL));
-
-	kern_return_t kr;
-	struct work_interval *work_interval;
-
-	kr = port_name_to_work_interval(port_name, &work_interval);
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (!work_interval || !priority || !policy) {
+		return KERN_INVALID_ARGUMENT;
 	}
 
-	/* work_interval has a +1 ref */
-	assert(work_interval != NULL);
 	assert3u(work_interval->wi_class, <, WI_CLASS_COUNT);
 
 	const sched_mode_t mode = work_interval_class_data[work_interval->wi_class].sched_mode;
-
 	if ((mode == TH_MODE_TIMESHARE) || (mode == TH_MODE_FIXED)) {
 		*policy = ((mode == TH_MODE_TIMESHARE)? POLICY_TIMESHARE: POLICY_RR);
 		*priority = work_interval_class_data[work_interval->wi_class].priority;
@@ -738,13 +739,23 @@ kern_work_interval_get_policy_from_port(mach_port_name_t port_name,
 		*priority += work_interval->wi_class_offset;
 		assert3u(*priority, <=, MAXPRI);
 	} /* No sched mode change for REALTIME (threads must explicitly opt-in) */
+	return KERN_SUCCESS;
+}
 
+#if CONFIG_THREAD_GROUPS
+kern_return_t
+kern_work_interval_get_thread_group(struct work_interval *work_interval,
+    struct thread_group **tg)
+{
+	if (!work_interval || !tg) {
+		return KERN_INVALID_ARGUMENT;
+	}
 	if (work_interval->wi_group) {
 		*tg = thread_group_retain(work_interval->wi_group);
+		return KERN_SUCCESS;
+	} else {
+		return KERN_INVALID_ARGUMENT;
 	}
-
-	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
-	return KERN_SUCCESS;
 }
 #endif /* CONFIG_THREAD_GROUPS */
 
@@ -1372,7 +1383,9 @@ kern_work_interval_set_workload_id(mach_port_name_t port_name,
 
 		wlida_flags = wl_config.wc_flags;
 
+#if !defined(XNU_TARGET_OS_XR)
 		wlida_flags &= ~WORK_INTERVAL_WORKLOAD_ID_RT_CRITICAL;
+#endif /* !XNU_TARGET_OS_XR */
 
 #if CONFIG_THREAD_GROUPS
 		tg_flags = wl_config.wc_thread_group_flags;
@@ -1519,6 +1532,27 @@ kern_work_interval_join(thread_t            thread,
 
 	kr = thread_set_work_interval_explicit_join(thread, work_interval);
 	/* ref was consumed by passing it to the thread in the successful case */
+	if (kr != KERN_SUCCESS) {
+		work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
+	}
+	return kr;
+}
+
+kern_return_t
+kern_work_interval_explicit_join(thread_t thread,
+    struct work_interval *work_interval)
+{
+	kern_return_t kr;
+	assert(thread == current_thread());
+	assert(work_interval != NULL);
+
+	/*
+	 * We take +1 ref on the work interval which is consumed by passing it
+	 * on to the thread below in the successful case.
+	 */
+	work_interval_retain(work_interval);
+
+	kr = thread_set_work_interval_explicit_join(thread, work_interval);
 	if (kr != KERN_SUCCESS) {
 		work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
 	}

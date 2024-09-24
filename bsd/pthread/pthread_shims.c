@@ -52,7 +52,7 @@
 #include <sys/sysproto.h>
 #include <sys/systm.h>
 #include <sys/ulock.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_protos.h>
 #include <kern/kcdata.h>
 

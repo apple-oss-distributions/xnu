@@ -34,6 +34,7 @@
 #include <kdp/kdp_core.h>
 #include <kdp/processor_core.h>
 #include <libkern/zlib.h>
+#include <vm/vm_kern_xnu.h>
 
 #define MAX_ZLIB_CHUNK (1024 * 1024 * 1024)
 

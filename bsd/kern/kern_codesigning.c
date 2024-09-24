@@ -23,10 +23,10 @@
 #include <os/overflow.h>
 #include <machine/atomic.h>
 #include <mach/vm_param.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/pmap.h>
 #include <vm/pmap_cs.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
@@ -36,6 +36,7 @@
 #include <libkern/section_keywords.h>
 #include <libkern/coretrust/coretrust.h>
 #include <pexpert/pexpert.h>
+#include <sys/user.h>
 #include <sys/vm.h>
 #include <sys/proc.h>
 #include <sys/proc_require.h>
@@ -109,9 +110,15 @@ SYSCTL_NODE(_security, OID_AUTO, codesigning, CTLFLAG_RD, 0, "XNU Code Signing")
 static SECURITY_READ_ONLY_LATE(bool) cs_config_set = false;
 static SECURITY_READ_ONLY_LATE(code_signing_monitor_type_t) cs_monitor = CS_MONITOR_TYPE_NONE;
 static SECURITY_READ_ONLY_LATE(code_signing_config_t) cs_config = 0;
+static uint32_t security_boot_mode_complete = 0;
 
 SYSCTL_UINT(_security_codesigning, OID_AUTO, monitor, CTLFLAG_RD, &cs_monitor, 0, "code signing monitor type");
 SYSCTL_UINT(_security_codesigning, OID_AUTO, config, CTLFLAG_RD, &cs_config, 0, "code signing configuration");
+
+SYSCTL_UINT(
+	_security_codesigning, OID_AUTO,
+	security_boot_mode_complete, CTLFLAG_RD,
+	&security_boot_mode_complete, 0, "security boot mode completion status");
 
 void
 code_signing_configuration(
@@ -156,11 +163,7 @@ code_signing_configuration(
 	 * Using that, we modify the state of the code signing features available.
 	 */
 	if (csm_enabled() == true) {
-#if kTXMKernelAPIVersion >= 3
 		bool platform_code_only = txm_cs_config->systemPolicy->platformCodeOnly;
-#else
-		bool platform_code_only = txm_ro_data->platformCodeOnly;
-#endif
 
 		/* Disable unsupported features when enforcing platform-code-only */
 		if (platform_code_only == true) {
@@ -170,12 +173,20 @@ code_signing_configuration(
 			config &= ~CS_CONFIG_OOP_JIT;
 		}
 
-#if kTXMKernelAPIVersion >= 3
+		/*
+		 * Restricted Execution Mode support. The pattern for this code snippet breaks
+		 * the norm compared to others. For the other features, we consider them enabled
+		 * by default unless TXM disables them. For REM, given this is a TXM only feature,
+		 * we consider it disabled unless TXM explicitly tells us it is enabled.
+		 */
+		if (txm_cs_config->systemPolicy->featureSet.restrictedExecutionMode == true) {
+			config |= CS_CONFIG_REM_SUPPORTED;
+		}
+
 		/* MAP_JIT support */
 		if (txm_cs_config->systemPolicy->featureSet.JIT == false) {
 			config &= ~CS_CONFIG_MAP_JIT;
 		}
-#endif
 
 		/* Developer mode support */
 		if (txm_cs_config->systemPolicy->featureSet.developerMode == false) {
@@ -220,6 +231,7 @@ code_signing_configuration(
 	int amfi_get_out_of_my_way = 0;
 	int cs_enforcement_disabled = 0;
 	int cs_integrity_skip = 0;
+	int amfi_relax_profile_trust = 0;
 
 	/* Parse the AMFI mask */
 	PE_parse_boot_argn("amfi", &amfi_mask, sizeof(amfi_mask));
@@ -253,6 +265,12 @@ code_signing_configuration(
 		"cs_integrity_skip",
 		&cs_integrity_skip,
 		sizeof(cs_integrity_skip));
+
+	/* Parse the AMFI profile trust bypass */
+	PE_parse_boot_argn(
+		"amfi_relax_profile_trust",
+		&amfi_relax_profile_trust,
+		sizeof(amfi_relax_profile_trust));
 
 	/* CS_CONFIG_UNRESTRICTED_DEBUGGING */
 	if (amfi_mask & CS_AMFI_MASK_UNRESTRICT_TASK_FOR_PID) {
@@ -293,6 +311,11 @@ code_signing_configuration(
 		config |= CS_CONFIG_INTEGRITY_SKIP;
 	}
 
+	/* CS_CONFIG_RELAX_PROFILE_TRUST */
+	if (amfi_relax_profile_trust) {
+		config |= CS_CONFIG_RELAX_PROFILE_TRUST;
+	}
+
 #if CONFIG_SPTM
 
 	if (csm_enabled() == true) {
@@ -315,6 +338,19 @@ code_signing_configuration(
 		if (txm_cs_config->exemptions.skipTrustEvaluation == false) {
 			config &= ~CS_CONFIG_GET_OUT_OF_MY_WAY;
 		}
+
+#if kTXMKernelAPIVersion >= 7
+		/*
+		 * In some cases, the relax_profile_trust exemption can be set even without
+		 * the boot-arg on TXM devices. As a result, we always overrule the kernel's
+		 * data with TXM's data for this exemption.
+		 */
+		if (txm_cs_config->exemptions.relaxProfileTrust == true) {
+			config |= CS_CONFIG_RELAX_PROFILE_TRUST;
+		} else {
+			config &= ~CS_CONFIG_RELAX_PROFILE_TRUST;
+		}
+#endif
 	}
 
 #elif PMAP_CS_PPL_MONITOR
@@ -432,6 +468,16 @@ disable_code_signing_feature(
 #endif
 }
 
+kern_return_t
+secure_channel_shared_page(
+	uint64_t *secure_channel_phys,
+	size_t *secure_channel_size)
+{
+	return CSM_PREFIX(secure_channel_shared_page)(
+		secure_channel_phys,
+		secure_channel_size);
+}
+
 #pragma mark Developer Mode
 
 void
@@ -455,6 +501,40 @@ developer_mode_state(void)
 	}
 
 	return os_atomic_load(developer_mode_enabled, relaxed);
+}
+
+#pragma mark Restricted Execution Mode
+
+kern_return_t
+restricted_execution_mode_enable(void)
+{
+	return CSM_PREFIX(rem_enable)();
+}
+
+kern_return_t
+restricted_execution_mode_state(void)
+{
+	return CSM_PREFIX(rem_state)();
+}
+
+void
+update_csm_device_state(void)
+{
+	CSM_PREFIX(update_device_state)();
+}
+
+void
+complete_security_boot_mode(
+	uint32_t security_boot_mode)
+{
+	CSM_PREFIX(complete_security_boot_mode)(security_boot_mode);
+
+	/*
+	 * If we're reach here, it means the completion of the security boot mode was
+	 * successful. We update our sysctl with the provided boot mode in order to
+	 * signify both completion and the boot mode identifier.
+	 */
+	security_boot_mode_complete = security_boot_mode;
 }
 
 #pragma mark Provisioning Profiles
@@ -488,6 +568,9 @@ typedef struct _cs_profile {
 	 * for one pass.
 	 */
 	bool skip_collector;
+
+	/* We skip repeated trust validations of the profile */
+	bool trusted;
 
 	/* Linked list linkage */
 	SLIST_ENTRY(_cs_profile) link;
@@ -545,6 +628,11 @@ csm_register_provisioning_profile(
 	void *monitor_profile_obj = NULL;
 	kern_return_t ret = KERN_DENIED;
 
+	/* Only proceed if code-signing-monitor is enabled */
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
 	/* Allocate storage for the profile wrapper object */
 	profile = kalloc_type(cs_profile_t, Z_WAITOK_ZERO);
 	assert(profile != NULL);
@@ -599,6 +687,55 @@ exit:
 }
 
 kern_return_t
+csm_trust_provisioning_profile(
+	const uuid_t profile_uuid,
+	const void *sig_data,
+	size_t sig_size)
+{
+	cs_profile_t *profile = NULL;
+	kern_return_t ret = KERN_NOT_FOUND;
+
+	/*
+	 * We don't explicitly make a check here for if the code-signing-monitor is enabled
+	 * or not because this function should never be called unless registration of the
+	 * profile succeeded, which it won't in cases where the CSM is disabled.
+	 *
+	 * If this function does somehow get called, it'll result in a panic -- this is good
+	 * for us to detect and to fix the code path which results in this behavior.
+	 */
+
+	/* Lock the profile set exclusively */
+	lck_rw_lock_exclusive(&profiles_lock);
+
+	/* Search for the registered profile */
+	profile = search_for_profile_uuid(profile_uuid);
+	if (profile == NULL) {
+		goto exit;
+	} else if (profile->trusted == true) {
+		ret = KERN_SUCCESS;
+		goto exit;
+	}
+
+	ret = CSM_PREFIX(trust_provisioning_profile)(
+		profile->profile_obj,
+		sig_data,
+		sig_size);
+
+	/* Mark profile as trusted if needed */
+	if (ret == KERN_SUCCESS) {
+		profile->trusted = true;
+	} else {
+		printf("unable to trust profile with monitor: %d\n", ret);
+	}
+
+exit:
+	/* Unlock the profile set */
+	lck_rw_unlock_exclusive(&profiles_lock);
+
+	return ret;
+}
+
+kern_return_t
 csm_associate_provisioning_profile(
 	void *monitor_sig_obj,
 	const uuid_t profile_uuid)
@@ -606,9 +743,14 @@ csm_associate_provisioning_profile(
 	cs_profile_t *profile = NULL;
 	kern_return_t ret = KERN_DENIED;
 
-	if (csm_enabled() == false) {
-		return KERN_NOT_SUPPORTED;
-	}
+	/*
+	 * We don't explicitly make a check here for if the code-signing-monitor is enabled
+	 * or not because this function should never be called unless registration of the
+	 * profile succeeded, which it won't in cases where the CSM is disabled.
+	 *
+	 * If this function does somehow get called, it'll result in a panic -- this is good
+	 * for us to detect and to fix the code path which results in this behavior.
+	 */
 
 	/* Lock the profile set as shared */
 	lck_rw_lock_shared(&profiles_lock);
@@ -781,6 +923,19 @@ get_trust_level_kdp(
 }
 
 kern_return_t
+get_jit_address_range_kdp(
+	__unused pmap_t pmap,
+	__unused uintptr_t *jit_region_start,
+	__unused uintptr_t *jit_region_end)
+{
+#if CODE_SIGNING_MONITOR
+	return csm_get_jit_address_range_kdp(pmap, jit_region_start, jit_region_end);
+#else
+	return KERN_NOT_SUPPORTED;
+#endif
+}
+
+kern_return_t
 csm_resolve_os_entitlements_from_proc(
 	__unused const proc_t process,
 	__unused const void **os_entitlements)
@@ -879,6 +1034,18 @@ address_space_debugged(
 		return KERN_SUCCESS;
 	}
 
+#if XNU_TARGET_OS_OSX
+	/*
+	 * For macOS systems only, we allow the execution of unsigned code. On Intel, code
+	 * doesn't need to be signed, and on ASi, Rosetta binaries don't need to be signed.
+	 * In these cases, we return successfully from this function because we don't know
+	 * what else we can do.
+	 */
+	if ((proc_getcsflags(process) & CS_SIGNED) == 0) {
+		return KERN_SUCCESS;
+	}
+#endif
+
 	return KERN_DENIED;
 }
 
@@ -907,12 +1074,10 @@ csm_check_lockdown_mode(void)
 	CSM_PREFIX(enter_lockdown_mode)();
 
 #if CONFIG_SPTM
-#if kTXMKernelAPIVersion >= 3
 	/* MAP_JIT lockdown */
 	if (txm_cs_config->systemPolicy->featureSet.JIT == false) {
 		disable_code_signing_feature(CS_CONFIG_MAP_JIT);
 	}
-#endif
 
 	/* Compilation service lockdown */
 	if (txm_cs_config->systemPolicy->featureSet.compilationService == false) {
@@ -949,47 +1114,36 @@ csm_code_signing_violation(
 	proc_t proc,
 	vm_offset_t addr)
 {
-	os_reason_t kill_reason = OS_REASON_NULL;
-
 	/* No enforcement if code-signing-monitor is disabled */
 	if (csm_enabled() == false) {
 		return;
-	} else if (proc == PROC_NULL) {
-		panic("code-signing violation without a valid proc");
 	}
-
-	/*
-	 * If the address space is being debugged, then we expect this task to undergo
-	 * some code signing violations. In this case, we return without killing the
-	 * task.
-	 */
-	if (address_space_debugged(proc) == KERN_SUCCESS) {
-		return;
-	}
-
-	/* Leave a ktriage record */
-	ktriage_record(
-		thread_tid(current_thread()),
-		KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_CODE_SIGNING),
-		0);
 
 	/* Leave a log for triage purposes */
-	printf("[%s: killed] code-signing-violation at %p\n", proc_best_name(proc), (void*)addr);
+	printf("[%s] code-signing-violation at %p\n", proc_best_name(proc), (void*)addr);
 
 	/*
-	 * Create a reason for the SIGKILL and set it to allow generating crash reports,
-	 * which is critical for better triaging these issues.
+	 * For now, the only input into this function is from current_proc(), so using current_thread()
+	 * over here is alright. If this function ever gets called from another location, we need to
+	 * then change where we get the user thread from.
 	 */
-	kill_reason = os_reason_create(OS_REASON_CODESIGNING, CODESIGNING_EXIT_REASON_INVALID_PAGE);
-	if (kill_reason != NULL) {
-		kill_reason->osr_flags |= OS_REASON_FLAG_GENERATE_CRASH_REPORT;
-	}
+	assert(proc == current_proc());
 
 	/*
-	 * Send a SIGKILL to the process. This function will consume the kill_reason, so
-	 * we do not need to manually free it here.
+	 * Force exit the process and set it to allow generating crash reports, which is critical
+	 * for better triaging these issues.
 	 */
-	psignal_with_reason(proc, SIGKILL, kill_reason);
+
+	exception_info_t info = {
+		.os_reason = OS_REASON_CODESIGNING,
+		.exception_type = EXC_BAD_ACCESS,
+		.mx_code = CODESIGNING_EXIT_REASON_INVALID_PAGE,
+		.mx_subcode = VM_USER_STRIP_PTR(addr),
+		.kt_info.kt_subsys = KDBG_TRIAGE_SUBSYS_VM,
+		.kt_info.kt_error = KDBG_TRIAGE_VM_CODE_SIGNING
+	};
+
+	exit_with_mach_exception(proc, info, PX_KTRIAGE);
 }
 
 kern_return_t
@@ -1148,6 +1302,19 @@ csm_get_trust_level_kdp(
 	}
 
 	return CSM_PREFIX(get_trust_level_kdp)(pmap, trust_level);
+}
+
+kern_return_t
+csm_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end)
+{
+	if (csm_enabled() == false) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	return CSM_PREFIX(get_jit_address_range_kdp)(pmap, jit_region_start, jit_region_end);
 }
 
 kern_return_t

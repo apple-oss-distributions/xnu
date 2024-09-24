@@ -51,6 +51,6 @@ tests()
 	}
 }
 
-T_DECL(operator_subscript, "bounded_array.operator.subscript") {
+T_DECL(operator_subscript, "bounded_array.operator.subscript", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

@@ -126,7 +126,7 @@ mach_client()
 
 T_DECL(memory_share_tests,
     "test vm memory sharing between client and server process with different process PAGE_SIZE",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	boolean_t use4k = FALSE;
 	char serviceName[64];

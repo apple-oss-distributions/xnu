@@ -227,7 +227,7 @@ struct cfil_msg_sock_attached {
  * CFIL data flags
  */
 #define CFD_DATA_FLAG_IP_HEADER         0x00000001          /* Data includes IP header */
-
+#define CFIL_DATA_HAS_DELEGATED_PID     1
 /*
  * struct cfil_msg_data_event
  *
@@ -252,6 +252,8 @@ struct cfil_msg_data_event {
 	cfil_crypto_signature   cfd_signature;
 	uint32_t                cfd_signature_length;
 	uint32_t                cfd_flags;
+	pid_t                   cfd_delegated_pid;
+	unsigned int            cfd_delegated_audit_token[8];
 	/* Actual content data immediatly follows */
 };
 
@@ -508,7 +510,12 @@ struct cfil_stats {
 
 #define M_SKIPCFIL      M_PROTO5
 
-#define CFIL_DGRAM_FILTERED(so) ((so->so_flags & SOF_CONTENT_FILTER) && (so->so_flow_db != NULL))
+extern uint32_t cfil_active_count;
+/*
+ * Check if flows on socket should be filtered
+ */
+#define CFIL_DGRAM_HAS_FILTERED_FLOWS(so) ((so->so_flags & SOF_CONTENT_FILTER) && (so->so_flow_db != NULL))
+#define CFIL_DGRAM_FILTERED(so) (!IS_TCP(so) && (cfil_active_count > 0) && (CFIL_DGRAM_HAS_FILTERED_FLOWS(so) || necp_socket_get_content_filter_control_unit(so)))
 
 extern int cfil_log_level;
 

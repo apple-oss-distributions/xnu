@@ -58,6 +58,9 @@
 #include <sys/ubc.h>
 #include <sys/param.h>                  /* for isset() */
 
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
+
 #include <libkern/OSAtomic.h>
 
 #include <machine/pal_routines.h>
@@ -2588,7 +2591,7 @@ static struct kd_callback sync_flush_kdcb = {
 #define TEST_COPROC_CTX 0xabadcafe
 
 static void
-test_coproc_cb(void *context, kd_callback_type __unused reason,
+test_coproc_cb(__assert_only void *context, kd_callback_type __unused reason,
     void * __unused arg)
 {
 	assert((uintptr_t)context == TEST_COPROC_CTX);

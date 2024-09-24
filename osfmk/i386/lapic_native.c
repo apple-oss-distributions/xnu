@@ -40,7 +40,7 @@
 #include <kern/debug.h>
 
 #include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <i386/lapic.h>
 #include <i386/cpuid.h>
@@ -654,10 +654,10 @@ lapic_shutdown(bool for_sleep)
 	mp_enable_preemption();
 }
 
-boolean_t
-cpu_can_exit(int cpu)
+bool
+ml_cpu_can_exit(int cpu_id)
 {
-	return cpu > lapic_max_interrupt_cpunum;
+	return cpu_id > lapic_max_interrupt_cpunum;
 }
 
 void

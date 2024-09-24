@@ -148,6 +148,11 @@ typedef enum {
 	kIOLockAssertNotOwned = LCK_ASSERT_NOTOWNED
 } IOLockAssertState;
 
+int     IOLockSleepWithInheritor( IOLock * lock, UInt32 lck_sleep_action,
+    void *event, thread_t inheritor, UInt32 interType, uint64_t deadline);
+
+void    IOLockWakeupAllWithInheritor(IOLock * lock, void *event);
+
 #ifdef IOLOCKS_INLINE
 #define IOLockAssert(l, type) LCK_MTX_ASSERT(l, type)
 

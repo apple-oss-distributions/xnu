@@ -5,7 +5,7 @@ import select
 class Interface(object):
     """Basic communication interface."""
     def __init__(self, host_cfg, portnum):
-        super(Interface, self).__init__()
+        super().__init__()
         self.host_cfg = host_cfg
         self.portnum = portnum
         self.pkt_size = 8192

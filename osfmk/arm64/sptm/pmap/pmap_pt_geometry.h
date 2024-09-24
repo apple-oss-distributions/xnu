@@ -136,6 +136,11 @@ struct page_table_attr {
 	 * virtual address.
 	 */
 	const uint64_t pta_page_shift;
+
+	/**
+	 * SPTM page table geometry index.
+	 */
+	const uint8_t geometry_id;
 };
 
 typedef struct page_table_attr pt_attr_t;
@@ -645,5 +650,24 @@ pmap_pte(pmap_t pmap, vm_map_address_t addr)
 	return pmap_tt3e(pmap, addr);
 }
 
+/**
+ * Given a virtual address and a page hierarchy level, align the address such that
+ * it targets a TTE index that is page ratio-aligned. Normally used prior to
+ * calling SPTM table operations (map/unmap/nest/unnest), since the SPTM enforces
+ * this requirement.
+ *
+ * @param pt_attr Page table attribute structure associated with the address space at hand.
+ * @param level Page table level for which to align the address.
+ * @param va Virtual address to align.
+ *
+ * @return Aligned virtual address.
+ */
+static inline vm_map_address_t
+pt_attr_align_va(const pt_attr_t * const pt_attr, unsigned int level, vm_map_address_t va)
+{
+	const uint64_t page_ratio = PAGE_SIZE / pt_attr_page_size(pt_attr);
+	const uint64_t ln_shift = pt_attr_ln_shift(pt_attr, level);
 
+	return va & ~((page_ratio - 1) << ln_shift);
+}
 #endif /* _ARM_PMAP_PMAP_PT_GEOMETRY_H_ */

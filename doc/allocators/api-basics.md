@@ -381,7 +381,13 @@ being allocated (i.e. `IOMallocData` for data only buffers, and `IOMallocType`/`
 for any other type).
 
 ### Wrapping C++ type allocation in container OSObjects
+
 The blessed way of wrapping and passing a C++ type allocation for use in the
-libkern collection is using `OSValueObject`. Please do no use OSData for this
+libkern collection is using `OSValueObject`. Please do not use `OSData` for this
 purpose as its backing store should not contain kernel pointers.
+
+`OSValueObject<T>` allows you to safely use an `OSData` like API surface
+wrapping a structure of type `T`. For each unique `T` being used, the
+`OSValueObject<T>` must be instantiated in a module of your kernel extension,
+using `OSDefineValueObjectForDependentType(T);`.
 

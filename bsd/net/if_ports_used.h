@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -42,6 +42,8 @@
 #include <stdbool.h>
 
 #define IP_PORTRANGE_SIZE 65536
+
+#define WAKE_PKT_EVENT_CONTROL_ENTITLEMENT "com.apple.private.network.wake_pkt.control"
 
 /*
  * The sysctl "net.link.generic.system.port_used.list" returns:
@@ -282,7 +284,10 @@ struct net_port_info_una_wake_event {
 	X(uint64_t, ifpu_incomplete_udp_hdr_pkt, "packet%s with incomplete UDP header", "", "s") \
 	X(uint64_t, ifpu_npi_not_added_no_wakeuuid, "port entr%s not added with wakeuuid not set", "y", "ies") \
 	X(uint64_t, ifpu_deferred_isakmp_natt_wake_pkt, "deferred matching of ISAKMP NAT traversal wake packet%s", "", "s") \
-	X(uint64_t, ifpu_spurious_wake_event, "spurious wake packet event%s", "", "s")
+	X(uint64_t, ifpu_spurious_wake_event, "spurious wake packet event%s", "", "s") \
+	X(uint64_t, ifpu_delayed_attributed_wake_event, "delayed attributed wake packet event%s", "", "s") \
+	X(uint64_t, ifpu_delayed_unattributed_wake_event, "delayed unattributed wake packet event%s", "", "s") \
+	X(uint64_t, ifpu_delayed_wake_event_undelivered, "undelivered delayed wake packet event%s", "", "s")
 
 struct if_ports_used_stats {
 #define X(_type, _field, ...) _type _field;

@@ -516,11 +516,11 @@ s/\$//g
 						printf("\t\tcase %d:\n\t\t\tp = \"userland %s\";\n\t\t\tbreak;\n", i - 1, arg) > systraceargdesctempfile
 					else
 						printf("\t\tcase %d:\n\t\t\tp = \"%s\";\n\t\t\tbreak;\n", i - 1, arg) > systraceargdesctempfile
-					if (index(arg, "*") > 0 || arg == "caddr_t")
+					if (index(arg, "*") > 0 || arg == "caddr_t" || arg == "caddr_ut")
                         printf("\t\tuarg[%d] = (uint64_t) p->%s; /* %s */\n", \
 							i - 1, \
 							argname[i], arg) > systraceargstempfile
-					else if (substr(arg, 1, 1) == "u" || arg == "size_t")
+					else if (substr(arg, 1, 1) == "u" || arg == "size_t" || arg == "size_ut")
                         printf("\t\tuarg[%d] = (uint64_t) p->%s; /* %s */\n", \
 							i - 1, \
 							argname[i], arg) > systraceargstempfile
@@ -563,6 +563,11 @@ s/\$//g
 						munge32 = munge32 "w"
 						size32 += 4
 					}
+					else if (argtype[i] == "size_ut") {
+						ext_argtype[i] = "user_size_ut";
+						munge32 = munge32 "w"
+						size32 += 4
+					}
 					else if (argtype[i] == "ssize_t") {
 						ext_argtype[i] = "user_ssize_t";
 						munge32 = munge32 "s"
@@ -577,12 +582,18 @@ s/\$//g
 						munge32 = munge32 "w"
 						size32 += 4
 					}
-					else if (argtype[i] == "caddr_t" || argtype[i] == "semun_t" ||
-  						argtype[i] == "uuid_t" || match(argtype[i], "[\*]") != 0) {
+					else if (argtype[i] == "caddr_t" ||
+						  argtype[i] == "semun_t" || argtype[i] == "uuid_t" ||
+							match(argtype[i], "[\*]") != 0) {
 						ext_argtype[i] = "user_addr_t";
 						munge32 = munge32 "w"
 						size32 += 4
 					}
+				  else if (argtype[i] == "caddr_ut") {
+						ext_argtype[i] = "user_addr_ut";
+						munge32 = munge32 "w"
+						size32 += 4
+				  }
 					else if (argtype[i] == "int" || argtype[i] == "u_int" ||
 							 argtype[i] == "uid_t" || argtype[i] == "pid_t" ||
 							 argtype[i] == "id_t" || argtype[i] == "idtype_t" ||

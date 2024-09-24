@@ -84,8 +84,9 @@ flow_mgr_fini(void)
 static int
 __fe_cuckoo_cmp(struct cuckoo_node *node, void *key0)
 {
-	struct flow_entry *fe = container_of(node, struct flow_entry, fe_cnode);
-	struct flow_key *key = key0;
+	struct flow_entry *__single fe = __container_of(node, struct flow_entry,
+	    fe_cnode);
+	struct flow_key *__single key = key0;
 	const struct flow_key *mask;
 
 	/*
@@ -126,7 +127,8 @@ __fe_cuckoo_cmp(struct cuckoo_node *node, void *key0)
 static void
 __fe_cuckoo_retain(struct cuckoo_node *node)
 {
-	struct flow_entry *fe = container_of(node, struct flow_entry, fe_cnode);
+	struct flow_entry *__single fe = __container_of(node, struct flow_entry,
+	    fe_cnode);
 	return flow_entry_retain(fe);
 }
 
@@ -134,7 +136,8 @@ static void
 __fe_cuckoo_release(struct cuckoo_node *node)
 {
 #pragma unused(node)
-	struct flow_entry *fe = container_of(node, struct flow_entry, fe_cnode);
+	struct flow_entry *__single fe =
+	    __container_of(node, struct flow_entry, fe_cnode);
 	flow_entry_release(&fe);
 }
 
@@ -153,7 +156,6 @@ flow_mgr_create(size_t fe_cnt, size_t fob_cnt,
 	ASSERT(frib_cnt != 0);
 
 	fm = sk_alloc_type(struct flow_mgr, Z_WAITOK | Z_NOFAIL, skmem_tag_fsw_flow_mgr);
-
 	struct cuckoo_hashtable_params p = {
 		.cht_capacity = fe_cnt,
 		.cht_obj_cmp = __fe_cuckoo_cmp,
@@ -170,41 +172,38 @@ flow_mgr_create(size_t fe_cnt, size_t fob_cnt,
 	 * flow_owner_bucket cache-aligned objects.
 	 */
 	fm->fm_owner_buckets = flow_owner_buckets_alloc(fob_cnt, &fob_sz, &fob_tot_sz);
+	fm->fm_owner_bucket_tot_sz = fob_tot_sz;
 	if (fm->fm_owner_buckets == NULL) {
 		flow_mgr_destroy(fm);
 		return NULL;
 	}
-	/* const overrides */
-	*(size_t *)(uintptr_t)&fm->fm_owner_buckets_cnt = fob_cnt;
-	*(size_t *)(uintptr_t)&fm->fm_owner_bucket_sz = fob_sz;
-	*(size_t *)(uintptr_t)&fm->fm_owner_bucket_tot_sz = fob_tot_sz;
+	fm->fm_owner_buckets_cnt = fob_cnt;
+	fm->fm_owner_bucket_sz = fob_sz;
 
 	/*
 	 * flow_route_bucket cache-aligned objects.
 	 */
 	fm->fm_route_buckets = flow_route_buckets_alloc(frb_cnt, &frb_sz, &frb_tot_sz);
+	fm->fm_route_bucket_tot_sz = frb_tot_sz;
 	if (fm->fm_route_buckets == NULL) {
 		flow_mgr_destroy(fm);
 		return NULL;
 	}
-	/* const overrides */
-	*(size_t *)(uintptr_t)&fm->fm_route_buckets_cnt = frb_cnt;
-	*(size_t *)(uintptr_t)&fm->fm_route_bucket_sz = frb_sz;
-	*(size_t *)(uintptr_t)&fm->fm_route_bucket_tot_sz = frb_tot_sz;
+	fm->fm_route_buckets_cnt = frb_cnt;
+	fm->fm_route_bucket_sz = frb_sz;
 
 	/*
 	 * flow_route_id_bucket cache-aligned objects.
 	 */
 	fm->fm_route_id_buckets =
 	    flow_route_id_buckets_alloc(frib_cnt, &frib_sz, &frib_tot_sz);
+	fm->fm_route_id_bucket_tot_sz = frib_tot_sz;
 	if (fm->fm_route_id_buckets == NULL) {
 		flow_mgr_destroy(fm);
 		return NULL;
 	}
-	/* const overrides */
-	*(size_t *)(uintptr_t)&fm->fm_route_id_buckets_cnt = frib_cnt;
-	*(size_t *)(uintptr_t)&fm->fm_route_id_bucket_sz = frib_sz;
-	*(size_t *)(uintptr_t)&fm->fm_route_id_bucket_tot_sz = frib_tot_sz;
+	fm->fm_route_id_buckets_cnt = frib_cnt;
+	fm->fm_route_id_bucket_sz = frib_sz;
 
 	/* construct flow_owner_buckets */
 	for (i = 0; i < fm->fm_owner_buckets_cnt; i++) {
@@ -279,9 +278,9 @@ flow_mgr_destroy(struct flow_mgr *fm)
 		flow_owner_buckets_free(fm->fm_owner_buckets,
 		    fm->fm_owner_bucket_tot_sz);
 		fm->fm_owner_buckets = NULL;
-		*(uint32_t *)(uintptr_t)&fm->fm_owner_buckets_cnt = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_owner_bucket_sz = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_owner_bucket_tot_sz = 0;
+		fm->fm_owner_bucket_tot_sz = 0;
+		fm->fm_owner_buckets_cnt = 0;
+		fm->fm_owner_bucket_sz = 0;
 	}
 	ASSERT(fm->fm_owner_buckets_cnt == 0);
 	ASSERT(fm->fm_owner_bucket_sz == 0);
@@ -297,9 +296,9 @@ flow_mgr_destroy(struct flow_mgr *fm)
 		flow_route_buckets_free(fm->fm_route_buckets,
 		    fm->fm_route_bucket_tot_sz);
 		fm->fm_route_buckets = NULL;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_buckets_cnt = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_bucket_sz = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_bucket_tot_sz = 0;
+		fm->fm_route_bucket_tot_sz = 0;
+		fm->fm_route_buckets_cnt = 0;
+		fm->fm_route_bucket_sz = 0;
 	}
 	ASSERT(fm->fm_route_buckets_cnt == 0);
 	ASSERT(fm->fm_route_bucket_sz == 0);
@@ -315,9 +314,9 @@ flow_mgr_destroy(struct flow_mgr *fm)
 		flow_route_id_buckets_free(fm->fm_route_id_buckets,
 		    fm->fm_route_id_bucket_tot_sz);
 		fm->fm_route_id_buckets = NULL;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_id_buckets_cnt = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_id_bucket_sz = 0;
-		*(uint32_t *)(uintptr_t)&fm->fm_route_id_bucket_tot_sz = 0;
+		fm->fm_route_id_bucket_tot_sz = 0;
+		fm->fm_route_id_buckets_cnt = 0;
+		fm->fm_route_id_bucket_sz = 0;
 	}
 	ASSERT(fm->fm_route_id_buckets_cnt == 0);
 	ASSERT(fm->fm_route_id_bucket_sz == 0);
@@ -527,7 +526,7 @@ flow_req_prepare_namespace(struct nx_flow_req *req)
 		if (!NETNS_TOKEN_VALID(&req->nfr_port_reservation)) {
 			union sockaddr_in_4_6 *saddr = &req->nfr_saddr;
 			struct ns_flow_info nfi;
-			netns_token ns_token;
+			netns_token __single ns_token;
 			flow_set_port_info(&nfi, req);
 			err = flow_namespace_create(saddr,
 			    req->nfr_ip_protocol, &ns_token,
@@ -563,7 +562,13 @@ flow_req_prepare_namespace(struct nx_flow_req *req)
 	if (flow_req_needs_ipsec_reservation(req)) {
 		union sockaddr_in_4_6 *saddr = &req->nfr_saddr;
 		union sockaddr_in_4_6 *daddr = &req->nfr_daddr;
-		void *ipsec_token = NULL;
+		/*
+		 * XXX -fbounds-safety: Currently, ke_reserve_custom_ipsec does
+		 * not return any size information for the first argument
+		 * (ipsec_token). Even though it takes a void **, it looks like
+		 * only struct secashead * is used.
+		 */
+		void *__single ipsec_token = NULL;
 		ASSERT(req->nfr_ipsec_reservation == NULL);
 		err = key_reserve_custom_ipsec(&ipsec_token, saddr,
 		    daddr, req->nfr_ip_protocol);
@@ -577,7 +582,7 @@ flow_req_prepare_namespace(struct nx_flow_req *req)
 	}
 
 	if (flow_req_needs_protons_reservation(req)) {
-		struct protons_token *ns_token = NULL;
+		struct protons_token *__single ns_token = NULL;
 		if (!protons_token_is_valid(req->nfr_proto_reservation)) {
 			err = protons_reserve(&ns_token, req->nfr_pid,
 			    req->nfr_epid, req->nfr_ip_protocol);
@@ -794,7 +799,7 @@ flow_req_prepare(struct nx_flow_req *req, struct kern_nexus *nx,
 
 	/* setup flow route and prepare saddr if needed */
 	if (__probable(has_daddr || has_dport)) {
-		struct flow_route *fr = NULL;
+		struct flow_route *__single fr = NULL;
 		err = flow_route_find(nx, fm, ifp, req, fr_ctor,
 		    fr_resolve, fr_arg, &fr);
 		if (__improbable(err != 0)) {
@@ -844,7 +849,6 @@ flow_req_cleanup(struct nx_flow_req *req)
 	    !(req->nfr_flags & NXFLOWREQF_EXT_PROTO_RSV)) {
 		protons_release(&req->nfr_proto_reservation);
 	}
-
 	if (key_custom_ipsec_token_is_valid(req->nfr_ipsec_reservation)) {
 		key_release_custom_ipsec(&req->nfr_ipsec_reservation);
 	}
@@ -918,7 +922,7 @@ flow_mgr_flow_add(struct kern_nexus *nx, struct flow_mgr *fm,
     flow_route_ctor_fn_t fr_ctor, flow_route_resolve_fn_t fr_resolve,
     void *fr_arg)
 {
-	struct flow_entry *fe;
+	struct flow_entry *__single fe;
 	int err = 0;
 
 	ASSERT(ifp != NULL);
@@ -1136,7 +1140,7 @@ struct flow_entry *
 flow_mgr_find_fe_by_key(struct flow_mgr *fm, struct flow_key *key)
 {
 	struct cuckoo_node *node = NULL;
-	struct flow_entry *fe = NULL;
+	struct flow_entry *__single fe = NULL;
 	uint32_t hash = 0;
 	uint16_t saved_mask = key->fk_mask;
 
@@ -1158,7 +1162,7 @@ flow_mgr_find_fe_by_key(struct flow_mgr *fm, struct flow_key *key)
 		    "[%d] mask=%08x hash %08x node 0x%llx", i, mask, hash,
 		    SK_KVA(node));
 		if (node != NULL) {
-			fe = container_of(node, struct flow_entry, fe_cnode);
+			fe = __container_of(node, struct flow_entry, fe_cnode);
 			/* v4 only listener fe shouldn't get v6 connection */
 			if (__improbable(fe->fe_key.fk_mask == FKMASK_2TUPLE &&
 			    fe->fe_key.fk_ipver == IPVERSION &&
@@ -1184,13 +1188,13 @@ struct flow_entry *
 flow_mgr_find_conflicting_fe(struct flow_mgr *fm, struct flow_key *key)
 {
 	struct cuckoo_node *node = NULL;
-	struct flow_entry *fe = NULL;
+	struct flow_entry *__single fe = NULL;
 	uint32_t hash = 0;
 
 	hash = flow_key_hash(key);
 	node = cuckoo_hashtable_find_with_hash(fm->fm_flow_table, key, hash);
 	if (node != NULL) {
-		fe = container_of(node, struct flow_entry, fe_cnode);
+		fe = __container_of(node, struct flow_entry, fe_cnode);
 		return fe;
 	}
 
@@ -1205,8 +1209,8 @@ flow_mgr_foreach_flow(struct flow_mgr *fm,
 	cuckoo_hashtable_foreach(fm->fm_flow_table,
 	    ^(struct cuckoo_node *node, uint32_t hv) {
 		#pragma unused(hv)
-		struct flow_entry *fe;
-		fe = container_of(node, struct flow_entry, fe_cnode);
+		struct flow_entry *__single fe;
+		fe = __container_of(node, struct flow_entry, fe_cnode);
 		flow_handler(fe);
 
 		if (fe->fe_flags & FLOWENTF_PARENT) {
@@ -1243,7 +1247,8 @@ rx_flow_demux_match(struct nx_flowswitch *fsw, struct flow_entry *fe, struct __k
 		return false;
 	}
 
-	uh = (struct udphdr *)pkt->pkt_flow_udp_hdr;
+	uh = __unsafe_forge_bidi_indexable(struct udphdr *,
+	    (struct udphdr *)pkt->pkt_flow_udp_hdr, sizeof(*uh) + pkt->pkt_flow_ulen);
 	if (__improbable(uh == NULL || pkt->pkt_flow_ulen == 0)) {
 		return false;
 	}

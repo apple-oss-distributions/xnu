@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2017, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -38,19 +38,6 @@
 #include <_types/_uint64_t.h>
 #include <Availability.h>
 
-#ifdef PRIVATE
-/*
- * These are only included for compatibility with previous header
- */
-#include <sys/types.h>
-#include <sys/mount.h>
-#ifdef __APPLE_API_PRIVATE
-#include <sys/attr.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#endif  /* __APPLE_API_PRIVATE */
-#endif /* PRIVATE */
-
 __BEGIN_DECLS
 
 /*
@@ -58,49 +45,12 @@ __BEGIN_DECLS
  */
 ssize_t fsgetpath(char *, size_t, fsid_t *, uint64_t) __OSX_AVAILABLE(10.13) __IOS_AVAILABLE(11.0) __TVOS_AVAILABLE(11.0) __WATCHOS_AVAILABLE(4.0);
 
-#ifdef PRIVATE
-#include <sys/_types/_fsobj_id_t.h>
-
-#ifndef FSOPT_NOFIRMLINKPATH     /* also in attr.h */
-#define FSOPT_NOFIRMLINKPATH     0x00000080
-#endif
-
-#ifndef FSOPT_ISREALFSID     /* also in attr.h */
-#ifdef  FSOPT_RETURN_REALDEV
-#define FSOPT_ISREALFSID         FSOPT_RETURN_REALDEV
-#else
-#define FSOPT_ISREALFSID         0x00000200
-#endif
-#endif /* FSOPT_ISREALFSID */
-
-#ifdef __APPLE_API_PRIVATE
-
-
-/*
- * openbyid_np: open a file given a file system id and a file system object id
- *
- * fsid :	value corresponding to getattlist ATTR_CMN_FSID attribute, or
- *			value of stat's st.st_dev ; set fsid = {st.st_dev, 0}
- *
- * objid: value (link id/node id) corresponding to getattlist ATTR_CMN_OBJID
- *		  attribute , or
- *		  value of stat's st.st_ino (node id); set objid =  st.st_ino
- *
- * For hfs the value of getattlist ATTR_CMN_FSID is a link id which uniquely identifies a
- * parent in the case of hard linked files; this allows unique path access validation.
- * Not all file systems support getattrlist ATTR_CMN_OBJID (link id).
- * A node id does not uniquely identify a parent in the case of hard linked files and may
- * resolve to a path for which access validation can fail.
- */
-int openbyid_np(fsid_t* fsid, fsobj_id_t* objid, int flags);
-
-ssize_t fsgetpath_ext(char *, size_t, fsid_t *, uint64_t, uint32_t) __OSX_AVAILABLE(10.15) __IOS_AVAILABLE(13.0) __TVOS_AVAILABLE(13.0) __WATCHOS_AVAILABLE(6.0);
-
-#endif /* __APPLE_API_PRIVATE */
-#endif /* PRIVATE */
-
 __END_DECLS
 
 #endif /* KERNEL */
+
+#if PRIVATE
+#include <sys/fsgetpath_private.h>
+#endif
 
 #endif /* !_FSGETPATH_H_ */

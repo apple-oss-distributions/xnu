@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -73,6 +73,7 @@
 
 #include <net/if.h>
 #include <net/route.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -107,8 +108,8 @@ static void
 adjust_scope_and_pktlen(struct mbuf *m,
     unsigned int *ifscope_p, uint32_t *mpktlen_p)
 {
-	struct pf_mtag *pf_mtag;
-	struct pf_fragment_tag *pf_ftagp;
+	struct pf_mtag *__single pf_mtag;
+	struct pf_fragment_tag *__single pf_ftagp;
 
 	pf_mtag = pf_find_mtag(m);
 	ASSERT(pf_mtag != NULL);
@@ -145,17 +146,17 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
     int srcrt)
 {
 	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
-	struct sockaddr_in6 *dst;
-	struct rtentry *rt;
+	struct sockaddr_in6 *__single dst;
+	struct rtentry *__single rt;
 	int error, type = 0, code = 0;
 	boolean_t proxy = FALSE;
 	struct mbuf *mcopy = NULL;
-	struct ifnet *ifp, *rcvifp, *origifp;   /* maybe unnecessary */
+	struct ifnet *__single ifp, *__single rcvifp, *__single origifp;
 	u_int32_t inzone, outzone, len = 0, pktcnt = 0;
 	struct in6_addr src_in6, dst_in6;
 	uint64_t curtime = net_uptime();
 #if IPSEC
-	struct secpolicy *sp = NULL;
+	struct secpolicy *__single sp = NULL;
 #endif
 	unsigned int ifscope = IFSCOPE_NONE;
 	uint32_t mpktlen = 0;
@@ -210,7 +211,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	if (ipsec_bypass == 0) {
 		if (ipsec6_in_reject(m, NULL)) {
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_polvio);
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IPSEC_REJECT, NULL, 0);
 			return NULL;
 		}
 	}
@@ -236,7 +237,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 			    ip6->ip6_nxt,
 			    if_name(m->m_pkthdr.rcvif));
 		}
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_CANNOT_FORWARD, NULL, 0);
 		return NULL;
 	}
 
@@ -296,7 +297,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 			m_freem(mcopy);
 #endif
 		}
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_CANNOT_FORWARD, NULL, 0);
 		return NULL;
 	}
 
@@ -319,7 +320,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 			m_freem(mcopy);
 #endif
 		}
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_CANNOT_FORWARD, NULL, 0); // or IPPOLICY ?
 		return NULL;
 
 	case IPSEC_POLICY_BYPASS:
@@ -341,7 +342,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 				m_freem(mcopy);
 #endif
 			}
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_CANNOT_FORWARD, NULL, 0); // or IPPOLICY ?
 			return NULL;
 		}
 		/* do IPsec */
@@ -448,7 +449,7 @@ skip_ipsec:
 				icmp6_error(mcopy, ICMP6_DST_UNREACH,
 				    ICMP6_DST_UNREACH_NOROUTE, 0);
 			}
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_NO_ROUTE, NULL, 0);
 			return NULL;
 		}
 		RT_LOCK_ASSERT_HELD(rt);
@@ -475,7 +476,7 @@ skip_ipsec:
 				icmp6_error(mcopy, ICMP6_DST_UNREACH,
 				    ICMP6_DST_UNREACH_NOROUTE, 0);
 			}
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_NO_ROUTE, NULL, 0);
 			return NULL;
 		}
 		RT_LOCK(rt);
@@ -500,7 +501,7 @@ skip_ipsec:
 		/* XXX: this should not happen */
 		ip6stat.ip6s_cantforward++;
 		ip6stat.ip6s_badscope++;
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_BAD_SCOPE, NULL, 0);
 		return NULL;
 	}
 	if (in6_setscope(&src_in6, m->m_pkthdr.rcvif, &inzone)) {
@@ -508,7 +509,7 @@ skip_ipsec:
 		RT_UNLOCK(rt);
 		ip6stat.ip6s_cantforward++;
 		ip6stat.ip6s_badscope++;
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_BAD_SCOPE, NULL, 0);
 		return NULL;
 	}
 
@@ -534,7 +535,7 @@ skip_ipsec:
 			icmp6_error(mcopy, ICMP6_DST_UNREACH,
 			    ICMP6_DST_UNREACH_BEYONDSCOPE, 0);
 		}
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_BAD_SCOPE, NULL, 0);
 		return NULL;
 	}
 
@@ -553,7 +554,7 @@ skip_ipsec:
 		RT_UNLOCK(rt);
 		ip6stat.ip6s_cantforward++;
 		ip6stat.ip6s_badscope++;
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP6_BAD_SCOPE, NULL, 0);
 		return NULL;
 	}
 
@@ -566,7 +567,7 @@ skip_ipsec:
 		if (mcopy) {
 			uint32_t mtu;
 #if IPSEC
-			struct secpolicy *sp2;
+			struct secpolicy *__single sp2;
 			int ipsecerror;
 			size_t ipsechdrsiz;
 #endif
@@ -729,7 +730,7 @@ skip_ipsec:
 		 */
 #if DUMMYNET
 		struct ip_fw_args args;
-		struct pf_mtag *pf_mtag;
+		struct pf_mtag *__single pf_mtag;
 
 		bzero(&args, sizeof(args));
 
@@ -759,7 +760,7 @@ skip_ipsec:
 		 * refragmented packets from PF.
 		 */
 		if ((pf_mtag->pftag_flags & PF_TAG_REFRAGMENTED) != 0) {
-			struct mbuf *t;
+			struct mbuf *__single t;
 
 			pf_mtag->pftag_flags &= ~PF_TAG_REFRAGMENTED;
 			/* for statistics */

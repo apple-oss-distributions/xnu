@@ -31,6 +31,7 @@
 
 #include <mach/mach.h>
 #include <mach/exception.h>
+#include <stdbool.h>
 #include <mach/thread_status.h>
 
 /**
@@ -51,6 +52,10 @@ typedef size_t (*exc_handler_callback_t)(mach_port_t task, mach_port_t thread,
 
 typedef size_t (*exc_handler_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
     exception_type_t type, mach_exception_data_t codes);
+
+typedef size_t (*exc_handler_state_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
+    exception_type_t type, mach_exception_data_t codes, thread_state_t in_state,
+    mach_msg_type_number_t in_state_count, thread_state_t out_state, mach_msg_type_number_t *out_state_count);
 
 typedef kern_return_t (*exc_handler_backtrace_callback_t)(kcdata_object_t kcdata_object,
     exception_type_t type, mach_exception_data_t codes);
@@ -79,7 +84,8 @@ void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
 
 void
-run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback, void *callback, exception_behavior_t behavior);
+run_exception_handler_behavior64(mach_port_t exc_port, void *preferred_callback, void *callback,
+    exception_behavior_t behavior, bool run_once);
 
 /**
  * Handles every exception received on the provided Mach port, by running the

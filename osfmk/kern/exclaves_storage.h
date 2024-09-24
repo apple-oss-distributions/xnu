@@ -94,6 +94,10 @@ extern tb_error_t
     const uint64_t fileid,
     tb_error_t (^_Nonnull completion)(xnuupcalls_xnuupcalls_getsize__result_s));
 
+extern tb_error_t
+    exclaves_storage_upcall_sealstate(const enum xnuupcalls_fstag_s fstag,
+    tb_error_t (^_Nonnull completion)(xnuupcalls_xnuupcalls_sealstate__result_s));
+
 __END_DECLS
 
 #endif /* __has_include(<Tightbeam/tightbeam.h>) */

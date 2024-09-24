@@ -120,13 +120,15 @@
 void
 ah4_input(struct mbuf *m, int off)
 {
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	struct ip *ip;
 	struct ah *ah;
 	u_int32_t spi;
 	const struct ah_algorithm *algo;
 	size_t siz;
 	size_t siz1;
-	u_char *cksum;
+	u_char *__bidi_indexable cksum = NULL;
 	struct secasvar *sav = NULL;
 	u_int16_t nxt;
 	u_int8_t hlen;
@@ -158,9 +160,10 @@ ah4_input(struct mbuf *m, int off)
 	/* find the sassoc. */
 	spi = ah->ah_spi;
 
-	if ((sav = key_allocsa(AF_INET,
-	    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst, IFSCOPE_NONE,
-	    IPPROTO_AH, spi)) == 0) {
+	ipsec_fill_ip_sockaddr_4_6(&src, ip->ip_src, 0);
+	ipsec_fill_ip_sockaddr_4_6(&dst, ip->ip_dst, 0);
+
+	if ((sav = key_allocsa(&src, &dst, IPPROTO_AH, spi, NULL)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv4 AH input: no key association found for spi %u\n",
 		    (u_int32_t)ntohl(spi)));
@@ -585,6 +588,8 @@ int
 ah6_input(struct mbuf **mp, int *offp, int proto)
 {
 #pragma unused(proto)
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	struct mbuf *m = *mp;
 	int off = *offp;
 	struct ip6_hdr *ip6 = NULL;
@@ -593,7 +598,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	const struct ah_algorithm *algo = NULL;
 	size_t siz = 0;
 	size_t siz1 = 0;
-	u_char *cksum = NULL;
+	u_char *__bidi_indexable cksum = NULL;
 	struct secasvar *sav = NULL;
 	u_int16_t nxt = IPPROTO_DONE;
 	size_t stripsiz = 0;
@@ -617,9 +622,11 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 		goto fail;
 	}
 
-	if ((sav = key_allocsa(AF_INET6,
-	    (caddr_t)&ip6->ip6_src, (caddr_t)&ip6->ip6_dst, ip6_input_getsrcifscope(m),
-	    IPPROTO_AH, spi)) == 0) {
+	ipsec_fill_ip6_sockaddr_4_6(&src, &ip6->ip6_src, 0);
+	ipsec_fill_ip6_sockaddr_4_6_with_ifscope(&dst, &ip6->ip6_dst, 0,
+	    ip6_input_getsrcifscope(m));
+
+	if ((sav = key_allocsa(&src, &dst, IPPROTO_AH, spi, NULL)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv6 AH input: no key association found for spi %u\n",
 		    (u_int32_t)ntohl(spi)));
@@ -956,14 +963,16 @@ fail:
 void
 ah6_ctlinput(int cmd, struct sockaddr *sa, void *d)
 {
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	const struct newah *ahp;
 	struct newah ah;
 	struct secasvar *sav;
 	struct ip6_hdr *ip6;
 	struct mbuf *m;
 	struct ip6ctlparam *ip6cp = NULL;
-	int off = 0;
 	struct sockaddr_in6 *sa6_src, *sa6_dst;
+	int off = 0;
 
 	if (sa->sa_family != AF_INET6 ||
 	    sa->sa_len != sizeof(struct sockaddr_in6)) {
@@ -1014,12 +1023,12 @@ ah6_ctlinput(int cmd, struct sockaddr *sa, void *d)
 			 * the address in the ICMP message payload.
 			 */
 			sa6_src = ip6cp->ip6c_src;
-			sa6_dst = (struct sockaddr_in6 *)(void *)sa;
-			sav = key_allocsa(AF_INET6,
-			    (caddr_t)&sa6_src->sin6_addr,
-			    (caddr_t)&sa6_dst->sin6_addr,
-			    sa6_dst->sin6_scope_id,
-			    IPPROTO_AH, ahp->ah_spi);
+			sa6_dst = SIN6(sa);
+			ipsec_fill_ip6_sockaddr_4_6(&src, &sa6_src->sin6_addr, 0);
+			ipsec_fill_ip6_sockaddr_4_6_with_ifscope(&dst,
+			    &sa6_dst->sin6_addr, 0, sa6_dst->sin6_scope_id);
+
+			sav = key_allocsa(&src, &dst, IPPROTO_AH, ahp->ah_spi, NULL);
 			if (sav) {
 				if (sav->state == SADB_SASTATE_MATURE ||
 				    sav->state == SADB_SASTATE_DYING) {

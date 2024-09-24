@@ -28,7 +28,7 @@
 
 #include <sys/sysctl.h>
 extern "C" {
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <kern/task.h>
 #include <kern/debug.h>
 }
@@ -1127,7 +1127,11 @@ IOTrackingLeaks(LIBKERN_CONSUMED OSData * data)
 	uintptr_t                inst;
 	uint32_t                 count, idx, numSites, dups, siteCount;
 
+	/* BEGIN IGNORE CODESTYLE */
+	__typed_allocators_ignore_push
 	instances = (typeof(instances))data->getBytesNoCopy();
+	__typed_allocators_ignore_pop
+	/* END IGNORE CODESTYLE */
 	count = (data->getLength() / sizeof(*instances));
 	qsort(instances, count, sizeof(*instances), &IOTrackingAddressCompare);
 
@@ -1144,7 +1148,11 @@ IOTrackingLeaks(LIBKERN_CONSUMED OSData * data)
 		}
 	}
 
+	/* BEGIN IGNORE CODESTYLE */
+	__typed_allocators_ignore_push
 	leakData = OSData::withCapacity(128 * sizeof(IOTrackingCallSiteInfo));
+	__typed_allocators_ignore_pop
+	/* END IGNORE CODESTYLE */
 
 	for (numSites = 0, idx = 0; idx < count; idx++) {
 		inst = instances[idx];
@@ -1169,11 +1177,16 @@ IOTrackingLeaks(LIBKERN_CONSUMED OSData * data)
 				instances[dups] = 0;
 			}
 		}
+		// leak byte size is reported as:
+		// (total bytes allocated by the callsite * number of leaked instances)
+		// divided by (number of allocations by callsite)
 		siteInfo.count   = siteCount;
-		siteInfo.size[0] = (site->size[0] * site->count) / siteCount;
-		siteInfo.size[1] = (site->size[1] * site->count) / siteCount;
+		siteInfo.size[0] = (site->size[0] * siteCount) / site->count;
+		siteInfo.size[1] = (site->size[1] * siteCount) / site->count;
 		CopyOutBacktraces(site, &siteInfo);
+		__typed_allocators_ignore_push
 		leakData->appendBytes(&siteInfo, sizeof(siteInfo));
+		__typed_allocators_ignore_pop
 	}
 	data->release();
 
@@ -1300,7 +1313,11 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 			}
 
 			if (!data) {
+				/* BEGIN IGNORE CODESTYLE */
+				__typed_allocators_ignore_push
 				data = OSData::withCapacity(1024 * sizeof(uintptr_t));
+				__typed_allocators_ignore_pop
+				/* END IGNORE CODESTYLE */
 			}
 
 			IOTRecursiveLockLock(&queue->lock);
@@ -1338,7 +1355,11 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 			}
 
 			if (!data) {
+				/* BEGIN IGNORE CODESTYLE */
+				__typed_allocators_ignore_push
 				data = OSData::withCapacity(128 * sizeof(IOTrackingCallSiteInfo));
+				__typed_allocators_ignore_pop
+				/* END IGNORE CODESTYLE */
 			}
 
 			IOTRecursiveLockLock(&queue->lock);
@@ -1412,7 +1433,9 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 					siteInfo.size[0] = tsize[0];
 					siteInfo.size[1] = tsize[1];
 					CopyOutBacktraces(site, &siteInfo);
+					__typed_allocators_ignore_push
 					data->appendBytes(&siteInfo, sizeof(siteInfo));
+					__typed_allocators_ignore_pop
 				}
 			}
 			assert(idx == num);
@@ -1470,7 +1493,9 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 							siteInfo.bt[1][j] = bt64[j];
 						}
 					}
+					__typed_allocators_ignore_push
 					data->appendBytes(&siteInfo, sizeof(siteInfo));
+					__typed_allocators_ignore_pop
 				}
 			}
 			assert(idx == num);
@@ -1507,7 +1532,11 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 		uint8_t      sLen;
 
 		if (!data) {
+			/* BEGIN IGNORE CODESTYLE */
+			__typed_allocators_ignore_push
 			data = OSData::withCapacity(4096 * sizeof(uintptr_t));
+			__typed_allocators_ignore_pop
+			/* END IGNORE CODESTYLE */
 		}
 
 		// <len><name>...<len><name><0>
@@ -1526,8 +1555,9 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 				};
 
 				btref_decode_unslide(ref, siteInfo.bt[0]);
-
+				__typed_allocators_ignore_push
 				data->appendBytes(&siteInfo, sizeof(siteInfo));
+				__typed_allocators_ignore_pop
 			});
 			if (KERN_SUCCESS == kr) {
 				ret = kIOReturnSuccess;
@@ -1545,7 +1575,11 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 		case kIOTrackingGetMappings:
 		{
 			IOTrackingCallSiteInfo * siteInfos;
+			/* BEGIN IGNORE CODESTYLE */
+			__typed_allocators_ignore_push
 			siteInfos = (typeof(siteInfos))data->getBytesNoCopy();
+			__typed_allocators_ignore_pop
+			/* END IGNORE CODESTYLE */
 			num = (data->getLength() / sizeof(*siteInfos));
 			qsort(siteInfos, num, sizeof(*siteInfos), &IOTrackingCallSiteInfoCompare);
 			break;

@@ -474,7 +474,7 @@ test5(void)
 	return;
 }
 
-T_DECL(turnstile_test, "Turnstile test", T_META_ASROOT(YES))
+T_DECL(turnstile_test, "Turnstile test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	test1(SYSCTL_TURNSTILE_TEST_USER_DEFAULT);
 	test2(SYSCTL_TURNSTILE_TEST_USER_DEFAULT);

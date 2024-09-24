@@ -81,8 +81,8 @@
 #include <kern/thread.h>
 #include <kern/exc_guard.h>
 #include <mach/mach_port_server.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
@@ -100,6 +100,7 @@
 #include <kern/coalition.h>
 #include <ipc/ipc_service_port.h>
 #include <kern/mach_filter.h>
+#include <sys/reason.h>
 
 
 #if IMPORTANCE_INHERITANCE
@@ -110,7 +111,6 @@ static TUNABLE(bool, provisional_reply_port_enforced, "-provisional_reply_port_e
 
 extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 extern int proc_isinitproc(struct proc *p);
-
 static int
 mach_port_name_cmp(const void *_n1, const void *_n2)
 {
@@ -130,8 +130,6 @@ kern_return_t mach_port_get_context(ipc_space_t space, mach_port_name_t name,
     mach_vm_address_t *context);
 kern_return_t mach_port_get_set_status(ipc_space_t space, mach_port_name_t name,
     mach_port_name_t **members, mach_msg_type_number_t *membersCnt);
-extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
-    mach_exception_data_type_t subcode);
 
 /*
  *	Routine:	mach_port_names_helper
@@ -570,13 +568,13 @@ mach_port_allocate_qos(
  *	Purpose:
  *		Allocates a right in a space.  Supports the
  *		special case of specifying a name. The name may
- *      be any legal name in the space that doesn't
+ *		be any legal name in the space that doesn't
  *		currently denote a right.
  *
- *      While we no longer support users requesting
- *      preallocated message for the port, we still
- *      check for errors in such requests and then
- *      just clear the request.
+ *		While we no longer support users requesting
+ *		preallocated message for the port, we still
+ *		check for errors in such requests and then
+ *		just clear the request.
  *	Conditions:
  *		Nothing locked.
  *	Returns:
@@ -738,9 +736,10 @@ mach_port_destroy(
  */
 
 kern_return_t
-mach_port_deallocate(
+mach_port_deallocate_kernel(
 	ipc_space_t             space,
-	mach_port_name_t        name)
+	mach_port_name_t        name,
+	ipc_kobject_type_t      kotype)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -760,8 +759,22 @@ mach_port_deallocate(
 	}
 	/* space is write-locked */
 
+	if (kotype != IKOT_UNKNOWN && io_kotype(entry->ie_object) != kotype) {
+		is_write_unlock(space);
+		mach_port_guard_exception(name, 0, 0, kGUARD_EXC_INVALID_RIGHT);
+		return KERN_INVALID_RIGHT;
+	}
+
 	kr = ipc_right_dealloc(space, name, entry); /* unlocks space */
 	return kr;
+}
+
+kern_return_t
+mach_port_deallocate(
+	ipc_space_t             space,
+	mach_port_name_t        name)
+{
+	return mach_port_deallocate_kernel(space, name, IKOT_UNKNOWN);
 }
 
 /*
@@ -1253,6 +1266,7 @@ mach_port_get_set_status(
 	}
 
 	size = VM_MAP_PAGE_SIZE(ipc_kernel_map);        /* initial guess */
+	actual = 0;
 
 	for (;;) {
 		mach_port_name_t *names;
@@ -1295,6 +1309,7 @@ mach_port_get_set_status(
 		size = vm_map_round_page(actual * sizeof(mach_port_name_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map)) +
 		    VM_MAP_PAGE_SIZE(ipc_kernel_map);
+		actual = 0;
 	}
 
 	if (actual == 0) {
@@ -2514,11 +2529,19 @@ mach_port_guard_ast(thread_t t,
 		 * deliver it synchronously and then kill the process, else kill the process
 		 * and deliver the exception via EXC_CORPSE_NOTIFY.
 		 */
+
+		int flags = PX_DEBUG_NO_HONOR;
+		exception_info_t info = {
+			.os_reason = OS_REASON_GUARD,
+			.exception_type = EXC_GUARD,
+			.mx_code = code,
+			.mx_subcode = subcode,
+		};
+
 		if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-			task_bsdtask_kill(task);
-		} else {
-			exit_with_guard_exception(get_bsdtask_info(task), code, subcode);
+			flags |= PX_PSIGNAL;
 		}
+		exit_with_mach_exception(get_bsdtask_info(task), info, flags);
 	} else {
 		/*
 		 * Mach port guards controlled by task settings.
@@ -2557,11 +2580,20 @@ mach_port_guard_ast(thread_t t,
 				 * Only generate crash report if synchronous EXC_GUARD wasn't handled,
 				 * but it has to die regardless.
 				 */
+
+				int flags = PX_DEBUG_NO_HONOR;
+				exception_info_t info = {
+					.os_reason = OS_REASON_GUARD,
+					.exception_type = EXC_GUARD,
+					.mx_code = code,
+					.mx_subcode = subcode
+				};
+
 				if (sync_exception_result == KERN_SUCCESS) {
-					task_bsdtask_kill(task);
-				} else {
-					exit_with_guard_exception(get_bsdtask_info(task), code, subcode);
+					flags |= PX_PSIGNAL;
 				}
+
+				exit_with_mach_exception(get_bsdtask_info(task), info, flags);
 			}
 		} else if (task->task_exc_guard & TASK_EXC_GUARD_MP_CORPSE) {
 			/* Raise exception via corpse fork if not handled synchronously */
@@ -2612,7 +2644,7 @@ mach_port_construct(
 	}
 
 	at_most_one_flags = options->flags & (MPO_REPLY_PORT | MPO_ENFORCE_REPLY_PORT_SEMANTICS |
-	    MPO_PROVISIONAL_ID_PROT_OPTOUT | MPO_PROVISIONAL_REPLY_PORT);
+	    MPO_EXCEPTION_PORT | MPO_PROVISIONAL_REPLY_PORT);
 	if (at_most_one_flags & (at_most_one_flags - 1)) {
 		/* at most one of the listed flags can be set */
 		return KERN_INVALID_ARGUMENT;
@@ -2638,8 +2670,8 @@ mach_port_construct(
 		init_flags |= IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS;
 	}
 
-	if (options->flags & MPO_PROVISIONAL_ID_PROT_OPTOUT) {
-		init_flags |= IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT;
+	if (options->flags & MPO_EXCEPTION_PORT) {
+		init_flags |= IPC_PORT_INIT_EXCEPTION_PORT;
 	}
 
 	if (options->flags & MPO_PROVISIONAL_REPLY_PORT) {

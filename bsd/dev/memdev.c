@@ -92,7 +92,7 @@
 #include <libkern/libkern.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_pager.h>
+#include <vm/vm_pager_xnu.h>
 #include <mach/memory_object_types.h>
 #include <kern/debug.h>
 

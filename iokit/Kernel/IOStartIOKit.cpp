@@ -77,11 +77,8 @@ IOKitInitializeTime( void )
 	t.tv_sec = 30;
 	t.tv_nsec = 0;
 
-// RTC is not present on this target
-#ifndef BCM2837
 	IOService::waitForService(
 		IOService::resourceMatching("IORTC"), &t );
-#endif
 #if defined(__i386__) || defined(__x86_64__)
 	IOService::waitForService(
 		IOService::resourceMatching("IONVRAM"), &t );

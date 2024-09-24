@@ -89,7 +89,7 @@ void
 nxdom_attach_all(void)
 {
 	struct nxdom *nxdom;
-	thread_t tp = THREAD_NULL;
+	thread_t __single tp = THREAD_NULL;
 
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(!__nxdom_inited);
@@ -364,8 +364,8 @@ nxdom_prov_add(struct nxdom *nxdom,
 		 * provider has UUID; this also guarantees that external
 		 * providers won't conflict with the builtin ones.
 		 */
-		if (strcmp(nxprov1->nxdom_prov_name,
-		    nxdom_prov->nxdom_prov_name) == 0) {
+		if (strbufcmp(nxprov1->nxdom_prov_name, sizeof(nxprov1->nxdom_prov_name),
+		    nxdom_prov->nxdom_prov_name, sizeof(nxdom_prov->nxdom_prov_name)) == 0) {
 			return EEXIST;
 		}
 	}
@@ -500,7 +500,8 @@ nxdom_prov_find(const struct nxdom *nxdom, const char *name)
 	if (name != NULL) {
 		STAILQ_FOREACH(nxdom_prov, &nxdom->nxdom_prov_head,
 		    nxdom_prov_link) {
-			if (strcmp(nxdom_prov->nxdom_prov_name, name) == 0) {
+			if (strlcmp(nxdom_prov->nxdom_prov_name, name,
+			    sizeof(nxdom_prov->nxdom_prov_name)) == 0) {
 				break;
 			}
 		}
@@ -977,8 +978,8 @@ kern_nexus_controller_register_provider(const nexus_controller_t ncd,
 		goto done;
 	}
 
-	if ((err = __nexus_provider_reg_prepare(&reg, name,
-	    nxdom_type, nxa)) != 0) {
+	if ((err = __nexus_provider_reg_prepare(&reg,
+	    __unsafe_null_terminated_from_indexable(name), nxdom_type, nxa)) != 0) {
 		SK_UNLOCK();
 		goto done;
 	}
@@ -1084,7 +1085,7 @@ kern_nexus_controller_alloc_net_provider_instance(
 	const struct kern_nexus_net_init *init, struct ifnet **pifp)
 {
 	struct kern_nexus *nx = NULL;
-	struct ifnet *ifp = NULL;
+	struct ifnet *__single ifp = NULL;
 	struct nxctl *nxctl;
 	boolean_t nxctl_locked = FALSE;
 	errno_t err = 0;
@@ -1147,7 +1148,13 @@ kern_nexus_controller_alloc_net_provider_instance(
 	}
 
 	/* attach embryonic ifnet to nexus */
-	err = _kern_nexus_ifattach(nxctl, nx->nx_uuid, ifp, NULL, FALSE, NULL);
+	/*
+	 * XXX -fbounds-safety: Update this once __counted_by_or_null is
+	 * available (rdar://75598414)
+	 */
+	err = _kern_nexus_ifattach(nxctl, nx->nx_uuid, ifp,
+	    __unsafe_forge_bidi_indexable(unsigned char *, NULL, sizeof(uuid_t)),
+	    FALSE, NULL);
 
 	if (err != 0) {
 		goto done;
@@ -1350,7 +1357,7 @@ errno_t
 kern_nexus_get_pbufpool(const kern_nexus_t nx, kern_pbufpool_t *ptx_pp,
     kern_pbufpool_t *prx_pp)
 {
-	kern_pbufpool_t tpp = NULL, rpp = NULL;
+	kern_pbufpool_t __single tpp = NULL, rpp = NULL;
 	int err = 0;
 
 	if (ptx_pp == NULL && prx_pp == NULL) {

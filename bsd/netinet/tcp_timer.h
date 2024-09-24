@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -127,17 +127,18 @@
 
 #define TCPT_PTO        0       /* Probe timeout */
 #define TCPT_DELAYFR    1       /* Delay recovery if there is reordering */
-#define TCPT_REXMT      2       /* retransmit */
-#define TCPT_DELACK     3       /* delayed ack */
-#define TCPT_PERSIST    4       /* retransmit persistence */
-#define TCPT_KEEP       5       /* keep alive */
-#define TCPT_2MSL       6       /* 2*msl quiet time timer */
+#define TCPT_REORDER    2       /* Reordering timer for RACK */
+#define TCPT_REXMT      3       /* retransmit */
+#define TCPT_DELACK     4       /* delayed ack */
+#define TCPT_PERSIST    5       /* retransmit persistence */
+#define TCPT_KEEP       6       /* keep alive */
+#define TCPT_2MSL       7       /* 2*msl quiet time timer */
 #if MPTCP
-#define TCPT_JACK_RXMT  7       /* retransmit timer for join ack */
-#define TCPT_CELLICON   8       /* Timer to check for cell-activity */
-#define TCPT_MAX        8
+#define TCPT_JACK_RXMT  8       /* retransmit timer for join ack */
+#define TCPT_CELLICON   9       /* Timer to check for cell-activity */
+#define TCPT_MAX        9
 #else /* MPTCP */
-#define TCPT_MAX        6
+#define TCPT_MAX        7
 #endif /* !MPTCP */
 
 #define TCPT_NONE       (TCPT_MAX + 1)
@@ -225,7 +226,7 @@ static char *tcptimers[] =
  * Rexmt and delayed ack timers are considered as fast timers which run
  * in the order of 100ms.
  *
- * Probe timeout is a quick timer which will run in the order of 10ms.
+ * Probe timeout and RACK reordering timer are quick timers which will run in the order of 10ms.
  */
 #define IS_TIMER_HZ_500MS(i)    ((i) >= TCPT_PERSIST)
 #define IS_TIMER_HZ_100MS(i)    ((i) >= TCPT_REXMT && (i) < TCPT_PERSIST)
@@ -324,7 +325,7 @@ extern int tcp_delack;          /* delayed ack timer */
 extern int tcp_maxpersistidle;
 extern int tcp_msl;
 extern int tcp_ttl;             /* time to live for TCP segs */
-extern int tcp_backoff[];
+extern int tcp_backoff[TCP_MAXRXTSHIFT + 1];
 extern int tcp_rexmt_slop;
 extern u_int32_t tcp_max_persist_timeout;       /* Maximum persistence for Zero Window Probes */
 

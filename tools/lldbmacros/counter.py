@@ -1,5 +1,8 @@
 from memory import IterateZPerCPU
-from xnu import *
+from xnu import (
+    LazyTarget, value, ArgumentError,
+    lldb_command, lldb_type_summary, header
+)
 
 @lldb_type_summary(['scalable_counter_t'])
 @header("Counter Value\n-------------")
@@ -10,7 +13,7 @@ def GetSimpleCounter(counter):
     """
     val = 0
     for v in IterateZPerCPU(counter):
-        val += dereference(v)
+        val += v
     return str(val)
 
 @lldb_command('showcounter')
@@ -19,6 +22,9 @@ def ShowSimpleCounter(cmd_args=None):
         Usage: showcounter <address of counter>
     """
     if not cmd_args:
-        raise ArgumentError("Please specify the address of the counter you want to read.")
+        raise ArgumentError("Please specify the address of the "
+                            "counter you want to read.")
 
-    print(GetSimpleCounter(kern.GetValueFromAddress(cmd_args[0], "scalable_counter_t")))
+    val = LazyTarget.GetTarget().chkCreateValueFromExpression(
+        'value', f"(scalable_counter_t){cmd_args[0]}")
+    print(GetSimpleCounter(value(val)))

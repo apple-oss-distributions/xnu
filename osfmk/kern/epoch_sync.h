@@ -73,23 +73,22 @@
 
 __BEGIN_DECLS
 
-struct ht;
-
 /*
- * @struct esync_queue_ht
+ * @enum esync_space_t
  *
- * @abstract Identifies the epoch sync space of synchronization objects
- * associated with "queues".
- */
-extern struct ht esync_queue_ht;
-
-/*
- * @struct esync_thread_ht
+ * @abstract Identifies the epoch sync space.
  *
- * @abstract Identifies the epoch sync space of synchronization objects
- * associated with "threads".
+ * @constant ESYNC_SPACE_EXCLAVES_Q
+ * Exclaves queues.
+ *
+ * @constant ESYNC_SPACE_EXCLAVES_T
+ * Exclaves threads.
  */
-extern struct ht esync_thread_ht;
+typedef enum __enum_closed {
+	ESYNC_SPACE_TEST       = 0,
+	ESYNC_SPACE_EXCLAVES_Q = 1,
+	ESYNC_SPACE_EXCLAVES_T = 2,
+} esync_space_t;
 
 /*!
  * @enum esync_policy_t
@@ -118,7 +117,7 @@ typedef enum __enum_closed {
  * @abstract
  * Wait on a turnstile associated with the specified id
  *
- * @param ns
+ * @param space
  * Namespace in which 'id' lives
  *
  * @param id
@@ -139,9 +138,9 @@ typedef enum __enum_closed {
  * @return
  * Result of blocking call (or THREAD_NOT_WAITING for pre-posted waits)
  */
-extern wait_result_t esync_wait(struct ht *ns, uint64_t id, uint64_t epoch,
-    os_atomic(uint64_t) * counter, ctid_t owner_ctid, esync_policy_t policy,
-    wait_interrupt_t interruptible);
+extern wait_result_t esync_wait(esync_space_t space, uint64_t id,
+    uint64_t epoch, os_atomic(uint64_t) * counter, ctid_t owner_ctid,
+    esync_policy_t policy, wait_interrupt_t interruptible);
 
 /*!
  * @enum esync_wake_mode_t
@@ -173,7 +172,7 @@ typedef enum __enum_closed {
  * @abstract
  * Wake one or more threads which have blocked on the specified id in esync_wait
  *
- * @param ns
+ * @param space
  * Namespace in which 'id' lives
  *
  * @param id
@@ -193,8 +192,8 @@ typedef enum __enum_closed {
  * @return
  * KERN_SUCCESS or KERN_NOT_WAITING if no thread was woken
  */
-extern kern_return_t esync_wake(struct ht *ns, uint64_t id, uint64_t epoch,
-    os_atomic(uint64_t) * counter, esync_wake_mode_t mode,
+extern kern_return_t esync_wake(esync_space_t space, uint64_t id,
+    uint64_t epoch, os_atomic(uint64_t) * counter, esync_wake_mode_t mode,
     ctid_t ctid);
 
 __END_DECLS

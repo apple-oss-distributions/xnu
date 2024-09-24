@@ -100,24 +100,9 @@ mach_vm_reclaim_ringbuffer_init(mach_vm_reclaim_ringbuffer_v1_t ring_buffer)
 	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
 	ring_buffer->buffer_len = entries_size / sizeof(mach_vm_reclaim_entry_v1_t);
 
-	int flags = VM_FLAGS_ANYWHERE | VM_FLAGS_PERMANENT | VM_MAKE_TAG(VM_MEMORY_MALLOC);
-	kr = mach_vm_map(mach_task_self(), (mach_vm_address_t *)&ring_buffer->buffer,
-	    buffer_size, 0, flags, MEMORY_OBJECT_NULL, 0, FALSE,
-	    VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
 	kr = mach_vm_deferred_reclamation_buffer_init(mach_task_self(),
-	    (mach_vm_address_t)ring_buffer->buffer, buffer_size);
-
-	if (kr != KERN_SUCCESS) {
-		mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)ring_buffer->buffer,
-		    buffer_size);
-		return kr;
-	}
-
-	return KERN_SUCCESS;
+	    (mach_vm_address_t *)&ring_buffer->buffer, buffer_size);
+	return kr;
 }
 
 uint64_t
@@ -158,6 +143,64 @@ mach_vm_reclaim_mark_free(
 	*should_update_kernel_accounting = update_accounting(ring_buffer, size);
 
 	return idx;
+}
+
+kern_return_t
+mach_vm_reclaim_mark_free_with_id(
+	mach_vm_reclaim_ringbuffer_v1_t ring_buffer,
+	mach_vm_address_t start_addr,
+	uint32_t size,
+	mach_vm_reclaim_behavior_v1_t behavior,
+	uint64_t id,
+	bool *should_update_kernel_accounting)
+{
+	mach_vm_reclaim_indices_v1_t *indices = &ring_buffer->buffer->indices;
+	mach_vm_reclaim_entry_v1_t *buffer = ring_buffer->buffer->entries;
+	mach_vm_size_t buffer_len = ring_buffer->buffer_len;
+	uint64_t head = 0, busy = 0, original_tail = 0;
+
+	if (id == VM_RECLAIM_INDEX_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	head = os_atomic_load_wide(&indices->head, relaxed);
+	if (id < head) {
+		/*
+		 * This is just a fast path for the case where the buffer has wrapped.
+		 * It's not strictly necessary beacuse idx must also be < busy.
+		 * That's why we can use a relaxed load for the head ptr.
+		 */
+		return KERN_FAILURE;
+	}
+	/* Attempt to move tail to idx */
+	original_tail = os_atomic_load_wide(&indices->tail, relaxed);
+	_assert("mach_vm_reclaim_mark_free_with_id",
+	    id < original_tail, original_tail);
+
+	os_atomic_store_wide(&indices->tail, id, relaxed);
+	os_atomic_thread_fence(seq_cst); // Our write to tail must happen before our read of busy
+	busy = os_atomic_load_wide(&indices->busy, relaxed);
+	if (id < busy) {
+		/* Kernel is acting on this entry. Undo. */
+		os_atomic_store_wide(&indices->tail, original_tail, relaxed);
+		return KERN_FAILURE;
+	}
+
+	mach_vm_reclaim_entry_v1_t *entry = &buffer[id % buffer_len];
+	_assert("mach_vm_reclaim_mark_free_with_id",
+	    entry->address == 0 && entry->size == 0, entry->address);
+
+	/* Sucessfully moved tail back. Can now overwrite the entry */
+	*entry = construct_entry(start_addr, size, behavior);
+
+	/* Tail increment can not be seen before the entry is set in the buffer */
+	os_atomic_thread_fence(seq_cst);
+	/* Reset tail. */
+	os_atomic_store_wide(&indices->tail, original_tail, relaxed);
+
+	*should_update_kernel_accounting = update_accounting(ring_buffer, size);
+
+	return KERN_SUCCESS;
 }
 
 bool

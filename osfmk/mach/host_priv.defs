@@ -79,6 +79,10 @@ userprefix r_;
 #define KERNEL_SERVER_SUFFIX(NAME) NAME
 #endif
 
+#if KERNEL_SERVER
+#define VM_KERNEL_SERVER 1
+#endif
+
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
 #include <mach/clock_types.defs>
@@ -133,9 +137,9 @@ routine host_default_memory_manager(
 routine	vm_wire(
 		host_priv	: host_priv_t;
 		task		: vm_map_t;
-		address		: vm_address_t;
-		size		: vm_size_t;
-		desired_access	: vm_prot_t);
+		address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		desired_access	: VM_USE_TMPTYPE(vm_prot_t));
 
 /*
  *	Specify that the target thread must always be able
@@ -147,29 +151,18 @@ routine	thread_wire(
 		wired		: boolean_t);
 
 /*
- *	Allocate zero-filled, wired, contiguous physical memory
- *	in the address space of the target task, either at the
- *	specified address, or wherever space can be found (if
- *	anywhere is TRUE), of the specified size.  The address
- *	at which the allocation actually took place is returned.
- *	All pages will be entered into the task's pmap immediately,
- *	with VM_PROT_ALL.
- *
- *	In addition to all the failure modes of its cousin,
- *	vm_allocate, this call may also fail if insufficient
- *	contiguous memory exists to satisfy the request.
- *
- *	Memory obtained from this call should be freed the
- *	normal way, via vm_deallocate.
- *
- *	N.B.  This is an EXPERIMENTAL interface!
+ * Obsolete
  */
+#if KERNEL_SERVER
+skip;
+#else
 routine	vm_allocate_cpm(
 		host_priv	: host_priv_t;
 		task		: vm_map_t;
 	inout	address		: vm_address_t;
 		size		: vm_size_t;
 		flags		: int);
+#endif
 
 /*
  *	Get list of processors on this host.
@@ -294,9 +287,9 @@ skip; /* old host_load_symbol_table */
 routine	KERNEL_SERVER_SUFFIX(mach_vm_wire)(
 		host_priv	: host_priv_t;
 		task		: vm_map_t;
-		address		: mach_vm_address_t;
-		size		: mach_vm_size_t;
-		desired_access	: vm_prot_t);
+		address		: VM_USE_TMPTYPE(mach_vm_address_t);
+		size		: VM_USE_TMPTYPE(mach_vm_size_t);
+		desired_access	: VM_USE_TMPTYPE(vm_prot_t));
 
 /*
  * JMM - Keep all processor_set related items at the end for easy

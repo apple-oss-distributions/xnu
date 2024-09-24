@@ -69,6 +69,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/mcache.h>
+#include <sys/sysctl.h>
 
 #include <kern/zalloc.h>
 
@@ -135,29 +136,6 @@ pfloginit(void)
 }
 
 #if !XNU_TARGET_OS_OSX
-
-static const char *
-findsubstr(const char * haystack, const char * needle, size_t needle_len)
-{
-	const char *    scan;
-
-	for (scan = haystack; *scan != '\0'; scan++) {
-		if (strncmp(scan, needle, needle_len) == 0) {
-			return scan;
-		}
-	}
-	return NULL;
-}
-
-extern char     osreleasetype[];
-
-#define MY_OS_RELEASE_TYPE_MATCHES(str) (findsubstr(osreleasetype, str, sizeof(str) - 1) != NULL)
-
-#define _DARWIN         "Darwin"
-#define _RESTORE        "Restore"
-#define _INTERNAL       "Internal"
-#define _NONUI          "NonUI"
-
 static inline bool
 pflog_is_enabled(void)
 {
@@ -171,10 +149,10 @@ pflog_is_enabled(void)
 		goto done;
 	}
 	flags = _FLAGS_INITIALIZED;
-	if (MY_OS_RELEASE_TYPE_MATCHES(_DARWIN) ||
-	    MY_OS_RELEASE_TYPE_MATCHES(_RESTORE) ||
-	    MY_OS_RELEASE_TYPE_MATCHES(_INTERNAL) ||
-	    MY_OS_RELEASE_TYPE_MATCHES(_NONUI)) {
+	if (kern_osreleasetype_matches("Darwin") ||
+	    kern_osreleasetype_matches("Restore") ||
+	    kern_osreleasetype_matches("Internal") ||
+	    kern_osreleasetype_matches("NonUI")) {
 		flags |= _FLAGS_ENABLED;
 	} else {
 		printf("%s: osreleasetype %s doesn't allow pflog\n", __func__,
@@ -187,14 +165,13 @@ pflog_is_enabled(void)
 done:
 	return (pflog_enabled_flags & _FLAGS_ENABLED) != 0;
 }
-
 #endif /* !XNU_TARGET_OS_OSX */
 
 static int
 pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 {
-	struct pflog_softc *pflogif;
-	struct ifnet_init_eparams pf_init;
+	struct pflog_softc *__single pflogif;
+	struct ifnet_init_eparams pf_init = { .name = NULL };
 	int error = 0;
 
 #if !XNU_TARGET_OS_OSX
@@ -216,7 +193,7 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	pf_init.ver = IFNET_INIT_CURRENT_VERSION;
 	pf_init.len = sizeof(pf_init);
 	pf_init.flags = IFNET_INIT_LEGACY;
-	pf_init.name = ifc->ifc_name;
+	pf_init.name = __unsafe_null_terminated_from_indexable(ifc->ifc_name);
 	pf_init.unit = unit;
 	pf_init.type = IFT_PFLOG;
 	pf_init.family = IFNET_FAMILY_LOOPBACK;
@@ -269,7 +246,7 @@ static int
 pflog_remove(struct ifnet *ifp)
 {
 	int error = 0;
-	struct pflog_softc *pflogif = NULL;
+	struct pflog_softc *__single pflogif = NULL;
 
 	lck_rw_lock_shared(&pf_perim_lock);
 	lck_mtx_lock(&pf_lock);
@@ -404,8 +381,7 @@ pflog_packet(struct pfi_kif *kif, pbuf_t *pbuf, sa_family_t af, u_int8_t dir,
 		hdr.rulenr = htonl(am->nr);
 		hdr.subrulenr = htonl(rm->nr);
 		if (ruleset != NULL && ruleset->anchor != NULL) {
-			strlcpy(hdr.ruleset, ruleset->anchor->name,
-			    sizeof(hdr.ruleset));
+			strbufcpy(hdr.ruleset, ruleset->anchor->name);
 		}
 	}
 	if (rm->log & PF_LOG_SOCKET_LOOKUP && !pd->lookup.done) {

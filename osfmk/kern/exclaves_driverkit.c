@@ -549,8 +549,9 @@ exclaves_driverkit_upcall_notification_signal(const uint64_t id,
 #define EXCLAVES_HELLO_DRIVER_INTERRUPTS_INDEX 0
 #define EXCLAVES_HELLO_DRIVER_INTERRUPTS_CHECK_RET(test) if (test) { break; }
 
-#define EXCLAVES_ID_HELLO_INTERRUPTS_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloDriverInterrupts"))
+#define EXCLAVES_ID_HELLO_INTERRUPTS_EP              \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.HelloDriverInterrupts"))
 
 typedef enum hello_driverkit_interrupts_test_type {
 	TEST_IRQ_REGISTER,
@@ -589,7 +590,7 @@ static const char *hello_driverkit_interrupts_test_string[] = {
 static int
 hello_driverkit_interrupts(hello_driverkit_interrupts_test_type_t test_type)
 {
-	printf("****** START: %s ******\n",
+	exclaves_debug_printf(show_test_output, "****** START: %s ******\n",
 	    hello_driverkit_interrupts_test_string[test_type]);
 
 	int err = 0;
@@ -690,11 +691,13 @@ exclaves_hello_driverkit_interrupts(uint64_t registryID, int64_t *out)
 		signal_param->id = registryID;
 		signal_param->index = EXCLAVES_HELLO_DRIVER_INTERRUPTS_INDEX;
 
-		printf("%s: SKIPPING INTERRUPT TESTS (rdar://107842497)\n", __func__);
+		exclaves_debug_printf(show_test_output,
+		    "%s: SKIPPING INTERRUPT TESTS (rdar://107842497)\n", __func__);
 
 		/* Timer tests */
 
-		printf("%s: TIMER TESTS\n", __func__);
+		exclaves_debug_printf(show_test_output,
+		    "%s: TIMER TESTS\n", __func__);
 		EXCLAVES_HELLO_DRIVER_INTERRUPTS_CHECK_RET(
 			hello_driverkit_interrupts(TEST_TIMER_REGISTER))
 		EXCLAVES_HELLO_DRIVER_INTERRUPTS_CHECK_RET(
@@ -756,7 +759,8 @@ exclaves_hello_driverkit_multi_timers(int64_t *out)
 	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
 
 	do {
-		printf("%s: TIMER TESTS\n", __func__);
+		exclaves_debug_printf(show_test_output,
+		    "%s: TIMER TESTS\n", __func__);
 		EXCLAVES_HELLO_DRIVER_INTERRUPTS_CHECK_RET(
 			hello_driverkit_interrupts(TEST_MULTI_TIMER_SETUP))
 		// Multiple timers are setup with the same timeout

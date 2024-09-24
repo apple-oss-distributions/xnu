@@ -45,7 +45,7 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("VM"));
 
 T_DECL(wire_copy_share,
-    "test VM object wired, copied and shared")
+    "test VM object wired, copied and shared", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_address_t vmaddr1, vmaddr2, vmaddr3;

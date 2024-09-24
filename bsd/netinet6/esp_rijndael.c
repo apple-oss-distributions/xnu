@@ -157,7 +157,8 @@ esp_cbc_decrypt_aes(
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
 	size_t ivoff, bodyoff;
 	u_int8_t iv[AES_BLOCKLEN] __attribute__((aligned(4))), *dptr;
-	u_int8_t sbuf[AES_BLOCKLEN] __attribute__((aligned(4))), *sp, *sp_unaligned, *sp_aligned = NULL;
+	u_int8_t sbuf[AES_BLOCKLEN] __attribute__((aligned(4))), *sp, *sp_unaligned;
+	u_int8_t *__bidi_indexable sp_aligned = NULL;
 	struct mbuf *scut;
 	int scutoff;
 	int     i, len;
@@ -372,7 +373,8 @@ esp_cbc_encrypt_aes(
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
 	size_t ivoff, bodyoff;
 	u_int8_t *ivp, *dptr, *ivp_unaligned;
-	u_int8_t sbuf[AES_BLOCKLEN] __attribute__((aligned(4))), *sp, *sp_unaligned, *sp_aligned = NULL;
+	u_int8_t sbuf[AES_BLOCKLEN] __attribute__((aligned(4))), *sp, *sp_unaligned;
+	u_int8_t *__bidi_indexable sp_aligned = NULL;
 	u_int8_t ivp_aligned_buf[AES_BLOCKLEN] __attribute__((aligned(4)));
 	struct mbuf *scut;
 	int scutoff;
@@ -585,9 +587,11 @@ esp_cbc_encrypt_aes(
 }
 
 int
-esp_aes_cbc_encrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
-    size_t out_ivlen, uint8_t *output_data, size_t output_data_len)
+esp_aes_cbc_encrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(out_ivlen)out_iv, size_t out_ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	aes_encrypt_ctx *ctx = NULL;
 	uint8_t *ivp = NULL;
@@ -626,9 +630,11 @@ esp_aes_cbc_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 }
 
 int
-esp_aes_cbc_decrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_aes_cbc_decrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)iv, size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	aes_decrypt_ctx *ctx = NULL;
 	aes_rval rc = 0;
@@ -672,20 +678,26 @@ esp_gcm_schedlen(
 	return sizeof(aes_gcm_ctx) + aes_decrypt_get_ctx_size_gcm() + aes_encrypt_get_ctx_size_gcm() + ESP_GCM_ALIGN;
 }
 
+#define P2ROUNDUP_GCM(p, ctx)                                                 \
+	intptr_t aligned_p = P2ROUNDUP(p, ESP_GCM_ALIGN);                     \
+	intptr_t diff = (aligned_p - (intptr_t)p);                            \
+	ctx = (aes_gcm_ctx *)(void *)((uint8_t *)p + diff)
+
 int
 esp_gcm_schedule( __unused const struct esp_algorithm *algo,
     struct secasvar *sav)
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = NULL;
 	const u_int ivlen = sav->ivlen;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
 	unsigned char nonce[ESP_GCM_SALT_LEN + ivlen];
 	int rc;
 
-	ctx->decrypt = &ctx->ctxt[0];
-	ctx->encrypt = &ctx->ctxt[aes_decrypt_get_ctx_size_gcm() / sizeof(ccgcm_ctx)];
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
+	ctx->decrypt = (ccgcm_ctx *)(void *)((uint8_t *)ctx + offsetof(aes_gcm_ctx, ctxt));
+	ctx->encrypt = (ccgcm_ctx *)(void *)((uint8_t *)ctx + offsetof(aes_gcm_ctx, ctxt) + aes_decrypt_get_ctx_size_gcm());
 
 	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
@@ -746,7 +758,9 @@ int
 esp_gcm_encrypt_finalize(struct secasvar *sav,
     unsigned char *tag, size_t tag_bytes)
 {
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = NULL;
+
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
 	return aes_encrypt_finalize_gcm(tag, tag_bytes, ctx->encrypt);
 }
 
@@ -754,7 +768,9 @@ int
 esp_gcm_decrypt_finalize(struct secasvar *sav,
     unsigned char *tag, size_t tag_bytes)
 {
-	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	aes_gcm_ctx *ctx = NULL;
+
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
 	return aes_decrypt_finalize_gcm(tag, tag_bytes, ctx->decrypt);
 }
 
@@ -771,7 +787,7 @@ esp_gcm_encrypt_aes(
 	uint32_t soff = 0;       /* offset from the head of chain, to head of this mbuf */
 	uint32_t sn = 0;     /* offset from the head of the mbuf, to meat */
 	uint8_t *sp = NULL;
-	aes_gcm_ctx *ctx;
+	aes_gcm_ctx *ctx = NULL;
 	uint32_t len;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
@@ -796,7 +812,7 @@ esp_gcm_encrypt_aes(
 		return EINVAL;
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
 
 	if (aes_encrypt_reset_gcm(ctx->encrypt)) {
 		ipseclog((LOG_ERR, "%s: gcm reset failure\n", __FUNCTION__));
@@ -930,7 +946,7 @@ esp_gcm_decrypt_aes(
 	uint32_t soff = 0;       /* offset from the head of chain, to head of this mbuf */
 	uint32_t sn = 0;     /* offset from the head of the mbuf, to meat */
 	uint8_t *sp = NULL;
-	aes_gcm_ctx *ctx;
+	aes_gcm_ctx *ctx = NULL;
 	uint32_t len;
 	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 	const bool gmac_only = (sav->alg_enc == SADB_X_EALG_AES_GMAC);
@@ -982,7 +998,7 @@ esp_gcm_decrypt_aes(
 		memcpy(nonce + sizeof(nonce) - sizeof(esp.esp_seq), &esp.esp_seq, sizeof(esp.esp_seq));
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
 	if (aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt)) {
 		ipseclog((LOG_ERR, "%s: failed to set IV\n", __FUNCTION__));
 		cc_clear(sizeof(nonce), nonce);
@@ -1059,11 +1075,14 @@ esp_gcm_decrypt_aes(
 }
 
 int
-esp_aes_gcm_encrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_aes_gcm_encrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)out_iv, size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN] = {};
+	aes_gcm_ctx *ctx = NULL;
 	int rc = 0; // return code of corecrypto operations
 
 	ESP_CHECK_ARG(sav);
@@ -1083,7 +1102,8 @@ esp_aes_gcm_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 		return EINVAL;
 	}
 
-	aes_gcm_ctx *ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
+
 	if (__improbable((rc = aes_encrypt_reset_gcm(ctx->encrypt)) != 0)) {
 		esp_log_err("Context reset failure %d, SPI 0x%08x\n",
 		    rc, ntohl(sav->spi));
@@ -1166,9 +1186,11 @@ esp_aes_gcm_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 }
 
 int
-esp_aes_gcm_decrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv, size_t ivlen,
-    uint8_t *output_data, size_t output_data_len)
+esp_aes_gcm_decrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)iv, size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN] = {};
 	aes_gcm_ctx *ctx = NULL;
@@ -1209,7 +1231,7 @@ esp_aes_gcm_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 		memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IVLEN);
 	}
 
-	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched_enc, ESP_GCM_ALIGN);
+	P2ROUNDUP_GCM(sav->sched_enc, ctx);
 
 	if (__improbable((rc = aes_decrypt_set_iv_gcm(nonce, sizeof(nonce),
 	    ctx->decrypt)) != 0)) {

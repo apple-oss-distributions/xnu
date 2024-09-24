@@ -225,13 +225,11 @@ def GetKmsgHeader(kmsgp):
     returns:
         Mach message header for kmsgp
     """
-    inline_buffer = kmsgp + sizeof(dereference(kmsgp))
-
-    if kmsgp.ikm_type <= int(GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL')):
-        return kern.GetValueFromAddress(inline_buffer, 'mach_msg_header_t *')
-
-    vec = kern.GetValueFromAddress(inline_buffer, 'ipc_kmsg_vector_t *')
-    return kern.GetValueFromAddress(unsigned(vec.kmsgv_data), 'mach_msg_header_t *')
+    if kmsgp.ikm_type == GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_ALL_INLINED'):
+        return kern.GetValueFromAddress(int(addressof(kmsgp.ikm_big_data)), 'mach_msg_header_t *')
+    if kmsgp.ikm_type == GetEnumValue('ipc_kmsg_type_t', 'IKM_TYPE_UDATA_OOL'):
+        return kern.GetValueFromAddress(int(addressof(kmsgp.ikm_small_data)), 'mach_msg_header_t *')
+    return kern.GetValueFromAddress(unsigned(kmsgp.ikm_kdata), 'mach_msg_header_t *')
 
 @header("{:<20s} {:<20s} {:<20s} {:<10s} {:>6s}  {:<20s}  {:<8s}  {:<26s} {:<26s}".format(
             "", "kmsg", "header", "msgid", "size", "reply-port", "disp", "source", "destination"))
@@ -584,7 +582,7 @@ def GetKObjectFromPort(portval):
         else:
             desc_str += re.sub(r'vtable for ', r' ', iokit_classnm)
 
-    elif objtype_str[:5] == 'TASK_':
+    elif objtype_str[:5] == 'TASK_' and objtype_str != 'TASK_ID_TOKEN':
         task = value(portval.GetSBValue().xCreateValueFromAddress(
             None, kobject_addr, gettype('struct task')).AddressOf())
         if GetProcFromTask(task):
@@ -1114,6 +1112,9 @@ def CollectPortsForAnalysis(port, disposition):
                 continue
             ipr_bits = unsigned(ipr.ipr_soright) & 3
             ipr_port = kern.GetValueFromAddress(int(ipr.ipr_soright) & ~3, 'struct ipc_port *')
+            # skip unused entries in the ipc table to avoid null dereferences
+            if not ipr_port:
+                continue
             ipr_disp = 0
             if ipr_bits & 3: ## send-possible armed and requested
                 ipr_disp = -5
@@ -1299,7 +1300,7 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
         ## for idx in xrange(1, num_entries)
 
         ## Task ports (send rights)
-        if unsigned(t.itk_settable_self) > 0:
+        if getattr(t, 'itk_settable_self', 0) > 0:
             func(t, space, ctx, taskports_idx, 0, t.itk_settable_self, 17)
         if unsigned(t.itk_host) > 0:
             func(t, space, ctx, taskports_idx, 0, t.itk_host, 17)
@@ -1354,7 +1355,7 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
             ## XXX: look at block reason to see if it's in mach_msg_receive - then look at saved state / message
 
             ## Thread port (send right)
-            if unsigned(thval.t_tro.tro_settable_self_port) > 0:
+            if getattr(thval.t_tro, 'tro_settable_self_port', 0) > 0:
                 thport = thval.t_tro.tro_settable_self_port
                 func(t, space, ctx, thports_idx, 0, thport, 17) ## see: osfmk/mach/message.h
             ## Thread special reply port (send-once right)
@@ -1478,19 +1479,18 @@ def CountPortsCallback(task, space, ctx, entry_idx, ipc_entry, ipc_port, port_di
         p_intransit.add(unsigned(ipc_port))
 
     if task.active or (task.halting and not task.active):
-        pname = GetProcNameForTask(task)
-        if not pname in p_bytask:
-            p_bytask[pname] = { 'transit':0, 'table':0, 'other':0 }
+        if not task in p_bytask:
+            p_bytask[task] = { 'transit':0, 'table':0, 'other':0 }
         if entry_idx == intransit_idx:
-            p_bytask[pname]['transit'] += 1
+            p_bytask[task]['transit'] += 1
         elif entry_idx >= 0:
-            p_bytask[pname]['table'] += 1
+            p_bytask[task]['table'] += 1
         else:
-            p_bytask[pname]['other'] += 1
+            p_bytask[task]['other'] += 1
 
-
-@lldb_command('countallports', 'P')
-def CountAllPorts(cmd_args=None, cmd_options={}):
+@header(f"{'#ports': <10s} {'in transit': <10s} {'Special': <10s}")           
+@lldb_command('countallports', 'P', fancy=True)
+def CountAllPorts(cmd_args=None, cmd_options={}, O=None):
     """ Routine to search for all as many references to ipc_port structures in the kernel
         that we can find.
         Usage: countallports [-P]
@@ -1508,14 +1508,18 @@ def CountAllPorts(cmd_args=None, cmd_options={}):
     ## DO recurse on busy ports
     ## DO log progress
     IterateAllPorts(None, CountPortsCallback, (p_set, p_intransit, p_bytask), find_psets, True, True)
-    sys.stderr.write("{:120s}\r".format(' '))
+    sys.stderr.write(f"{' ':120s}\r")
 
-    print("Total ports found: {:d}".format(len(p_set)))
-    print("In Transit: {:d}".format(len(p_intransit)))
-    print("By Task:")
-    for pname in sorted(p_bytask.keys()):
-        count = p_bytask[pname]
-        print("\t{: <20s}: table={: <5d}, transit={: <5d}, other={: <5d}".format(pname, count['table'], count['transit'], count['other']))
+    # sort by ipc table size 
+    with O.table(GetTaskIPCSummary.header + ' ' + CountAllPorts.header):
+        for task, port_summary in sorted(p_bytask.items(), key=lambda item: item[1]['table'], reverse=True):
+            outstring, _ = GetTaskIPCSummary(task)
+            outstring += f" {port_summary['table']: <10d} {port_summary['transit']: <10d} {port_summary['other']: <10d}"
+            print(outstring)
+    
+    print(f"\nTotal ports found: {len(p_set)}")
+    print(f"Number of ports In Transit: {len(p_intransit)}")
+    
 # EndMacro: countallports
 # Macro: showpipestats
 

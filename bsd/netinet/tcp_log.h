@@ -30,29 +30,7 @@
 #ifndef _NETINET_TCP_LOG_H_
 #define _NETINET_TCP_LOG_H_
 
-#ifdef BSD_KERNEL_PRIVATE
-
-#include <sys/param.h>
-#include <sys/systm.h>
-
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/in_pcb.h>
-#include <netinet6/in6_pcb.h>
-
-#include <netinet/tcp.h>
-#include <netinet/tcp_var.h>
-#include <netinet6/tcp6_var.h>
-
-#include <net/net_log_common.h>
-
-#include <os/log.h>
-
-#include <stdbool.h>
-
-extern os_log_t tcp_mpkl_log_object;
-extern uint32_t tcp_log_enable_flags;
-extern uint32_t tcp_log_port;
+#ifdef PRIVATE
 
 #define TCP_ENABLE_FLAG_LIST \
 	X(TLEF_CONNECTION,	0x00000001, connection) \
@@ -82,6 +60,34 @@ enum {
 #undef X
 };
 
+#endif /* PRIVATE */
+
+#ifdef BSD_KERNEL_PRIVATE
+
+#include <sys/param.h>
+#include <sys/systm.h>
+
+#include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/in_pcb.h>
+#include <netinet6/in6_pcb.h>
+
+#include <netinet/tcp.h>
+#include <netinet/tcp_var.h>
+#include <netinet6/tcp6_var.h>
+
+#include <netinet/inp_log.h>
+
+#include <net/net_log_common.h>
+
+#include <os/log.h>
+
+#include <stdbool.h>
+
+extern os_log_t tcp_mpkl_log_object;
+extern uint32_t tcp_log_enable_flags;
+extern uint16_t tcp_log_port;
+
 #define TLEF_MASK_DST (TLEF_DST_LOOPBACK | TLEF_DST_LOCAL | TLEF_DST_GW)
 
 extern void tcp_log_connection_summary(struct tcpcb *tp);
@@ -108,12 +114,12 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 		return false;
 	}
 	inp = tp->t_inpcb;
-	if (tcp_log_port > 0 && tcp_log_port <= IPPORT_HILASTAUTO) {
-		if (ntohs(inp->inp_lport) != tcp_log_port &&
-		    ntohs(tp->t_inpcb->inp_fport) != tcp_log_port) {
-			return false;
-		}
+	if (tcp_log_port > 0 &&
+	    ntohs(inp->inp_lport) != tcp_log_port &&
+	    ntohs(tp->t_inpcb->inp_fport) != tcp_log_port) {
+		return false;
 	}
+
 	/*
 	 * First find out the kind of destination
 	 */
@@ -158,7 +164,7 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
     tcp_log_keepalive(__func__, __LINE__, (tp), (idle_time))
 
 #define TCP_LOG_CONNECT(tp, outgoing, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
-    tcp_log_connection((tp), (outgoing) ? "connect outgoing" : "connect incoming", (error))
+    tcp_log_connection((tp), __unsafe_forge_null_terminated(const char *, ((outgoing) ? "connect outgoing" : "connect incoming")), (error))
 
 #define TCP_LOG_CONNECTED(tp, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
     tcp_log_connection((tp), "connected", (error))
@@ -193,7 +199,7 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_LOG)) \
     tcp_log_message(__func__, __LINE__, tp, format, ## __VA_ARGS__)
 
-#define TCP_LOG_STATE(tp, new_state) if (tcp_log_enable_flags & TLEF_STATE) \
+#define TCP_LOG_STATE(tp, new_state) if (tcp_is_log_enabled(tp, TLEF_STATE)) \
     tcp_log_state_change((tp), (new_state))
 
 #define TCP_LOG_OUTPUT(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_OUTPUT)) \

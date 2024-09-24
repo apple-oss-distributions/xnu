@@ -55,7 +55,6 @@ struct turnstile_stats {
 #include <os/refcnt.h>
 #include <kern/assert.h>
 #include <kern/kern_types.h>
-#include <kern/mpsc_queue.h>
 #include <kern/locks.h>
 
 /*
@@ -351,7 +350,6 @@ struct turnstile {
 	union {
 		struct turnstile_list ts_free_turnstiles;    /* turnstile free list (IL) */
 		SLIST_ENTRY(turnstile) ts_free_elm;          /* turnstile free list element (IL) */
-		struct mpsc_queue_chain ts_deallocate_link;  /* thread deallocate link */
 	};
 	struct priority_queue_sched_max ts_inheritor_queue;  /* Queue of turnstile with us as an inheritor (WL) */
 	struct priority_queue_entry_sched ts_inheritor_links;    /* Inheritor queue links */
@@ -477,18 +475,6 @@ void
 turnstile_waitq_add_thread_priority_queue(
 	struct waitq* wq,
 	thread_t thread);
-
-/*
- * Name: turnstile_deallocate_safe
- *
- * Description: Drop a reference on the turnstile safely without triggering zfree.
- *
- * Arg1: turnstile
- *
- * Returns: None.
- */
-void
-turnstile_deallocate_safe(struct turnstile *turnstile);
 
 /*
  * Name: turnstile_recompute_priority_locked

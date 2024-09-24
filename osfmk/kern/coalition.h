@@ -66,11 +66,16 @@ void     task_coalition_roles(task_t task, int roles[COALITION_NUM_TYPES]);
 int      task_coalition_role_for_type(task_t task, int coalition_type);
 int      coalition_type(coalition_t coal);
 
+coalition_t task_get_coalition(task_t task, int type);
+
 void     task_coalition_update_gpu_stats(task_t task, uint64_t gpu_ns_delta);
+void     coalition_update_ane_stats(coalition_t coalition, uint64_t ane_mach_time, uint64_t ane_energy_nj);
 boolean_t task_coalition_adjust_focal_count(task_t task, int count, uint32_t *new_count);
 uint32_t task_coalition_focal_count(task_t task);
 uint32_t task_coalition_game_mode_count(task_t task);
 bool task_coalition_adjust_game_mode_count(task_t task, int count, uint32_t *new_count);
+uint32_t task_coalition_carplay_mode_count(task_t task);
+bool task_coalition_adjust_carplay_mode_count(task_t task, int count, uint32_t *new_count);
 boolean_t task_coalition_adjust_nonfocal_count(task_t task, int count, uint32_t *new_count);
 uint32_t task_coalition_nonfocal_count(task_t task);
 
@@ -88,11 +93,14 @@ struct thread_group *coalition_get_thread_group(coalition_t coal);
 
 void task_coalition_thread_group_focal_update(task_t task);
 void task_coalition_thread_group_game_mode_update(task_t task);
+void task_coalition_thread_group_carplay_mode_update(task_t task);
 void task_coalition_thread_group_application_set(task_t task);
 #endif /* CONFIG_THREAD_GROUPS */
 
-void coalition_for_each_task(coalition_t coal, void *ctx,
-    void (*callback)(coalition_t, void *, task_t));
+typedef bool (^coalition_for_each_task_block_t)(task_t task);
+
+void coalition_for_each_task(coalition_t coal,
+    coalition_for_each_task_block_t block);
 
 /*  Coalition ledger  */
 struct coalition_ledger_indices {
@@ -142,6 +150,8 @@ coalition_t coalition_find_and_activate_by_id(uint64_t coal_id);
 
 void coalition_remove_active(coalition_t coal);
 
+void coalition_retain(coalition_t coal);
+
 void coalition_release(coalition_t coal);
 
 /*
@@ -184,6 +194,10 @@ kern_return_t coalition_debug_info_internal(coalition_t coal,
 
 task_t kdp_coalition_get_leader(coalition_t coal);
 
+kern_return_t jetsam_coalition_set_policy(coalition_t coal, int flavor, int value);
+kern_return_t jetsam_coalition_get_policy(coalition_t coal, int flavor, int *value);
+
+
 /*
  * development/debug interfaces
  */
@@ -225,8 +239,7 @@ task_coalition_focal_count(__unused task_t task)
 
 static inline void
 coalition_for_each_task(__unused coalition_t coal,
-    __unused void *ctx,
-    __unused void (*callback)(coalition_t, void *, task_t))
+    __unused coalition_for_each_task_block_t callback)
 {
 	return;
 }
@@ -242,6 +255,19 @@ coalition_is_swappable(__unused coalition_t coal)
 {
 	return false;
 }
+
+static inline kern_return_t
+jetsam_coalition_set_policy(coalition_t coal, int flavor, int value)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+static inline kern_return_t
+jetsam_coalition_get_policy(coalition_t coal, int flavor, int *value)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
 
 #endif /* CONFIG_COALITIONS */
 

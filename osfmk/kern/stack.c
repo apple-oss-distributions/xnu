@@ -44,8 +44,8 @@
 #include <kern/kalloc.h>
 #include <kern/ledger.h>
 
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <san/kasan.h>
 

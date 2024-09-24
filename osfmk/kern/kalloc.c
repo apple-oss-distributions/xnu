@@ -75,8 +75,8 @@
 #include <kern/kalloc.h>
 #include <kern/ledger.h>
 #include <kern/backtrace.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_object.h>
+#include <vm/vm_kern_internal.h>
+#include <vm/vm_object_xnu.h>
 #include <vm/vm_map.h>
 #include <vm/vm_memtag.h>
 #include <sys/kdebug.h>
@@ -386,7 +386,7 @@ kalloc_zone_init(
 		strlcpy(z_name, buf, len + 1);
 
 		(void)zone_create_ext(z_name, size, zc_flags, ZONE_ID_ANY, ^(zone_t z){
-#if __arm64e__ || CONFIG_KERNEL_TAGGING
+#if __arm64e__ || ZSECURITY_CONFIG(ZONE_TAGGING)
 			uint32_t scale = kalloc_log2down(size / 32);
 
 			if (size == 32 << scale) {
@@ -1463,8 +1463,7 @@ kalloc_type_apply_policy(
 
 #if DEBUG || DEVELOPMENT
 	if (startup_phase < STARTUP_SUB_LOCKDOWN) {
-		uint16_t current_zones = os_atomic_load(&num_zones, relaxed);
-
+		__assert_only uint16_t current_zones = os_atomic_load(&num_zones, relaxed);
 		assert(zone_budget + current_zones <= MAX_ZONES);
 	}
 #endif
@@ -1700,7 +1699,7 @@ kalloc_type_create_zones_fixed(
 	uint16_t kt_zones_sig[MAX_K_ZONE(kt_zone_cfg)] = {};
 	uint16_t kt_zones_type[MAX_K_ZONE(kt_zone_cfg)] = {};
 #if DEBUG || DEVELOPMENT
-	uint64_t kt_shuffle_count = ((vm_address_t) kt_shuffle_buf -
+	__assert_only uint64_t kt_shuffle_count = ((vm_address_t) kt_shuffle_buf -
 	    (vm_address_t) kt_buffer) / sizeof(uint16_t);
 #endif
 	/*
@@ -1786,7 +1785,7 @@ kalloc_type_view_init_fixed(void)
 	kt_count = kalloc_type_view_parse(KTV_FIXED);
 	assert(kt_count < KALLOC_TYPE_SIZE_MASK);
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	vm_size_t sig_slist_size = (size_t) kt_count * sizeof(uint16_t);
 	vm_size_t kt_buffer_size = (size_t) kt_count * sizeof(kalloc_type_view_t);
 	assert(kt_scratch_size >= kt_buffer_size + sig_slist_size);
@@ -1906,7 +1905,7 @@ kalloc_type_view_init_var(void)
 	kt_count = kalloc_type_view_parse(KTV_VAR);
 	assert(kt_count < UINT32_MAX);
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	vm_size_t sig_slist_size = (size_t) kt_count * sizeof(uint32_t);
 	vm_size_t kt_buffer_size = (size_t) kt_count * sizeof(kalloc_type_views_t);
 	assert(kt_scratch_size >= kt_buffer_size + sig_slist_size);
@@ -1980,7 +1979,7 @@ kalloc_init(void)
 	kalloc_heap_init(KHEAP_SHARED);
 
 	kmem_alloc(kernel_map, (vm_offset_t *)&kt_buffer, kt_scratch_size,
-	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT, VM_KERN_MEMORY_KALLOC);
+	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_SPRAYQTN, VM_KERN_MEMORY_KALLOC);
 
 	/*
 	 * Handle fixed size views
@@ -2041,7 +2040,7 @@ kalloc_guard(vm_tag_t tag, uint16_t type_hash, const void *owner)
 	return guard;
 }
 
-#if __arm64e__ || CONFIG_KERNEL_TAGGING
+#if __arm64e__ || ZSECURITY_CONFIG(ZONE_TAGGING)
 
 #if __arm64e__
 #define KALLOC_ARRAY_TYPE_SHIFT (64 - T1SZ_BOOT - 1)
@@ -2060,7 +2059,7 @@ kalloc_guard(vm_tag_t tag, uint16_t type_hash, const void *owner)
  */
 
 static_assert(T1SZ_BOOT + 1 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
-#else
+#else /* __arm64e__ */
 #define KALLOC_ARRAY_TYPE_SHIFT (64 - 8 - 1)
 
 /*
@@ -2074,7 +2073,7 @@ static_assert(T1SZ_BOOT + 1 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
  */
 
 static_assert(8 + 1 + 1 + VM_KERNEL_POINTER_SIGNIFICANT_BITS <= 64);
-#endif
+#endif /* __arm64e__*/
 
 SECURITY_READ_ONLY_LATE(uint32_t) kalloc_array_type_shift = KALLOC_ARRAY_TYPE_SHIFT;
 
@@ -2114,7 +2113,7 @@ __kalloc_array_encode_vm(vm_address_t addr, vm_size_t size)
 	return addr | atop(size);
 }
 
-#else
+#else /* __arm64e__ || ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 SECURITY_READ_ONLY_LATE(uint32_t) kalloc_array_type_shift = 0;
 
@@ -2166,7 +2165,7 @@ __kalloc_array_encode_vm(vm_address_t addr, vm_size_t size)
 	return addr;
 }
 
-#endif
+#endif /* __arm64e__ || ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 vm_size_t
 kalloc_next_good_size(vm_size_t size, uint32_t period)
@@ -2226,9 +2225,13 @@ kalloc_large(
 	uint16_t              kt_hash,
 	void                 *owner __unused)
 {
-	kma_flags_t kma_flags = KMA_KASAN_GUARD | KMA_TAG;
+	kma_flags_t kma_flags = KMA_KASAN_GUARD;
 	vm_tag_t tag;
 	vm_offset_t addr, size;
+
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	kma_flags |= KMA_TAG;
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 	if (flags & Z_NOFAIL) {
 		panic("trying to kalloc(Z_NOFAIL) with a large size (%zd)",
@@ -2897,12 +2900,16 @@ krealloc_large(
 	uint16_t              kt_hash,
 	void                 *owner __unused)
 {
-	kmr_flags_t kmr_flags = KMR_FREEOLD | KMR_TAG | KMR_KASAN_GUARD;
+	kmr_flags_t kmr_flags = KMR_FREEOLD | KMR_KASAN_GUARD;
 	vm_size_t new_req_size = new_size;
 	vm_size_t old_req_size = old_size;
 	uint64_t delta;
 	kmem_return_t kmr;
 	vm_tag_t tag;
+
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	kmr_flags |= KMR_TAG;
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 	if (flags & Z_NOFAIL) {
 		panic("trying to kalloc(Z_NOFAIL) with a large size (%zd)",

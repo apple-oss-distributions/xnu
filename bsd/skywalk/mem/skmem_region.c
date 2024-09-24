@@ -127,10 +127,10 @@ static struct sksegment *sksegment_freelist_remove(struct skmem_region *,
 static struct sksegment *sksegment_freelist_grow(struct skmem_region *);
 static struct sksegment *sksegment_alloc_with_idx(struct skmem_region *,
     uint32_t);
-static void *skmem_region_alloc_common(struct skmem_region *,
-    struct sksegment *);
-static void *skmem_region_mirror_alloc(struct skmem_region *,
-    struct sksegment *, struct sksegment **);
+static void *__sized_by(seg_size) skmem_region_alloc_common(struct skmem_region *,
+    struct sksegment *, uint32_t seg_size);
+static void *__sized_by(seg_size) skmem_region_mirror_alloc(struct skmem_region *,
+    struct sksegment *, uint32_t seg_size, struct sksegment **);
 static void skmem_region_applyall(void (*)(struct skmem_region *));
 static void skmem_region_update(struct skmem_region *);
 static void skmem_region_update_func(thread_call_param_t, thread_call_param_t);
@@ -204,6 +204,11 @@ SYSCTL_UINT(_kern_skywalk_mem, OID_AUTO, region_update_interval,
 
 static SKMEM_TYPE_DEFINE(skr_zone, struct skmem_region);
 
+/*
+ * XXX: This is used in only one function (skmem_region_init) after the
+ * -fbounds-safety changes were made for Skmem. We can remove this global and
+ * just make it a local variable to the function (skmem_region_init).
+ */
 static unsigned int sg_size;                    /* size of zone element */
 static struct skmem_cache *skmem_sg_cache;      /* cache for sksegment */
 
@@ -229,6 +234,18 @@ static SKMEM_TAG_DEFINE(skmem_tag_region_mib, SKMEM_TAG_REGION_MIB);
 	((((uint64_t)-1) >> ((BMAPSZ - 1) - (_end))) & ~((1ULL << (_beg)) - 1))
 
 static int __skmem_region_inited = 0;
+
+/*
+ * XXX -fbounds-safety: we added seg_size to skmem_region_alloc_common(), but
+ * this is only used by -fbounds-safety, so we add __unused if -fbounds-safety
+ * is disabled. The utility macro for that is SK_BF_ARG().
+ * We do the same for skmem_region_alloc(), with objsize
+ */
+#if !__has_ptrcheck
+#define SK_FB_ARG __unused
+#else
+#define SK_FB_ARG
+#endif
 
 void
 skmem_region_init(void)
@@ -694,9 +711,11 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 		/* allocate the allocated-address hash chain */
 		skr->skr_hash_initial = SKMEM_REGION_HASH_INITIAL;
 		skr->skr_hash_limit = SKMEM_REGION_HASH_LIMIT;
+		uint32_t size = skr->skr_hash_initial;
 		skr->skr_hash_table = sk_alloc_type_array(struct sksegment_bkt,
-		    skr->skr_hash_initial, Z_WAITOK | Z_NOFAIL,
+		    size, Z_WAITOK | Z_NOFAIL,
 		    skmem_tag_segment_hash);
+		skr->skr_hash_size = size;
 		skr->skr_hash_mask = (skr->skr_hash_initial - 1);
 		skr->skr_hash_shift = flsll(srp->srp_c_seg_size) - 1;
 
@@ -795,6 +814,7 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	if (cflags & SKMEM_REGION_CR_THREADSAFE) {
 		skr->skr_mode |= SKR_MODE_THREADSAFE;
 	}
+
 	if (cflags & SKMEM_REGION_CR_MEMTAG) {
 		skr->skr_mode |= SKR_MODE_MEMTAG;
 	}
@@ -830,8 +850,10 @@ skmem_region_create(const char *name, struct skmem_region_params *srp,
 	if (!(skr->skr_mode & SKR_MODE_PSEUDO)) {
 		ASSERT(skr->skr_seg_max_cnt != 0);
 		skr->skr_seg_bmap_len = BITMAP_LEN(skr->skr_seg_max_cnt);
-		skr->skr_seg_bmap = sk_alloc_data(BITMAP_SIZE(skr->skr_seg_max_cnt),
+		size_t size = BITMAP_SIZE(skr->skr_seg_max_cnt);
+		skr->skr_seg_bmap = sk_alloc_data(size,
 		    Z_WAITOK | Z_NOFAIL, skmem_tag_segment_bmap);
+		skr->skr_seg_bmap_size = size;
 		ASSERT(BITMAP_SIZE(skr->skr_seg_max_cnt) ==
 		    (skr->skr_seg_bmap_len * sizeof(*skr->skr_seg_bmap)));
 
@@ -952,8 +974,10 @@ skmem_region_destroy(struct skmem_region *skr)
 		assert(bitmap_is_full(skr->skr_seg_bmap, skr->skr_seg_max_cnt));
 #endif /* DEBUG || DEVELOPMENT */
 
-		sk_free_data(skr->skr_seg_bmap, BITMAP_SIZE(skr->skr_seg_max_cnt));
+		bitmap_t *__indexable bmap = skr->skr_seg_bmap;
+		sk_free_data(bmap, skr->skr_seg_bmap_size);
 		skr->skr_seg_bmap = NULL;
+		skr->skr_seg_bmap_size = 0;
 		skr->skr_seg_bmap_len = 0;
 	}
 	ASSERT(skr->skr_seg_bmap_len == 0);
@@ -966,9 +990,12 @@ skmem_region_destroy(struct skmem_region *skr)
 		}
 #endif /* DEBUG || DEVELOPMENT */
 
-		sk_free_type_array(struct sksegment_bkt, skr->skr_hash_mask + 1,
-		    skr->skr_hash_table);
+		struct sksegment_bkt *__indexable htable = skr->skr_hash_table;
+		sk_free_type_array(struct sksegment_bkt, skr->skr_hash_size,
+		    htable);
 		skr->skr_hash_table = NULL;
+		skr->skr_hash_size = 0;
+		htable = NULL;
 	}
 	if ((mskr = skr->skr_mirror) != NULL) {
 		ASSERT(!(skr->skr_mode & SKR_MODE_PSEUDO));
@@ -992,6 +1019,7 @@ skmem_region_destroy(struct skmem_region *skr)
 void
 skmem_region_mirror(struct skmem_region *skr, struct skmem_region *mskr)
 {
+	ASSERT(mskr != NULL);
 	SK_DF(SK_VERB_MEM_REGION, "skr master 0x%llx, slave 0x%llx ",
 	    SK_KVA(skr), SK_KVA(mskr));
 
@@ -1055,16 +1083,20 @@ skmem_region_slab_config(struct skmem_region *skr, struct skmem_cache *skm,
  * Common routines for skmem_region_{alloc,mirror_alloc}.
  */
 static void *
-skmem_region_alloc_common(struct skmem_region *skr, struct sksegment *sg)
+__sized_by(objsize)
+skmem_region_alloc_common(struct skmem_region *skr, struct sksegment *sg,
+    uint32_t SK_FB_ARG objsize)
 {
 	struct sksegment_bkt *sgb;
-	void *addr;
+	uint32_t SK_FB_ARG seg_sz = 0;
+	void *__sized_by(seg_sz) addr;
 
 	SKR_LOCK_ASSERT_HELD(skr);
 
 	ASSERT(sg->sg_md != NULL);
 	ASSERT(sg->sg_start != 0 && sg->sg_end != 0);
-	addr = (void *)sg->sg_start;
+	addr = __unsafe_forge_bidi_indexable(void *, (void *)sg->sg_start, objsize);
+	seg_sz = objsize;
 	sgb = SKMEM_REGION_HASH(skr, addr);
 	ASSERT(sg->sg_link.tqe_next == NULL);
 	ASSERT(sg->sg_link.tqe_prev == NULL);
@@ -1082,14 +1114,23 @@ skmem_region_alloc_common(struct skmem_region *skr, struct sksegment *sg)
 
 /*
  * Allocate a segment from the region.
+ * XXX -fbounds-safety: there's only 5 callers of this funcion, so it was easier
+ * to just add objsize to the function signature
+ * XXX -fbounds-safety: until we have __sized_by_or_null (rdar://75598414), we
+ * can't pass NULL, but instead create a variable whose value is NULL. Also,
+ * once rdar://83900556 lands, -fbounds-safety will do size checking at return.
+ * So we need to come back to this once rdar://75598414 and rdar://83900556
+ * land.
  */
 void *
-skmem_region_alloc(struct skmem_region *skr, void **maddr,
-    struct sksegment **retsg, struct sksegment **retsgm, uint32_t skmflag)
+__sized_by(objsize)
+skmem_region_alloc(struct skmem_region *skr, void *__sized_by(*msize) * maddr,
+    struct sksegment **retsg, struct sksegment **retsgm, uint32_t skmflag,
+    uint32_t SK_FB_ARG objsize, uint32_t *SK_FB_ARG msize)
 {
 	struct sksegment *sg = NULL;
-	struct sksegment *sg1 = NULL;
-	void *addr = NULL, *addr1 = NULL;
+	struct sksegment *__single sg1 = NULL;
+	void *__indexable addr = NULL, *__indexable addr1 = NULL;
 	uint32_t retries = 0;
 
 	VERIFY(!(skr->skr_mode & SKR_MODE_GUARD));
@@ -1223,7 +1264,8 @@ retry:
 
 		if (sg != NULL) {
 			/* insert to allocated-address hash chain */
-			addr = skmem_region_alloc_common(skr, sg);
+			addr = skmem_region_alloc_common(skr, sg,
+			    skr->skr_seg_size);
 		}
 	}
 
@@ -1273,7 +1315,8 @@ retry:
 		ASSERT(skr->skr_mirror != skr);
 		ASSERT(!(skr->skr_mode & SKR_MODE_MIRRORED));
 		ASSERT(skr->skr_mirror->skr_mode & SKR_MODE_MIRRORED);
-		addr1 = skmem_region_mirror_alloc(skr->skr_mirror, sg, &sg1);
+		addr1 = skmem_region_mirror_alloc(skr->skr_mirror, sg,
+		    skr->skr_mirror->skr_seg_size, &sg1);
 		ASSERT(addr1 != NULL);
 		ASSERT(sg1 != NULL && sg1 != sg);
 		ASSERT(sg1->sg_index == sg->sg_index);
@@ -1293,7 +1336,13 @@ done:
 	}
 
 	if (maddr != NULL) {
-		*maddr = addr1;
+		if (addr1) {
+			*maddr = addr1;
+			*msize = skr->skr_mirror->skr_seg_size;
+		} else {
+			*maddr = addr1;
+			*msize = 0;
+		}
 	}
 
 	return addr;
@@ -1305,8 +1354,9 @@ done:
  * separate allows us to avoid further convoluting that routine.
  */
 static void *
+__sized_by(seg_size)
 skmem_region_mirror_alloc(struct skmem_region *skr, struct sksegment *sg0,
-    struct sksegment **retsg)
+    uint32_t SK_FB_ARG seg_size, struct sksegment **__single retsg)
 {
 	struct sksegment sg_key = { .sg_index = sg0->sg_index };
 	struct sksegment *sg = NULL;
@@ -1348,7 +1398,7 @@ skmem_region_mirror_alloc(struct skmem_region *skr, struct sksegment *sg0,
 	VERIFY(sg != NULL);
 
 	/* insert to allocated-address hash chain */
-	addr = skmem_region_alloc_common(skr, sg);
+	addr = skmem_region_alloc_common(skr, sg, skr->skr_seg_size);
 
 #if SK_LOG
 	SK_DF(SK_VERB_MEM_REGION, "skr 0x%llx sg 0x%llx",
@@ -1538,7 +1588,7 @@ sksegment_cmp(const struct sksegment *sg1, const struct sksegment *sg2)
 static struct sksegment *
 sksegment_create(struct skmem_region *skr, uint32_t i)
 {
-	struct sksegment *sg = NULL;
+	struct sksegment *__single sg = NULL;
 	bitmap_t *bmap;
 
 	SKR_LOCK_ASSERT_HELD(skr);
@@ -1552,7 +1602,7 @@ sksegment_create(struct skmem_region *skr, uint32_t i)
 	ASSERT(bit_test(*bmap, i % BMAPSZ));
 
 	sg = skmem_cache_alloc(skmem_sg_cache, SKMEM_SLEEP);
-	bzero(sg, sg_size);
+	bzero(sg, sizeof(*sg));
 
 	sg->sg_region = skr;
 	sg->sg_index = i;
@@ -1632,7 +1682,7 @@ sksegment_freelist_insert(struct skmem_region *skr, struct sksegment *sg,
 		ASSERT(sg->sg_start == 0 && sg->sg_end == 0);
 		ASSERT(sg->sg_state == SKSEG_STATE_DETACHED);
 	} else {
-		IOSKMemoryBufferRef md;
+		IOSKMemoryBufferRef __single md;
 		IOReturn err;
 
 		ASSERT(sg->sg_md != NULL);
@@ -1900,7 +1950,7 @@ sksegment_alloc_with_idx(struct skmem_region *skr, uint32_t idx)
 static void
 skmem_region_hash_rescale(struct skmem_region *skr)
 {
-	struct sksegment_bkt *old_table, *new_table;
+	struct sksegment_bkt *__indexable old_table, *new_table;
 	size_t old_size, new_size;
 	uint32_t i, moved = 0;
 
@@ -1945,6 +1995,7 @@ skmem_region_hash_rescale(struct skmem_region *skr)
 
 	skr->skr_hash_mask = (uint32_t)(new_size - 1);
 	skr->skr_hash_table = new_table;
+	skr->skr_hash_size = new_size;
 	skr->skr_rescale++;
 
 	for (i = 0; i < old_size; i++) {
@@ -2080,14 +2131,16 @@ skmem_region_get_stats(struct skmem_region *skr, struct sk_stats_region *sreg)
 }
 
 static size_t
-skmem_region_mib_get_stats(struct skmem_region *skr, void *out, size_t len)
+skmem_region_mib_get_stats(struct skmem_region *skr, void *__sized_by(len) out,
+    size_t len)
 {
 	size_t actual_space = sizeof(struct sk_stats_region);
-	struct sk_stats_region *sreg = out;
+	struct sk_stats_region *__single sreg;
 
 	if (out == NULL || len < actual_space) {
 		goto done;
 	}
+	sreg = out;
 
 	skmem_region_get_stats(skr, sreg);
 
@@ -2102,8 +2155,8 @@ skmem_region_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	struct skmem_region *skr;
 	size_t actual_space;
 	size_t buffer_space;
-	size_t allocated_space;
-	caddr_t buffer = NULL;
+	size_t allocated_space = 0;
+	caddr_t __sized_by(allocated_space) buffer = NULL;
 	caddr_t scan;
 	int error = 0;
 
@@ -2117,11 +2170,13 @@ skmem_region_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (buffer_space > SK_SYSCTL_ALLOC_MAX) {
 			buffer_space = SK_SYSCTL_ALLOC_MAX;
 		}
-		allocated_space = buffer_space;
-		buffer = sk_alloc_data(allocated_space, Z_WAITOK, skmem_tag_region_mib);
-		if (__improbable(buffer == NULL)) {
+		caddr_t temp;
+		temp = sk_alloc_data(buffer_space, Z_WAITOK, skmem_tag_region_mib);
+		if (__improbable(temp == NULL)) {
 			return ENOBUFS;
 		}
+		buffer = temp;
+		allocated_space = buffer_space;
 	} else if (req->oldptr == USER_ADDR_NULL) {
 		buffer_space = 0;
 	}
@@ -2151,7 +2206,7 @@ skmem_region_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		}
 	}
 	if (buffer != NULL) {
-		sk_free_data(buffer, allocated_space);
+		sk_free_data_sized_by(buffer, allocated_space);
 	}
 
 	return error;
@@ -2280,7 +2335,9 @@ skmem_region_id2name(skmem_region_id_t id)
 		break;
 	}
 
-	return name;
+	const char *__null_terminated s = __unsafe_null_terminated_from_indexable(name);
+
+	return s;
 }
 #endif /* SK_LOG */
 

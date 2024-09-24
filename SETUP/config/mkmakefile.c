@@ -380,23 +380,43 @@ nextopt:
 		goto nextopt;
 	}
 	if (eq(wd, "bound-checks")) {
+		if (f_flags & BOUND_CHECKS_MASK) {
+			printf("%s: cannot combine bound-checks options\n", fname);
+			exit(1);
+		}
 		f_flags |= BOUND_CHECKS;
 		goto nextopt;
 	}
-	if (eq(wd, "bound-checks-soft")) {
-		if (f_flags & BOUND_CHECKS_DEBUG) {
-			printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+	if (eq(wd, "bound-checks-pending")) {
+		if (f_flags & BOUND_CHECKS_MASK) {
+			printf("%s: cannot combine bound-checks options\n", fname);
 			exit(1);
 		}
-		f_flags |= BOUND_CHECKS | BOUND_CHECKS_SOFT;
+		f_flags |= BOUND_CHECKS_PENDING;
+		goto nextopt;
+	}
+	if (eq(wd, "bound-checks-soft")) {
+		if (f_flags & BOUND_CHECKS_MASK) {
+			printf("%s: cannot combine bound-checks options\n", fname);
+			exit(1);
+		}
+		f_flags |= BOUND_CHECKS_SOFT;
 		goto nextopt;
 	}
 	if (eq(wd, "bound-checks-debug")) {
-		if (f_flags & BOUND_CHECKS_SOFT) {
-			printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+		if (f_flags & BOUND_CHECKS_MASK) {
+			printf("%s: cannot combine bound-checks options\n", fname);
 			exit(1);
 		}
-		f_flags |= BOUND_CHECKS | BOUND_CHECKS_DEBUG;
+		f_flags |= BOUND_CHECKS_DEBUG;
+		goto nextopt;
+	}
+	if (eq(wd, "bound-checks-seed")) {
+		if (f_flags & BOUND_CHECKS_MASK) {
+			printf("%s: cannot combine bound-checks options\n", fname);
+			exit(1);
+		}
+		f_flags |= BOUND_CHECKS_SEED;
 		goto nextopt;
 	}
 	nreqs++;
@@ -504,25 +524,47 @@ checkdev:
 				continue;
 			}
 			if (eq(wd, "bound-checks")) {
+				if (f_flags & BOUND_CHECKS_MASK) {
+					printf("%s: cannot combine bound-checks options\n", fname);
+					exit(1);
+				}
 				f_flags |= BOUND_CHECKS;
 				next_word(fp, wd);
 				continue;
 			}
-			if (eq(wd, "bound-checks-soft")) {
-				if (f_flags & BOUND_CHECKS_DEBUG) {
-					printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+			if (eq(wd, "bound-checks-pending")) {
+				if (f_flags & BOUND_CHECKS_MASK) {
+					printf("%s: cannot combine bound-checks options\n", fname);
 					exit(1);
 				}
-				f_flags |= BOUND_CHECKS | BOUND_CHECKS_SOFT;
+				f_flags |= BOUND_CHECKS_PENDING;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks-soft")) {
+				if (f_flags & BOUND_CHECKS_MASK) {
+					printf("%s: cannot combine bound-checks options\n", fname);
+					exit(1);
+				}
+				f_flags |= BOUND_CHECKS_SOFT;
 				next_word(fp, wd);
 				continue;
 			}
 			if (eq(wd, "bound-checks-debug")) {
-				if (f_flags & BOUND_CHECKS_SOFT) {
-					printf("%s: cannot combine bound-checks-soft and bound-checks-debug\n", fname);
+				if (f_flags & BOUND_CHECKS_MASK) {
+					printf("%s: cannot combine bound-checks options\n", fname);
 					exit(1);
 				}
-				f_flags |= BOUND_CHECKS | BOUND_CHECKS_DEBUG;
+				f_flags |= BOUND_CHECKS_DEBUG;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks-seed")) {
+				if (f_flags & BOUND_CHECKS_MASK) {
+					printf("%s: cannot combine bound-checks options\n", fname);
+					exit(1);
+				}
+				f_flags |= BOUND_CHECKS_SEED;
 				next_word(fp, wd);
 				continue;
 			}
@@ -762,13 +804,33 @@ do_rules(FILE *f)
 		*cp = '\0';
 		tp = tail(np);  /* dvw: init tp before 'if' */
 		fprintf(f, "-include %sd\n", tp);
-		if (ftp->f_flags & BOUND_CHECKS) {
+		switch (ftp->f_flags & BOUND_CHECKS_MASK) {
+		case BOUND_CHECKS_PENDING:
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_PENDING}\n", tp);
+			break;
+		case BOUND_CHECKS:
 			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
-			if (ftp->f_flags & BOUND_CHECKS_SOFT) {
-				fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
-			} else if (ftp->f_flags & BOUND_CHECKS_DEBUG) {
-				fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_DEBUG}\n", tp);
-			}
+			break;
+		case BOUND_CHECKS_SOFT:
+			fprintf(f, "ifeq ($(CURRENT_KERNEL_CONFIG),RELEASE)\n");
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_PENDING}\n", tp);
+			fprintf(f, "else\n");
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
+			fprintf(f, "endif # CURRENT_KERNEL_CONFIG\n");
+			break;
+		case BOUND_CHECKS_DEBUG:
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_DEBUG}\n", tp);
+			break;
+		case BOUND_CHECKS_SEED:
+			fprintf(f, "ifeq ($(CURRENT_KERNEL_CONFIG),RELEASE)\n");
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS_SOFT}\n", tp);
+			fprintf(f, "else\n");
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+			fprintf(f, "endif # CURRENT_KERNEL_CONFIG\n");
+			break;
 		}
 		fprintf(f, "%so: %s%s%c\n", tp, source_dir, np, och);
 		if (och == 's') {

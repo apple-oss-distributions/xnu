@@ -189,7 +189,7 @@ tests()
 	}
 }
 
-T_DECL(arith_subtract_assign, "bounded_ptr.arith.subtract_assign") {
+T_DECL(arith_subtract_assign, "bounded_ptr.arith.subtract_assign", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

@@ -14,7 +14,7 @@ SUPPORTED_ARCH_CONFIGS := X86_64 X86_64H ARM64
 #
 # Kernel Configuration options
 #
-SUPPORTED_KERNEL_CONFIGS = RELEASE DEVELOPMENT DEBUG PROFILE KASAN
+SUPPORTED_KERNEL_CONFIGS = RELEASE DEVELOPMENT DEBUG PROFILE KASAN SPTM
 
 
 #
@@ -29,8 +29,9 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else ifneq ($(findstring _host,$(RC_ProjectName)),)
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T6020 T8101 T8103 T8112 VMAPPLE
+SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T8101 T8103 T8112 T8122 T8132 VMAPPLE
 
+SPTM_ENABLED_SOCS_MacOSX = t8132
 endif
 
 #
@@ -49,6 +50,17 @@ ifndef CURRENT_MACHINE_CONFIG_LC
 	export CURRENT_MACHINE_CONFIG_LC := $(shell printf "%s" "$(CURRENT_MACHINE_CONFIG)" | $(TR) A-Z a-z)
 endif
 
+# Enable BTI by default for all ARM64 targets
+BTI_BUILD = 1
+
+
+# -mkernel contains BTI by default
+ifeq ($(BTI_BUILD),1)
+	BTI_BUILD_FLAGS = -DXNU_BUILT_WITH_BTI
+else
+	BTI_BUILD_FLAGS = -fno-branch-target-identification -UXNU_BUILT_WITH_BTI
+endif
+
 #
 # Component List
 #
@@ -58,11 +70,14 @@ COMPONENT_IMPORT_LIST = $(filter-out $(COMPONENT),$(COMPONENT_LIST))
 
 MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101			-mcpu=apple-a14
 MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=apple-a14
-MACHINE_FLAGS_ARM64_T8112 = -DARM64_BOARD_CONFIG_T8112 			-mcpu=apple-a15
 MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000			-mcpu=apple-a14
 MACHINE_FLAGS_ARM64_T6020 = -DARM64_BOARD_CONFIG_T6020 			-mcpu=apple-a15
-MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
-MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+MACHINE_FLAGS_ARM64_T8112 = -DARM64_BOARD_CONFIG_T8112 			-mcpu=apple-a15
+MACHINE_FLAGS_ARM64_T6030 = -DARM64_BOARD_CONFIG_T6030 			-mcpu=apple-a16
+MACHINE_FLAGS_ARM64_T6031 = -DARM64_BOARD_CONFIG_T6031 			-mcpu=apple-a16
+MACHINE_FLAGS_ARM64_T8122 = -DARM64_BOARD_CONFIG_T8122_T8130		-mcpu=apple-a16
+MACHINE_FLAGS_ARM64_T8132 = -DARM64_BOARD_CONFIG_T8132			-mcpu=apple-acc7
+MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a+sme2
 
 
 #
@@ -162,12 +177,14 @@ WARNFLAGS_STD := \
 	-Wno-switch-enum \
 	-Wno-unaligned-access \
 	-Wno-undef \
+	-Wno-invalid-offsetof \
 	-Wno-unused-macros \
 	-Wno-used-but-marked-unused \
 	-Wno-variadic-macros \
-	-Wno-vla \
 	-Wno-zero-length-array \
-	-Wno-packed
+	-Wno-packed \
+	-Wno-cast-function-type-strict \
+	-Wno-incompatible-function-pointer-types-strict
 
 # When a new clang has new warnings disable them here until the kernel is fixed.
 WARNFLAGS_STD := $(WARNFLAGS_STD) \
@@ -176,9 +193,10 @@ WARNFLAGS_STD := $(WARNFLAGS_STD) \
 	-Wno-error=enum-enum-conversion \
 	-Wno-error=c99-designator \
 	-Wno-error=reorder-init-list \
+	-Wno-error=switch-default \
 	-Wno-deprecated-volatile \
 	-Wno-error=incompatible-function-pointer-types-strict \
-	-Wno-error=cast-function-type-strict
+	-Wno-cast-function-type-strict
 
 WARNFLAGS_STD := $(WARNFLAGS_STD) \
 	-Wno-declaration-after-statement
@@ -341,7 +359,10 @@ endif
 
 
 CFLAGS_ARM64	= -Darm64 -DARM64 -D__ARM64__ -DLP64 -DPAGE_SIZE_FIXED -DVM_KERNEL_LINK_ADDRESS=$(ARM64_LINK_ADDR) \
-			$(LARGE_MEMORY_DEFINE) -momit-leaf-frame-pointer -fno-strict-aliasing -D__API__=v4 -mkernel
+				$(LARGE_MEMORY_DEFINE) -momit-leaf-frame-pointer -fno-strict-aliasing -D__API__=v4 -mkernel \
+				$(BTI_BUILD_FLAGS)
+
+CXXFLAGS_ARM64  = $(BTI_BUILD_FLAGS)
 
 CFLAGS_RELEASEX86_64 = -O2
 CFLAGS_DEVELOPMENTX86_64 = -O2
@@ -366,24 +387,74 @@ CFLAGS_RELEASEARM64 = -O2
 CFLAGS_DEVELOPMENTARM64 = -O2
 CFLAGS_KASANARM64 = $(CFLAGS_DEVELOPMENTARM64)
 CFLAGS_DEBUGARM64 = -O0
+CFLAGS_SPTMARM64 = $(CFLAGS_DEVELOPMENTARM64)
 CFLAGS_PROFILEARM64 = -O2
 
 #
 # bound-checking support
 #
-# BOUND_CHECKS=0 disables, else support is dynamically detected
+# BOUND_CHECKS=0 disables, else support is dynamically detected.
+# Intel is currently disabled.
 #
 ifndef BOUND_CHECKS
-ifeq ($(shell $(CC) -E -fbounds-attributes /dev/null 2>/dev/null && echo 1),1)
-    export BOUND_CHECKS := 1
+ifeq ($(shell $(CC) -E -fbounds-safety /dev/null 2>/dev/null && echo 1),1)
+	ifeq ($(CURRENT_ARCH_CONFIG_LC),x86_64)
+	    export BOUND_CHECKS := 0
+	    export CFLAGS_BOUND_CHECKS = -Wno-error=self-assign
+	else
+		export BOUND_CHECKS := 1
+	endif
 else
     export BOUND_CHECKS := 0
 endif
 endif # ifndef BOUND_CHECKS
 ifeq ($(BOUND_CHECKS),1)
-CFLAGS_BOUND_CHECKS = -fbounds-attributes
+CFLAGS_BOUND_CHECKS = -fbounds-safety
 else
-CFLAGS_BOUND_CHECKS =
+CFLAGS_BOUND_CHECKS ?=
+endif
+
+CFLAGS_BOUND_CHECKS_PENDING = -DBOUND_CHECKS_PENDING=1 -Wno-self-assign
+
+# Bounds-safety adoption mode
+#
+# * Tells Clang to run in bounds-safety adoption mode which is allowed to
+#   produce better diagnostics but a slower build.
+# * Doesn't try to suppress any warnings in staging (see Bounds-safety warning
+#   staging)
+#
+BOUNDS_SAFETY_ADOPTION_MODE ?= 0
+ifeq ($(BOUNDS_SAFETY_ADOPTION_MODE),1)
+  ifneq ($(BOUND_CHECKS),1)
+    $(error BOUNDS_SAFETY_ADOPTION_MODE cannot be enabled when BOUND_CHECKS=0)
+  endif
+  ifeq ($(RC_XBS),YES)
+    # This mode should **only** be used at engineers' desks and not in B&I
+    # builds because it may add compile-time overhead.
+    $(error BOUNDS_SAFETY_ADOPTION_MODE should not be enabled in B&I builds)
+  endif
+  CFLAGS_BOUND_CHECKS += -fbounds-safety-adoption-mode
+endif
+
+# Bounds-safety warning staging
+#
+# To prevent new bounds-safety warnings in a soon to be submitted Clang from
+# breaking the build they can be explicitly be prevented from being errors by
+# adding `-Wno-error=<new_warning_name>` to
+# `BOUNDS_SAFETY_DOWNGRADED_UPCOMING_WARNFLAGS`.
+#
+# A warning in `BOUNDS_SAFETY_DOWNGRADED_UPCOMING_WARNFLAGS` should be
+# removed once the new Clang with the warning is in the OS and the code builds
+# without it firing.
+#
+BOUNDS_SAFETY_DOWNGRADED_UPCOMING_WARNFLAGS =
+
+ifneq ($(words $(BOUNDS_SAFETY_DOWNGRADED_UPCOMING_WARNFLAGS)),0)
+  ifeq ($(BOUNDS_SAFETY_ADOPTION_MODE),0)
+    # Note this implicitly relies on `-Wno-unknown-warning-option` already being
+    # passed to the compiler.
+    CFLAGS_BOUND_CHECKS +=  $(BOUNDS_SAFETY_DOWNGRADED_UPCOMING_WARNFLAGS)
+  endif
 endif
 
 # Check whether soft trap is supported
@@ -395,7 +466,7 @@ else
 endif
 endif # ifndef BOUND_CHECKS_SOFT
 ifeq ($(BOUND_CHECKS_SOFT),1)
-CFLAGS_BOUND_CHECKS_SOFT =  -fbounds-attributes -ftrap-function=ml_bound_chk_soft_trap -ftrap-function-returns
+CFLAGS_BOUND_CHECKS_SOFT =  -fbounds-safety  -ftrap-function=ml_bound_chk_soft_trap -ftrap-function-returns
 CFLAGS_BOUND_CHECKS_DEBUG =	$(CFLAGS_BOUND_CHECKS_SOFT) -DBOUND_CHECKS_DEBUG=1
 else
 CFLAGS_BOUND_CHECKS_SOFT =
@@ -583,7 +654,6 @@ CFLAGS	= $(CFLAGS_GEN) \
 		  $($(addsuffix $(CURRENT_ARCH_CONFIG), $(addsuffix $(CURRENT_KERNEL_CONFIG),CFLAGS_))) \
 		  $(DEPLOYMENT_TARGET_FLAGS) \
 		  $(DEPLOYMENT_TARGET_DEFINES) \
-		  $(BOUND_CHECKS_DEFINES) \
 		  $(DEFINES) \
 		  $(CFLAGS_EXTRA)
 
@@ -819,6 +889,17 @@ LDFLAGS_KERNEL_GENARM64 = \
 	-Wl,-sectcreate,"__PLK_LLVM_COV",__llvm_covmap,/dev/null \
 	-Wl,-sectcreate,"__PLK_LINKEDIT",__data,/dev/null
 
+# To support code coverage for kexts, the coverage mapping sections __llvm_covmap
+# and __llvm_covfun are put into the __PLK_LLVM_COV segment rather than the
+# standard __LLVM_COV segment. For later processing of the coverage data using
+# llvm-cov, we move the coverage mapping for the kernel itself into the same
+# segment (see also rdar://104951137)
+ifeq ($(BUILD_CODE_COVERAGE),1)
+LDFLAGS_KERNEL_GENARM64 += \
+  -Wl,-rename_section,__LLVM_COV,__llvm_covmap,__PLK_LLVM_COV,__llvm_covmap \
+  -Wl,-rename_section,__LLVM_COV,__llvm_covfun,__PLK_LLVM_COV,__llvm_covfun
+endif
+
 LDFLAGS_KERNEL_SEGARM64_SEG_ORDER = \
 	__TEXT:__DATA_CONST:__DATA_SPTM:__LINKEDIT:__TEXT_EXEC:__TEXT_BOOT_EXEC:__KLD:__PPLTEXT:__PPLTRAMP:__PPLDATA_CONST:__LASTDATA_CONST:__LAST:__PPLDATA:__KLDDATA:__DATA:__HIBDATA:__BOOTDATA
 
@@ -851,6 +932,7 @@ LDFLAGS_KERNEL_ONLY_CONFIG_DEVELOPMENTARM64 =
 
 LDFLAGS_KERNEL_KASANARM64 = $(LDFLAGS_KERNEL_DEVELOPMENTARM64)
 LDFLAGS_KERNEL_DEBUGARM64 = $(LDFLAGS_KERNEL_DEVELOPMENTARM64)
+LDFLAGS_KERNEL_SPTMARM64 = $(LDFLAGS_KERNEL_DEVELOPMENTARM64)
 
 LDFLAGS_KERNEL_ONLY_CONFIG_KASANARM64 = $(LDFLAGS_KERNEL_ONLY_CONFIG_DEVELOPMENTARM64)
 LDFLAGS_KERNEL_ONLY_CONFIG_DEBUGARM64 = $(LDFLAGS_KERNEL_ONLY_CONFIG_DEVELOPMENTARM64)
@@ -889,11 +971,25 @@ LDFILES_KERNEL_ONLY = $(TARGET)/all-kpi.exp $(TARGET)/all-alias.exp $(TARGET)/sy
 #
 LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
-# Link opensource binary library
-ifneq ($(filter T6000 T6020 T8101 T8103 T8112 VMAPPLE T6000 T6020 T8101 T8103 T8112 VMAPPLE,$(CURRENT_MACHINE_CONFIG)),)
-	LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
-endif
 
+#
+# SPTM TODO: This is a hack to always link the SPTM library when building the
+#            SPTM variant. In the future, we should base whether to link the
+#            library off of the HasSPTMTXM EDM per-target property. Note that
+#            for standard kernels where the SPTM is enabled by default,
+#            linkage is configured on a per-target and per-platform basis.
+#
+ifeq ($(CURRENT_KERNEL_CONFIG),SPTM)
+LD_KERNEL_ARCHIVES += -lTrustedExecutionMonitor_Kernel
+LD_KERNEL_ARCHIVES += -lsptm_xnu
+else
+ ifneq ($(CURRENT_KERNEL_CONFIG),KASAN)
+  ifneq ($(filter $(CURRENT_MACHINE_CONFIG_LC),$(SPTM_ENABLED_SOCS_$(PLATFORM))),)
+    LD_KERNEL_ARCHIVES += -lTrustedExecutionMonitor_Kernel
+    LD_KERNEL_ARCHIVES += -lsptm_xnu
+  endif
+ endif
+endif
 
 #
 # DTrace support
@@ -926,6 +1022,22 @@ INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTER
 MIGFLAGS	= $(DEFINES) $(INCFLAGS) -novouchers $($(addsuffix $(CURRENT_ARCH_CONFIG),CFLAGS_)) $($(addsuffix $(CURRENT_ARCH_CONFIG),ARCH_FLAGS_)) \
 		$(DEPLOYMENT_TARGET_FLAGS)
 
+#
+# Default MIG Kernel Server flags
+#
+MIGKSFLAGS = \
+	-DMACH_KERNEL_PRIVATE \
+	-DKERNEL_SERVER=1 \
+	-mach_msg2
+
+#
+# Default MIG KernelUser flags
+#
+MIGKUFLAGS = \
+	-DMACH_KERNEL_PRIVATE \
+	-DKERNEL_USER=1 \
+	-maxonstack 1024
+
 # Support for LLVM Profile Guided Optimization (PGO)
 
 ifeq ($(BUILD_PROFILE),1)
@@ -939,6 +1051,14 @@ CXXFLAGS_GEN += -fprofile-instr-use=$(USE_PROFILE)
 LDFLAGS_KERNEL_GEN += -fprofile-instr-use=$(USE_PROFILE)
 
 CFLAGS_GEN += -Wno-error=profile-instr-out-of-date
+endif
+
+# Support for LLVM Source-based Code coverage. Since enabling code coverage
+# increases the size of __LINKEDIT, it might be necessary to set the keepsyms=1
+# boot-arg when building the kernel with code coverage enabled.
+ifeq ($(BUILD_CODE_COVERAGE),1)
+CFLAGS_GEN += -fprofile-instr-generate -fcoverage-mapping
+CXXFLAGS_GEN += -fprofile-instr-generate -fcoverage-mapping
 endif
 
 #
@@ -960,6 +1080,7 @@ LTO_ENABLED_RELEASE = 1
 LTO_ENABLED_DEVELOPMENT = 1
 LTO_ENABLED_DEBUG = 0
 LTO_ENABLED_KASAN = 0
+LTO_ENABLED_SPTM = $(LTO_ENABLED_DEVELOPMENT)
 
 ifneq ($(BUILD_LTO),)
 USE_LTO = $(BUILD_LTO)
@@ -1121,6 +1242,7 @@ STRIP_FLAGS_RELEASE	= -S -x
 STRIP_FLAGS_DEVELOPMENT	= -S
 STRIP_FLAGS_KASAN = $(STRIP_FLAGS_DEVELOPMENT)
 STRIP_FLAGS_DEBUG	= -S
+STRIP_FLAGS_SPTM = $(STRIP_FLAGS_DEVELOPMENT)
 STRIP_FLAGS_PROFILE	= -S -x
 
 STRIP_FLAGS	= $($(addsuffix $(CURRENT_KERNEL_CONFIG),STRIP_FLAGS_))
@@ -1212,7 +1334,7 @@ INSTALL_KERNEL_SYM_DIR = /System/Library/Extensions/KDK
 INSTALL_SHARE_MISC_DIR = /usr/share/misc
 INSTALL_DTRACE_SCRIPTS_DIR = /usr/lib/dtrace
 INSTALL_DTRACE_LIBEXEC_DIR = /usr/libexec/dtrace
-
+INSTALL_ARIADNE_PLISTS_DIR = /AppleInternal/Library/Ariadne/Plists
 #
 # Generated xnu version file
 #

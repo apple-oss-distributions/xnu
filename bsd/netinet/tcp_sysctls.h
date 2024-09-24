@@ -37,6 +37,8 @@ extern int tcp_cubic_use_minrtt;
 extern int tcp_cubic_minor_fixes;
 extern int tcp_cubic_rfc_compliant;
 
+extern int tcp_rack;
+
 extern int target_qdelay;
 extern int tcp_ledbat_allowed_increase;
 extern int tcp_ledbat_tether_shift;

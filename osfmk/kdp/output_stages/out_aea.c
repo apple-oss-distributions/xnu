@@ -35,6 +35,7 @@
 #include <kdp/processor_core.h>
 #include <machine/param.h>
 #include <libkern/apple_encrypted_archive/apple_encrypted_archive.h>
+#include <vm/vm_kern_xnu.h>
 
 struct aea_stage_data {
 	bool     encryption_open;

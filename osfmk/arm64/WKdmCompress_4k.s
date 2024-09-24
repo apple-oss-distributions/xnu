@@ -153,6 +153,10 @@
     rsrini, 09/14/14
 */
 
+#if KERNEL
+#include <machine/asm.h>
+#endif /* KERNEL */
+
 #ifndef PAGES_SIZE_IN_KBYTES    
 #define PAGES_SIZE_IN_KBYTES    4
 #endif
@@ -234,6 +238,7 @@ _WKdm_compress_4k:
 #endif
 
 #if KERNEL
+	ARM64_PROLOG
     sub     sp, sp, #64
     st1.4s  {v0,v1,v2,v3},[sp]
 #endif

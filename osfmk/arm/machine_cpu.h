@@ -49,7 +49,7 @@ extern void cpu_idle_tickle(void);
 
 extern void cpu_machine_idle_init(boolean_t from_boot);
 
-extern void arm_init_cpu(cpu_data_t *args);
+extern void arm_init_cpu(cpu_data_t *args, uint64_t hib_header_phys);
 
 extern void arm_init_idle_cpu(cpu_data_t *args);
 

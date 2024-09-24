@@ -108,6 +108,8 @@
 #include <kern/policy_internal.h>
 #include <kern/sync_sema.h>
 
+#include <vm/vm_shared_region_xnu.h>
+
 #include <os/log.h>
 
 #include <mach/exception.h>
@@ -134,7 +136,6 @@ extern kern_return_t get_signalact(task_t, thread_t *, int);
 extern unsigned int get_useraddr(void);
 extern boolean_t task_did_exec(task_t task);
 extern boolean_t task_is_exec_copy(task_t task);
-extern void vm_shared_region_reslide_stale(boolean_t driverkit);
 
 /*
  * ---
@@ -1968,7 +1969,8 @@ build_signal_reason(int signum, const char *procname)
 {
 	os_reason_t signal_reason = OS_REASON_NULL;
 	proc_t sender_proc = current_proc();
-	uint32_t reason_buffer_size_estimate = 0, proc_name_length = 0;
+	const uint32_t proc_name_length = sizeof(sender_proc->p_name);
+	uint32_t reason_buffer_size_estimate = 0;
 	const char *default_sender_procname = "unknown";
 	mach_vm_address_t data_addr;
 	int ret;
@@ -1996,7 +1998,6 @@ build_signal_reason(int signum, const char *procname)
 		printf("build_signal_reason: exceeded space in signal reason buf, unable to log PID\n");
 	}
 
-	proc_name_length = sizeof(sender_proc->p_name);
 	if (KERN_SUCCESS == kcdata_get_memory_addr(&signal_reason->osr_kcd_descriptor, KCDATA_TYPE_PROCNAME,
 	    proc_name_length, &data_addr)) {
 		if (procname) {
@@ -3054,12 +3055,6 @@ postsig_locked(int signum)
 #if DIAGNOSTIC
 	if (signum == 0) {
 		panic("postsig");
-	}
-	/*
-	 *	This must be called on master cpu
-	 */
-	if (cpu_number() != master_cpu) {
-		panic("psig not on master");
 	}
 #endif
 

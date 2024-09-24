@@ -45,7 +45,7 @@ extern "C" {
  * Returns 32-bit hash value.  Hashes which are capable of returning
  * more bits currently have their results truncated to 32-bit.
  */
-typedef u_int32_t net_flowhash_fn_t(const void *, u_int32_t, const u_int32_t);
+typedef u_int32_t net_flowhash_fn_t(const void *__sized_by(len) key, u_int32_t len, const u_int32_t);
 
 extern net_flowhash_fn_t *net_flowhash;
 extern net_flowhash_fn_t net_flowhash_mh3_x86_32;

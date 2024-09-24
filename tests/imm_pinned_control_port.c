@@ -410,9 +410,13 @@ test_imm_pinned_control_port(const char *test_prog_name)
 			T_FAIL("waitpid: child mia");
 		}
 
-		if (WIFEXITED(child_status) && WEXITSTATUS(child_status)) {
-			T_FAIL("Child exited with status = %x", child_status);
-			T_END;
+		if (WIFEXITED(child_status)) {
+			if (WEXITSTATUS(child_status)) {
+				T_FAIL("Child exited with status = %x", child_status); T_END;
+			} else {
+				/* Skipping test because CS_OPS_CLEARPLATFORM is not supported in the current BATS container */
+				T_SKIP("Failed to remove platform binary");
+			}
 		}
 
 		sleep(1);
@@ -441,7 +445,8 @@ T_DECL(imm_pinned_control_port_hardened, "Test pinned & immovable task and threa
 
 T_DECL(imm_pinned_control_port, "Test pinned & immovable task and thread control ports for first party binary",
     T_META_IGNORECRASHES(".*pinned_rights_child.*"),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_PREFERRED)
 {
 	test_imm_pinned_control_port("imm_pinned_control_port_crasher");
 }

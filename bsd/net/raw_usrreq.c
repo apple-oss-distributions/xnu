@@ -72,6 +72,7 @@
 #include <kern/locks.h>
 
 #include <net/raw_cb.h>
+#include <net/sockaddr_utils.h>
 
 static LCK_GRP_DECLARE(raw_mtx_grp, "rawcb");
 LCK_MTX_DECLARE(raw_mtx, &raw_mtx_grp);   /*### global raw cb mutex for now */
@@ -117,12 +118,10 @@ raw_input(struct mbuf *m0, struct sockproto *proto, struct sockaddr *src,
 		 * Note that if the lengths are not the same
 		 * the comparison will fail at the first byte.
 		 */
-#define equal(a1, a2) \
-  (bcmp((caddr_t)(a1), (caddr_t)(a2), a1->sa_len) == 0)
-		if (rp->rcb_laddr && !equal(rp->rcb_laddr, dst)) {
+		if (rp->rcb_laddr && SOCKADDR_CMP(rp->rcb_laddr, dst, rp->rcb_laddr->sa_len) != 0) {
 			continue;
 		}
-		if (rp->rcb_faddr && !equal(rp->rcb_faddr, src)) {
+		if (rp->rcb_faddr && SOCKADDR_CMP(rp->rcb_faddr, src, rp->rcb_faddr->sa_len) != 0) {
 			continue;
 		}
 		if (last) {
@@ -320,6 +319,7 @@ raw_usend(struct socket *so, int flags, struct mbuf *m,
 		error = ENOTCONN;
 		goto release;
 	}
+	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
 	error = (*so->so_proto->pr_output)(m, so);
 	m = NULL;
 	if (nam) {

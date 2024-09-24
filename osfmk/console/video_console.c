@@ -97,7 +97,7 @@
 #include <kern/thread_call.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <machine/machine_cpu.h>
 
 #include <pexpert/pexpert.h>

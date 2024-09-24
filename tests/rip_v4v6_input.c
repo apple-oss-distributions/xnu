@@ -108,14 +108,14 @@ close_raw_socket(int fd)
 	(void)close(fd);
 }
 
-T_DECL(rip_no_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_no_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	udp_port_scan();
 
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 
@@ -126,7 +126,7 @@ T_DECL(rip_v4_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v6_raw_fd1 = open_raw_ipv6_socket();
 
@@ -137,7 +137,7 @@ T_DECL(rip_v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4v4_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4v4_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 	int v4_raw_fd2 = open_raw_ipv4_socket();
@@ -150,7 +150,7 @@ T_DECL(rip_v4v4_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v6_raw_fd1 = open_raw_ipv6_socket();
 	int v6_raw_fd2 = open_raw_ipv6_socket();
@@ -163,7 +163,7 @@ T_DECL(rip_v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 	int v6_raw_fd1 = open_raw_ipv6_socket();
@@ -176,7 +176,7 @@ T_DECL(rip_v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 	int v4_raw_fd2 = open_raw_ipv4_socket();
@@ -191,7 +191,7 @@ T_DECL(rip_v4v4v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 	int v6_raw_fd1 = open_raw_ipv6_socket();
@@ -206,7 +206,7 @@ T_DECL(rip_v4v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
 	T_PASS("%s", __func__);
 }
 
-T_DECL(rip_v4v4v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ")
+T_DECL(rip_v4v4v6v6_input, "test reception of IPv4 packet on raw IPv6 socket ", T_META_TAG_VM_PREFERRED)
 {
 	int v4_raw_fd1 = open_raw_ipv4_socket();
 	int v4_raw_fd2 = open_raw_ipv4_socket();

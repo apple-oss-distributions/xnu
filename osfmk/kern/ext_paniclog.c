@@ -31,6 +31,7 @@
 #include <kern/zalloc.h>
 #include <libkern/OSAtomic.h>
 #include <os/log.h>
+#include <sys/errno.h>
 
 #include <kern/ext_paniclog.h>
 #include <kern/debug.h>
@@ -103,6 +104,7 @@ ext_paniclog_handle_alloc_with_uuid(uuid_t uuid, const char *data_id,
 	memcpy(handle->data_id, data_id, data_id_size);
 
 	handle->options = options;
+	handle->flags = (options & EXT_PANICLOG_OPTIONS_ADD_SEPARATE_KEY) ? EXT_PANICLOG_FLAGS_ADD_SEPARATE_KEY : EXT_PANICLOG_FLAGS_NONE;
 	handle->max_len = max_len;
 	handle->used_len = 0;
 	handle->active = 0;
@@ -326,12 +328,11 @@ is_debug_ptr_in_ext_paniclog(void)
 /*
  * Format of the Extensible panic log:
  *
- * +---------+------------+---------+------------+------------+---------+--------+-----------+------------+----------+
- * |         |            |         |            |            |         |        |           |            |          |
- * |Version  | No of logs | UUID 1  | Data ID 1  | Data len 1 | Data 1  | UUID 2 | Data ID 2 | Data len 2 | Data 2   |
- * |         |            |         |            |            |         |        |           |            |          |
- * +---------+------------+---------+------------+------------+---------+--------+-----------+------------+----------+
- *
+ * +---------+------------+---------+---------+------------+------------+---------+---------+---------+-----------+------------+----------+
+ * |         |            |         |         |            |            |         |         |         |           |            |          |
+ * |Version  | No of logs | UUID 1  | Flags 1 | Data ID 1  | Data len 1 | Data 1  | UUID 2  | Flags 2 | Data ID 2 | Data len 2 | Data 2   |
+ * |         |            |         |         |            |            |         |         |         |           |            |          |
+ * +---------+------------+---------+---------+------------+------------+---------+---------+---------+-----------+------------+----------+
  *
  */
 uint32_t
@@ -371,6 +372,8 @@ ext_paniclog_write_panicdata(void)
 
 		memcpy(dst, tmp->uuid, sizeof(uuid_t));
 		dst += sizeof(uuid_t);
+		memcpy(dst, &tmp->flags, sizeof(ext_paniclog_flags_t));
+		dst += sizeof(ext_paniclog_flags_t);
 		memcpy(dst, &tmp->data_id, data_id_size);
 		dst += data_id_size;
 		memcpy(dst, &tmp->used_len, sizeof(tmp->used_len));
@@ -447,6 +450,7 @@ ext_paniclog_multiple_handles_test(void)
 	char data[17] = "abcdefghabcdefgh";
 	uint32_t bytes_copied = 0;
 	uint32_t no_of_logs;
+	ext_paniclog_flags_t flags;
 	uint32_t data_len = 0;
 	ext_paniclog_handle_t *handles[2] = {0};
 	const char *data_id[] = {"Test Handle 1", "Test Handle 2"};
@@ -457,7 +461,7 @@ ext_paniclog_multiple_handles_test(void)
 	ret = ext_paniclog_create_multiple_handles(handles, data_id, data);
 	if (ret < 0) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Create handles failed\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	bytes_copied = ext_paniclog_write_panicdata();
@@ -492,6 +496,15 @@ ext_paniclog_multiple_handles_test(void)
 
 	buf_ptr = buf_ptr + 20;
 	for (int i = 1; i >= 0; i--) {
+		memcpy(&flags, buf_ptr, 4);
+		if (flags != EXT_PANICLOG_FLAGS_NONE) {
+			os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Flags are not equal: %d\n", flags);
+			ret = -1;
+			goto finish;
+		}
+
+		buf_ptr += 4;
+
 		size_t data_id_len = strnlen(data_id[i], MAX_DATA_ID_SIZE);
 
 		if (strncmp(data_id[i], buf_ptr, data_id_len)) {
@@ -542,16 +555,18 @@ ext_paniclog_write_panicdata_test(void)
 	const char data_id[] = "Test Handle";
 	char *buf_ptr;
 	uint32_t num_of_logs = 0;
+	ext_paniclog_flags_t flags;
 	uint32_t data_len = 0;
 	char data1[17] = "abcdefghabcdefgh";
 	char panic_data[1024] = {0};
 	uint32_t version = 0;
 	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Creating handle with UUID: %s\n", uuid_string);
 
-	ext_paniclog_handle_t *handle = ext_paniclog_handle_alloc_with_uuid(uuid, data_id, 1024, EXT_PANICLOG_OPTIONS_NONE);
+	// Including ADD_SEPARATE_KEY option allows us to test if the option --> flag translation works well
+	ext_paniclog_handle_t *handle = ext_paniclog_handle_alloc_with_uuid(uuid, data_id, 1024, EXT_PANICLOG_OPTIONS_ADD_SEPARATE_KEY);
 	if (handle == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Handle is NULL\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	ext_paniclog_insert_data(handle, data1, 16);
@@ -578,7 +593,7 @@ ext_paniclog_write_panicdata_test(void)
 	if (version != EXT_PANICLOG_VERSION) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Version mismatch: %d\n", version);
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	buf_ptr += 4;
@@ -588,7 +603,7 @@ ext_paniclog_write_panicdata_test(void)
 	if (num_of_logs != 1) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Num logs is not equal: %d\n", num_of_logs);
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	buf_ptr += 4;
@@ -598,17 +613,27 @@ ext_paniclog_write_panicdata_test(void)
 	if (memcmp(uuid_cmp, uuid, 16)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: UUID is not equal\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	buf_ptr += 16;
+
+	memcpy(&flags, buf_ptr, 4);
+
+	if (!(flags & EXT_PANICLOG_FLAGS_ADD_SEPARATE_KEY)) {
+		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Flags are not equal: %d\n", flags);
+		ext_paniclog_handle_free(handle);
+		return ECANCELED;
+	}
+
+	buf_ptr += 4;
 
 	size_t data_id_len = strnlen(data_id, MAX_DATA_ID_SIZE);
 
 	if (strncmp(data_id, buf_ptr, data_id_len)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: data id is not equal: %s\n", panic_data + 20);
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	buf_ptr += data_id_len + 1;
@@ -617,7 +642,7 @@ ext_paniclog_write_panicdata_test(void)
 	if (data_len != 16) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: data len is not equal: %d\n", data_len);
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	buf_ptr += 4;
@@ -626,7 +651,7 @@ ext_paniclog_write_panicdata_test(void)
 	if (memcmp(data_cmp, data1, data_len)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Buffers don't match\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	ext_paniclog_handle_free(handle);
@@ -650,14 +675,14 @@ ext_paniclog_handle_create_test(void)
 	ext_paniclog_handle_t *handle = ext_paniclog_handle_alloc_with_uuid(uuid, "Test Handle", max_len, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Handle create failed. Returned NULL\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	if ((strncmp(handle->data_id, "Test Handle", strlen(handle->data_id))) ||
 	    (handle->max_len != 1024)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: attribute mismatch\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	ext_paniclog_handle_free(handle);
@@ -712,7 +737,7 @@ ext_paniclog_set_active_inactive_test(void)
 	if (cnt != (initial_cnt + 1)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: List count error after active\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	ext_paniclog_handle_set_inactive(handle);
@@ -724,7 +749,7 @@ ext_paniclog_set_active_inactive_test(void)
 	if (cnt != initial_cnt) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: List count error after inactive\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	ext_paniclog_handle_free(handle);
@@ -753,7 +778,7 @@ ext_paniclog_insert_data_test(void)
 	if (memcmp(handle->buf_addr, data1, 8)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Buffers don't match\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	char data2[9] = "abcdefgh";
@@ -764,7 +789,7 @@ ext_paniclog_insert_data_test(void)
 	if (memcmp(handle->buf_addr, cmp_data, 16)) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Buffers don't match\n");
 		ext_paniclog_handle_free(handle);
-		return -1;
+		return ECANCELED;
 	}
 
 	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Used len of buffer: %d\n", handle->used_len);
@@ -790,23 +815,22 @@ ext_paniclog_insert_dummy_handles_test(void)
 	handle_1 = ext_paniclog_handle_alloc_with_uuid(uuid_1, "Dummy handle 1", 1024, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle_1 == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 1\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	handle_2 = ext_paniclog_handle_alloc_with_uuid(uuid_1, "Dummy handle 2", 1024, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle_2 == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 2\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	char uuid_string_3[] = "A10F32F8-D5AF-431F-8098-FEDD0FFB794A";
 	uuid_t uuid_3;
 	uuid_parse(uuid_string_3, uuid_3);
-
 	handle_3 = ext_paniclog_handle_alloc_with_uuid(uuid_3, "Dummy handle 3", 1024, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle_3 == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 3\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Created three handles\n");
@@ -849,7 +873,7 @@ ext_paniclog_insert_struct_handles_test(void)
 	handle_1 = ext_paniclog_handle_alloc_with_uuid(uuid_1, "Dummy handle 1", 1024, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle_1 == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 1\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	char uuid_string_2[] = "78FD5A06-1FA3-4B1C-A2F5-AF82F5D9CEFD";
@@ -859,7 +883,7 @@ ext_paniclog_insert_struct_handles_test(void)
 	handle_2 = ext_paniclog_handle_alloc_with_uuid(uuid_2, "Dummy handle 2", 1024, EXT_PANICLOG_OPTIONS_NONE);
 	if (handle_2 == NULL) {
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 3\n");
-		return -1;
+		return ECANCELED;
 	}
 
 	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Created two handles\n");
@@ -882,6 +906,63 @@ ext_paniclog_insert_struct_handles_test(void)
 	ext_paniclog_handle_set_active(handle_2);
 
 	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Wrote two handles\n");
+
+	return 0;
+}
+
+/*
+ * Test 9
+ * Insert one handle with string data and one handle with struct data
+ * into the ext_paniclog with the "ADD_SEPARATE_KEY" flag so that they're
+ * added as separate fields in the paniclog.
+ */
+static int
+ext_paniclog_insert_dummy_handles_separate_fields_test(void)
+{
+	ext_paniclog_handle_t *handle_1, *handle_2;
+	char data1[18] = "Data for handle 1";
+
+	struct _handle_2_data {
+		uint32_t dummy_1;
+		uint32_t dummy_2;
+	};
+
+	struct _handle_2_data *handle_2_data;
+
+	char uuid_string_1[] = "28245A8F-04CA-4932-8A38-E6C159FD9C92";
+	uuid_t uuid_1;
+	uuid_parse(uuid_string_1, uuid_1);
+	handle_1 = ext_paniclog_handle_alloc_with_uuid(uuid_1, "Dummy handle 1", 1024, EXT_PANICLOG_OPTIONS_ADD_SEPARATE_KEY);
+	if (handle_1 == NULL) {
+		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 1\n");
+		return ECANCELED;
+	}
+
+	char uuid_string_2[] = "A10F32F8-D5AF-431F-8098-FEDD0FFB794A";
+	uuid_t uuid_2;
+	uuid_parse(uuid_string_2, uuid_2);
+
+	handle_2 = ext_paniclog_handle_alloc_with_uuid(uuid_2, "Dummy handle 2", 1024, EXT_PANICLOG_OPTIONS_ADD_SEPARATE_KEY);
+	if (handle_2 == NULL) {
+		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Failed to create handle 2\n");
+		return ECANCELED;
+	}
+
+	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Created two handles\n");
+
+	// Insert handle with string data
+	ext_paniclog_insert_data(handle_1, data1, 17);
+
+	// Insert handle with struct data
+	handle_2_data = (struct _handle_2_data *)ext_paniclog_claim_buffer(handle_2);
+	handle_2_data->dummy_1 = 0x10000000;
+	handle_2_data->dummy_2 = 0xFFFF;
+	ext_paniclog_yield_buffer(handle_2, sizeof(struct _handle_2_data));
+
+	ext_paniclog_handle_set_active(handle_1);
+	ext_paniclog_handle_set_active(handle_2);
+
+	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Inserted two handles\n");
 
 	return 0;
 }
@@ -924,12 +1005,20 @@ ext_paniclog_test_hook(uint32_t option)
 		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Insert struct handles\n");
 		rval = ext_paniclog_insert_struct_handles_test();
 		break;
+	case EXT_PANICLOG_TEST_INSERT_DUMMY_HANDLES_AS_SEPARATE_FIELDS:
+		os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Insert dummy handles as separate fields\n");
+		rval = ext_paniclog_insert_dummy_handles_separate_fields_test();
+		break;
 	default:
 		os_log(OS_LOG_DEFAULT, "Not a valid option\n");
 		break;
 	}
 
-	os_log(OS_LOG_DEFAULT, "EXT_PANICLOG_TEST: Test exit: %d\n", rval);
+	if (rval != 0) {
+		printf("EXT_PANICLOG_TEST: Test Failed with error code: %d\n", rval);
+	} else {
+		printf("EXT_PANICLOG_TEST: Test Success\n");
+	}
 	return rval;
 }
 #endif // DEVELOPEMNT || DEBUG

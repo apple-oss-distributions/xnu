@@ -69,9 +69,17 @@
    contained in basic arithmetic. */
 #define __counted_by(N) __attribute__((__counted_by__(N)))
 
+/* Identical to __counted_by(N), aside that the pointer may be null for
+ * non-zero values of N. */
+#define __counted_by_or_null(N) __attribute__((__counted_by_or_null__(N)))
+
 /* Identical to __counted_by(N), aside that N is a byte count instead of an
    object count. */
 #define __sized_by(N) __attribute__((__sized_by__(N)))
+
+/* Identical to __sized_by(N), aside that the pointer may be null for non-zero
+ * values of N. */
+#define __sized_by_or_null(N) __attribute__((__sized_by_or_null__(N)))
 
 /* An attribute that modifies a pointer type such that it has the ABI of a
    regular C pointer, but it implicitly converts to a __bidi_indexable pointer
@@ -266,7 +274,9 @@
 #define __single
 #define __unsafe_indexable
 #define __counted_by(N)
+#define __counted_by_or_null(N)
 #define __sized_by(N)
+#define __sized_by_or_null(N)
 #define __ended_by(E)
 
 /* We intentionally define the terminated_by attributes to nothing. */
@@ -299,8 +309,10 @@
 /* decay operates normally; attribute is meaningless without pointer checks. */
 #define __array_decay_dicards_count_in_parameters
 
+/* The APIs marked with these attributes are available outside the context of
+   pointer checks, so do nothing. */
 #define __ptrcheck_unavailable
-#define __ptrcheck_unavailable_r(R)
+#define __ptrcheck_unavailable_r(REPLACEMENT)
 
 #endif /* __has_ptrcheck */
 

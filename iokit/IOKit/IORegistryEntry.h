@@ -979,7 +979,7 @@ private:
 	static LIBKERN_RETURNS_NOT_RETAINED IORegistryEntry * initialize( void );
 
 #ifdef XNU_KERNEL_PRIVATE
-	SInt32 getRegistryEntryGenerationCount( void ) const;
+	SInt32 getRegistryEntryParentGenerationCount( void ) const;
 	void setName(const OSString * name,
 	    const IORegistryPlane * plane = NULL);
 #endif

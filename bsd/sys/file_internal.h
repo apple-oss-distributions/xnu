@@ -194,10 +194,10 @@ struct fileglob {
 
 /* Disambiguate OFD ids from flock ids (fileglobs) */
 __pure2
-static inline caddr_t
+static inline caddr_t __unsafe_indexable
 ofd_to_id(const struct fileglob *fg)
 {
-	return (caddr_t)~(uintptr_t)fg;
+	return (caddr_t __unsafe_indexable)~(uintptr_t)fg;
 }
 
 extern int maxfiles;                    /* kernel limit on number of open files */
@@ -207,7 +207,23 @@ os_refgrp_decl_extern(f_refgrp);        /* os_refgrp_t for file refcounts */
 
 #define FILEGLOB_DTYPE(fg)              ((const file_type_t)((fg)->fg_ops->fo_type))
 
+/* Special value to indicate "no process association". */
+#define FG_NOPROC       ((struct proc *)~0UL)
+
 #pragma mark files (struct fileglob)
+
+/*!
+ * @function fg_alloc_init
+ *
+ * @brief
+ * Allocate and minimally initialize a file structure.
+ *
+ * @description
+ * The fileglob is allocated as if with falloc_withinit(), but is not
+ * assocated with any fileproc.
+ */
+struct fileglob *
+fg_alloc_init(vfs_context_t ctx);
 
 /*!
  * @function fg_ref
@@ -220,7 +236,8 @@ os_refgrp_decl_extern(f_refgrp);        /* os_refgrp_t for file refcounts */
  * to avoid races with setting the FG_CONFINED flag.
  *
  * @param proc
- * The proc this file reference is taken on behalf of.
+ * The proc this file reference is taken on behalf of, or FG_NOPROC
+ * if the file is guaranteed to not be associated with any fileproc.
  *
  * @param fg
  * The specified file
@@ -251,7 +268,7 @@ fg_drop_live(struct fileglob *fg);
  *
  * @param p
  * The process making the request,
- * or PROC_NULL if the file belongs to a message/fileport.
+ * or FG_NOPROC if the file belongs to a message/fileport.
  *
  * @param fg
  * The file being closed.

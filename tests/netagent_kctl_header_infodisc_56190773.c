@@ -12,7 +12,9 @@
 
 #include <darwintest.h>
 
-struct netagent_message_header {
+// netagent_message_header, but with the padding between
+// message_flags and message_id explicitly specified.
+struct netagent_message_header_with_padding {
 	uint8_t message_type;
 	uint8_t message_flags;
 	uint8_t padding[2];
@@ -26,7 +28,7 @@ T_DECL(netagent_kctl_header_infodisc_56190773, "Zero out padding in netagent_mes
 	int s;
 	struct sockaddr_ctl sc;
 	struct ctl_info ci;
-	struct netagent_message_header m;
+	struct netagent_message_header_with_padding m;
 
 	T_SETUPBEGIN;
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL), NULL);

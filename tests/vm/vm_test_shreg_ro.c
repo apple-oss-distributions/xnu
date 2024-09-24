@@ -97,7 +97,7 @@ find_nested_read_only_mapping(
 	return false;
 }
 
-T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be overwritten")
+T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be overwritten", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_address_t vmaddr, vmaddr_sub, vmaddr_tmp, vmaddr_buf;
@@ -428,7 +428,7 @@ T_DECL(vm_test_shreg_ro, "Tests that read-only shared-region mappings can't be o
 }
 
 T_DECL(shared_region_x86_writable, "Tests shared region PROT_WRITE is permitted on Intel only, and fails on all other architectures",
-    T_META_ALL_VALID_ARCHS(true))
+    T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	mach_vm_address_t vmaddr_sub;
 	mach_vm_size_t vmsize_sub;

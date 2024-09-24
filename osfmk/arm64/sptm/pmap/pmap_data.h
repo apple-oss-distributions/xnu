@@ -44,6 +44,10 @@
 #include <arm/machine_routines.h>
 #include <arm64/proc_reg.h>
 
+#if HIBERNATION
+#include <arm64/hibernate_secure_hmac.h>
+#endif /* HIBERNATION */
+
 /* Temporary include before moving all ledger functions into pmap_data.c */
 #include <os/refcnt.h>
 
@@ -62,6 +66,10 @@
  * pages (usually iBoot carved out memory or I/O).
  */
 extern pmap_paddr_t vm_first_phys, vm_last_phys;
+
+#define PMAP_HIB_STATE_REACHED(states) false
+#define PMAP_ASSERT_NOT_WRITING_HIB()
+#define PMAP_IS_HIBERNATING() false
 
 /**
  * Return whether the given address represents a kernel-managed physical page.
@@ -239,6 +247,11 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_HASHED (1ULL << 58)
 
+#define PVH_FLAG_RETIRED 0
+
+
+#define PVH_FLAG_TAGGED 0
+
 
 /**
  * This flag is used to mark that a PV head entry has been placed into
@@ -256,7 +269,7 @@ pai_to_pvh(unsigned int pai)
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
-#define PVH_MUTABLE_FLAGS (PVH_FLAG_CPU | PVH_FLAG_EXEC | PVH_FLAG_HASHED)
+#define PVH_MUTABLE_FLAGS (PVH_FLAG_CPU | PVH_FLAG_EXEC | PVH_FLAG_HASHED | PVH_FLAG_RETIRED | PVH_FLAG_TAGGED)
 
 #define PVH_LOCK_FLAGS (PVH_FLAG_LOCK | PVH_FLAG_SLEEP)
 
@@ -277,9 +290,9 @@ pai_to_pvh(unsigned int pai)
 static inline void
 pvh_assert_locked(__assert_only unsigned int index)
 {
-	assertf(pv_head_table[index] & PVH_LOCK_FLAGS,
-	    "%s: PVH %p for pai 0x%x not locked or in sleep mode", __func__,
-	    &pv_head_table[index], index);
+	assertf(os_atomic_load(&pv_head_table[index], relaxed) & PVH_LOCK_FLAGS,
+	    "%s: PVH %p (=%p) for pai 0x%x not locked or in sleep mode", __func__,
+	    &pv_head_table[index], (void*)(os_atomic_load(&pv_head_table[index], relaxed)), index);
 }
 
 /**
@@ -316,7 +329,8 @@ pvh_lock(unsigned int index)
 {
 	extern unsigned int not_in_kdp;
 	const bool was_preemptible = preemption_enabled();
-	assert(was_preemptible || (startup_phase < STARTUP_SUB_EARLY_BOOT) || !not_in_kdp);
+	assert(was_preemptible || (startup_phase < STARTUP_SUB_EARLY_BOOT) ||
+	    PMAP_IS_HIBERNATING() || !not_in_kdp);
 
 	bool (^check_preemption)(void) = ^bool (void) {
 		return was_preemptible && pmap_pending_preemption();
@@ -329,7 +343,7 @@ pvh_lock(unsigned int index)
 		    &hw_lock_bit_policy, check_preemption, &pmap_lck_grp);
 
 		if (ret == HW_LOCK_ACQUIRED) {
-			locked_pvh.pvh = pv_head_table[index];
+			locked_pvh.pvh = os_atomic_load(&pv_head_table[index], relaxed);
 			if (__improbable(locked_pvh.pvh & PVH_FLAG_SLEEP)) {
 				wait_result_t wres;
 				wres = assert_wait(&pv_head_table[index], THREAD_UNINT);
@@ -363,7 +377,7 @@ pvh_lock_nopreempt(unsigned int index)
 		return pvh_lock(index);
 	}
 	hw_lock_bit(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET, &pmap_lck_grp);
-	const locked_pvh_t locked_pvh = {.pvh = pv_head_table[index], .pai = index};
+	const locked_pvh_t locked_pvh = {.pvh = os_atomic_load(&pv_head_table[index], relaxed), .pai = index};
 
 	if (__improbable(locked_pvh.pvh & PVH_FLAG_SLEEP)) {
 		panic("%s invoked on sleep-mode PVH %p for pai 0x%x", __func__, &pv_head_table[index], index);
@@ -387,7 +401,7 @@ pvh_try_lock(unsigned int index)
 	bool locked = hw_lock_bit_try(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET, &pmap_lck_grp);
 
 	if (locked) {
-		locked_pvh.pvh = pv_head_table[index];
+		locked_pvh.pvh = os_atomic_load(&pv_head_table[index], relaxed);
 		assert(locked_pvh.pvh != 0);
 		if (__improbable(locked_pvh.pvh & PVH_FLAG_SLEEP)) {
 			hw_unlock_bit(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET);
@@ -434,8 +448,10 @@ pvh_lock_enter_sleep_mode(locked_pvh_t *locked_pvh)
 	assert(locked_pvh->pvh != 0);
 	unsigned int index = locked_pvh->pai;
 	pvh_assert_locked(index);
-	if (!(pv_head_table[index] & PVH_FLAG_SLEEP)) {
-		os_atomic_store(&pv_head_table[index], pv_head_table[index] | PVH_FLAG_SLEEP, relaxed);
+	const uintptr_t old_pvh = os_atomic_load(&pv_head_table[index], relaxed);
+	if (!(old_pvh & PVH_FLAG_SLEEP)) {
+		assert(old_pvh & PVH_FLAG_LOCK);
+		os_atomic_store(&pv_head_table[index], old_pvh | PVH_FLAG_SLEEP, relaxed);
 		/**
 		 * Tell the scheduler that this thread may need a priority boost if it needs to go
 		 * off-core, to reduce the likelihood of priority inversion.
@@ -443,7 +459,9 @@ pvh_lock_enter_sleep_mode(locked_pvh_t *locked_pvh)
 		locked_pvh->pri_token = thread_priority_floor_start();
 		hw_unlock_bit(pvh_lock_word(index), PVH_LOCK_BIT_OFFSET);
 	}
-	assert(preemption_enabled());
+
+	/* Hibernation runs single-core so we can skip this check. */
+	assert(preemption_enabled() || PMAP_IS_HIBERNATING());
 }
 
 /**
@@ -480,7 +498,7 @@ pvh_unlock(locked_pvh_t *locked_pvh)
 	assert(locked_pvh->pvh != 0);
 	unsigned int index = locked_pvh->pai;
 	pvh_assert_locked(index);
-	const uintptr_t old_pvh = pv_head_table[index];
+	const uintptr_t old_pvh = os_atomic_load(&pv_head_table[index], relaxed);
 	bool pri_floor_end = false;
 
 	if (__improbable(old_pvh & PVH_FLAG_SLEEP)) {
@@ -599,29 +617,6 @@ pvh_update_head(locked_pvh_t *locked_pvh, void *pvep, unsigned int type)
 	assert(!((uintptr_t)pvep & PVH_TYPE_MASK));
 	const uintptr_t pvh_flags = locked_pvh->pvh & PVH_HIGH_FLAGS;
 	locked_pvh->pvh = ((uintptr_t)pvep & ~PVH_HIGH_FLAGS) | type | pvh_flags;
-}
-
-/**
- * Performs an in-place update of a pv_head_table entry/pointer to be a
- * different type and/or point to a different object.
- *
- * @note The pv_head_table entry CAN'T already be locked.
- *
- * @note This function will clobber any existing flags stored in the PVH
- *       pointer. It's up to the caller to preserve flags if that functionality
- *       is needed (either by ensuring `pvep` contains those flags, or by
- *       manually setting the flags after this call).
- *
- * @param index The array index of the pv_head_table entry to update.
- * @param pvh The new entry to use. This could be either a pt_entry_t*,
- *            pv_entry_t*, or pt_desc_t* depending on the type.
- * @param type The type of the new entry.
- */
-static inline void
-pvh_store_head_unlocked(unsigned int index, uintptr_t pvh, unsigned int type)
-{
-	assert(!(pv_head_table[index] & PVH_LOCK_FLAGS));
-	pv_head_table[index] = (pvh | type) & ~PVH_LOCK_FLAGS;
 }
 
 /**
@@ -978,32 +973,6 @@ pve_remove(locked_pvh_t *locked_pvh, pv_entry_t **pvepp, pv_entry_t *pvep)
  */
 
 /**
- * When the pmap layer allocates memory, it always does so in chunks of the VM
- * page size (which are represented by the PAGE_SIZE/PAGE_SHIFT macros). The VM
- * page size might not match up with the hardware page size for a given address
- * space (this is especially true on systems that support more than one page
- * size).
- *
- * The pv_head_table is allocated to have one entry per VM page, not hardware
- * page (which can change depending on the address space). Because of that, a
- * single VM-page-sized region (single pv_head_table entry) can potentially hold
- * up to four page tables. Only one page table descriptor (PTD) is allocated per
- * pv_head_table entry (per VM page), so on some systems, one PTD might have to
- * keep track of up to four different page tables.
- */
-
-#if __ARM_MIXED_PAGE_SIZE__
-#define PT_INDEX_MAX (ARM_PGBYTES / 4096)
-#elif (ARM_PGSHIFT == 14)
-#define PT_INDEX_MAX 1
-#elif (ARM_PGSHIFT == 12)
-#define PT_INDEX_MAX 4
-#else
-#error Unsupported ARM_PGSHIFT
-#endif /* __ARM_MIXED_PAGE_SIZE__ || ARM_PGSHIFT == 14 || ARM_PGSHIFT == 12 */
-
-
-/**
  * Page table descriptor (PTD) info structure.
  *
  * Contains information about a page table. These pieces of data are separate
@@ -1109,7 +1078,7 @@ typedef struct pt_desc {
 	 * translating for, or a value set by an IOMMU driver if this PTD is being
 	 * used to track an IOMMU page.
 	 */
-	vm_offset_t va[PT_INDEX_MAX];
+	vm_offset_t va;
 
 	/**
 	 * ptd_info_t's are allocated separately so as to reduce false sharing
@@ -1177,7 +1146,7 @@ typedef struct {
 	uint8_t flags;
 } pmap_retype_epoch_t;
 
-#define PMAP_SPTM_PCPU_ALIGN (4096)
+#define PMAP_SPTM_PCPU_ALIGN (8192)
 
 typedef struct {
 	/**
@@ -1218,7 +1187,17 @@ typedef struct {
 	/* Retype epoch tracking structure. */
 	pmap_retype_epoch_t retype_epoch;
 
+	/* Guest virtual machine dispatch structure. */
+	sptm_guest_dispatch_t sptm_guest_dispatch;
+
+	/* Guest virtual machine dispatch structure physical address. */
+	pmap_paddr_t sptm_guest_dispatch_paddr;
+
+	/* SPTM Logical CPU ID  */
 	uint16_t sptm_cpu_id;
+
+	/* Read index associated with this CPU's SPTM trace buffer  */
+	uint64_t sptm_trace_buffer_read_index;
 } __attribute__((aligned(PMAP_SPTM_PCPU_ALIGN))) pmap_sptm_percpu_data_t;
 
 _Static_assert((PAGE_SIZE % PMAP_SPTM_PCPU_ALIGN) == 0,
@@ -1311,68 +1290,18 @@ tte_get_ptd(const tt_entry_t tte)
 }
 
 /**
- * In address spaces where the VM page size doesn't match the underlying
- * hardware page size, one PTD could represent multiple page tables. This
- * function returns the correct index value depending on which page table is
- * being accessed. That index value can then be used to access the
- * per-page-table properties stored within a PTD.
- *
- * @note See the description above the PT_INDEX_MAX definition for a more
- *       detailed explanation of why multiple page tables can be represented
- *       by a single PTD object in the pv_head_table.
+ * This function returns the ptd_info_t structure associated with a given
+ * page table descriptor.
  *
  * @param ptd The page table descriptor that's being accessed.
- * @param ttep Pointer to the translation table entry that's being accessed.
  *
- * @return The correct index value for a specific, hardware-sized page
- *         table.
- */
-static inline unsigned
-ptd_get_index(__unused const pt_desc_t *ptd, __unused const tt_entry_t *ttep)
-{
-#if PT_INDEX_MAX == 1
-	return 0;
-#else
-	assert(ptd != NULL);
-
-	const uint64_t pmap_page_shift = pt_attr_leaf_shift(pmap_get_pt_attr(ptd->pmap));
-	const vm_offset_t ttep_page = (vm_offset_t)ttep >> pmap_page_shift;
-
-	/**
-	 * Use the difference between the VM page shift and the hardware page shift
-	 * to get the index of the correct page table. In practice, this equates to
-	 * masking out the bottom two bits of the L3 table index in address spaces
-	 * where the VM page size is greater than the hardware page size. In address
-	 * spaces where they're identical, the index will always be zero.
-	 */
-	const unsigned int ttep_index = ttep_page & ((1U << (PAGE_SHIFT - pmap_page_shift)) - 1);
-	assert(ttep_index < PT_INDEX_MAX);
-
-	return ttep_index;
-#endif
-}
-
-/**
- * In address spaces where the VM page size doesn't match the underlying
- * hardware page size, one PTD could represent multiple page tables. This
- * function returns the correct ptd_info_t structure depending on which page
- * table is being accessed.
- *
- * @note See the description above the PT_INDEX_MAX definition for a more
- *       detailed explanation of why multiple page tables can be represented
- *       by a single PTD object in the pv_head_table.
- *
- * @param ptd The page table descriptor that's being accessed.
- * @param ttep Pointer to the translation table entry that's being accessed.
- *
- * @return The correct ptd_info_t structure for a specific, hardware-sized page
- *         table.
+ * @return ptd_info_t structure associated with [ptd].
  */
 static inline ptd_info_t *
-ptd_get_info(pt_desc_t *ptd, const tt_entry_t *ttep)
+ptd_get_info(pt_desc_t *ptd)
 {
 	assert(ptd != NULL);
-	return &ptd->ptd_info[ptd_get_index(ptd, ttep)];
+	return ptd->ptd_info;
 }
 
 /**
@@ -1387,7 +1316,7 @@ ptd_get_info(pt_desc_t *ptd, const tt_entry_t *ttep)
 static inline ptd_info_t *
 ptep_get_info(const pt_entry_t *ptep)
 {
-	return ptd_get_info(ptep_get_ptd(ptep), ptep);
+	return ptd_get_info(ptep_get_ptd(ptep));
 }
 
 /**
@@ -1402,9 +1331,23 @@ ptd_get_va(const pt_desc_t *ptdp, const pt_entry_t *ptep)
 {
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(ptdp->pmap);
 
-	vm_map_address_t va = ptdp->va[ptd_get_index(ptdp, ptep)];
-	vm_offset_t ptep_index = ((vm_offset_t)ptep & pt_attr_leaf_offmask(pt_attr)) / sizeof(*ptep);
+	vm_map_address_t va = ptdp->va;
 
+	const uint64_t pmap_page_shift = pt_attr_leaf_shift(pmap_get_pt_attr(ptdp->pmap));
+	const vm_offset_t ptep_page = (vm_offset_t)ptep >> pmap_page_shift;
+
+	/**
+	 * Use the difference between the VM page shift and the hardware page shift
+	 * to get the index of the correct page table. In practice, this equates to
+	 * masking out the bottom two bits of the L3 table index in address spaces
+	 * where the VM page size is greater than the hardware page size. In address
+	 * spaces where they're identical, the index will always be zero.
+	 */
+	const unsigned int ttep_index = ptep_page & ((1U << (PAGE_SHIFT - pmap_page_shift)) - 1);
+	va += ttep_index * pt_attr_twig_size(pt_attr);
+
+	/* Increment VA now to target the VA space covered by this specific PTE */
+	const vm_offset_t ptep_index = ((vm_offset_t)ptep & pt_attr_leaf_offmask(pt_attr)) / sizeof(*ptep);
 	va += (ptep_index << pt_attr_leaf_shift(pt_attr));
 
 	return va;
@@ -2269,10 +2212,27 @@ pmap_retype_unmapped_page(pmap_paddr_t pa)
 	if (__improbable(pmap_type_requires_retype_on_unmap(frame_type))) {
 		sptm_retype_params_t retype_params = {.raw = SPTM_RETYPE_PARAMS_NULL};
 		pmap_retype_epoch_drain();
-		sptm_retype(pa, frame_type, XNU_DEFAULT, retype_params);
+		sptm_retype(pa & ~PAGE_MASK, frame_type, XNU_DEFAULT, retype_params);
 		return true;
 	}
 	return false;
+}
+
+static inline boolean_t
+pmap_is_preemptible(void)
+{
+	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT) || PMAP_IS_HIBERNATING();
+}
+
+/**
+ * This helper function ensures that potentially-long-running batched operations are
+ * called in preemptible context before entering the SPTM, so that the SPTM call may
+ * periodically exit to allow pending urgent ASTs to be taken.
+ */
+static inline void
+pmap_verify_preemptible(void)
+{
+	assert(pmap_is_preemptible());
 }
 
 /**
@@ -2445,5 +2405,28 @@ typedef struct pmap_io_range {
 _Static_assert(sizeof(pmap_io_range_t) == 24, "unexpected size for pmap_io_range_t");
 
 extern pmap_io_range_t* pmap_find_io_attr(pmap_paddr_t);
+
+/**
+ * This structure describes a sub-page-size I/O region owned by SPTM but the kernel can write to.
+ *
+ * @note I/O filter software will use a collection of such data structures to determine access
+ *       permissions to a page owned by SPTM.
+ *
+ * @note The {signature, offset} key is used to index a collection of such data structures to
+ *       optimize for space in the case where one page layout is repeated for many devices, such
+ *       as the memory controller channels.
+ */
+typedef struct pmap_io_filter_entry {
+	/* 4 Character Code (4CC) describing what this range (page) is. */
+	uint32_t signature;
+
+	/* Offset within the page. It has to be within [0, PAGE_SIZE). */
+	uint16_t offset;
+
+	/* Length of the range, and (offset + length) has to be within [0, PAGE_SIZE). */
+	uint16_t length;
+} pmap_io_filter_entry_t;
+
+_Static_assert(sizeof(pmap_io_filter_entry_t) == 8, "unexpected size for pmap_io_filter_entry_t");
 
 extern void pmap_cpu_data_init_internal(unsigned int);

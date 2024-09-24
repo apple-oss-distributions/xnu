@@ -37,7 +37,6 @@ OPTIONS/config_serial_kdp	optional config_serial_kdp
 OPTIONS/mach_ldebug		optional mach_ldebug
 OPTIONS/mach_vm_debug		optional mach_vm_debug
 OPTIONS/mig_debug		optional mig_debug
-OPTIONS/vm_cpm			optional vm_cpm
 OPTIONS/importance_inheritance	optional importance_inheritance
 OPTIONS/importance_debug	optional importance_debug
 OPTIONS/config_ecc_logging	optional config_ecc_logging
@@ -98,6 +97,7 @@ osfmk/ipc/ipc_kmsg.c			standard
 osfmk/ipc/ipc_mqueue.c		standard
 osfmk/ipc/ipc_notify.c		standard
 osfmk/ipc/ipc_object.c		standard
+osfmk/ipc/ipc_policy.c			standard
 osfmk/ipc/ipc_port.c			standard
 osfmk/ipc/ipc_pset.c			standard
 osfmk/ipc/ipc_right.c			standard
@@ -129,19 +129,21 @@ osfmk/kern/ecc_logging.c			optional config_ecc_logging
 osfmk/kern/energy_perf.c		standard
 osfmk/kern/exception.c		standard
 osfmk/kern/exclaves.c		standard
-osfmk/kern/exclaves_conclave.c	standard
 osfmk/kern/exclaves_boot.c		standard
-osfmk/kern/exclaves_upcalls.c		standard
+osfmk/kern/exclaves_conclave.c	standard
 osfmk/kern/exclaves_driverkit.c		standard
 osfmk/kern/exclaves_frame_mint.c	standard
+osfmk/kern/exclaves_inspection.c	standard
 osfmk/kern/exclaves_log.c		standard
+osfmk/kern/exclaves_memory.c            standard
 osfmk/kern/exclaves_panic.c		standard
 osfmk/kern/exclaves_resource.c		standard
 osfmk/kern/exclaves_sensor.c		standard
 osfmk/kern/exclaves_shared_memory.c	standard
 osfmk/kern/exclaves_storage.c		standard
 osfmk/kern/exclaves_tests.c		standard
-osfmk/kern/exclaves_inspection.c	standard
+osfmk/kern/exclaves_upcalls.c		standard
+osfmk/kern/exclaves_xnuproxy.c		standard
 ./kern/exclaves.tightbeam.c			optional config_exclaves
 osfmk/kern/extmod_statistics.c		standard
 osfmk/kern/host.c			standard
@@ -175,16 +177,12 @@ osfmk/kern/recount.c		standard
 osfmk/kern/restartable.c		standard
 osfmk/kern/sched_average.c		standard
 #ifdef __AMP__
-osfmk/kern/sched_amp.c		optional config_sched_multiq
-osfmk/kern/sched_amp_common.c	optional config_sched_multiq
+osfmk/kern/sched_amp.c		standard
+osfmk/kern/sched_amp_common.c	standard
 #endif
-osfmk/kern/sched_dualq.c	optional config_sched_multiq
+osfmk/kern/sched_dualq.c	standard
 osfmk/kern/sched_clutch.c	optional config_clutch
 osfmk/kern/sched_prim.c		standard
-osfmk/kern/sched_proto.c	optional config_sched_proto
-osfmk/kern/sched_traditional.c	optional config_sched_traditional
-osfmk/kern/sched_grrr.c	optional config_sched_grrr_core
-osfmk/kern/sched_multiq.c	optional config_sched_multiq
 osfmk/kern/sfi.c			standard
 osfmk/kern/smr.c		standard
 osfmk/kern/stack.c			standard
@@ -222,7 +220,6 @@ osfmk/kern/copyout_shim.c	optional copyout_shim
 osfmk/kern/task_ident.c     standard
 osfmk/kern/socd_client.c   	standard
 osfmk/kern/iotrace.c		optional config_iotrace
-osfmk/kern/epoch_sync.c		optional config_exclaves
 
 ./mach/clock_server.c			standard
 ./mach/clock_reply_user.c		standard
@@ -241,7 +238,6 @@ osfmk/kern/epoch_sync.c		optional config_exclaves
 ./mach/memory_entry_server.c		standard
 ./mach/resource_notify_user.c		standard
 ./mach/restartable_server.c		standard
-./mach/upl_server.c			standard
 ./mach/audit_triggers_user.c		standard
 ./mach/task_access_user.c          	standard
 osfmk/corpses/corpse.c			standard
@@ -256,6 +252,7 @@ osfmk/tests/ptrauth_data_tests.c		optional config_xnupost
 osfmk/tests/bitmap_test.c		optional config_xnupost
 osfmk/tests/test_thread_call.c          optional config_xnupost
 osfmk/tests/vfp_state_test.c		optional config_xnupost
+osfmk/tests/vm_parameter_validation_kern.c	optional development
 ./mach/telemetry_notification_user.c optional config_telemetry
 osfmk/bank/bank.c			standard
 osfmk/atm/atm.c			optional config_atm
@@ -269,6 +266,7 @@ osfmk/voucher/ipc_pthread_priority.c	optional config_voucher_deprecated
 ./mach/arcade_register_server.c optional config_arcade
 ./mach/iocompressionstats_notification_user.c optional config_io_compression_stats
 ./mach/memory_error_notification_user.c optional config_telemetry
+./mach/doubleagent_mig_user.c		standard
 
 #
 # For now, no external pagers
@@ -284,6 +282,7 @@ osfmk/voucher/ipc_pthread_priority.c	optional config_voucher_deprecated
 ./mach/mach_test_upcall_user.c		standard
 
 osfmk/vm/analytics.c			standard
+osfmk/vm/vm_sanitize_telemetry.c	standard
 osfmk/vm/bsd_vm.c			optional mach_bsd
 osfmk/vm/vm_compressor.c		standard
 osfmk/vm/vm_compressor_pager.c		standard
@@ -301,8 +300,10 @@ osfmk/vm/vm_map.c			standard
 osfmk/vm/vm_map_store.c			standard
 osfmk/vm/vm_map_store_ll.c		standard
 osfmk/vm/vm_map_store_rb.c		standard
+osfmk/vm/vm_memory_entry.c		standard
 osfmk/vm/vm_object.c			standard
 osfmk/vm/vm_pageout.c			standard
+osfmk/vm/vm_pmap.c			standard
 osfmk/vm/vm_purgeable.c			standard
 osfmk/vm/vm_reclaim.c			optional config_deferred_reclaim
 osfmk/vm/vm_resident.c			standard
@@ -311,8 +312,11 @@ osfmk/vm/vm_shared_region_pager.c	standard
 osfmk/vm/vm_dyld_pager.c		standard
 osfmk/vm/vm_swapfile_pager.c		standard
 osfmk/vm/vm_tests.c			optional config_xnupost
+osfmk/vm/vm_upl.c			standard
 osfmk/vm/vm_user.c			standard
 osfmk/vm/vm32_user.c			standard
+osfmk/vm/vm_sanitize.c			standard
+osfmk/vm/vm_sanitize_error_compat.c	standard
 
 #
 # IOKit files, for a while
@@ -373,6 +377,7 @@ osfmk/corecrypto/ccdigest_update.c	standard
 osfmk/corecrypto/ccgcm.c	standard
 osfmk/corecrypto/ccmode_gcm_gf_mult.c	standard
 osfmk/corecrypto/ccmode_gcm_mult_h.c	standard
+osfmk/corecrypto/cchkdf.c	standard
 osfmk/corecrypto/cchmac.c	standard
 osfmk/corecrypto/cchmac_init.c	standard
 osfmk/corecrypto/cchmac_update.c	standard

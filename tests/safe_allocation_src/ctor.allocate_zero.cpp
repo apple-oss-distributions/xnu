@@ -30,7 +30,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_allocate_zero, "safe_allocation.ctor.allocate_zero") {
+T_DECL(ctor_allocate_zero, "safe_allocation.ctor.allocate_zero", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 	tests<int>();

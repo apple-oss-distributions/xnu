@@ -22,7 +22,7 @@ fd_select_close_helper(void *ctx)
 	return NULL;
 }
 
-T_DECL(fd_select_close, "Test for 54795873: make sure close breaks out of select")
+T_DECL(fd_select_close, "Test for 54795873: make sure close breaks out of select", T_META_TAG_VM_PREFERRED)
 {
 	fd_set read_fd;
 	int pair[2], rc;
@@ -40,7 +40,7 @@ T_DECL(fd_select_close, "Test for 54795873: make sure close breaks out of select
 	T_EXPECT_POSIX_FAILURE(rc, EBADF, "select broke out with EBADF");
 }
 
-T_DECL(fd_select_ebadf, "Test that select on closed fd returns EBADF")
+T_DECL(fd_select_ebadf, "Test that select on closed fd returns EBADF", T_META_TAG_VM_PREFERRED)
 {
 	fd_set read_fd;
 	int pair[2], rc;
@@ -80,7 +80,7 @@ fd_stress_dup2_close_fun(void *ctx)
 	return NULL;
 }
 
-T_DECL(fd_stress_dup2_close, "Stress test races between dup2 and close")
+T_DECL(fd_stress_dup2_close, "Stress test races between dup2 and close", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t th[4];
 	int rc;
@@ -97,7 +97,7 @@ T_DECL(fd_stress_dup2_close, "Stress test races between dup2 and close")
 }
 
 T_DECL(fd_dup2_erase_clofork_58446996,
-    "Make sure dup2() doesn't inherit flags from an old fd")
+    "Make sure dup2() doesn't inherit flags from an old fd", T_META_TAG_VM_PREFERRED)
 {
 	int fd1, fd2;
 
@@ -129,7 +129,7 @@ confine_thread(void *data)
 	return NULL;
 }
 
-T_DECL(confined_fileport_race, "test for rdar://69922255")
+T_DECL(confined_fileport_race, "test for rdar://69922255", T_META_TAG_VM_PREFERRED)
 {
 	int fd = -1;
 	pthread_t t;

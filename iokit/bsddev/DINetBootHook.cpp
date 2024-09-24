@@ -386,7 +386,11 @@ di_root_ramfile( IORegistryEntry * entry )
 		extentData  = OSData::withData(data);
 		assert(extentData);
 
+		/* BEGIN IGNORE CODESTYLE */
+		__typed_allocators_ignore_push
 		extentList  = (IOAddressRange *) extentData->getBytesNoCopy();
+		__typed_allocators_ignore_pop
+		/* END IGNORE CODESTYLE */
 		extentCount = extentData->getLength() / sizeof(IOAddressRange);
 		extentSize  = 0;
 		remain = dmgSize;

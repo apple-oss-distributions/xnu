@@ -46,7 +46,7 @@
  */
 #define IS_RESTRICTED_IN_PORT(x) (bitmap_test(restricted_port_bitmap, ntohs((uint16_t)(x))))
 
-extern bitmap_t *restricted_port_bitmap;
+extern bitmap_t *__sized_by_or_null(BITMAP_SIZE(UINT16_MAX)) restricted_port_bitmap;
 
 extern void restricted_in_port_init(void);
 

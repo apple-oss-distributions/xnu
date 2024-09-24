@@ -504,7 +504,7 @@ pager_test(const_page_t *state)
 }
 
 T_DECL(thread_self_restrict_pagers,
-    "Verify that the TPRO pager interfaces work correctly")
+    "Verify that the TPRO pager interfaces work correctly", T_META_TAG_VM_PREFERRED)
 {
 #if __arm64__
 	/* Check to see that we support the necessary hardware features. */

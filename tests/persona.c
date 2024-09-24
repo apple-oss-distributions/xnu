@@ -33,7 +33,7 @@ _create_persona(int persona_type, uint32_t persona_info_version)
 	return persona_id;
 }
 
-T_DECL(mutlipe_system_personas, "create multiple PERSONA_SYSTEM")
+T_DECL(mutlipe_system_personas, "create multiple PERSONA_SYSTEM", T_META_TAG_VM_PREFERRED)
 {
 	uid_t first = _create_persona(PERSONA_SYSTEM, PERSONA_INFO_V1);
 	uid_t second = _create_persona(PERSONA_SYSTEM, PERSONA_INFO_V1);
@@ -44,7 +44,7 @@ T_DECL(mutlipe_system_personas, "create multiple PERSONA_SYSTEM")
 	T_ASSERT_EQ(kpersona_dealloc(second), 0, NULL);
 }
 
-T_DECL(mutlipe_system_proxy_personas, "create multiple PERSONA_SYSTEM_PROXY")
+T_DECL(mutlipe_system_proxy_personas, "create multiple PERSONA_SYSTEM_PROXY", T_META_TAG_VM_PREFERRED)
 {
 	uid_t first = _create_persona(PERSONA_SYSTEM_PROXY, PERSONA_INFO_V1);
 	uid_t second = _create_persona(PERSONA_SYSTEM_PROXY, PERSONA_INFO_V1);
@@ -55,7 +55,7 @@ T_DECL(mutlipe_system_proxy_personas, "create multiple PERSONA_SYSTEM_PROXY")
 	T_ASSERT_EQ(kpersona_dealloc(second), 0, NULL);
 }
 
-T_DECL(persona_info_v2, "create and query persona PERSONA_INFO_V2")
+T_DECL(persona_info_v2, "create and query persona PERSONA_INFO_V2", T_META_TAG_VM_PREFERRED)
 {
 	uid_t persona = _create_persona(PERSONA_MANAGED, PERSONA_INFO_V2);
 
@@ -72,7 +72,7 @@ T_DECL(persona_info_v2, "create and query persona PERSONA_INFO_V2")
 	T_ASSERT_EQ(kpersona_dealloc(persona), 0, NULL);
 }
 
-T_DECL(persona_uid, "create a persona with a uid and fetch it")
+T_DECL(persona_uid, "create a persona with a uid and fetch it", T_META_TAG_VM_PREFERRED)
 {
 	uid_t persona_uid = 501;
 	struct kpersona_info pinfo = {
@@ -102,7 +102,7 @@ T_DECL(persona_uid, "create a persona with a uid and fetch it")
 	T_ASSERT_EQ(kpersona_dealloc(persona_id), 0, NULL);
 }
 
-T_DECL(persona_v1_uid_is_unset, "create PERSONA_INFO_V1 and make sure its UID is unset")
+T_DECL(persona_v1_uid_is_unset, "create PERSONA_INFO_V1 and make sure its UID is unset", T_META_TAG_VM_PREFERRED)
 {
 	uid_t persona = _create_persona(PERSONA_MANAGED, PERSONA_INFO_V1);
 

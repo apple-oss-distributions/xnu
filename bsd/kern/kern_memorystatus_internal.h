@@ -44,7 +44,13 @@
 #include <stdbool.h>
 #include <os/base.h>
 #include <os/log.h>
+#include <os/overflow.h>
+#include <kern/locks.h>
 #include <kern/sched_prim.h>
+#include <sys/kern_memorystatus.h>
+#include <sys/kernel_types.h>
+#include <sys/proc.h>
+#include <sys/proc_internal.h>
 
 #if CONFIG_FREEZE
 #include <sys/kern_memorystatus_freeze.h>
@@ -66,6 +72,12 @@ extern uint64_t memorystatus_available_pages_critical;
 extern int block_corpses; /* counter to block new corpses if jetsam purges them */
 extern int system_procs_aging_band;
 extern int applications_aging_band;
+/* the jetsam band which will contain P_MEMSTAT_FROZEN processes */
+extern int memorystatus_freeze_jetsam_band;
+#if CONFIG_FREEZE
+extern unsigned int memorystatus_suspended_count;
+#endif /* CONFIG_FREEZE */
+
 /*
  * TODO(jason): This should really be calculated dynamically by the zalloc
  * subsystem before we do a zone map exhaustion kill. But the zone_gc
@@ -117,9 +129,9 @@ OS_CLOSED_ENUM(memorystatus_action, uint32_t,
  * Typically there should be a single jetsam thread
  * unless parallel jetsam is enabled.
  */
-typedef struct jetsam_thread_state {
-	uint8_t                         inited; /* boolean - if the thread is initialized */
-	uint8_t                         limit_to_low_bands; /* boolean */
+typedef struct jetsam_state_s {
+	bool                            inited; /* if the thread is initialized */
+	bool                            limit_to_low_bands; /* limit kills to < JETSAM_PRIORITY_ELEVATED_INACTIVE */
 	int                             index; /* jetsam thread index */
 	thread_t                        thread; /* jetsam thread pointer */
 	int                             jld_idle_kills; /*  idle jetsam kill counter for this session */
@@ -130,7 +142,7 @@ typedef struct jetsam_thread_state {
 	uint64_t                        memory_reclaimed; /* Amount of memory that was just reclaimed */
 	uint32_t                        hwm_kills; /* hwm kill counter for this session */
 	sched_cond_atomic_t             jt_wakeup_cond; /* condition var used to synchronize wake/sleep operations for this jetsam thread */
-} jetsam_thread_state_t;
+} *jetsam_state_t;
 
 /*
  * The memorystatus thread monitors these conditions
@@ -161,22 +173,17 @@ bool memorystatus_is_system_healthy(const memorystatus_system_health_t *status);
 /* Picks a kill cause given an unhealthy system status */
 uint32_t memorystatus_pick_kill_cause(const memorystatus_system_health_t *status);
 
-/*
- * Agressive jetsam tunables
- */
-#define kJetsamAgingPolicyNone                          (0)
-#define kJetsamAgingPolicyLegacy                        (1)
-#define kJetsamAgingPolicySysProcsReclaimedFirst        (2)
-#define kJetsamAgingPolicyAppsReclaimedFirst            (3)
-#define kJetsamAgingPolicyMax                           kJetsamAgingPolicyAppsReclaimedFirst
+#pragma mark Locks
+
+extern lck_mtx_t memorystatus_jetsam_broadcast_lock;
+
+#pragma mark Agressive jetsam tunables
+
 extern boolean_t memorystatus_jld_enabled;              /* Enable jetsam loop detection */
 extern uint32_t memorystatus_jld_eval_period_msecs;         /* Init pass sets this based on device memory size */
-extern int      memorystatus_jld_eval_aggressive_count;     /* Raise the priority max after 'n' aggressive loops */
-extern int      memorystatus_jld_eval_aggressive_priority_band_max;  /* Kill aggressively up through this band */
 extern int      memorystatus_jld_max_kill_loops;            /* How many times should we try and kill up to the target band */
 extern unsigned int memorystatus_sysproc_aging_aggr_pages; /* Aggressive jetsam pages threshold for sysproc aging policy */
-extern int       jld_eval_aggressive_count;
-extern int32_t   jld_priority_band_max;
+extern unsigned int jld_eval_aggressive_count;
 extern uint64_t  jld_timestamp_msecs;
 extern int       jld_idle_kill_candidates;
 
@@ -198,8 +205,6 @@ extern _Atomic bool    vm_swapout_wake_pending;
 #define VM_PAGE_DONATE_DISABLED     0
 #define VM_PAGE_DONATE_ENABLED      1
 extern uint32_t vm_page_donate_mode;
-void vm_swapout_thread(void);
-void vm_compressor_process_special_swapped_in_segments(void);
 
 #if CONFIG_JETSAM
 #define MEMORYSTATUS_LOG_AVAILABLE_PAGES memorystatus_available_pages
@@ -219,12 +224,17 @@ bool is_reason_thrashing(unsigned cause);
 /* Is the zone map almost full? */
 bool is_reason_zone_map_exhaustion(unsigned cause);
 
-memorystatus_action_t memorystatus_pick_action(struct jetsam_thread_state *jetsam_thread,
+memorystatus_action_t memorystatus_pick_action(jetsam_state_t state,
     uint32_t *kill_cause, bool highwater_remaining,
     bool suspended_swappable_apps_remaining,
     bool swappable_apps_remaining, int *jld_idle_kills);
 
 #define MEMSTAT_PERCENT_TOTAL_PAGES(p) (p * atop_64(max_mem) / 100)
+
+/*
+ * Take a (redacted) zprint snapshot along with the jetsam snapshot.
+ */
+#define JETSAM_ZPRINT_SNAPSHOT (CONFIG_MEMORYSTATUS && (DEBUG || DEVELOPMENT))
 
 #pragma mark Logging Utilities
 
@@ -260,6 +270,134 @@ extern memorystatus_log_level_t memorystatus_log_level;
 #define memorystatus_log_debug(format, ...) if (memorystatus_log_level >= MEMORYSTATUS_LOG_LEVEL_DEBUG) { _memorystatus_log_with_type(OS_LOG_TYPE_DEBUG, format, ##__VA_ARGS__); }
 #define memorystatus_log_error(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_ERROR, format, ##__VA_ARGS__)
 #define memorystatus_log_fault(format, ...) _memorystatus_log_with_type(OS_LOG_TYPE_FAULT, format, ##__VA_ARGS__)
+
+#pragma mark Jetsam Priority Management
+
+/*
+ * Cancel a process' idle aging
+ * Returns whether a reschedule of the idle demotion thread is needed.
+ */
+void memstat_update_priority_locked(proc_t p, int priority,
+    memstat_priority_options_t options);
+
+static inline bool
+_memstat_proc_is_aging(proc_t p)
+{
+	return p->p_memstat_dirty & P_DIRTY_AGING_IN_PROGRESS;
+}
+
+static inline bool
+_memstat_proc_is_tracked(proc_t p)
+{
+	return p->p_memstat_dirty & P_DIRTY_TRACK;
+}
+
+static inline bool
+_memstat_proc_is_dirty(proc_t p)
+{
+	return p->p_memstat_dirty & P_DIRTY_IS_DIRTY;
+}
+
+static inline bool
+_memstat_proc_can_idle_exit(proc_t p)
+{
+	return _memstat_proc_is_tracked(p) &&
+	       (p->p_memstat_dirty & P_DIRTY_ALLOW_IDLE_EXIT);
+}
+
+static inline bool
+_memstat_proc_has_priority_assertion(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_PRIORITY_ASSERTION;
+}
+
+static inline bool
+_memstat_proc_is_managed(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_MANAGED;
+}
+
+static inline bool
+_memstat_proc_is_frozen(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_FROZEN;
+}
+
+static inline bool
+_memstat_proc_is_suspended(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_SUSPENDED;
+}
+
+static inline void
+_memstat_proc_set_suspended(proc_t p)
+{
+	LCK_MTX_ASSERT(&proc_list_mlock, LCK_ASSERT_OWNED);
+	if (!_memstat_proc_is_suspended(p)) {
+		p->p_memstat_state |= P_MEMSTAT_SUSPENDED;
+#if CONFIG_FREEZE
+		if (os_inc_overflow(&memorystatus_suspended_count)) {
+			panic("Overflowed memorystatus_suspended_count");
+		}
+#endif /* CONFIG_FREEZE */
+	}
+}
+
+static inline void
+_memstat_proc_set_resumed(proc_t p)
+{
+	LCK_MTX_ASSERT(&proc_list_mlock, LCK_ASSERT_OWNED);
+	if (_memstat_proc_is_suspended(p)) {
+		p->p_memstat_state &= ~P_MEMSTAT_SUSPENDED;
+#if CONFIG_FREEZE
+		if (os_dec_overflow(&memorystatus_suspended_count)) {
+			panic("Underflowed memorystatus_suspended_count");
+		}
+#endif /* CONFIG_FREEZE */
+	}
+}
+
+/*
+ * Return whether the process is to be placed in an elevated band while idle.
+ */
+static inline bool
+_memstat_proc_is_elevated(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_USE_ELEVATED_INACTIVE_BAND;
+}
+
+/*
+ * Return whether p's ledger-enforced memlimit is fatal (as last cached by
+ * memorystatus)
+ */
+static inline bool
+_memstat_proc_cached_memlimit_is_fatal(proc_t p)
+{
+	return p->p_memstat_state & P_MEMSTAT_FATAL_MEMLIMIT;
+}
+
+/*
+ * Return whether p's inactive/active memlimit is fatal
+ */
+static inline bool
+_memstat_proc_memlimit_is_fatal(proc_t p, bool is_active)
+{
+	const uint32_t flag = is_active ?
+	    P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL : P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL;
+	return p->p_memstat_state & flag;
+}
+
+static inline bool
+_memstat_proc_active_memlimit_is_fatal(proc_t p)
+{
+	return _memstat_proc_memlimit_is_fatal(p, true);
+}
+
+static inline bool
+_memstat_proc_inactive_memlimit_is_fatal(proc_t p)
+{
+	return _memstat_proc_memlimit_is_fatal(p, false);
+}
 
 #pragma mark Freezer
 #if CONFIG_FREEZE

@@ -31,7 +31,7 @@ T_GLOBAL_META(
 extern char **environ;
 static mach_port_t resource_notify_port = MACH_PORT_NULL;
 
-T_DECL(test_fd_table_set_soft_limit, "Allocate fds upto soft limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false))
+T_DECL(test_fd_table_set_soft_limit, "Allocate fds upto soft limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	char *test_prog_name = "./fd_table_limits_client";
 	char *child_args[MAX_ARGV];
@@ -72,7 +72,7 @@ T_DECL(test_fd_table_set_soft_limit, "Allocate fds upto soft limit", T_META_IGNO
 	T_ASSERT_EQ(WIFEXITED(child_status), 1, "Child exited normally with exit value %d", WEXITSTATUS(child_status));
 }
 
-T_DECL(test_fd_table_set_hard_limit, "Allocate fds upto hard limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false))
+T_DECL(test_fd_table_set_hard_limit, "Allocate fds upto hard limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	char *test_prog_name = "./fd_table_limits_client";
 	char *child_args[MAX_ARGV];
@@ -113,7 +113,7 @@ T_DECL(test_fd_table_set_hard_limit, "Allocate fds upto hard limit", T_META_IGNO
 	}
 }
 
-T_DECL(test_fd_table_setting_limits, "Allocate fds - both soft & hard limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false))
+T_DECL(test_fd_table_setting_limits, "Allocate fds - both soft & hard limit", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	char *test_prog_name = "./fd_table_limits_client";
 	char *child_args[MAX_ARGV];
@@ -227,7 +227,7 @@ server_setup(struct args *args)
 	resource_notify_port = args->server_port;
 }
 
-T_DECL(test_fd_table_hard_limit_with_resource_notify_port, "Allocate ports upto hard limit and trigger notification", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false))
+T_DECL(test_fd_table_hard_limit_with_resource_notify_port, "Allocate ports upto hard limit and trigger notification", T_META_IGNORECRASHES(".*fd_table_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	char *test_prog_name = "./fd_table_limits_client";
 	char *child_args[MAX_ARGV];

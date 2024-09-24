@@ -12,7 +12,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 ssize_t __getdirentries64(int fd, void *buf, size_t bufsize, off_t *basep);
 
-T_DECL(getdirentries64_extended, "check for GETDIRENTRIES64_EOF")
+T_DECL(getdirentries64_extended, "check for GETDIRENTRIES64_EOF", T_META_TAG_VM_PREFERRED)
 {
 	char buf[GETDIRENTRIES64_EXTENDED_BUFSIZE];
 	getdirentries64_flags_t *flags;

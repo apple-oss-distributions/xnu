@@ -8,7 +8,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("IPC"));
 
-T_DECL(mach_port_mod_refs, "mach_port_mod_refs"){
+T_DECL(mach_port_mod_refs, "mach_port_mod_refs", T_META_TAG_VM_PREFERRED){
 	mach_port_t port_set;
 	mach_port_t port;
 	task_exc_guard_behavior_t old, new;

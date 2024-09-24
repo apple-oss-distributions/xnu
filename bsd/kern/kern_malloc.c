@@ -73,6 +73,9 @@
 
 #include <sys/malloc.h>
 #include <sys/sysctl.h>
+#include <sys/kauth.h>
+
+#include <vm/vm_kern_xnu.h>
 
 #include <libkern/libkern.h>
 
@@ -418,6 +421,10 @@ sysctl_zones_collectable_bytes SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 	uint64_t zones_free_mem = get_zones_collectable_bytes();
+
+	if (!kauth_cred_issuser(kauth_cred_get())) {
+		return EPERM;
+	}
 
 	return SYSCTL_OUT(req, &zones_free_mem, sizeof(zones_free_mem));
 }

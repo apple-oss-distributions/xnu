@@ -186,22 +186,22 @@ test_bits(void)
 	bitmap_t map = 0;
 
 	for (int i = 0; i < 64; i++) {
-		bool changed = bit_set_if_clear(map, i);
+		__assert_only bool changed = bit_set_if_clear(map, i);
 		assert(changed);
 	}
 	assert(map == ~0);
 	for (int i = 0; i < 64; i++) {
-		bool changed = bit_set_if_clear(map, i);
+		__assert_only bool changed = bit_set_if_clear(map, i);
 		assert(!changed);
 	}
 
 	for (int i = 0; i < 64; i++) {
-		bool changed = bit_clear_if_set(map, i);
+		__assert_only bool changed = bit_clear_if_set(map, i);
 		assert(changed);
 	}
 	assert(map == 0);
 	for (int i = 0; i < 64; i++) {
-		bool changed = bit_clear_if_set(map, i);
+		__assert_only bool changed = bit_clear_if_set(map, i);
 		assert(!changed);
 	}
 }

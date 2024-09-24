@@ -87,6 +87,7 @@
 #include <net/net_api_stats.h>
 #include <net/route.h>
 #include <net/content_filter.h>
+#include <net/sockaddr_utils.h>
 
 #define _IP_VHL
 #include <netinet/in.h>
@@ -159,9 +160,12 @@ rip_init(struct protosw *pp, struct domain *dp)
 	 * to allocate a one entry hash list than it is to check all
 	 * over the place for ipi_hashbase == NULL.
 	 */
-	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
-	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
-
+	hashinit_counted_by(1, ripcbinfo.ipi_hashbase,
+	    ripcbinfo.ipi_hashbase_count);
+	ripcbinfo.ipi_hashmask = ripcbinfo.ipi_hashbase_count - 1;
+	hashinit_counted_by(1, ripcbinfo.ipi_porthashbase,
+	    ripcbinfo.ipi_porthashbase_count);
+	ripcbinfo.ipi_porthashmask = ripcbinfo.ipi_porthashbase_count - 1;
 	ripcbinfo.ipi_zone = ripzone;
 
 	pcbinfo = &ripcbinfo;
@@ -192,7 +196,7 @@ rip_inp_input(struct inpcb *inp, struct mbuf *m, int iphlen)
 		.sin_addr = { .s_addr = 0 },
 		.sin_zero = {0, 0, 0, 0, 0, 0, 0, 0, }
 	};
-	struct mbuf *opts = NULL;
+	mbuf_ref_t opts = NULL;
 	boolean_t is_wake_pkt = false;
 	uint32_t num_delivered = 0;
 
@@ -394,8 +398,8 @@ rip_output(
 	uint32_t cfil_so_state_change_cnt = 0;
 	uint32_t cfil_so_options = 0;
 	int cfil_inp_flags = 0;
-	struct sockaddr *cfil_faddr = NULL;
-	struct sockaddr_in *cfil_sin;
+	struct sockaddr *__single cfil_faddr = NULL;
+	struct sockaddr_in *__single cfil_sin;
 	u_int32_t cfil_dst = 0;
 #endif
 
@@ -744,9 +748,12 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 	struct  inpcb *inp = sotoinpcb(so);
 	int     error, optval;
 
-	/* Allow <SOL_SOCKET,SO_FLUSH> at this level */
-	if (sopt->sopt_level != IPPROTO_IP &&
-	    !(sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_FLUSH)) {
+	/* Allow <SOL_SOCKET,SO_BINDTODEVICE> at this level */
+	if (sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_BINDTODEVICE) {
+		return ip_ctloutput(so, sopt);
+	}
+
+	if (sopt->sopt_level != IPPROTO_IP) {
 		return EINVAL;
 	}
 
@@ -1130,6 +1137,7 @@ rip_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		}
 		goto bad;
 	}
+	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
 
 	if (nam != NULL) {
 		dst = ((struct sockaddr_in *)(void *)nam)->sin_addr.s_addr;
@@ -1155,11 +1163,11 @@ bad:
 int
 rip_unlock(struct socket *so, int refcount, void *debug)
 {
-	void *lr_saved;
+	void *__single lr_saved;
 	struct inpcb *inp = sotoinpcb(so);
 
 	if (debug == NULL) {
-		lr_saved = __builtin_return_address(0);
+		lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 	} else {
 		lr_saved = debug;
 	}

@@ -113,6 +113,8 @@
 
 #include <net/sockaddr_utils.h>
 
+extern char *proc_name_address(void *p);
+
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
 
@@ -505,12 +507,14 @@ accept_nocancel(proc_ref_t p, struct accept_nocancel_args *uap,
 			error = EINVAL;
 		}
 		socket_unlock(head, 1);
+		os_log(OS_LOG_DEFAULT, "%s:%d accept() SO_ACCEPTCONN %d: msleep", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 check_again:
 	if ((head->so_state & SS_NBIO) && head->so_comp.tqh_first == NULL) {
 		socket_unlock(head, 1);
 		error = EWOULDBLOCK;
+		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: non-blocking  empty queue", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 	while (TAILQ_EMPTY(&head->so_comp) && head->so_error == 0) {
@@ -532,6 +536,7 @@ check_again:
 			error = ECONNABORTED;
 		}
 		if (error) {
+			os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: msleep", proc_name_address(p), proc_selfpid(), error);
 			socket_unlock(head, 1);
 			goto out;
 		}
@@ -540,6 +545,7 @@ check_again:
 		error = head->so_error;
 		head->so_error = 0;
 		socket_unlock(head, 1);
+		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: head->so_error", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 
@@ -606,6 +612,7 @@ check_again:
 		/* Drop reference on listening socket */
 		sodereference(head);
 		/* Propagate socket filter's error code to the caller */
+		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: soacceptfilter", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 
@@ -624,6 +631,7 @@ check_again:
 		socket_unlock(so, 1);
 		soclose(so);
 		sodereference(head);
+		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 	*retval = newfd;
@@ -671,7 +679,7 @@ check_again:
 		/* save sa_len before it is destroyed */
 		sa_len = sa->sa_len;
 		namelen = MIN(namelen, sa_len);
-		error = copyout(sa, uap->name, namelen);
+		error = copyout(__SA_UTILS_CONV_TO_BYTES(sa), uap->name, namelen);
 		if (!error) {
 			/* return the actual, untruncated address length */
 			namelen = sa_len;
@@ -679,6 +687,9 @@ check_again:
 gotnoname:
 		error = copyout((caddr_t)&namelen, uap->anamelen,
 		    sizeof(socklen_t));
+		if (__improbable(error != 0)) {
+			os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
+		}
 	}
 	free_sockaddr(sa);
 
@@ -1761,9 +1772,9 @@ static int
 sendit_x(proc_ref_t p, socket_ref_t so, struct sendmsg_x_args *uap, u_int *retval)
 {
 	int error = 0;
-	uio_t auio = NULL;
+	uio_t __single auio = NULL;
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
-	void_ptr_t src;
+	void *src;
 	MBUFQ_HEAD() pktlist = {};
 	size_t total_pkt_len = 0;
 	u_int pkt_cnt = 0;
@@ -1785,7 +1796,7 @@ sendit_x(proc_ref_t p, socket_ref_t so, struct sendmsg_x_args *uap, u_int *retva
 		goto done;
 	}
 
-	src = (void_ptr_t)uap->msgp;
+	src = __unsafe_forge_bidi_indexable(void *, uap->msgp, uap->cnt);
 
 	/*
 	 * Create a list of packets
@@ -1847,9 +1858,8 @@ sendit_x(proc_ref_t p, socket_ref_t so, struct sendmsg_x_args *uap, u_int *retva
 	top = MBUFQ_FIRST(&pktlist);
 	MBUFQ_INIT(&pktlist);
 	error = sosend_list(so, top, total_pkt_len, &pkt_cnt, flags);
-	if (error != 0) {
+	if (error != 0 && error != ENOBUFS) {
 		os_log(OS_LOG_DEFAULT, "sendit_x: sosend_list error %d\n", error);
-		goto done;
 	}
 done:
 	*retval = pkt_cnt;
@@ -1864,9 +1874,9 @@ done:
 int
 sendmsg_x(proc_ref_t p, struct sendmsg_x_args *uap, user_ssize_t *retval)
 {
-	void_ptr_t src;
+	void *src;
 	int error;
-	uio_t auio = NULL;
+	uio_t __single auio = NULL;
 	socket_ref_t so;
 	u_int uiocnt = 0;
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
@@ -1902,7 +1912,7 @@ sendmsg_x(proc_ref_t p, struct sendmsg_x_args *uap, user_ssize_t *retval)
 		goto done;
 	}
 
-	src = (void_ptr_t)uap->msgp;
+	src = __unsafe_forge_bidi_indexable(void *, uap->msgp, uap->cnt);
 
 	/* We re-use the uio when possible */
 	auio = uio_create(1, 0,
@@ -1981,7 +1991,7 @@ copyout_sa(sockaddr_ref_t fromsa, user_addr_t name, socklen_t *namelen)
 #endif
 		sa_len = fromsa->sa_len;
 		len = MIN((unsigned int)len, sa_len);
-		error = copyout(fromsa, name, (unsigned)len);
+		error = copyout(__SA_UTILS_CONV_TO_BYTES(fromsa), name, (unsigned)len);
 		if (error) {
 			goto out;
 		}
@@ -2290,7 +2300,7 @@ recvfrom_nocancel(proc_ref_t p, struct recvfrom_nocancel_args *uap,
 {
 	struct user_msghdr msg;
 	int error;
-	uio_t auio = NULL;
+	uio_t __single auio = NULL;
 
 	KERNEL_DEBUG(DBG_FNC_RECVFROM | DBG_FUNC_START, 0, 0, 0, 0, 0);
 	AUDIT_ARG(fd, uap->s);
@@ -2359,7 +2369,7 @@ recvmsg_nocancel(proc_ref_t p, struct recvmsg_nocancel_args *uap,
 	int     size_of_msghdr;
 	user_addr_t uiov;
 	int error;
-	uio_t auio = NULL;
+	uio_t __single auio = NULL;
 	struct user_iovec *iovp;
 
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
@@ -2661,9 +2671,9 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 	uio_t auio = NULL;
 	caddr_t src;
 	int flags;
-	struct mbuf *pkt_list = NULL, *m;
-	struct mbuf *addr_list = NULL, *m_addr;
-	struct mbuf *ctl_list = NULL, *control;
+	mbuf_ref_t pkt_list = NULL, m;
+	mbuf_ref_t addr_list = NULL, m_addr;
+	mbuf_ref_t ctl_list = NULL, control;
 	u_int pktcnt;
 
 	KERNEL_DEBUG(DBG_FNC_RECVMSG_X | DBG_FUNC_START, 0, 0, 0, 0, 0);
@@ -2721,7 +2731,7 @@ recvmsg_x(struct proc *p, struct recvmsg_x_args *uap, user_ssize_t *retval)
 		size_of_msghdrx = sizeof(struct user32_msghdr_x);
 		spacetype = UIO_USERSPACE32;
 	}
-	src = (caddr_t)uap->msgp;
+	src = __unsafe_forge_bidi_indexable(caddr_t, uap->msgp, uap->cnt);
 
 	flags = uap->flags;
 
@@ -3163,7 +3173,7 @@ getsockname(__unused proc_ref_t p, struct getsockname_args *uap,
 
 	sa_len = sa->sa_len;
 	len = MIN(len, sa_len);
-	error = copyout((caddr_t)sa, uap->asa, len);
+	error = copyout(__SA_UTILS_CONV_TO_BYTES(sa), uap->asa, len);
 	if (error) {
 		goto bad;
 	}
@@ -3250,7 +3260,7 @@ getpeername(__unused proc_ref_t p, struct getpeername_args *uap,
 	}
 	sa_len = sa->sa_len;
 	len = MIN(len, sa_len);
-	error = copyout(sa, uap->asa, len);
+	error = copyout(__SA_UTILS_CONV_TO_BYTES(sa), uap->asa, len);
 	if (error) {
 		goto bad;
 	}
@@ -3345,7 +3355,7 @@ static int
 getsockaddr(struct socket *so, sockaddr_ref_ref_t namp, user_addr_t uaddr,
     size_t len, boolean_t translate_unspec)
 {
-	sockaddr_ref_t  sa;
+	struct sockaddr *sa;
 	int error;
 
 	if (len > SOCK_MAXADDRLEN) {
@@ -3356,7 +3366,7 @@ getsockaddr(struct socket *so, sockaddr_ref_ref_t namp, user_addr_t uaddr,
 		return EINVAL;
 	}
 
-	sa = SA(alloc_sockaddr(len, Z_WAITOK | Z_NOFAIL));
+	sa = alloc_sockaddr(len, Z_WAITOK | Z_NOFAIL);
 
 	error = copyin(uaddr, (caddr_t)sa, len);
 	if (error) {
@@ -3401,7 +3411,7 @@ getsockaddr_s(struct socket *so, sockaddr_storage_ref_t ss,
 	}
 
 	bzero(ss, sizeof(*ss));
-	error = copyin(uaddr, (caddr_t)ss, len);
+	error = copyin(uaddr, __SA_UTILS_CONV_TO_BYTES(ss), len);
 	if (error == 0) {
 		/*
 		 * Force sa_family to AF_INET on AF_INET sockets to handle
@@ -3720,6 +3730,7 @@ sendfile(proc_ref_t p, struct sendfile_args *uap, __unused int *retval)
 	size_t sizeof_hdtr;
 	off_t file_size;
 	struct vfs_context context = *vfs_context_current();
+	bool got_vnode_ref = false;
 
 	const bool is_p_64bit_process = IS_64BIT_PROCESS(p);
 
@@ -3736,6 +3747,11 @@ sendfile(proc_ref_t p, struct sendfile_args *uap, __unused int *retval)
 	if ((error = fp_getfvp(p, uap->fd, &fp, &vp))) {
 		goto done;
 	}
+	if ((error = vnode_getwithref(vp))) {
+		goto done;
+	}
+	got_vnode_ref = true;
+
 	if ((fp->f_flag & FREAD) == 0) {
 		error = EBADF;
 		goto done1;
@@ -4097,6 +4113,9 @@ done2:
 done1:
 	file_drop(uap->fd);
 done:
+	if (got_vnode_ref) {
+		vnode_put(vp);
+	}
 	if (uap->nbytes != USER_ADDR_NULL) {
 		/* XXX this appears bogus for some early failure conditions */
 		copyout(&sbytes, uap->nbytes, sizeof(off_t));

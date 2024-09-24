@@ -139,6 +139,20 @@ extern int PAGE_SHIFT_CONST;
 #define MACH_VM_MAX_ADDRESS_RAW 0x0000000FC0000000ULL
 #endif
 
+/*
+ * `MACH_VM_MAX_ADDRESS` is exported to user space, but we don't want this
+ * larger value for `MACH_VM_MAX_ADDRESS` to be exposed outside the kernel.
+ */
+#if XNU_KERNEL_PRIVATE
+#if defined(XNU_PLATFORM_iPhoneOS) && EXTENDED_USER_VA_SUPPORT
+#undef MACH_VM_MAX_ADDRESS_RAW
+#define MACH_VM_MAX_ADDRESS_RAW 0x00007FFFFE000000ULL
+#endif /* defined(XNU_PLATFORM_iPhoneOS) && EXTENDED_USER_VA_SUPPORT */
+/* threshold for allocations to be placed in the large file range */
+#define VM_LARGE_FILE_THRESHOLD (1ULL << 30)
+#define MACH_VM_JUMBO_ADDRESS ((mach_vm_offset_t) 0x0000000FC0000000ULL)
+#endif /* KERNEL_PRIVATE */
+
 #define MACH_VM_MIN_ADDRESS     ((mach_vm_offset_t) MACH_VM_MIN_ADDRESS_RAW)
 #define MACH_VM_MAX_ADDRESS     ((mach_vm_offset_t) MACH_VM_MAX_ADDRESS_RAW)
 
@@ -155,6 +169,8 @@ extern int PAGE_SHIFT_CONST;
 #define VM_MAP_MAX_ADDRESS      VM_MAX_ADDRESS
 
 #ifdef  KERNEL
+
+#include <vm/vm_memtag.h>
 
 #if defined (__arm__)
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31

@@ -41,7 +41,7 @@
 #include <stdio.h>
 #include <string.h>
 
-T_DECL(posix_so_linger, "POSIX SO_LINGER")
+T_DECL(posix_so_linger, "POSIX SO_LINGER", T_META_TAG_VM_PREFERRED)
 {
 	T_LOG("POSIX SO_LINGER 0x%x", SO_LINGER);
 
@@ -68,7 +68,7 @@ T_DECL(posix_so_linger, "POSIX SO_LINGER")
 	    set_l.l_linger, get_l.l_linger);
 }
 
-T_DECL(posix_so_linger_negative, "POSIX SO_LINGER negative")
+T_DECL(posix_so_linger_negative, "POSIX SO_LINGER negative", T_META_TAG_VM_PREFERRED)
 {
 	T_LOG("POSIX SO_LINGER 0x%x", SO_LINGER);
 

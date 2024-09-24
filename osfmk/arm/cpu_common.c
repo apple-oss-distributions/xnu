@@ -49,7 +49,7 @@
 #include <mach/processor_info.h>
 #include <machine/atomic.h>
 #include <machine/config.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <pexpert/arm/protos.h>
 #include <pexpert/device_tree.h>
@@ -65,6 +65,7 @@ cpu_data_entry_t CpuDataEntries[MAX_CPUS];
 
 static LCK_GRP_DECLARE(cpu_lck_grp, "cpu_lck_grp");
 static LCK_RW_DECLARE(cpu_state_lock, &cpu_lck_grp);
+static LCK_MTX_DECLARE(cpu_xcall_mtx, &cpu_lck_grp);
 
 unsigned int    real_ncpus = 1;
 boolean_t       idle_enable = FALSE;
@@ -258,18 +259,18 @@ cpu_broadcast_xcall_internal(unsigned int signal,
 	int             max_cpu = ml_get_max_cpu_number() + 1;
 
 	//yes, param ALSO cannot be NULL
+	assert(synch);
 	assert(func);
 	assert(parm);
 
+	lck_mtx_lock(&cpu_xcall_mtx);
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
 
 	failsig = 0;
 
-	if (synch != NULL) {
-		*synch = max_cpu;
-		assert_wait((event_t)synch, THREAD_UNINT);
-	}
+	*synch = max_cpu;
+	assert_wait((event_t)synch, THREAD_UNINT);
 
 	for (cpu = 0; cpu < max_cpu; cpu++) {
 		target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
@@ -290,13 +291,12 @@ cpu_broadcast_xcall_internal(unsigned int signal,
 
 	(void) ml_set_interrupts_enabled(intr);
 
-	if (synch != NULL) {
-		if (os_atomic_sub(synch, (!self_xcall) ? failsig + 1 : failsig, relaxed) == 0) {
-			clear_wait(current_thread(), THREAD_AWAKENED);
-		} else {
-			thread_block(THREAD_CONTINUE_NULL);
-		}
+	if (os_atomic_sub(synch, (!self_xcall) ? failsig + 1 : failsig, relaxed) == 0) {
+		clear_wait(current_thread(), THREAD_AWAKENED);
+	} else {
+		thread_block(THREAD_CONTINUE_NULL);
 	}
+	lck_mtx_unlock(&cpu_xcall_mtx);
 
 	if (!self_xcall) {
 		return max_cpu - failsig - 1;
@@ -347,28 +347,11 @@ cpu_xcall_simple(boolean_t self_xcall,
 }
 
 unsigned int
-cpu_broadcast_immediate_xcall(uint32_t *synch,
-    boolean_t self_xcall,
-    broadcastFunc func,
-    void *parm)
-{
-	return cpu_broadcast_xcall_internal(SIGPxcallImm, synch, self_xcall, func, parm);
-}
-
-unsigned int
 cpu_broadcast_xcall_simple(boolean_t self_xcall,
     broadcastFunc func,
     void *parm)
 {
 	return cpu_xcall_simple(self_xcall, func, parm, false);
-}
-
-unsigned int
-cpu_broadcast_immediate_xcall_simple(boolean_t self_xcall,
-    broadcastFunc func,
-    void *parm)
-{
-	return cpu_xcall_simple(self_xcall, func, parm, true);
 }
 
 static kern_return_t
@@ -407,13 +390,12 @@ cpu_immediate_xcall(int cpu_number, broadcastFunc func, void *param)
 
 static kern_return_t
 cpu_signal_internal(cpu_data_t *target_proc,
-    unsigned int signal,
+    cpu_signal_t signal,
     void *p0,
     void *p1,
     boolean_t defer)
 {
-	unsigned int    Check_SIGPdisabled;
-	int             current_signals;
+	cpu_signal_t    current_signals;
 	bool            swap_success;
 	boolean_t       interruptible = ml_set_interrupts_enabled(FALSE);
 	cpu_data_t      *current_proc = getCpuDatap();
@@ -421,12 +403,6 @@ cpu_signal_internal(cpu_data_t *target_proc,
 	/* We'll mandate that only IPIs meant to kick a core out of idle may ever be deferred. */
 	if (defer) {
 		assert(signal == SIGPnop);
-	}
-
-	if (current_proc != target_proc) {
-		Check_SIGPdisabled = SIGPdisabled;
-	} else {
-		Check_SIGPdisabled = 0;
 	}
 
 	if ((signal == SIGPxcall) || (signal == SIGPxcallImm)) {
@@ -480,7 +456,10 @@ cpu_signal_internal(cpu_data_t *target_proc,
 	} else {
 		do {
 			current_signals = target_proc->cpu_signal;
-			if ((Check_SIGPdisabled != 0) && (current_signals & Check_SIGPdisabled) == SIGPdisabled) {
+			if ((current_signals & SIGPdisabled) == SIGPdisabled) {
+				if (current_proc == target_proc) {
+					panic("cpu_signal of self while signals are disabled");
+				}
 				ml_set_interrupts_enabled(interruptible);
 				return KERN_FAILURE;
 			}
@@ -499,6 +478,10 @@ cpu_signal_internal(cpu_data_t *target_proc,
 	__builtin_arm_dsb(DSB_ISHST);
 
 	if (!(target_proc->cpu_signal & SIGPdisabled)) {
+		/* Make sure cpu_phys_id is actually initialized */
+		assert3u(os_atomic_load(&target_proc->cpu_flags, relaxed) & (InitState | StartedState),
+		    ==, InitState | StartedState);
+
 		if (defer) {
 #if defined(HAS_IPI)
 			if (gFastIPI) {
@@ -528,7 +511,7 @@ cpu_signal_internal(cpu_data_t *target_proc,
 
 kern_return_t
 cpu_signal(cpu_data_t *target_proc,
-    unsigned int signal,
+    cpu_signal_t signal,
     void *p0,
     void *p1)
 {
@@ -576,7 +559,6 @@ void
 cpu_signal_handler_internal(boolean_t disable_signal)
 {
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
-	unsigned int    cpu_signal;
 
 	cpu_data_ptr->cpu_stat.ipi_cnt++;
 	cpu_data_ptr->cpu_stat.ipi_cnt_wake++;
@@ -590,30 +572,27 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	 * the cpu_signal mask, any prerequisite setup is also visible to signal
 	 * handlers.
 	 */
-	cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
+	cpu_signal_t cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
 
 	if ((!(cpu_signal & SIGPdisabled)) && (disable_signal == TRUE)) {
-		os_atomic_or(&cpu_data_ptr->cpu_signal, SIGPdisabled, relaxed);
+		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, SIGPdisabled, acq_rel);
 	} else if ((cpu_signal & SIGPdisabled) && (disable_signal == FALSE)) {
-		os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdisabled, relaxed);
+		/* We must not clear SIGPdisabled unless the CPU is properly started */
+		assert3u(os_atomic_load(&cpu_data_ptr->cpu_flags, relaxed) & (InitState | StartedState),
+		    ==, InitState | StartedState);
+		cpu_signal = os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdisabled, acq_rel);
 	}
 
 	while (cpu_signal & ~SIGPdisabled) {
 		if (cpu_signal & SIGPdebug) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdebug, relaxed);
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdebug, acquire);
 			INTERRUPT_MASKED_DEBUG_START(DebuggerXCall, DBG_INTR_TYPE_IPI);
 			DebuggerXCall(cpu_data_ptr->cpu_int_state);
 			INTERRUPT_MASKED_DEBUG_END();
 		}
-		if (cpu_signal & SIGPdec) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPdec, relaxed);
-			INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_IPI);
-			rtclock_intr(FALSE);
-			INTERRUPT_MASKED_DEBUG_END();
-		}
 #if KPERF
 		if (cpu_signal & SIGPkppet) {
-			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPkppet, relaxed);
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPkppet, acquire);
 			extern void kperf_signal_handler(void);
 			INTERRUPT_MASKED_DEBUG_START(kperf_signal_handler, DBG_INTR_TYPE_IPI);
 			kperf_signal_handler();
@@ -629,6 +608,12 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 			ast_check(current_processor());
 			INTERRUPT_MASKED_DEBUG_END();
 		}
+		if (cpu_signal & SIGPTimerLocal) {
+			os_atomic_andnot(&cpu_data_ptr->cpu_signal, SIGPTimerLocal, acquire);
+			INTERRUPT_MASKED_DEBUG_START(timer_queue_expire_local, DBG_INTR_TYPE_IPI);
+			timer_queue_expire_local(current_processor());
+			INTERRUPT_MASKED_DEBUG_END();
+		}
 
 		cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
 	}
@@ -637,6 +622,7 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 void
 cpu_exit_wait(int cpu_id)
 {
+#if !APPLEVIRTUALPLATFORM /* AVP doesn't provide an equivalent poll-for-powerdown operation */
 #if USE_APPLEARMSMP
 	if (!ml_is_quiescing()) {
 		// For runtime disable (non S2R) the CPU will shut down immediately.
@@ -667,43 +653,40 @@ cpu_exit_wait(int cpu_id)
 #endif
 			}
 		}
-		return;
 	}
 #endif /* USE_APPLEARMSMP */
+#endif /* !APPLEVIRTUALPLATFORM */
 
-	if (cpu_id != master_cpu) {
+	if (cpu_id != master_cpu || (support_bootcpu_shutdown && !ml_is_quiescing())) {
 		// For S2R, ml_arm_sleep() will do some extra polling after setting ARM_CPU_ON_SLEEP_PATH.
 		cpu_data_t      *cpu_data_ptr;
 
+		uint64_t start = mach_absolute_time(), interval;
+		nanoseconds_to_absolutetime(10 * NSEC_PER_SEC, &interval);
+
 		cpu_data_ptr = CpuDataEntries[cpu_id].cpu_data_vaddr;
 		while (!((*(volatile unsigned int*)&cpu_data_ptr->cpu_sleep_token) == ARM_CPU_ON_SLEEP_PATH)) {
+			if (mach_absolute_time() > start + interval) {
+				panic("CPU %d failed to reach ARM_CPU_ON_SLEEP_PATH: %d", cpu_id, cpu_data_ptr->cpu_sleep_token);
+			}
 		}
-		;
 	}
-}
-
-boolean_t
-cpu_can_exit(__unused int cpu)
-{
-	return TRUE;
 }
 
 void
 cpu_machine_init(void)
 {
-	static boolean_t started = FALSE;
-	cpu_data_t      *cpu_data_ptr;
+	cpu_data_t *cpu_data_ptr = getCpuDatap();
 
-	cpu_data_ptr = getCpuDatap();
-	started = ((cpu_data_ptr->cpu_flags & StartedState) == StartedState);
 	if (cpu_data_ptr->cpu_cache_dispatch != NULL) {
 		platform_cache_init();
 	}
 
+	bool started = os_atomic_or_orig(&cpu_data_ptr->cpu_flags, StartedState, relaxed) & StartedState;
+
 	/* Note: this calls IOCPURunPlatformActiveActions when resuming on boot cpu */
 	PE_cpu_machine_init(cpu_data_ptr->cpu_id, !started);
 
-	cpu_data_ptr->cpu_flags |= StartedState;
 	ml_init_interrupt();
 }
 
@@ -827,13 +810,15 @@ cpu_threadtype(void)
 int
 cpu_number(void)
 {
-	return getCpuDatap()->cpu_number;
+	return current_thread()->machine.cpu_number;
 }
 
 vm_offset_t
 current_percpu_base(void)
 {
-	return current_thread()->machine.pcpu_data_base;
+	long base = current_thread()->machine.pcpu_data_base_and_cpu_number;
+
+	return (vm_offset_t)(base >> 16);
 }
 
 vm_offset_t
@@ -848,47 +833,57 @@ ml_get_wake_timebase(void)
 	return wake_abstime;
 }
 
-bool
-ml_cpu_signal_is_enabled(void)
+/*
+ * Called while running on a specific CPU to wait for it to handle the
+ * self-IPI that clears SIGPdisabled.
+ */
+void
+ml_wait_for_cpu_signal_to_enable(void)
 {
-	return !(getCpuDatap()->cpu_signal & SIGPdisabled);
+	assert(ml_get_interrupts_enabled());
+	cpu_data_t *cpu_data_ptr = getCpuDatap();
+
+	hw_wait_while_equals32(__DEVOLATILE(uint32_t*, &cpu_data_ptr->cpu_signal), SIGPdisabled);
+}
+
+void
+assert_ml_cpu_signal_is_enabled(bool enabled)
+{
+	if (enabled) {
+		assert((getCpuDatap()->cpu_signal & SIGPdisabled) == 0);
+	} else {
+		assert3u(getCpuDatap()->cpu_signal, ==, SIGPdisabled);
+	}
 }
 
 bool
-ml_cpu_can_exit(__unused int cpu_id, processor_reason_t reason)
+ml_cpu_can_exit(__unused int cpu_id)
 {
-	/* processor_exit() is always allowed on the S2R path */
-	if (ml_is_quiescing()) {
-		return true;
-	}
-#if HAS_CLUSTER && USE_APPLEARMSMP
-	/*
-	 * Until the feature is known to be stable, guard it with a boot-arg
-	 */
-	extern bool enable_processor_exit;
-	extern bool cluster_power_supported;
-
-	if (!(enable_processor_exit || cluster_power_supported)) {
-		return false;
-	}
-
-	if (!enable_processor_exit) {
-		/* Only cluster_power_supported so disallow any USER reason */
-		if ((reason == REASON_USER) || (reason == REASON_CLPC_USER)) {
-			return false;
-		}
-	}
-
+#if USE_APPLEARMSMP
 	/*
 	 * Cyprus and newer chips can disable individual non-boot CPUs. The
 	 * implementation polls cpuX_IMPL_CPU_STS, which differs on older chips.
+	 * Until the feature is known to be stable, guard it with a boot-arg.
 	 */
-	if (CpuDataEntries[cpu_id].cpu_data_vaddr != &BootCpuData) {
-		return true;
+
+	bool cpu_supported = true;
+
+	if (cpu_id == master_cpu && !support_bootcpu_shutdown) {
+		cpu_supported = false;
 	}
-#else
-	(void)reason;
-#endif
+
+	if (enable_processor_exit) {
+		return cpu_supported;
+	}
+
+#if HAS_CLUSTER
+	if (ml_get_topology_info()->cluster_power_down) {
+		return cpu_supported;
+	}
+#endif /* HAS_CLUSTER */
+
+#endif /* USE_APPLEARMSMP */
+
 	return false;
 }
 

@@ -58,7 +58,7 @@ nx_netif_filter_tx_pkt_enqueue(struct nexus_netif_adapter *nifna,
 
 SK_NO_INLINE_ATTRIBUTE
 static struct __kern_packet *
-get_next_pkt(struct nx_pktq *pktqs, int *curr, int end)
+get_next_pkt(struct nx_pktq pktqs[KPKT_TC_MAX], int *curr, int end)
 {
 	int i;
 	struct __kern_packet *p = NULL;
@@ -80,7 +80,8 @@ nx_netif_filter_tx_processed_pkt_dequeue(struct nexus_netif_adapter *nifna,
 	struct nx_netif *nif = nifna->nifna_netif;
 	int curr, end;
 	uint32_t cnt = 0, bytes = 0;
-	struct __kern_packet *p, *p_head = NULL, **p_tailp = &p_head;
+	struct __kern_packet *p, *__single p_head = NULL;
+	struct __kern_packet **p_tailp = &p_head;
 
 	if (sc == KPKT_SC_UNSPEC) {
 		/*
@@ -121,7 +122,7 @@ nx_netif_filter_tx_processed_pkt_enqueue(struct nexus_netif_adapter *nifna,
 {
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct netif_stats *nifs = &nif->nif_stats;
-	struct __kern_packet *p_tail = NULL;
+	struct __kern_packet *__single p_tail = NULL;
 	uint32_t cnt = 0, bytes = 0, qlen = 0, tc;
 	struct nx_pktq *q;
 
@@ -211,7 +212,7 @@ fix_dequeue_pkt_return_args(struct __kern_packet *p_chain, classq_pkt_t *head,
     classq_pkt_t *tail, uint32_t *cnt, uint32_t *len, errno_t orig_err,
     errno_t *err)
 {
-	struct __kern_packet *p_tail = NULL;
+	struct __kern_packet *__single p_tail = NULL;
 	uint32_t c = 0, l = 0;
 
 	nx_netif_pkt_chain_info(p_chain, &p_tail, &c, &l);

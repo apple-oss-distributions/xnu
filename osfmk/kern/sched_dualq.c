@@ -87,7 +87,7 @@ static void
 sched_dualq_processor_init(processor_t processor);
 
 static thread_t
-sched_dualq_choose_thread(processor_t processor, int priority, ast_t reason);
+sched_dualq_choose_thread(processor_t processor, int priority, __unused thread_t prev, ast_t reason);
 
 static void
 sched_dualq_processor_queue_shutdown(processor_t processor);
@@ -129,7 +129,6 @@ const struct sched_dispatch_table sched_dualq_dispatch = {
 	.processor_bound_count                          = sched_dualq_processor_bound_count,
 	.thread_update_scan                             = sched_dualq_thread_update_scan,
 	.multiple_psets_enabled                         = TRUE,
-	.sched_groups_enabled                           = FALSE,
 	.avoid_processor_enabled                        = TRUE,
 	.thread_avoid_processor                         = sched_dualq_thread_avoid_processor,
 	.processor_balance                              = sched_SMT_balance,
@@ -216,6 +215,7 @@ static thread_t
 sched_dualq_choose_thread(
 	processor_t      processor,
 	int              priority,
+	__unused thread_t         prev_thread,
 	__unused ast_t            reason)
 {
 	run_queue_t main_runq  = dualq_main_runq(processor);

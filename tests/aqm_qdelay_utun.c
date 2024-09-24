@@ -178,7 +178,7 @@ aqmstats_cleanup()
 	free(ifcqs);
 }
 
-T_DECL(aqm_qdelay, "This test checks the min/max/avg AQM queuing delay")
+T_DECL(aqm_qdelay, "This test checks the min/max/avg AQM queuing delay", T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 

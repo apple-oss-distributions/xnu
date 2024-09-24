@@ -218,7 +218,7 @@ exc_handler_identity_protected(
 #if !TARGET_OS_OSX
 T_DECL(corpse_backtrace_os_log_lightweight,
     "Test os_log_fault() fast backtracing with lightweight corpse",
-    T_META_CHECK_LEAKS(false)) /* Test may otherwise time out after T_END */
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED) /* Test may otherwise time out after T_END */
 {
 	mach_port_t exc_port = MACH_PORT_NULL;
 
@@ -232,7 +232,7 @@ T_DECL(corpse_backtrace_os_log_lightweight,
 	T_LOG("Exception port: %d\n", exc_port);
 
 	run_exception_handler_behavior64(exc_port, exc_handler_backtrace, NULL,
-	    EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_BACKTRACE_PREFERRED);
+	    EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_BACKTRACE_PREFERRED, true);
 
 	/* Generate a non-fatal EXC_GUARD */
 	uint64_t payload = 0xDEADBEEF;
@@ -251,7 +251,7 @@ T_DECL(corpse_backtrace_os_log_lightweight,
 
 T_DECL(corpse_backtrace_bad_access,
     "Test os_bad_access fast backtracing with lightweight corpse",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t exc_port = MACH_PORT_NULL;
 
@@ -265,7 +265,7 @@ T_DECL(corpse_backtrace_bad_access,
 	T_LOG("Exception port 2: %d\n", exc_port);
 
 	run_exception_handler_behavior64(exc_port, exc_handler_backtrace, exc_handler_identity_protected,
-	    EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_BACKTRACE_PREFERRED);
+	    EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_BACKTRACE_PREFERRED, true);
 
 	/* Generate an EXC_BAD_ACCESS */
 	*(void *volatile*)0 = 0;
@@ -275,7 +275,7 @@ T_DECL(corpse_backtrace_bad_access,
 
 T_DECL(corpse_backtrace_os_log_lightweight_reportcrash,
     "Test os_log_fault() fast backtracing with lightweight corpse and report crash",
-    T_META_ENABLED(false))
+    T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t rc_port = MACH_PORT_NULL, bootstrap = MACH_PORT_NULL;
 	kern_return_t kr;

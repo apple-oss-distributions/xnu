@@ -244,13 +244,15 @@ struct skmem_region {
 #define skr_seg_size    skr_params.srp_c_seg_size /* configured segment size */
 #define skr_seg_max_cnt skr_params.srp_seg_cnt  /* max # of segments */
 	uint32_t                skr_seg_bmap_len; /* # of skr_seg_bmap */
-	bitmap_t                *skr_seg_bmap;  /* segment bitmaps */
+	size_t                  skr_seg_bmap_size;
+	bitmap_t                *__sized_by(skr_seg_bmap_size) skr_seg_bmap;  /* segment bitmaps */
 	uint32_t                skr_seg_free_cnt; /* # of free segments */
 	uint32_t                skr_hash_initial; /* initial hash table size */
 	uint32_t                skr_hash_limit; /* hash table size limit */
 	uint32_t                skr_hash_shift; /* get to interesting bits */
 	uint32_t                skr_hash_mask;  /* hash table mask */
-	struct sksegment_bkt    *skr_hash_table; /* alloc'd segment htable */
+	size_t                  skr_hash_size;
+	struct sksegment_bkt    *__counted_by(skr_hash_size) skr_hash_table; /* alloc'd segment htable */
 	TAILQ_HEAD(segfreehead, sksegment) skr_seg_free; /* free segment list */
 	RB_HEAD(segtfreehead, sksegment) skr_seg_tfree; /* free tree */
 	uint32_t                skr_seg_waiters; /* # of waiter threads */
@@ -339,8 +341,9 @@ extern struct skmem_region *skmem_region_create(const char *,
 extern void skmem_region_mirror(struct skmem_region *, struct skmem_region *);
 extern void skmem_region_slab_config(struct skmem_region *,
     struct skmem_cache *, bool);
-extern void *skmem_region_alloc(struct skmem_region *, void **,
-    struct sksegment **, struct sksegment **, uint32_t);
+extern void *__sized_by(objsize) skmem_region_alloc(struct skmem_region *,
+    void *__sized_by(*msize) *, struct sksegment **, struct sksegment **,
+    uint32_t, uint32_t objsize, uint32_t *msize);
 extern void skmem_region_free(struct skmem_region *, void *, void *);
 extern void skmem_region_retain(struct skmem_region *);
 extern boolean_t skmem_region_release(struct skmem_region *);

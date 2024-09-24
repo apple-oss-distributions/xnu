@@ -63,7 +63,8 @@ struct sockaddr_in;
 #ifdef BSD_KERNEL_PRIVATE
 extern boolean_t arp_is_entry_probing(route_t p_route);
 extern errno_t arp_lookup_ip(ifnet_t interface,
-    const struct sockaddr_in *ip_dest, struct sockaddr_dl *ll_dest,
+    const struct sockaddr_in *ip_dest,
+    struct sockaddr_dl *__sized_by(ll_dest_len)ll_dest,
     size_t ll_dest_len, route_t hint, mbuf_t packet);
 #define inet_arp_lookup arp_lookup_ip
 #else
@@ -130,9 +131,9 @@ extern void inet_arp_init_ifaddr(ifnet_t interface, ifaddr_t ipaddr);
 #endif /* !BSD_KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
-extern void arp_init(void);
 extern void in_arpdrain(void *);
-extern void arp_llreach_set_reachable(struct ifnet *, void *, unsigned int);
+extern void arp_llreach_set_reachable(struct ifnet *,
+    void *__sized_by(alen) addr, unsigned int alen);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL */
 #endif /* _NETINET_IN_ARP_H_ */

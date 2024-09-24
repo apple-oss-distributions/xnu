@@ -94,6 +94,7 @@ pa_valid(pmap_paddr_t pa)
  * @note This function is only valid for physical addresses that are
  *       kernel-managed.
  */
+
 static inline unsigned int
 pa_index(pmap_paddr_t pa)
 {
@@ -245,13 +246,22 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_LOCKDOWN_RO (1ULL << 56)
 
+#define PVH_FLAG_RETIRED 0
+
+#define PVH_FLAG_TAGS 0
+#define PVH_FLAG_TAGGGED 0
+
+/**
+ * Flags which disallow a new mapping to a page.
+ */
+#define PVH_FLAG_NOMAP_MASK (PVH_FLAG_RETIRED | PVH_FLAG_TAGS)
 
 /**
  * Marking a pv_head_table entry with this flag denotes that this page has
  * been mapped into a non-coherent coprocessor address space and requires a
  * cache flush operation once all mappings have been removed.
  */
-#define PVH_FLAG_FLUSH_NEEDED (1ULL << 54)
+#define PVH_FLAG_FLUSH_NEEDED (1ULL << 52)
 
 /**
  * Marking a pv_head_table entry with any bit in this mask denotes that this page
@@ -261,6 +271,7 @@ pai_to_pvh(unsigned int pai)
  */
 #define PVH_FLAG_LOCKDOWN_MASK (PVH_FLAG_LOCKDOWN_KC | PVH_FLAG_LOCKDOWN_CS | PVH_FLAG_LOCKDOWN_RO)
 
+
 /**
  * These bits need to be set to safely dereference a pv_head_table
  * entry/pointer.
@@ -268,8 +279,10 @@ pai_to_pvh(unsigned int pai)
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
+
 #define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | \
-    PVH_FLAG_HASHED | PVH_FLAG_FLUSH_NEEDED)
+    PVH_FLAG_HASHED | PVH_FLAG_FLUSH_NEEDED | PVH_FLAG_RETIRED)
+
 
 #endif /* defined(__arm64__) */
 
@@ -1759,6 +1772,23 @@ static inline bool
 ppattr_test_modfault(unsigned int pai)
 {
 	return ppattr_test_bits(pai, PP_ATTR_MODFAULT);
+}
+
+static inline boolean_t
+pmap_is_preemptible(void)
+{
+	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT);
+}
+
+/**
+ * This helper function ensures that potentially-long-running batched PPL operations are
+ * called in preemptible context before entering the PPL, so that the PPL call may
+ * periodically exit to allow pending urgent ASTs to be taken.
+ */
+static inline void
+pmap_verify_preemptible(void)
+{
+	assert(pmap_is_preemptible());
 }
 
 /**

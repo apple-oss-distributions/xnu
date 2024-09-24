@@ -113,6 +113,14 @@ _csr_is_recovery_environment(void)
 }
 
 static bool
+_csr_is_restore_environment(void)
+{
+	int notused;
+
+	return PE_parse_boot_argn("-restore", &notused, sizeof(notused));
+}
+
+static bool
 _csr_is_iuou_or_iuos_device(void)
 {
 	DTEntry entry;
@@ -189,10 +197,11 @@ csr_bootstrap(void)
 		csr_config |= CSR_ALLOW_APPLE_INTERNAL;
 	}
 
-	// Unrestrict filesystem access in recovery.
+	// Unrestrict filesystem access in recovery and restore OS.
 	// This is required so the MSU stack can mount/unmount the update volume
 	// during paired recovery.
-	if (_csr_is_recovery_environment()) {
+	if (_csr_is_recovery_environment() ||
+	    _csr_is_restore_environment()) {
 		csr_config |= CSR_ALLOW_UNRESTRICTED_FS;
 	}
 

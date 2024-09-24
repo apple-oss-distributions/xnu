@@ -575,7 +575,8 @@ ctl_deregister(kern_ctl_ref kctlref);
  *               ENOBUFS - The queue is full or there are no free mbufs.
  */
 errno_t
-ctl_enqueuedata(kern_ctl_ref kctlref, u_int32_t unit, void *data, size_t len, u_int32_t flags);
+    ctl_enqueuedata(kern_ctl_ref kctlref, u_int32_t unit, void *__sized_by(len) data,
+    size_t len, u_int32_t flags);
 
 /*!
  *       @function ctl_enqueuembuf
@@ -675,8 +676,8 @@ struct socket_info;
 
 void kctl_fill_socketinfo(struct socket *, struct socket_info *);
 
-u_int32_t ctl_id_by_name(const char *name);
-errno_t ctl_name_by_id(u_int32_t id, char *out_name, size_t maxsize);
+u_int32_t ctl_id_by_name(const char *);
+errno_t ctl_name_by_id(u_int32_t, char *__counted_by(maxsize), size_t maxsize);
 
 extern const u_int32_t ctl_maxunit;
 #endif /* KERNEL_PRIVATE */

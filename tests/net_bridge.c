@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -116,10 +116,11 @@ bridge_mac_nat_entries_copy(u_int * ret_count);
 static void
 bridge_mac_nat_entries_log(struct ifbrmne * entries, u_int count);
 
-#define SETUP_FLAGS_MAC_NAT             0x1
-#define SETUP_FLAGS_CHECKSUM_OFFLOAD    0x2
-#define SETUP_FLAGS_ATTACH_STACK        0x4
-#define SETUP_FLAGS_TRAILERS            0x8
+#define SETUP_FLAGS_MAC_NAT             0x01
+#define SETUP_FLAGS_CHECKSUM_OFFLOAD    0x02
+#define SETUP_FLAGS_ATTACH_STACK        0x04
+#define SETUP_FLAGS_TRAILERS            0x08
+#define SETUP_FLAGS_SHARE_MEMBER_MAC    0x10
 
 #define s6_addr16 __u6_addr.__u6_addr16
 
@@ -238,10 +239,6 @@ ip_addresses_are_equal(uint8_t af, union ifbrip * ip1, union ifbrip * ip2)
 	return equal;
 }
 
-static ether_addr_t ether_broadcast = {
-	{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }
-};
-
 static ether_addr_t ether_external = {
 	{ 0x80, 0x00, 0x00, 0x00, 0x00, 0x01 }
 };
@@ -293,326 +290,6 @@ get_broadcast_ip_address(uint8_t af, union ifbrip * ip)
 		T_FAIL("unrecognized address family %u", af);
 		break;
 	}
-}
-static void
-siocaifaddr(int s, char *ifname, struct in_addr addr)
-{
-	struct ifaliasreq       ifra;
-	char                    ntopbuf_ip[INET_ADDRSTRLEN];
-	char                    ntopbuf_mask[INET_ADDRSTRLEN];
-	int                     ret;
-	struct sockaddr_in *    sin;
-
-	bzero(&ifra, sizeof(ifra));
-	strncpy(ifra.ifra_name, ifname, sizeof(ifra.ifra_name));
-
-	sin = (struct sockaddr_in *)(void *)&ifra.ifra_addr;
-	sin->sin_len = sizeof(*sin);
-	sin->sin_family = AF_INET;
-	sin->sin_addr = addr;
-
-	sin = (struct sockaddr_in *)(void *)&ifra.ifra_mask;
-	sin->sin_len = sizeof(*sin);
-	sin->sin_family = AF_INET;
-	sin->sin_addr.s_addr = htonl(IN_CLASSC_NET);
-
-	ret = ioctl(s, SIOCAIFADDR, &ifra);
-	inet_ntop(AF_INET, &addr, ntopbuf_ip, sizeof(ntopbuf_ip));
-	inet_ntop(AF_INET, &sin->sin_addr, ntopbuf_mask, sizeof(ntopbuf_mask));
-	T_ASSERT_POSIX_SUCCESS(ret, "SIOCAIFADDR %s %s %s",
-	    ifname, ntopbuf_ip, ntopbuf_mask);
-	return;
-}
-
-#if 0
-static void
-in6_len2mask(struct in6_addr * mask, int len)
-{
-	int i;
-
-	bzero(mask, sizeof(*mask));
-	for (i = 0; i < len / 8; i++) {
-		mask->s6_addr[i] = 0xff;
-	}
-	if (len % 8) {
-		mask->s6_addr[i] = (0xff00 >> (len % 8)) & 0xff;
-	}
-}
-
-static void
-siocaifaddr_in6(int s, char *ifname, struct in6_addr *addr)
-{
-	struct in6_aliasreq     ifra;
-	char                    ntopbuf_ip[INET6_ADDRSTRLEN];
-	int                     result;
-	struct sockaddr_in6 *   sin;
-
-	bzero(&ifra, sizeof(ifra));
-	(void) strncpy(ifra.ifra_name, ifname, sizeof(ifra.ifra_name));
-
-	sin = (struct sockaddr_in6 *)(&ifra.ifra_addr);
-	sin->sin6_family = AF_INET6;
-	sin->sin6_len = sizeof(*sin);
-	sin->sin6_addr = *addr;
-#define _PREFIX_LEN_64          64
-	sin = (struct sockaddr_in6 *)&ifra.ifra_prefixmask;
-	sin->sin6_family = AF_INET6;
-	sin->sin6_len = sizeof(*sin);
-	in6_len2mask(&sin->sin6_addr, _PREFIX_LEN_64);
-	ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
-	ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
-
-	result = ioctl(s, SIOCAIFADDR_IN6, &ifra);
-	inet_ntop(AF_INET6, addr, ntopbuf_ip, sizeof(ntopbuf_ip));
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCAIFADDR_IN6 %s %s/64",
-	    ifname, ntopbuf_ip);
-	return;
-}
-#endif
-
-static void
-siocll_start(int s, const char * ifname)
-{
-	struct in6_aliasreq     ifra_in6;
-	int                     result;
-
-	bzero(&ifra_in6, sizeof(ifra_in6));
-	strncpy(ifra_in6.ifra_name, ifname, sizeof(ifra_in6.ifra_name));
-	result = ioctl(s, SIOCLL_START, &ifra_in6);
-	T_QUIET;
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCLL_START %s", ifname);
-	return;
-}
-
-static void
-nd_flags_set(int s, const char * if_name,
-    uint32_t set_flags, uint32_t clear_flags)
-{
-	uint32_t                new_flags;
-	struct in6_ndireq       nd;
-	int                     result;
-
-	bzero(&nd, sizeof(nd));
-	strncpy(nd.ifname, if_name, sizeof(nd.ifname));
-	result = ioctl(s, SIOCGIFINFO_IN6, &nd);
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCGIFINFO_IN6(%s)", if_name);
-	new_flags = nd.ndi.flags;
-	if (set_flags) {
-		new_flags |= set_flags;
-	}
-	if (clear_flags) {
-		new_flags &= ~clear_flags;
-	}
-	if (new_flags != nd.ndi.flags) {
-		nd.ndi.flags = new_flags;
-		result = ioctl(s, SIOCSIFINFO_FLAGS, (caddr_t)&nd);
-		T_ASSERT_POSIX_SUCCESS(result,
-		    "SIOCSIFINFO_FLAGS(%s) 0x%x",
-		    if_name, nd.ndi.flags);
-	}
-	return;
-}
-
-
-static void
-siocprotoattach_in6(int s, const char * name)
-{
-	struct in6_aliasreq ifra;
-	int                 result;
-
-	bzero(&ifra, sizeof(ifra));
-	strncpy(ifra.ifra_name, name, sizeof(ifra.ifra_name));
-	result = ioctl(s, SIOCPROTOATTACH_IN6, &ifra);
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCPROTOATTACH_IN6(%s)", name);
-	return;
-}
-
-
-static void
-start_ipv6(int s, const char * ifname)
-{
-	/* attach IPv6 */
-	siocprotoattach_in6(s, ifname);
-
-	/* disable DAD to avoid 1 second delay (rdar://problem/73270401) */
-	nd_flags_set(s, ifname, 0, ND6_IFF_DAD);
-
-	/* start IPv6LL */
-	siocll_start(s, ifname);
-
-	return;
-}
-
-/*
- * Stolen/modified from IPMonitor/ip_plugin.c
- */
-/*
- * Define: ROUTE_MSG_ADDRS_SPACE
- * Purpose:
- *   Since sizeof(sockaddr_dl) > sizeof(sockaddr_in), we need space for
- *   3 sockaddr_in's and 2 sockaddr_dl's, but pad it just in case
- *   someone changes the code and doesn't think to modify this.
- */
-#define ROUTE_MSG_ADDRS_SPACE   (3 * sizeof(struct sockaddr_in) \
-	                         + 2 * sizeof(struct sockaddr_dl) \
-	                         + 128)
-typedef struct {
-	struct rt_msghdr    hdr;
-	char                addrs[ROUTE_MSG_ADDRS_SPACE];
-} route_msg;
-
-typedef unsigned short  IFIndex;
-
-typedef enum {
-	kRouteFlagsIsScoped         = 0x0001,
-	kRouteFlagsHasGateway       = 0x0002,
-	kRouteFlagsIsHost           = 0x0004,
-} RouteFlags;
-
-typedef struct {
-	IFIndex         ifindex;
-	RouteFlags      flags;
-	struct in_addr  dest;
-	struct in_addr  mask;
-	struct in_addr  gateway;
-	struct in_addr  ifa;
-} IPv4Route, * IPv4RouteRef;
-
-/*
- * Function: IPv4RouteApply
- * Purpose:
- *   Add or remove the specified route to/from the kernel routing table.
- */
-static int
-IPv4RouteApply(IPv4RouteRef route, uint8_t cmd, int s)
-{
-	size_t          len;
-	int             ret = 0;
-	route_msg       rtmsg;
-	union {
-		struct sockaddr_in *    in_p;
-		struct sockaddr_dl *    dl_p;
-		char *                  ptr;
-	} rtaddr;
-	static int      rtm_seq;
-	static bool     rtm_seq_inited;
-
-	if (!rtm_seq_inited) {
-		rtm_seq_inited = true;
-		rtm_seq = (int)arc4random();
-	}
-	if (route->ifindex == 0) {
-		T_LOG("no interface specified, ignoring %s",
-		    inet_ntoa(route->dest));
-		return ENXIO;
-	}
-	if (s < 0) {
-		T_LOG("invalid routing socket");
-		return EBADF;
-	}
-	memset(&rtmsg, 0, sizeof(rtmsg));
-	rtmsg.hdr.rtm_type = cmd;
-	rtmsg.hdr.rtm_version = RTM_VERSION;
-	rtmsg.hdr.rtm_seq = rtm_seq++;
-	rtmsg.hdr.rtm_addrs = RTA_DST | RTA_GATEWAY | RTA_IFP;
-	if (route->ifa.s_addr != 0) {
-		rtmsg.hdr.rtm_addrs |= RTA_IFA;
-	}
-	rtmsg.hdr.rtm_flags = RTF_UP | RTF_STATIC;
-	if ((route->flags & kRouteFlagsIsHost) != 0) {
-		rtmsg.hdr.rtm_flags |= RTF_HOST;
-	} else {
-		rtmsg.hdr.rtm_addrs |= RTA_NETMASK;
-		if ((route->flags & kRouteFlagsHasGateway) == 0) {
-			rtmsg.hdr.rtm_flags |= RTF_CLONING;
-		}
-	}
-	if ((route->flags & kRouteFlagsHasGateway) != 0) {
-		rtmsg.hdr.rtm_flags |= RTF_GATEWAY;
-	}
-	if ((route->flags & kRouteFlagsIsScoped) != 0) {
-		rtmsg.hdr.rtm_index = route->ifindex;
-		rtmsg.hdr.rtm_flags |= RTF_IFSCOPE;
-	}
-
-	rtaddr.ptr = rtmsg.addrs;
-
-	/* dest */
-	rtaddr.in_p->sin_len = sizeof(*rtaddr.in_p);
-	rtaddr.in_p->sin_family = AF_INET;
-	rtaddr.in_p->sin_addr = route->dest;
-	rtaddr.ptr += sizeof(*rtaddr.in_p);
-
-	/* gateway */
-	if ((rtmsg.hdr.rtm_flags & RTF_GATEWAY) != 0) {
-		/* gateway is an IP address */
-		rtaddr.in_p->sin_len = sizeof(*rtaddr.in_p);
-		rtaddr.in_p->sin_family = AF_INET;
-		rtaddr.in_p->sin_addr = route->gateway;
-		rtaddr.ptr += sizeof(*rtaddr.in_p);
-	} else {
-		/* gateway is the interface itself */
-		rtaddr.dl_p->sdl_len = sizeof(*rtaddr.dl_p);
-		rtaddr.dl_p->sdl_family = AF_LINK;
-		rtaddr.dl_p->sdl_index = route->ifindex;
-		rtaddr.ptr += sizeof(*rtaddr.dl_p);
-	}
-
-	/* mask */
-	if ((rtmsg.hdr.rtm_addrs & RTA_NETMASK) != 0) {
-		rtaddr.in_p->sin_len = sizeof(*rtaddr.in_p);
-		rtaddr.in_p->sin_family = AF_INET;
-		rtaddr.in_p->sin_addr = route->mask;
-		rtaddr.ptr += sizeof(*rtaddr.in_p);
-	}
-
-	/* interface */
-	if ((rtmsg.hdr.rtm_addrs & RTA_IFP) != 0) {
-		rtaddr.dl_p->sdl_len = sizeof(*rtaddr.dl_p);
-		rtaddr.dl_p->sdl_family = AF_LINK;
-		rtaddr.dl_p->sdl_index = route->ifindex;
-		rtaddr.ptr += sizeof(*rtaddr.dl_p);
-	}
-	/* interface address */
-	if ((rtmsg.hdr.rtm_addrs & RTA_IFA) != 0) {
-		rtaddr.in_p->sin_len = sizeof(*rtaddr.in_p);
-		rtaddr.in_p->sin_family = AF_INET;
-		rtaddr.in_p->sin_addr = route->ifa;
-		rtaddr.ptr += sizeof(*rtaddr.in_p);
-	}
-
-	/* apply the route */
-	len = (sizeof(rtmsg.hdr)
-	    + (unsigned long)(rtaddr.ptr - (char *)rtmsg.addrs));
-	rtmsg.hdr.rtm_msglen = (u_short)len;
-	if (write(s, &rtmsg, len) == -1) {
-		ret = errno;
-		T_LOG("write routing socket failed, (%d) %s",
-		    errno, strerror(errno));
-	}
-	return ret;
-}
-
-static void
-add_scoped_subnet_route(int s, char * ifname, u_short if_index,
-    struct in_addr ifa)
-{
-	int             error;
-	IPv4Route       route;
-
-	bzero(&route, sizeof(route));
-	route.flags |= kRouteFlagsIsScoped;
-	route.ifa = ifa;
-	route.ifindex = if_index;
-	route.mask.s_addr = htonl(IN_CLASSC_NET);
-	route.dest.s_addr = route.ifa.s_addr & route.mask.s_addr;
-	T_QUIET;
-	T_ASSERT_NE((int)route.ifindex, 0, "if_nametoindex(%s)", ifname);
-	error = IPv4RouteApply(&route, RTM_ADD, s);
-	T_QUIET;
-	T_ASSERT_EQ(error, 0, "add scoped subnet route %s %s/24", ifname,
-	    inet_ntoa(route.dest));
-	return;
 }
 
 #define ETHER_NTOA_BUFSIZE      (ETHER_ADDR_LEN * 3)
@@ -1287,11 +964,11 @@ switch_port_send_arp(switch_port_t port,
 	T_QUIET;
 	T_ASSERT_GT(frame_length, 0, "%s: frame_length %u",
 	    __func__, frame_length);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Port %s -> %s transmitting %u bytes",
 		    port->ifname, port->member_ifname, frame_length);
 	}
-	ethernet_frame_validate(&pkt, frame_length, S_debug);
+	ethernet_frame_validate(&pkt, frame_length, G_debug);
 	n = write(port->fd, &pkt, frame_length);
 	if (n < 0) {
 		T_ASSERT_POSIX_SUCCESS(n, "%s write fd %d failed %ld",
@@ -1329,11 +1006,11 @@ switch_port_send_nd6(switch_port_t port,
 	T_QUIET;
 	T_ASSERT_GT(frame_length, 0, "%s: frame_length %u",
 	    __func__, frame_length);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Port %s -> %s transmitting %u bytes",
 		    port->ifname, port->member_ifname, frame_length);
 	}
-	ethernet_frame_validate(&pkt, frame_length, S_debug);
+	ethernet_frame_validate(&pkt, frame_length, G_debug);
 	n = write(port->fd, &pkt, frame_length);
 	if (n < 0) {
 		T_ASSERT_POSIX_SUCCESS(n, "%s write fd %d failed %ld",
@@ -1379,11 +1056,11 @@ switch_port_send_udp(switch_port_t port,
 	    payload_length);
 	T_QUIET;
 	T_ASSERT_GT(frame_length, 0, NULL);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Port %s transmitting %u bytes",
 		    port->ifname, frame_length);
 	}
-	ethernet_frame_validate(&pkt, frame_length, S_debug);
+	ethernet_frame_validate(&pkt, frame_length, G_debug);
 	n = write(port->fd, &pkt, frame_length);
 	if (n < 0) {
 		T_ASSERT_POSIX_SUCCESS(n, "%s write fd %d failed %ld",
@@ -1462,11 +1139,11 @@ switch_port_receive(switch_port_t port,
 		T_ASSERT_EQ(eh_p->ether_shost[0] & 0x01, 0,
 		    "broadcast/multicast source");
 
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("Port %s [unit %d] [fd %d] Received %u bytes",
 			    port->ifname, port->unit, port->fd, pkt_len);
 		}
-		ethernet_frame_validate(pkt, pkt_len, S_debug);
+		ethernet_frame_validate(pkt, pkt_len, G_debug);
 
 		/* call the validation function */
 		(*validator)(port, eh_p, pkt_len, context);
@@ -1537,7 +1214,7 @@ switch_port_list_dealloc(switch_port_list_t list)
 }
 
 static errno_t
-switch_port_list_add_port(int s, switch_port_list_t port_list, u_int unit,
+switch_port_list_add_port(switch_port_list_t port_list, u_int unit,
     const char * ifname, u_short if_index, const char * member_ifname,
     u_int num_addrs, bool mac_nat, struct in_addr * ip)
 {
@@ -1574,7 +1251,7 @@ switch_port_list_add_port(int s, switch_port_list_t port_list, u_int unit,
 	T_ASSERT_POSIX_SUCCESS(bpf_set_header_complete(fd, 1), NULL);
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(bpf_get_blen(fd, &buf_size), NULL);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("%s [unit %d] [member %s] bpf fd %d bufsize %d\n",
 		    ifname, unit,
 		    member_ifname, fd, buf_size);
@@ -1588,8 +1265,8 @@ switch_port_list_add_port(int s, switch_port_list_t port_list, u_int unit,
 	p->rx_buf_size = buf_size;
 	p->rx_buf = malloc((unsigned)buf_size);
 	p->mac_nat = mac_nat;
-	ifnet_get_lladdr(s, ifname, &p->mac);
-	ifnet_get_lladdr(s, member_ifname, &p->member_mac);
+	ifnet_get_lladdr(ifname, &p->mac);
+	ifnet_get_lladdr(member_ifname, &p->member_mac);
 	p->ip = *ip;
 	p->if_index = if_index;
 	get_ipv6_ll_address(&p->mac, &p->ip6);
@@ -1741,7 +1418,7 @@ switch_port_list_verify_rt_table(switch_port_list_t port_list, bool log)
 		}
 	}
 	for (i = 0, port = port_list->list; i < port_list->count; i++, port++) {
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("%s unit %d [member %s] %u expect %u",
 			    port->ifname, port->unit, port->member_ifname,
 			    port->test_address_count, port->num_addrs);
@@ -1827,7 +1504,7 @@ switch_port_list_verify_mac_nat(switch_port_list_t port_list, bool log)
 			    port->member_ifname,
 			    port->test_address_count);
 		} else {
-			if (S_debug) {
+			if (G_debug) {
 				T_LOG("%s unit %d [member %s] %u expect %u",
 				    port->ifname, port->unit,
 				    port->member_ifname,
@@ -1951,7 +1628,7 @@ unicast_send_all(switch_port_list_t port_list, uint8_t af, switch_port_t port)
 	switch_port_t   scan;
 
 	for (i = 0, scan = port_list->list; i < port_list->count; i++, scan++) {
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("Unicast send on %s", port->ifname);
 		}
 		for (u_int j = 0; j < scan->num_addrs; j++) {
@@ -1985,7 +1662,7 @@ bridge_learning_test_once(switch_port_list_t port_list,
 			/* already populated */
 			continue;
 		}
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("Sending on %s", port->ifname);
 		}
 		for (u_int j = 0; j < port->num_addrs; j++) {
@@ -2023,12 +1700,6 @@ bridge_learning_test_once(switch_port_list_t port_list,
 		}
 	}
 	return;
-}
-
-static inline const char *
-af_get_str(uint8_t af)
-{
-	return (af == AF_INET) ? "IPv4" : "IPv6";
 }
 
 static void
@@ -2153,7 +1824,7 @@ static void
 validate_mac_nat_in(switch_port_t port, const ether_header_t * eh_p,
     u_int pkt_len, __unused void * context)
 {
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("%s received %u bytes", port->member_ifname, pkt_len);
 		ethernet_frame_validate(eh_p, pkt_len, true);
 	}
@@ -2171,7 +1842,7 @@ validate_mac_nat_arp_out(switch_port_t port, const ether_header_t * eh_p,
 	const struct ether_arp *        earp;
 	switch_port_t                   send_port = (switch_port_t)context;
 
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("%s received %u bytes", port->member_ifname, pkt_len);
 		ethernet_frame_validate(eh_p, pkt_len, true);
 	}
@@ -2229,7 +1900,7 @@ validate_mac_nat_arp_in(switch_port_t port, const ether_header_t * eh_p,
 	const struct ether_arp *        earp;
 	switch_port_t                   send_port = (switch_port_t)context;
 
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("%s received %u bytes", port->member_ifname, pkt_len);
 		ethernet_frame_validate(eh_p, pkt_len, true);
 	}
@@ -2305,7 +1976,7 @@ mac_nat_send_arp_response(switch_port_t ext_port, switch_port_t port)
 		struct in_addr  ip_dst;
 
 		get_ipv4_address(port->unit, j, &ip_dst);
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("Generating ARP destined to %s %s",
 			    port->ifname, inet_ntoa(ip_dst));
 		}
@@ -2425,7 +2096,7 @@ mac_nat_test_dhcp(switch_port_list_t port_list, bool link_layer_unicast)
 		}
 		set_ethernet_address(&eaddr, port->unit, 0);
 		payload_len = make_dhcp_payload(&payload, &eaddr);
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("%s: transmit DHCP packet (member %s)",
 			    port->ifname, port->member_ifname);
 		}
@@ -2476,7 +2147,9 @@ validate_mac_nat_nd6(switch_port_t port,
 	}
 	nd_opt = (const struct nd_opt_hdr *)(const void *)(ptr + nd_hdr_size);
 	T_QUIET;
-	T_ASSERT_EQ(nd_opt->nd_opt_type, opt_type, NULL);
+	T_ASSERT_EQ(nd_opt->nd_opt_type, opt_type,
+	    "nd_opt->nd_opt_type 0x%x, opt_type 0x%x",
+	    nd_opt->nd_opt_type, opt_type);
 	T_QUIET;
 	T_ASSERT_EQ(GET_ND_OPT_LEN(nd_opt->nd_opt_len), LINKADDR_OPT_LEN, NULL);
 	linkaddr = (const uint8_t *)(nd_opt + 1);
@@ -2535,9 +2208,10 @@ validate_mac_nat_nd6_out(switch_port_t port, const ether_header_t * eh_p,
 {
 	const struct icmp6_hdr *        icmp6;
 	const struct ip6_hdr *          ip6;
+	unsigned int                    payload_length;
 	switch_port_t                   send_port = (switch_port_t)context;
 
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("%s received %u bytes", port->member_ifname, pkt_len);
 		ethernet_frame_validate(eh_p, pkt_len, true);
 	}
@@ -2574,9 +2248,8 @@ validate_mac_nat_nd6_out(switch_port_t port, const ether_header_t * eh_p,
 		    eh_p->ether_shost[EA_UNIT_INDEX], send_port->unit);
 	}
 	/* validate the icmp6 payload */
-	validate_mac_nat_icmp6_out(port, icmp6,
-	    pkt_len - ETHER_IPV6_LEN,
-	    send_port);
+	payload_length = ntohs(ip6->ip6_plen);
+	validate_mac_nat_icmp6_out(port, icmp6, payload_length, send_port);
 	port->test_count++;
 }
 
@@ -2671,7 +2344,7 @@ mac_nat_send_response(switch_port_t ext_port, uint8_t af, switch_port_t port)
 	T_QUIET;
 	T_ASSERT_TRUE(ext_port->mac_nat, "%s is MAC-NAT interface",
 	    ext_port->member_ifname);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Generating UDP traffic destined to %s", port->ifname);
 	}
 	get_external_ip_address(af, &src_ip);
@@ -2705,7 +2378,7 @@ mac_nat_test_ip_once(switch_port_list_t port_list, uint8_t af, bool retry)
 			/* already populated */
 			continue;
 		}
-		if (S_debug) {
+		if (G_debug) {
 			T_LOG("Sending on %s", port->ifname);
 		}
 		for (u_int j = 0; j < port->num_addrs; j++) {
@@ -2817,50 +2490,15 @@ mac_nat_test_ip(switch_port_list_t port_list, uint8_t af)
 ** interface management
 **/
 
-#if 0
 static int
-ifnet_detach_ip(int s, char * name)
-{
-	int                     err;
-	struct ifreq    ifr;
-
-	bzero(&ifr, sizeof(ifr));
-	strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
-	err = ioctl(s, SIOCPROTODETACH, &ifr);
-	T_QUIET;
-	T_ASSERT_POSIX_SUCCESS(err, "SIOCPROTODETACH %s", ifr.ifr_name);
-	return err;
-}
-#endif
-
-#define BRIDGE_NAME     "bridge"
-#define BRIDGE200       BRIDGE_NAME "200"
-#define FETH_NAME       "feth"
-#define FETH0           FETH_NAME "0"
-
-static int
-bridge_add_member(int s, const char * bridge, const char * member)
+bridge_delete_member(const char * bridge, const char * member)
 {
 	struct ifbreq           req;
 	int                     ret;
 
 	memset(&req, 0, sizeof(req));
 	strlcpy(req.ifbr_ifsname, member, sizeof(req.ifbr_ifsname));
-	ret = siocdrvspec(s, bridge, BRDGADD, &req, sizeof(req), true);
-	T_QUIET;
-	T_ASSERT_POSIX_SUCCESS(ret, "%s %s %s", __func__, bridge, member);
-	return ret;
-}
-
-static int
-bridge_delete_member(int s, const char * bridge, const char * member)
-{
-	struct ifbreq           req;
-	int                     ret;
-
-	memset(&req, 0, sizeof(req));
-	strlcpy(req.ifbr_ifsname, member, sizeof(req.ifbr_ifsname));
-	ret = siocdrvspec(s, bridge, BRDGDEL, &req, sizeof(req), true);
+	ret = siocdrvspec(bridge, BRDGDEL, &req, sizeof(req), true);
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(ret, "%s %s %s", __func__, bridge, member);
 	return ret;
@@ -2868,7 +2506,7 @@ bridge_delete_member(int s, const char * bridge, const char * member)
 
 
 static int
-bridge_member_modify_ifflags(int s, const char * bridge, const char * member,
+bridge_member_modify_ifflags(const char * bridge, const char * member,
     uint32_t flags_to_modify, bool set)
 {
 	uint32_t        flags;
@@ -2878,7 +2516,7 @@ bridge_member_modify_ifflags(int s, const char * bridge, const char * member,
 
 	memset(&req, 0, sizeof(req));
 	strlcpy(req.ifbr_ifsname, member, sizeof(req.ifbr_ifsname));
-	ret = siocdrvspec(s, bridge, BRDGGIFFLGS, &req, sizeof(req), false);
+	ret = siocdrvspec(bridge, BRDGGIFFLGS, &req, sizeof(req), false);
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(ret, "BRDGGIFFLGS %s %s", bridge, member);
 	flags = req.ifbr_ifsflags;
@@ -2894,7 +2532,7 @@ bridge_member_modify_ifflags(int s, const char * bridge, const char * member,
 		req.ifbr_ifsflags &= ~flags_to_modify;
 	}
 	if (need_set) {
-		ret = siocdrvspec(s, bridge, BRDGSIFFLGS,
+		ret = siocdrvspec(bridge, BRDGSIFFLGS,
 		    &req, sizeof(req), true);
 		T_QUIET;
 		T_ASSERT_POSIX_SUCCESS(ret, "BRDGSIFFLGS %s %s 0x%x => 0x%x",
@@ -2905,16 +2543,16 @@ bridge_member_modify_ifflags(int s, const char * bridge, const char * member,
 }
 
 static int
-bridge_member_modify_mac_nat(int s, const char * bridge,
+bridge_member_modify_mac_nat(const char * bridge,
     const char * member, bool enable)
 {
-	return bridge_member_modify_ifflags(s, bridge, member,
+	return bridge_member_modify_ifflags(bridge, member,
 	           IFBIF_MAC_NAT,
 	           enable);
 }
 
 static int
-bridge_member_modify_checksum_offload(int s, const char * bridge,
+bridge_member_modify_checksum_offload(const char * bridge,
     const char * member, bool enable)
 {
 #ifndef IFBIF_CHECKSUM_OFFLOAD
@@ -2923,7 +2561,7 @@ bridge_member_modify_checksum_offload(int s, const char * bridge,
 	                                 * bad checksum
 	                                 */
 #endif
-	return bridge_member_modify_ifflags(s, bridge, member,
+	return bridge_member_modify_ifflags(bridge, member,
 	           IFBIF_CHECKSUM_OFFLOAD,
 	           enable);
 }
@@ -2937,9 +2575,6 @@ bridge_rt_table_copy_common(const char * bridge, u_int * ret_count)
 	char *                  ninbuf;
 	int                     ret;
 	struct ifbareq *        rt_table = NULL;
-	int                     s;
-
-	s = inet_dgram_socket();
 
 	/*
 	 * BRDGRTS should work like other ioctl's where passing in NULL
@@ -2953,7 +2588,7 @@ bridge_rt_table_copy_common(const char * bridge, u_int * ret_count)
 		T_ASSERT_NOTNULL((void *)ninbuf, "realloc %u", len);
 		ifbac.ifbac_len = len;
 		ifbac.ifbac_buf = inbuf = ninbuf;
-		ret = siocdrvspec(s, bridge, BRDGRTS,
+		ret = siocdrvspec(bridge, BRDGRTS,
 		    &ifbac, sizeof(ifbac), false);
 		T_QUIET;
 		T_ASSERT_POSIX_SUCCESS(ret, "%s %s", __func__, bridge);
@@ -2973,9 +2608,6 @@ bridge_rt_table_copy_common(const char * bridge, u_int * ret_count)
 done:
 	if (rt_table == NULL) {
 		*ret_count = 0;
-	}
-	if (s >= 0) {
-		close(s);
 	}
 	return rt_table;
 }
@@ -3011,15 +2643,11 @@ bridge_mac_nat_entries_copy_common(const char * bridge, u_int * ret_count)
 	u_int                   i;
 	struct ifbrmnelist      mnl;
 	struct ifbrmne *        ret_list = NULL;
-	int                     s;
 	char *                  scan;
-
-
-	s = inet_dgram_socket();
 
 	/* find out how many there are */
 	bzero(&mnl, sizeof(mnl));
-	err = siocdrvspec(s, bridge, BRDGGMACNATLIST, &mnl, sizeof(mnl), false);
+	err = siocdrvspec(bridge, BRDGGMACNATLIST, &mnl, sizeof(mnl), false);
 	if (err != 0 && S_cleaning_up) {
 		T_LOG("BRDGGMACNATLIST %s failed %d", bridge, errno);
 		goto done;
@@ -3039,7 +2667,7 @@ bridge_mac_nat_entries_copy_common(const char * bridge, u_int * ret_count)
 	T_QUIET;
 	T_ASSERT_NOTNULL(buf, "mac nat entries buffer");
 	mnl.ifbml_buf = buf;
-	err = siocdrvspec(s, bridge, BRDGGMACNATLIST, &mnl, sizeof(mnl), false);
+	err = siocdrvspec(bridge, BRDGGMACNATLIST, &mnl, sizeof(mnl), false);
 	T_QUIET;
 	T_ASSERT_POSIX_SUCCESS(err, "BRDGGMACNATLIST %s", bridge);
 	count = mnl.ifbml_len / mnl.ifbml_elsize;
@@ -3063,9 +2691,6 @@ bridge_mac_nat_entries_copy_common(const char * bridge, u_int * ret_count)
 		ret_list[i] = *ifbmne;
 	}
 done:
-	if (s >= 0) {
-		close(s);
-	}
 	if (buf != NULL) {
 		free(buf);
 	}
@@ -3213,7 +2838,7 @@ cleanup_common(bool dump_table)
 		}
 		(void)switch_port_list_verify_rt_table(S_port_list, true);
 	}
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("sleeping for 5 seconds\n");
 		sleep(5);
 	}
@@ -3241,45 +2866,39 @@ bridge_setup(char * bridge, u_int n_ports, u_int num_addrs,
 {
 	u_int                   addr_index = 1;
 	bool                    attach_stack;
+	ether_addr_t            bridge_mac;
 	bool                    checksum_offload;
 	errno_t                 err;
 	struct in_addr          ip;
 	switch_port_list_t      list = NULL;
 	bool                    mac_nat;
-	int                     rs = -1;
-	int                     s;
-	int                     s6 = -1;
+	bool                    share_member_mac = false;
 	uint8_t                 trailers;
 
 	attach_stack = (setup_flags & SETUP_FLAGS_ATTACH_STACK) != 0;
 	checksum_offload = (setup_flags & SETUP_FLAGS_CHECKSUM_OFFLOAD) != 0;
 	mac_nat = (setup_flags & SETUP_FLAGS_MAC_NAT) != 0;
 	trailers = (setup_flags & SETUP_FLAGS_TRAILERS) != 0;
+	share_member_mac = (setup_flags & SETUP_FLAGS_SHARE_MEMBER_MAC) != 0;
 
 	S_n_ports = n_ports;
 	T_ATEND(cleanup);
 	T_SETUPBEGIN;
-	s = inet_dgram_socket();
-	if (attach_stack) {
-		rs = routing_socket();
-		s6 = inet6_dgram_socket();
-	}
-	err = ifnet_create(s, bridge);
+	err = ifnet_create(bridge);
 	if (err != 0) {
 		goto done;
 	}
+	ifnet_get_lladdr(bridge, &bridge_mac);
 	bridge_if_index = (u_short)if_nametoindex(bridge);
 	if (attach_stack) {
-		ether_addr_t    bridge_mac;
 		char            ntopbuf_ip[INET6_ADDRSTRLEN];
-
-		ifnet_get_lladdr(s, bridge, &bridge_mac);
 
 		/* bridge gets .1 */
 		get_ipv4_address(0, addr_index, &bridge_ip_addr);
 		addr_index++;
-		siocaifaddr(s, bridge, bridge_ip_addr);
-		start_ipv6(s6, bridge);
+		ifnet_add_ip_address(bridge, bridge_ip_addr,
+		    inet_class_c_subnet_mask);
+		ifnet_start_ipv6(bridge);
 		get_ipv6_ll_address(&bridge_mac, &bridge_ipv6_addr);
 		inet_ntop(AF_INET6, &bridge_ipv6_addr, ntopbuf_ip,
 		    sizeof(ntopbuf_ip));
@@ -3298,30 +2917,35 @@ bridge_setup(char * bridge, u_int n_ports, u_int num_addrs,
 		    FETH_NAME, i);
 		snprintf(member_ifname, sizeof(member_ifname), "%s%d",
 		    FETH_NAME, i + n_ports);
-		err = ifnet_create(s, ifname);
+		err = ifnet_create(ifname);
 		if (err != 0) {
 			goto done;
 		}
-		ifnet_attach_ip(s, ifname);
-		err = ifnet_create(s, member_ifname);
+		ifnet_attach_ip(ifname);
+		err = ifnet_create(member_ifname);
 		if (err != 0) {
 			goto done;
 		}
-		err = fake_set_peer(s, ifname, member_ifname);
-		if (err != 0) {
-			goto done;
+		if (i == 0 && share_member_mac) {
+			err = ifnet_set_lladdr(member_ifname, &bridge_mac);
+			if (err != 0) {
+				goto done;
+			}
 		}
+		fake_set_peer(ifname, member_ifname);
 		if (attach_stack) {
 			/* members get .2, .3, etc. */
 			if_index = (u_short)if_nametoindex(ifname);
 			get_ipv4_address(0, addr_index, &ip);
-			siocaifaddr(s, ifname, ip);
-			add_scoped_subnet_route(rs, ifname, if_index, ip);
+			ifnet_add_ip_address(ifname, ip,
+			    inet_class_c_subnet_mask);
+			route_add_inet_scoped_subnet(ifname, if_index,
+			    ip, inet_class_c_subnet_mask);
 			addr_index++;
-			start_ipv6(s6, ifname);
+			ifnet_start_ipv6(ifname);
 		}
 		/* add the interface's peer to the bridge */
-		err = bridge_add_member(s, bridge, member_ifname);
+		err = bridge_add_member(bridge, member_ifname);
 		if (err != 0) {
 			goto done;
 		}
@@ -3329,14 +2953,14 @@ bridge_setup(char * bridge, u_int n_ports, u_int num_addrs,
 		do_mac_nat = (i == 0 && mac_nat);
 		if (do_mac_nat) {
 			/* enable MAC NAT on unit 0 */
-			err = bridge_member_modify_mac_nat(s, bridge,
+			err = bridge_member_modify_mac_nat(bridge,
 			    member_ifname,
 			    true);
 			if (err != 0) {
 				goto done;
 			}
 		} else if (checksum_offload) {
-			err = bridge_member_modify_checksum_offload(s, bridge,
+			err = bridge_member_modify_checksum_offload(bridge,
 			    member_ifname,
 			    true);
 			if (err != 0) {
@@ -3344,19 +2968,13 @@ bridge_setup(char * bridge, u_int n_ports, u_int num_addrs,
 			}
 		}
 		/* we'll send/receive on the interface */
-		err = switch_port_list_add_port(s, list, i, ifname, if_index,
+		err = switch_port_list_add_port(list, i, ifname, if_index,
 		    member_ifname, num_addrs, do_mac_nat, &ip);
 		if (err != 0) {
 			goto done;
 		}
 	}
 done:
-	if (s >= 0) {
-		close(s);
-	}
-	if (s6 >= 0) {
-		close(s6);
-	}
 	if (err != 0 && list != NULL) {
 		switch_port_list_dealloc(list);
 		list = NULL;
@@ -3368,10 +2986,7 @@ done:
 static void
 bridge_cleanup(const char * bridge, u_int n_ports, bool fail_on_error)
 {
-	int s;
-
-	s = inet_dgram_socket();
-	ifnet_destroy(s, bridge, fail_on_error);
+	ifnet_destroy(bridge, fail_on_error);
 	for (u_int i = 0; i < n_ports; i++) {
 		char    ifname[IFNAMSIZ];
 		char    member_ifname[IFNAMSIZ];
@@ -3380,11 +2995,8 @@ bridge_cleanup(const char * bridge, u_int n_ports, bool fail_on_error)
 		    FETH_NAME, i);
 		snprintf(member_ifname, sizeof(member_ifname), "%s%d",
 		    FETH_NAME, i + n_ports);
-		ifnet_destroy(s, ifname, fail_on_error);
-		ifnet_destroy(s, member_ifname, fail_on_error);
-	}
-	if (s >= 0) {
-		close(s);
+		ifnet_destroy(ifname, fail_on_error);
+		ifnet_destroy(member_ifname, fail_on_error);
 	}
 	S_n_ports = 0;
 	fake_restore_trailers_fcs();
@@ -3471,7 +3083,7 @@ bridge_test_mac_nat_ipv4(u_int n_ports, u_int num_addrs)
 	/* verify IP broadcast to MAC-NAT interface link layer address */
 	mac_nat_test_dhcp(port_list, true);
 
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Sleeping for 5 seconds");
 		sleep(5);
 	}
@@ -3482,7 +3094,7 @@ bridge_test_mac_nat_ipv4(u_int n_ports, u_int num_addrs)
 }
 
 static void
-bridge_test_mac_nat_ipv6(u_int n_ports, u_int num_addrs)
+bridge_test_mac_nat_ipv6(u_int n_ports, u_int num_addrs, uint8_t flags)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Test uses too much memory");
@@ -3490,8 +3102,8 @@ bridge_test_mac_nat_ipv6(u_int n_ports, u_int num_addrs)
 	switch_port_list_t port_list;
 
 	signal(SIGINT, sigint_handler);
-	port_list = bridge_setup(BRIDGE200, n_ports, num_addrs,
-	    SETUP_FLAGS_MAC_NAT);
+	flags |= SETUP_FLAGS_MAC_NAT;
+	port_list = bridge_setup(BRIDGE200, n_ports, num_addrs, flags);
 	if (port_list == NULL) {
 		T_FAIL("bridge_setup");
 		return;
@@ -3503,7 +3115,7 @@ bridge_test_mac_nat_ipv6(u_int n_ports, u_int num_addrs)
 
 	/* verify that ND6 packet gets translated when necessary */
 	mac_nat_test_nd6_out(port_list);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Sleeping for 5 seconds");
 		sleep(5);
 	}
@@ -3545,7 +3157,7 @@ system_cmd(const char *cmd, bool fail_on_error)
 static bool
 executable_is_present(const char * path)
 {
-	struct stat statb = {};
+	struct stat statb = { 0 };
 
 	return stat(path, &statb) == 0 && (statb.st_mode & S_IXUSR) != 0;
 }
@@ -3554,13 +3166,12 @@ static void
 cleanup_pf(void)
 {
 	struct ifbrparam param;
-	int s = inet_dgram_socket();
 
 	system_cmd("pfctl -d", false);
 	system_cmd("pfctl -F all", false);
 
 	param.ifbrp_filter = 0;
-	siocdrvspec(s, BRIDGE200, BRDGSFILT,
+	siocdrvspec(BRIDGE200, BRDGSFILT,
 	    &param, sizeof(param), true);
 	return;
 }
@@ -3568,7 +3179,6 @@ cleanup_pf(void)
 static void
 block_all_traffic(bool input, const char* infname1, const char* infname2)
 {
-	int s = inet_dgram_socket();
 	int ret;
 	struct ifbrparam param;
 	char command[512];
@@ -3578,7 +3188,7 @@ block_all_traffic(bool input, const char* infname1, const char* infname2)
 	    dir, infname1, dir, infname2);
 	/* enable block all filter */
 	param.ifbrp_filter = IFBF_FILT_MEMBER | IFBF_FILT_ONLYIP;
-	ret = siocdrvspec(s, BRIDGE200, BRDGSFILT,
+	ret = siocdrvspec(BRIDGE200, BRDGSFILT,
 	    &param, sizeof(param), true);
 	T_ASSERT_POSIX_SUCCESS(ret,
 	    "SIOCDRVSPEC(BRDGSFILT %s, 0x%x)",
@@ -3643,7 +3253,7 @@ filter_test(uint8_t af)
 				block_all_traffic(input, ifnames[0], ifnames[1]);
 			}
 			for (i = 0, port = port_list->list; i < port_list->count; i++, port++) {
-				if (S_debug) {
+				if (G_debug) {
 					T_LOG("Sending on %s", port->ifname);
 				}
 				for (u_int j = 0; j < port->num_addrs; j++) {
@@ -3716,55 +3326,6 @@ filter_test(uint8_t af)
  * Bridge checksum offload tests
  */
 
-static const char *
-ipproto_get_str(uint8_t proto)
-{
-	const char * str;
-
-	switch (proto) {
-	case IPPROTO_UDP:
-		str = "UDP";
-		break;
-	case IPPROTO_TCP:
-		str = "TCP";
-		break;
-	default:
-		str = "<?>";
-		break;
-	}
-	return str;
-}
-
-static void
-test_traffic(uint8_t af, inet_address_t server,
-    const char * server_ifname, int server_if_index,
-    const char * client_ifname, int client_if_index)
-{
-	inet_endpoint   endpoint;
-	/* do TCP first because TCP is reliable and will populate ND cache */
-	uint8_t         protos[] = { IPPROTO_TCP, IPPROTO_UDP, 0 };
-
-	bzero(&endpoint, sizeof(endpoint));
-	endpoint.af = af;
-	endpoint.addr = *server;
-	endpoint.port = 1;
-	for (uint8_t * proto = protos; *proto != 0; proto++) {
-		bool    success;
-
-		T_LOG("%s: %s %s server %s client %s",
-		    __func__, af_get_str(af),
-		    ipproto_get_str(*proto),
-		    server_ifname, client_ifname);
-		endpoint.proto = *proto;
-		success = inet_transfer_local(&endpoint, server_if_index,
-		    client_if_index);
-		T_ASSERT_TRUE(success,
-		    "inet_transfer_local(): %s",
-		    inet_transfer_error_string());
-	}
-	return;
-}
-
 static void
 test_traffic_for_af(switch_port_list_t ports, uint8_t af)
 {
@@ -3784,7 +3345,7 @@ test_traffic_for_af(switch_port_list_t ports, uint8_t af)
 		server.v6 = bridge_ipv6_addr;
 	}
 	for (i = 0, port = ports->list; i < ports->count; i++, port++) {
-		test_traffic(af, &server, server_name,
+		inet_test_traffic(af, &server, server_name,
 		    server_if_index, port->ifname, port->if_index);
 	}
 
@@ -3799,13 +3360,13 @@ test_traffic_for_af(switch_port_list_t ports, uint8_t af)
 		server.v6 = server_port->ip6;
 	}
 	for (i = 1, port = ports->list + 1; i < ports->count; i++, port++) {
-		test_traffic(af, &server, server_name,
+		inet_test_traffic(af, &server, server_name,
 		    server_if_index, port->ifname, port->if_index);
 	}
 }
 
 static void
-bridge_test_checksum_offload(u_int n_ports, uint8_t setup_flags)
+bridge_test_transfer(u_int n_ports, uint8_t setup_flags)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Test uses too much memory");
@@ -3814,7 +3375,6 @@ bridge_test_checksum_offload(u_int n_ports, uint8_t setup_flags)
 
 	signal(SIGINT, sigint_handler);
 	port_list = bridge_setup(BRIDGE200, n_ports, 0,
-	    SETUP_FLAGS_CHECKSUM_OFFLOAD |
 	    SETUP_FLAGS_ATTACH_STACK | setup_flags);
 	if (port_list == NULL) {
 		T_FAIL("bridge_setup");
@@ -3822,7 +3382,7 @@ bridge_test_checksum_offload(u_int n_ports, uint8_t setup_flags)
 	}
 	test_traffic_for_af(port_list, AF_INET);
 	test_traffic_for_af(port_list, AF_INET6);
-	if (S_debug) {
+	if (G_debug) {
 		T_LOG("Sleeping for 5 seconds");
 		sleep(5);
 	}
@@ -3832,17 +3392,12 @@ bridge_test_checksum_offload(u_int n_ports, uint8_t setup_flags)
 #endif /* TARGET_OS_BRIDGE */
 }
 
-
 static void
 lro_test_cleanup(void)
 {
-	int             s;
-
-	s = inet_dgram_socket();
-	ifnet_destroy(s, BRIDGE200, false);
-	ifnet_destroy(s, FETH0, false);
+	ifnet_destroy(BRIDGE200, false);
+	ifnet_destroy(FETH0, false);
 	fake_set_lro(false);
-	close(s);
 }
 
 static void
@@ -3853,11 +3408,12 @@ sigint_lro_cleanup(__unused int sig)
 }
 
 static void
-verify_lro_capability(int s, const char * if_name, bool expected)
+verify_lro_capability(const char * if_name, bool expected)
 {
 	struct ifreq    ifr;
 	int             result;
 	bool            lro_enabled;
+	int             s = inet_dgram_socket_get();
 
 	memset(&ifr, 0, sizeof(ifr));
 	strlcpy(ifr.ifr_name, if_name, sizeof(ifr.ifr_name));
@@ -3871,121 +3427,140 @@ verify_lro_capability(int s, const char * if_name, bool expected)
 static void
 bridge_test_lro_disable(void)
 {
-	errno_t         err;
-	int             s;
+	int             err;
 
 	signal(SIGINT, sigint_lro_cleanup);
 
 	T_ATEND(lro_test_cleanup);
 
-	s = inet_dgram_socket();
-	err = ifnet_create(s, BRIDGE200);
+	err = ifnet_create(BRIDGE200);
 	T_ASSERT_EQ(err, 0, "ifnet_create(%s)", BRIDGE200);
 	fake_set_lro(true);
-	err = ifnet_create(s, FETH0);
+	err = ifnet_create(FETH0);
 	T_ASSERT_EQ(err, 0, "ifnet_create(%s)", FETH0);
 	fake_set_lro(false);
-	verify_lro_capability(s, FETH0, true);
-	bridge_add_member(s, BRIDGE200, FETH0);
-	verify_lro_capability(s, FETH0, false);
-	bridge_delete_member(s, BRIDGE200, FETH0);
-	verify_lro_capability(s, FETH0, true);
-	close(s);
+	verify_lro_capability(FETH0, true);
+	bridge_add_member(BRIDGE200, FETH0);
+	verify_lro_capability(FETH0, false);
+	bridge_delete_member(BRIDGE200, FETH0);
+	verify_lro_capability(FETH0, true);
 }
 
-T_DECL(if_bridge_bcast,
+T_DECL(net_if_bridge_bcast,
     "bridge broadcast IPv4",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_broadcast_dhost, NULL, &ether_broadcast,
 	    AF_INET, 5, 1);
 }
 
-T_DECL(if_bridge_bcast_many,
+T_DECL(net_if_bridge_bcast_many,
     "bridge broadcast many IPv4",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_broadcast_dhost, NULL, &ether_broadcast,
 	    AF_INET, 5, 20);
 }
 
-T_DECL(if_bridge_unknown,
+T_DECL(net_if_bridge_unknown,
     "bridge unknown host IPv4",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_not_present_dhost, NULL, &ether_external,
 	    AF_INET, 5, 1);
 }
 
-T_DECL(if_bridge_bcast_v6,
+T_DECL(net_if_bridge_bcast_v6,
     "bridge broadcast IPv6",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_broadcast_dhost, NULL, &ether_broadcast,
 	    AF_INET6, 5, 1);
 }
 
-T_DECL(if_bridge_bcast_many_v6,
+T_DECL(net_if_bridge_bcast_many_v6,
     "bridge broadcast many IPv6",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_broadcast_dhost, NULL, &ether_broadcast,
 	    AF_INET6, 5, 20);
 }
 
-T_DECL(if_bridge_unknown_v6,
+T_DECL(net_if_bridge_unknown_v6,
     "bridge unknown host IPv6",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test(validate_not_present_dhost, NULL, &ether_external,
 	    AF_INET6, 5, 1);
 }
 
-T_DECL(if_bridge_mac_nat_ipv4,
+T_DECL(net_if_bridge_mac_nat_ipv4,
     "bridge mac nat ipv4",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test_mac_nat_ipv4(5, 10);
 }
 
-T_DECL(if_bridge_mac_nat_ipv6,
+T_DECL(net_if_bridge_mac_nat_ipv6,
     "bridge mac nat ipv6",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
-	bridge_test_mac_nat_ipv6(5, 10);
+	bridge_test_mac_nat_ipv6(5, 10, 0);
 }
 
-T_DECL(if_bridge_filter_ipv4,
+T_DECL(net_if_bridge_mac_nat_ipv6_trailers,
+    "bridge mac nat ipv6 trailers",
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+{
+	bridge_test_mac_nat_ipv6(5, 10, SETUP_FLAGS_TRAILERS);
+}
+
+T_DECL(net_if_bridge_filter_ipv4,
     "bridge filter ipv4",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	filter_test(AF_INET);
 }
 
-T_DECL(if_bridge_filter_ipv6,
+T_DECL(net_if_bridge_filter_ipv6,
     "bridge filter ipv6",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	filter_test(AF_INET6);
 }
 
-T_DECL(if_bridge_checksum_offload,
+T_DECL(net_if_bridge_checksum_offload,
     "bridge checksum offload",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
-	bridge_test_checksum_offload(2, 0);
+	bridge_test_transfer(2, SETUP_FLAGS_CHECKSUM_OFFLOAD);
 }
 
-T_DECL(if_bridge_checksum_offload_trailers,
+T_DECL(net_if_bridge_checksum_offload_trailers,
     "bridge checksum offload with trailers+fcs",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
-	bridge_test_checksum_offload(2, SETUP_FLAGS_TRAILERS);
+	bridge_test_transfer(2, SETUP_FLAGS_CHECKSUM_OFFLOAD |
+	    SETUP_FLAGS_TRAILERS);
 }
 
-T_DECL(if_bridge_lro_disable,
-    "bridge LRO disable",
+T_DECL(net_if_bridge_transfer,
+    "bridge transfer",
     T_META_ASROOT(true))
+{
+	bridge_test_transfer(2, 0);
+}
+
+T_DECL(net_if_bridge_transfer_share_mac,
+    "bridge transfer share member's MAC",
+    T_META_ASROOT(true))
+{
+	bridge_test_transfer(2, SETUP_FLAGS_SHARE_MEMBER_MAC);
+}
+
+T_DECL(net_if_bridge_lro_disable,
+    "bridge LRO disable",
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	bridge_test_lro_disable();
 }

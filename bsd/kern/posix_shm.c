@@ -82,8 +82,10 @@
 #include <mach/vm_inherit.h>
 #include <mach/kern_return.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_memory_entry_xnu.h>
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
@@ -732,19 +734,18 @@ pshm_access(pshm_info_t *pinfo, int mode, kauth_cred_t cred, __unused proc_t p)
 int
 pshm_mmap(
 	__unused proc_t    p,
-	struct mmap_args   *uap,
-	user_addr_t        *retval,
+	vm_map_offset_t    user_addr,
+	vm_map_size_t      user_size,
+	int                prot,
+	int                flags,
 	struct fileproc    *fp,
-	off_t              pageoff)
+	off_t              file_pos,
+	off_t              pageoff,
+	user_addr_t        *retval)
 {
-	vm_map_offset_t    user_addr = (vm_map_offset_t)uap->addr;
-	vm_map_size_t      user_size = (vm_map_size_t)uap->len;
 	vm_map_offset_t    user_start_addr = 0;
 	vm_map_size_t      map_size, mapped_size, pshm_size;
-	int                prot = uap->prot;
 	int                max_prot = VM_PROT_DEFAULT;
-	int                flags = uap->flags;
-	vm_object_offset_t file_pos = (vm_object_offset_t)uap->pos;
 	vm_object_offset_t map_pos;
 	vm_map_t           user_map;
 	vm_map_kernel_flags_t vmk_flags;
@@ -853,7 +854,7 @@ pshm_mmap(
 
 	mapped_size = 0;
 	/* reserve the entire space first... */
-	kret = vm_map_enter_mem_object(user_map,
+	kret = mach_vm_map_kernel(user_map,
 	    &user_addr,
 	    user_size,
 	    0,
@@ -885,7 +886,7 @@ pshm_mmap(
 			map_size = user_size;
 		}
 
-		kret = vm_map_enter_mem_object(
+		kret = mach_vm_map_kernel(
 			user_map,
 			&user_addr,
 			map_size,

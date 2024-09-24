@@ -149,7 +149,7 @@ struct buf {
 	void *  b_stackbrelse[6];
 	void *  b_stackgetblk[6];
 #endif
-	uint32_t b_lblksize;          /* Block size used to set b_lbkno */
+	off_t   b_lblksize;           /* Block size used to set b_lbkno if not B_CLUSTER*/
 	vnode_t b_vnop_vp;            /* identifies vp on which VNOP has been called */
 };
 
@@ -167,6 +167,7 @@ extern vm_offset_t buf_kernel_addrperm;
 #define b_trans_next b_freelist.tqe_next
 #define b_iostate    b_rcred
 #define b_cliodone   b_wcred
+#define b_clfoffset  b_lblksize
 
 /*
  * These flags are kept in b_lflags...
@@ -278,6 +279,7 @@ extern vm_offset_t buf_kernel_addrperm;
 #define BA_IO_SCHEDULED         0x00008000 /* buf is associated with a mount point that is io scheduled */
 #define BA_EXPEDITED_META_IO    0x00010000 /* metadata I/O which needs a high I/O tier */
 #define BA_WILL_VERIFY          0x00020000 /* Cluster layer will verify data */
+#define BA_ASYNC_VERIFY         0x00040000 /* Allowed to hand off to async threads */
 
 #define GET_BUFATTR_IO_TIER(bap)        ((bap->ba_flags & BA_IO_TIER_MASK) >> BA_IO_TIER_SHIFT)
 #define SET_BUFATTR_IO_TIER(bap, tier)                                          \

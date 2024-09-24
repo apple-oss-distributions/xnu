@@ -45,6 +45,12 @@ int kpc_pc_capture = 1;
 int kpc_pc_capture = 0;
 #endif /* !HAS_CPMU_PC_CAPTURE */
 
+#if DEVELOPMENT || DEBUG
+bool kpc_allows_counting_system = true;
+#else // DEVELOPMENT || DEBUG
+__security_const_late bool kpc_allows_counting_system = false;
+#endif // !(DEVELOPMENT || DEBUG)
+
 #if APPLE_ARM64_ARCH_FAMILY
 
 void kpc_pmi_handler(unsigned int ctr);
@@ -288,14 +294,9 @@ set_modes(uint32_t counter, kpc_config_t cfgword)
 	if (cfgword & CFGWORD_EL0A64EN_MASK) {
 		bits |= PMCR1_EL0_A64_ENABLE_MASK(counter);
 	}
-	if (cfgword & CFGWORD_EL1EN_MASK) {
+	if (kpc_allows_counting_system && (cfgword & CFGWORD_EL1EN_MASK)) {
 		bits |= PMCR1_EL1_A64_ENABLE_MASK(counter);
 	}
-#if !NO_MONITOR
-	if (cfgword & CFGWORD_EL3EN_MASK) {
-		bits |= PMCR1_EL3_A64_ENABLE_MASK(counter);
-	}
-#endif
 
 	/*
 	 * Backwards compatibility: Writing a non-zero configuration word with
@@ -303,7 +304,9 @@ set_modes(uint32_t counter, kpc_config_t cfgword)
 	 * This matches the behavior when the PMCR1 bits weren't exposed.
 	 */
 	if (bits == 0 && cfgword != 0) {
-		bits = PMCR1_EL_ALL_ENABLE_MASK(counter);
+		bits = kpc_allows_counting_system ?
+		    PMCR1_EL_ALL_ENABLE_MASK(counter)
+		    : PMCR1_EL0_A64_ENABLE_MASK(counter);
 	}
 
 	uint64_t pmcr1 = saved_PMCR[1];
@@ -391,6 +394,9 @@ static void
 restore_control_regs(uint32_t classes)
 {
 	SREG_WRITE("PMCR1_EL1", saved_PMCR[1] | 0x30303);
+#if CONFIG_EXCLAVES
+	SREG_WRITE("PMCR1_EL12", saved_PMCR[1] | 0x30303);
+#endif
 	SREG_WRITE("PMESR0_EL1", saved_PMESR[0]);
 	SREG_WRITE("PMESR1_EL1", saved_PMESR[1]);
 
@@ -500,6 +506,7 @@ void
 kpc_arch_init(void)
 {
 	cpu_event_register_callback(kpc_cpu_callback, NULL);
+	kpc_allows_counting_system = PE_i_can_has_debugger(NULL);
 }
 
 boolean_t

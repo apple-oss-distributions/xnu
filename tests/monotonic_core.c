@@ -65,7 +65,7 @@ check_fixed_counts(struct thsc_cpi counts[2])
 }
 
 T_DECL(core_fixed_task, "check that task counting is working",
-    XNU_T_META_SOC_SPECIFIC, T_META_ASROOT(true))
+    XNU_T_META_SOC_SPECIFIC, T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	task_t task = mach_task_self();
 	kern_return_t kr;
@@ -89,7 +89,7 @@ T_DECL(core_fixed_task, "check that task counting is working",
 }
 
 T_DECL(core_fixed_kdebug, "check that the kdebug macros for monotonic work",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	__block bool saw_events = false;
 	ktrace_session_t s;
@@ -167,7 +167,7 @@ spin_task_inspect(__unused void *arg)
 }
 
 T_DECL(core_fixed_stack_leak_race,
-    "ensure no stack data is leaked by TASK_INSPECT_BASIC_COUNTS")
+    "ensure no stack data is leaked by TASK_INSPECT_BASIC_COUNTS", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 
@@ -226,20 +226,20 @@ perf_sysctl_deltas(const char *sysctl_name, const char *stat_name)
 }
 
 T_DECL(perf_core_fixed_cpu, "test the performance of fixed CPU counter access",
-    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_cpu_perf", "fixed_cpu_counters");
 }
 
 T_DECL(perf_core_fixed_thread, "test the performance of fixed thread counter access",
-    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_thread_perf",
 	    "fixed_thread_counters");
 }
 
 T_DECL(perf_core_fixed_task, "test the performance of fixed task counter access",
-    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF)
+    T_META_ASROOT(true), XNU_T_META_SOC_SPECIFIC, T_META_TAG_PERF, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	perf_sysctl_deltas("kern.monotonic.fixed_task_perf", "fixed_task_counters");
 }

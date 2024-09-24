@@ -26,7 +26,7 @@ handler(int sig, siginfo_t *sip, __unused void *uconp)
 }
 
 
-T_DECL(sigchldreturn, "checks that a child process exited with an exitcode returns correctly to parent", T_META_CHECK_LEAKS(false))
+T_DECL(sigchldreturn, "checks that a child process exited with an exitcode returns correctly to parent", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	struct sigaction act;
 	int pid;
@@ -53,7 +53,7 @@ T_DECL(sigchldreturn, "checks that a child process exited with an exitcode retur
 	}
 }
 
-T_DECL(sigabrt_test, "check that child process' exitcode contains signum = SIGABRT", T_META_CHECK_LEAKS(false))
+T_DECL(sigabrt_test, "check that child process' exitcode contains signum = SIGABRT", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	siginfo_t siginfo;
@@ -78,7 +78,7 @@ T_DECL(sigabrt_test, "check that child process' exitcode contains signum = SIGAB
 	}
 }
 
-T_DECL(sigkill_test, "check that child process' exitcode contains signum = SIGKILL", T_META_CHECK_LEAKS(false))
+T_DECL(sigkill_test, "check that child process' exitcode contains signum = SIGKILL", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	siginfo_t siginfo;
@@ -102,7 +102,7 @@ T_DECL(sigkill_test, "check that child process' exitcode contains signum = SIGKI
 	}
 }
 
-T_DECL(sigchild_posix_spawn_fail, "check SIGCHLD is correctly delivered when posix_spawn fails", T_META_CHECK_LEAKS(false))
+T_DECL(sigchild_posix_spawn_fail, "check SIGCHLD is correctly delivered when posix_spawn fails", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	struct sigaction act;
 	int pid;

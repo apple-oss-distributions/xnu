@@ -231,24 +231,20 @@ static const struct page_level_config {
 
 /* Return kernel's VA size from TCR. */
 static inline uint64_t
-sc_va_size(uint64_t tcr)
+sc_va_size_bits(uint64_t tcr)
 {
-	return (tcr >> 16) & 0x3f;
+	return 64 - ((tcr >> TCR_T1SZ_SHIFT) & TCR_TSZ_MASK);
 }
 
 /* Return page size in bits based on TCR. */
 static inline uint64_t
-sc_va_page_size(uint64_t tcr)
+sc_va_page_size_bits(uint64_t tcr)
 {
-	const uint64_t tg1 = (tcr >> 30) & 0x3;
+	const uint64_t tg1 = tcr & (TCR_TG1_GRANULE_MASK << TCR_TG1_GRANULE_SHIFT);
 
-	switch (tg1) {
-	case 1:
-		return 16;
-	case 2:
-		return 4;
-	case 3:
-		return 64;
+	/* Only 16K pages are supported. */
+	if (tg1 == TCR_TG1_GRANULE_16KB) {
+		return 14;
 	}
 
 	return 0;
@@ -262,18 +258,18 @@ static kern_return_t
 sc_boostrap_va(struct dbg_kernel_header *hdrp)
 {
 	/* validate and set VA bit mask */
-	const uint64_t va_size_bits = sc_va_size(hdrp->tcr);
+	const uint64_t va_size_bits = sc_va_size_bits(hdrp->tcr);
 	if (va_size_bits == 0) {
-		kern_coredump_log(NULL, "secure_core: Invalid VA bit size");
+		kern_coredump_log(NULL, "secure_core: Invalid VA bit size: 0x%llx", hdrp->tcr);
 		return KERN_FAILURE;
 	}
 
 	sc_vaddr_mask = (1UL << va_size_bits) - 1;
 
 	/* validate and set page size / levels */
-	const uint64_t page_size_bits = sc_va_page_size(hdrp->tcr);
+	const uint64_t page_size_bits = sc_va_page_size_bits(hdrp->tcr);
 	if (page_size_bits == 0) {
-		kern_coredump_log(NULL, "secure_core: Invalid page size bits");
+		kern_coredump_log(NULL, "secure_core: Invalid page size bits: 0x%llx", hdrp->tcr);
 		return KERN_FAILURE;
 	}
 
@@ -729,16 +725,19 @@ sk_core_init(void)
 
 	if (sc_init_cdbg() != KERN_SUCCESS) {
 		printf("secure_core: not supported\n");
+		sc_dump_mode = SC_MODE_DISABLED;
 		return;
 	}
 
 	if (SPTMArgs->sptm_variant != SPTM_VARIANT_DEVELOPMENT) {
 		printf("secure_core: requires development sptm\n");
+		sc_dump_mode = SC_MODE_DISABLED;
 		return;
 	}
 
 	if (!sk_core_enabled()) {
 		printf("secure_core: no secure kernel present\n");
+		sc_dump_mode = SC_MODE_DISABLED;
 		return;
 	}
 

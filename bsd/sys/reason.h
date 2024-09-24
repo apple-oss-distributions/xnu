@@ -66,6 +66,30 @@ char *exit_reason_get_string_desc(os_reason_t exit_reason);
 /* The blocking allocation is currently not exported to KEXTs */
 int os_reason_alloc_buffer(os_reason_t cur_reason, uint32_t osr_bufsize);
 
+typedef struct _exception_info {
+	int os_reason;
+	int signal;
+	exception_type_t exception_type;
+	mach_exception_data_type_t mx_code;
+	mach_exception_data_type_t mx_subcode;
+	struct kt_info {
+		int kt_subsys;
+		uint32_t kt_error;
+	} kt_info;
+} exception_info_t;
+
+#define PX_FLAGS_NONE           0
+/* think twice about userspace debugging experience before using PX_DEBUG_NO_HONOR */
+#define PX_DEBUG_NO_HONOR       (1 << 0) /* force exit even when debugging */
+#define PX_KTRIAGE              (1 << 1) /* leave a ktriage record */
+#define PX_PSIGNAL              (1 << 2) /* send sig instead of forced exit */
+#define PX_NO_EXCEPTION_UTHREAD (1 << 3) /* do not set bsdthread exception */
+
+int exit_with_mach_exception(struct proc *p, exception_info_t exception, uint32_t flags);
+#if CONFIG_EXCLAVES
+int exit_with_exclave_exception(struct proc *p, exception_info_t exception, uint32_t flags);
+#endif
+
 #else /* XNU_KERNEL_PRIVATE */
 
 typedef void * os_reason_t;
@@ -125,11 +149,14 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 
 
 #define OS_REASON_REALITYKIT 38
+#define OS_REASON_AUDIO      39
+#define OS_REASON_WAKEBOARD  40
+#define OS_REASON_CORERC     41
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_REALITYKIT
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_CORERC
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 

@@ -88,6 +88,14 @@ IOMallocArraySize(vm_size_t hdr_size, vm_size_t elem_size, vm_size_t elem_count)
 	return s;
 }
 
+#define IOKIT_TYPE_IS_COMPATIBLE_PTR(ptr, type) \
+	(__builtin_xnu_types_compatible(os_get_pointee_type(ptr), type) ||   \
+	    __builtin_xnu_types_compatible(os_get_pointee_type(ptr), void))  \
+
+#define IOKIT_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
+	_Static_assert(IOKIT_TYPE_IS_COMPATIBLE_PTR(ptr, type), \
+	    "Pointer type is not compatible with specified type")
+
 /*
  * These are opaque to the user.
  */
@@ -283,7 +291,7 @@ void IOFreePageable(void * address, vm_size_t size);
 #define IOMallocData(size)     __IOMalloc_internal(KHEAP_DATA_BUFFERS, size, Z_WAITOK)
 #define IOMallocZeroData(size) __IOMalloc_internal(KHEAP_DATA_BUFFERS, size, Z_ZERO)
 
-#elif KERNEL_PRIVATE /* XNU_KERNEL_PRIVATE */
+#else /* XNU_KERNEL_PRIVATE */
 
 /*! @function IOMallocData
  *   @abstract Allocates wired memory in the kernel map, from a separate section meant for pure data.
@@ -299,9 +307,7 @@ void * IOMallocData(vm_size_t size) __attribute__((alloc_size(1)));
  *   @result Pointer to the allocated memory, or zero on failure. */
 void * IOMallocZeroData(vm_size_t size) __attribute__((alloc_size(1)));
 
-#endif /* KERNEL_PRIVATE */
-
-#if KERNEL_PRIVATE
+#endif /* !XNU_KERNEL_PRIVATE */
 
 /*! @function IOFreeData
  *   @abstract Frees memory allocated with IOMallocData or IOMallocZeroData.
@@ -309,6 +315,21 @@ void * IOMallocZeroData(vm_size_t size) __attribute__((alloc_size(1)));
  *   @param address Virtual address of the allocated memory. Passing NULL here is acceptable.
  *   @param size Size of the memory allocated. It is acceptable to pass 0 size for a NULL address. */
 void IOFreeData(void * address, vm_size_t size);
+
+#define IONewData(type, count) \
+	((type *)IOMallocData(IOMallocArraySize(0, sizeof(type), count)))
+
+#define IONewZeroData(type, count) \
+	((type *)IOMallocZeroData(IOMallocArraySize(0, sizeof(type), count)))
+
+#define IODeleteData(ptr, type, count) ({ \
+	vm_size_t  __count = (vm_size_t)(count);             \
+	IOKIT_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type);     \
+	IOFreeData(os_ptr_load_and_erase(ptr),               \
+	    IOMallocArraySize(0, sizeof(type), __count));    \
+})
+
+#if KERNEL_PRIVATE
 
 /*
  * Typed memory allocation macros. All may block.
@@ -338,19 +359,6 @@ void IOFreeData(void * address, vm_size_t size);
 	IOFREETYPE_ASSERT_COMPATIBLE_POINTER(elem, type);   \
 	IOFreeTypeImpl(kt_view_var,                         \
 	    os_ptr_load_and_erase(elem));                   \
-})
-
-#define IONewData(type, count) \
-	((type *)IOMallocData(IOMallocArraySize(0, sizeof(type), count)))
-
-#define IONewZeroData(type, count) \
-	((type *)IOMallocZeroData(IOMallocArraySize(0, sizeof(type), count)))
-
-#define IODeleteData(ptr, type, count) ({                \
-	vm_size_t  __count = (vm_size_t)(count);             \
-	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type);    \
-	IOFreeData(os_ptr_load_and_erase(ptr),               \
-	    IOMallocArraySize(0, sizeof(type), __count));    \
 })
 
 /*

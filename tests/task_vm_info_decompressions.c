@@ -147,7 +147,7 @@ join_threads(int nthreads, pthread_t *threads)
 }
 
 T_DECL(task_vm_info_decompressions,
-    "Test multithreaded per-task decompressions counter")
+    "Test multithreaded per-task decompressions counter", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int     err;
 	int     ncpu;

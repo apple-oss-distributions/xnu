@@ -70,13 +70,10 @@ extern kern_return_t cpu_control(
 
 extern void     cpu_sleep(void);
 
-extern kern_return_t cpu_start(
+extern void cpu_start(
 	int                 slot_num);
 
 extern void cpu_exit_wait(
-	int                 slot_num);
-
-extern boolean_t cpu_can_exit(
 	int                 slot_num);
 
 extern kern_return_t cpu_info(

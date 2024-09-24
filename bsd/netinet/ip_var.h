@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -131,9 +131,10 @@ struct ip_moptions {
 	u_char  imo_multicast_loop;     /* 1 => hear sends if a member */
 	u_short imo_num_memberships;    /* no. memberships this socket */
 	u_short imo_max_memberships;    /* max memberships this socket */
+	u_short imo_max_filters;        /* max filters this socket */
 	struct  in_multi **__counted_by(imo_max_memberships) imo_membership;
 	/* group memberships */
-	struct  in_mfilter *__counted_by(imo_max_memberships) imo_mfilters;
+	struct  in_mfilter *__counted_by(imo_max_filters) imo_mfilters;
 	/* source filters */
 	u_int32_t imo_multicast_vif;    /* vif num outgoing multicasts */
 	struct  in_addr imo_multicast_addr; /* ifindex/addr on MULTICAST_IF */
@@ -262,6 +263,9 @@ struct  ipstat {
 	u_int32_t ips_necp_policy_drop; /* NECP policy related drop */
 	u_int32_t ips_rcv_if_weak_match; /* packets whose receive interface that passed the Weak ES address check */
 	u_int32_t ips_rcv_if_no_match;  /* packets whose receive interface did not pass the address check */
+	u_int32_t ips_input_ipf_drop;   /* packets dropped by IP filters */
+	u_int32_t ips_input_no_proto;   /* packets dropped for unsuppported IP protocol */
+	u_int32_t ips_src_addr_not_avail; /* outgoing packets with source address not available */
 };
 
 struct ip_linklocal_stat {
@@ -348,7 +352,7 @@ extern u_short ip_id;                   /* ip packet ctr, for ids */
 extern int ip_defttl;                   /* default IP ttl */
 extern int ipforwarding;                /* ip forwarding */
 extern int rfc6864;
-extern struct protosw *ip_protox[];
+extern struct protosw *ip_protox[IPPROTO_MAX];
 extern struct pr_usrreqs rip_usrreqs;
 
 extern void ip_moptions_init(void);

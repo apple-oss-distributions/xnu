@@ -121,16 +121,10 @@
 #include <ptrauth.h>
 
 #if defined(__i386__) || defined(__x86_64__)
-#define MB_TAG_MBUF_DEFAULT 1
-#else
-#define MB_TAG_MBUF_DEFAULT 0
+#define MB_TAG_MBUF 1
 #endif /* defined(__i386__) || defined(__x86_64__) */
 
 SYSCTL_DECL(_kern_ipc);
-
-unsigned int mb_tag_mbuf = MB_TAG_MBUF_DEFAULT;
-SYSCTL_UINT(_kern_ipc, OID_AUTO, mb_tag_mbuf,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &mb_tag_mbuf, 0, "");
 
 struct m_tag_type_entry {
 	m_tag_kalloc_func_t mt_alloc_func;
@@ -149,7 +143,9 @@ SECURITY_READ_ONLY_LATE(static struct m_tag_type_entry) m_tag_type_table[KERNEL_
 
 static struct m_tag_type_stats m_tag_type_stats[KERNEL_TAG_TYPE_COUNT] = {};
 
+#ifdef MB_TAG_MBUF
 static struct m_tag *m_tag_create_mbuf(uint32_t, uint16_t, uint16_t, int, struct mbuf *);
+#endif /* MB_TAG_MBUF */
 
 /*
  * ensure that [off, off + len) is contiguous on the mbuf chain "m".
@@ -457,20 +453,22 @@ m_tag_verify_cookie(struct m_tag *tag)
 struct m_tag *
 m_tag_create(uint32_t id, uint16_t type, int len, int wait, struct mbuf *buf)
 {
-	if (mb_tag_mbuf != 0) {
-		/*
-		 * Create and return an m_tag, either by re-using space in a previous tag
-		 * or by allocating a new mbuf/cluster
-		 */
-		return m_tag_create_mbuf(id, type, (uint16_t)len, wait, buf);
-	} else {
-		/*
-		 * Each packet tag has its own allocation
-		 */
-		return m_tag_alloc(id, type, (uint16_t)len, wait);
-	}
+#ifdef MB_TAG_MBUF
+	/*
+	 * Create and return an m_tag, either by re-using space in a previous tag
+	 * or by allocating a new mbuf/cluster
+	 */
+	return m_tag_create_mbuf(id, type, (uint16_t)len, wait, buf);
+#else /* MB_TAG_MBUF */
+#pragma unused(buf)
+	/*
+	 * Each packet tag has its own allocation
+	 */
+	return m_tag_alloc(id, type, (uint16_t)len, wait);
+#endif /* MB_TAG_MBUF */
 }
 
+#ifdef MB_TAG_MBUF
 /* Get a packet tag structure along with specified data following. */
 static struct m_tag *
 m_tag_alloc_mbuf(u_int32_t id, u_int16_t type, uint16_t len, int wait)
@@ -606,6 +604,7 @@ m_tag_free_mbuf(struct m_tag *t)
 		m_mclfree((caddr_t)t);
 	}
 }
+#endif /* MB_TAG_MBUF */
 
 /*
  * Allocations for external data are known to not have pointers for
@@ -716,6 +715,7 @@ get_m_tag_type_entry(uint32_t id, uint16_t type, struct m_tag_type_stats **pmtts
 	return mtte;
 }
 
+#ifndef MB_TAG_MBUF
 static struct m_tag *
 m_tag_kalloc(uint32_t id, uint16_t type, uint16_t len, int wait, struct m_tag_type_entry *mtte)
 {
@@ -741,6 +741,7 @@ m_tag_kfree(struct m_tag *tag, struct m_tag_type_entry *mtte)
 {
 	mtte->mt_free_func(tag);
 }
+#endif /* MB_TAG_MBUF */
 
 struct m_tag *
 m_tag_alloc(uint32_t id, uint16_t type, int len, int wait)
@@ -755,21 +756,22 @@ m_tag_alloc(uint32_t id, uint16_t type, int len, int wait)
 		goto done;
 	}
 
-	if (mb_tag_mbuf != 0) {
-		tag = m_tag_alloc_mbuf(id, type, (uint16_t)len, wait);
-	} else {
-		/*
-		 * Using Z_NOWAIT could cause retransmission delays when there aren't
-		 * many other colocated types in the zone that would prime it. Use
-		 * Z_NOPAGEWAIT instead which will only fail to allocate when zalloc
-		 * needs to block on the VM for pages.
-		 */
-		if (wait & Z_NOWAIT) {
-			wait &= ~Z_NOWAIT;
-			wait |= Z_NOPAGEWAIT;
-		}
-		tag = m_tag_kalloc(id, type, (uint16_t)len, wait, mtte);
+#ifdef MB_TAG_MBUF
+	tag = m_tag_alloc_mbuf(id, type, (uint16_t)len, wait);
+#else /* MB_TAG_MBUF */
+	/*
+	 * Using Z_NOWAIT could cause retransmission delays when there aren't
+	 * many other colocated types in the zone that would prime it. Use
+	 * Z_NOPAGEWAIT instead which will only fail to allocate when zalloc
+	 * needs to block on the VM for pages.
+	 */
+	if (wait & Z_NOWAIT) {
+		wait &= ~Z_NOWAIT;
+		wait |= Z_NOPAGEWAIT;
 	}
+	tag = m_tag_kalloc(id, type, (uint16_t)len, wait, mtte);
+#endif /* MB_TAG_MBUF */
+
 done:
 	if (__probable(tag != NULL)) {
 		m_tag_verify_cookie(tag);
@@ -800,11 +802,11 @@ m_tag_free(struct m_tag *tag)
 
 	mtte = get_m_tag_type_entry(tag->m_tag_id, tag->m_tag_type, &mtts);
 
-	if (mb_tag_mbuf != 0) {
-		m_tag_free_mbuf(tag);
-	} else {
-		m_tag_kfree(tag, mtte);
-	}
+#ifdef MB_TAG_MBUF
+	m_tag_free_mbuf(tag);
+#else /* MB_TAG_MBUF */
+	m_tag_kfree(tag, mtte);
+#endif /* MB_TAG_MBUF */
 
 	os_atomic_inc(&mtts->mt_free_count, relaxed);
 }

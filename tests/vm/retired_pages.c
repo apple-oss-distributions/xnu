@@ -19,7 +19,8 @@ T_DECL(retired_pages_test,
     T_META_BOOTARGS_SET(USEBOOTARG),
     T_META_ASROOT(true),
     T_META_CHECK_LEAKS(false),
-    T_META_ENABLED(0))
+    T_META_ENABLED(0),
+    T_META_TAG_VM_PREFERRED)
 {
 	/* TODO: Joe will update/enable test in rdar://70008487 */
 

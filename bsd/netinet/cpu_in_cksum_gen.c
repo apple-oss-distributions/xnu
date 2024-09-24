@@ -99,15 +99,15 @@
 struct _mbuf {
 	struct _mbuf    *_m_next;
 	void            *_m_pad;
-	uint8_t         *_m_data;
+	uint8_t         *__sized_by(_m_len) _m_data;
 	int32_t         _m_len;
 };
 
-extern uint32_t os_cpu_in_cksum(const void *, uint32_t, uint32_t);
+extern uint32_t os_cpu_in_cksum(const void *__sized_by(len), uint32_t len, uint32_t);
 extern uint32_t os_cpu_in_cksum_mbuf(struct _mbuf *, int, int, uint32_t);
 
 uint32_t
-os_cpu_in_cksum(const void *data, uint32_t len, uint32_t initial_sum)
+os_cpu_in_cksum(const void *__sized_by(len) data, uint32_t len, uint32_t initial_sum)
 {
 	/*
 	 * If data is 4-bytes aligned (conditional), length is multiple
@@ -119,7 +119,8 @@ os_cpu_in_cksum(const void *data, uint32_t len, uint32_t initial_sum)
 		IS_P2ALIGNED(data, sizeof(uint32_t)) &&
 #endif /* !__arm64__ && !__x86_64__ */
 		len <= 64 && (len & 3) == 0) {
-		uint8_t *p = __DECONST(uint8_t *, data);
+		uint32_t plen = len;
+		uint8_t *__sized_by(plen) p = __DECONST(uint8_t *, data);
 		uint64_t sum = initial_sum;
 
 		switch (len) {
@@ -143,10 +144,10 @@ os_cpu_in_cksum(const void *data, uint32_t len, uint32_t initial_sum)
 			break;
 
 		default:
-			while (len) {
+			while (plen) {
 				sum += *(uint32_t *)(void *)p;
 				p += 4;
-				len -= 4;
+				plen -= 4;
 			}
 			break;
 		}

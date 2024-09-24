@@ -76,6 +76,7 @@
 
 #ifdef KERNEL
 #include <sys/mbuf.h>
+#include <net/sockaddr_utils.h>
 #endif
 #include <net/bpf.h>
 #ifdef KERNEL
@@ -83,7 +84,7 @@
 extern unsigned int bpf_maxbufsize;
 
 static inline u_int32_t
-get_word_from_buffers(u_char * cp, u_char * np, size_t num_from_cp)
+get_word_from_buffers(u_char *__indexable cp, u_char *__indexable np, size_t num_from_cp)
 {
 	u_int32_t       val;
 
@@ -111,19 +112,20 @@ get_word_from_buffers(u_char * cp, u_char * np, size_t num_from_cp)
 	return val;
 }
 
-static u_char *
-m_hdr_offset(struct mbuf **m_p, void * hdr, size_t hdrlen, bpf_u_int32 * k_p,
+static u_char *__indexable
+m_hdr_offset(struct mbuf **m_p, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 * k_p,
     size_t * len_p)
 {
-	u_char  *cp;
-	bpf_u_int32 k = *k_p;
 	size_t len;
+	u_char *cp;
+	bpf_u_int32 k = *k_p;
 
 	if (k >= hdrlen) {
 		struct mbuf *m = *m_p;
 
 		/* there's no header or the offset we want is past the header */
 		k -= hdrlen;
+
 		len = m->m_len;
 		while (k >= len) {
 			k -= len;
@@ -149,7 +151,7 @@ m_hdr_offset(struct mbuf **m_p, void * hdr, size_t hdrlen, bpf_u_int32 * k_p,
 }
 
 static u_int32_t
-m_xword(struct mbuf *m, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+m_xword(struct mbuf *m, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
 	size_t len;
 	u_char *cp, *np;
@@ -175,7 +177,7 @@ bad:
 }
 
 static uint16_t
-m_xhalf(struct mbuf *m, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+m_xhalf(struct mbuf *m, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
 	size_t len;
 	u_char *cp;
@@ -199,7 +201,7 @@ bad:
 }
 
 static u_int8_t
-m_xbyte(struct mbuf *m, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+m_xbyte(struct mbuf *m, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
 	size_t len;
 	u_char *cp;
@@ -219,26 +221,34 @@ bad:
 
 #include <skywalk/os_skywalk_private.h>
 
-static void *
+static void *__indexable
 buflet_get_address(kern_buflet_t buflet)
 {
 	uint8_t *addr;
+	uint32_t offset;
+	uint32_t limit;
 
-	addr = kern_buflet_get_data_address(buflet);
+	limit = kern_buflet_get_data_limit(buflet);
+	addr = __unsafe_forge_bidi_indexable(uint8_t *,
+	    kern_buflet_get_data_address(buflet),
+	    limit);
 	if (addr == NULL) {
 		return NULL;
 	}
-	return addr + kern_buflet_get_data_offset(buflet);
+	offset = kern_buflet_get_data_offset(buflet);
+	return __unsafe_forge_bidi_indexable(uint8_t *,
+	           addr + offset,
+	           limit - offset);
 }
 
-static u_char *
-p_hdr_offset(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 * k_p,
+static u_char *__indexable
+p_hdr_offset(kern_packet_t p, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 * k_p,
     size_t * len_p, kern_buflet_t * buflet_p)
 {
 	u_char          *cp = NULL;
 	bpf_u_int32     k = *k_p;
 	size_t          len;
-	kern_buflet_t   buflet = NULL;
+	kern_buflet_t __single  buflet = NULL;
 
 	if (k >= hdrlen) {
 		k -= hdrlen;
@@ -269,9 +279,9 @@ p_hdr_offset(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 * k_p,
 }
 
 static u_int32_t
-p_xword(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+p_xword(kern_packet_t p, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
-	kern_buflet_t   buflet = NULL;
+	kern_buflet_t __single buflet = NULL;
 	u_char          *cp;
 	size_t          len = 0;
 	u_char          *np;
@@ -299,9 +309,9 @@ bad:
 }
 
 static uint16_t
-p_xhalf(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+p_xhalf(kern_packet_t p, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
-	kern_buflet_t   buflet = NULL;
+	kern_buflet_t __single buflet = NULL;
 	u_char          *cp;
 	size_t          len = 0;
 	u_char          *np;
@@ -327,9 +337,9 @@ bad:
 }
 
 static u_int8_t
-p_xbyte(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+p_xbyte(kern_packet_t p, void *__sized_by(hdrlen) hdr, size_t hdrlen, bpf_u_int32 k, int *err)
 {
-	kern_buflet_t   buflet = NULL;
+	kern_buflet_t __single buflet = NULL;
 	u_char          *cp;
 	size_t          len = 0;
 
@@ -349,8 +359,8 @@ bad:
 static u_int32_t
 bp_xword(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 {
-	void *  hdr = bp->bpfp_header;
-	size_t  hdrlen = bp->bpfp_header_length;
+	size_t hdrlen = bp->bpfp_header_length;
+	void *hdr = bp->bpfp_header;
 
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
@@ -369,8 +379,8 @@ bp_xword(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 static u_int16_t
 bp_xhalf(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 {
-	void *  hdr = bp->bpfp_header;
-	size_t  hdrlen = bp->bpfp_header_length;
+	size_t hdrlen = bp->bpfp_header_length;
+	void *hdr = bp->bpfp_header;
 
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
@@ -389,8 +399,8 @@ bp_xhalf(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 static u_int8_t
 bp_xbyte(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 {
-	void *  hdr = bp->bpfp_header;
-	size_t  hdrlen = bp->bpfp_header_length;
+	size_t hdrlen = bp->bpfp_header_length;
+	void *hdr = bp->bpfp_header;
 
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
@@ -414,15 +424,19 @@ bp_xbyte(struct bpf_packet *bp, bpf_u_int32 k, int *err)
  * buflen is the amount of data present
  */
 u_int
-bpf_filter(const struct bpf_insn *pc, u_char *p, u_int wirelen, u_int buflen)
+bpf_filter(const struct bpf_insn *__counted_by(pc_len) pc_orig, u_int pc_len,
+    u_char *__sized_by(sizeof(struct bpf_packet)) p, u_int wirelen, u_int buflen)
 {
 	u_int32_t A = 0, X = 0;
 	bpf_u_int32 k;
 	int32_t mem[BPF_MEMWORDS];
+	const struct bpf_insn *pc = pc_orig;
 #ifdef KERNEL
 	int merr;
 	struct bpf_packet * bp = (struct bpf_packet *)(void *)p;
 #endif /* KERNEL */
+	/* Ignore warning without -fbounds-safety. */
+	(void)pc_len;
 
 	bzero(mem, sizeof(mem));
 
@@ -770,7 +784,7 @@ bpf_filter(const struct bpf_insn *pc, u_char *p, u_int wirelen, u_int buflen)
  * Otherwise, a bogus program could easily crash the system.
  */
 int
-bpf_validate(const struct bpf_insn *f, int len)
+bpf_validate(const struct bpf_insn *__counted_by(len) f, int len)
 {
 	u_int i, from;
 	const struct bpf_insn *p;

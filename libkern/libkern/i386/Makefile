@@ -8,11 +8,11 @@ include $(MakeInc_def)
 
 DATAFILES = \
           OSByteOrder.h \
-	  _OSByteOrder.h
+          _OSByteOrder.h
 
 DRIVERKIT_DATAFILES = \
           OSByteOrder.h \
-	  _OSByteOrder.h
+          _OSByteOrder.h
 
 INSTALL_MD_LIST	= ${DATAFILES}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -96,6 +96,7 @@
 #include <net/net_osdep.h>
 #include <net/dlil.h>
 #include <net/net_perf.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -146,7 +147,7 @@ static int sysctl_ip_output_measure_bins SYSCTL_HANDLER_ARGS;
 static int sysctl_ip_output_getperf SYSCTL_HANDLER_ARGS;
 static void ip_out_cksum_stats(int, u_int32_t);
 static struct mbuf *ip_insertoptions(struct mbuf *, struct mbuf *, int *);
-static int ip_optcopy(struct ip *, struct ip *);
+static int ip_optcopy(struct ip *__indexable, struct ip *__indexable);
 static int ip_pcbopts(int, struct mbuf **, struct mbuf *);
 static void imo_trace(struct ip_moptions *, int);
 static void ip_mloopback(struct ifnet *, struct ifnet *, struct mbuf *,
@@ -230,8 +231,9 @@ static unsigned int imo_debug = 1;      /* debugging (enabled) */
 static unsigned int imo_debug;          /* debugging (disabled) */
 #endif /* !DEBUG */
 
-static struct zone *imo_zone;           /* zone for ip_moptions */
-#define IMO_ZONE_NAME           "ip_moptions"   /* zone name */
+ZONE_DECLARE(imo_zone, struct ip_moptions);
+#define IMO_ZONE_NAME  "ip_moptions"   /* zone name */
+zone_t imo_zone = {0};                 /* zone for ip_moptions */
 
 #if PF
 __attribute__((noinline))
@@ -292,23 +294,23 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 {
 	struct ip *ip;
 	struct ifnet *ifp = NULL;               /* not refcnt'd */
-	struct mbuf *m = m0, *prevnxt = NULL, **mppn = &prevnxt;
+	mbuf_ref_t m = m0, prevnxt = NULL, *mppn = &prevnxt;
 	int hlen = sizeof(struct ip);
 	int len = 0, error = 0;
-	struct sockaddr_in *dst = NULL;
-	struct in_ifaddr *ia = NULL, *src_ia = NULL;
+	struct sockaddr_in *__single dst = NULL;
+	struct in_ifaddr *__single ia = NULL, *__single src_ia = NULL;
 	struct in_addr pkt_dst;
-	struct ipf_pktopts *ippo = NULL;
-	ipfilter_t inject_filter_ref = NULL;
-	struct mbuf *packetlist;
+	struct ipf_pktopts *__single ippo = NULL;
+	ipfilter_t inject_filter_ref __single = NULL;
+	mbuf_ref_t packetlist;
 	uint32_t sw_csum, pktcnt = 0, scnt = 0, bytecnt = 0;
 	uint32_t packets_processed = 0;
 	unsigned int ifscope = IFSCOPE_NONE;
 	struct flowadv *adv = NULL;
 	struct timeval start_tv;
 #if IPSEC
-	struct socket *so = NULL;
-	struct secpolicy *sp = NULL;
+	struct socket *__single so = NULL;
+	struct secpolicy *__single sp = NULL;
 #endif /* IPSEC */
 #if NECP
 	necp_kernel_policy_result necp_result = 0;
@@ -316,7 +318,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 	necp_kernel_policy_id necp_matched_policy_id = 0;
 #endif /* NECP */
 #if DUMMYNET
-	struct m_tag *tag;
+	struct m_tag *__single tag;
 	struct ip_out_args saved_ipoa;
 	struct sockaddr_in dst_buf;
 #endif /* DUMMYNET */
@@ -353,7 +355,8 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 	} ipobf = { .raw = 0 };
 
 	int interface_mtu = 0;
-	struct pf_rule *dn_pf_rule = NULL;
+	struct pf_rule *__single dn_pf_rule = NULL;
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 /*
  * Here we check for restrictions when sending frames.
  * N.B.: IPv4 over internal co-processor interfaces is not allowed.
@@ -420,6 +423,7 @@ ipfw_tags_done:
 		    ipoa->ipoa_boundif != IFSCOPE_NONE) {
 			if (ipsec4_getpolicybyinterface(m, IPSEC_DIR_OUTBOUND,
 			    &flags, ipoa, &sp) != 0) {
+				drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 				goto bad;
 			}
 		}
@@ -502,7 +506,7 @@ ipfw_tags_done:
 		pkt_dst = ip->ip_dst;
 		if (ro->ro_rt != NULL) {
 			RT_LOCK_SPIN(ro->ro_rt);
-			ia = (struct in_ifaddr *)ro->ro_rt->rt_ifa;
+			ia = ifatoia(ro->ro_rt->rt_ifa);
 			if (ia) {
 				/* Become a regular mutex */
 				RT_CONVERT_LOCK(ro->ro_rt);
@@ -551,6 +555,7 @@ loopit:
 	 */
 	if (IN_ZERONET(ntohl(pkt_dst.s_addr))) {
 		error = EHOSTUNREACH;
+		drop_reason = DROP_REASON_IP_ZERO_NET;
 		goto bad;
 	}
 
@@ -603,7 +608,9 @@ loopit:
 		    !(flags & (IP_ROUTETOIF | IP_FORWARDING))) {
 			src_ia = ifa_foraddr(ip->ip_src.s_addr);
 			if (src_ia == NULL) {
+				OSAddAtomic(1, &ipstat.ips_src_addr_not_avail);
 				error = EADDRNOTAVAIL;
+				drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
 				goto bad;
 			}
 			ifa_remref(&src_ia->ia_ifa);
@@ -650,6 +657,7 @@ loopit:
 				OSAddAtomic(1, &ipstat.ips_noroute);
 				error = ENETUNREACH;
 				/* XXX IPv6 APN fallback notification?? */
+				drop_reason = DROP_REASON_IP_DST_ADDR_NO_AVAIL;
 				goto bad;
 			}
 		}
@@ -710,6 +718,7 @@ loopit:
 				if (flags & IP_OUTARGS) {
 					ipoa->ipoa_flags |= IPOAF_R_IFDENIED;
 				}
+				drop_reason = DROP_REASON_IP_TO_RESTRICTED_IF;
 				goto bad;
 			}
 
@@ -724,6 +733,8 @@ loopit:
 			if (ia0 == NULL && (!(flags & IP_RAWOUTPUT) ||
 			    ipobf.srcbound) && ifscope != lo_ifp->if_index) {
 				error = EADDRNOTAVAIL;
+				OSAddAtomic(1, &ipstat.ips_src_addr_not_avail);
+				drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
 				goto bad;
 			}
 
@@ -826,6 +837,7 @@ loopit:
 				ifa_remref(ia0);
 				ia0 = NULL;
 			}
+			drop_reason = DROP_REASON_IP_NO_ROUTE;
 			goto bad;
 		}
 
@@ -931,6 +943,7 @@ loopit:
 			if (!(ifp->if_flags & IFF_MULTICAST)) {
 				OSAddAtomic(1, &ipstat.ips_noroute);
 				error = ENETUNREACH;
+				drop_reason = DROP_REASON_IP_IF_CANNOT_MULTICAST;
 				goto bad;
 			}
 		}
@@ -954,6 +967,7 @@ loopit:
 			lck_rw_done(&in_ifaddr_rwlock);
 			if (ip->ip_src.s_addr == INADDR_ANY) {
 				error = ENETUNREACH;
+				drop_reason = DROP_REASON_IP_SRC_ADDR_ANY;
 				goto bad;
 			}
 		}
@@ -1014,6 +1028,7 @@ loopit:
 						if (result != 0) {
 							ipf_unref();
 							INM_REMREF(inm);
+							drop_reason = DROP_REASON_IP_FILTER_DROP;
 							goto bad;
 						}
 					}
@@ -1066,14 +1081,17 @@ loopit:
 	if (ipobf.isbroadcast) {
 		if (!(ifp->if_flags & IFF_BROADCAST)) {
 			error = EADDRNOTAVAIL;
+			drop_reason = DROP_REASON_IP_IF_CANNOT_BROADCAST;
 			goto bad;
 		}
 		if (!(flags & IP_ALLOWBROADCAST)) {
 			error = EACCES;
+			drop_reason = DROP_REASON_IP_BROADCAST_NOT_ALLOWED;
 			goto bad;
 		}
 		/* don't allow broadcast messages to be fragmented */
 		if ((u_short)ip->ip_len > ifp->if_mtu) {
+			drop_reason = DROP_REASON_IP_BROADCAST_TOO_BIG;
 			error = EMSGSIZE;
 			goto bad;
 		}
@@ -1149,6 +1167,7 @@ sendit:
 		 */
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
 			error = EMSGSIZE;
+			drop_reason = DROP_REASON_IP_FILTER_TSO;
 			goto bad;
 		}
 
@@ -1176,6 +1195,7 @@ sendit:
 				}
 				if (result != 0) {
 					ipf_unref();
+					drop_reason = DROP_REASON_IP_FILTER_DROP;
 					goto bad;
 				}
 			}
@@ -1204,14 +1224,20 @@ sendit:
 			if (!necp_packet_is_allowed_over_interface(m, ifp)) {
 				error = EHOSTUNREACH;
 				OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+				drop_reason = DROP_REASON_IP_NECP_POLICY_NO_ALLOW_IF;
 				goto bad;
 			}
 			goto skip_ipsec;
 		case NECP_KERNEL_POLICY_RESULT_DROP:
+			error = EHOSTUNREACH;
+			OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+			drop_reason = DROP_REASON_IP_NECP_POLICY_DROP;
+			goto bad;
 		case NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT:
 			/* Flow divert packets should be blocked at the IP layer */
 			error = EHOSTUNREACH;
 			OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+			drop_reason = DROP_REASON_IP_NECP_POLICY_SOCKET_DIVERT;
 			goto bad;
 		case NECP_KERNEL_POLICY_RESULT_IP_TUNNEL: {
 			/* Verify that the packet is being routed to the tunnel */
@@ -1221,6 +1247,7 @@ sendit:
 				if (!necp_packet_is_allowed_over_interface(m, ifp)) {
 					error = EHOSTUNREACH;
 					OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+					drop_reason = DROP_REASON_IP_NECP_POLICY_TUN_NO_ALLOW_IF;
 					goto bad;
 				}
 				goto skip_ipsec;
@@ -1230,6 +1257,7 @@ sendit:
 					if (!necp_packet_is_allowed_over_interface(m, policy_ifp)) {
 						error = EHOSTUNREACH;
 						OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+						drop_reason = DROP_REASON_IP_NECP_POLICY_TUN_REBIND_NO_ALLOW_IF;
 						goto bad;
 					}
 
@@ -1258,6 +1286,7 @@ sendit:
 				} else {
 					error = ENETUNREACH;
 					OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+					drop_reason = DROP_REASON_IP_NECP_POLICY_TUN_NO_REBIND_IF;
 					goto bad;
 				}
 			}
@@ -1270,6 +1299,7 @@ sendit:
 	if (!necp_packet_is_allowed_over_interface(m, ifp)) {
 		error = EHOSTUNREACH;
 		OSAddAtomic(1, &ipstat.ips_necp_policy_drop);
+		drop_reason = DROP_REASON_IP_NECP_NO_ALLOW_IF;
 		goto bad;
 	}
 #endif /* NECP */
@@ -1294,6 +1324,7 @@ sendit:
 			IPSEC_STAT_INCREMENT(ipsecstat.out_inval);
 			KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 			    0, 0, 0, 0, 0);
+			drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 			goto bad;
 		}
 	}
@@ -1310,6 +1341,7 @@ sendit:
 		IPSEC_STAT_INCREMENT(ipsecstat.out_polvio);
 		KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 		    1, 0, 0, 0, 0);
+		drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 		goto bad;
 
 	case IPSEC_POLICY_BYPASS:
@@ -1317,6 +1349,7 @@ sendit:
 		/* no need to do IPsec. */
 		KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 		    2, 0, 0, 0, 0);
+		drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 		goto skip_ipsec;
 
 	case IPSEC_POLICY_IPSEC:
@@ -1325,6 +1358,7 @@ sendit:
 			error = key_spdacquire(sp);
 			KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 			    3, 0, 0, 0, 0);
+			drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 			goto bad;
 		}
 		if (sp->ipsec_if) {
@@ -1332,6 +1366,7 @@ sendit:
 			if (sp->ipsec_if == ifp) {
 				goto skip_ipsec;
 			}
+			drop_reason = DROP_REASON_IP_OUTBOUND_IPSEC_POLICY;
 			goto bad;
 		}
 		break;
@@ -1443,6 +1478,8 @@ sendit:
 			error = EADDRNOTAVAIL;
 			KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 			    5, 0, 0, 0, 0);
+			OSAddAtomic(1, &ipstat.ips_src_addr_not_avail);
+			drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
 			goto bad;
 		}
 		if (src_ia != NULL) {
@@ -1458,6 +1495,7 @@ sendit:
 			error = EHOSTUNREACH;   /* XXX */
 			KERNEL_DEBUG(DBG_FNC_IPSEC4_OUTPUT | DBG_FUNC_END,
 			    6, 0, 0, 0, 0);
+			drop_reason = DROP_REASON_IP_NO_ROUTE;
 			goto bad;
 		}
 	} else {
@@ -1500,6 +1538,7 @@ sendit:
 		 */
 		if (m->m_pkthdr.csum_flags & CSUM_TSO_IPV4) {
 			error = EMSGSIZE;
+			drop_reason = DROP_REASON_IP_FILTER_TSO;
 			goto bad;
 		}
 
@@ -1522,6 +1561,7 @@ sendit:
 				}
 				if (result != 0) {
 					ipf_unref();
+					drop_reason = DROP_REASON_IP_FILTER_DROP;
 					goto bad;
 				}
 			}
@@ -1544,6 +1584,7 @@ skip_ipsec:
 	    (ntohl(ip->ip_dst.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET)) {
 		OSAddAtomic(1, &ipstat.ips_badaddr);
 		error = EADDRNOTAVAIL;
+		drop_reason = DROP_REASON_IP_INVALID_ADDR;
 		goto bad;
 	}
 
@@ -1684,6 +1725,7 @@ sendchain:
 			m0 = packetlist;
 		}
 		OSAddAtomic(1, &ipstat.ips_cantfrag);
+		drop_reason = DROP_REASON_IP_CANNOT_FRAGMENT;
 		goto bad;
 	}
 
@@ -1730,7 +1772,8 @@ sendchain:
 	error = ip_fragment(m, ifp, interface_mtu, sw_csum);
 	if (error != 0) {
 		m0 = m = NULL;
-		goto bad;
+		/* ip_fragment() takes care of calling m_drop() */
+		goto done;
 	}
 
 	KERNEL_DEBUG(DBG_LAYER_END, ip->ip_dst.s_addr,
@@ -1800,7 +1843,7 @@ bad:
 	if (pktcnt > 0) {
 		m0 = packetlist;
 	}
-	m_freem_list(m0);
+	m_drop_list(m0, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	goto done;
 
 #undef ipsec_state
@@ -1815,7 +1858,7 @@ int
 ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 {
 	struct ip *ip, *mhip;
-	int len, hlen, mhlen, firstlen, off, error = 0;
+	int len, hlen, mhlen, firstlen, off;
 	struct mbuf **mnext = &m->m_nextpkt, *m0;
 	int nfrags = 1;
 
@@ -1837,7 +1880,9 @@ ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 
 	firstlen = len = (mtu - hlen) & ~7;
 	if (len < 8) {
-		m_freem(m);
+		OSAddAtomic(1, &ipstat.ips_odropped);
+		m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_FRAG_TOO_SMALL,
+		    NULL, 0);
 		return EMSGSIZE;
 	}
 
@@ -1859,9 +1904,10 @@ ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 	for (off = hlen + len; off < (u_short)ip->ip_len; off += len) {
 		MGETHDR(m, M_DONTWAIT, MT_HEADER);      /* MAC-OK */
 		if (m == NULL) {
-			error = ENOBUFS;
+			m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_FRAG_NO_MEM,
+			    NULL, 0);
 			OSAddAtomic(1, &ipstat.ips_odropped);
-			goto sendorfree;
+			return ENOBUFS;
 		}
 		m->m_flags |= (m0->m_flags & M_MCAST) | M_FRAG;
 		m->m_data += max_linkhdr;
@@ -1884,10 +1930,10 @@ ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 		mhip->ip_len = htons((u_short)(len + mhlen));
 		m->m_next = m_copy(m0, off, len);
 		if (m->m_next == NULL) {
-			(void) m_free(m);
-			error = ENOBUFS;        /* ??? */
+			m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_FRAG_NO_MEM,
+			    NULL, 0);
 			OSAddAtomic(1, &ipstat.ips_odropped);
-			goto sendorfree;
+			return ENOBUFS;
 		}
 		m->m_pkthdr.len = mhlen + len;
 		m->m_pkthdr.rcvif = NULL;
@@ -1936,12 +1982,8 @@ ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 		ip->ip_sum = ip_cksum_hdr_out(m, hlen);
 		m->m_pkthdr.csum_flags &= ~CSUM_DELAY_IP;
 	}
-sendorfree:
-	if (error) {
-		m_freem_list(m0);
-	}
 
-	return error;
+	return 0;
 }
 
 static void
@@ -1972,7 +2014,7 @@ uint32_t
 in_finalize_cksum(struct mbuf *m, uint32_t hoff, uint32_t csum_flags)
 {
 	unsigned char buf[15 << 2] __attribute__((aligned(8)));
-	struct ip *ip;
+	struct ip *__single ip;
 	uint32_t offset, _hlen, mlen, hlen, len, sw_csum;
 	uint16_t csum, ip_len;
 
@@ -2007,7 +2049,7 @@ in_finalize_cksum(struct mbuf *m, uint32_t hoff, uint32_t csum_flags)
 		ip = (struct ip *)(void *)buf;
 		_hlen = sizeof(*ip);
 	} else {
-		ip = (struct ip *)(void *)(m->m_data + hoff);
+		ip = (struct ip *)(void *)(m_mtod_current(m) + hoff);
 		_hlen = 0;
 	}
 
@@ -2036,7 +2078,7 @@ in_finalize_cksum(struct mbuf *m, uint32_t hoff, uint32_t csum_flags)
 			printf("%s: mbuf 0x%llx proto %d IP len %d (%x) "
 			    "[swapped %d (%x)] doesn't match actual packet "
 			    "length; %d is used instead\n", __func__,
-			    (uint64_t)VM_KERNEL_ADDRPERM(m), ip->ip_p,
+			    (uint64_t)VM_KERNEL_ADDRHASH(m), ip->ip_p,
 			    ip->ip_len, ip->ip_len, ip_len, ip_len,
 			    (mlen - hoff));
 			if (mlen - hoff > UINT16_MAX) {
@@ -2199,7 +2241,7 @@ ip_insertoptions(struct mbuf *m, struct mbuf *opt, int *phlen)
  * omitting those not copied during fragmentation.
  */
 static int
-ip_optcopy(struct ip *ip, struct ip *jp)
+ip_optcopy(struct ip *__indexable ip, struct ip *__indexable jp)
 {
 	u_char *cp, *dp;
 	int opt, optlen, cnt;
@@ -2246,6 +2288,7 @@ ip_optcopy(struct ip *ip, struct ip *jp)
 	return optlen;
 }
 
+
 /*
  * IP socket option processing.
  */
@@ -2254,22 +2297,25 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 {
 	struct  inpcb *inp = sotoinpcb(so);
 	int     error, optval;
-	lck_mtx_t *mutex_held = NULL;
 
 	error = optval = 0;
-	if (sopt->sopt_level != IPPROTO_IP) {
+
+	if (sopt->sopt_level != IPPROTO_IP && !(sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_BINDTODEVICE)) {
 		return EINVAL;
 	}
 
 	switch (sopt->sopt_dir) {
 	case SOPT_SET:
-		mutex_held = socket_getlock(so, PR_F_WILLUNLOCK);
 		/*
 		 *  Wait if we are in the middle of ip_output
 		 *  as we unlocked the socket there and don't
 		 *  want to overwrite the IP options
 		 */
 		if (inp->inp_sndinprog_cnt > 0) {
+			lck_mtx_t *__single mutex_held = NULL;
+
+			mutex_held = socket_getlock(so, PR_F_WILLUNLOCK);
+
 			inp->inp_sndingprog_waiters++;
 
 			while (inp->inp_sndinprog_cnt > 0) {
@@ -2277,6 +2323,19 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 				    PSOCK | PCATCH, "inp_sndinprog_cnt", NULL);
 			}
 			inp->inp_sndingprog_waiters--;
+		}
+		if (sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_BINDTODEVICE) {
+			char namebuf[IFNAMSIZ + 1] = {};
+
+			error = sooptcopyin_bindtodevice(sopt, namebuf, sizeof(namebuf));
+			if (error != 0) {
+				break;
+			}
+			namebuf[IFNAMSIZ] = 0;
+
+			error = inp_bindtodevice(inp, __unsafe_null_terminated_from_indexable(namebuf, namebuf + IFNAMSIZ));
+
+			break;
 		}
 		switch (sopt->sopt_name) {
 #ifdef notyet
@@ -2454,7 +2513,7 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 			caddr_t req = NULL;
 			size_t len = 0;
 			int priv;
-			struct mbuf *m;
+			mbuf_ref_t m;
 			int optname;
 
 			if ((error = soopt_getm(sopt, &m)) != 0) { /* XXX */
@@ -2568,6 +2627,15 @@ ip_ctloutput(struct socket *so, struct sockopt *sopt)
 		break;
 
 	case SOPT_GET:
+		if (sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_BINDTODEVICE) {
+			char namebuf[IFNAMSIZ + 1] = {};
+
+			if (inp->inp_flags & INP_BOUND_IF) {
+				strlcpy(namebuf, inp->inp_boundifp->if_xname, IFNAMSIZ);
+			}
+			error = sooptcopyout(sopt, &namebuf, IFNAMSIZ);
+			break;
+		}
 		switch (sopt->sopt_name) {
 		case IP_OPTIONS:
 		case IP_RETOPTS:
@@ -2864,8 +2932,9 @@ imo_remref(struct ip_moptions *imo)
 
 	IMO_UNLOCK(imo);
 
-	kfree_type(struct in_multi *, imo->imo_max_memberships, imo->imo_membership);
-	kfree_type(struct in_mfilter, imo->imo_max_memberships, imo->imo_mfilters);
+	kfree_type_counted_by(struct in_multi *, imo->imo_max_memberships, imo->imo_membership);
+	kfree_type_counted_by(struct in_mfilter, imo->imo_max_filters, imo->imo_mfilters);
+
 	lck_mtx_destroy(&imo->imo_lock, &ifa_mtx_grp);
 
 	if (!(imo->imo_debug & IFD_ALLOC)) {

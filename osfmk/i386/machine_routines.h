@@ -153,6 +153,7 @@ uint64_t ml_cpu_cache_size(unsigned int level);
 void ml_set_max_cpus(
 	unsigned int max_cpus);
 
+extern void     ml_cpu_init_completed(void);
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
 extern void     ml_cpu_up_update_counts(int cpu_id);
@@ -212,7 +213,8 @@ void ml_panic_trap_to_debugger(const char *panic_format_str,
     unsigned int reason,
     void *ctx,
     uint64_t panic_options_mask,
-    unsigned long panic_caller);
+    unsigned long panic_caller,
+    const char *panic_initiator);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE
@@ -430,7 +432,6 @@ struct i386_cpu_info;
 struct machine_thread;
 /* LBR support */
 void i386_lbr_init(struct i386_cpu_info *info_p, bool is_master);
-void i386_switch_lbrs(thread_t old, thread_t new);
 int i386_filtered_lbr_state_to_mach_thread_state(thread_t thr_act, last_branch_state_t *machlbrp, boolean_t from_userspace);
 void i386_lbr_synch(thread_t thr);
 void i386_lbr_enable(void);

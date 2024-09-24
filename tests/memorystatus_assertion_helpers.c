@@ -88,7 +88,7 @@ check_properties(pid_t pid, int32_t expected_priority, int32_t expected_limit_mb
 		T_LOG("state is 0x%x\n", actual_state);
 		log_state(actual_state);
 
-		T_ASSERT_FAIL("check_properties: %s", test);
+		T_FAIL("check_properties: %s", test);
 	} else {
 		T_PASS("check_properties: %s ok", test);
 		return true;

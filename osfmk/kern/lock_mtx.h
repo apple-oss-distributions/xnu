@@ -66,7 +66,7 @@ typedef union lck_mtx_state {
 	uint64_t                val;
 } lck_mtx_state_t;
 
-typedef struct _lck_mtx_ {
+typedef struct lck_mtx_s {
 	uint32_t                lck_mtx_tsid : 24;      /* turnstile ID */
 	uint8_t                 lck_mtx_type :  8;      /* Type */
 	uint32_t                lck_mtx_grp;

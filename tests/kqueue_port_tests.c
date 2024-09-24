@@ -83,7 +83,7 @@ pthread_async(void (^block)(void))
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(rc, "pthread_create");
 }
 
-T_DECL(kqueue_machport, "basic EVFILT_MACHPORT tests")
+T_DECL(kqueue_machport, "basic EVFILT_MACHPORT tests", T_META_TAG_VM_PREFERRED)
 {
 	mach_port_options_t opts = {
 		.flags = MPO_INSERT_SEND_RIGHT,
@@ -191,7 +191,7 @@ kevent_attach_event(mach_port_t port, uint16_t flags, uint32_t fflags, int *erro
 }
 
 /* rdar://95680295 (Turnstile Use-after-Free in XNU) */
-T_DECL(kqueue_machport_no_toggle_flags, "don't allow turnstile flags to be toggled for EVFILT_MACHPORT")
+T_DECL(kqueue_machport_no_toggle_flags, "don't allow turnstile flags to be toggled for EVFILT_MACHPORT", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	int rc, error = 0;

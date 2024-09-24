@@ -37,6 +37,7 @@
 #include <mach/vm_types.h>
 #include <vm/memory_types.h>
 #include <vm/pmap.h>
+#include <vm/vm_kern_xnu.h>
 
 static bool
 is_normal_memory(uint64_t phys)

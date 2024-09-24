@@ -86,6 +86,7 @@
 #include <mach/host_priv.h>
 #include <mach/vm_map.h>
 #include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
 #include <gssd/gssd_mach.h>
 
 #include <nfs/rpcv2.h>

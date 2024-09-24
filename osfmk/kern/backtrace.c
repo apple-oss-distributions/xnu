@@ -33,7 +33,7 @@
 #include <kern/thread.h>
 #include <machine/machine_routines.h>
 #include <sys/errno.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 #if defined(__arm64__)
 #include <arm/cpu_data.h>

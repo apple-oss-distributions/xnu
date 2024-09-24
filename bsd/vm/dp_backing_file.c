@@ -68,7 +68,8 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <vm/vnode_pager.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_compressor_backing_store_xnu.h>
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
@@ -202,8 +203,6 @@ macx_swapoff(
  *	Function:
  *		Syscall interface to get general swap statistics
  */
-extern uint64_t vm_swap_get_total_space(void);
-extern uint64_t vm_swap_get_free_space(void);
 extern boolean_t vm_swap_up;
 
 int

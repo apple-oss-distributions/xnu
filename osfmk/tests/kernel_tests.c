@@ -43,8 +43,9 @@
 #include <kern/kern_cdata.h>
 #include <machine/lowglobals.h>
 #include <vm/vm_page.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_internal.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_iokit.h>
 #include <string.h>
 #include <kern/kern_apfs_reflock.h>
 
@@ -103,6 +104,12 @@ extern kern_return_t arm64_ropjop_test(void);
 #if CONFIG_SPTM
 extern kern_return_t arm64_panic_lockdown_test(void);
 #endif /* CONFIG_SPTM */
+#if HAS_SPECRES
+extern kern_return_t specres_test(void);
+#endif /* HAS_SPECRES */
+#if BTI_ENFORCED
+kern_return_t arm64_bti_test(void);
+#endif /* BTI_ENFORCED */
 #endif /* __arm64__ */
 
 extern kern_return_t test_thread_call(void);
@@ -153,6 +160,9 @@ struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test
 	                                   XNUPOST_TEST_CONFIG_BASIC(counter_tests),
 #if ML_IO_TIMEOUTS_ENABLED
 	                                   XNUPOST_TEST_CONFIG_BASIC(ml_io_timeout_test),
+#endif
+#if HAS_SPECRES
+	                                   XNUPOST_TEST_CONFIG_BASIC(specres_test),
 #endif
 };
 
@@ -1919,7 +1929,7 @@ find_id_in_cache(int obj_id, struct info_sleep_inheritor_test *info)
 }
 
 static bool
-free_id_in_cache(int obj_id, struct info_sleep_inheritor_test *info, struct obj_cached *expected)
+free_id_in_cache(int obj_id, struct info_sleep_inheritor_test *info, __assert_only struct obj_cached *expected)
 {
 	struct obj_cached **obj_cache = info->obj_cache;
 	int i;

@@ -97,22 +97,24 @@ def DumpMbufData(mp, count):
     cmd = "memory read -force -size 1 -count {0:d} 0x{1:x}".format(count, mdata)
     print(lldb_run_command(cmd))
 
-def DecodeMbufData(mp, decode_as="ether"):
+def DecodeMbufData(in_mp, decode_as="ether"):
     import scapy.all
     err = lldb.SBError()
-    while True:
+    scan = in_mp
+    while (scan):
         full_buf = b''
-        while True:
+        mp = scan
+        while (mp):
             if kern.globals.mb_uses_mcache == 1:
                 mdata = mp.m_hdr.mh_data
-                mlen = mp.m_hdr.mh_len
+                mlen = unsigned(mp.m_hdr.mh_len)
                 flags = mp.m_hdr.mh_flags
                 if flags & M_EXT:
                     mdata = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
                 mnext = mp.m_hdr.mh_next
             else:
                 mdata = mp.M_hdr_common.M_hdr.mh_data
-                mlen = mp.M_hdr_common.M_hdr.mh_len
+                mlen = unsigned(mp.M_hdr_common.M_hdr.mh_len)
                 flags = mp.M_hdr_common.M_hdr.mh_flags
                 if flags & M_EXT:
                     mdata = mp.M_hdr_common.M_ext.ext_buf
@@ -144,11 +146,9 @@ def DecodeMbufData(mp, decode_as="ether"):
                     break
             mp = mnext
         if kern.globals.mb_uses_mcache == 1:
-            mp = mp.m_hdr.mh_nextpkt
+            scan = scan.m_hdr.mh_nextpkt
         else:
-            mp = mp.M_hdr_common.M_hdr.mh_nextpkt
-        if mp is None:
-            break
+            scan = scan.M_hdr_common.M_hdr.mh_nextpkt
 
 
 # Macro: mbuf_decode
@@ -201,17 +201,26 @@ def ShowMbuf(prefix, mp, count, total, dump_data_len):
         mhlen = mp.m_hdr.mh_len
         mhtype = mp.m_hdr.mh_type
         mhflags = mp.m_hdr.mh_flags
+        mhdata = mp.m_hdr.mh_data
+        if mhflags & M_EXT:
+            extbuf = mp.M_dat.MH.MH_dat.MH_ext.ext_buf
         if kern.globals.mclaudit != 0:
             mca += GetMbufBuf2Mca(mp) + ", "
     else:
         mhlen = mp.M_hdr_common.M_hdr.mh_len
         mhtype = mp.M_hdr_common.M_hdr.mh_type
         mhflags = mp.M_hdr_common.M_hdr.mh_flags
-    mbuf_walk_format = "{0:s}{1:d} 0x{2:x} [len {3:d}, type {4:d}, "
-    out_string += mbuf_walk_format.format(prefix, count[0], mp, mhlen, mhtype)
+        mhdata = mp.M_hdr_common.M_hdr.mh_data
+        if mhflags & M_EXT:
+            extbuf = mp.M_hdr_common.M_ext.ext_buf
+    mbuf_walk_format = "{0:s}{1:d} 0x{2:x} [len {3:d}, type {4:d}, data 0x{5:x}, "
+    out_string += mbuf_walk_format.format(prefix, count[0], mp, mhlen, mhtype, mhdata)
     out_string += "flags " + GetMbufFlagsAsString(mhflags) + ", "
     if (mhflags & M_PKTHDR):
         out_string += GetMbufPktCrumbs(mp) + ", "
+    if (mhflags & M_EXT):
+        m_ext_format = "ext_buf 0x{0:x}, "
+        out_string += m_ext_format.format(extbuf)
     if (mca != ""):
         out_string += mca + ", "
     total[0] = total[0] + mhlen
@@ -266,7 +275,7 @@ def MbufWalkPacket(cmd_args=None, cmd_options={}):
         if kern.globals.mb_uses_mcache == 1:
             mp = mp.m_hdr.mh_nextpkt
         else:
-            mp = mp.M_hdr_common.M_hdr.mh_next
+            mp = mp.M_hdr_common.M_hdr.mh_nextpkt
     out_string = "Total packets: {0:d} mbufs: {1:d} length: {2:d} ".format(count_packet, count_mbuf, total_len)
     print(out_string)
 # EndMacro: mbuf_walkpkt

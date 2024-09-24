@@ -35,7 +35,8 @@
 
 #define TRACE_DEBUGID (0xfedfed00U)
 
-T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events")
+T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -88,7 +89,8 @@ T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events")
 
 T_DECL(kdebug_trace_string_syscall,
 		"test that kdebug_trace_string(2) emits correct events",
-		T_META_ENABLED(IS_64BIT))
+		T_META_ENABLED(IS_64BIT),
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -160,7 +162,8 @@ T_DECL(kdebug_trace_string_syscall,
 #define SIGNPOST_PAIRED_CODE (0x20U)
 
 T_DECL(kdebug_signpost_syscall,
-		"test that kdebug_signpost(2) emits correct events")
+		"test that kdebug_signpost(2) emits correct events",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -236,7 +239,8 @@ T_DECL(kdebug_signpost_syscall,
 }
 
 T_DECL(syscall_tracing,
-		"ensure that syscall arguments are traced propertly")
+		"ensure that syscall arguments are traced propertly",
+		T_META_TAG_VM_PREFERRED)
 {
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "created session");
@@ -301,7 +305,8 @@ T_DECL(syscall_tracing,
 
 T_DECL(wrapping,
     "ensure that wrapping traces lost events and no events prior to the wrap",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED)
 {
 	kbufinfo_t buf_info;
 	int wait_wrapping_secs = (WRAPPING_EVENTS_COUNT / TRACE_ITERATIONS) + 5;
@@ -429,7 +434,8 @@ _drain_until_event(uint32_t debugid)
 }
 
 T_DECL(disabling_event_match,
-    "ensure that ktrace is disabled when an event disable matcher fires")
+    "ensure that ktrace is disabled when an event disable matcher fires",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -474,7 +480,8 @@ T_DECL(disabling_event_match,
 
 T_DECL(reject_old_events,
     "ensure that kdebug rejects events from before tracing began",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED)
 {
 	__block uint64_t event_horizon_ts;
 
@@ -514,7 +521,7 @@ T_DECL(reject_old_events,
 
 T_DECL(ascending_time_order,
     "ensure that kdebug events are in ascending order based on time",
-    T_META_CHECK_LEAKS(false), XNU_T_META_SOC_SPECIFIC)
+    T_META_CHECK_LEAKS(false), XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	__block uint64_t prev_ts = 0;
 	__block uint32_t prev_debugid = 0;
@@ -681,7 +688,8 @@ expect_dyld_events(ktrace_session_t s, const char *name, uint32_t base_code,
 	}
 }
 
-T_DECL(dyld_events, "test that dyld registering libraries emits events")
+T_DECL(dyld_events, "test that dyld registering libraries emits events",
+		T_META_TAG_VM_PREFERRED)
 {
 	dyld_kernel_image_info_t info;
 
@@ -876,7 +884,7 @@ expect_kdbg_test_events(ktrace_session_t s, bool use_all_callback,
 	ktrace_end(s, 0);
 }
 
-T_DECL(kernel_events, "ensure kernel macros work")
+T_DECL(kernel_events, "ensure kernel macros work", T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -912,7 +920,8 @@ T_DECL(kernel_events, "ensure kernel macros work")
 	dispatch_main();
 }
 
-T_DECL(kernel_events_filtered, "ensure that the filtered kernel macros work")
+T_DECL(kernel_events_filtered, "ensure that the filtered kernel macros work",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -942,7 +951,8 @@ T_DECL(kernel_events_filtered, "ensure that the filtered kernel macros work")
 }
 
 T_DECL(kernel_events_noprocfilt,
-    "ensure that the no process filter kernel macros work")
+    "ensure that the no process filter kernel macros work",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -998,7 +1008,8 @@ kdebug_abuser_thread(void *ctx)
 }
 
 T_DECL(stress, "emit events on all but one CPU with a small buffer",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -1207,7 +1218,8 @@ T_DECL(stress, "emit events on all but one CPU with a small buffer",
  * never see.
  */
 T_DECL(round_trips,
-    "test sustained tracing with multiple round-trips through the kernel")
+    "test sustained tracing with multiple round-trips through the kernel",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -1272,7 +1284,8 @@ T_DECL(round_trips,
  * Ensure we see events periodically, checking for recent events on a
  * heart-beat.
  */
-T_DECL(event_coverage, "ensure events appear up to the end of tracing")
+T_DECL(event_coverage, "ensure events appear up to the end of tracing",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -1385,7 +1398,7 @@ _mb_of_events(unsigned int event_count)
 }
 
 T_DECL(set_buffer_size, "ensure large buffer sizes can be set",
-		XNU_T_META_SOC_SPECIFIC)
+		XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	uint64_t memsize = 0;
@@ -1432,7 +1445,8 @@ donothing(__unused void *arg)
 	return NULL;
 }
 
-T_DECL(long_names, "ensure long command names are reported")
+T_DECL(long_names, "ensure long command names are reported",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -1504,13 +1518,14 @@ T_DECL(long_names, "ensure long command names are reported")
 }
 
 T_DECL(continuous_time, "make sure continuous time status can be queried",
-	T_META_RUN_CONCURRENTLY(true))
+	T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
 {
 	bool cont_time = kdebug_using_continuous_time();
 	T_ASSERT_FALSE(cont_time, "should not be using continuous time yet");
 }
 
-T_DECL(lookup_long_paths, "lookup long path names")
+T_DECL(lookup_long_paths, "lookup long path names",
+		T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -1583,7 +1598,7 @@ static const char *expected_subsystems[] = {
 		(sizeof(expected_subsystems) / sizeof(expected_subsystems[0]))
 
 T_DECL(early_boot_tracing, "ensure early boot strings are present",
-	T_META_BOOTARGS_SET("trace=1000000"), XNU_T_META_SOC_SPECIFIC)
+	T_META_BOOTARGS_SET("trace=1000000"), XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_ATEND(reset_ktrace);
 
@@ -1661,7 +1676,7 @@ T_DECL(early_boot_tracing, "ensure early boot strings are present",
 // Allocating ~4TB should be clamped to some lower number.
 T_DECL(early_boot_tracing_too_large,
     "ensure early boot tracing can allocate up to a clamped size",
-	T_META_BOOTARGS_SET("trace=64000000000"), XNU_T_META_SOC_SPECIFIC)
+	T_META_BOOTARGS_SET("trace=64000000000"), XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	expect_kernel_task_tracing();
 	T_EXPECT_NE(get_nevents(), 0, "allocated some events");
@@ -1669,7 +1684,8 @@ T_DECL(early_boot_tracing_too_large,
 
 // Not SoC-specific because the typefilter parsing logic is generic.
 T_DECL(typefilter_boot_arg, "ensure typefilter is set up correctly at boot",
-	T_META_BOOTARGS_SET("trace=100000 trace_typefilter=S0x0c00,C0xfe"))
+	T_META_BOOTARGS_SET("trace=100000 trace_typefilter=S0x0c00,C0xfe"),
+	T_META_TAG_VM_PREFERRED)
 {
 	T_ATEND(reset_ktrace);
 
@@ -1709,7 +1725,8 @@ sighandler(int sig)
 
 T_DECL(instrs_and_cycles_on_proc_exit,
 		"instructions and cycles should be traced on thread exit",
-		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
+		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1),
+		T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	start_controlling_ktrace();
@@ -1811,7 +1828,8 @@ get_thread_counters(void* ptr)
 
 T_DECL(instrs_and_cycles_on_thread_exit,
 		"instructions and cycles should be traced on thread exit",
-		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
+		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1),
+		T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	start_controlling_ktrace();

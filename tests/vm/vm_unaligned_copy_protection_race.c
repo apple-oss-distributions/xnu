@@ -56,7 +56,7 @@ protect_thread(__unused void *arg)
 }
 
 T_DECL(unaligned_write_to_cow_bypass,
-    "Test that unaligned copy respects COW")
+    "Test that unaligned copy respects COW", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t th = NULL;
 	int ret;

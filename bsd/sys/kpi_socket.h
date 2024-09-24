@@ -40,6 +40,7 @@
 #include <sys/types.h>
 #include <sys/kernel_types.h>
 #include <sys/socket.h>
+#include <sys/ioccom.h>
 
 #ifndef PRIVATE
 #include <Availability.h>
@@ -113,14 +114,14 @@ typedef void (*sock_evupcall)(socket_t so, void *cookie, uint32_t event);
  *       @result 0 on success otherwise the errno error.
  */
 #ifdef KERNEL_PRIVATE
-extern errno_t sock_accept_internal(socket_t so, struct sockaddr *from, int fromlen,
+extern errno_t sock_accept_internal(socket_t so, struct sockaddr *__sized_by(fromlen) from, int fromlen,
     int flags, sock_upcall callback, void *cookie, socket_t *new_so);
 
 #define sock_accept(so, from, fromlen, flags, callback, cookie, new_so) \
 	sock_accept_internal((so), (from), (fromlen), (flags), (callback), \
 	(cookie), (new_so))
 #else
-extern errno_t sock_accept(socket_t so, struct sockaddr *from, int fromlen,
+extern errno_t sock_accept(socket_t so, struct sockaddr *__sized_by(fromlen) from, int fromlen,
     int flags, sock_upcall callback, void *cookie, socket_t *new_so)
 __NKE_API_DEPRECATED;
 #endif /* KERNEL_PRIVATE */
@@ -183,7 +184,7 @@ extern errno_t sock_connectwait(socket_t so, const struct timeval *tv);
  *       @param peernamelen Length of storage for the peer name.
  *       @result 0 on success otherwise the errno error.
  */
-extern errno_t sock_getpeername(socket_t so, struct sockaddr *peername,
+extern errno_t sock_getpeername(socket_t so, struct sockaddr *__sized_by(peernamelen) peername,
     int peernamelen)
 __NKE_API_DEPRECATED;
 
@@ -196,7 +197,7 @@ __NKE_API_DEPRECATED;
  *       @param socknamelen Length of storage for the socket name.
  *       @result 0 on success otherwise the errno error.
  */
-extern errno_t sock_getsockname(socket_t so, struct sockaddr *sockname,
+extern errno_t sock_getsockname(socket_t so, struct sockaddr *__sized_by(socknamelen) sockname,
     int socknamelen)
 __NKE_API_DEPRECATED;
 
@@ -222,7 +223,7 @@ __NKE_API_DEPRECATED;
  *       @param argp The argument.
  *       @result 0 on success otherwise the errno error.
  */
-extern errno_t sock_ioctl(socket_t so, unsigned long request, void *argp)
+extern errno_t sock_ioctl(socket_t so, unsigned long request, void *__sized_by(IOCPARM_LEN(request)) argp)
 __NKE_API_DEPRECATED;
 
 /*!

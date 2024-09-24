@@ -146,7 +146,7 @@ struct flowq {
 		/* empty list purge time (in nanoseconds) */
 		uint64_t   fq_empty_purge_time;
 	};
-	SLIST_ENTRY(flowq) fq_hashlink; /* for flow queue hash table */
+	LIST_ENTRY(flowq) fq_hashlink; /* for flow queue hash table */
 	/*
 	 * flow queue will only be on either one of the lists.
 	 */

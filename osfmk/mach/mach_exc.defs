@@ -168,4 +168,31 @@ routine		mach_exception_raise_backtrace(
 	skip;
 #endif /* MACH_EXC_SERVER_BACKTRACE */
 
+/*
+ * Same as identity_protected above, but also handles an in/out thread_state_t. 
+ */
+#if MACH_EXC_SERVER_TASKIDTOKEN_STATE || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER)
+routine		mach_exception_raise_state_identity_protected(
+			exception_port	: mach_port_t;
+			thread_id	: uint64_t;
+			task_id_token_t	: mach_port_t;
+			exception	: exception_type_t;
+			code		: mach_exception_data_t;
+			inout flavor    : int;
+			old_state       : thread_state_t;
+		    out new_state   : thread_state_t
+#if MACH_EXC_SERVER_SECTOKEN
+ ;
+ ServerSecToken stoken	: security_token_t
+#endif
+#if MACH_EXC_SERVER_AUDITTOKEN
+ ;
+ ServerAuditToken atoken: audit_token_t
+#endif
+			);
+#else  /* MACH_EXC_SERVER_TASKIDTOKEN_STATE  || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER) */
+	skip;
+#endif /* MACH_EXC_SERVER_TASKIDTOKEN_STATE  || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER) */
+
+
 /* vim: set ft=c : */

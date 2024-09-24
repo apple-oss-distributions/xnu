@@ -106,7 +106,7 @@ SYSCTL_UINT(_net_classq, OID_AUTO, flow_control_adv,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ifclassq_flow_control_adv, 1,
     "enable/disable flow control advisory");
 
-uint16_t fq_codel_quantum = 0;
+uint32_t fq_codel_quantum = 0;
 #endif /* DEBUG || DEVELOPMENT */
 
 static KALLOC_TYPE_DEFINE(ifcq_zone, struct ifclassq, NET_KT_DEFAULT);
@@ -509,9 +509,12 @@ ifclassq_dequeue_common(struct ifclassq *ifq, mbuf_svc_class_t sc,
 void
 ifclassq_update(struct ifclassq *ifq, cqev_t ev)
 {
+	void *ev_p = (void *)&ev;
+
 	IFCQ_LOCK_ASSERT_HELD(ifq);
 	VERIFY(IFCQ_IS_READY(ifq));
-	fq_if_request_classq(ifq, CLASSQRQ_EVENT, (void *)ev);
+
+	fq_if_request_classq(ifq, CLASSQRQ_EVENT, ev_p);
 }
 
 int
@@ -563,7 +566,7 @@ ifclassq_getqstats(struct ifclassq *ifq, u_int8_t gid, u_int32_t qid, void *ubuf
 	err = pktsched_getqstats(ifq, gid, qid, ifqs);
 	IFCQ_UNLOCK(ifq);
 
-	if (err == 0 && (err = copyout((caddr_t)ifqs,
+	if (err == 0 && (err = copyout(ifqs,
 	    (user_addr_t)(uintptr_t)ubuf, sizeof(*ifqs))) == 0) {
 		*nbytes = sizeof(*ifqs);
 	}
@@ -573,10 +576,10 @@ ifclassq_getqstats(struct ifclassq *ifq, u_int8_t gid, u_int32_t qid, void *ubuf
 	return err;
 }
 
-const char *
+const char *__null_terminated
 ifclassq_ev2str(cqev_t ev)
 {
-	const char *c;
+	const char *__null_terminated c = "";
 
 	switch (ev) {
 	case CLASSQ_EV_LINK_BANDWIDTH:
@@ -963,7 +966,7 @@ ifclassq_retain(struct ifclassq *ifcq)
 void
 ifclassq_release(struct ifclassq **pifcq)
 {
-	struct ifclassq *ifcq = *pifcq;
+	struct ifclassq *__single ifcq = *pifcq;
 
 	*pifcq = NULL;
 	if (os_ref_release(&ifcq->ifcq_refcnt) == 0) {

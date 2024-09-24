@@ -114,7 +114,7 @@ tests()
 	}
 }
 
-T_DECL(arith_difference, "bounded_ptr.arith.difference") {
+T_DECL(arith_difference, "bounded_ptr.arith.difference", T_META_TAG_VM_PREFERRED) {
 	tests<T, T, T>();
 	tests<T, T, T const>();
 	tests<T, T const, T>();

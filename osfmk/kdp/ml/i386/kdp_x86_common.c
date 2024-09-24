@@ -34,7 +34,7 @@
 #include <mach/vm_param.h>
 #include <libsa/types.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <i386/pmap.h>
 #include <i386/pmap_internal.h> /* pmap_pde */
 #include <i386/mp.h>
@@ -50,7 +50,7 @@
 #include <mach/vm_map.h>
 
 #include <vm/vm_protos.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <machine/pal_routines.h>
 #include <libkern/kernel_mach_header.h>

@@ -176,8 +176,11 @@ ether_inet6_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 	if (result == 0) {
 		u_int16_t ethertype_ipv6 = htons(ETHERTYPE_IPV6);
 
-		bcopy(&ethertype_ipv6, type, sizeof(ethertype_ipv6));
-		bcopy(LLADDR(&sdl), edst, sdl.sdl_alen);
+		uint8_t *frametype = dlil_frame_type(type);
+		bcopy(&ethertype_ipv6, frametype, sizeof(ethertype_ipv6));
+
+		uint8_t *laddr = dlil_link_addr(edst);
+		bcopy(LLADDR(&sdl), laddr, sdl.sdl_alen);
 	}
 
 	return result;
@@ -255,15 +258,14 @@ errno_t
 ether_attach_inet6(struct ifnet *ifp, protocol_family_t protocol_family)
 {
 #pragma unused(protocol_family)
-	struct ifnet_attach_proto_param proto;
-	struct ifnet_demux_desc demux[1];
+	struct ifnet_attach_proto_param proto = {};
 	u_short en_6native = htons(ETHERTYPE_IPV6);
+	struct ifnet_demux_desc demux[1] = {
+		{ .type = DLIL_DESC_ETYPE2, .data = &en_6native,
+		  .datalen = sizeof(en_6native) }
+	};
 	errno_t error;
 
-	bzero(&proto, sizeof(proto));
-	demux[0].type = DLIL_DESC_ETYPE2;
-	demux[0].data = &en_6native;
-	demux[0].datalen = sizeof(en_6native);
 	proto.demux_list = demux;
 	proto.demux_count = 1;
 	proto.input = ether_inet6_input;

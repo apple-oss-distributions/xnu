@@ -41,6 +41,10 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_iokit.h>
+
 #include "IOKitKernelInternal.h"
 
 #define MAPTYPE(type)           ((UInt) (type) & kTypeMask)

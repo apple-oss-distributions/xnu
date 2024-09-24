@@ -119,7 +119,11 @@ struct nxctl_traffic_rule_type {
 	nxctl_traffic_rule_create_cb_t *ntrt_create;
 	nxctl_traffic_rule_destroy_cb_t *ntrt_destroy;
 	nxctl_traffic_rule_get_all_cb_t *ntrt_get_all;
-	void *ntrt_storage;
+	/*
+	 * -fbounds-safety: Why is this void *? All usage of this was for
+	 * struct nxctl_traffic_rule_inet_storage *
+	 */
+	struct nxctl_traffic_rule_inet_storage *ntrt_storage;
 };
 
 static nxctl_traffic_rule_validate_cb_t inet_traffic_rule_validate;
@@ -271,7 +275,7 @@ static kern_allocation_name_t nxctl_traffic_rule_tag;
 static struct nxctl_traffic_rule_type *inet_traffic_rule_type = NULL;
 
 /*
- * If a interface attaches after rule(s) are added, this function is used
+ * If an interface attaches after rule(s) are added, this function is used
  * retrieve the current rule count for that interface.
  */
 int
@@ -288,7 +292,7 @@ nxctl_inet_traffic_rule_get_count(const char *ifname, uint32_t *count)
 		goto fail;
 	}
 	SLIST_FOREACH(rif, &rs->ris_if_list, rii_link) {
-		if (strcmp(rif->rii_ifname, ifname) == 0) {
+		if (strlcmp(rif->rii_ifname, ifname, sizeof(rif->rii_ifname)) == 0) {
 			break;
 		}
 	}
@@ -311,18 +315,19 @@ int
 nxctl_inet_traffic_rule_find_qset_id(const char *ifname,
     struct ifnet_traffic_descriptor_inet *td, uint64_t *qset_id)
 {
-	struct nxctl_traffic_rule_inet *ntri = NULL;
+	struct nxctl_traffic_rule_inet *__single ntri = NULL;
+	struct nxctl_traffic_rule *__single ntr = NULL;
 	int err;
 
 	NXTR_RLOCK();
 	ASSERT(inet_traffic_rule_type != NULL);
 	err = inet_traffic_rule_type->ntrt_find(inet_traffic_rule_type, ifname,
-	    (struct ifnet_traffic_descriptor_common *)td, 0,
-	    (struct nxctl_traffic_rule **)&ntri);
+	    (struct ifnet_traffic_descriptor_common *)td, 0, &ntr);
 	if (err != 0) {
 		SK_ERR("rule find failed: %d", err);
 		goto fail;
 	}
+	ntri = __container_of(ntr, struct nxctl_traffic_rule_inet, ntri_common);
 	*qset_id = ntri->ntri_ra.ras_qset_id;
 	NXTR_RUNLOCK();
 	return 0;
@@ -339,8 +344,8 @@ static int
 fill_inet_td(struct __kern_packet *pkt, struct ifnet_traffic_descriptor_inet *td)
 {
 	union {
-		volatile struct ip *_iph;
-		volatile struct ip6_hdr *_ip6;
+		volatile struct ip *__indexable _iph;
+		volatile struct ip6_hdr *__indexable _ip6;
 	} _l3;
 	#define iph _l3._iph
 	#define ip6 _l3._ip6
@@ -818,7 +823,7 @@ inet_traffic_rule_match(struct nxctl_traffic_rule_inet *ntri, const char *ifname
 	uint8_t mask;
 	boolean_t exact;
 
-	VERIFY(strcmp(ntr->ntr_ifname, ifname) == 0);
+	VERIFY(strlcmp(ntr->ntr_ifname, ifname, sizeof(ntr->ntr_ifname)) == 0);
 	tdi0 = &ntri->ntri_td;
 
 	exact = ((flags & NTR_FIND_FLAG_EXACT) != 0);
@@ -901,7 +906,7 @@ inet_traffic_rule_find(struct nxctl_traffic_rule_type *type, const char *ifname,
 		return ENOENT;
 	}
 	SLIST_FOREACH(rif, &rs->ris_if_list, rii_link) {
-		if (strcmp(rif->rii_ifname, ifname) != 0) {
+		if (strlcmp(rif->rii_ifname, ifname, sizeof(rif->rii_ifname)) != 0) {
 			continue;
 		}
 		for (i = 0; i < NINETRULEMASKS; i++) {
@@ -971,18 +976,21 @@ inet_traffic_rule_link(struct nxctl_traffic_rule *ntr)
 	    (struct nxctl_traffic_rule_inet *)ntr;
 	struct nxctl_traffic_rule_inet_head *list = NULL;
 	int i;
+	char *__null_terminated ntr_ifname = NULL;
+	char *__null_terminated rii_ifname = NULL;
 
 	if ((rs = type->ntrt_storage) == NULL) {
 		rs = inet_traffic_rule_storage_create();
 		type->ntrt_storage = rs;
 	}
 	SLIST_FOREACH(rif, &rs->ris_if_list, rii_link) {
-		if (strcmp(rif->rii_ifname, ntr->ntr_ifname) == 0) {
+		if (strbufcmp(rif->rii_ifname, ntr->ntr_ifname) == 0) {
 			break;
 		}
 	}
 	if (rif == NULL) {
-		rif = inet_traffic_rule_if_create(ntr->ntr_ifname);
+		ntr_ifname = __unsafe_null_terminated_from_indexable(ntr->ntr_ifname);
+		rif = inet_traffic_rule_if_create(ntr_ifname);
 		SLIST_INSERT_HEAD(&rs->ris_if_list, rif, rii_link);
 	}
 	for (i = 0; i < NINETRULEMASKS; i++) {
@@ -997,7 +1005,8 @@ inet_traffic_rule_link(struct nxctl_traffic_rule *ntr)
 	SLIST_INSERT_HEAD(list, ntri, ntri_storage_link);
 	/* per-interface count */
 	rif->rii_count++;
-	inet_update_ifnet_traffic_rule_count(rif->rii_ifname, rif->rii_count);
+	rii_ifname = __unsafe_null_terminated_from_indexable(rif->rii_ifname);
+	inet_update_ifnet_traffic_rule_count(rii_ifname, rif->rii_count);
 
 	/* global count */
 	rs->ris_count++;
@@ -1013,12 +1022,13 @@ inet_traffic_rule_unlink(struct nxctl_traffic_rule *ntr)
 	struct nxctl_traffic_rule_inet_head *list = NULL;
 	struct nxctl_traffic_rule_type *type;
 	int i;
+	char *__null_terminated rii_ifname = NULL;
 
 	type = ntr->ntr_type;
 	rs = type->ntrt_storage;
 	ASSERT(rs != NULL);
 	SLIST_FOREACH(rif, &rs->ris_if_list, rii_link) {
-		if (strcmp(rif->rii_ifname, ntr->ntr_ifname) == 0) {
+		if (strbufcmp(rif->rii_ifname, ntr->ntr_ifname) == 0) {
 			break;
 		}
 	}
@@ -1033,7 +1043,8 @@ inet_traffic_rule_unlink(struct nxctl_traffic_rule *ntr)
 	ASSERT(list != NULL);
 	SLIST_REMOVE(list, ntri, nxctl_traffic_rule_inet, ntri_storage_link);
 	rif->rii_count--;
-	inet_update_ifnet_traffic_rule_count(rif->rii_ifname, rif->rii_count);
+	rii_ifname = __unsafe_null_terminated_from_indexable(rif->rii_ifname);
+	inet_update_ifnet_traffic_rule_count(rii_ifname, rif->rii_count);
 
 	rs->ris_count--;
 	release_traffic_rule(ntr);
@@ -1059,11 +1070,13 @@ inet_traffic_rule_notify(struct nxctl_traffic_rule *ntr, uint32_t flags)
 {
 	struct ifnet *ifp;
 	struct nx_netif *nif;
-	struct netif_qset *qset = NULL;
+	struct netif_qset *__single qset = NULL;
 	struct nxctl_traffic_rule_inet *ntri;
 	int err = 0;
+	char *__null_terminated ntr_ifname = NULL;
 
-	ifp = ifunit_ref(ntr->ntr_ifname);
+	ntr_ifname = __unsafe_null_terminated_from_indexable(ntr->ntr_ifname);
+	ifp = ifunit_ref(ntr_ifname);
 	if (ifp == NULL) {
 		DTRACE_SKYWALK1(ifname__not__found, char *, ntr->ntr_ifname);
 		err = ENXIO;
@@ -1098,6 +1111,8 @@ inet_traffic_rule_create(struct nxctl_traffic_rule_type *type,
 {
 	struct nxctl_traffic_rule_inet *ntri;
 	struct nxctl_traffic_rule *ntr;
+	struct ifnet_traffic_descriptor_inet *tdi;
+	struct ifnet_traffic_rule_action_steer *ras;
 
 	ntri = sk_alloc_type(struct nxctl_traffic_rule_inet,
 	    Z_WAITOK | Z_NOFAIL, nxctl_traffic_rule_tag);
@@ -1110,8 +1125,11 @@ inet_traffic_rule_create(struct nxctl_traffic_rule_type *type,
 
 	strlcpy(ntr->ntr_ifname, ifname, sizeof(ntr->ntr_ifname));
 	proc_selfname(ntr->ntr_procname, sizeof(ntr->ntr_procname));
-	bcopy(td, &ntri->ntri_td, sizeof(ntri->ntri_td));
-	bcopy(ra, &ntri->ntri_ra, sizeof(ntri->ntri_ra));
+
+	tdi = __container_of(td, struct ifnet_traffic_descriptor_inet, inet_common);
+	ras = __container_of(ra, struct ifnet_traffic_rule_action_steer, ras_common);
+	bcopy(tdi, &ntri->ntri_td, sizeof(ntri->ntri_td));
+	bcopy(ras, &ntri->ntri_ra, sizeof(ntri->ntri_ra));
 
 	*ntrp = ntr;
 	return 0;
@@ -1140,10 +1158,8 @@ convert_ntri_to_iocinfo(struct nxctl_traffic_rule_inet *ntri,
 	_CASSERT(sizeof(ntr->ntr_procname) == sizeof(ginfo->trg_procname));
 	_CASSERT(sizeof(ntr->ntr_ifname) == sizeof(ginfo->trg_ifname));
 	uuid_copy(ginfo->trg_uuid, ntr->ntr_uuid);
-	strlcpy(ginfo->trg_procname, ntr->ntr_procname,
-	    sizeof(ginfo->trg_procname));
-	strlcpy(ginfo->trg_ifname, ntr->ntr_ifname,
-	    sizeof(ginfo->trg_ifname));
+	strbufcpy(ginfo->trg_procname, ntr->ntr_procname);
+	strbufcpy(ginfo->trg_ifname, ntr->ntr_ifname);
 	bcopy(&ntri->ntri_td, &info->tri_td, sizeof(info->tri_td));
 	bcopy(&ntri->ntri_ra, &info->tri_ra, sizeof(info->tri_ra));
 }
@@ -1248,7 +1264,7 @@ find_traffic_rule_by_uuid(uuid_t uuid, struct nxctl_traffic_rule **ntrp)
 {
 	int i, err;
 	struct nxctl_traffic_rule_type *ntrt;
-	struct nxctl_traffic_rule *ntr = NULL;
+	struct nxctl_traffic_rule *__single ntr = NULL;
 
 	for (i = 0; i < NRULETYPES; i++) {
 		ntrt = &nxctl_rule_types[i];
@@ -1286,7 +1302,7 @@ add_traffic_rule(struct nxctl *nxctl, const char *ifname,
     struct nxctl_traffic_rule **ntrp)
 {
 	struct nxctl_traffic_rule_type *type = NULL;
-	struct nxctl_traffic_rule *ntr = NULL;
+	struct nxctl_traffic_rule *__single ntr = NULL;
 	int err;
 
 	NXTR_WLOCK();
@@ -1334,7 +1350,7 @@ static int
 remove_traffic_rule(struct nxctl *nxctl, uuid_t uuid,
     struct nxctl_traffic_rule **ntrp)
 {
-	struct nxctl_traffic_rule *ntr;
+	struct nxctl_traffic_rule *__single ntr;
 	int err;
 
 	NXTR_WLOCK();
@@ -1372,7 +1388,7 @@ add_traffic_rule_generic(struct nxctl *nxctl, const char *ifname,
     struct ifnet_traffic_descriptor_common *td,
     struct ifnet_traffic_rule_action *ra, uint32_t flags, uuid_t *uuid)
 {
-	struct nxctl_traffic_rule *ntr;
+	struct nxctl_traffic_rule *__single ntr;
 	int err;
 
 	err = add_traffic_rule(nxctl, ifname, td, ra, flags, &ntr);
@@ -1391,8 +1407,11 @@ nxioctl_add_traffic_rule_inet(struct nxctl *nxctl, caddr_t data, proc_t procp)
 #pragma unused(procp)
 	struct nxctl_add_traffic_rule_inet_iocargs *args =
 	    (struct nxctl_add_traffic_rule_inet_iocargs *)(void *)data;
+	char *__null_terminated atri_ifname = NULL;
 
-	return add_traffic_rule_generic(nxctl, args->atri_ifname,
+	atri_ifname = __unsafe_null_terminated_from_indexable(args->atri_ifname);
+
+	return add_traffic_rule_generic(nxctl, atri_ifname,
 	           (struct ifnet_traffic_descriptor_common *)&args->atri_td,
 	           (struct ifnet_traffic_rule_action *)&args->atri_ra,
 	           convert_traffic_rule_ioc_flags(args->atri_flags),
@@ -1405,7 +1424,7 @@ nxioctl_remove_traffic_rule(struct nxctl *nxctl, caddr_t data, proc_t procp)
 #pragma unused(procp)
 	struct nxctl_remove_traffic_rule_iocargs *args =
 	    (struct nxctl_remove_traffic_rule_iocargs *)(void *)data;
-	struct nxctl_traffic_rule *ntr;
+	struct nxctl_traffic_rule *__single ntr;
 	int err;
 
 	err = remove_traffic_rule(nxctl, args->rtr_uuid, &ntr);

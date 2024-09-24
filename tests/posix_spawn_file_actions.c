@@ -22,7 +22,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 #define TEST_PATH "/System/Library/Caches"
 
 T_DECL(posix_spawn_file_actions_addchdir_np, "Check posix_spawn_file_actions_addchdir_np",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	posix_spawn_file_actions_t file_actions;
 	int ret;
@@ -62,7 +62,7 @@ T_DECL(posix_spawn_file_actions_addchdir_np, "Check posix_spawn_file_actions_add
 }
 
 T_DECL(posix_spawn_file_actions_addchdir_np_errors, "Check posix_spawn_file_actions_addchdir_np errors",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	char longpath[PATH_MAX + 1];
 	posix_spawn_file_actions_t file_actions;
@@ -87,7 +87,7 @@ T_DECL(posix_spawn_file_actions_addchdir_np_errors, "Check posix_spawn_file_acti
 }
 
 T_DECL(posix_spawn_file_actions_addfchdir_np, "Check posix_spawn_file_actions_addfchdir_np",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	posix_spawn_file_actions_t file_actions;
 	int ret;
@@ -135,7 +135,7 @@ T_DECL(posix_spawn_file_actions_addfchdir_np, "Check posix_spawn_file_actions_ad
 }
 
 T_DECL(posix_spawn_file_actions_addfchdir_np_errors, "Check posix_spawn_file_actions_addfchdir_np errors",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	posix_spawn_file_actions_t file_actions;
 	int ret;

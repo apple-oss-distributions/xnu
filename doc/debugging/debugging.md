@@ -1,10 +1,10 @@
 # XNU debugging
 
-Debugging xnu through kernel core files or with a live device.
+Debugging XNU through kernel core files or with a live device.
 
 ## Overview
 
-xnu’s debugging macros are compatible with both Python 3.9+. Please be careful about pulling
+XNU’s debugging macros are compatible with Python 3.9+. Please be careful about pulling
 in the latest language features. Some users are living on older Xcodes and may not have the newest
 Python installed.
 
@@ -133,11 +133,7 @@ to ensure that macros use the correct semantics.
 
 ## Testing changes
 
-There is no perfect test suite to check that macros are producing a correct value compared to what
-the debugger sees in a target.
-
-Be careful when touching common framework code. For larger changes, ask the Platform Triage team to
-validate that the changes work in their environment before integration.
+Please check documentation here: <doc:macro_testing>
 
 ### Coding style
 
@@ -213,25 +209,16 @@ $ python3 -m pip install --user coverage
 Then collect coverage:.
 
 ```
-# 1. Start LLDB with your macros as described above.
+(lldb) xnudebug coverage /tmp/coverage.cov showallstacks
 
-# 2. Load and start code coverage recording.
-(lldb) script import coverage
-(lldb) script cov = coverage.Coverage()
-(lldb) script cov.start()
+...
 
-# 3. Do the testing.
-
-# 4. Collect the coverage.
-(lldb) script cov.stop()
-(lldb) script cov.save()
+Coverage info saved to: "/tmp/coverage.cov"
 ```
 
-You can override the default file (*.coverage*) by adding an additional environment variable to LLDB:
+You can then run `coverage html --data-file=/tmp/coverage.cov` in your terminal
+to generate an HTML report.
 
-```
-$ env COVERAGE_FILE="${OUTDIR}/.coverage.mytest" # usual LLDB command line
-```
 
 Combine coverage from multiple files:
 
@@ -248,6 +235,20 @@ $ coverage html
 
 It is possible to start coverage collection **before** importing the operating system library and
 loading macros to check code run during bootstrapping.
+
+For this, you'll need to run coverage manually:
+# 1. Start LLDB
+
+# 2. Load and start code coverage recording.
+(lldb) script import coverage
+(lldb) script cov = coverage.Coverage(data_file=_filepath_)
+(lldb) script cov.start()
+
+# 3. Load macros
+
+# 4. Collect the coverage.
+(lldb) script cov.stop()
+(lldb) script cov.save()
 
 ### Performance testing
 

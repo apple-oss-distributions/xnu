@@ -271,10 +271,14 @@ struct bpf_comp_stats {
 #define BIOCGHDRCOMPON  _IOR('B', 137, int)
 #define BIOCGDIRECTION  _IOR('B', 138, int)
 #define BIOCSDIRECTION  _IOW('B', 139, int)
-#define BIOCSWRITEMAX  _IOW('B', 140, u_int)
-#define BIOCGWRITEMAX  _IOR('B', 141, u_int)
-#define BIOCGBATCHWRITE  _IOR('B', 142, int)
-#define BIOCSBATCHWRITE  _IOW('B', 143, int)
+#define BIOCSWRITEMAX   _IOW('B', 140, u_int)
+#define BIOCGWRITEMAX   _IOR('B', 141, u_int)
+#define BIOCGBATCHWRITE _IOR('B', 142, int)
+#define BIOCSBATCHWRITE _IOW('B', 143, int)
+#define BIOCGNOTSTAMP   _IOR('B', 144, int)
+#define BIOCSNOTSTAMP   _IOW('B', 145, int)
+#define BIOCGDVRTIN     _IOR('B', 146, int)
+#define BIOCSDVRTIN     _IOW('B', 146, int)
 #endif /* PRIVATE */
 
 /*
@@ -355,7 +359,9 @@ struct xbpf_d {
 	uint8_t         bd_exthdr;
 	uint8_t         bd_trunc;
 	uint8_t         bd_pkthdrv2;
-	uint8_t         bd_pad;
+	uint8_t         bd_batch_write : 1;
+	uint8_t         bd_divert_in : 1;
+	uint8_t         bd_padding : 6;
 
 	uint64_t        bd_rcount;
 	uint64_t        bd_dcount;
@@ -1451,6 +1457,9 @@ struct bpf_dltlist {
 #define PORT_ISAKMP 500
 #define PORT_ISAKMP_NATT 4500   /* rfc3948 */
 
+#define BPF_T_MICROTIME         0x0000  /* The default */
+#define BPF_T_NONE              0x0003
+
 /* Forward declerations */
 struct ifnet;
 struct mbuf;
@@ -1463,7 +1472,7 @@ struct mbuf;
 
 struct bpf_packet {
 	int     bpfp_type;
-	void *  bpfp_header;            /* optional */
+	void *__sized_by(bpfp_header_length) bpfp_header; /* optional */
 	size_t  bpfp_header_length;
 	union {
 		struct mbuf     *bpfpu_mbuf;
@@ -1478,10 +1487,11 @@ struct bpf_packet {
 	size_t  bpfp_total_length;      /* length including optional header */
 };
 
-extern int      bpf_validate(const struct bpf_insn *, int);
+extern int      bpf_validate(const struct bpf_insn *__counted_by(len), int len);
 extern void     bpfdetach(struct ifnet *);
 extern void     bpfilterattach(int);
-extern u_int    bpf_filter(const struct bpf_insn *, u_char *, u_int, u_int);
+extern u_int    bpf_filter(const struct bpf_insn *__counted_by(pc_len), u_int pc_len,
+    u_char *__sized_by(sizeof(struct bpf_packet)), u_int wirelen, u_int);
 #endif /* KERNEL_PRIVATE */
 
 #endif /* !defined(DRIVERKIT) */
@@ -1591,7 +1601,7 @@ extern errno_t  bpf_attach(ifnet_t interface, u_int32_t data_link_type,
  *       @param header_len If the header was specified, the length of the header.
  */
 extern void bpf_tap_in(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
-    void *header, size_t header_len);
+    void *__sized_by(header_len) header, size_t header_len);
 
 /*!
  *       @function bpf_tap_out
@@ -1605,7 +1615,7 @@ extern void bpf_tap_in(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
  *       @param header_len If the header was specified, the length of the header.
  */
 extern void bpf_tap_out(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
-    void *header, size_t header_len);
+    void *__sized_by(header_len) header, size_t header_len);
 
 #if SKYWALK
 /*!
@@ -1620,7 +1630,7 @@ extern void bpf_tap_out(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
  *       @param header_len If the header was specified, the length of the header.
  */
 extern void bpf_tap_packet_in(ifnet_t interface, u_int32_t dlt,
-    kern_packet_t packet, void *header, size_t header_len);
+    kern_packet_t packet, void *__sized_by(header_len) header, size_t header_len);
 
 /*!
  *       @function bpf_tap_packet_out
@@ -1634,7 +1644,7 @@ extern void bpf_tap_packet_in(ifnet_t interface, u_int32_t dlt,
  *       @param header_len If the header was specified, the length of the header.
  */
 extern void bpf_tap_packet_out(ifnet_t interface, u_int32_t dlt,
-    kern_packet_t packet, void *header, size_t header_len);
+    kern_packet_t packet, void *__sized_by(header_len) header, size_t header_len);
 
 #endif /* SKYWALK */
 #endif /* KERNEL */

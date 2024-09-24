@@ -191,12 +191,20 @@ timer_queue_expire_local(
 	rtclock_timer_t         *mytimer = &getCpuDatap()->rtclock_timer;
 	uint64_t                abstime;
 
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_EXPIRE_LOCAL | DBG_FUNC_START,
+	    mytimer->deadline, 0, 0, 0, 0);
+
 	abstime = mach_absolute_time();
 	mytimer->has_expired = TRUE;
 	mytimer->deadline = timer_queue_expire(&mytimer->queue, abstime);
 	mytimer->has_expired = FALSE;
 
 	timer_resync_deadlines();
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_EXPIRE_LOCAL | DBG_FUNC_END,
+	    mytimer->deadline, 0, 0, 0, 0);
 }
 
 boolean_t
@@ -219,6 +227,13 @@ timer_queue_assign(
 			timer_set_deadline(deadline);
 		}
 	} else {
+		/*
+		 * No timers should be armed by powered down CPUs, except
+		 * already badly behaved code in the hibernation path, and
+		 * that is running on master_cpu.
+		 */
+		assert(ml_is_quiescing());
+
 		queue = &cpu_datap(master_cpu)->rtclock_timer.queue;
 	}
 

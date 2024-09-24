@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -219,10 +219,7 @@ struct dlil_main_threading_info {
  */
 #define DLIL_IFF_TSO            0x01    /* Interface filter supports TSO */
 #define DLIL_IFF_INTERNAL       0x02    /* Apple internal -- do not count towards stats */
-
-/* Input poll interval definitions */
-#define IF_RXPOLL_INTERVALTIME_MIN      (1ULL * 1000)           /* 1 us */
-#define IF_RXPOLL_INTERVALTIME          (1ULL * 1000 * 1000)    /* 1 ms */
+#define DLIL_IFF_BRIDGE         0x04    /* bridge interface filter */
 
 extern int dlil_verbose;
 extern uint32_t hwcksum_dbg;
@@ -300,7 +297,7 @@ extern errno_t dlil_send_arp_internal(ifnet_t, u_int16_t,
  * compare as equal to the NULL pointer.
  */
 struct net_thread_marks;
-typedef const struct net_thread_marks *net_thread_marks_t;
+typedef const struct net_thread_marks *__single net_thread_marks_t;
 
 extern const net_thread_marks_t net_thread_marks_none;
 
@@ -310,6 +307,10 @@ extern void net_thread_marks_pop(net_thread_marks_t);
 extern void net_thread_unmarks_pop(net_thread_marks_t);
 extern u_int32_t net_thread_is_marked(u_int32_t);
 extern u_int32_t net_thread_is_unmarked(u_int32_t);
+
+#define DLIL_OUTPUT_FLAGS_NONE                  0x0
+#define DLIL_OUTPUT_FLAGS_RAW                   0x1
+#define DLIL_OUTPUT_FLAGS_SKIP_IF_FILTERS       0x2
 
 extern int dlil_output(ifnet_t, protocol_family_t, mbuf_t, void *,
     const struct sockaddr *, int, struct flowadv *);
@@ -360,8 +361,6 @@ extern boolean_t ifnet_nx_noauto_flowswitch(ifnet_t ifp);
 extern boolean_t ifnet_is_low_latency(ifnet_t ifp);
 extern boolean_t ifnet_attach_flowswitch_nexus(ifnet_t ifp);
 extern boolean_t ifnet_detach_flowswitch_nexus(ifnet_t ifp);
-extern boolean_t ifnet_attach_netif_nexus(ifnet_t ifp);
-extern boolean_t ifnet_detach_netif_nexus(ifnet_t ifp);
 extern boolean_t ifnet_add_netagent(ifnet_t ifp);
 extern boolean_t ifnet_remove_netagent(ifnet_t ifp);
 extern void      ifnet_attach_native_flowswitch(ifnet_t ifp);
@@ -402,8 +401,16 @@ extern void dlil_node_absent(struct ifnet *, struct sockaddr *);
 extern int dlil_node_present_v2(struct ifnet *, struct sockaddr *, struct sockaddr_dl *, int32_t, int,
     int, u_int8_t[48]);
 
-extern const void *__indexable dlil_ifaddr_bytes(const struct sockaddr_dl *, size_t *,
+extern const void *dlil_ifaddr_bytes(const struct sockaddr_dl *, size_t *,
     kauth_cred_t *);
+
+static inline const void *__header_indexable
+__attribute__((always_inline))
+dlil_ifaddr_bytes_indexable(const struct sockaddr_dl * sdl, size_t *sizep, kauth_cred_t *cred)
+{
+	const void *__unsafe_indexable raw_bytes = dlil_ifaddr_bytes(sdl, sizep, cred);
+	return __unsafe_forge_bidi_indexable(const void*, raw_bytes, *sizep);
+}
 
 extern void dlil_report_issues(struct ifnet *, u_int8_t[DLIL_MODIDLEN],
     u_int8_t[DLIL_MODARGLEN]);
@@ -512,6 +519,60 @@ ifp_inc_traffic_class_out(struct ifnet *ifp, struct mbuf *m)
 }
 
 extern void ifnet_ioctl_async(struct ifnet *, u_long);
+
+extern int bridge_enable_early_input;
+extern mbuf_t bridge_early_input(struct ifnet *ifp, mbuf_t m, u_int32_t cnt);
+
+#define DLIL_MAX_FRAME_TYPE_SIZE 4 /* LONGWORDS */
+#define DLIL_MAX_FRAME_TYPE_BUFFER_SIZE (DLIL_MAX_FRAME_TYPE_SIZE * 4)
+
+/*
+ * Helper function to safely expand the frame type
+ * parameter to indexable pointer.
+ */
+static inline uint8_t * __header_indexable
+__dlil_frame_type_buffer(char *frame_type)
+{
+	return __unsafe_forge_bidi_indexable(uint8_t *,
+	           frame_type, DLIL_MAX_FRAME_TYPE_BUFFER_SIZE);
+}
+
+static inline const uint8_t * __header_indexable
+__dlil_frame_type_cbuffer(const char *frame_type)
+{
+	return __unsafe_forge_bidi_indexable(const uint8_t *,
+	           frame_type, DLIL_MAX_FRAME_TYPE_BUFFER_SIZE);
+}
+
+#define dlil_frame_type(x) (_Generic((x),           \
+	char       * : __dlil_frame_type_buffer,        \
+	const char * : __dlil_frame_type_cbuffer)((x)))
+
+#define DLIL_MAX_LINKADDR        4 /* LONGWORDS */
+#define DLIL_MAX_LINKADDR_BUFFER_SIZE (DLIL_MAX_LINKADDR * 4)
+
+/*
+ * Helper function to safely expand the link address
+ * parameter to indexable pointer.
+ */
+static inline uint8_t * __header_indexable
+__dlil_link_addr_buffer(char *link_addr)
+{
+	return __unsafe_forge_bidi_indexable(uint8_t *,
+	           link_addr, DLIL_MAX_LINKADDR_BUFFER_SIZE);
+}
+
+static inline const uint8_t * __header_indexable
+__dlil_link_addr_cbuffer(const char *link_addr)
+{
+	return __unsafe_forge_bidi_indexable(const uint8_t *,
+	           link_addr, DLIL_MAX_LINKADDR_BUFFER_SIZE);
+}
+
+#define dlil_link_addr(x) (_Generic((x),           \
+	char       * : __dlil_link_addr_buffer,        \
+	const char * : __dlil_link_addr_cbuffer)((x)))
+
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */

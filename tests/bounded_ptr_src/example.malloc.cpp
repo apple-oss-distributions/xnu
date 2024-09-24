@@ -49,7 +49,7 @@ require(bool condition)
 	}
 }
 
-T_DECL(example_malloc, "bounded_ptr.example.malloc") {
+T_DECL(example_malloc, "bounded_ptr.example.malloc", T_META_TAG_VM_PREFERRED) {
 	test_bounded_ptr<SomeType> array = nullptr;
 	std::uint32_t count = 100;
 	std::uint32_t alloc_size = count * sizeof(SomeType);

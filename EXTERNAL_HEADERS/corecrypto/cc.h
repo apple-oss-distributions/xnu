@@ -113,9 +113,6 @@ uint8_t b[_alignment_]; \
 /* number of array elements used in a cc_ctx_decl */
 #define cc_ctx_n(_type_, _size_) ((_size_ + sizeof(_type_) - 1) / sizeof(_type_))
 
-/* sizeof of a context declared with cc_ctx_decl */
-#define cc_ctx_sizeof(_type_, _size_) sizeof(_type_[cc_ctx_n(_type_, _size_)])
-
 // VLA warning opt-outs to help transition away from VLAs.
 #if defined(__KEIL__)
  #define CC_IGNORE_VLA_WARNINGS \
@@ -132,6 +129,12 @@ uint8_t b[_alignment_]; \
  #define CC_RESTORE_VLA_WARNINGS \
      _Pragma("GCC diagnostic pop")
 #endif
+
+/* sizeof of a context declared with cc_ctx_decl */
+#define cc_ctx_sizeof(_type_, _size_) \
+	CC_IGNORE_VLA_WARNINGS \
+	sizeof(_type_[cc_ctx_n(_type_, _size_)]) \
+	CC_RESTORE_VLA_WARNINGS
 
 /*
   1. _alloca cannot be removed because this header file is compiled with both MSVC++ and with clang.

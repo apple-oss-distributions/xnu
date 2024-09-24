@@ -68,6 +68,19 @@ __BEGIN_DECLS
 void CSM_PREFIX(toggle_developer_mode)(
 	bool state);
 
+kern_return_t CSM_PREFIX(rem_enable)(void);
+
+kern_return_t CSM_PREFIX(rem_state)(void);
+
+kern_return_t CSM_PREFIX(secure_channel_shared_page)(
+	uint64_t * secure_channel_phys,
+	size_t *secure_channel_size);
+
+void CSM_PREFIX(update_device_state)(void);
+
+void CSM_PREFIX(complete_security_boot_mode)(
+	uint32_t security_boot_mode);
+
 void CSM_PREFIX(set_compilation_service_cdhash)(
 	const uint8_t cdhash[CS_CDHASH_LEN]);
 
@@ -143,6 +156,11 @@ kern_return_t CSM_PREFIX(register_provisioning_profile)(
 	const size_t profile_blob_size,
 	void **profile_obj);
 
+kern_return_t CSM_PREFIX(trust_provisioning_profile)(
+	void *profile_obj,
+	const void *sig_data,
+	size_t sig_size);
+
 kern_return_t CSM_PREFIX(unregister_provisioning_profile)(
 	void *profile_obj);
 
@@ -201,6 +219,11 @@ kern_return_t CSM_PREFIX(allow_invalid_code)(
 kern_return_t CSM_PREFIX(get_trust_level_kdp)(
 	pmap_t pmap,
 	uint32_t *trust_level);
+
+kern_return_t CSM_PREFIX(get_jit_address_range_kdp)(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end);
 
 kern_return_t CSM_PREFIX(address_space_exempt)(
 	const pmap_t pmap);

@@ -313,8 +313,17 @@ struct tcp_info {
 	uint32_t       tcpi_server_accecn_state;   /* Server's Accurate ECN state as seen by clent */
 	uint64_t       tcpi_ecn_capable_packets_sent;   /* Packets sent with ECT */
 	uint64_t       tcpi_ecn_capable_packets_acked;  /* Packets sent with ECT that were ACKed */
-	uint64_t       tcpi_ecn_capable_packets_marked; /* Packets sent with ECT that were marked */
+	uint64_t       tcpi_ecn_capable_packets_marked; /* Packets sent with ECT that were marked, same as delivered_ce_packets */
 	uint64_t       tcpi_ecn_capable_packets_lost;   /* Packets sent with ECT that were lost */
+
+#define TCPINFO_HAS_L4S 1
+	uint64_t       tcpi_received_ce_packets;
+	uint64_t       tcpi_received_ect0_bytes;
+	uint64_t       tcpi_received_ect1_bytes;
+	uint64_t       tcpi_received_ce_bytes;
+	uint64_t       tcpi_delivered_ect0_bytes;
+	uint64_t       tcpi_delivered_ect1_bytes;
+	uint64_t       tcpi_delivered_ce_bytes;
 
 #define TCPINFO_HAS_LIMITED_TIME 1
 	uint64_t       tcpi_flow_control_total_time;

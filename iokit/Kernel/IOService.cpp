@@ -292,7 +292,7 @@ static IOLock *                 gIOConsoleUsersLock;
 static thread_call_t            gIOConsoleLockCallout;
 static IONotifier *             gIOServiceNullNotifier;
 
-static uint32_t                 gIODextRelaunchMax = 1000;
+static SECURITY_READ_ONLY_LATE(uint32_t) gIODextRelaunchMax;
 
 #if DEVELOPMENT || DEBUG
 uint64_t                        driverkit_checkin_timed_out = 0;
@@ -414,6 +414,7 @@ IOSetCoreAnalyticsSendEventProc(IOCoreAnalyticsSendEventProc proc)
 
 
 static IOMessage  sSystemPower;
+extern "C" bool restore_boot;
 
 namespace IOServicePH
 {
@@ -486,7 +487,14 @@ IOService::initialize( void )
 		kIOServiceLegacyMatchingRegistryIDKey );
 #endif /* defined(XNU_TARGET_OS_OSX) */
 
-	PE_parse_boot_argn("dextrelaunch", &gIODextRelaunchMax, sizeof(gIODextRelaunchMax));
+	if (!PE_parse_boot_argn("dextrelaunch", &gIODextRelaunchMax, sizeof(gIODextRelaunchMax))) {
+		if (restore_boot) {
+			// Limit dext relaunches in the restore environment
+			gIODextRelaunchMax = 10;
+		} else {
+			gIODextRelaunchMax = 1000;
+		}
+	}
 	PE_parse_boot_argn("iocthreads", &gMaxConfigThreads, sizeof(gMaxConfigThreads));
 
 	gIOUserClientClassKey = OSSymbol::withCStringNoCopy( kIOUserClientClassKey );
@@ -1341,7 +1349,7 @@ IOService::getProvider( void ) const
 	IOService * parent;
 	SInt32      generation;
 
-	generation = getRegistryEntryGenerationCount();
+	generation = getRegistryEntryParentGenerationCount();
 	if (__providerGeneration == generation) {
 		return __provider;
 	}
@@ -1802,7 +1810,7 @@ IOService::lockForArbitration( bool isSuccessRequired )
 restart_sleep:
 				// unlock global access
 				// & put thread to sleep, waiting for our event to fire...
-				wait_result = lck_mtx_sleep_with_inheritor(gArbitrationLockQueueLock,
+				wait_result = IOLockSleepWithInheritor(gArbitrationLockQueueLock,
 				    LCK_SLEEP_UNLOCK,
 				    &element->service->__machPortHoldDestroy,     // event
 				    owner->thread,
@@ -2775,7 +2783,13 @@ IOService::waitToBecomeTerminateThread(void)
 	do {
 		wait = (gIOTerminateThread != THREAD_NULL);
 		if (wait) {
-			IOLockSleep(gJobsLock, &gIOTerminateThread, THREAD_UNINT);
+			IOLockSleepWithInheritor(
+				gJobsLock,
+				LCK_SLEEP_DEFAULT,
+				&gIOTerminateThread,
+				gIOTerminateThread,
+				THREAD_UNINT,
+				TIMEOUT_WAIT_FOREVER);
 		}
 	} while (wait);
 	gIOTerminateThread = current_thread();
@@ -2830,7 +2844,7 @@ IOService::scheduleTerminatePhase2( IOOptionBits options )
 				}
 				/* let others do work while we wait */
 				gIOTerminateThread = NULL;
-				IOLockWakeup( gJobsLock, (event_t) &gIOTerminateThread, /* one-thread */ false);
+				IOLockWakeupAllWithInheritor(gJobsLock, &gIOTerminateThread);
 				waitResult = IOLockSleepDeadline( gJobsLock, &gIOTerminateWork,
 				    deadline, THREAD_UNINT );
 				if (__improbable(waitResult == THREAD_TIMED_OUT)) {
@@ -2842,7 +2856,7 @@ IOService::scheduleTerminatePhase2( IOOptionBits options )
 		} while (gIOTerminateWork || (wait && (waitResult != THREAD_TIMED_OUT)));
 
 		gIOTerminateThread = NULL;
-		IOLockWakeup( gJobsLock, (event_t) &gIOTerminateThread, /* one-thread */ false);
+		IOLockWakeupAllWithInheritor(gJobsLock, &gIOTerminateThread);
 	} else {
 		// ! kIOServiceSynchronous
 
@@ -2874,7 +2888,7 @@ IOService::terminateThread( void * arg, wait_result_t waitResult )
 		}
 
 		gIOTerminateThread = NULL;
-		IOLockWakeup( gJobsLock, (event_t) &gIOTerminateThread, /* one-thread */ false);
+		IOLockWakeupAllWithInheritor(gJobsLock, &gIOTerminateThread);
 		IOLockSleep(gJobsLock, &gIOTerminateWork, THREAD_UNINT);
 	}
 }
@@ -3910,6 +3924,9 @@ IOService::probeCandidates( OSOrderedSet * matches )
 			if (isDext && !(kIODKEnable & gIODKDebug)) {
 				continue;
 			}
+			if (isDext && !OSKext::iokitDaemonAvailable()) {
+				continue;
+			}
 			if (isDext && !gIODextRelaunchMax && rematchCountProp) {
 				continue;
 			}
@@ -4548,10 +4565,16 @@ IOServicePH::matchingEnd(IOService * service)
 	unlock();
 
 	if (notifyServers) {
+		uint32_t sleepType = 0;
+		uint32_t standbyTimer = 0;
+		bool hibernate = false;
+		if (fSystemOff && IOService::getPMRootDomain()->getSystemSleepType(&sleepType, &standbyTimer) == kIOReturnSuccess) {
+			hibernate = (sleepType == kIOPMSleepTypeHibernate);
+		}
 		notifyServers->iterateObjects(^bool (OSObject * obj) {
 			IOUserServer * us;
 			us = (typeof(us))obj;
-			us->systemPower(fSystemOff);
+			us->systemPower(fSystemOff, hibernate);
 			return false;
 		});
 		OSSafeReleaseNULL(notifyServers);
@@ -5419,14 +5442,21 @@ IOService::doServiceMatch( IOOptionBits options )
 	__state[1] &= ~kIOServiceConfigState;
 	scheduleTerminatePhase2();
 
-	_adjustBusy( -1 );
-	unlockForArbitration();
+	_adjustBusy(-1, /*unlock*/ true);
+	// does	unlockForArbitration();
 }
 
 UInt32
-IOService::_adjustBusy( SInt32 delta )
+IOService::_adjustBusy(SInt32 delta)
+{
+	return _adjustBusy(delta, false);
+}
+
+UInt32
+IOService::_adjustBusy(SInt32 delta, bool unlock)
 {
 	IOService * next;
+	IOService * nextProvider;
 	UInt32      count;
 	UInt32      result;
 	bool        wasQuiet, nowQuiet, needWake;
@@ -5456,7 +5486,13 @@ IOService::_adjustBusy( SInt32 delta )
 				thread_wakeup((event_t) next);
 				IOLockUnlock( gIOServiceBusyLock );
 			}
-			if (next != this) {
+			if (wasQuiet || nowQuiet) {
+				nextProvider = next->getProvider();
+				if (nextProvider) {
+					nextProvider->retain();
+				}
+			}
+			if ((next != this) || unlock) {
 				next->unlockForArbitration();
 			}
 
@@ -5499,7 +5535,12 @@ IOService::_adjustBusy( SInt32 delta )
 			}
 
 			delta = nowQuiet ? -1 : +1;
-		} while ((wasQuiet || nowQuiet) && (next = next->getProvider()));
+			if (next != this) {
+				next->release();
+			}
+			next = nextProvider;
+			nextProvider = NULL;
+		} while ((wasQuiet || nowQuiet) && next);
 	}
 
 	return result;
@@ -5733,7 +5774,7 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 			OSSafeReleaseNULL(iter);
 		}
 
-		dopanic = (kIOWaitQuietPanics & gIOKitDebug) && (options & kIOWaitQuietPanicOnFailure);
+		dopanic = (kIOWaitQuietPanics & gIOKitDebug) && (options & kIOWaitQuietPanicOnFailure) && !gIOKitWillTerminate;
 #if WITH_IOWAITQUIET_EXTENSIONS
 		dopanic = (dopanic && (loops >= (timeoutExtensions - 1)));
 #endif
@@ -7566,6 +7607,19 @@ IOService::matchLocation( IOService * /* client */ )
 	return parent;
 }
 
+OSDictionary *
+IOService::_copyPropertiesForMatching(void)
+{
+	OSDictionary * matchProps;
+
+	matchProps = dictionaryWithProperties();
+	if (matchProps) {
+		// merge will check the OSDynamicCast
+		matchProps->merge((const OSDictionary *)matchProps->getObject(gIOUserServicePropertiesKey));
+	}
+	return matchProps;
+}
+
 bool
 IOService::matchInternal(OSDictionary * table, uint32_t options, uint32_t * did)
 {
@@ -7673,7 +7727,7 @@ IOService::matchInternal(OSDictionary * table, uint32_t options, uint32_t * did)
 			done++;
 			match = false;
 			if (!matchProps) {
-				matchProps = dictionaryWithProperties();
+				matchProps = _copyPropertiesForMatching();
 			}
 			if (matchProps) {
 				nextDict = OSDynamicCast( OSDictionary, obj);
@@ -7709,7 +7763,7 @@ IOService::matchInternal(OSDictionary * table, uint32_t options, uint32_t * did)
 			done++;
 			match = false;
 			if (!matchProps) {
-				matchProps = dictionaryWithProperties();
+				matchProps = _copyPropertiesForMatching();
 			}
 			if (matchProps) {
 				nextKey = OSDynamicCast( OSString, obj);
@@ -8339,7 +8393,9 @@ requireMaxCpuDelay(IOService * service, UInt32 ns, UInt32 delayType)
 	IORecursiveLockLock(sCpuDelayLock);
 
 	UInt count = sCpuDelayData->getLength() / sizeof(CpuDelayEntry);
+	__typed_allocators_ignore_push
 	CpuDelayEntry *entries = (CpuDelayEntry *) sCpuDelayData->getBytesNoCopy();
+	__typed_allocators_ignore_pop
 	IOService * holder = NULL;
 
 	if (ns) {
@@ -8366,7 +8422,9 @@ requireMaxCpuDelay(IOService * service, UInt32 ns, UInt32 delayType)
 
 		setCpuDelay = true;
 		if (kNoReplace == replace) {
+			__typed_allocators_ignore_push
 			sCpuDelayData->appendBytes(&ne, sizeof(ne));
+			__typed_allocators_ignore_pop
 		} else {
 			entries[replace] = ne;
 		}
@@ -8460,7 +8518,9 @@ setLatencyHandler(UInt32 delayType, IOService * target, bool enable)
 			array->setObject(target);
 
 			UInt count = sCpuDelayData->getLength() / sizeof(CpuDelayEntry);
+			__typed_allocators_ignore_push
 			CpuDelayEntry *entries = (CpuDelayEntry *) sCpuDelayData->getBytesNoCopy();
+			__typed_allocators_ignore_pop
 			UInt32 ns = -1U; // Set to max unsigned, i.e. no restriction
 			IOService * holder = NULL;
 
@@ -8693,6 +8753,14 @@ IOService::unregisterInterrupt(int source)
 	}
 
 	return ret;
+}
+
+void
+IOService::unregisterAllInterrupts(void)
+{
+	for (int source = 0; source < _numInterruptSources; source++) {
+		(void) unregisterInterrupt(source);
+	}
 }
 
 IOReturn

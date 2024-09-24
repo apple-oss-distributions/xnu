@@ -31,11 +31,11 @@
 #include <libkern/section_keywords.h>
 #include <pexpert/device_tree.h>
 #include <os/atomic_private.h>
-#include <vm/cpm.h>
+#include <vm/cpm_internal.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
+#include <vm/vm_object_xnu.h>
+#include <vm/vm_page_internal.h>
 #include <vm/vm_pageout.h>
 
 #include <arm/pmap/pmap_internal.h>
@@ -631,7 +631,8 @@ pmap_data_bootstrap(void)
 	vm_size_t ptd_root_table_size = num_ptd_pages * PAGE_SIZE;
 
 	/* Number of VM pages that span all of kernel-managed memory. */
-	const unsigned int npages = (unsigned int)atop(mem_size);
+	unsigned int npages = (unsigned int)atop(mem_size);
+
 
 	/* The pv_head_table and pp_attr_table both have one entry per VM page. */
 	const vm_size_t pp_attr_table_size = npages * sizeof(pp_attr_t);
@@ -1117,18 +1118,22 @@ pmap_mark_page_as_ppl_page_internal(pmap_paddr_t pa, bool initially_free)
 	pvh_lock(pai);
 
 	/* A page that the PPL already owns can't be given to the PPL. */
-	if (ppattr_pa_test_monitor(pa)) {
+	if (__improbable(ppattr_pa_test_monitor(pa))) {
 		panic("%s: page already belongs to PPL, pa=0x%llx", __func__, pa);
 	}
 
+	if (__improbable(pvh_get_flags(pai_to_pvh(pai)) & PVH_FLAG_LOCKDOWN_MASK)) {
+		panic("%s: page locked down, pa=0x%llx", __func__, pa);
+	}
+
 	/* The page cannot be mapped outside of the physical aperture. */
-	if (!pmap_verify_free((ppnum_t)atop(pa))) {
+	if (__improbable(!pmap_verify_free((ppnum_t)atop(pa)))) {
 		panic("%s: page still has mappings, pa=0x%llx", __func__, pa);
 	}
 
 	do {
 		attr = pp_attr_table[pai];
-		if (attr & PP_ATTR_NO_MONITOR) {
+		if (__improbable(attr & PP_ATTR_NO_MONITOR)) {
 			panic("%s: page excluded from PPL, pa=0x%llx", __func__, pa);
 		}
 	} while (!OSCompareAndSwap16(attr, attr | PP_ATTR_MONITOR, &pp_attr_table[pai]));
@@ -1230,12 +1235,6 @@ pmap_enqueue_pages(vm_page_t mem)
 		*(NEXT_PAGE_PTR(m_prev)) = VM_PAGE_NULL;
 	}
 	vm_object_unlock(pmap_object);
-}
-
-static inline boolean_t
-pmap_is_preemptible(void)
-{
-	return preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT);
 }
 
 /**

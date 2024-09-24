@@ -19,7 +19,7 @@ T_GLOBAL_META(
  *  If hw.memsize > 600MB, and kern.max_task_pmem is present, assert that
  *  kern.max_task_pmem is set to value > 0.
  */
-T_DECL(kern_max_task_pmem, "Embedded platforms should have a positive value for kern.max_task_pmem when hw.memsize > 600MB")
+T_DECL(kern_max_task_pmem, "Embedded platforms should have a positive value for kern.max_task_pmem when hw.memsize > 600MB", T_META_TAG_VM_PREFERRED)
 {
 	int kern_max_task_pmem = 0;
 	size_t pmem_size = sizeof(kern_max_task_pmem);

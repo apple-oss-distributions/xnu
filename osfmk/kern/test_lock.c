@@ -21,6 +21,7 @@
 #include <machine/atomic.h>
 #include <string.h>
 #include <kern/kalloc.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <sys/kdebug.h>
 #include <sys/errno.h>
@@ -197,7 +198,7 @@ smr_hash_basic_test(__unused int64_t in, int64_t *out)
 		smrh_key_t key;
 		bool seen[nelems] = { };
 
-		assert3u(h->smrh_count, ==, nelems / 2);
+		assert3u(smr_hash_serialized_count(h), ==, nelems / 2);
 
 		for (int i = 0; i < nelems / 2; i++) {
 			key = SMRH_SCALAR_KEY(elems[i].val);
@@ -224,7 +225,17 @@ smr_hash_basic_test(__unused int64_t in, int64_t *out)
 
 	printf("%s: STARTING\n", __func__);
 
+	smr_hash_init_empty(h);
+
+	assert3u(smr_hash_serialized_count(h), ==, 0);
+	assert(!smr_hash_entered_find(h, SMRH_SCALAR_KEY(0ul), T));
+	assert(!smr_hash_entered_find(h, SMRH_SCALAR_KEY(42ul), T));
+	assert(!smr_hash_entered_find(h, SMRH_SCALAR_KEY(314ul), T));
+	assert(smr_hash_is_empty_initialized(h));
+
 	smr_hash_init(h, 4);
+
+	assert(!smr_hash_is_empty_initialized(h));
 
 	printf("%s: populating the hash with unique entries\n", __func__);
 

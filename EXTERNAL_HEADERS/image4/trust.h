@@ -1,3 +1,30 @@
+/*
+ * Copyright © 2017-2024 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
 /*!
  * @header
  * Encapsulation which describes an Image4 trust object. This object can perform
@@ -61,6 +88,7 @@ OS_CLOSED_OPTIONS(image4_trust_flags, uint64_t,
  * is only recognized by the implementation when the trust object has been
  * initialized with an IMG4 object that contains an IM4R section.
  *
+ * @availability
  * This constant first became available in API version 20231103.
  *
  * @const IMAGE4_TRUST_SECTION_PAYLOAD_PROPERTIES
@@ -68,6 +96,7 @@ OS_CLOSED_OPTIONS(image4_trust_flags, uint64_t,
  * object, either by initializing the object with an IMG4 object, or by setting
  * a payload with {@link image4_trust_set_payload}.
  *
+ * @availability
  * This constant first became available in API version 20231103.
  */
 OS_CLOSED_ENUM(image4_trust_section, uint64_t,
@@ -97,7 +126,26 @@ OS_CLOSED_ENUM(image4_trust_section, uint64_t,
  *
  * @param error
  * A POSIX error code describing the result of the trust evaluation. Upon
- * success, zero will be passed.
+ * success, zero will be passed. The implementation may directly return any of
+ * the following:
+ *
+ *     [EILSEQ]     The manifest or payload data is not valid Image4 data
+ *     [EFTYPE]     The manifest is not a valid Image4 manifest, or the payload
+ *                  type does not match the type specified to
+ *                  {@link image4_trust_set_payload}
+ *     [ENOENT]     The manifest does not authenticate the payload specified to
+ *                  {@link image4_trust_set_payload}
+ *     [EAUTH]      The manifest was signed by a key which was either not issued
+ *                  by the expected certificate authority, or the manifest
+ *                  violated the signing key's constraints
+ *     [EACCES]     The manifest constraints were violated by the environment
+ *     [ESTALE]     The manifest has been invalidated and is no longer valid for
+ *                  the provided environment
+ *     [ENOEXEC]    The payload measurement does not match the measurement
+ *                  expected in the manifest
+ *     [E2BIG]      The caller specified a result buffer via
+ *                  {@link image4_trust_set_result_buffer}, and the buffer was
+ *                  not sufficient to hold the result
  *
  * @param context
  * The caller-provided context pointer. If no context pointer was set, NULL will
@@ -105,7 +153,7 @@ OS_CLOSED_ENUM(image4_trust_section, uint64_t,
  */
 typedef void (*image4_trust_evaluation_result_t)(
 	const image4_trust_t *trst,
-	const void *_Nullable result,
+	const void *_Nullable __sized_by(result_len) result,
 	size_t result_len,
 	errno_t error,
 	void *_Nullable context
@@ -116,7 +164,7 @@ typedef void (*image4_trust_evaluation_result_t)(
  * The version of the {@link image4_trust_t} structure supported by the
  * implementation.
  */
-#define IMAGE4_TRUST_STRUCT_VERSION (0u)
+#define IMAGE4_TRUST_STRUCT_VERSION (1u)
 
 /*!
  * @header image4_trust_storage_t
@@ -130,7 +178,7 @@ typedef void (*image4_trust_evaluation_result_t)(
  * The size of this object was set in API version 20231103.
  */
 typedef struct _image4_trust_storage {
-	uint8_t __opaque[1920];
+	uint8_t __opaque[2048];
 } image4_trust_storage_t;
 
 /*!
@@ -150,7 +198,7 @@ typedef struct _image4_trust_storage {
  * @param storage
  * The storage structure.
  *
- * @param environment
+ * @param nv
  * The environment in which the trust evaluation should be performed.
  *
  * @param evaluation
@@ -179,7 +227,7 @@ OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2 OS_NONNULL3 OS_NONNULL4
 image4_trust_t *
 _image4_trust_init(
 	image4_trust_storage_t *storage,
-	const image4_environment_t *environment,
+	const image4_environment_t *nv,
 	const image4_trust_evaluation_t *evaluation,
 	const void *__sized_by(manifest_len) manifest,
 	size_t manifest_len,
@@ -316,6 +364,41 @@ image4_trust_set_booter(
 	image4_trust_t *trst,
 	const image4_trust_t *booter);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_trust_set_booter);
+
+/*!
+ * @function image4_trust_set_result_buffer
+ * Provide a caller-owned buffer into which trust evaluation results will be
+ * written. This is useful for trust evaluations which may allocate memory for
+ * the result, such as {@link IMAGE4_TRUST_EVALUATION_NORMALIZE}.
+ *
+ * @param trst
+ * The trust object.
+ *
+ * @param p
+ * The caller-managed buffer. This parameter may be NULL, in which case the
+ * existing caller-managed buffer is cleared from the object.
+ *
+ * @param p_len
+ * The length of the buffer provided in {@link p}.
+ *
+ * @discussion
+ * The caller retains ownership of the buffer and is responsible for
+ * deallocating it when it is no longer needed.
+ *
+ * If this buffer is too small for the complete result, the trust evaluation
+ * callback will deliver E2BIG.
+ *
+ * @availability
+ * This function first became available in API version 20240503.
+ */
+IMAGE4_API_AVAILABLE_FALL_2024
+OS_EXPORT OS_NONNULL1 OS_NONNULL2
+void
+image4_trust_set_result_buffer(
+	image4_trust_t *trst,
+	void *_Nullable __sized_by(p_len) p,
+	size_t p_len);
+IMAGE4_XNU_AVAILABLE_DIRECT(image4_trust_set_result_buffer);
 
 /*!
  * @function image4_trust_record_property_bool

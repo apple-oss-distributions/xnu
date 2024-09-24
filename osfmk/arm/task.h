@@ -85,9 +85,13 @@
 #define TASK_ADDITIONS_X18
 #endif
 
+#define TASK_ADDITIONS_APT
+
 #define MACHINE_TASK \
 	void * XNU_PTRAUTH_SIGNED_PTR("task.task_debug") task_debug; \
 	TASK_ADDITIONS_PAC \
 \
 	TASK_ADDITIONS_UEXC \
-	TASK_ADDITIONS_X18
+	TASK_ADDITIONS_X18 \
+	TASK_ADDITIONS_APT \
+	bool uses_1ghz_timebase;

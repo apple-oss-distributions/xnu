@@ -124,8 +124,6 @@ _mach_gss_init_sec_context_v2
 _mach_gss_lookup
 _mach_gss_unhold_cred
 _mach_make_memory_entry_64
-_mach_memory_entry_page_op
-_mach_memory_entry_range_op
 _mach_memory_entry_ownership
 _mach_msg_destroy_from_kernel_proper
 _mach_msg_rpc_from_kernel_proper
@@ -159,9 +157,9 @@ _ovbcopy
 _pmap_find_phys
 _populate_model_name
 _prf
-_processor_exit
+_processor_exit:_processor_exit_from_kext
 _processor_info
-_processor_start
+_processor_start:_processor_start_from_kext
 _putc
 _securelevel
 _set_vm_privilege
@@ -189,7 +187,6 @@ _vm_map_unwire
 _vm_map_wire:_vm_map_wire_external
 _vm_protect
 _vm_region
-_vm_region_object_create
 _vnode_tag
 _vnop_getnamedstream_desc
 _vnop_kqfilt_add_desc

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -105,7 +105,6 @@ extern struct inpcbinfo udbinfo;
 extern struct inpcbinfo ripcbinfo;
 
 static int get_rand_iid(struct ifnet *, struct in6_addr *);
-static int in6_generate_tmp_iid(u_int8_t *, const u_int8_t *, u_int8_t *);
 static int in6_select_iid_from_all_hw(struct ifnet *, struct ifnet *,
     struct in6_addr *);
 static int in6_ifattach_linklocal(struct ifnet *, struct in6_aliasreq *);
@@ -133,7 +132,7 @@ get_rand_iid(
 	bzero(&ctxt, sizeof(ctxt));
 	SHA256_Init(&ctxt);
 	lck_mtx_lock(&hostname_lock);
-	hostnlen = strlen(hostname);
+	hostnlen = strnlen(hostname, sizeof(hostname));
 	SHA256_Update(&ctxt, hostname, hostnlen);
 	lck_mtx_unlock(&hostname_lock);
 	SHA256_Final(digest, &ctxt);
@@ -153,9 +152,9 @@ get_rand_iid(
 
 static int
 in6_generate_tmp_iid(
-	u_int8_t *seed0,
-	const u_int8_t *seed1,
-	u_int8_t *ret)
+	u_int8_t *__sized_by(8)seed0,
+	const u_int8_t *__sized_by(8)seed1,
+	u_int8_t *__sized_by(8)ret)
 {
 	SHA256_CTX ctxt;
 	u_int8_t seed[16], nullbuf[8], digest[SHA256_DIGEST_LENGTH];
@@ -255,9 +254,9 @@ in6_generate_tmp_iid(
 int
 in6_iid_from_hw(struct ifnet *ifp, struct in6_addr *in6)
 {
-	struct ifaddr *ifa = NULL;
+	struct ifaddr *__single ifa = NULL;
 	struct sockaddr_dl *sdl;
-	u_int8_t *addr;
+	const u_int8_t *addr;
 	size_t addrlen;
 	static u_int8_t allzero[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 	static u_int8_t allone[8] =
@@ -273,11 +272,11 @@ in6_iid_from_hw(struct ifnet *ifp, struct in6_addr *in6)
 		return -1;
 	}
 	ifa_addref(ifa);        /* for this routine */
-	ifnet_lock_done(ifp);
 
 	IFA_LOCK(ifa);
-	addr = (u_int8_t *) LLADDR(sdl);
+	addr = (const u_int8_t *) IF_LLADDR(ifp);
 	addrlen = sdl->sdl_alen;
+	ifnet_lock_done(ifp);
 
 	/* get EUI64 */
 	switch (ifp->if_type) {
@@ -469,8 +468,9 @@ success:
 static int
 in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 {
-	struct in6_ifaddr *ia;
-	struct nd_prefix pr0, *pr;
+	struct in6_ifaddr *__single ia;
+	struct nd_prefix pr0;
+	struct nd_prefix *__single pr;
 	int i, error;
 
 	VERIFY(ifra != NULL);
@@ -538,7 +538,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 		}
 	}
 
-	in6_post_msg(ifp, KEV_INET6_NEW_LL_ADDR, ia, NULL);
+	in6_post_msg(ifp, KEV_INET6_NEW_LL_ADDR, ia, NULL, 0);
 	ifa_remref(&ia->ia_ifa);
 
 	/* Drop use count held above during lookup/add */
@@ -555,7 +555,7 @@ in6_ifattach_loopback(
 	struct ifnet *ifp)      /* must be IFT_LOOP */
 {
 	struct in6_aliasreq ifra;
-	struct in6_ifaddr *ia;
+	struct in6_ifaddr *__single ia;
 	int error;
 
 	bzero(&ifra, sizeof(ifra));
@@ -613,7 +613,7 @@ in6_ifattach_loopback(
 int
 in6_nigroup(
 	struct ifnet *ifp,
-	const char *name,
+	const char *__counted_by(namelen)name,
 	size_t namelen,
 	struct in6_addr *in6,
 	uint32_t *ifscopep)
@@ -630,15 +630,15 @@ in6_nigroup(
 	}
 
 	p = name;
-	while (p && *p && *p != '.' && p - name < namelen) {
+	while (p - name < namelen && p && *p != '.') {
 		p++;
 	}
 	if (p - name > sizeof(n) - 1) {
 		return -1;    /* label too long */
 	}
 	l = p - name;
-	strlcpy(n, name, l);
-	n[(int)l] = '\0';
+	strbufcpy(n, sizeof(n), name, l);
+
 	for (q = (u_char *) n; *q; q++) {
 		if ('A' <= *q && *q <= 'Z') {
 			*q = *q - 'A' + 'a';
@@ -703,7 +703,7 @@ int
 in6_ifattach_prelim(struct ifnet *ifp)
 {
 	int error = 0;
-	struct in6_ifaddr *ia6 = NULL;
+	struct in6_ifaddr *__single ia6 = NULL;
 
 	VERIFY(ifp != NULL);
 
@@ -807,7 +807,7 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
     struct in6_aliasreq *ifra0)
 {
 	int error;
-	struct in6_ifaddr *ia6;
+	struct in6_ifaddr *__single ia6;
 	struct in6_aliasreq ifra;
 
 	error = in6_ifattach_prelim(ifp);
@@ -932,8 +932,8 @@ int
 in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 {
 	struct in6_aliasreq ifra;
-	struct in6_ifaddr *ia6 = NULL;
-	struct nd_ifinfo *ndi = NULL;
+	struct in6_ifaddr *__single ia6 = NULL;
+	struct nd_ifinfo *__single ndi = NULL;
 	int error;
 
 	VERIFY(llcgasr != NULL);
@@ -1028,11 +1028,11 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 void
 in6_ifdetach(struct ifnet *ifp)
 {
-	struct in6_ifaddr *ia, *nia;
-	struct ifaddr *ifa;
-	struct rtentry *rt;
+	struct in6_ifaddr *__single ia, *__single nia;
+	struct ifaddr *__single ifa;
+	struct rtentry *__single rt;
 	struct sockaddr_in6 sin6;
-	struct in6_multi_mship *imm;
+	struct in6_multi_mship *__single imm;
 	int unlinked;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
@@ -1079,7 +1079,7 @@ in6_ifdetach(struct ifnet *ifp)
 			continue;
 		}
 
-		ia = (struct in6_ifaddr *)ifa;
+		ia = ifatoia6(ifa);
 
 		/* hold a reference for this routine */
 		ifa_addref(ifa);
@@ -1207,7 +1207,7 @@ in6_ifdetach(struct ifnet *ifp)
 }
 
 void
-in6_iid_mktmp(struct ifnet *ifp, u_int8_t *retbuf, const u_int8_t *baseid,
+in6_iid_mktmp(struct ifnet *ifp, u_int8_t *__sized_by(8)retbuf, const u_int8_t *__sized_by(8)baseid,
     int generate)
 {
 	u_int8_t nullbuf[8];
@@ -1237,8 +1237,8 @@ void
 in6_tmpaddrtimer(void *arg)
 {
 #pragma unused(arg)
-	struct ifnet *ifp = NULL;
-	struct nd_ifinfo *ndi = NULL;
+	struct ifnet *__single ifp = NULL;
+	struct nd_ifinfo *__single ndi = NULL;
 	u_int8_t nullbuf[8];
 
 	timeout(in6_tmpaddrtimer, (caddr_t)0, (ip6_temp_preferred_lifetime -

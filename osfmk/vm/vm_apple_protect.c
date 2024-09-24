@@ -53,13 +53,15 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 
-#include <vm/vm_fault.h>
+#include <vm/vm_fault_internal.h>
 #include <vm/vm_map.h>
-#include <vm/vm_pageout.h>
-#include <vm/memory_object.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/memory_object_internal.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_protos_internal.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_ubc.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_object_internal.h>
 
 /*
  * APPLE PROTECT MEMORY PAGER
@@ -636,7 +638,7 @@ retry_src_fault:
 		/*
 		 * Cleanup the result of vm_fault_page() of the source page.
 		 */
-		PAGE_WAKEUP_DONE(src_page);
+		vm_page_wakeup_done(src_page_object, src_page);
 		src_page = VM_PAGE_NULL;
 		vm_object_paging_end(src_page_object);
 		vm_object_unlock(src_page_object);
@@ -793,7 +795,7 @@ apple_protect_pager_terminate_internal(
 	pager->crypt_info = NULL;
 
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->ap_pgr_hdr.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
+	memory_object_destroy(pager->ap_pgr_hdr.mo_control, VM_OBJECT_DESTROY_PAGER);
 }
 
 /*

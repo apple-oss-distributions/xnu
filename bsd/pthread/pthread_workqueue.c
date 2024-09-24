@@ -41,6 +41,7 @@
 #include <kern/thread.h>
 #include <kern/thread_group.h>
 #include <kern/zalloc.h>
+#include <kern/work_interval.h>
 #include <mach/kern_return.h>
 #include <mach/mach_param.h>
 #include <mach/mach_port.h>
@@ -82,6 +83,13 @@
 #include <os/log.h>
 
 static void workq_unpark_continue(void *uth, wait_result_t wr) __dead2;
+
+static void workq_bound_thread_unpark_continue(void *uth, wait_result_t wr) __dead2;
+
+static void workq_bound_thread_initialize_and_unpark_continue(void *uth, wait_result_t wr) __dead2;
+
+static void workq_bound_thread_setup_and_run(struct uthread *uth, int setup_flags) __dead2;
+
 static void workq_schedule_creator(proc_t p, struct workqueue *wq,
     workq_kern_threadreq_flags_t flags);
 
@@ -89,7 +97,8 @@ static bool workq_threadreq_admissible(struct workqueue *wq, struct uthread *uth
     workq_threadreq_t req);
 
 static uint32_t workq_constrained_allowance(struct workqueue *wq,
-    thread_qos_t at_qos, struct uthread *uth, bool may_start_timer);
+    thread_qos_t at_qos, struct uthread *uth,
+    bool may_start_timer, bool record_failed_allowance);
 
 static bool _wq_cooperative_queue_refresh_best_req_qos(struct workqueue *wq);
 
@@ -615,7 +624,8 @@ workq_thread_update_bucket(proc_t p, struct workqueue *wq, struct uthread *uth,
 	thread_qos_t old_bucket = old_pri.qos_bucket;
 	thread_qos_t new_bucket = workq_pri_bucket(new_pri);
 
-	if (old_bucket != new_bucket) {
+	if ((old_bucket != new_bucket) &&
+	    !workq_thread_is_permanently_bound(uth)) {
 		_wq_thactive_move(wq, old_bucket, new_bucket);
 	}
 
@@ -626,7 +636,9 @@ workq_thread_update_bucket(proc_t p, struct workqueue *wq, struct uthread *uth,
 		thread_set_workq_override(get_machthread(uth), new_pri.qos_override);
 	}
 
-	if (wq->wq_reqcount && (old_bucket > new_bucket || force_run)) {
+	if (wq->wq_reqcount &&
+	    !workq_thread_is_permanently_bound(uth) &&
+	    (old_bucket > new_bucket || force_run)) {
 		int flags = WORKQ_THREADREQ_CAN_CREATE_THREADS;
 		if (old_bucket > new_bucket) {
 			/*
@@ -675,7 +687,11 @@ workq_thread_reset_cpupercent(workq_threadreq_t req, struct uthread *uth)
 	}
 }
 
-/* Called with the workq lock held */
+/*
+ * This function is always called with the workq lock, except for the
+ * permanently bound workqueue thread, which instead requires the kqlock.
+ * See locking model for bound thread's uu_workq_flags.
+ */
 static void
 workq_thread_reset_pri(struct workqueue *wq, struct uthread *uth,
     workq_threadreq_t req, bool unpark)
@@ -944,11 +960,13 @@ workq_thread_terminate(struct proc *p, struct uthread *uth)
 	struct workqueue *wq = proc_get_wqptr_fast(p);
 
 	workq_lock_spin(wq);
-	TAILQ_REMOVE(&wq->wq_thrunlist, uth, uu_workq_entry);
-	if (uth->uu_workq_flags & UT_WORKQ_DYING) {
-		WQ_TRACE_WQ(TRACE_wq_thread_terminate | DBG_FUNC_END,
-		    wq, wq->wq_thidlecount, 0, 0);
-		workq_death_policy_evaluate(wq, 1);
+	if (!workq_thread_is_permanently_bound(uth)) {
+		TAILQ_REMOVE(&wq->wq_thrunlist, uth, uu_workq_entry);
+		if (uth->uu_workq_flags & UT_WORKQ_DYING) {
+			WQ_TRACE_WQ(TRACE_wq_thread_terminate | DBG_FUNC_END,
+			    wq, wq->wq_thidlecount, 0, 0);
+			workq_death_policy_evaluate(wq, 1);
+		}
 	}
 	if (wq->wq_nthreads-- == wq_max_threads) {
 		/*
@@ -1044,8 +1062,13 @@ workq_thread_init_and_wq_lock(task_t task, thread_t th)
  * - dropped and retaken around thread creation
  * - return with workq lock held
  */
-static bool
-workq_add_new_idle_thread(proc_t p, struct workqueue *wq)
+static kern_return_t
+workq_add_new_idle_thread(
+	proc_t             p,
+	struct workqueue  *wq,
+	thread_continue_t continuation,
+	bool              is_permanently_bound,
+	thread_t          *new_thread)
 {
 	mach_vm_offset_t th_stackaddr;
 	kern_return_t kret;
@@ -1064,7 +1087,10 @@ workq_add_new_idle_thread(proc_t p, struct workqueue *wq)
 		goto out;
 	}
 
-	kret = thread_create_workq_waiting(proc_task(p), workq_unpark_continue, &th);
+	kret = thread_create_workq_waiting(proc_task(p),
+	    continuation,
+	    &th,
+	    is_permanently_bound);
 	if (kret != KERN_SUCCESS) {
 		WQ_TRACE_WQ(TRACE_wq_thread_create_failed | DBG_FUNC_NONE, wq,
 		    kret, 0, 0);
@@ -1076,14 +1102,20 @@ workq_add_new_idle_thread(proc_t p, struct workqueue *wq)
 	// on success, because it calls workq_thread_init_and_wq_lock() above
 
 	struct uthread *uth = get_bsdthread_info(th);
+	uth->uu_workq_stackaddr = (user_addr_t)th_stackaddr;
 
 	wq->wq_creations++;
-	wq->wq_thidlecount++;
-	uth->uu_workq_stackaddr = (user_addr_t)th_stackaddr;
-	TAILQ_INSERT_TAIL(&wq->wq_thnewlist, uth, uu_workq_entry);
+	if (!is_permanently_bound) {
+		wq->wq_thidlecount++;
+		TAILQ_INSERT_TAIL(&wq->wq_thnewlist, uth, uu_workq_entry);
+	}
+
+	if (new_thread) {
+		*new_thread = th;
+	}
 
 	WQ_TRACE_WQ(TRACE_wq_thread_create | DBG_FUNC_NONE, wq, 0, 0, 0);
-	return true;
+	return kret;
 
 out:
 	workq_lock_spin(wq);
@@ -1093,7 +1125,7 @@ out:
 	 * to do so when it fails.
 	 */
 	wq->wq_nthreads--;
-	return false;
+	return kret;
 }
 
 static inline bool
@@ -1105,13 +1137,20 @@ workq_thread_is_overcommit(struct uthread *uth)
 static inline bool
 workq_thread_is_nonovercommit(struct uthread *uth)
 {
-	return (uth->uu_workq_flags & (UT_WORKQ_OVERCOMMIT | UT_WORKQ_COOPERATIVE)) == 0;
+	return (uth->uu_workq_flags & (UT_WORKQ_OVERCOMMIT |
+	       UT_WORKQ_COOPERATIVE)) == 0;
 }
 
 static inline bool
 workq_thread_is_cooperative(struct uthread *uth)
 {
 	return (uth->uu_workq_flags & UT_WORKQ_COOPERATIVE) != 0;
+}
+
+bool
+workq_thread_is_permanently_bound(struct uthread *uth)
+{
+	return (uth->uu_workq_flags & UT_WORKQ_PERMANENT_BIND) != 0;
 }
 
 static inline void
@@ -1324,7 +1363,9 @@ workq_tr_is_overcommit(workq_tr_flags_t tr_flags)
 static inline bool
 workq_tr_is_nonovercommit(workq_tr_flags_t tr_flags)
 {
-	return (tr_flags & (WORKQ_TR_FLAG_OVERCOMMIT | WORKQ_TR_FLAG_COOPERATIVE)) == 0;
+	return (tr_flags & (WORKQ_TR_FLAG_OVERCOMMIT |
+	       WORKQ_TR_FLAG_COOPERATIVE |
+	       WORKQ_TR_FLAG_PERMANENT_BIND)) == 0;
 }
 
 static inline bool
@@ -1364,13 +1405,10 @@ workq_priority_queue_for_req(struct workqueue *wq, workq_threadreq_t req)
 	}
 }
 
-
 /* Calculates the number of threads scheduled >= the input QoS */
 static uint64_t
-workq_num_cooperative_threads_scheduled_to_qos(struct workqueue *wq, thread_qos_t qos)
+workq_num_cooperative_threads_scheduled_to_qos_internal(struct workqueue *wq, thread_qos_t qos)
 {
-	workq_lock_held(wq);
-
 	uint64_t num_cooperative_threads = 0;
 
 	for (thread_qos_t cur_qos = WORKQ_THREAD_QOS_MAX; cur_qos >= qos; cur_qos--) {
@@ -1381,13 +1419,20 @@ workq_num_cooperative_threads_scheduled_to_qos(struct workqueue *wq, thread_qos_
 	return num_cooperative_threads;
 }
 
+/* Calculates the number of threads scheduled >= the input QoS */
+static uint64_t
+workq_num_cooperative_threads_scheduled_to_qos_locked(struct workqueue *wq, thread_qos_t qos)
+{
+	workq_lock_held(wq);
+	return workq_num_cooperative_threads_scheduled_to_qos_internal(wq, qos);
+}
+
 static uint64_t
 workq_num_cooperative_threads_scheduled_total(struct workqueue *wq)
 {
-	return workq_num_cooperative_threads_scheduled_to_qos(wq, WORKQ_THREAD_QOS_MIN);
+	return workq_num_cooperative_threads_scheduled_to_qos_locked(wq, WORKQ_THREAD_QOS_MIN);
 }
 
-#if DEBUG || DEVELOPMENT
 static bool
 workq_has_cooperative_thread_requests(struct workqueue *wq)
 {
@@ -1400,7 +1445,6 @@ workq_has_cooperative_thread_requests(struct workqueue *wq)
 
 	return false;
 }
-#endif
 
 /*
  * Determines the next QoS bucket we should service next in the cooperative
@@ -1485,7 +1529,7 @@ _wq_cooperative_queue_refresh_best_req_qos(struct workqueue *wq)
 		wq->wq_cooperative_queue_best_req_qos = highest_qos_req;
 	}
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	/* Assert that if we are showing up the next best req as UN, then there
 	 * actually is no thread request in the cooperative pool buckets */
 	if (wq->wq_cooperative_queue_best_req_qos == THREAD_QOS_UNSPECIFIED) {
@@ -1561,7 +1605,7 @@ workq_cooperative_allowance(struct workqueue *wq, thread_qos_t qos, struct uthre
 	 * If number of threads at the QoS bucket >= input QoS exceeds the max we want
 	 * for the pool, deny this thread
 	 */
-	uint64_t aggregate_down_to_qos = workq_num_cooperative_threads_scheduled_to_qos(wq, qos);
+	uint64_t aggregate_down_to_qos = workq_num_cooperative_threads_scheduled_to_qos_locked(wq, qos);
 	passed_admissions = (aggregate_down_to_qos < wq_cooperative_queue_max_size(wq));
 	WQ_TRACE(TRACE_wq_cooperative_admission | DBG_FUNC_NONE, aggregate_down_to_qos,
 	    qos, passed_admissions, WQ_COOPERATIVE_POOL_SATURATED_UP_TO_QOS);
@@ -2280,7 +2324,8 @@ bool
 bsdthread_part_of_cooperative_workqueue(struct uthread *uth)
 {
 	return (workq_thread_is_cooperative(uth) || workq_thread_is_nonovercommit(uth)) &&
-	       (uth->uu_workq_pri.qos_bucket != WORKQ_THREAD_QOS_MANAGER);
+	       (uth->uu_workq_pri.qos_bucket != WORKQ_THREAD_QOS_MANAGER) &&
+	       (!workq_thread_is_permanently_bound(uth));
 }
 
 static bool
@@ -2941,7 +2986,7 @@ workq_reqthreads(struct proc *p, uint32_t reqcount, pthread_priority_t pp, bool 
 			assert(!workq_threadreq_is_cooperative(req));
 
 			if (workq_threadreq_is_nonovercommit(req)) {
-				unpaced = workq_constrained_allowance(wq, qos, NULL, false);
+				unpaced = workq_constrained_allowance(wq, qos, NULL, false, true);
 				if (unpaced >= reqcount - 1) {
 					unpaced = reqcount - 1;
 				}
@@ -2982,7 +3027,8 @@ workq_reqthreads(struct proc *p, uint32_t reqcount, pthread_priority_t pp, bool 
 			reqcount--;
 		}
 	} while (unpaced && wq->wq_nthreads < wq_max_threads &&
-	    workq_add_new_idle_thread(p, wq));
+	    (workq_add_new_idle_thread(p, wq, workq_unpark_continue,
+	    false, NULL) == KERN_SUCCESS));
 
 	if (_wq_exiting(wq)) {
 		goto unlock_and_exit;
@@ -3014,6 +3060,11 @@ workq_kern_threadreq_initiate(struct proc *p, workq_threadreq_t req,
 
 	assert(req->tr_flags & (WORKQ_TR_FLAG_WORKLOOP | WORKQ_TR_FLAG_KEVENT));
 
+	/*
+	 * For any new initialization changes done to workqueue thread request below,
+	 * please also consider if they are relevant to permanently bound thread
+	 * request. See workq_kern_threadreq_permanent_bind.
+	 */
 	if (req->tr_flags & WORKQ_TR_FLAG_WL_OUTSIDE_QOS) {
 		workq_threadreq_param_t trp = kqueue_threadreq_workloop_param(req);
 		qos = thread_workq_qos_for_pri(trp.trp_pri);
@@ -3200,6 +3251,34 @@ workq_kern_threadreq_modify(struct proc *p, workq_threadreq_t req,
 }
 
 void
+workq_kern_bound_thread_reset_pri(workq_threadreq_t req, struct uthread *uth)
+{
+	assert(workq_thread_is_permanently_bound(uth));
+
+	if (req && (req->tr_flags & WORKQ_TR_FLAG_WL_OUTSIDE_QOS)) {
+		/*
+		 * For requests outside-of-QoS, we set the scheduling policy and
+		 * absolute priority for the bound thread right at the initialization
+		 * time. See workq_kern_threadreq_permanent_bind.
+		 */
+		return;
+	}
+
+	struct workqueue *wq = proc_get_wqptr_fast(current_proc());
+	if (req) {
+		assert(req->tr_qos != WORKQ_THREAD_QOS_MANAGER);
+		workq_thread_reset_pri(wq, uth, req, /*unpark*/ true);
+	} else {
+		thread_qos_t qos = workq_pri_override(uth->uu_workq_pri);
+		if (qos > WORKQ_THREAD_QOS_CLEANUP) {
+			workq_thread_reset_pri(wq, uth, NULL, /*unpark*/ true);
+		} else {
+			uth->uu_save.uus_workq_park_data.qos = qos;
+		}
+	}
+}
+
+void
 workq_kern_threadreq_lock(struct proc *p)
 {
 	workq_lock_spin(proc_get_wqptr_fast(p));
@@ -3225,7 +3304,7 @@ workq_kern_threadreq_update_inheritor(struct proc *p, workq_threadreq_t req,
 
 	if (req->tr_state == WORKQ_TR_STATE_BINDING) {
 		kqueue_threadreq_bind(p, req, req->tr_thread,
-		    KQUEUE_THREADERQ_BIND_NO_INHERITOR_UPDATE);
+		    KQUEUE_THREADREQ_BIND_NO_INHERITOR_UPDATE);
 		return;
 	}
 
@@ -3248,6 +3327,188 @@ workq_kern_threadreq_update_inheritor(struct proc *p, workq_threadreq_t req,
 	workq_perform_turnstile_operation_locked(wq, ^{
 		turnstile_update_inheritor(wl_ts, inheritor, flags);
 	});
+}
+
+/*
+ * An entry point for kevent to request a newly created workqueue thread
+ * and bind it permanently to the given workqueue thread request.
+ *
+ * It currently only supports fixed scheduler priority thread requests.
+ *
+ * The newly created thread counts towards wq_nthreads. This function returns
+ * an error if we are above that limit. There is no concept of delayed thread
+ * creation for such specially configured kqworkloops.
+ *
+ * If successful, the newly created thread will be parked in
+ * workq_bound_thread_initialize_and_unpark_continue waiting for
+ * new incoming events.
+ */
+kern_return_t
+workq_kern_threadreq_permanent_bind(struct proc *p, struct workq_threadreq_s *kqr)
+{
+	kern_return_t ret = 0;
+	thread_t new_thread = NULL;
+	struct workqueue *wq = proc_get_wqptr_fast(p);
+
+	workq_lock_spin(wq);
+
+	if (wq->wq_nthreads >= wq_max_threads) {
+		ret = EDOM;
+	} else {
+		if (kqr->tr_flags & WORKQ_TR_FLAG_WL_OUTSIDE_QOS) {
+			workq_threadreq_param_t trp = kqueue_threadreq_workloop_param(kqr);
+			/*
+			 * For requests outside-of-QoS, we fully initialize the thread
+			 * request here followed by preadopting the scheduling properties
+			 * on the newly created bound thread.
+			 */
+			thread_qos_t qos = thread_workq_qos_for_pri(trp.trp_pri);
+			if (qos == THREAD_QOS_UNSPECIFIED) {
+				qos = WORKQ_THREAD_QOS_ABOVEUI;
+			}
+			kqr->tr_qos = qos;
+		}
+		kqr->tr_count = 1;
+
+		/* workq_lock dropped and retaken around thread creation below. */
+		ret = workq_add_new_idle_thread(p, wq,
+		    workq_bound_thread_initialize_and_unpark_continue,
+		    true, &new_thread);
+		if (ret == KERN_SUCCESS) {
+			struct uthread *uth = get_bsdthread_info(new_thread);
+			if (kqr->tr_flags & WORKQ_TR_FLAG_WL_OUTSIDE_QOS) {
+				workq_thread_reset_pri(wq, uth, kqr, /*unpark*/ true);
+			}
+			/*
+			 * The newly created thread goes through a full bind to the kqwl
+			 * right upon creation.
+			 * It then falls back to soft bind/unbind upon wakeup/park.
+			 */
+			kqueue_threadreq_bind_prepost(p, kqr, uth);
+			uth->uu_workq_flags |= UT_WORKQ_PERMANENT_BIND;
+		}
+	}
+
+	workq_unlock(wq);
+
+	if (ret == KERN_SUCCESS) {
+		kqueue_threadreq_bind_commit(p, new_thread);
+	}
+	return ret;
+}
+
+/*
+ * Called with kqlock held. It does not need to take the process wide
+ * global workq lock -> making it faster.
+ */
+void
+workq_kern_bound_thread_wakeup(struct workq_threadreq_s *kqr)
+{
+	struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+	workq_threadreq_param_t trp = kqueue_threadreq_workloop_param(kqr);
+
+	/*
+	 * See "Locking model for accessing uu_workq_flags" for more information
+	 * on how access to uu_workq_flags for the bound thread is synchronized.
+	 */
+	assert((uth->uu_workq_flags & (UT_WORKQ_RUNNING | UT_WORKQ_DYING)) == 0);
+
+	if (trp.trp_flags & TRP_RELEASED) {
+		uth->uu_workq_flags |= UT_WORKQ_DYING;
+	} else {
+		uth->uu_workq_flags |= UT_WORKQ_RUNNING;
+	}
+
+	workq_thread_wakeup(uth);
+}
+
+/*
+ * Called with kqlock held. Dropped before parking.
+ * It does not need to take process wide global workqueue
+ * lock -> making it faster.
+ */
+__attribute__((noreturn, noinline))
+void
+workq_kern_bound_thread_park(struct workq_threadreq_s *kqr)
+{
+	struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+	assert(uth == current_uthread());
+
+	/*
+	 * See "Locking model for accessing uu_workq_flags" for more information
+	 * on how access to uu_workq_flags for the bound thread is synchronized.
+	 */
+	uth->uu_workq_flags &= ~(UT_WORKQ_RUNNING);
+
+	thread_disarm_workqueue_quantum(get_machthread(uth));
+
+	/*
+	 * TODO (pavhad) We could do the reusable userspace stack performance
+	 * optimization here.
+	 */
+
+	kqworkloop_bound_thread_park_prepost(kqr);
+	/* KQ_SLEEP bit is set and kqlock is dropped. */
+
+	__assert_only kern_return_t kr;
+	kr = thread_set_voucher_name(MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+
+	kqworkloop_bound_thread_park_commit(kqr,
+	    workq_parked_wait_event(uth), workq_bound_thread_unpark_continue);
+
+	__builtin_unreachable();
+}
+
+/*
+ * To terminate the permenantly bound workqueue thread. It unbinds itself
+ * with the kqwl during uthread_cleanup -> kqueue_threadreq_unbind.
+ * It is also when it will release its reference on the kqwl.
+ */
+__attribute__((noreturn, noinline))
+void
+workq_kern_bound_thread_terminate(struct workq_threadreq_s *kqr)
+{
+	proc_t p = current_proc();
+	struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+	uint16_t uu_workq_flags_orig;
+
+	assert(uth == current_uthread());
+
+	/*
+	 * See "Locking model for accessing uu_workq_flags" for more information
+	 * on how access to uu_workq_flags for the bound thread is synchronized.
+	 */
+	kqworkloop_bound_thread_terminate(kqr, &uu_workq_flags_orig);
+
+	if (uu_workq_flags_orig & UT_WORKQ_WORK_INTERVAL_JOINED) {
+		__assert_only kern_return_t kr;
+		kr = kern_work_interval_join(get_machthread(uth), MACH_PORT_NULL);
+		/* The bound thread un-joins the work interval and drops its +1 ref. */
+		assert(kr == KERN_SUCCESS);
+	}
+
+	/*
+	 * Drop the voucher now that we are on our way to termination.
+	 */
+	__assert_only kern_return_t kr;
+	kr = thread_set_voucher_name(MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+
+	uint32_t upcall_flags = WQ_FLAG_THREAD_NEWSPI;
+	upcall_flags |= uth->uu_save.uus_workq_park_data.qos |
+	    WQ_FLAG_THREAD_PRIO_QOS;
+
+	thread_t th = get_machthread(uth);
+	vm_map_t vmap = get_task_map(proc_task(p));
+
+	if ((uu_workq_flags_orig & UT_WORKQ_NEW) == 0) {
+		upcall_flags |= WQ_FLAG_THREAD_REUSE;
+	}
+
+	pthread_functions->workq_setup_thread(p, th, vmap, uth->uu_workq_stackaddr,
+	    uth->uu_workq_thport, 0, WQ_SETUP_EXIT_THREAD, upcall_flags);
+	__builtin_unreachable();
 }
 
 void
@@ -3313,7 +3574,7 @@ workq_kern_quantum_expiry_reevaluate(proc_t proc, thread_t thread)
 			flags |= PTHREAD_WQ_QUANTUM_EXPIRY_SHUFFLE;
 		}
 	} else if (workq_thread_is_nonovercommit(uth)) {
-		if (!workq_constrained_allowance(wq, qos, uth, false)) {
+		if (!workq_constrained_allowance(wq, qos, uth, false, false)) {
 			flags |= PTHREAD_WQ_QUANTUM_EXPIRY_NARROW;
 		}
 	}
@@ -3377,6 +3638,10 @@ workq_thread_return(struct proc *p, struct workq_kernreturn_args *uap,
 		trp = kqueue_threadreq_workloop_param(kqr);
 	}
 
+	if (kqr && kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND) {
+		goto handle_stack_events;
+	}
+
 	/*
 	 * Freeze the base pri while we decide the fate of this thread.
 	 *
@@ -3385,6 +3650,8 @@ workq_thread_return(struct proc *p, struct workq_kernreturn_args *uap,
 	 * - or we proceed to workq_select_threadreq_or_park_and_unlock() who will.
 	 */
 	thread_freeze_base_pri(th);
+
+handle_stack_events:
 
 	if (kqr) {
 		uint32_t upcall_flags = WQ_FLAG_THREAD_NEWSPI | WQ_FLAG_THREAD_REUSE;
@@ -3554,7 +3821,7 @@ workq_kernreturn(struct proc *p, struct workq_kernreturn_args *uap, int32_t *ret
 			break;
 		}
 		workq_lock_spin(wq);
-		bool should_narrow = !workq_constrained_allowance(wq, qos, uth, false);
+		bool should_narrow = !workq_constrained_allowance(wq, qos, uth, false, false);
 		workq_unlock(wq);
 
 		*retval = should_narrow;
@@ -3710,11 +3977,13 @@ workq_may_start_event_mgr_thread(struct workqueue *wq, struct uthread *uth)
 	       (uth && uth->uu_workq_pri.qos_bucket == WORKQ_THREAD_QOS_MANAGER);
 }
 
+/* Called with workq lock held. */
 static uint32_t
 workq_constrained_allowance(struct workqueue *wq, thread_qos_t at_qos,
-    struct uthread *uth, bool may_start_timer)
+    struct uthread *uth, bool may_start_timer, bool record_failed_allowance)
 {
 	assert(at_qos != WORKQ_THREAD_QOS_MANAGER);
+	uint32_t allowance_passed = 0;
 	uint32_t count = 0;
 
 	uint32_t max_count = wq->wq_constrained_threads_scheduled;
@@ -3733,7 +4002,8 @@ workq_constrained_allowance(struct workqueue *wq, thread_qos_t at_qos,
 		 * we need 1 or more constrained threads to return to the kernel before
 		 * we can dispatch additional work
 		 */
-		return 0;
+		allowance_passed = 0;
+		goto out;
 	}
 	max_count -= wq_max_constrained_threads;
 
@@ -3770,10 +4040,12 @@ workq_constrained_allowance(struct workqueue *wq, thread_qos_t at_qos,
 		count -= thactive_count + busycount;
 		WQ_TRACE_WQ(TRACE_wq_constrained_admission | DBG_FUNC_NONE, wq, 2,
 		    thactive_count, busycount);
-		return MIN(count, max_count);
+		allowance_passed = MIN(count, max_count);
+		goto out;
 	} else {
 		WQ_TRACE_WQ(TRACE_wq_constrained_admission | DBG_FUNC_NONE, wq, 3,
 		    thactive_count, busycount);
+		allowance_passed = 0;
 	}
 
 	if (may_start_timer) {
@@ -3784,7 +4056,11 @@ workq_constrained_allowance(struct workqueue *wq, thread_qos_t at_qos,
 		workq_schedule_delayed_thread_creation(wq, 0);
 	}
 
-	return 0;
+out:
+	if (record_failed_allowance) {
+		wq->wq_exceeded_active_constrained_thread_limit = !allowance_passed;
+	}
+	return allowance_passed;
 }
 
 static bool
@@ -3798,7 +4074,7 @@ workq_threadreq_admissible(struct workqueue *wq, struct uthread *uth,
 		return workq_cooperative_allowance(wq, req->tr_qos, uth, true);
 	}
 	if (workq_threadreq_is_nonovercommit(req)) {
-		return workq_constrained_allowance(wq, req->tr_qos, uth, true);
+		return workq_constrained_allowance(wq, req->tr_qos, uth, true, true);
 	}
 
 	return true;
@@ -3928,7 +4204,7 @@ workq_threadreq_select_for_creator(struct workqueue *wq)
 			return req_pri;
 		}
 
-		if (workq_constrained_allowance(wq, req_tmp->tr_qos, NULL, true)) {
+		if (workq_constrained_allowance(wq, req_tmp->tr_qos, NULL, true, true)) {
 			/*
 			 * If the constrained thread request is the best one and passes
 			 * the admission check, pick it.
@@ -4137,7 +4413,7 @@ workq_threadreq_select(struct workqueue *wq, struct uthread *uth)
 			return req_pri;
 		}
 
-		if (workq_constrained_allowance(wq, req_tmp->tr_qos, uth, true)) {
+		if (workq_constrained_allowance(wq, req_tmp->tr_qos, uth, true, true)) {
 			/*
 			 * If the constrained thread request is the best one and passes
 			 * the admission check, pick it.
@@ -4260,7 +4536,8 @@ again:
 		} else if (!(flags & WORKQ_THREADREQ_CAN_CREATE_THREADS)) {
 			/* This can drop the workqueue lock, and take it again */
 			workq_schedule_immediate_thread_creation(wq);
-		} else if (workq_add_new_idle_thread(p, wq)) {
+		} else if ((workq_add_new_idle_thread(p, wq,
+		    workq_unpark_continue, false, NULL) == KERN_SUCCESS)) {
 			goto again;
 		} else {
 			workq_schedule_delayed_thread_creation(wq, 0);
@@ -4382,6 +4659,21 @@ workq_select_threadreq_or_park_and_unlock(proc_t p, struct workqueue *wq,
 			});
 		}
 		WQ_TRACE_WQ(TRACE_wq_select_threadreq | DBG_FUNC_NONE, wq, 3, 0, 0);
+
+		/*
+		 * If a cooperative thread was the one which picked up the manager
+		 * thread request, we need to reevaluate the cooperative pool before
+		 * it goes and parks.
+		 *
+		 * For every other of thread request that it picks up, the logic in
+		 * workq_threadreq_select should have done this refresh.
+		 * See workq_push_idle_thread.
+		 */
+		if (cooperative_sched_count_changed) {
+			if (req->tr_qos == WORKQ_THREAD_QOS_MANAGER) {
+				_wq_cooperative_queue_refresh_best_req_qos(wq);
+			}
+		}
 		goto park_thawed;
 	}
 
@@ -4551,7 +4843,7 @@ workq_creator_should_yield(struct workqueue *wq, struct uthread *uth)
 }
 
 /**
- * parked thread wakes up
+ * parked idle thread wakes up
  */
 __attribute__((noreturn, noinline))
 static void
@@ -4678,7 +4970,7 @@ workq_setup_and_run(proc_t p, struct uthread *uth, int setup_flags)
 	WQ_TRACE_WQ(TRACE_wq_runthread | DBG_FUNC_START,
 	    proc_get_wqptr_fast(p), 0, 0, 0);
 
-	if (workq_thread_is_cooperative(uth)) {
+	if (workq_thread_is_cooperative(uth) || workq_thread_is_permanently_bound(uth)) {
 		thread_sched_call(th, NULL);
 	} else {
 		thread_sched_call(th, workq_sched_callback);
@@ -4687,6 +4979,157 @@ workq_setup_and_run(proc_t p, struct uthread *uth, int setup_flags)
 	pthread_functions->workq_setup_thread(p, th, vmap, uth->uu_workq_stackaddr,
 	    uth->uu_workq_thport, 0, setup_flags, upcall_flags);
 
+	__builtin_unreachable();
+}
+
+/**
+ * A wrapper around workq_setup_and_run for permanently bound thread.
+ */
+__attribute__((noreturn, noinline))
+static void
+workq_bound_thread_setup_and_run(struct uthread *uth, int setup_flags)
+{
+	struct workq_threadreq_s * kqr = uth->uu_kqr_bound;
+
+	uint32_t upcall_flags = (WQ_FLAG_THREAD_NEWSPI |
+	    WQ_FLAG_THREAD_WORKLOOP | WQ_FLAG_THREAD_KEVENT);
+	if (workq_tr_is_overcommit(kqr->tr_flags)) {
+		workq_thread_set_type(uth, UT_WORKQ_OVERCOMMIT);
+		upcall_flags |= WQ_FLAG_THREAD_OVERCOMMIT;
+	}
+	uth->uu_save.uus_workq_park_data.upcall_flags = upcall_flags;
+	workq_setup_and_run(current_proc(), uth, setup_flags);
+	__builtin_unreachable();
+}
+
+/**
+ * A parked bound thread wakes up for the first time.
+ */
+__attribute__((noreturn, noinline))
+static void
+workq_bound_thread_initialize_and_unpark_continue(void *parameter __unused,
+    wait_result_t wr)
+{
+	/*
+	 * Locking model for accessing uu_workq_flags :
+	 *
+	 * The concurrent access to uu_workq_flags is synchronized with workq lock
+	 * until a thread gets permanently bound to a kqwl. Post that, kqlock
+	 * is used for subsequent synchronizations. This gives us a significant
+	 * benefit by avoiding having to take a process wide workq lock on every
+	 * wakeup of the bound thread.
+	 * This flip in locking model is tracked with UT_WORKQ_PERMANENT_BIND flag.
+	 *
+	 * There is one more optimization we can perform for when the thread is
+	 * awakened for running (i.e THREAD_AWAKENED) until it parks.
+	 * During this window, we know KQ_SLEEP bit is reset so there should not
+	 * be any concurrent attempts to modify uu_workq_flags by
+	 * kqworkloop_bound_thread_wakeup because the thread is already "awake".
+	 * So we can safely access uu_workq_flags within this window without having
+	 * to take kqlock. This KQ_SLEEP is later set by the bound thread under
+	 * kqlock on its way to parking.
+	 */
+	struct uthread *uth = get_bsdthread_info(current_thread());
+
+	if (__probable(wr == THREAD_AWAKENED)) {
+		/* At most one flag. */
+		assert((uth->uu_workq_flags & (UT_WORKQ_RUNNING | UT_WORKQ_DYING))
+		    != (UT_WORKQ_RUNNING | UT_WORKQ_DYING));
+
+		assert(workq_thread_is_permanently_bound(uth));
+
+		if (uth->uu_workq_flags & UT_WORKQ_RUNNING) {
+			assert(uth->uu_workq_flags & UT_WORKQ_NEW);
+			uth->uu_workq_flags &= ~UT_WORKQ_NEW;
+
+			struct workq_threadreq_s * kqr = uth->uu_kqr_bound;
+			if (kqr->tr_work_interval) {
+				kern_return_t kr;
+				kr = kern_work_interval_explicit_join(get_machthread(uth),
+				    kqr->tr_work_interval);
+				/*
+				 * The work interval functions requires to be called on the
+				 * current thread. If we fail here, we record the fact and
+				 * continue.
+				 * In the future, we can preflight checking that this join will
+				 * always be successful when the paird kqwl is configured; but,
+				 * for now, this should be a rare case (e.g. if you have passed
+				 * invalid arguments to the join).
+				 */
+				if (kr == KERN_SUCCESS) {
+					uth->uu_workq_flags |= UT_WORKQ_WORK_INTERVAL_JOINED;
+					/* Thread and kqwl both have +1 ref on the work interval. */
+				} else {
+					uth->uu_workq_flags |= UT_WORKQ_WORK_INTERVAL_FAILED;
+				}
+			}
+			workq_thread_reset_cpupercent(kqr, uth);
+			workq_bound_thread_setup_and_run(uth, WQ_SETUP_FIRST_USE);
+			__builtin_unreachable();
+		} else {
+			/*
+			 * The permanently bound kqworkloop is getting destroyed so we
+			 * are woken up to cleanly unbind ourselves from it and terminate.
+			 * See KQ_WORKLOOP_DESTROY -> workq_kern_bound_thread_wakeup.
+			 *
+			 * The actual full unbind happens from
+			 * uthread_cleanup -> kqueue_threadreq_unbind.
+			 */
+			assert(uth->uu_workq_flags & UT_WORKQ_DYING);
+		}
+	} else {
+		/*
+		 * The process is getting terminated so we are woken up to die.
+		 * E.g. SIGKILL'd.
+		 */
+		assert(wr == THREAD_INTERRUPTED);
+		/*
+		 * It is possible we started running as the process is aborted
+		 * due to termination; but, workq_kern_threadreq_permanent_bind
+		 * has not had a chance to bind us to the kqwl yet.
+		 *
+		 * We synchronize with it using workq lock.
+		 */
+		proc_t p = current_proc();
+		struct workqueue *wq = proc_get_wqptr_fast(p);
+		workq_lock_spin(wq);
+		assert(workq_thread_is_permanently_bound(uth));
+		workq_unlock(wq);
+
+		/*
+		 * We do the bind commit ourselves if workq_kern_threadreq_permanent_bind
+		 * has not done it for us yet so our state is aligned with what the
+		 * termination path below expects.
+		 */
+		kqueue_threadreq_bind_commit(p, get_machthread(uth));
+	}
+	workq_kern_bound_thread_terminate(uth->uu_kqr_bound);
+	__builtin_unreachable();
+}
+
+/**
+ * A parked bound thread wakes up. Not the first time.
+ */
+__attribute__((noreturn, noinline))
+static void
+workq_bound_thread_unpark_continue(void *parameter __unused, wait_result_t wr)
+{
+	struct uthread *uth = get_bsdthread_info(current_thread());
+	assert(workq_thread_is_permanently_bound(uth));
+
+	if (__probable(wr == THREAD_AWAKENED)) {
+		/* At most one flag. */
+		assert((uth->uu_workq_flags & (UT_WORKQ_RUNNING | UT_WORKQ_DYING))
+		    != (UT_WORKQ_RUNNING | UT_WORKQ_DYING));
+		if (uth->uu_workq_flags & UT_WORKQ_RUNNING) {
+			workq_bound_thread_setup_and_run(uth, WQ_SETUP_NONE);
+		} else {
+			assert(uth->uu_workq_flags & UT_WORKQ_DYING);
+		}
+	} else {
+		assert(wr == THREAD_INTERRUPTED);
+	}
+	workq_kern_bound_thread_terminate(uth->uu_kqr_bound);
 	__builtin_unreachable();
 }
 
@@ -4734,6 +5177,17 @@ fill_procworkqueue(proc_t p, struct proc_workqueueinfo * pwqinfo)
 		pwqinfo->pwq_state |= WQ_EXCEEDED_TOTAL_THREAD_LIMIT;
 	}
 
+	uint64_t total_cooperative_threads;
+	total_cooperative_threads = workq_num_cooperative_threads_scheduled_total(wq);
+	if ((total_cooperative_threads == wq_cooperative_queue_max_size(wq)) &&
+	    workq_has_cooperative_thread_requests(wq)) {
+		pwqinfo->pwq_state |= WQ_EXCEEDED_COOPERATIVE_THREAD_LIMIT;
+	}
+
+	if (wq->wq_exceeded_active_constrained_thread_limit) {
+		pwqinfo->pwq_state |= WQ_EXCEEDED_ACTIVE_CONSTRAINED_THREAD_LIMIT;
+	}
+
 	workq_unlock(wq);
 	return error;
 }
@@ -4764,16 +5218,22 @@ workqueue_get_pwq_exceeded(void *v, boolean_t *exceeded_total,
 	return TRUE;
 }
 
-uint32_t
-workqueue_get_pwq_state_kdp(void * v)
+uint64_t
+workqueue_get_task_ss_flags_from_pwq_state_kdp(void * v)
 {
 	static_assert((WQ_EXCEEDED_CONSTRAINED_THREAD_LIMIT << 17) ==
 	    kTaskWqExceededConstrainedThreadLimit);
 	static_assert((WQ_EXCEEDED_TOTAL_THREAD_LIMIT << 17) ==
 	    kTaskWqExceededTotalThreadLimit);
 	static_assert((WQ_FLAGS_AVAILABLE << 17) == kTaskWqFlagsAvailable);
+	static_assert(((uint64_t)WQ_EXCEEDED_COOPERATIVE_THREAD_LIMIT << 34) ==
+	    (uint64_t)kTaskWqExceededCooperativeThreadLimit);
+	static_assert(((uint64_t)WQ_EXCEEDED_ACTIVE_CONSTRAINED_THREAD_LIMIT << 34) ==
+	    (uint64_t)kTaskWqExceededActiveConstrainedThreadLimit);
 	static_assert((WQ_FLAGS_AVAILABLE | WQ_EXCEEDED_TOTAL_THREAD_LIMIT |
-	    WQ_EXCEEDED_CONSTRAINED_THREAD_LIMIT) == 0x7);
+	    WQ_EXCEEDED_CONSTRAINED_THREAD_LIMIT |
+	    WQ_EXCEEDED_COOPERATIVE_THREAD_LIMIT |
+	    WQ_EXCEEDED_ACTIVE_CONSTRAINED_THREAD_LIMIT) == 0x1F);
 
 	if (v == NULL) {
 		return 0;
@@ -4786,17 +5246,29 @@ workqueue_get_pwq_state_kdp(void * v)
 		return 0;
 	}
 
-	uint32_t pwq_state = WQ_FLAGS_AVAILABLE;
+	uint64_t ss_flags = kTaskWqFlagsAvailable;
 
 	if (wq->wq_constrained_threads_scheduled >= wq_max_constrained_threads) {
-		pwq_state |= WQ_EXCEEDED_CONSTRAINED_THREAD_LIMIT;
+		ss_flags |= kTaskWqExceededConstrainedThreadLimit;
 	}
 
 	if (wq->wq_nthreads >= wq_max_threads) {
-		pwq_state |= WQ_EXCEEDED_TOTAL_THREAD_LIMIT;
+		ss_flags |= kTaskWqExceededTotalThreadLimit;
 	}
 
-	return pwq_state;
+	uint64_t total_cooperative_threads;
+	total_cooperative_threads = workq_num_cooperative_threads_scheduled_to_qos_internal(wq,
+	    WORKQ_THREAD_QOS_MIN);
+	if ((total_cooperative_threads == wq_cooperative_queue_max_size(wq)) &&
+	    workq_has_cooperative_thread_requests(wq)) {
+		ss_flags |= kTaskWqExceededCooperativeThreadLimit;
+	}
+
+	if (wq->wq_exceeded_active_constrained_thread_limit) {
+		ss_flags |= kTaskWqExceededActiveConstrainedThreadLimit;
+	}
+
+	return ss_flags;
 }
 
 void

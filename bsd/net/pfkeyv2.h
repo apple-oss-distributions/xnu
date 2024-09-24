@@ -414,8 +414,8 @@ struct sadb_sastat {
 #define SADB_X_AALG_SHA2_384    7       /*6*/
 #define SADB_X_AALG_SHA2_512    8       /*7*/
 /* private allocations should use 249-255 (RFC2407) */
-#define SADB_X_AALG_MD5         3       /*249*/	/* Keyed MD5 */
-#define SADB_X_AALG_SHA         4       /*250*/	/* Keyed SHA */
+#define SADB_X_AALG_MD5         3       /*249*/	/* Keyed MD5, not implemented */
+#define SADB_X_AALG_SHA         4       /*250*/	/* Keyed SHA, not implemented */
 #define SADB_X_AALG_NULL        5       /*251*/	/* null authentication */
 
 /* RFC2367 numbers - meets RFC2407 */

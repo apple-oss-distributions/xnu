@@ -256,7 +256,7 @@ lacp_actor_partner_state_expired(lacp_actor_partner_state state)
  *   value, putting it into network byte order
  */
 static __inline__ void
-lacp_uint16_set(uint8_t * field, uint16_t value)
+lacp_uint16_set(uint8_t *__header_indexable field, uint16_t value)
 {
 	uint16_t tmp_value = htons(value);
 	memcpy((void *)field, (void *)&tmp_value, sizeof(uint16_t));
@@ -270,7 +270,7 @@ lacp_uint16_set(uint8_t * field, uint16_t value)
  *   to host byte order.
  */
 static __inline__ uint16_t
-lacp_uint16_get(const uint8_t * field)
+lacp_uint16_get(const uint8_t *__header_indexable field)
 {
 	uint16_t tmp_field;
 	memcpy((void *)&tmp_field, (const void *)field, sizeof(uint16_t));
@@ -284,7 +284,7 @@ lacp_uint16_get(const uint8_t * field)
  *   value, putting it into network byte order
  */
 static __inline__ void
-lacp_uint32_set(uint8_t * field, uint32_t value)
+lacp_uint32_set(uint8_t *__header_indexable field, uint32_t value)
 {
 	uint32_t tmp_value = htonl(value);
 	memcpy((void *)field, (void *)&tmp_value, sizeof(uint32_t));
@@ -298,7 +298,7 @@ lacp_uint32_set(uint8_t * field, uint32_t value)
  *   to host byte order.
  */
 static __inline__ uint32_t
-lacp_uint32_get(const uint8_t * field)
+lacp_uint32_get(const uint8_t *__header_indexable field)
 {
 	uint32_t tmp_field;
 	memcpy((void *)&tmp_field, (const void *)field, sizeof(uint32_t));
@@ -389,6 +389,8 @@ typedef struct lacpdu_s {
 	u_char              la_terminator_length;
 	u_char              la_reserved[50];
 } lacpdu, *lacpdu_ref;
+
+#define LACPDU_MIN_SIZE         ((unsigned int)offsetof(lacpdu, la_reserved))
 
 /* timer values in seconds */
 #define LACP_FAST_PERIODIC_TIME         1

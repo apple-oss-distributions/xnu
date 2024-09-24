@@ -39,7 +39,7 @@ skip_if_monotonic_unsupported(void)
 }
 
 T_DECL(coalition_resource_info_counters,
-    "ensure that coalition resource info produces valid counter data")
+    "ensure that coalition resource info produces valid counter data", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	skip_if_monotonic_unsupported();
 
@@ -81,7 +81,7 @@ T_DECL(coalition_resource_info_counters,
 }
 
 T_DECL(coalition_resource_info_kernel_ptime_sane,
-    "ensure that coalition resource info for the kernel has a sane P-CPU time")
+    "ensure that coalition resource info for the kernel has a sane P-CPU time", T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 	struct proc_pidcoalitioninfo idinfo = {};

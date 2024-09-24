@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -104,6 +104,8 @@
 #include <sys/reboot.h>
 #include <sys/memory_maintenance.h>
 #include <sys/priv.h>
+#include <sys/ubc.h> /* mach_to_bsd_errno */
+
 #include <stdatomic.h>
 #include <uuid/uuid.h>
 
@@ -128,8 +130,8 @@
 #include <kern/sched_prim.h>
 #include <kern/workload_config.h>
 #include <kern/iotrace.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 #include <mach/host_info.h>
 #include <mach/exclaves.h>
 #include <kern/hvg_hypercall.h>
@@ -154,8 +156,9 @@
 #include <nfs/nfs_conf.h>
 
 #include <vm/vm_protos.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_compressor_algorithms.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_compressor_algorithms_xnu.h>
+#include <vm/vm_compressor_xnu.h>
 #include <sys/imgsrc.h>
 #include <kern/timer_call.h>
 #include <sys/codesign.h>
@@ -214,6 +217,7 @@ extern unsigned int vm_max_batch;
 extern unsigned int vm_page_free_min;
 extern unsigned int vm_page_free_target;
 extern unsigned int vm_page_free_reserved;
+extern unsigned int vm_page_max_speculative_age_q;
 
 #if (DEVELOPMENT || DEBUG)
 extern uint32_t vm_page_creation_throttled_hard;
@@ -1792,7 +1796,6 @@ sysctl_maxproc
 	return error;
 }
 
-extern int sched_enable_smt;
 STATIC int
 sysctl_sched_enable_smt
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -2026,6 +2029,12 @@ sysctl_osproductversion(__unused struct sysctl_oid *oidp, void *arg1, int arg2, 
 	} else {
 		return sysctl_handle_string(oidp, arg1, arg2, req);
 	}
+#elif defined(XNU_TARGET_OS_XR)
+	if (proc_platform(req->p) == PLATFORM_IOS && (iossupportversion_string[0] != '\0')) {
+		return sysctl_handle_string(oidp, iossupportversion_string, arg2, req);
+	} else {
+		return sysctl_handle_string(oidp, arg1, arg2, req);
+	}
 #else
 	return sysctl_handle_string(oidp, arg1, arg2, req);
 #endif
@@ -2041,7 +2050,7 @@ SYSCTL_PROC(_kern, OID_AUTO, osproductversion,
     osproductversion, sizeof(osproductversion),
     sysctl_osproductversion, "A", "The ProductVersion from SystemVersion.plist");
 
-char osreleasetype[48] = { '\0' };
+char osreleasetype[OSRELEASETYPE_SIZE] = { '\0' };
 
 STATIC int
 sysctl_osreleasetype(__unused struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
@@ -2072,7 +2081,17 @@ sysctl_iossupportversion(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 		return EPERM;
 	}
 
+#if defined(XNU_TARGET_OS_XR)
+	if (proc_platform(req->p) == PLATFORM_IOS) {
+		/* return empty string for iOS processes to match how this would behave on iOS */
+		return sysctl_handle_string(oidp, "", arg2, req);
+	} else {
+		/* native processes see the actual value */
+		return sysctl_handle_string(oidp, arg1, arg2, req);
+	}
+#else
 	return sysctl_handle_string(oidp, arg1, arg2, req);
+#endif
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, iossupportversion,
@@ -2523,6 +2542,7 @@ SYSCTL_PROC(_kern_perfcontrol_callout, OID_AUTO, update_cycles,
     sysctl_perfcontrol_callout_stat, "I", "");
 
 #if __AMP__
+#if !CONFIG_CLUTCH
 extern int sched_amp_idle_steal;
 SYSCTL_INT(_kern, OID_AUTO, sched_amp_idle_steal,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -2535,6 +2555,7 @@ extern int sched_amp_spill_count;
 SYSCTL_INT(_kern, OID_AUTO, sched_amp_spill_count,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &sched_amp_spill_count, 0, "");
+#endif /* !CONFIG_CLUTCH */
 extern int sched_amp_spill_deferred_ipi;
 SYSCTL_INT(_kern, OID_AUTO, sched_amp_spill_deferred_ipi,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -2612,6 +2633,10 @@ sysctl_kern_sched_powered_cores(__unused struct sysctl_oid *oidp, __unused void 
 	int old_value = sched_get_powered_cores();
 	int error = sysctl_io_number(req, old_value, sizeof(int), &new_value, &changed);
 	if (changed) {
+		if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
+			return ENOTSUP;
+		}
+
 		sched_set_powered_cores(new_value);
 	}
 
@@ -2622,12 +2647,38 @@ SYSCTL_PROC(_kern, OID_AUTO, sched_powered_cores,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_kern_sched_powered_cores, "I", "");
 
+#if __arm64__
+
+static int
+sysctl_kern_update_sched_recommended_cores(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	uint64_t new_value;
+	int changed;
+	uint64_t old_value = sched_sysctl_get_recommended_cores();
+	int error = sysctl_io_number(req, old_value, sizeof(uint64_t), &new_value, &changed);
+	if (changed) {
+		if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
+			return ENOTSUP;
+		}
+
+		sched_perfcontrol_update_recommended_cores_reason(new_value, REASON_CLPC_USER, 0);
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, sched_update_recommended_cores,
+    CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_kern_update_sched_recommended_cores, "I", "");
+
+#endif /* __arm64__ */
+
 #endif /* (DEVELOPMENT || DEBUG) */
 
-extern uint64_t perfcontrol_requested_recommended_cores;
+extern uint64_t sysctl_sched_recommended_cores;
 SYSCTL_QUAD(_kern, OID_AUTO, sched_recommended_cores,
     CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
-    &perfcontrol_requested_recommended_cores, "");
+    &sysctl_sched_recommended_cores, "");
 
 static int
 sysctl_kern_suspend_cluster_powerdown(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -2800,6 +2851,12 @@ SYSCTL_UINT(_kern, OID_AUTO, vm_page_speculative_percentage,
 SYSCTL_UINT(_kern, OID_AUTO, vm_page_speculative_q_age_ms,
     CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &vm_pageout_state.vm_page_speculative_q_age_ms, 0, "");
+
+#if (DEVELOPMENT || DEBUG)
+SYSCTL_UINT(_kern, OID_AUTO, vm_page_max_speculative_age_q,
+    CTLFLAG_RD,
+    &vm_page_max_speculative_age_q, 0, "");
+#endif /* (DEVELOPMENT || DEBUG) */
 
 SYSCTL_UINT(_kern, OID_AUTO, vm_max_delayed_work_limit,
     CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
@@ -3174,7 +3231,7 @@ enum {
 	SCAN_LIMIT, SCAN_INTERVAL, SCAN_PAUSES, SCAN_POSTPONES,
 };
 extern uint64_t timer_sysctl_get(int);
-extern int      timer_sysctl_set(int, uint64_t);
+extern kern_return_t timer_sysctl_set(int, uint64_t);
 
 STATIC int
 sysctl_timer
@@ -3188,7 +3245,8 @@ sysctl_timer
 
 	error = sysctl_io_number(req, value, sizeof(value), &new_value, &changed);
 	if (changed) {
-		error = timer_sysctl_set(oid, new_value);
+		kern_return_t kr = timer_sysctl_set(oid, new_value);
+		error = mach_to_bsd_errno(kr);
 	}
 
 	return error;
@@ -3344,6 +3402,22 @@ SYSCTL_PROC(_kern, KERN_SUGID_COREDUMP, sugid_coredump,
     0, 0, sysctl_suid_coredump, "I", "");
 
 #endif /* CONFIG_COREDUMP */
+
+#if CONFIG_KDP_INTERACTIVE_DEBUGGING
+
+extern const char* kdp_corefile_path;
+STATIC int
+sysctl_kdp_corefile(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	return SYSCTL_OUT(req, kdp_corefile_path, strlen(kdp_corefile_path) + 1);
+}
+
+/* this needs to be a proc rather than a string since kdp_corefile_path is not a compile-time constant */
+SYSCTL_PROC(_kern, OID_AUTO, kdp_corefile,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_kdp_corefile, "A", "");
+
+#endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
 
 STATIC int
 sysctl_delayterm
@@ -4365,18 +4439,27 @@ extern int      vm_compressor_mode;
 extern int      vm_compressor_is_active;
 extern int      vm_compressor_available;
 extern uint32_t c_seg_bufsize;
+extern uint32_t c_seg_allocsize;
+extern int      c_seg_fixed_array_len;
+extern uint32_t c_segments_limit;
+extern uint32_t c_segment_pages_compressed_limit;
 extern uint64_t compressor_pool_size;
+extern uint32_t compressor_pool_multiplier;
 extern uint32_t vm_ripe_target_age;
 extern uint32_t swapout_target_age;
-extern int64_t  compressor_bytes_used;
-extern int64_t  c_segment_input_bytes;
-extern int64_t  c_segment_compressed_bytes;
+extern _Atomic uint64_t compressor_bytes_used;
+extern _Atomic uint64_t c_segment_input_bytes;
+extern _Atomic uint64_t c_segment_compressed_bytes;
+extern uint32_t c_segment_pages_compressed;
 extern uint32_t compressor_eval_period_in_msecs;
 extern uint32_t compressor_sample_min_in_msecs;
 extern uint32_t compressor_sample_max_in_msecs;
 extern uint32_t compressor_thrashing_threshold_per_10msecs;
 extern uint32_t compressor_thrashing_min_per_10msecs;
 extern uint32_t vm_compressor_time_thread;
+extern uint32_t c_segment_svp_in_hash;
+extern uint32_t c_segment_svp_hash_succeeded;
+extern uint32_t c_segment_svp_hash_failed;
 
 #if DEVELOPMENT || DEBUG
 extern uint32_t vm_compressor_minorcompact_threshold_divisor;
@@ -4465,9 +4548,9 @@ SYSCTL_PROC(_vm, OID_AUTO, compressor_catchup_threshold_divisor,
 #endif
 
 
-SYSCTL_QUAD(_vm, OID_AUTO, compressor_input_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_input_bytes, "");
-SYSCTL_QUAD(_vm, OID_AUTO, compressor_compressed_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_compressed_bytes, "");
-SYSCTL_QUAD(_vm, OID_AUTO, compressor_bytes_used, CTLFLAG_RD | CTLFLAG_LOCKED, &compressor_bytes_used, "");
+SYSCTL_QUAD(_vm, OID_AUTO, compressor_input_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, ((uint64_t *)&c_segment_input_bytes), "");
+SYSCTL_QUAD(_vm, OID_AUTO, compressor_compressed_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, ((uint64_t *)&c_segment_compressed_bytes), "");
+SYSCTL_QUAD(_vm, OID_AUTO, compressor_bytes_used, CTLFLAG_RD | CTLFLAG_LOCKED, ((uint64_t *)&compressor_bytes_used), "");
 
 SYSCTL_INT(_vm, OID_AUTO, compressor_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_mode, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_is_active, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_is_active, 0, "");
@@ -4475,6 +4558,15 @@ SYSCTL_INT(_vm, OID_AUTO, compressor_swapout_target_age, CTLFLAG_RD | CTLFLAG_LO
 SYSCTL_INT(_vm, OID_AUTO, compressor_available, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_available, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_segment_buffer_size, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_bufsize, 0, "");
 SYSCTL_QUAD(_vm, OID_AUTO, compressor_pool_size, CTLFLAG_RD | CTLFLAG_LOCKED, &compressor_pool_size, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_pool_multiplier, CTLFLAG_RD | CTLFLAG_LOCKED, &compressor_pool_multiplier, 0, "");
+SYSCTL_INT(_vm, OID_AUTO, compressor_segment_slots_fixed_array_len, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_fixed_array_len, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_limit, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segments_limit, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_pages_compressed_limit, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_pages_compressed_limit, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_alloc_size, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_allocsize, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_pages_compressed, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_pages_compressed, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_svp_in_hash, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_svp_in_hash, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_svp_hash_succeeded, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_svp_hash_succeeded, 0, "");
+SYSCTL_UINT(_vm, OID_AUTO, compressor_segment_svp_hash_failed, CTLFLAG_RD | CTLFLAG_LOCKED, &c_segment_svp_hash_failed, 0, "");
 
 #if CONFIG_TRACK_UNMODIFIED_ANON_PAGES
 extern uint64_t compressor_ro_uncompressed;
@@ -4707,7 +4799,6 @@ SYSCTL_QUAD(_vm, OID_AUTO, vm_pageout_rejected_bq_external, CTLFLAG_RD | CTLFLAG
 
 #endif /* __LP64__ */
 
-extern void vm_update_darkwake_mode(boolean_t);
 extern boolean_t vm_darkwake_mode;
 
 STATIC int
@@ -4811,7 +4902,9 @@ SCALABLE_COUNTER_DECLARE(oslog_e_metadata_dropped_count);
 SCALABLE_COUNTER_DECLARE(oslog_e_signpost_count);
 SCALABLE_COUNTER_DECLARE(oslog_e_signpost_dropped_count);
 SCALABLE_COUNTER_DECLARE(oslog_e_query_count);
-SCALABLE_COUNTER_DECLARE(oslog_e_error_query_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_query_error_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_trace_mode_set_count);
+SCALABLE_COUNTER_DECLARE(oslog_e_trace_mode_error_count);
 #endif // CONFIG_EXCLAVES
 
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_p_total_msgcount, oslog_p_total_msgcount, "");
@@ -4870,8 +4963,12 @@ SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_signpost_dropped_count, oslog_e_signpost
     "Number of dropped signposts retrieved from the exclaves log server");
 SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_query_count, oslog_e_query_count,
     "Number of sucessful queries to the exclaves log server");
-SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_error_query_count, oslog_e_error_query_count,
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_query_error_count, oslog_e_query_error_count,
     "Number of failed queries to the exclaves log server");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_trace_mode_set_count, oslog_e_trace_mode_set_count,
+    "Number of exclaves trace mode updates");
+SYSCTL_SCALABLE_COUNTER(_debug, oslog_e_trace_mode_error_count, oslog_e_trace_mode_error_count,
+    "Number of failed exclaves trace mode updates");
 #endif // CONFIG_EXCLAVES
 
 #endif /* DEVELOPMENT || DEBUG */
@@ -4904,28 +5001,6 @@ extern int ipc_portbt;
 SYSCTL_INT(_kern, OID_AUTO, ipc_portbt,
     CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &ipc_portbt, 0, "");
-
-/*
- * Mach message signature validation control and outputs
- */
-extern unsigned int ikm_signature_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_failures, 0, "Message signature failure count");
-extern unsigned int ikm_signature_failure_id;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_failure_id,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_failure_id, 0, "Message signature failure count");
-
-#if (DEVELOPMENT || DEBUG)
-extern unsigned int ikm_signature_panic_disable;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_panic_disable,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ikm_signature_panic_disable, 0, "Message signature failure mode");
-extern unsigned int ikm_signature_header_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_header_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_header_failures, 0, "Message header signature failure count");
-extern unsigned int ikm_signature_trailer_failures;
-SYSCTL_INT(_kern, OID_AUTO, ikm_signature_trailer_failures,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ikm_signature_trailer_failures, 0, "Message trailer signature failure count");
-#endif
 
 /*
  * Scheduler sysctls
@@ -5306,6 +5381,7 @@ SYSCTL_COMPAT_INT(_kern, OID_AUTO, development, CTLFLAG_RD | CTLFLAG_MASKED | CT
 SYSCTL_COMPAT_INT(_kern, OID_AUTO, development, CTLFLAG_RD | CTLFLAG_MASKED, NULL, 0, "");
 #endif
 
+SYSCTL_INT(_kern, OID_AUTO, serverperfmode, CTLFLAG_RD, &serverperfmode, 0, "");
 
 #if DEVELOPMENT || DEBUG
 
@@ -5505,13 +5581,13 @@ SYSCTL_INT(_kern, OID_AUTO, direct_handoff,
 SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_pa, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &phys_carveout_pa,
     "base physical address of the phys_carveout_mb boot-arg region");
+SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_va, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &phys_carveout,
+    "base virtual address of the phys_carveout_mb boot-arg region");
 SYSCTL_QUAD(_kern, OID_AUTO, phys_carveout_size, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &phys_carveout_size,
     "size in bytes of the phys_carveout_mb boot-arg region");
 
-
-extern void do_cseg_wedge_thread(void);
-extern void do_cseg_unwedge_thread(void);
 
 static int
 cseg_wedge_thread SYSCTL_HANDLER_ARGS
@@ -5882,8 +5958,25 @@ SYSCTL_PROC(_kern, OID_AUTO, test_panic_with_thread,
     0, 0, sysctl_test_panic_with_thread, "A", "test panic flow for backtracing a different thread");
 #endif /* defined (__x86_64__) */
 
+static int
+sysctl_generate_file_permissions_guard_exception SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error, val = 0;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || val == 0) {
+		return error;
+	}
+	generate_file_permissions_guard_exception(0, val);
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, file_perm_guard_exception, CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    0, 0, sysctl_generate_file_permissions_guard_exception, "I", "Test File Permission Guard exception");
+
 #endif /* DEVELOPMENT || DEBUG */
 
+extern const int copysize_limit_panic;
 static int
 sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 {
@@ -5903,6 +5996,7 @@ sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 	vmobject_list_output_t buffer = NULL;
 	size_t output_size;
 	size_t entries;
+	bool free_buffer = false;
 
 	/* we have a "newptr" (for write) we get a task port name from the caller. */
 	error = SYSCTL_IN(req, &task_port_name, sizeof(mach_port_name_t));
@@ -5940,13 +6034,10 @@ sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 				error = ENOMEM;
 				goto sysctl_get_vmobject_list_deallocate_and_exit;
 			}
+			free_buffer = true;
 
 			task_get_owned_vmobjects(task, buffer_size, buffer, &output_size, &entries);
 		}
-
-		/* req->oldptr should be USER_ADDR_NULL if buffer == NULL and return the current size */
-		/* otherwise copy buffer to oldptr and return the bytes copied */
-		error = SYSCTL_OUT(req, (char *)buffer, output_size);
 	} else {
 		vmobject_list_output_t list;
 
@@ -5965,18 +6056,26 @@ sysctl_get_owned_vmobjects SYSCTL_HANDLER_ARGS
 		} else {
 			output_size = max_size;
 		}
+	}
 
-		/* req->oldptr should be USER_ADDR_NULL if buffer == NULL and return the current size */
-		/* otherwise copy buffer to oldptr and return the bytes copied */
-		error = SYSCTL_OUT(req, (char*)buffer, output_size);
-		buffer = NULL;
+	/* req->oldptr should be USER_ADDR_NULL if buffer == NULL and return the current size */
+	/* otherwise copy buffer to oldptr and return the bytes copied */
+	size_t num_copied, chunk_size;
+	for (num_copied = 0, chunk_size = 0;
+	    num_copied < output_size;
+	    num_copied += chunk_size) {
+		chunk_size = MIN(output_size - num_copied, copysize_limit_panic);
+		error = SYSCTL_OUT(req, (char *)buffer + num_copied, chunk_size);
+		if (error) {
+			break;
+		}
 	}
 
 sysctl_get_vmobject_list_deallocate_and_exit:
 	task_deallocate(task);
 
 sysctl_get_vmobject_list_exit:
-	if (buffer) {
+	if (free_buffer) {
 		kfree_data(buffer, buffer_size);
 	}
 
@@ -6101,8 +6200,10 @@ SYSCTL_PROC(_kern, OID_AUTO, task_conclave_untaintable,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     "", 0, sysctl_task_conclave_untaintable, "A", "Task could not be tainted by talking to conclaves");
 
-extern uint32_t fake_crash_buffer_length;
-SYSCTL_INT(_kern, OID_AUTO, fake_crash_buffer_length, CTLFLAG_RD, &fake_crash_buffer_length, 0, NULL);
+extern exclaves_requirement_t exclaves_relaxed_requirements;
+SYSCTL_QUAD(_kern, OID_AUTO, exclaves_relaxed_requirements,
+    CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &exclaves_relaxed_requirements, "Exclaves requirements which have been relaxed");
 
 #endif /* CONFIG_EXCLAVES */
 
@@ -6143,4 +6244,20 @@ SYSCTL_PROC(_kern, OID_AUTO, exclaves_boot_stage,
 extern unsigned int exclaves_debug;
 SYSCTL_UINT(_kern, OID_AUTO, exclaves_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &exclaves_debug, 0, "Exclaves debug flags");
+
+static int
+sysctl_exclaves_inspection_status SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	int value = (int)exclaves_inspection_is_initialized();
+	return sysctl_io_number(req, value, sizeof(value), NULL, NULL);
+}
+SYSCTL_PROC(_kern, OID_AUTO, exclaves_inspection_status,
+    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_exclaves_inspection_status, "I", "Exclaves debug inspection status");
 #endif /* CONFIG_EXCLAVES && (DEVELOPMENT || DEBUG) */
+
+#if (DEBUG || DEVELOPMENT)
+extern uint32_t disable_vm_sanitize_telemetry;
+SYSCTL_UINT(_debug, OID_AUTO, disable_vm_sanitize_telemetry, CTLFLAG_RW | CTLFLAG_LOCKED /*| CTLFLAG_MASKED*/, &disable_vm_sanitize_telemetry, 0, "disable VM API sanitization telemetry");
+#endif

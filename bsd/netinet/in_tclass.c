@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -64,6 +64,11 @@
 
 static_assert(_SO_TC_MAX == SO_TC_STATS_MAX);
 
+/*
+ * The size is one more than the max because DSCP start at zero
+ */
+#define DSCP_ARRAY_SIZE (_MAX_DSCP + 1)
+
 struct net_qos_dscp_map {
 	uint8_t        sotc_to_dscp[SO_TC_MAX];
 	uint8_t        netsvctype_to_dscp[_NET_SERVICE_TYPE_COUNT];
@@ -74,12 +79,9 @@ struct dcsp_msc_map {
 	mbuf_svc_class_t        msc;
 };
 static inline int so_throttle_best_effort(struct socket *, struct ifnet *);
-static void set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *, int);
-static errno_t dscp_msc_map_from_netsvctype_dscp_map(struct netsvctype_dscp_map *, size_t,
-    struct dcsp_msc_map *);
-
-static LCK_GRP_DECLARE(tclass_lck_grp, "tclass");
-static LCK_MTX_DECLARE(tclass_lock, &tclass_lck_grp);
+static void set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *__indexable, int);
+static errno_t dscp_msc_map_from_netsvctype_dscp_map(struct netsvctype_dscp_map *__counted_by(count) map,
+    size_t count, struct dcsp_msc_map *__counted_by(DSCP_ARRAY_SIZE));
 
 SYSCTL_NODE(_net, OID_AUTO, qos,
     CTLFLAG_RW | CTLFLAG_LOCKED, 0, "QoS");
@@ -179,10 +181,6 @@ static struct net_qos_dscp_map rfc4594_net_qos_dscp_map;
 static struct net_qos_dscp_map custom_net_qos_dscp_map;
 #endif /* (DEBUG || DEVELOPMENT) */
 
-/*
- * The size is one more than the max because DSCP start at zero
- */
-#define DSCP_ARRAY_SIZE (_MAX_DSCP + 1)
 
 /*
  * The DSCP to UP mapping (via mbuf service class) for WiFi follows is the mapping
@@ -281,6 +279,9 @@ mbuf_svc_class_t wifi_dscp_to_msc_array[DSCP_ARRAY_SIZE];
 
 #if (DEVELOPMENT || DEBUG)
 
+static LCK_GRP_DECLARE(tclass_lck_grp, "tclass");
+static LCK_MTX_DECLARE(tclass_lock, &tclass_lck_grp);
+
 static int tfp_count = 0;
 
 static TAILQ_HEAD(, tclass_for_proc) tfp_head =
@@ -328,7 +329,7 @@ find_tfp_by_pname(const char *pname)
 	struct tclass_for_proc *tfp;
 
 	TAILQ_FOREACH(tfp, &tfp_head, tfp_link) {
-		if (strncmp(pname, tfp->tfp_pname,
+		if (strlcmp(tfp->tfp_pname, pname,
 		    sizeof(tfp->tfp_pname)) == 0) {
 			break;
 		}
@@ -342,13 +343,13 @@ set_tclass_for_curr_proc(struct socket *so)
 	struct tclass_for_proc *tfp = NULL;
 	proc_t p = current_proc();      /* Not ref counted */
 	pid_t pid = proc_pid(p);
-	char *pname = proc_best_name(p);
+	const char *__null_terminated pname = proc_best_name(p);
 
 	lck_mtx_lock(&tclass_lock);
 
 	TAILQ_FOREACH(tfp, &tfp_head, tfp_link) {
 		if ((tfp->tfp_pid == pid) || (tfp->tfp_pid == -1 &&
-		    strncmp(pname, tfp->tfp_pname,
+		    strlcmp(tfp->tfp_pname, pname,
 		    sizeof(tfp->tfp_pname)) == 0)) {
 			if (tfp->tfp_class != SO_TC_UNSPEC) {
 				so->so_traffic_class = (uint16_t)tfp->tfp_class;
@@ -437,7 +438,7 @@ flush_tclass_for_proc(void)
  * Must be called with tclass_lock held
  */
 static struct tclass_for_proc *
-alloc_tclass_for_proc(pid_t pid, const char *pname)
+alloc_tclass_for_proc(pid_t pid, const char *__sized_by(pnamelen) pname, size_t pnamelen)
 {
 	struct tclass_for_proc *tfp;
 
@@ -458,7 +459,12 @@ alloc_tclass_for_proc(pid_t pid, const char *pname)
 	if (pid != -1) {
 		TAILQ_INSERT_HEAD(&tfp_head, tfp, tfp_link);
 	} else {
-		strlcpy(tfp->tfp_pname, pname, sizeof(tfp->tfp_pname));
+		if (pname != NULL) {
+			strbufcpy(tfp->tfp_pname, sizeof(tfp->tfp_pname),
+			    pname, pnamelen);
+		} else {
+			tfp->tfp_pname[0] = '\0';
+		}
 		TAILQ_INSERT_TAIL(&tfp_head, tfp, tfp_link);
 	}
 
@@ -492,17 +498,14 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 
 	tfp = find_tfp_by_pid(pid);
 	if (tfp == NULL) {
-		tfp = alloc_tclass_for_proc(pid, NULL);
+		tfp = alloc_tclass_for_proc(pid, NULL, 0);
 		if (tfp == NULL) {
-			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
-			goto done;
+			goto done_unlock;
 		}
 	}
 	tfp->tfp_class = tclass;
 	tfp->tfp_qos_mode = so_tcdbg->so_tcbbg_qos_mode;
-
-	lck_mtx_unlock(&tclass_lock);
 
 	if (tfp != NULL) {
 		struct fileproc *fp;
@@ -553,6 +556,8 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 	}
 
 	error = 0;
+done_unlock:
+	lck_mtx_unlock(&tclass_lock);
 done:
 	if (p != NULL) {
 		proc_rele(p);
@@ -569,9 +574,10 @@ set_pname_tclass(struct so_tcdbg *so_tcdbg)
 
 	lck_mtx_lock(&tclass_lock);
 
-	tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
+	tfp = find_tfp_by_pname(__unsafe_null_terminated_from_indexable(so_tcdbg->so_tcdbg_pname));
 	if (tfp == NULL) {
-		tfp = alloc_tclass_for_proc(-1, so_tcdbg->so_tcdbg_pname);
+		tfp = alloc_tclass_for_proc(-1, so_tcdbg->so_tcdbg_pname,
+		    sizeof(so_tcdbg->so_tcdbg_pname));
 		if (tfp == NULL) {
 			lck_mtx_unlock(&tclass_lock);
 			error = ENOBUFS;
@@ -675,7 +681,7 @@ get_pname_tclass(struct so_tcdbg *so_tcdbg)
 	/* Need a tfp */
 	lck_mtx_lock(&tclass_lock);
 
-	tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
+	tfp = find_tfp_by_pname(__unsafe_null_terminated_from_indexable(so_tcdbg->so_tcdbg_pname));
 	if (tfp != NULL) {
 		so_tcdbg->so_tcdbg_tclass = tfp->tfp_class;
 		so_tcdbg->so_tcbbg_qos_mode = tfp->tfp_qos_mode;
@@ -698,7 +704,7 @@ delete_tclass_for_pid_pname(struct so_tcdbg *so_tcdbg)
 	if (pid != -1) {
 		tfp = find_tfp_by_pid(pid);
 	} else {
-		tfp = find_tfp_by_pname(so_tcdbg->so_tcdbg_pname);
+		tfp = find_tfp_by_pname(__unsafe_null_terminated_from_indexable(so_tcdbg->so_tcdbg_pname));
 	}
 
 	if (tfp != NULL) {
@@ -829,9 +835,8 @@ sogetopt_tcdbg(struct socket *so, struct sockopt *sopt)
 			} else {
 				ptr->so_tcdbg_cmd = SO_TCDBG_PNAME;
 				ptr->so_tcdbg_pid = -1;
-				strlcpy(ptr->so_tcdbg_pname,
-				    tfp->tfp_pname,
-				    sizeof(ptr->so_tcdbg_pname));
+				strbufcpy(ptr->so_tcdbg_pname,
+				    tfp->tfp_pname);
 			}
 			ptr->so_tcdbg_tclass = tfp->tfp_class;
 			ptr->so_tcbbg_qos_mode = tfp->tfp_qos_mode;
@@ -1092,30 +1097,22 @@ so_tos_from_control(struct mbuf *control)
 	return tos;
 }
 
+/*
+ * There is no traffic class for input packet
+ */
 __private_extern__ void
 so_recv_data_stat(struct socket *so, struct mbuf *m, size_t off)
 {
-	uint32_t mtc = m_get_traffic_class(m);
-
-	if (mtc >= SO_TC_STATS_MAX) {
-		mtc = MBUF_TC_BE;
-	}
-
-	so->so_tc_stats[mtc].rxpackets += 1;
-	so->so_tc_stats[mtc].rxbytes +=
+	so->so_tc_stats[SO_STATS_DATA].rxpackets += 1;
+	so->so_tc_stats[SO_STATS_DATA].rxbytes +=
 	    ((m->m_flags & M_PKTHDR) ? m->m_pkthdr.len : 0) + off;
 }
 
 __private_extern__ void
-so_inc_recv_data_stat(struct socket *so, size_t pkts, size_t bytes,
-    uint32_t mtc)
+so_inc_recv_data_stat(struct socket *so, size_t pkts, size_t bytes)
 {
-	if (mtc >= SO_TC_STATS_MAX) {
-		mtc = MBUF_TC_BE;
-	}
-
-	so->so_tc_stats[mtc].rxpackets += pkts;
-	so->so_tc_stats[mtc].rxbytes += bytes;
+	so->so_tc_stats[SO_STATS_DATA].rxpackets += pkts;
+	so->so_tc_stats[SO_STATS_DATA].rxbytes += bytes;
 }
 
 static inline int
@@ -1333,25 +1330,6 @@ no_mbtc:
 	if (so->so_type == SOCK_STREAM) {
 		set_tcp_stream_priority(so);
 	}
-
-	so_tc_update_stats(m, so, msc);
-}
-
-__private_extern__ void
-so_tc_update_stats(struct mbuf *m, struct socket *so, mbuf_svc_class_t msc)
-{
-	mbuf_traffic_class_t mtc;
-
-	/*
-	 * Assume socket and mbuf traffic class values are the same
-	 * Also assume the socket lock is held.  Note that the stats
-	 * at the socket layer are reduced down to the legacy traffic
-	 * classes; we could/should potentially expand so_tc_stats[].
-	 */
-	mtc = MBUF_SC2TC(msc);
-	VERIFY(mtc < SO_TC_STATS_MAX);
-	so->so_tc_stats[mtc].txpackets += 1;
-	so->so_tc_stats[mtc].txbytes += m->m_pkthdr.len;
 }
 
 __private_extern__ mbuf_svc_class_t
@@ -1615,15 +1593,16 @@ rfc4594_dscp_to_tc(uint8_t dscp)
  */
 static errno_t
 set_netsvctype_dscp_map(struct net_qos_dscp_map *net_qos_dscp_map,
-    const struct netsvctype_dscp_map *netsvctype_dscp_map)
+    const struct netsvctype_dscp_map *__counted_by(_NET_SERVICE_TYPE_COUNT) netsvctype_dscp_map)
 {
 	size_t i;
 	int netsvctype;
 
+	VERIFY(netsvctype_dscp_map != NULL);
 	/*
 	 * Do not accept more that max number of distinct DSCPs
 	 */
-	if (net_qos_dscp_map == NULL || netsvctype_dscp_map == NULL) {
+	if (net_qos_dscp_map == NULL) {
 		return EINVAL;
 	}
 
@@ -1687,7 +1666,7 @@ set_netsvctype_dscp_map(struct net_qos_dscp_map *net_qos_dscp_map,
 }
 
 static size_t
-get_netsvctype_dscp_map(struct netsvctype_dscp_map *netsvctype_dscp_map)
+get_netsvctype_dscp_map(struct netsvctype_dscp_map *__counted_by(_NET_SERVICE_TYPE_COUNT) netsvctype_dscp_map)
 {
 	struct net_qos_dscp_map *net_qos_dscp_map;
 	int i;
@@ -1861,7 +1840,7 @@ set_packet_qos(struct mbuf *m, struct ifnet *ifp, boolean_t qos_allowed,
 }
 
 static void
-set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *map, int clear)
+set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *__indexable map, int clear)
 {
 	int i;
 
@@ -1900,8 +1879,8 @@ set_dscp_to_wifi_ac_map(const struct dcsp_msc_map *map, int clear)
 }
 
 static errno_t
-dscp_msc_map_from_netsvctype_dscp_map(struct netsvctype_dscp_map *netsvctype_dscp_map,
-    size_t count, struct dcsp_msc_map *dcsp_msc_map)
+dscp_msc_map_from_netsvctype_dscp_map(struct netsvctype_dscp_map *__counted_by(count) netsvctype_dscp_map,
+    size_t count, struct dcsp_msc_map *__counted_by(DSCP_ARRAY_SIZE) dcsp_msc_map)
 {
 	errno_t error = 0;
 	uint32_t i;

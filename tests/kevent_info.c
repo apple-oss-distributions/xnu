@@ -17,7 +17,7 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.kevent"),
 
 extern int __proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg, user_addr_t buffer, int32_t buffersize);
 
-T_DECL(avoid_leaking_KASLR, "rdar://101248992") {
+T_DECL(avoid_leaking_KASLR, "rdar://101248992", T_META_TAG_VM_PREFERRED) {
 	int kq = kqueue();
 	T_ASSERT_GE(kq, 0, "Valid kqueue");
 

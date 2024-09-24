@@ -1,3 +1,30 @@
+/*
+ * Copyright © 2017-2024 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
 /*!
  * @header
  * Encapsulation which describes an Image4 environment. The environment
@@ -27,7 +54,7 @@ typedef struct _image4_environment_storage image4_environment_storage_t;
  * @typedef image4_environment_query_boot_nonce_t
  * A callback to provide the boot nonce for the environment.
  *
- * @param env
+ * @param nv
  * The environment for which to retrieve the boot nonce.
  *
  * @param n
@@ -57,7 +84,7 @@ typedef struct _image4_environment_storage image4_environment_storage_t;
  * This callback is utilized by exec, sign, and boot trust evaluations.
  */
 typedef errno_t (*image4_environment_query_boot_nonce_t)(
-	const image4_environment_t *env,
+	const image4_environment_t *nv,
 	uint8_t n[__static_size _Nonnull IMAGE4_NONCE_MAX_LEN],
 	size_t *n_len,
 	void *_ctx
@@ -68,7 +95,7 @@ typedef errno_t (*image4_environment_query_boot_nonce_t)(
  * A callback to provide a nonce digest for use during preflight trust
  * evaluations.
  *
- * @param env
+ * @param nv
  * The environment for which to retrieve the boot nonce.
  *
  * @param nd
@@ -99,8 +126,8 @@ typedef errno_t (*image4_environment_query_boot_nonce_t)(
  * callback.
  */
 typedef errno_t (*image4_environment_query_nonce_digest_t)(
-	const image4_environment_t *env,
-	uint8_t nd[__static_size _Nonnull IMAGE4_NONCE_DIGEST_MAX_LEN],
+	const image4_environment_t *nv,
+	uint8_t nd[__static_size _Nonnull IMAGE4_DIGEST_MAX_LEN],
 	size_t *nd_len,
 	void *_ctx
 );
@@ -288,6 +315,41 @@ _image4_environment_init(
 IMAGE4_XNU_AVAILABLE_INDIRECT(_image4_environment_init);
 
 /*!
+ * @function image4_environment_init_coproc
+ * A less-verbose form of {@link image4_environment_init}.
+ *
+ * @param _storage
+ * The storage structure.
+ *
+ * @param _coproc_short
+ * The shortened form of the coprocessor name, e.g. `AP` for
+ * `IMAGE4_COPROCESSOR_AP`.
+ *
+ * @param _handle_short
+ * The shortened form of the coprocessor handle name, e.g. `FF00` for
+ * `IMAGE4_COPROCESSOR_AP_FF00`.
+ *
+ * @result
+ * An initialized {@link image4_environment_t} object.
+ *
+ * @example
+ * The following two code snippets are equivalent.
+ *
+ *     nv = image4_environment_init(
+ *             &s,
+ *             IMAGE4_COPROCESSOR_CRYPTEX1,
+ *             IMAGE4_COPROCESSOR_CRYPTEX1_BOOT);
+ * and
+ *
+ *     nv = image4_environment_init_coproc(&s, CRYPTEX1, BOOT);
+ */
+#define image4_environment_init_coproc(_storage, _coproc_short, _handle_short) \
+	image4_environment_init( \
+		(_storage), \
+		IMAGE4_COPROCESSOR_ ## _coproc_short, \
+		IMAGE4_COPROCESSOR_HANDLE_ ## _coproc_short ## _ ## _handle_short)
+
+/*!
  * @function image4_environment_new
  * Allocates an environment in which to perform a trust evaluation.
  *
@@ -315,6 +377,41 @@ image4_environment_new(
 	const image4_coprocessor_t *_Nullable coproc,
 	image4_coprocessor_handle_t handle);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_new);
+
+/*!
+ * @function image4_environment_new_coproc
+ * A less-verbose form of {@link image4_environment_new}.
+ *
+ * @param _coproc_short
+ * The shortened form of the coprocessor name, e.g. `AP` for
+ * `IMAGE4_COPROCESSOR_AP`.
+ *
+ * @param _handle_short
+ * The shortened form of the coprocessor handle name, e.g. `FF00` for
+ * `IMAGE4_COPROCESSOR_AP_FF00`.
+ *
+ * @result
+ * A newly-allocated and initialized {@link image4_environment_t} object. The
+ * caller is responsible for disposing of this object with
+ * {@link image4_environment_destroy} when it is no longer needed.
+ *
+ * If insufficient resources were available to allocate the object, or if the
+ * host runtime does not have an allocator, NULL is returned.
+ *
+ * @example
+ * The following two code snippets are equivalent.
+ *
+ *     nv = image4_environment_new(
+ *             IMAGE4_COPROCESSOR_CRYPTEX1,
+ *             IMAGE4_COPROCESSOR_CRYPTEX1_BOOT);
+ * and
+ *
+ *     nv = image4_environment_new_coproc(CRYPTEX1, BOOT);
+ */
+#define image4_environment_new_coproc(_coproc_short, _handle_short) \
+	image4_environment_new( \
+		IMAGE4_COPROCESSOR_ ## _coproc_short, \
+		IMAGE4_COPROCESSOR_HANDLE_ ## _coproc_short ## _ ## _handle_short)
 
 /*!
  * @function image4_environment_set_secure_boot
@@ -421,15 +518,40 @@ image4_environment_identify(
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_identify);
 
 /*!
+ * @function image4_environment_get_digest_info
+ * Retrieves the CoreCrypto digest info structure which the environment uses to
+ * compute digests.
+ *
+ * @param nv
+ * The environment to query.
+ *
+ * @result
+ * A pointer to the CoreCrypto digest info structure corresponding to the
+ * environment.
+ *
+ * @availability
+ * This function first became available in API version 20231215.
+ */
+IMAGE4_API_AVAILABLE_FALL_2024
+OS_EXPORT OS_WARN_RESULT OS_NONNULL1
+const struct ccdigest_info *
+image4_environment_get_digest_info(
+		const image4_environment_t *nv);
+IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_get_digest_info);
+
+/*!
  * @function image4_environment_copy_nonce_digest
  * Copies the digest of the specified nonce.
  *
  * @param nv
  * The environment to query.
  *
- * @param digest
+ * @param d
  * Upon successful return, the digest of the live nonce for the environment. On
  * failure, the contents of this structure are undefined.
+ *
+ * @param d_len
+ * Upon successful return, the length of the nonce digest.
  *
  * @result
  * Upon success, zero is returned. Otherwise, the implementation may directly
@@ -442,11 +564,12 @@ IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_identify);
  *                the next boot
  */
 IMAGE4_API_AVAILABLE_SPRING_2024
-OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
+OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2 OS_NONNULL3
 errno_t
 image4_environment_copy_nonce_digest(
 	const image4_environment_t *nv,
-	image4_nonce_digest_t *digest);
+	uint8_t d[__static_size _Nonnull IMAGE4_DIGEST_MAX_LEN],
+	size_t *d_len);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_copy_nonce_digest);
 
 /*!
@@ -480,9 +603,26 @@ IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_roll_nonce);
  * @param nv
  * The environment to manipulate.
  *
- * @param digest
- * Upon successful return, the digest of the nonce proposal which was generated.
- * On failure, the contents of this structure are undefined.
+ * @param d
+ * Upon successful return, the digest of the proposal nonce which was
+ * generated. On failure, the contents of this structure are undefined.
+ *
+ * @param d_len
+ * Upon successful return, the length of the nonce digest.
+ *
+ * @param n
+ * Upon successful return, the proposal nonce which was generated.
+ *
+ * This parameter may be NULL. If the caller's minimum deployment target is less
+ * than macOS 15 or iOS 17, and the caller is building with -fbounds-checking,
+ * then the caller must pass a non-NULL parameter.
+ *
+ * @param n_len
+ * Upon input, the length of the buffer referred to by {@link n}. Since
+ * {@link n} can be NULL, C does not permit the static qualifier to enforce a
+ * minimum array size, and therefore this parameter communicates the length of
+ * the buffer to the callee. Upon successful return, the this parameter will
+ * be the length of the nonce returned in {@link n}.
  *
  * @result
  * Upon success, zero is returned. Otherwise, the implementation may directly
@@ -490,14 +630,31 @@ IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_roll_nonce);
  *
  *     [EPERM]    The caller lacks the entitlement required to manipulate the
  *                desired nonce
+ *     [EACCES]   The caller requested the proposal nonce in addition to its
+ *                digest, and the environment does not support returning the
+ *                nonce to the caller's execution context
  *     [ENOTSUP]  The environment does not manage a nonce for anti-replay
+ *
+ * @discussion
+ * The {@link n} and {@link n_len} parameters must either both be NULL or non-
+ * NULL. Passing NULL for one but not the other will result in undefined
+ * behavior in the implementation.
+ *
+ * If the caller's minimum deployment target is less than macOS 15 or iOS 17,
+ * and the caller is building with -fbounds-checking, then the caller must pass
+ * non-NULL values for both {@link n} and {@link n_len}. In this case, the value
+ * referred to be {@link n_len} should be 0 to indicate to the implementation
+ * that the proposal nonce itself is not desired.
  */
 IMAGE4_API_AVAILABLE_SPRING_2024
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
 errno_t
 image4_environment_generate_nonce_proposal(
 	const image4_environment_t *nv,
-	image4_nonce_digest_t *digest);
+	uint8_t d[__static_size _Nonnull IMAGE4_DIGEST_MAX_LEN],
+	size_t *d_len,
+	uint8_t n[__static_array_or_null(IMAGE4_NONCE_MAX_LEN)],
+	size_t *_Nullable n_len);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_generate_nonce_proposal);
 
 /*!
@@ -508,8 +665,11 @@ IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_generate_nonce_proposal);
  * @param nv
  * The environment to manipulate.
  *
- * @param digest
+ * @param d
  * The digest of the proposal to commit.
+ *
+ * @param d_len
+ * The length of the nonce proposal digest.
  *
  * @result
  * Upon success, zero is returned. Otherwise, the implementation may directly
@@ -528,41 +688,75 @@ OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
 errno_t
 image4_environment_commit_nonce_proposal(
 	const image4_environment_t *nv,
-	const image4_nonce_digest_t *digest);
+	const uint8_t d[__static_size _Nonnull IMAGE4_DIGEST_MAX_LEN],
+	size_t *d_len);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_commit_nonce_proposal);
 
 /*!
- * @function image4_environment_get_nonce_handle
- * Obtains the appropriate nonce handle to include in a signing request for the
- * environment.
+ * @function image4_environment_flash
+ * Activates an Image4 object with the provided environment.
  *
  * @param nv
- * The environment to query.
+ * The environment to manipulate.
  *
- * @param handle
- * Upon successful return, the handle appropriate for the signing request's
- * nonce domain field. On failure, this parameter's value is undefined.
+ * @param object
+ * A pointer to the Image4 object bytes that will be activated. These bytes must
+ * represent a complete Image4 object. If the environment requires personalized
+ * signatures, then the object must also have a RestoreInfo section with the DFU
+ * nonce set in the appropriate property.
+ *
+ * @param object_len
+ * The length of the buffer referenced by {@link object}.
+ *
+ * @param n
+ * Upon successful return, the value of the nonce which was consumed during the
+ * DFU operation. The caller is expected to store this value in a RestoreInfo
+ * section in order to subsequently verify the manifest.
+ *
+ * This parameter may be NULL.
+ *
+ * @param n_len
+ * Upon input, the length of the buffer referred to by {@link n}. Since
+ * {@link n} can be NULL, C does not permit the static qualifier to enforce a
+ * minimum array size, and therefore this parameter communicates the length of
+ * the buffer to the callee. Upon successful return, the this parameter will
+ * be the length of the nonce returned in {@link n}.
  *
  * @result
  * Upon success, zero is returned. Otherwise, the implementation may directly
  * return one of the following POSIX error codes:
  *
- *     [ENOTSUP]  The environment does not manage a nonce for anti-replay
- *     [ENOENT]   The environment does not support identifing a nonce by its
- *                handle in the personalization request
+ *     [EPERM]    The caller lacks the entitlement required to DFU the
+ *                environment
+ *     [ENOTSUP]  The environment does not support DFU in this target
+ *
+ * The implementation may also return any error that the
+ * {@link image4_trust_evaluation_result_t} callback may deliver to its callee.
+ *
+ * @availability
+ * This function first became available in API version 20240112.
  *
  * @discussion
- * This function is not implemented and will be removed. See discussion in
- * {@link image4_environment_set_nonce_handle} for guidance as to how to
- * implement the relevant workflows.
+ * The {@link n} and {@link n_len} parameters must either both be NULL or non-
+ * NULL. Passing NULL for one but not the other will result in undefined
+ * behavior in the implementation.
+ *
+ * If the caller's minimum deployment target is less than macOS 15 or iOS 17,
+ * and the caller is building with -fbounds-checking, then the caller must pass
+ * non-NULL values for both {@link n} and {@link n_len}. In this case, the value
+ * referred to be {@link n_len} should be 0 to indicate to the implementation
+ * that the proposal nonce itself is not desired.
  */
-IMAGE4_API_AVAILABLE_SPRING_2024
+IMAGE4_API_AVAILABLE_FALL_2024
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
 errno_t
-image4_environment_get_nonce_handle(
+image4_environment_flash(
 	const image4_environment_t *nv,
-	uint64_t *handle);
-IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_get_nonce_handle);
+	const void *__sized_by(object_len) object,
+	size_t object_len,
+	uint8_t n[__static_array_or_null(IMAGE4_NONCE_MAX_LEN)],
+	size_t *_Nullable n_len);
+IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_flash);
 
 /*!
  * @function image4_environment_destroy
@@ -583,6 +777,9 @@ void
 image4_environment_destroy(
 	image4_environment_t *_Nonnull *_Nullable nv);
 IMAGE4_XNU_AVAILABLE_DIRECT(image4_environment_destroy);
+
+#pragma mark Retired
+IMAGE4_XNU_RETIRED_DIRECT(image4_environment_get_nonce_handle);
 
 OS_ASSUME_PTR_ABI_SINGLE_END
 OS_ASSUME_NONNULL_END

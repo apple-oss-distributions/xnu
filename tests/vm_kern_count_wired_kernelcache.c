@@ -18,7 +18,7 @@ T_GLOBAL_META(
 
 T_DECL(vm_kern_count_wired_kernelcache,
     "mach_memory_info returns a counter for for kernelcache",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	uint64_t i;

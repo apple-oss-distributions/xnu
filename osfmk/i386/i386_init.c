@@ -176,6 +176,8 @@ int insn_copyin_count;
 char *physfree;
 void idt64_remap(void);
 
+TUNABLE(bool, restore_boot, "-restore", false);
+
 /*
  * Note: ALLOCPAGES() can only be used safely within Idle_PTs_init()
  * due to the mutation of physfree.
@@ -924,7 +926,7 @@ i386_init(void)
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
-		enable_dklog_serial_output = (serialmode & SERIALMODE_DKLOG) != 0;
+		enable_dklog_serial_output = restore_boot || (serialmode & SERIALMODE_DKLOG) != 0;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
 				serialmode |= SERIALMODE_SYNCDRAIN;
@@ -1103,9 +1105,9 @@ do_init_slave(boolean_t fast_restart)
 	}
 #endif /* KPERF */
 
-	slave_main(init_param);
+	secondary_cpu_main(init_param);
 
-	panic("do_init_slave() returned from slave_main()");
+	panic("do_init_slave() returned from secondary_cpu_main()");
 }
 
 /*

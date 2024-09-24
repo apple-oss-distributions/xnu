@@ -409,11 +409,13 @@ __nexus_bind_req_prepare(struct nx_bind_req *nbr, const uuid_t nx_uuid,
     const nexus_port_t port, const pid_t pid, const uuid_t exec_uuid,
     const void *key, const uint32_t key_len, const uint32_t bind_flags)
 {
+	uuid_t uuid_null = {0};
+
 	bzero(nbr, sizeof(*nbr));
 	if (nx_uuid != NULL) {
 		bcopy(nx_uuid, nbr->nb_nx_uuid, sizeof(uuid_t));
 	}
-	if (exec_uuid != NULL) {
+	if (exec_uuid != NULL && memcmp(exec_uuid, uuid_null, sizeof(uuid_t))) {
 		bcopy(exec_uuid, nbr->nb_exec_uuid, sizeof(uuid_t));
 	}
 	nbr->nb_port = port;

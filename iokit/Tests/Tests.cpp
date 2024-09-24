@@ -180,6 +180,7 @@
 
 #endif /* TEST_HEADERS */
 
+#include <vm/vm_kern_xnu.h>
 #include <sys/sysctl.h>
 #include <libkern/c++/OSData.h>
 #include <IOKit/IOService.h>
@@ -901,7 +902,7 @@ OSCollectionTest(int newValue)
 	assert(dict->isEqualTo(o.get()));
 
 	dict = OSDynamicPtrCast<OSDictionary>(o);
-	OSNumber * nnum = OSDynamicCast(OSNumber, dict->getObject("test"));
+	__assert_only OSNumber * nnum = OSDynamicCast(OSNumber, dict->getObject("test"));
 	assert(12345678 == (int)(10000 * nnum->doubleValue()));
 
 	return 0;
@@ -922,7 +923,7 @@ OSAllocationTests(int)
 
 	{
 		int counter = 0;
-		for (int& i : ints) {
+		for (__assert_only int& i : ints) {
 			assert(i == counter);
 			++counter;
 		}
@@ -930,7 +931,7 @@ OSAllocationTests(int)
 
 	OSDataAllocation<int> arrayZero(100, OSAllocateMemoryZero);
 	assert(arrayZero);
-	for (const auto& i : arrayZero) {
+	for (__assert_only const auto& i : arrayZero) {
 		assert(i == 0);
 	}
 
@@ -971,7 +972,7 @@ OSDataAllocationTests(int)
 
 	{
 		int counter = 0;
-		for (const int& i : ints) {
+		for (__assert_only const int& i : ints) {
 			assert(i == counter);
 			++counter;
 		}
@@ -979,7 +980,7 @@ OSDataAllocationTests(int)
 
 	OSDataAllocation<int> arrayZero(100, OSAllocateMemoryZero);
 	assert(arrayZero);
-	for (const auto& i : arrayZero) {
+	for (__assert_only const auto& i : arrayZero) {
 		assert(i == 0);
 	}
 
@@ -1001,7 +1002,7 @@ OSBoundedArrayTests(int)
 
 	{
 		int counter = 0;
-		for (int& i : ints) {
+		for (__assert_only int& i : ints) {
 			assert(i == counter);
 			++counter;
 		}
@@ -1026,7 +1027,7 @@ OSBoundedArrayRefTests(int)
 
 	{
 		int counter = 0;
-		for (int& i : ints) {
+		for (__assert_only int& i : ints) {
 			assert(i == counter);
 			++counter;
 		}
@@ -1460,8 +1461,8 @@ OSStaticPtrCastTests()
 	// && overload
 	{
 		OSSharedPtr<OSDictionary> dict = OSMakeShared<OSDictionary>();
-		OSDictionary* oldDict = dict.get();
-		OSSharedPtr<OSCollection> collection = OSStaticPtrCast<OSCollection>(os::move(dict));
+		__assert_only OSDictionary* oldDict = dict.get();
+		__assert_only OSSharedPtr<OSCollection> collection = OSStaticPtrCast<OSCollection>(os::move(dict));
 		assert(collection.get() == oldDict);
 		assert(dict == nullptr);
 	}
@@ -1501,8 +1502,8 @@ OSConstPtrCastTests()
 	// && overload
 	{
 		OSSharedPtr<OSDictionary const> dict = OSMakeShared<OSDictionary>();
-		OSDictionary const* oldDict = dict.get();
-		OSSharedPtr<OSDictionary> dict2 = OSConstPtrCast<OSDictionary>(os::move(dict));
+		__assert_only OSDictionary const* oldDict = dict.get();
+		__assert_only OSSharedPtr<OSDictionary> dict2 = OSConstPtrCast<OSDictionary>(os::move(dict));
 		assert(dict == nullptr);
 		assert(dict2 == oldDict);
 	}

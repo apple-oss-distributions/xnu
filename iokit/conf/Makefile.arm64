@@ -19,9 +19,12 @@ HIB_FILES=$(filter $(UNCONFIGURED_HIB_FILES),$(OBJS))
 IOHibernateRestoreKernel.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG) -fno-sanitize=address -UKASAN
 # Stack protector and stack check must be disabled because the stack protector runtime isn't available
 IOHibernateRestoreKernel.o_CFLAGS_ADD += -fno-stack-protector -fno-stack-check
+# Profiling information and code coverage must be disabled for __HIB files (see rdar://104951137)
+IOHibernateRestoreKernel.o_CFLAGS_ADD += -fno-profile-instr-generate -fno-coverage-mapping
 
 IOHibernateIO.cpo_INCFLAGS += -I$(SRCROOT)/osfmk
 IOHibernateRestoreKernel.o_INCFLAGS += -I$(SRCROOT)/osfmk
+IOUnifiedAddressTranslator.cpo_INCFLAGS += -I$(SRCROOT)/osfmk
 
 ######################################################################
 #END    Machine dependent Makefile fragment for arm

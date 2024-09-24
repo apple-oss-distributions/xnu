@@ -67,9 +67,9 @@ extern int in6_ifattach_aliasreq(struct ifnet *, struct ifnet *,
 extern int in6_ifattach_llcgareq(struct ifnet *, struct in6_cgareq *);
 extern void in6_ifdetach(struct ifnet *);
 extern int in6_iid_from_hw(struct ifnet *, struct in6_addr *);
-extern void in6_iid_mktmp(struct ifnet *, u_int8_t *, const u_int8_t *, int);
+extern void in6_iid_mktmp(struct ifnet *, u_int8_t *__sized_by(8), const u_int8_t *__sized_by(8), int);
 extern void in6_tmpaddrtimer(void *);
-extern int in6_nigroup(struct ifnet *, const char *, size_t, struct in6_addr *, uint32_t*);
+extern int in6_nigroup(struct ifnet *, const char *__counted_by(hostlen), size_t hostlen, struct in6_addr *, uint32_t*);
 #endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* _NETINET6_IN6_IFATTACH_H_ */

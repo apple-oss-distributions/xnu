@@ -45,6 +45,7 @@
 #define JETSAM_PRIORITY_ENTITLED_MAX              9 /* Entitled processes may use bands 1-9 for experimentation */
 #define JETSAM_PRIORITY_IDLE_DEFERRED             10 /* Keeping this around till all xnu_quick_tests can be moved away from it.*/
 #define JETSAM_PRIORITY_AGING_BAND1               JETSAM_PRIORITY_IDLE_DEFERRED
+#define JETSAM_PRIORITY_AGING_BAND1_STUCK         15 /* Sysprocs stuck in JETSAM_PRIORITY_IDLE_DEFERRED will be moved to this band */
 #define JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC  20
 #define JETSAM_PRIORITY_AGING_BAND2               JETSAM_PRIORITY_BACKGROUND_OPPORTUNISTIC
 #define JETSAM_PRIORITY_BACKGROUND                30
@@ -232,6 +233,7 @@ typedef struct jetsam_snapshot_entry {
 	uint64_t jse_frozen_to_swap_pages;
 	uint64_t csflags;
 	uint32_t cs_trust_level;
+	uint64_t jse_neural_nofootprint_total_pages;
 } memorystatus_jetsam_snapshot_entry_t;
 
 typedef struct jetsam_snapshot {
@@ -388,6 +390,10 @@ __END_DECLS
 
 #define MEMORYSTATUS_CMD_SET_DIAG_LIMIT               30 /* Set the diagnostics memory limit */
 #define MEMORYSTATUS_CMD_GET_DIAG_LIMIT               31 /* Get the diagnostics memory limit */
+
+#define MEMORYSTATUS_CMD_GET_JETSAM_ZPRINT_NAMES      32   /* Get jetsam snapshot zprint names array */
+#define MEMORYSTATUS_CMD_GET_JETSAM_ZPRINT_INFO       33   /* Get jetsam snapshot zprint zone info */
+#define MEMORYSTATUS_CMD_GET_JETSAM_ZPRINT_MEMINFO    34   /* Get jetsam snapshot zprint wired memory info */
 
 /* Commands that act on a group of processes */
 #define MEMORYSTATUS_CMD_GRP_SET_PROPERTIES           100
@@ -572,8 +578,8 @@ typedef struct memorystatus_diag_memlimit_properties {
 
 typedef struct memstat_bucket {
 	TAILQ_HEAD(, proc) list;
-	int count;
-	int relaunch_high_count;
+	uint32_t count;
+	uint32_t relaunch_high_count;
 } memstat_bucket_t;
 
 extern memstat_bucket_t memstat_bucket[MEMSTAT_BUCKET_COUNT];
@@ -590,14 +596,34 @@ typedef struct memorystatus_internal_probabilities {
 extern memorystatus_internal_probabilities_t *memorystatus_global_probabilities_table;
 extern size_t memorystatus_global_probabilities_size;
 
+extern void memorystatus_post_snapshot(void);
+
 extern void memorystatus_init(void);
 
 extern void memorystatus_init_at_boot_snapshot(void);
 
 extern int memorystatus_add(proc_t p, boolean_t locked);
-extern int memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t is_assertion, boolean_t effective,
-    boolean_t update_memlimit, int32_t memlimit_active, boolean_t memlimit_active_is_fatal,
-    int32_t memlimit_inactive, boolean_t memlimit_inactive_is_fatal);
+
+__options_closed_decl(memstat_priority_options_t, uint8_t, {
+	MEMSTAT_PRIORITY_OPTIONS_NONE   = 0x00,
+	/* Priority is driven by a RB assertion */
+	MEMSTAT_PRIORITY_IS_ASSERTION   = 0x01,
+	MEMSTAT_PRIORITY_IS_EFFECTIVE   = 0x02,
+	/* Insert at the head of the corresponding band */
+	MEMSTAT_PRIORITY_INSERT_HEAD    = 0x04,
+	/* Do not consider aging the process (used to send directly to IDLE) */
+	MEMSTAT_PRIORITY_NO_AGING = 0x08,
+});
+
+extern int memorystatus_set_priority(proc_t p, int priority, uint64_t user_data,
+    memstat_priority_options_t options);
+
+__options_decl(memlimit_options_t, uint8_t, {
+	MEMLIMIT_OPTIONS_NONE = 0x00,
+	MEMLIMIT_ACTIVE_FATAL = 0x01,
+	MEMLIMIT_INACTIVE_FATAL = 0x02,
+});
+extern int memorystatus_set_memlimits(proc_t p, int32_t active_limit, int32_t inactive_limit, memlimit_options_t options);
 
 /* Remove this process from jetsam bands for killing or freezing.
  * The proc_list_lock is held by the caller.
@@ -640,6 +666,7 @@ void memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty, boolean_t *is
 void memorystatus_act_on_legacy_footprint_entitlement(proc_t p, boolean_t footprint_increase);
 void memorystatus_act_on_ios13extended_footprint_entitlement(proc_t p);
 void memorystatus_act_on_entitled_task_limit(proc_t p);
+void memorystatus_act_on_entitled_developer_task_limit(proc_t p);
 #endif /* __arm64__ */
 
 #endif /* CONFIG_MEMORYSTATUS */
@@ -697,10 +724,9 @@ boolean_t memorystatus_idle_exit_from_VM(void);
 proc_t memorystatus_get_first_proc_locked(unsigned int *bucket_index, boolean_t search);
 proc_t memorystatus_get_next_proc_locked(unsigned int *bucket_index, proc_t p, boolean_t search);
 void memorystatus_get_task_page_counts(task_t task, uint32_t *footprint, uint32_t *max_footprint_lifetime, uint32_t *purgeable_pages);
-void memorystatus_invalidate_idle_demotion_locked(proc_t p, boolean_t clean_state);
-void memorystatus_update_priority_locked(proc_t p, int priority, boolean_t head_insert, boolean_t skip_demotion_check);
 
 bool memorystatus_task_has_increased_memory_limit_entitlement(task_t task);
+bool memorystatus_task_has_increased_debugging_memory_limit_entitlement(task_t task);
 bool memorystatus_task_has_legacy_footprint_entitlement(task_t task);
 bool memorystatus_task_has_ios13extended_footprint_limit(task_t task);
 

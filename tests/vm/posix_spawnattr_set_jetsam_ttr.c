@@ -30,7 +30,7 @@ set_small_relaunch_values(posix_spawnattr_t *attrs)
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "posix_spawnattr_set_jetsam_ttr_np");
 }
 
-T_DECL(set_high_relaunch_behavior, "supply very small time to relaunch values")
+T_DECL(set_high_relaunch_behavior, "supply very small time to relaunch values", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attrs;
 	_posix_spawnattr_t psattr;
@@ -47,7 +47,7 @@ T_DECL(set_high_relaunch_behavior, "supply very small time to relaunch values")
 	posix_spawnattr_destroy(&attrs);
 }
 
-T_DECL(set_medium_relaunch_behavior, "supply very large time to relaunch values")
+T_DECL(set_medium_relaunch_behavior, "supply very large time to relaunch values", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attrs;
 	_posix_spawnattr_t psattr;
@@ -77,7 +77,7 @@ T_DECL(set_medium_relaunch_behavior, "supply very large time to relaunch values"
 }
 
 
-T_DECL(set_low_relaunch_behavior, "supply very large time to relaunch values")
+T_DECL(set_low_relaunch_behavior, "supply very large time to relaunch values", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attrs;
 	_posix_spawnattr_t psattr;
@@ -106,7 +106,7 @@ T_DECL(set_low_relaunch_behavior, "supply very large time to relaunch values")
 	posix_spawnattr_destroy(&attrs);
 }
 
-T_DECL(set_high_relaunch_with_mixed_histogram, "supply slightly more small values than large values")
+T_DECL(set_high_relaunch_with_mixed_histogram, "supply slightly more small values than large values", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attrs;
 	_posix_spawnattr_t psattr;
@@ -220,12 +220,12 @@ posix_spawn_helper_and_wait_for_exit(char *name)
 	posix_spawnattr_destroy(&attrs);
 }
 
-T_DECL(posix_spawn_sets_relaunch_flags, "Check that posix_spawn sets the relaunch flags on the new proc")
+T_DECL(posix_spawn_sets_relaunch_flags, "Check that posix_spawn sets the relaunch flags on the new proc", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawn_helper_and_wait_for_exit("check_relaunch_flags");
 }
 
-T_DECL(relaunch_flags_persist_across_exec, "Check that the relaunch flags persist across exec")
+T_DECL(relaunch_flags_persist_across_exec, "Check that the relaunch flags persist across exec", T_META_TAG_VM_PREFERRED)
 {
 	posix_spawn_helper_and_wait_for_exit("exec_into_check_relaunch_flags");
 }

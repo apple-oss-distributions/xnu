@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.private.amfi.can-set-exception-ports</key>
+	<true/>
+	<key>com.apple.private.skywalk.register-flow-switch</key>
+	<true/>
+	<key>com.apple.private.skywalk.register-kernel-pipe</key>
+	<true/>
+	<key>com.apple.private.skywalk.register-net-if</key>
+	<true/>
+	<key>com.apple.private.skywalk.register-user-pipe</key>
+	<true/>
+	<key>com.apple.private.skywalk.observe-all</key>
+	<true/>
+	<key>com.apple.private.skywalk.observe-stats</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.private.network.restricted.port.lights_out_management</key>
+	<true/>
+	<key>com.apple.private.skywalk.low-latency-channel</key>
+	<true/>
+	<key>com.apple.private.set-exception-port</key>
+    <true/>
+</dict>
+</plist>

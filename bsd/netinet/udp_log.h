@@ -29,8 +29,7 @@
 #ifndef _NETINET_UDP_LOG_H_
 #define _NETINET_UDP_LOG_H_
 
-extern uint32_t udp_log_enable_flags;
-extern uint32_t udp_log_port;
+#ifdef PRIVATE
 
 #define UDP_ENABLE_FLAG_LIST \
 	X(ULEF_BIND,            0x00000002, bind) \
@@ -51,6 +50,15 @@ enum {
 	UDP_ENABLE_FLAG_LIST
 #undef X
 };
+
+#endif /* PRIVATE */
+
+#ifdef BSD_KERNEL_PRIVATE
+
+#include <netinet/inp_log.h>
+
+extern uint32_t udp_log_enable_flags;
+extern uint32_t udp_log_port;
 
 #define ULEF_MASK_DST (ULEF_DST_LOOPBACK | ULEF_DST_LOCAL | ULEF_DST_GW)
 
@@ -101,5 +109,6 @@ udp_is_log_enabled(struct inpcb *inp, uint32_t req_flags)
 #define UDP_LOG_CONNECTION_SUMMARY(inp) if (udp_is_log_enabled(inp, ULEF_CONNECTION)) \
     udp_log_connection_summary((inp))
 
+#endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* _NETINET_UDP_LOG_H_ */

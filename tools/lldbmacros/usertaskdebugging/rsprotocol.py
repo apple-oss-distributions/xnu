@@ -4,7 +4,7 @@ import logging
 class Message(object):
     """represents a message of Remote serial protocol"""
     def __init__(self, data):
-        super(Message, self).__init__()
+        super().__init__()
         self.data = data
 
     def __str__(self):
@@ -48,7 +48,7 @@ class Message(object):
 class ProtocolAcknowledgement(Message):
     """Ack Messages"""
     def __init__(self, ack_str):
-        super(ProtocolAcknowledgement, self).__init__(ack_str)
+        super().__init__(ack_str)
         self.data = ack_str
     
     def getRSPByteData(self):

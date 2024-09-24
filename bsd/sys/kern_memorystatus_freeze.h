@@ -44,8 +44,8 @@ typedef struct memorystatus_freeze_entry {
 } memorystatus_freeze_entry_t;
 
 #ifdef PRIVATE
-#define FREEZE_PROCESSES_MAX 20
-#define FREEZE_PROCESSES_MAX_SWAP_ENABLED 36
+#define FREEZE_PROCESSES_MAX_DEFAULT 20
+#define FREEZE_PROCESSES_MAX_SWAP_ENABLED_DEFAULT 36
 #endif /* PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -59,7 +59,6 @@ extern unsigned int memorystatus_frozen_shared_mb;
 extern unsigned int memorystatus_frozen_shared_mb_max;
 extern unsigned int memorystatus_freeze_shared_mb_per_process_max; /* Max. MB allowed per process to be freezer-eligible. */
 extern unsigned int memorystatus_freeze_private_shared_pages_ratio; /* Ratio of private:shared pages for a process to be freezer-eligible. */
-extern unsigned int memorystatus_suspended_count;
 extern unsigned int memorystatus_thaw_count; /* # of processes that have been thawed in the current interval. */
 extern unsigned int memorystatus_refreeze_eligible_count; /* # of processes currently thawed i.e. have state on disk & in-memory */
 extern unsigned int memorystatus_freeze_max_candidate_band;
@@ -72,12 +71,12 @@ extern int  memorystatus_freeze_process_sync(proc_t p);
 extern int memorystatus_entitled_max_task_footprint_mb;
 
 #if XNU_TARGET_OS_WATCH
-#define FREEZE_PAGES_MIN   ( 2 * 1024 * 1024 / PAGE_SIZE)
+#define FREEZE_PAGES_MIN_DEFAULT   ( 2 * 1024 * 1024 / PAGE_SIZE)
 #else
-#define FREEZE_PAGES_MIN   ( 8 * 1024 * 1024 / PAGE_SIZE)
+#define FREEZE_PAGES_MIN_DEFAULT   ( 8 * 1024 * 1024 / PAGE_SIZE)
 #endif
-#define FREEZE_PAGES_MAX   (max_task_footprint_mb == 0 ? INT_MAX : (max_task_footprint_mb << (20 - PAGE_SHIFT)))
-#define FREEZE_PAGES_MAX_SWAP_ENABLED \
+#define FREEZE_PAGES_MAX_DEFAULT   (max_task_footprint_mb == 0 ? INT_MAX : (max_task_footprint_mb << (20 - PAGE_SHIFT)))
+#define FREEZE_PAGES_MAX_SWAP_ENABLED_DEFAULT \
     (memorystatus_entitled_max_task_footprint_mb == 0 ? INT_MAX : (memorystatus_entitled_max_task_footprint_mb << (20 - PAGE_SHIFT)))
 
 #if XNU_TARGET_OS_WATCH
@@ -86,18 +85,18 @@ extern int memorystatus_entitled_max_task_footprint_mb;
 #define FREEZE_SUSPENDED_THRESHOLD_DEFAULT 4
 #endif
 
-#define FREEZE_DAILY_MB_MAX_DEFAULT       1024
+#define FREEZE_DAILY_MB_MAX_DEFAULT       2048
 #define FREEZE_DEGRADATION_BUDGET_THRESHOLD     25 //degraded perf. when the daily budget left falls below this threshold percentage
 
 #define MAX_FROZEN_SHARED_MB_PERCENT 10
-#define MAX_FROZEN_PROCESS_DEMOTIONS 2
-#define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED 4
-#define MIN_THAW_DEMOTION_THRESHOLD  5
+#define MAX_FROZEN_PROCESS_DEMOTIONS_DEFAULT 2
+#define MAX_FROZEN_PROCESS_DEMOTIONS_SWAP_ENABLED_DEFAULT 4
+#define MIN_THAW_DEMOTION_THRESHOLD_DEFAULT  5
 
 #if XNU_TARGET_OS_WATCH
-#define MIN_THAW_REFREEZE_THRESHOLD  0
+#define MIN_THAW_REFREEZE_THRESHOLD_DEFAULT  0
 #else
-#define MIN_THAW_REFREEZE_THRESHOLD  3
+#define MIN_THAW_REFREEZE_THRESHOLD_DEFAULT  3
 #endif
 
 #if XNU_TARGET_OS_WATCH
@@ -106,6 +105,11 @@ extern int memorystatus_entitled_max_task_footprint_mb;
 #define FREEZE_MAX_CANDIDATE_BAND JETSAM_PRIORITY_AGING_BAND2
 #endif
 
+#if XNU_TARGET_OS_WATCH
+#define FREEZE_USE_ELEVATED_INACTIVE_BAND 0
+#else
+#define FREEZE_USE_ELEVATED_INACTIVE_BAND 1
+#endif
 
 typedef struct throttle_interval_t {
 	uint32_t mins;
@@ -115,7 +119,7 @@ typedef struct throttle_interval_t {
 	mach_timespec_t ts;
 } throttle_interval_t;
 
-extern bool memorystatus_freeze_enabled;
+extern boolean_t memorystatus_freeze_enabled;
 extern int memorystatus_freeze_wakeup;
 
 /* Thresholds */
@@ -134,8 +138,6 @@ extern unsigned int memorystatus_min_thaw_refreeze_threshold;
 #if DEVELOPMENT || DEBUG
 #define FREEZER_CONTROL_GET_STATUS      (1)
 #endif /* DEVELOPMENT || DEBUG */
-
-extern int memorystatus_freeze_jetsam_band; /* the jetsam band which will contain P_MEMSTAT_FROZEN processes */
 
 bool memorystatus_freeze_thread_should_run(void);
 int memorystatus_set_process_is_freezable(pid_t pid, boolean_t is_freezable);
@@ -264,7 +266,7 @@ void memorystatus_freezer_mark_ui_transition(proc_t p);
 /* Lists all the processes that are currently in the freezer. */
 #define FREEZER_CONTROL_GET_PROCS        (2)
 
-#define FREEZER_CONTROL_GET_PROCS_MAX_COUNT (FREEZE_PROCESSES_MAX * 2)
+#define FREEZER_CONTROL_GET_PROCS_MAX_COUNT (FREEZE_PROCESSES_MAX_DEFAULT * 2)
 
 typedef struct _global_frozen_procs {
 	uint64_t gfp_num_frozen;

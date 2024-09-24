@@ -114,6 +114,7 @@
 #include <mach/host_priv.h>
 #include <mach/sdt.h>
 #include <mach-o/loader.h>
+#include <mach/vm_types_unsafe.h>
 
 #include <machine/machine_routines.h>
 
@@ -125,10 +126,10 @@
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOBSD.h>
 
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_pager.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_pager_xnu.h>
+#include <vm/vm_sanitize_internal.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -169,6 +170,103 @@ proc_2020_fall_os_sdk_or_later(void)
 	}
 }
 
+static inline kern_return_t
+mmap_sanitize(
+	vm_map_t                user_map,
+	vm_prot_ut              prot_u,
+	vm_addr_struct_t        pos_u,
+	vm_size_struct_t        len_u,
+	vm_addr_struct_t        addr_u,
+	int                     flags,
+	vm_prot_t              *prot,
+	vm_object_offset_t     *file_pos,
+	vm_object_offset_t     *file_end,
+	vm_map_size_t          *file_size,
+	vm_map_offset_t        *user_addr,
+	vm_map_offset_t        *user_end,
+	vm_map_size_t          *user_size)
+{
+	kern_return_t           kr;
+	vm_map_offset_t         user_mask = vm_map_page_mask(user_map);
+	vm_sanitize_flags_t     vm_sanitize_flags;
+
+	kr = vm_sanitize_prot_bsd(prot_u, VM_SANITIZE_CALLER_MMAP, prot);
+	*prot &= VM_PROT_ALL;
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
+	}
+
+	/*
+	 * Check file_pos doesn't overflow with PAGE_MASK since VM objects use
+	 * this page mask internally, and it can be wider than the user_map's.
+	 */
+	if (flags & MAP_UNIX03) {
+		vm_sanitize_flags = VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS;
+	} else {
+		vm_sanitize_flags = VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH;
+	}
+
+	kr = vm_sanitize_addr_size(pos_u, len_u, VM_SANITIZE_CALLER_MMAP, PAGE_MASK,
+	    vm_sanitize_flags | VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES,
+	    file_pos, file_end, file_size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
+	}
+
+	/*
+	 * Check that file_pos is page aligned for the user page size when
+	 * UNIX03 compliance is requested.
+	 * The user page size may be different from the kernel page size we
+	 * use to check for overflows in the sanitizer call above).
+	 */
+	if ((flags & MAP_UNIX03) && (*file_pos & user_mask)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (flags & MAP_FIXED) {
+		kr = vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MMAP,
+		    user_map,
+		    VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+		    user_addr, user_end, user_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		/*
+		 * Further validation since we allowed a misaligned user_addr
+		 * for fixed mappings.
+		 *
+		 * The specified address must have the same remainder
+		 * as the file offset taken modulo PAGE_SIZE, so it
+		 * should be aligned after adjustment by (file_pos & user_mask).
+		 */
+		if (!VM_SANITIZE_UNSAFE_IS_EQUAL(addr_u, *user_addr + (*file_pos & user_mask))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+	} else {
+		/*
+		 * For "anywhere" mappings, the address is only a hint,
+		 * mach_vm_map_kernel() will fail with KERN_NO_SPACE
+		 * if user_addr + user_size overflows,
+		 * and mmap will start scanning again.
+		 *
+		 * Unlike Mach VM APIs, the hint is taken as a strict
+		 * "start" which is why we round the sanitized address up,
+		 * rather than truncate.
+		 */
+		*user_addr = vm_sanitize_addr(user_map,
+		    vm_sanitize_compute_unsafe_end(addr_u, user_mask));
+		kr = vm_sanitize_size(pos_u, len_u, VM_SANITIZE_CALLER_MMAP,
+		    user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+		    user_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 /*
  * XXX Internally, we use VM_PROT_* somewhat interchangeably, but the correct
  * XXX usage is PROT_* from an interface perspective.  Thus the values of
@@ -180,29 +278,31 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	/*
 	 *	Map in special device (must be SHARED) or file
 	 */
-	struct fileproc *fp;
-	struct                  vnode *vp;
+	struct fileproc        *fp;
+	struct vnode           *vp = NULLVP;
 	int                     flags;
 	int                     prot;
 	int                     err = 0;
 	vm_map_t                user_map;
 	kern_return_t           result;
-	vm_map_offset_t         user_addr;
-	vm_map_offset_t         sum;
-	vm_map_size_t           user_size;
-	vm_object_offset_t      pageoff;
-	vm_object_offset_t      file_pos;
 	vm_map_kernel_flags_t   vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 	boolean_t               docow;
 	vm_prot_t               maxprot;
-	void                    *handle;
+	void                   *handle;
 	memory_object_t         pager = MEMORY_OBJECT_NULL;
-	memory_object_control_t  control;
+	memory_object_control_t control;
 	int                     mapanon = 0;
 	int                     fpref = 0;
-	int error = 0;
-	int fd = uap->fd;
-	int num_retries = 0;
+	int                     error = 0;
+	int                     fd = uap->fd;
+	int                     num_retries = 0;
+	kern_return_t           kr;
+	/* page-aligned "user_map" quantities */
+	vm_map_offset_t         user_addr, user_end, user_mask;
+	vm_map_size_t           user_size;
+	/* unaligned "file" quantities */
+	vm_object_offset_t      file_pos, file_end;
+	vm_map_size_t           file_size;
 
 	/*
 	 * Note that for UNIX03 conformance, there is additional parameter checking for
@@ -211,18 +311,35 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	 * one can get returned errnos.
 	 */
 
-	user_map = current_map();
-	user_addr = (vm_map_offset_t)uap->addr;
-	user_size = (vm_map_size_t) uap->len;
+	user_map  = current_map();
+	flags     = uap->flags;
+	user_mask = vm_map_page_mask(user_map);
 
-	AUDIT_ARG(addr, user_addr);
-	AUDIT_ARG(len, user_size);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 	AUDIT_ARG(fd, uap->fd);
 
-	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
+	/*
+	 * Sanitize any input parameters that are addr/size/protections
+	 */
+	kr = mmap_sanitize(user_map,
+	    uap->prot,
+	    uap->pos,
+	    uap->len,
+	    uap->addr,
+	    flags,
+	    &prot,
+	    &file_pos,
+	    &file_end,
+	    &file_size,
+	    &user_addr,
+	    &user_end,
+	    &user_size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(kr));
 		return EINVAL;
 	}
-	prot = (uap->prot & VM_PROT_ALL);
+
 #if 3777787
 	/*
 	 * Since the hardware currently does not support writing without
@@ -234,9 +351,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		prot |= VM_PROT_READ;
 	}
 #endif  /* radar 3777787 */
-
-	flags = uap->flags;
-	vp = NULLVP;
 
 	/*
 	 * verify no unknown flags are passed in, and if any are,
@@ -272,57 +386,15 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	}
 
 
-	/*
-	 * The vm code does not have prototypes & compiler doesn't do
-	 * the right thing when you cast 64bit value and pass it in function
-	 * call. So here it is.
-	 */
-	file_pos = (vm_object_offset_t)uap->pos;
-
-
-	/* make sure mapping fits into numeric range etc */
-	if (os_add3_overflow(file_pos, user_size, vm_map_page_size(user_map) - 1, &sum)) {
-		return EINVAL;
-	}
-
 	if (flags & MAP_UNIX03) {
-		vm_map_offset_t offset_alignment_mask;
-
 		/*
 		 * Enforce UNIX03 compliance.
 		 */
-
-		if (vm_map_is_exotic(current_map())) {
-			offset_alignment_mask = 0xFFF;
-		} else {
-			offset_alignment_mask = vm_map_page_mask(current_map());
-		}
-		if (file_pos & offset_alignment_mask) {
-			/* file offset should be page-aligned */
-			return EINVAL;
-		}
 		if (!(flags & (MAP_PRIVATE | MAP_SHARED))) {
 			/* need either MAP_PRIVATE or MAP_SHARED */
 			return EINVAL;
 		}
-		if (user_size == 0) {
-			/* mapping length should not be 0 */
-			return EINVAL;
-		}
 	}
-
-	/*
-	 * Align the file position to a page boundary,
-	 * and save its page offset component.
-	 */
-	pageoff = (file_pos & vm_map_page_mask(user_map));
-	file_pos -= (vm_object_offset_t)pageoff;
-
-
-	/* Adjust size for rounding (on both ends). */
-	user_size += pageoff;   /* low end... */
-	user_size = vm_map_round_page(user_size,
-	    vm_map_page_mask(user_map));                           /* hi end */
 
 
 	if (flags & MAP_JIT) {
@@ -388,39 +460,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		}
 	}
 
-	/*
-	 * Check for illegal addresses.  Watch out for address wrap... Note
-	 * that VM_*_ADDRESS are not constants due to casts (argh).
-	 */
-	if (flags & MAP_FIXED) {
-		/*
-		 * The specified address must have the same remainder
-		 * as the file offset taken modulo PAGE_SIZE, so it
-		 * should be aligned after adjustment by pageoff.
-		 */
-		user_addr -= pageoff;
-		if (user_addr & vm_map_page_mask(user_map)) {
-			return EINVAL;
-		}
-	}
-#ifdef notyet
-	/* DO not have apis to get this info, need to wait till then*/
-	/*
-	 * XXX for non-fixed mappings where no hint is provided or
-	 * the hint would fall in the potential heap space,
-	 * place it after the end of the largest possible heap.
-	 *
-	 * There should really be a pmap call to determine a reasonable
-	 * location.
-	 */
-	else if (addr < vm_map_round_page(p->p_vmspace->vm_daddr + MAXDSIZ,
-	    vm_map_page_mask(user_map))) {
-		addr = vm_map_round_page(p->p_vmspace->vm_daddr + MAXDSIZ,
-		    vm_map_page_mask(user_map));
-	}
-
-#endif
-
 	/* Entitlement check against code signing monitor */
 	if ((flags & MAP_JIT) && (vm_map_csm_allow_jit(user_map) != KERN_SUCCESS)) {
 		printf("[%d] code signing monitor denies JIT mapping\n", proc_pid(p));
@@ -482,7 +521,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		 * otherwise, force the heap range.
 		 */
 		if (vmk_flags.vm_tag) {
-			vm_map_kernel_flags_update_range_id(&vmk_flags, user_map);
+			vm_map_kernel_flags_update_range_id(&vmk_flags, user_map, user_size);
 		} else {
 			vmk_flags.vmkf_range_id = UMEM_RANGE_ID_HEAP;
 		}
@@ -490,7 +529,6 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 		handle = NULL;
 		file_pos = 0;
-		pageoff = 0;
 		mapanon = 1;
 	} else {
 		struct vnode_attr va;
@@ -511,12 +549,10 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		fpref = 1;
 		switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 		case DTYPE_PSXSHM:
-			uap->addr = (user_addr_t)user_addr;
-			uap->len = (user_size_t)user_size;
-			uap->prot = prot;
-			uap->flags = flags;
-			uap->pos = file_pos;
-			error = pshm_mmap(p, uap, retval, fp, (off_t)pageoff);
+			error = pshm_mmap(p, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr),
+			    user_size, prot, flags, fp,
+			    vm_map_trunc_page(file_pos, user_mask),
+			    file_pos & user_mask, retval);
 			goto bad;
 		case DTYPE_VNODE:
 			break;
@@ -619,8 +655,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			handle = (void *)vp;
 #if CONFIG_MACF
 			error = mac_file_check_mmap(vfs_context_ucred(ctx),
-			    fp->fp_glob, prot, flags, file_pos + pageoff,
-			    &maxprot);
+			    fp->fp_glob, prot, flags, file_pos, &maxprot);
 			if (error) {
 				(void)vnode_put(vp);
 				goto bad;
@@ -649,6 +684,14 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 #if CONFIG_MAP_RANGES && !XNU_PLATFORM_MacOSX
 		/* force file ranges on !macOS */
 		vmk_flags.vmkf_range_id = UMEM_RANGE_ID_HEAP;
+#if XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT
+		/*
+		 * Put allocations on iOS with EXTENDED_USER_VA_SUPPORT
+		 * in the large file range, if the process has the "extra jumbo" entitlement.
+		 * Otherwise, place allocation into the heap range.
+		 */
+		vmk_flags.vmkf_range_id = UMEM_RANGE_ID_LARGE_FILE;
+#endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
 #endif /* CONFIG_MAP_RANGES && !XNU_PLATFORM_MacOSX */
 	}
 
@@ -660,33 +703,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		goto bad;
 	}
 
-	/*
-	 *	We bend a little - round the start and end addresses
-	 *	to the nearest page boundary.
-	 */
-	user_size = vm_map_round_page(user_size,
-	    vm_map_page_mask(user_map));
-
-	if (file_pos & vm_map_page_mask(user_map)) {
-		if (!mapanon) {
-			(void)vnode_put(vp);
-		}
-		error = EINVAL;
-		goto bad;
-	}
-
-	if ((flags & MAP_FIXED) == 0) {
-		user_addr = vm_map_round_page(user_addr,
-		    vm_map_page_mask(user_map));
-	} else {
-		if (user_addr != vm_map_trunc_page(user_addr,
-		    vm_map_page_mask(user_map))) {
-			if (!mapanon) {
-				(void)vnode_put(vp);
-			}
-			error = EINVAL;
-			goto bad;
-		}
+	if (flags & MAP_FIXED) {
 		/*
 		 * mmap(MAP_FIXED) will replace any existing mappings in the
 		 * specified range, if the new mapping is successful.
@@ -768,8 +785,8 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 #endif  /* radar 3777787 */
 map_anon_retry:
 
-		result = vm_map_enter_mem_object(user_map,
-		    &user_addr, user_size,
+		result = mach_vm_map_kernel(user_map,
+		    vm_sanitize_wrap_addr_ref(&user_addr), user_size,
 		    0, vmk_flags,
 		    IPC_PORT_NULL, 0, FALSE,
 		    prot, maxprot,
@@ -909,17 +926,10 @@ map_file_retry:
 			maxprot &= prot;
 		}
 
-		vm_object_offset_t end_pos = 0;
-		if (os_add_overflow(user_size, file_pos, &end_pos)) {
-			vnode_put(vp);
-			error = EINVAL;
-			goto bad;
-		}
-
 		result = vm_map_enter_mem_object_control(user_map,
-		    &user_addr, user_size,
+		    vm_sanitize_wrap_addr_ref(&user_addr), user_size,
 		    0, vmk_flags,
-		    control, file_pos,
+		    control, vm_map_trunc_page(file_pos, user_mask),
 		    docow, prot, maxprot,
 		    (flags & MAP_SHARED) ?
 		    VM_INHERIT_SHARE :
@@ -942,7 +952,7 @@ map_file_retry:
 
 	switch (result) {
 	case KERN_SUCCESS:
-		*retval = user_addr + pageoff;
+		*retval = user_addr + (file_pos & user_mask);
 		error = 0;
 		break;
 	case KERN_INVALID_ADDRESS:
@@ -1059,38 +1069,49 @@ msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int3
 	return 0;
 }
 
+static inline kern_return_t
+munmap_sanitize(
+	vm_map_t                user_map,
+	vm_addr_struct_t        addr_u,
+	vm_size_struct_t        len_u,
+	mach_vm_offset_t       *user_addr,
+	mach_vm_offset_t       *user_end,
+	mach_vm_size_t         *user_size)
+{
+	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MUNMAP,
+	           user_map,
+	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START | VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS,
+	           user_addr, user_end, user_size);
+}
 
 int
 munmap(__unused proc_t p, struct munmap_args *uap, __unused int32_t *retval)
 {
-	mach_vm_offset_t        user_addr;
+	mach_vm_offset_t        user_addr, user_end;
 	mach_vm_size_t          user_size;
 	kern_return_t           result;
 	vm_map_t                user_map;
 
 	user_map = current_map();
-	user_addr = (mach_vm_offset_t) uap->addr;
-	user_size = (mach_vm_size_t) uap->len;
 
-	AUDIT_ARG(addr, user_addr);
-	AUDIT_ARG(len, user_size);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 
-	if (user_addr & vm_map_page_mask(user_map)) {
-		/* UNIX SPEC: user address is not page-aligned, return EINVAL */
+	/*
+	 * Sanitize any input parameters that are addr/size/protections
+	 */
+	result = munmap_sanitize(user_map,
+	    uap->addr,
+	    uap->len,
+	    &user_addr,
+	    &user_end,
+	    &user_size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(result) ==
+		    KERN_INVALID_ARGUMENT);
 		return EINVAL;
 	}
-
-	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
-		return EINVAL;
-	}
-
-	if (user_size == 0) {
-		/* UNIX SPEC: size is 0, return EINVAL */
-		return EINVAL;
-	}
-
-	result = mach_vm_deallocate(user_map, user_addr, user_size);
-	if (result != KERN_SUCCESS) {
+	if (mach_vm_deallocate(user_map, user_addr, user_size)) {
 		return EINVAL;
 	}
 	return 0;
@@ -1303,16 +1324,12 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 	    size != 0 &&
 	    (uap->behav == MADV_FREE ||
 	    uap->behav == MADV_FREE_REUSABLE)) {
-		printf("** FOURK_COMPAT: %d[%s] "
+		printf("** %s: %d[%s] "
 		    "failing madvise(0x%llx,0x%llx,%s)\n",
-		    proc_getpid(p), p->p_comm, start, size,
+		    __func__, proc_getpid(p), p->p_comm, start, size,
 		    ((uap->behav == MADV_FREE_REUSABLE)
 		    ? "MADV_FREE_REUSABLE"
 		    : "MADV_FREE"));
-		DTRACE_VM3(fourk_compat_madvise,
-		    uint64_t, start,
-		    uint64_t, size,
-		    int, uap->behav);
 		return EINVAL;
 	}
 #endif /* __arm64__ */
@@ -1501,64 +1518,50 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 int
 mlock(__unused proc_t p, struct mlock_args *uap, __unused int32_t *retvalval)
 {
-	vm_map_t user_map;
-	vm_map_offset_t addr;
-	vm_map_size_t size, pageoff;
-	kern_return_t   result;
+	kern_return_t result;
 
-	AUDIT_ARG(addr, uap->addr);
-	AUDIT_ARG(len, uap->len);
-
-	user_map = current_map();
-	addr = (vm_map_offset_t) uap->addr;
-	size = (vm_map_size_t)uap->len;
-
-	if (vm_map_range_overflows(user_map, addr, size)) {
-		return EINVAL;
-	}
-
-	if (size == 0) {
-		return 0;
-	}
-
-	pageoff = (addr & vm_map_page_mask(user_map));
-	addr -= pageoff;
-	size = vm_map_round_page(size + pageoff, vm_map_page_mask(user_map));
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 
 	/* have to call vm_map_wire directly to pass "I don't know" protections */
-	result = vm_map_wire_kernel(user_map, addr, addr + size, VM_PROT_NONE, VM_KERN_MEMORY_MLOCK, TRUE);
+	result = vm_map_wire_kernel(current_map(), uap->addr,
+	    vm_sanitize_compute_unsafe_end(uap->addr, uap->len),
+	    vm_sanitize_wrap_prot(VM_PROT_NONE), VM_KERN_MEMORY_MLOCK, TRUE);
 
-	if (result == KERN_RESOURCE_SHORTAGE) {
+	switch (result) {
+	case KERN_SUCCESS:
+		return 0;
+	case KERN_INVALID_ARGUMENT:
+		return EINVAL;
+	case KERN_RESOURCE_SHORTAGE:
 		return EAGAIN;
-	} else if (result == KERN_PROTECTION_FAILURE) {
-		return EACCES;
-	} else if (result != KERN_SUCCESS) {
+	case KERN_PROTECTION_FAILURE:
+		return EPERM;
+	default:
 		return ENOMEM;
 	}
-
-	return 0;       /* KERN_SUCCESS */
 }
 
 int
 munlock(__unused proc_t p, struct munlock_args *uap, __unused int32_t *retval)
 {
-	mach_vm_offset_t addr;
-	mach_vm_size_t size;
-	vm_map_t user_map;
-	kern_return_t   result;
+	kern_return_t result;
 
-	AUDIT_ARG(addr, uap->addr);
-	AUDIT_ARG(len, uap->len);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 
-	addr = (mach_vm_offset_t) uap->addr;
-	size = (mach_vm_size_t)uap->len;
-	user_map = current_map();
-	if (vm_map_range_overflows(user_map, addr, size)) {
-		return EINVAL;
-	}
 	/* JMM - need to remove all wirings by spec - this just removes one */
-	result = mach_vm_wire_kernel(user_map, addr, size, VM_PROT_NONE, VM_KERN_MEMORY_MLOCK);
-	return result == KERN_SUCCESS ? 0 : ENOMEM;
+	result = vm_map_unwire(current_map(), uap->addr,
+	    vm_sanitize_compute_unsafe_end(uap->addr, uap->len), TRUE);
+
+	switch (result) {
+	case KERN_SUCCESS:
+		return 0;
+	case KERN_INVALID_ARGUMENT:
+		return EINVAL;
+	default:
+		return ENOMEM;
+	}
 }
 
 
@@ -1575,10 +1578,25 @@ munlockall(__unused proc_t p, __unused struct munlockall_args *uap, __unused int
 }
 
 #if CONFIG_CODE_DECRYPTION
+static inline kern_return_t
+mremap_encrypted_sanitize(
+	vm_map_t                user_map,
+	vm_addr_struct_t        addr_u,
+	vm_size_struct_t        len_u,
+	mach_vm_offset_t       *user_addr,
+	mach_vm_offset_t       *user_end,
+	mach_vm_size_t         *user_size)
+{
+	return vm_sanitize_addr_size(addr_u, len_u,
+	           VM_SANITIZE_CALLER_MREMAP_ENCRYPTED, user_map,
+	           VM_SANITIZE_FLAGS_CHECK_ALIGNED_START | VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH,
+	           user_addr, user_end, user_size);
+}
+
 int
 mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __unused int32_t *retval)
 {
-	mach_vm_offset_t    user_addr;
+	mach_vm_offset_t    user_addr, user_end;
 	mach_vm_size_t      user_size;
 	kern_return_t       result;
 	vm_map_t    user_map;
@@ -1594,22 +1612,25 @@ mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __u
 	uintptr_t vnodeaddr;
 	uint32_t vid;
 
-	AUDIT_ARG(addr, uap->addr);
-	AUDIT_ARG(len, uap->len);
+	AUDIT_ARG(addr, VM_SANITIZE_UNSAFE_UNWRAP(uap->addr));
+	AUDIT_ARG(len, VM_SANITIZE_UNSAFE_UNWRAP(uap->len));
 
-	user_map = current_map();
-	user_addr = (mach_vm_offset_t) uap->addr;
-	user_size = (mach_vm_size_t) uap->len;
-
-	cryptid = uap->cryptid;
-	cputype = uap->cputype;
+	user_map   = current_map();
+	cryptid    = uap->cryptid;
+	cputype    = uap->cputype;
 	cpusubtype = uap->cpusubtype;
 
-	if (vm_map_range_overflows(user_map, user_addr, user_size)) {
-		return EINVAL;
-	}
-	if (user_addr & vm_map_page_mask(user_map)) {
-		/* UNIX SPEC: user address is not page-aligned, return EINVAL */
+	/*
+	 * Sanitize any input parameters that are addr/size/protections
+	 */
+	result = mremap_encrypted_sanitize(user_map,
+	    uap->addr,
+	    uap->len,
+	    &user_addr,
+	    &user_end,
+	    &user_size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		assert(vm_sanitize_get_kr(result));
 		return EINVAL;
 	}
 

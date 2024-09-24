@@ -86,6 +86,7 @@ __notif_dest_by_nx_uuid(struct __notif_dest *dest, const uuid_t nx_uuid)
 {
 	struct kern_nexus *nx;
 	struct nx_flowswitch *fsw;
+	const char *__null_terminated desc = "detached fsw";
 
 	if (dest == NULL) {
 		return EINVAL;
@@ -103,7 +104,7 @@ __notif_dest_by_nx_uuid(struct __notif_dest *dest, const uuid_t nx_uuid)
 	dest->dest_fsw = fsw;
 	dest->dest_desc = (fsw->fsw_ifp != NULL)
 	    ? if_name(fsw->fsw_ifp)
-	    : "detached fsw";
+	    : desc;
 	return 0;
 }
 
@@ -121,7 +122,7 @@ __notif_dest_by_nx_uuid(struct __notif_dest *dest, const uuid_t nx_uuid)
 static inline errno_t
 kern_channel_packet_event_notify(struct __notif_dest *dest,
     os_channel_event_type_t event_type, size_t event_dlen,
-    uint8_t *event_data, uint32_t nx_port_id)
+    uint8_t *__sized_by(event_dlen)event_data, uint32_t nx_port_id)
 {
 	char buf[CHANNEL_EVENT_MAX_LEN]
 	__attribute((aligned(sizeof(uint64_t))));
@@ -201,14 +202,21 @@ kern_channel_event_transmit_status(const ifnet_t ifp,
 {
 	errno_t err;
 	struct __notif_dest dest = {0, {NULL}, NULL};
+	uint8_t *event_data;
 
 	if ((err = __notif_dest_by_ifp(&dest, ifp)) != 0) {
 		return err;
 	}
 
+	/*
+	 * -fbounds-safety: kern_channel_packet_event_notify only accepts
+	 * uint8_t * for event_data.
+	 */
+	event_data = (uint8_t * __bidi_indexable)
+	    (os_channel_event_packet_transmit_status_t * __bidi_indexable) pkt_tx_status;
 	return kern_channel_packet_event_notify(&dest,
 	           CHANNEL_EVENT_PACKET_TRANSMIT_STATUS,
-	           sizeof(*pkt_tx_status), (uint8_t*)pkt_tx_status, nx_port_id);
+	           sizeof(*pkt_tx_status), event_data, nx_port_id);
 }
 
 errno_t
@@ -218,14 +226,21 @@ kern_channel_event_transmit_status_with_nexus(const uuid_t nx_uuid,
 {
 	errno_t err;
 	struct __notif_dest dest = {0, {NULL}, NULL};
+	uint8_t *event_data;
 
 	if ((err = __notif_dest_by_nx_uuid(&dest, nx_uuid)) != 0) {
 		return err;
 	}
 
+	/*
+	 * -fbounds-safety: kern_channel_packet_event_notify only accepts
+	 * uint8_t * for event_data.
+	 */
+	event_data = (uint8_t * __bidi_indexable)
+	    (os_channel_event_packet_transmit_status_t * __bidi_indexable) pkt_tx_status;
 	return kern_channel_packet_event_notify(&dest,
 	           CHANNEL_EVENT_PACKET_TRANSMIT_STATUS,
-	           sizeof(*pkt_tx_status), (uint8_t*)pkt_tx_status, nx_port_id);
+	           sizeof(*pkt_tx_status), event_data, nx_port_id);
 }
 
 errno_t
@@ -235,14 +250,21 @@ kern_channel_event_transmit_expired(const ifnet_t ifp,
 {
 	errno_t err;
 	struct __notif_dest dest = {0, {NULL}, NULL};
+	uint8_t *event_data;
 
 	if ((err = __notif_dest_by_ifp(&dest, ifp)) != 0) {
 		return err;
 	}
 
+	/*
+	 * -fbounds-safety: kern_channel_packet_event_notify only accepts
+	 * uint8_t * for event_data.
+	 */
+	event_data = (uint8_t * __bidi_indexable)
+	    (os_channel_event_packet_transmit_expired_t * __bidi_indexable) pkt_tx_expired;
 	return kern_channel_packet_event_notify(&dest,
 	           CHANNEL_EVENT_PACKET_TRANSMIT_EXPIRED,
-	           sizeof(*pkt_tx_expired), (uint8_t*)pkt_tx_expired, nx_port_id);
+	           sizeof(*pkt_tx_expired), event_data, nx_port_id);
 }
 
 extern errno_t
@@ -252,14 +274,21 @@ kern_channel_event_transmit_expired_with_nexus(const uuid_t nx_uuid,
 {
 	errno_t err;
 	struct __notif_dest dest = {0, {NULL}, NULL};
+	uint8_t *event_data;
 
 	if ((err = __notif_dest_by_nx_uuid(&dest, nx_uuid)) != 0) {
 		return err;
 	}
 
+	/*
+	 * -fbounds-safety: kern_channel_packet_event_notify only accepts
+	 * uint8_t * for event_data.
+	 */
+	event_data = (uint8_t * __bidi_indexable)
+	    (os_channel_event_packet_transmit_expired_t * __bidi_indexable) pkt_tx_expired;
 	return kern_channel_packet_event_notify(&dest,
 	           CHANNEL_EVENT_PACKET_TRANSMIT_EXPIRED,
-	           sizeof(*pkt_tx_expired), (uint8_t*)pkt_tx_expired, nx_port_id);
+	           sizeof(*pkt_tx_expired), event_data, nx_port_id);
 }
 
 /* routine to post kevent notification for the event ring */

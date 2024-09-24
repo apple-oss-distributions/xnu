@@ -18,12 +18,10 @@ ifndef SYMROOT
 SYMROOT=./BUILD/sym
 endif
 ifdef SRCROOT
-EXTHDRSRC=$(SRCROOT)/EXTERNAL_HEADERS
 HDRSRC=$(SRCROOT)/libkern/libkern
 OBJSRC=$(SRCROOT)/libkern/kxld
 else
 SRCROOT=.
-EXTHDRSRC=$(SRCROOT)/../../EXTERNAL_HEADERS
 HDRSRC=$(SRCROOT)/../libkern
 OBJSRC=$(SRCROOT)
 ROOT=BUILD
@@ -79,7 +77,7 @@ CFLAGS=-std=c99 -Wall -Wextra -Werror -pedantic -Wformat=2 -Wcast-align \
 LDFLAGS=$(ARCHS) -dynamiclib -install_name $(LIBKXLD_INSTALLNAME) \
 	-compatibility_version $(COMPATIBILITY_VERSION) \
 	-current_version $(CURRENT_VERSION) -lstdc++
-INCLUDES=-I$(HDRSRC) -isystem $(EXTHDRSRC)
+INCLUDES=-I$(HDRSRC)
 
 ifneq ($(SDK_DIR),/)
 	CFLAGS += -isysroot $(SDK_DIR)

@@ -47,11 +47,12 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <machine/endian.h>
+#include <machine/trap.h>
 #include <net/flowhash.h>
 #include <os/base.h>
 
-static inline u_int32_t getblock32(const u_int32_t *, int);
-static inline u_int64_t getblock64(const u_int64_t *, int);
+static inline u_int32_t getblock32(const u_int32_t *__bidi_indexable, int);
+static inline u_int64_t getblock64(const u_int64_t *__bidi_indexable, int);
 static inline u_int32_t mh3_fmix32(u_int32_t);
 static inline u_int64_t mh3_fmix64(u_int64_t);
 
@@ -76,19 +77,19 @@ net_flowhash_fn_t *net_flowhash = net_flowhash_jhash;
 
 #if defined(__i386__) || defined(__x86_64__) || defined(__arm64__)
 static inline u_int32_t
-getblock32(const u_int32_t *p, int i)
+getblock32(const u_int32_t *__bidi_indexable p, int i)
 {
 	return p[i];
 }
 
 static inline u_int64_t
-getblock64(const u_int64_t *p, int i)
+getblock64(const u_int64_t *__bidi_indexable p, int i)
 {
 	return p[i];
 }
 #else /* !__i386__ && !__x86_64__ && !__arm64__*/
 static inline u_int32_t
-getblock32(const u_int32_t *p, int i)
+getblock32(const u_int32_t *__bidi_indexable p, int i)
 {
 	const u_int8_t *bytes = (u_int8_t *)(void *)(uintptr_t)(p + i);
 	u_int32_t value;
@@ -114,7 +115,7 @@ getblock32(const u_int32_t *p, int i)
 }
 
 static inline u_int64_t
-getblock64(const u_int64_t *p, int i)
+getblock64(const u_int64_t *__bidi_indexable p, int i)
 {
 	const u_int8_t *bytes = (const u_int8_t *)(void *)(uintptr_t)(p + i);
 	u_int64_t value;
@@ -179,7 +180,7 @@ mh3_fmix64(u_int64_t k)
 #define MH3_X86_32_C2   0x1b873593
 
 u_int32_t
-net_flowhash_mh3_x86_32(const void *key, u_int32_t len, const u_int32_t seed)
+net_flowhash_mh3_x86_32(const void *__sized_by(len) key, u_int32_t len, const u_int32_t seed)
 {
 	const u_int8_t *data = (const u_int8_t *)key;
 	const u_int32_t nblocks = len / 4;
@@ -238,7 +239,7 @@ net_flowhash_mh3_x86_32(const void *key, u_int32_t len, const u_int32_t seed)
 #define MH3_X64_128_C2  0x4cf5ad432745937fLLU
 
 u_int32_t
-net_flowhash_mh3_x64_128(const void *key, u_int32_t len, const u_int32_t seed)
+net_flowhash_mh3_x64_128(const void *__sized_by(len) key, u_int32_t len, const u_int32_t seed)
 {
 	const u_int8_t *data = (const u_int8_t *)key;
 	const u_int32_t nblocks = len / 16;
@@ -414,7 +415,7 @@ net_flowhash_mh3_x64_128(const void *key, u_int32_t len, const u_int32_t seed)
  * hashbig()
  */
 u_int32_t
-net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
+net_flowhash_jhash(const void *__sized_by(len) key, u_int32_t len, const u_int32_t seed)
 {
 	u_int32_t a, b, c;
 
@@ -423,18 +424,19 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 
 	if (ALIGNED32(key)) {
 		/* read 32-bit chunks */
-		const u_int32_t *k = (const u_int32_t *)key;
+		u_int32_t k_len = len;
+		const u_int32_t *__sized_by(k_len) k = (const u_int32_t *)key;
 
 		/*
 		 * all but last block:
 		 * aligned reads and affect 32 bits of (a,b,c)
 		 */
-		while (len > 12) {
+		while (k_len > 12) {
 			a += k[0];
 			b += k[1];
 			c += k[2];
 			JHASH_MIX(a, b, c);
-			len -= 12;
+			k_len -= 12;
 			k += 3;
 		}
 
@@ -448,7 +450,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 		 * trick does make the hash noticably faster for short
 		 * strings (like English words).
 		 */
-		switch (len) {
+		switch (k_len) {
 		case 12:
 			c += k[2];
 			b += k[1];
@@ -520,10 +522,11 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 	}
 
 	/* need to read the key one byte at a time */
-	const u_int8_t *k = (const u_int8_t *)key;
+	u_int32_t k_len = len;
+	const u_int8_t *__sized_by(k_len) k = (const u_int8_t *)key;
 
 	/* all but the last block: affect some 32 bits of (a,b,c) */
-	while (len > 12) {
+	while (k_len > 12) {
 		a += ((u_int32_t)k[0]) << 24;
 		a += ((u_int32_t)k[1]) << 16;
 		a += ((u_int32_t)k[2]) << 8;
@@ -537,12 +540,12 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 		c += ((u_int32_t)k[10]) << 8;
 		c += ((u_int32_t)k[11]);
 		JHASH_MIX(a, b, c);
-		len -= 12;
+		k_len -= 12;
 		k += 12;
 	}
 
 	/* last block: affect all 32 bits of (c) */
-	switch (len) {
+	switch (k_len) {
 	case 12:
 		c += k[11];
 		OS_FALLTHROUGH;
@@ -594,7 +597,7 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
  * hashlittle()
  */
 u_int32_t
-net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
+net_flowhash_jhash(const void *__sized_by(len) key, u_int32_t len, const u_int32_t seed)
 {
 	u_int32_t a, b, c;
 
@@ -612,7 +615,8 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 	if (ALIGNED32(key)) {
 #endif /* !defined(__i386__) && !defined(__x86_64__) */
 		/* read 32-bit chunks */
-		const u_int32_t *k = (const u_int32_t *)key;
+		u_int32_t k_len = len;
+		const u_int32_t *__sized_by(k_len) k = (const u_int32_t *)key;
 		const u_int16_t *k16 = (const u_int16_t *)key;
 		const u_int8_t *k8 = (const u_int8_t *)key;
 
@@ -620,17 +624,17 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 		 * all but last block:
 		 * aligned reads and affect 32 bits of (a,b,c)
 		 */
-		while (len > 12) {
+		while (k_len > 12) {
 			a += k[0];
 			b += k[1];
 			c += k[2];
 			JHASH_MIX(a, b, c);
-			len -= 12;
+			k_len -= 12;
 			k += 3;
 		}
 
 		/* handle the last (probably partial) block */
-		switch (len) {
+		switch (k_len) {
 		case 12:
 			c += k[2];
 			b += k[1];
@@ -707,22 +711,23 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 	else if (ALIGNED16(key)) {
 #endif /* !defined(__i386__) && !defined(__x86_64__) */
 	/* read 16-bit chunks */
-	const u_int16_t *k = (const u_int16_t *)key;
+	u_int32_t k_len = len;
+	const u_int16_t *__sized_by(k_len) k = (const u_int16_t *)key;
 	const u_int8_t *k8;
 
 	/* all but last block: aligned reads and different mixing */
-	while (len > 12) {
+	while (k_len > 12) {
 		a += k[0] + (((u_int32_t)k[1]) << 16);
 		b += k[2] + (((u_int32_t)k[3]) << 16);
 		c += k[4] + (((u_int32_t)k[5]) << 16);
 		JHASH_MIX(a, b, c);
-		len -= 12;
+		k_len -= 12;
 		k += 6;
 	}
 
 	/* handle the last (probably partial) block */
 	k8 = (const u_int8_t *)k;
-	switch (len) {
+	switch (k_len) {
 	case 12:
 		c += k[4] + (((u_int32_t)k[5]) << 16);
 		b += k[2] + (((u_int32_t)k[3]) << 16);
@@ -784,10 +789,11 @@ net_flowhash_jhash(const void *key, u_int32_t len, const u_int32_t seed)
 }
 
 /* need to read the key one byte at a time */
-const u_int8_t *k = (const u_int8_t *)key;
+u_int32_t k_len = len;
+const u_int8_t *__sized_by(k_len) k = (const u_int8_t *)key;
 
 /* all but the last block: affect some 32 bits of (a,b,c) */
-while (len > 12) {
+while (k_len > 12) {
 	a += k[0];
 	a += ((u_int32_t)k[1]) << 8;
 	a += ((u_int32_t)k[2]) << 16;
@@ -801,12 +807,12 @@ while (len > 12) {
 	c += ((u_int32_t)k[10]) << 16;
 	c += ((u_int32_t)k[11]) << 24;
 	JHASH_MIX(a, b, c);
-	len -= 12;
+	k_len -= 12;
 	k += 12;
 }
 
 /* last block: affect all 32 bits of (c) */
-switch (len) {
+switch (k_len) {
 case 12:
 	c += ((u_int32_t)k[11]) << 24;
 	OS_FALLTHROUGH;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -97,9 +97,6 @@
 #include <netinet/tcp_cc.h>
 #include <netinet6/tcp6_var.h>
 #include <netinet/tcpip.h>
-#if TCPDEBUG
-#include <netinet/tcp_debug.h>
-#endif
 #include <netinet/tcp_log.h>
 
 #include <sys/kdebug.h>
@@ -451,7 +448,7 @@ struct tcp_last_report_stats {
 static void add_to_time_wait_locked(struct tcpcb *tp, uint32_t delay);
 static boolean_t tcp_garbage_collect(struct inpcb *, int);
 
-#define TIMERENTRY_TO_TP(te) ((struct tcpcb *)((uintptr_t)te - offsetof(struct tcpcb, tentry.le.le_next)))
+#define TIMERENTRY_TO_TP(te) (__unsafe_forge_single(struct tcpcb *, ((uintptr_t)te - offsetof(struct tcpcb, tentry.le.le_next))))
 
 #define VERIFY_NEXT_LINK(elm, field) do {       \
 	if (LIST_NEXT((elm),field) != NULL &&   \
@@ -793,9 +790,6 @@ tcp_gc(struct inpcbinfo *ipi)
 {
 	struct inpcb *inp, *nxt;
 	struct tcpcb *tw_tp, *tw_ntp;
-#if TCPDEBUG
-	int ostate;
-#endif
 #if  KDEBUG
 	static int tws_checked = 0;
 #endif
@@ -997,8 +991,8 @@ tcp_pmtud_black_holed_next_mss(struct tcpcb *tp)
 static bool
 tcp_send_keep_alive(struct tcpcb *tp)
 {
-	struct tcptemp *t_template;
-	struct mbuf *m;
+	struct tcptemp *__single t_template;
+	struct mbuf *__single m;
 
 	tcpstat.tcps_keepprobe++;
 	t_template = tcp_maketemplate(tp, &m);
@@ -1037,9 +1031,6 @@ tcp_timers(struct tcpcb *tp, int timer)
 {
 	int32_t rexmt, optlen = 0, idle_time = 0;
 	struct socket *so;
-#if TCPDEBUG
-	int ostate;
-#endif
 	u_int64_t accsleep_ms;
 	u_int64_t last_sleep_ms = 0;
 
@@ -1268,7 +1259,7 @@ retransmit_packet:
 			tp->t_stat.rxmitsyns++;
 
 			/* When retransmitting, disable TFO */
-			if (tfo_enabled(tp) &&
+			if (TFO_ENABLED(tp) &&
 			    !(tp->t_flagsext & TF_FASTOPEN_FORCE_ENABLE)) {
 				tcp_disable_tfo(tp);
 				tp->t_tfo_flags |= TFO_F_SYN_LOSS;
@@ -1288,6 +1279,10 @@ retransmit_packet:
 		}
 
 		tcp_free_sackholes(tp);
+		if (TCP_RACK_ENABLED(tp)) {
+			tcp_segs_clear_sacked(tp);
+			tcp_rack_loss_on_rto(tp, true);
+		}
 		/*
 		 * Check for potential Path MTU Discovery Black Hole
 		 */
@@ -1358,7 +1353,7 @@ retransmit_packet:
 		 */
 		if (tp->t_state == TCPS_SYN_SENT &&
 		    tp->t_rxtshift == tcp_broken_peer_syn_rxmit_thres) {
-			tp->t_flags &= ~(TF_REQ_SCALE | TF_REQ_TSTMP | TF_REQ_CC);
+			tp->t_flags &= ~(TF_REQ_SCALE | TF_REQ_TSTMP);
 		}
 
 		/*
@@ -1695,9 +1690,7 @@ fc_output:
 		if ((tp->t_state != TCPS_ESTABLISHED ||
 		    tp->t_rxtshift > 0 ||
 		    tp->snd_max == tp->snd_una ||
-		    !SACK_ENABLED(tp) ||
-		    (tcp_do_better_lr != 1 && !TAILQ_EMPTY(&tp->snd_holes)) ||
-		    IN_FASTRECOVERY(tp)) &&
+		    !SACK_ENABLED(tp) || IN_FASTRECOVERY(tp)) &&
 		    !(tp->t_flagsext & TF_IF_PROBING)) {
 			break;
 		}
@@ -1838,6 +1831,7 @@ fc_output:
 
 		if (!(tp->t_flagsext & TF_IF_PROBING)) {
 			tp->t_tlphighrxt = tp->snd_nxt;
+			tp->t_tlphightrxt_persist = tp->snd_nxt;
 		}
 		break;
 	}
@@ -1869,7 +1863,6 @@ fc_output:
 		tp->t_timer[TCPT_REXMT] = 0;
 		tcpstat.tcps_sack_recovery_episode++;
 		tp->t_sack_recovery_episode++;
-		tp->sack_newdata = tp->snd_nxt;
 		tp->snd_cwnd = tp->t_maxseg;
 		tcp_ccdbg_trace(tp, NULL, TCP_CC_ENTER_FASTRECOVERY);
 		(void) tcp_output(tp);
@@ -1881,13 +1874,12 @@ dropit:
 		    (SO_FILT_HINT_LOCKED | SO_FILT_HINT_TIMEOUT));
 		tp = tcp_drop(tp, ETIMEDOUT);
 		break;
+	case TCPT_REORDER:
+		if (TCP_RACK_ENABLED(tp)) {
+			tcp_rack_reordering_timeout(tp, 0);
+		}
+		break;
 	}
-#if TCPDEBUG
-	if (tp->t_inpcb->inp_socket->so_options & SO_DEBUG) {
-		tcp_trace(TA_USER, ostate, tp, (void *)0, (struct tcphdr *)0,
-		    PRU_SLOWTIMO);
-	}
-#endif
 	return tp;
 }
 
@@ -2142,9 +2134,9 @@ void
 tcp_run_timerlist(void * arg1, void * arg2)
 {
 #pragma unused(arg1, arg2)
-	struct tcptimerentry *te, *next_te;
-	struct tcptimerlist *listp = &tcp_timer_list;
-	struct tcpcb *tp;
+	struct tcptimerentry *te, *__single next_te;
+	struct tcptimerlist *__single listp = &tcp_timer_list;
+	struct tcpcb *__single tp;
 	uint32_t next_timer = 0; /* offset of the next timer on the list */
 	u_int16_t te_mode = 0;  /* modes of all active timers in a tcpcb */
 	u_int16_t list_mode = 0; /* cumulative of modes of all tcpcbs */

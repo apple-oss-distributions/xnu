@@ -22,6 +22,9 @@
 
 #include <pexpert/arm64/board_config.h>
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
 
 /* extern references */
 extern void     pe_identify_machine(boot_args *bootArgs);
@@ -59,8 +62,14 @@ SECURITY_READ_ONLY_LATE(ml_page_protection_t) page_protection_type;
 
 uint8_t         gPlatformECID[8];
 uint32_t        gPlatformMemoryID;
+#if defined(XNU_TARGET_OS_XR)
+uint32_t        gPlatformChipRole = UINT32_MAX;
+#endif /* not XNU_TARGET_OS_XR */
 static boolean_t vc_progress_initialized = FALSE;
 uint64_t    last_hwaccess_thread = 0;
+uint8_t last_hwaccess_type = 0;
+uint8_t last_hwaccess_size = 0;
+uint64_t last_hwaccess_paddr = 0;
 char     gTargetTypeBuffer[16];
 char     gModelTypeBuffer[32];
 
@@ -363,6 +372,9 @@ PE_init_iokit(void)
 		}
 
 		KDBG_RELEASE(IOKDBG_CODE(DBG_BOOTER, 0), start_time_value, debug_wait_start_value, load_kernel_start_value, populate_registry_time_value);
+#if CONFIG_SPTM
+		KDBG_RELEASE(IOKDBG_CODE(DBG_BOOTER, 1), SPTMArgs->timestamp_sk_bootstrap, SPTMArgs->timestamp_xnu_bootstrap);
+#endif
 	}
 
 	InitIOKit(PE_state.deviceTreeHead);
@@ -506,6 +518,17 @@ PE_init_platform(boolean_t vm_initialized, void *args)
 				bcopy(prop, &gPlatformMemoryID, size);
 			}
 		}
+#if defined(XNU_TARGET_OS_XR)
+		if (kSuccess == SecureDTLookupEntry(NULL, "/product", &entry)) {
+			if (kSuccess == SecureDTGetProperty(entry, "chip-role",
+			    (void const **) &prop, &size)) {
+				if (size > sizeof(gPlatformChipRole)) {
+					size = sizeof(gPlatformChipRole);
+				}
+				bcopy(prop, &gPlatformChipRole, size);
+			}
+		}
+#endif /* not XNU_TARGET_OS_XR */
 		pe_init_debug();
 	}
 }
@@ -633,7 +656,7 @@ PE_update_panic_crc(unsigned char *buf, unsigned int *size)
 	*size = *size > panic_text_len ? panic_text_len : *size;
 	if (panic_info->eph_magic != EMBEDDED_PANIC_MAGIC) {
 		// rdar://88696402 (PanicTest: test case for MAGIC check in PE_update_panic_crc)
-		printf("Error!! Current Magic 0x%X, expected value 0x%x", panic_info->eph_magic, EMBEDDED_PANIC_MAGIC);
+		printf("Error!! Current Magic 0x%X, expected value 0x%x\n", panic_info->eph_magic, EMBEDDED_PANIC_MAGIC);
 	}
 
 	/* CRC everything after the CRC itself - starting with the panic header version */
@@ -825,6 +848,14 @@ PE_mark_hwaccess(uint64_t thread)
 	__builtin_arm_dmb(DMB_ISH);
 }
 
+void
+PE_mark_hwaccess_data(uint8_t type, uint8_t size, uint64_t paddr)
+{
+	last_hwaccess_type = type;
+	last_hwaccess_size = size;
+	last_hwaccess_paddr = paddr;
+	__builtin_arm_dmb(DMB_ISH);
+}
 __startup_func
 vm_size_t
 PE_init_socd_client(void)

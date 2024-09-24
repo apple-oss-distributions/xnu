@@ -123,7 +123,8 @@ static void nx_fsw_prov_fini(struct kern_nexus_domain_provider *);
 static int nx_fsw_prov_nx_ctor(struct kern_nexus *);
 static void nx_fsw_prov_nx_dtor(struct kern_nexus *);
 static size_t nx_fsw_prov_mib_get(struct kern_nexus *nx,
-    struct nexus_mib_filter *, void *, size_t, struct proc *);
+    struct nexus_mib_filter *, void *__sized_by(len)out, size_t len,
+    struct proc *);
 
 struct nxdom nx_flowswitch_dom_s = {
 	.nxdom_prov_head =
@@ -363,8 +364,9 @@ nx_fsw_prov_params(struct kern_nexus_domain_provider *nxdom_prov,
 }
 
 static void
-fsw_vp_region_params_setup(struct nexus_adapter *na, struct skmem_region_params *srp0,
-    struct skmem_region_params *srp)
+fsw_vp_region_params_setup(struct nexus_adapter *na,
+    struct skmem_region_params *__counted_by(SKMEM_REGIONS)srp0,
+    struct skmem_region_params *__counted_by(SKMEM_REGIONS)srp)
 {
 	int i;
 	uint32_t totalrings, nslots, afslots, evslots, lbaslots;
@@ -616,9 +618,10 @@ nx_fsw_prov_nx_dtor(struct kern_nexus *nx)
 
 static size_t
 nx_fsw_prov_mib_get(struct kern_nexus *nx, struct nexus_mib_filter *filter,
-    void *out, size_t len, struct proc *p)
+    void *__sized_by(len)out, size_t len, struct proc *p)
 {
 	struct nx_flowswitch *fsw = NX_FSW_PRIVATE(nx);
+	size_t rlen;
 
 	/* this check doesn't require holding fsw_lock */
 	if ((filter->nmf_bitmap & NXMIB_FILTER_NX_UUID) &&
@@ -629,10 +632,10 @@ nx_fsw_prov_mib_get(struct kern_nexus *nx, struct nexus_mib_filter *filter,
 
 	/* intercept NXMIB_FSW_STATS here since it's for flowswitch */
 	FSW_RLOCK(fsw);
-	len = fsw_mib_get(fsw, filter, out, len, p);
+	rlen = fsw_mib_get(fsw, filter, out, len, p);
 	FSW_UNLOCK(fsw);
 
-	return len;
+	return rlen;
 }
 
 boolean_t
@@ -667,7 +670,7 @@ nx_fsw_dom_find_port(struct kern_nexus *nx, boolean_t rsvd,
 
 	FSW_WLOCK(fsw);
 	if (__improbable(first == last)) {
-		error = ENOSPC;
+		error = ENOMEM;
 	} else {
 		error = nx_port_find(nx, first, last - 1, &port);
 		ASSERT(error != 0 || (port >= first && port < last));
@@ -717,7 +720,7 @@ nx_fsw_dom_bind_port(struct kern_nexus *nx, nexus_port_t *nx_port,
 
 	FSW_WLOCK(fsw);
 	if (__improbable(first == last)) {
-		error = ENOSPC;
+		error = ENOMEM;
 	} else if (port != NEXUS_PORT_ANY) {
 		error = nx_port_bind(nx, port, nxb);
 	} else {
@@ -887,8 +890,8 @@ nx_fsw_na_find_log(const struct chreq *chr, boolean_t create)
 	    chr->cr_name, sk_uuid_unparse(chr->cr_spec_uuid, uuidstr),
 	    (int)chr->cr_port, chr->cr_mode, CHMODE_BITS, chr->cr_pipe_id,
 	    (int)chr->cr_ring_id, chr->cr_ring_set, chr->cr_real_endpoint,
-	    chr->cr_endpoint, create, (strncmp(chr->cr_name, NX_FSW_NAME,
-	    sizeof(NX_FSW_NAME) - 1) != 0) ? " (skipped)" : "");
+	    chr->cr_endpoint, create, (strlcmp(chr->cr_name,
+	    NX_FSW_NAME, sizeof(NX_FSW_NAME)) != 0) ? " (skipped)" : "");
 }
 #endif /* SK_LOG */
 
@@ -907,8 +910,7 @@ nx_fsw_na_find(struct kern_nexus *nx, struct kern_channel *ch,
     struct chreq *chr, struct nxbind *nxb, struct proc *p,
     struct nexus_adapter **na, boolean_t create)
 {
-#pragma unused(ch)
-	struct nexus_vp_adapter *vpna = NULL;
+	struct nexus_vp_adapter *__single vpna = NULL;
 	char *cr_name = chr->cr_name;
 	struct nx_flowswitch *fsw;
 	int error = 0;
@@ -923,7 +925,7 @@ nx_fsw_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 #endif /* SK_LOG */
 
 	/* first try to see if this is a flow switch port. */
-	if (strncmp(cr_name, NX_FSW_NAME, sizeof(NX_FSW_NAME) - 1) != 0) {
+	if (strlcmp(cr_name, NX_FSW_NAME, sizeof(NX_FSW_NAME) - 1) != 0) {
 		return 0;  /* no error, but no flow switch prefix */
 	}
 	ASSERT(nx->nx_prov->nxprov_params->nxp_type == NEXUS_TYPE_FLOW_SWITCH);

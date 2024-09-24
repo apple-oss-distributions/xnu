@@ -48,7 +48,7 @@
 #define LogFixups 0
 
 // cannot safely callout out to functions like strcmp before initial fixup
-static inline int
+static inline __attribute__((__always_inline__)) int
 strings_are_equal(const char* a, const char* b)
 {
 	while (*a && *b) {
@@ -71,7 +71,7 @@ union ChainedFixupPointerOnDisk {
 	struct dyld_chained_ptr_64_kernel_cache_rebase fixup64;
 };
 
-static uint64_t __unused
+static inline __attribute__((__always_inline__)) uint64_t __unused
 sign_pointer(struct dyld_chained_ptr_64_kernel_cache_rebase pointer __unused,
     void *loc __unused,
     uint64_t target __unused)

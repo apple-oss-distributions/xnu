@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
- *
+ * Copyright (c) 2021, 2023 Apple Inc. All rights reserved.
  * @APPLE_LICENSE_HEADER_START@
  *
  * This file contains Original Code and/or Modifications of Original Code
@@ -64,6 +63,7 @@
 #include <string.h>
 #include <libkern/libkern.h>
 #include <kern/socket_flows.h>
+#include <net/sockaddr_utils.h>
 
 extern struct inpcbinfo ripcbinfo;
 
@@ -127,7 +127,6 @@ do {                                                                            
     }                                                                                                               \
 } while (0)
 
-#define SOFLOW_HASH_SIZE 16
 #define SOFLOW_HASH(laddr, faddr, lport, fport) ((faddr) ^ ((laddr) >> 16) ^ (fport) ^ (lport))
 
 #define SOFLOW_IS_UDP(so) (so && SOCK_CHECK_TYPE(so, SOCK_DGRAM) && SOCK_CHECK_PROTO(so, IPPROTO_UDP))
@@ -151,8 +150,6 @@ os_refgrp_decl(static, soflow_refgrp, "soflow_ref_group", NULL);
     if (db && (os_ref_release(&db->soflow_db_ref_count) == 0)) { \
     soflow_db_free(db); \
     }
-
-LIST_HEAD(soflow_hash_head, soflow_hash_entry);
 
 static int soflow_initialized = 0;
 
@@ -395,12 +392,13 @@ static errno_t
 soflow_db_init(struct socket *so)
 {
 	errno_t error = 0;
-	struct soflow_db *db = NULL;
+	struct soflow_db * __single db = NULL;
 	struct soflow_hash_entry *hash_entry = NULL;
 
 	db = kalloc_type(struct soflow_db, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	db->soflow_db_so = so;
-	db->soflow_db_hashbase = hashinit(SOFLOW_HASH_SIZE, M_CFIL, &db->soflow_db_hashmask);
+	void * __single hash = hashinit(SOFLOW_HASH_SIZE, M_CFIL, &db->soflow_db_hashmask);
+	db->soflow_db_hashbase = __unsafe_forge_bidi_indexable(struct soflow_hash_head *, hash, SOFLOW_HASH_SIZE * sizeof(void*));
 	if (db->soflow_db_hashbase == NULL) {
 		kfree_type(struct soflow_db, db);
 		error = ENOMEM;
@@ -648,7 +646,7 @@ void *
 soflow_db_get_feature_context(struct soflow_db *db, u_int64_t feature_context_id)
 {
 	struct soflow_hash_entry *hash_entry = NULL;
-	void *context = NULL;
+	void * __single context = NULL;
 
 	if (db == NULL || db->soflow_db_so == NULL || feature_context_id == 0) {
 		return NULL;
@@ -778,15 +776,15 @@ done:
 	return entry;
 }
 
-static int
-soflow_udp_get_address_from_control(sa_family_t family, struct mbuf *control, uint8_t **address_ptr)
+static boolean_t
+soflow_udp_get_address_from_control(sa_family_t family, struct mbuf *control, uint8_t *__counted_by(*count) *address_ptr, int *count)
 {
 	struct cmsghdr *cm;
 	struct in6_pktinfo *pi6;
 	struct socket *so = NULL;
 
 	if (control == NULL || address_ptr == NULL) {
-		return 0;
+		return false;
 	}
 
 	for (; control != NULL; control = control->m_next) {
@@ -805,7 +803,8 @@ soflow_udp_get_address_from_control(sa_family_t family, struct mbuf *control, ui
 				    cm->cmsg_level == IPPROTO_IP &&
 				    cm->cmsg_len == CMSG_LEN(sizeof(struct in_addr))) {
 					*address_ptr = CMSG_DATA(cm);
-					return sizeof(struct in_addr);
+					*count = sizeof(struct in_addr);
+					return true;
 				}
 				break;
 			case IPV6_PKTINFO:
@@ -815,7 +814,8 @@ soflow_udp_get_address_from_control(sa_family_t family, struct mbuf *control, ui
 				    cm->cmsg_len == CMSG_LEN(sizeof(struct in6_pktinfo))) {
 					pi6 = (struct in6_pktinfo *)(void *)CMSG_DATA(cm);
 					*address_ptr = (uint8_t *)&pi6->ipi6_addr;
-					return sizeof(struct in6_addr);
+					*count = sizeof(struct in6_addr);
+					return true;
 				}
 				break;
 			default:
@@ -823,7 +823,7 @@ soflow_udp_get_address_from_control(sa_family_t family, struct mbuf *control, ui
 			}
 		}
 	}
-	return 0;
+	return false;
 }
 
 static boolean_t
@@ -865,10 +865,11 @@ soflow_entry_update_local(struct soflow_db *db, struct soflow_hash_entry *entry,
 		// Flow does not have a local address yet.  Retrieve local address
 		// from control mbufs if present.
 		if (local == NULL && control != NULL) {
-			uint8_t *addr_ptr = NULL;
-			int size = soflow_udp_get_address_from_control(entry->soflow_family, control, &addr_ptr);
+			int size = 0;
+			uint8_t * __counted_by(size) addr_ptr = NULL;
+			boolean_t result = soflow_udp_get_address_from_control(entry->soflow_family, control, &addr_ptr, &size);
 
-			if (size && addr_ptr) {
+			if (result && size && addr_ptr) {
 				switch (entry->soflow_family) {
 				case AF_INET:
 					if (size == sizeof(struct in_addr)) {

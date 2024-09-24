@@ -182,7 +182,7 @@ __enum_decl(lck_type_t, uint8_t, {
  * 2. an interlock queue which is more typical MCS.
  */
 typedef struct lck_mtx_mcs {
-	struct _lck_mtx_       *lmm_ilk_current;
+	struct lck_mtx_s       *lmm_ilk_current;
 
 	struct lck_mtx_mcs     *lmm_ilk_next;
 	unsigned long           lmm_ilk_ready;

@@ -48,13 +48,17 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 
-#include <vm/memory_object.h>
+#include <vm/memory_object_internal.h>
 #include <vm/vm_kern.h>
-#include <vm/vm_fault.h>
-#include <vm/vm_map.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
-#include <vm/vm_dyld_pager.h>
+#include <vm/vm_fault_internal.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_dyld_pager_internal.h>
+#include <vm/vm_ubc.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_sanitize_internal.h>
 
 #include <sys/kdebug_triage.h>
 #include <mach-o/fixup-chains.h>
@@ -1007,7 +1011,7 @@ retry_src_fault:
 		/*
 		 * Cleanup the result of vm_fault_page() of the source page.
 		 */
-		PAGE_WAKEUP_DONE(src_page);
+		vm_page_wakeup_done(src_top_object, src_page);
 		src_page = VM_PAGE_NULL;
 		vm_object_paging_end(src_page_object);
 		vm_object_unlock(src_page_object);
@@ -1103,7 +1107,7 @@ dyld_pager_terminate_internal(
 		pager->dyld_backing_object = VM_OBJECT_NULL;
 	}
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->dyld_header.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
+	memory_object_destroy(pager->dyld_header.mo_control, VM_OBJECT_DESTROY_PAGER);
 }
 
 /*
@@ -1323,7 +1327,7 @@ dyld_pager_create(
 	os_ref_init_count_raw(&pager->dyld_ref_count, NULL, 1);
 	pager->dyld_is_mapped = FALSE;
 	pager->dyld_backing_object = backing_object;
-	pager->dyld_link_info = link_info;
+	pager->dyld_link_info = link_info; /* pager takes ownership of this pointer here */
 	pager->dyld_link_info_size = link_info_size;
 #if defined(HAS_APPLE_PAC)
 	pager->dyld_a_key = (task->map && task->map->pmap && !task->map->pmap->disable_jop) ? task->jop_pid : 0;
@@ -1408,14 +1412,15 @@ dyld_pager_setup(
  *
  * The arguments to this function are mostly just used as input.
  * Except for the link_info! That is saved off in the pager that
- * gets created, so shouldn't be free'd by the caller, if KERN_SUCCES.
+ * gets created. If the pager assumed ownership of *link_info,
+ * the argument is NULLed, if not, the caller need to free it on error.
  */
 kern_return_t
 vm_map_with_linking(
 	task_t                  task,
 	struct mwl_region       *regions,
 	uint32_t                region_cnt,
-	void                    *link_info,
+	void                    **link_info,
 	uint32_t                link_info_size,
 	memory_object_control_t file_control)
 {
@@ -1435,11 +1440,12 @@ vm_map_with_linking(
 	}
 
 	/* create a pager */
-	pager = dyld_pager_setup(task, object, regions, region_cnt, link_info, link_info_size);
+	pager = dyld_pager_setup(task, object, regions, region_cnt, *link_info, link_info_size);
 	if (pager == MEMORY_OBJECT_NULL) {
 		kr = KERN_RESOURCE_SHORTAGE;
 		goto done;
 	}
+	*link_info = NULL; /* ownership of this pointer was given to pager */
 
 	for (r = 0; r < region_cnt; ++r) {
 		vm_map_kernel_flags_t vmk_flags = {
@@ -1456,10 +1462,10 @@ vm_map_with_linking(
 			vmk_flags.vmf_tpro = TRUE;
 		}
 
-		kr = vm_map_enter_mem_object(map,
-		    &map_addr,
+		kr = mach_vm_map_kernel(map,
+		    vm_sanitize_wrap_addr_ref(&map_addr),
 		    rp->mwlr_size,
-		    (mach_vm_offset_t) 0,
+		    0,
 		    vmk_flags,
 		    (ipc_port_t)(uintptr_t)pager,
 		    rp->mwlr_file_offset,

@@ -63,6 +63,7 @@
 #define ARM_EXCEPTION_STATE64    7
 //      ARM_THREAD_STATE_LAST    8 /* legacy */
 #define ARM_THREAD_STATE32       9
+#define ARM_EXCEPTION_STATE64_V2 10
 
 #ifdef XNU_KERNEL_PRIVATE
 #define X86_THREAD_STATE_NONE    13 /* i386/thread_status.h THREAD_STATE_NONE */
@@ -85,6 +86,12 @@
 
 #define ARM_PAGEIN_STATE         27
 
+#if XNU_KERNEL_PRIVATE
+/* For kernel use */
+#define ARM_SME_SAVED_STATE      28
+#endif /* XNU_KERNEL_PRIVATE */
+
+#define THREAD_STATE_FLAVORS     29     /* This must be updated to 1 more than the highest numerical state flavor */
 
 #ifndef ARM_STATE_FLAVOR_IS_OTHER_VALID
 #define ARM_STATE_FLAVOR_IS_OTHER_VALID(_flavor_) 0
@@ -104,6 +111,7 @@
 	 (x == ARM_THREAD_STATE32) ||         \
 	 (x == ARM_THREAD_STATE64) ||         \
 	 (x == ARM_EXCEPTION_STATE64) ||      \
+	 (x == ARM_EXCEPTION_STATE64_V2) ||      \
 	 (x == ARM_NEON_STATE) ||             \
 	 (x == ARM_NEON_STATE64) ||           \
 	 (x == ARM_DEBUG_STATE32) ||          \
@@ -137,6 +145,9 @@ typedef _STRUCT_ARM_THREAD_STATE64 arm_thread_state64_t;
 /* Set pc field of arm_thread_state64_t to a function pointer */
 #define arm_thread_state64_set_pc_fptr(ts, fptr) \
 	        __darwin_arm_thread_state64_set_pc_fptr(ts, fptr)
+/* Set pc field of arm_thread_state64_t to an already signed function pointer */
+#define arm_thread_state64_set_pc_presigned_fptr(ts, fptr) \
+	        __darwin_arm_thread_state64_set_pc_presigned_fptr(ts, fptr)
 /* Return lr field of arm_thread_state64_t as a data pointer value */
 #define arm_thread_state64_get_lr(ts) \
 	        __darwin_arm_thread_state64_get_lr(ts)
@@ -148,6 +159,9 @@ typedef _STRUCT_ARM_THREAD_STATE64 arm_thread_state64_t;
 /* Set lr field of arm_thread_state64_t to a function pointer */
 #define arm_thread_state64_set_lr_fptr(ts, fptr) \
 	        __darwin_arm_thread_state64_set_lr_fptr(ts, fptr)
+/* Set lr field of arm_thread_state64_t to an already signed function pointer */
+#define arm_thread_state64_set_lr_presigned_fptr(ts, fptr) \
+	        __darwin_arm_thread_state64_set_lr_presigned_fptr(ts, fptr)
 /* Return sp field of arm_thread_state64_t as a data pointer value */
 #define arm_thread_state64_get_sp(ts) \
 	        __darwin_arm_thread_state64_get_sp(ts)
@@ -197,6 +211,7 @@ typedef _STRUCT_ARM_NEON_STATE64      arm_neon_state64_t;
 typedef _STRUCT_ARM_EXCEPTION_STATE   arm_exception_state_t;
 typedef _STRUCT_ARM_EXCEPTION_STATE   arm_exception_state32_t;
 typedef _STRUCT_ARM_EXCEPTION_STATE64 arm_exception_state64_t;
+typedef _STRUCT_ARM_EXCEPTION_STATE64_V2 arm_exception_state64_v2_t;
 
 typedef _STRUCT_ARM_DEBUG_STATE32     arm_debug_state32_t;
 typedef _STRUCT_ARM_DEBUG_STATE64     arm_debug_state64_t;
@@ -227,6 +242,9 @@ typedef _STRUCT_ARM_LEGACY_DEBUG_STATE arm_debug_state_t;
 
 #define ARM_EXCEPTION_STATE64_COUNT ((mach_msg_type_number_t) \
 	(sizeof (arm_exception_state64_t)/sizeof(uint32_t)))
+
+#define ARM_EXCEPTION_STATE64_V2_COUNT ((mach_msg_type_number_t) \
+	(sizeof (arm_exception_state64_v2_t)/sizeof(uint32_t)))
 
 #define ARM_DEBUG_STATE_COUNT ((mach_msg_type_number_t) \
 	(sizeof (arm_debug_state_t)/sizeof(uint32_t)))
@@ -272,11 +290,17 @@ typedef _STRUCT_ARM_LEGACY_DEBUG_STATE arm_debug_state_t;
 #if CONFIG_XNUPOST
 #define HAS_ADD_SAVED_STATE_PC          1
 #define HAS_SET_SAVED_STATE_PC          1
+#define HAS_SET_SAVED_STATE_CPSR        1
 #endif /* CONFIG_DTRACE */
 
 #if DEBUG || DEVELOPMENT
 #define HAS_ADD_SAVED_STATE_PC          1
 #endif
+
+#if CONFIG_BTI_TELEMETRY
+/* BTI Telemetry needs CPSR to recover from BTI exceptions */
+#define HAS_SET_SAVED_STATE_CPSR        1
+#endif /* CONFIG_HAS_BTI_TELEMETRY */
 
 
 static inline boolean_t
@@ -355,8 +379,7 @@ struct arm_saved_state64 {
 	uint32_t cpsr;      /* Current program status register */
 	uint32_t reserved;  /* Reserved padding */
 	uint64_t far;       /* Virtual fault address */
-	uint32_t esr;       /* Exception syndrome register */
-	uint32_t exception; /* Exception number */
+	uint64_t esr;       /* Exception syndrome register */
 #if HAS_APPLE_PAC
 	uint64_t jophash;
 #endif /* HAS_APPLE_PAC */
@@ -930,35 +953,20 @@ set_saved_state_far(arm_saved_state_t *iss, register_t far)
 	}
 }
 
-static inline uint32_t
+static inline uint64_t
 get_saved_state_esr(const arm_saved_state_t *iss)
 {
 	return is_saved_state32(iss) ? const_saved_state32(iss)->esr : const_saved_state64(iss)->esr;
 }
 
 static inline void
-set_saved_state_esr(arm_saved_state_t *iss, uint32_t esr)
+set_saved_state_esr(arm_saved_state_t *iss, uint64_t esr)
 {
 	if (is_saved_state32(iss)) {
-		saved_state32(iss)->esr = esr;
+		assert(esr < (uint64_t) (uint32_t) -1);
+		saved_state32(iss)->esr = (uint32_t) esr;
 	} else {
 		saved_state64(iss)->esr = esr;
-	}
-}
-
-static inline uint32_t
-get_saved_state_exc(const arm_saved_state_t *iss)
-{
-	return is_saved_state32(iss) ? const_saved_state32(iss)->exception : const_saved_state64(iss)->exception;
-}
-
-static inline void
-set_saved_state_exc(arm_saved_state_t *iss, uint32_t exc)
-{
-	if (is_saved_state32(iss)) {
-		saved_state32(iss)->exception = exc;
-	} else {
-		saved_state64(iss)->exception = exc;
 	}
 }
 
@@ -1071,6 +1079,92 @@ neon_state64(arm_neon_saved_state_t *state)
 }
 
 
+#if HAS_ARM_FEAT_SME
+
+
+struct arm_sme_saved_state;
+typedef struct arm_sme_saved_state arm_sme_saved_state_t;
+
+#if !__has_ptrcheck
+typedef struct {
+	uint8_t                 zt0[64];
+	uint8_t                 __z_p_za[];
+} arm_sme_context_t;
+
+struct arm_sme_saved_state {
+	arm_state_hdr_t         hdr;
+	uint64_t                svcr;
+	uint16_t                svl_b;
+	arm_sme_context_t       context;
+};
+
+static inline size_t
+arm_sme_z_size(uint16_t svl_b)
+{
+	return 32 * svl_b;
+}
+
+static inline size_t
+arm_sme_p_size(uint16_t svl_b)
+{
+	return 2 * svl_b;
+}
+
+static inline size_t
+arm_sme_za_size(uint16_t svl_b)
+{
+	return svl_b * svl_b;
+}
+
+static inline mach_msg_type_number_t
+arm_sme_saved_state_count(uint16_t svl_b)
+{
+	assert(svl_b % 16 == 0);
+	size_t size = sizeof(arm_sme_saved_state_t) +
+	    arm_sme_z_size(svl_b) +
+	    arm_sme_p_size(svl_b) +
+	    arm_sme_za_size(svl_b);
+	return (mach_msg_type_number_t)(size / sizeof(unsigned int));
+}
+
+static inline uint8_t *
+arm_sme_z(arm_sme_context_t *ss)
+{
+	return ss->__z_p_za;
+}
+
+static inline const uint8_t *
+const_arm_sme_z(const arm_sme_context_t *ss)
+{
+	return ss->__z_p_za;
+}
+
+static inline uint8_t *
+arm_sme_p(arm_sme_context_t *ss, uint16_t svl_b)
+{
+	return ss->__z_p_za + arm_sme_z_size(svl_b);
+}
+
+static inline const uint8_t *
+const_arm_sme_p(const arm_sme_context_t *ss, uint16_t svl_b)
+{
+	return ss->__z_p_za + arm_sme_z_size(svl_b);
+}
+
+static inline uint8_t *
+arm_sme_za(arm_sme_context_t *ss, uint16_t svl_b)
+{
+	return ss->__z_p_za + arm_sme_z_size(svl_b) + arm_sme_p_size(svl_b);
+}
+
+static inline const uint8_t *
+const_arm_sme_za(const arm_sme_context_t *ss, uint16_t svl_b)
+{
+	return ss->__z_p_za + arm_sme_z_size(svl_b) + arm_sme_p_size(svl_b);
+}
+
+#endif /* !__has_ptrcheck */
+#endif /* HAS_ARM_FEAT_SME */
 
 /*
  * Aggregated context

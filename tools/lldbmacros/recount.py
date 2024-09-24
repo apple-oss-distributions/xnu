@@ -464,15 +464,13 @@ def RecountProcessor(pr_ptrs_or_ids, cmd_options={}, O=None):  # noqa: E741
             if not mach_times:
                 idle_time = kern.GetNanotimeFromAbstime(idle_time) / 1e9
                 total_time = kern.GetNanotimeFromAbstime(total_time) / 1e9
-            kind = 'SMP'
             pset = pr.processor_set
-            if unsigned(pset.pset_cluster_type) == 1:
-                kind = 'E'
-            elif unsigned(pset.pset_cluster_type) == 2:
-                kind = 'P'
-
+            cluster_kind = 'SMP'
+            if unsigned(pset.pset_cluster_type) != 0:
+                cluster_kind = GetEnumName('pset_cluster_type_t',
+                        pset.pset_cluster_type, 'PSET_AMP_')
             prefix = '{:<#018x} {:>4d} {:>4s} '.format(
-                    unsigned(pr), pr.cpu_id, kind)
+                    unsigned(pr), pr.cpu_id, cluster_kind)
             suffix = (
                     ' ' + plan.time_fmt().format(idle_time) + ' ' +
                     plan.time_fmt().format(total_time) +

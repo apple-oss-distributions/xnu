@@ -263,7 +263,7 @@ nx_netif_mbuf_to_filter_pkt_chain(struct nexus_netif_adapter *nifna,
     struct mbuf *m_chain, uint32_t flags)
 {
 	struct mbuf *m = m_chain, *next;
-	struct __kern_packet *pkt_head = NULL, *pkt;
+	struct __kern_packet *__single pkt_head = NULL, *pkt;
 	struct __kern_packet **pkt_tailp = &pkt_head;
 	int c = 0;
 
@@ -306,7 +306,7 @@ nx_netif_filter_pkt_to_mbuf_chain(struct nexus_netif_adapter *nifna,
     struct __kern_packet *pkt_chain, uint32_t flags)
 {
 	struct __kern_packet *pkt = pkt_chain, *next;
-	struct mbuf *m_head = NULL, *m;
+	struct mbuf *__single m_head = NULL, *m;
 	struct mbuf **m_tailp = &m_head;
 	int c = 0;
 
@@ -461,7 +461,7 @@ nx_netif_pkt_to_filter_pkt_chain(struct nexus_netif_adapter *nifna,
     struct __kern_packet *pkt_chain, uint32_t flags)
 {
 	struct __kern_packet *pkt = pkt_chain, *next;
-	struct __kern_packet *p_head = NULL, *p;
+	struct __kern_packet *__single p_head = NULL, *p;
 	struct __kern_packet **p_tailp = &p_head;
 	int c = 0;
 
@@ -504,7 +504,7 @@ nx_netif_filter_pkt_to_pkt_chain(struct nexus_netif_adapter *nifna,
     struct __kern_packet *pkt_chain, uint32_t flags)
 {
 	struct __kern_packet *pkt = pkt_chain, *next;
-	struct __kern_packet *p_head = NULL, *p;
+	struct __kern_packet *__single p_head = NULL, *p;
 	struct __kern_packet **p_tailp = &p_head;
 	int c = 0;
 
@@ -530,7 +530,7 @@ nx_netif_pkt_to_mbuf(struct nexus_netif_adapter *nifna,
 {
 	struct nx_netif *nif = nifna->nifna_netif;
 	ifnet_t ifp = nif->nif_ifp;
-	struct mbuf *m;
+	struct mbuf *__single m;
 	unsigned int one = 1;
 	size_t len;
 	uint16_t pad, hlen;
@@ -563,6 +563,11 @@ nx_netif_pkt_to_mbuf(struct nexus_netif_adapter *nifna,
 
 	nif->nif_pkt_copy_to_mbuf(type, ph, pkt->pkt_headroom,
 	    m, 0, (uint32_t)len, FALSE, 0);
+	m->m_pkthdr.pkt_flowsrc = pkt->pkt_flowsrc_type;
+	m->m_pkthdr.pkt_flowid = pkt->pkt_flow_token;
+	m->m_pkthdr.necp_mtag.necp_policy_id = pkt->pkt_policy_id;
+	m->m_pkthdr.necp_mtag.necp_skip_policy_id = pkt->pkt_skip_policy_id;
+
 	nx_netif_free_packet(pkt);
 	return m;
 }
@@ -677,6 +682,15 @@ nx_netif_pkt_to_pkt(struct nexus_netif_adapter *nifna,
 		nif->nif_pkt_copy_from_pkt(type, dph, off, ph,
 		    pkt->pkt_headroom, len, FALSE, 0, 0, FALSE);
 	}
+
+	if (type == NR_TX) {
+		dpkt->pkt_flowsrc_type = pkt->pkt_flowsrc_type;
+		dpkt->pkt_flow_token = pkt->pkt_flow_token;
+		dpkt->pkt_policy_id = pkt->pkt_policy_id;
+		dpkt->pkt_skip_policy_id = pkt->pkt_skip_policy_id;
+		_UUID_COPY(dpkt->pkt_policy_euuid, pkt->pkt_policy_euuid);
+	}
+
 	err = __packet_finalize(dph);
 	VERIFY(err == 0);
 	nx_netif_free_packet(pkt);

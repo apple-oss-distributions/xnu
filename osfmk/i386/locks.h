@@ -45,7 +45,7 @@ typedef struct {
 
 #if LCK_MTX_USE_ARCH
 
-typedef struct _lck_mtx_ {
+typedef struct lck_mtx_s {
 	union {
 		struct {
 			volatile uint32_t

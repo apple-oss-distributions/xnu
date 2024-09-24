@@ -49,7 +49,7 @@
 #include <sys/tty.h>
 #include <kern/task.h>
 #include <sys/quota.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <mach/vm_param.h>
 #include <sys/filedesc.h>
 #include <mach/host_priv.h>
@@ -154,7 +154,7 @@ __abortlike
 static void
 panic_kernel(int howto, char *message)
 {
-	uint64_t opts = DEBUGGER_OPTION_NONE;
+	uint64_t opts = DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC;
 
 	if ((howto & RB_PANIC_ZPRINT) == RB_PANIC_ZPRINT) {
 		zprint_panic_info();

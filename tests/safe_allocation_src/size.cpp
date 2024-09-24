@@ -42,7 +42,7 @@ tests()
 	}
 }
 
-T_DECL(size, "safe_allocation.size") {
+T_DECL(size, "safe_allocation.size", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

@@ -107,11 +107,13 @@
 #include <mach/mach_vm.h>
 #include <mach/machine.h>
 
-#include <vm/vm_map.h>
 #include <vm/vm_map_internal.h>
-#include <vm/vm_shared_region.h>
-
-#include <vm/vm_protos.h>
+#include <vm/vm_memory_entry_xnu.h>
+#include <vm/vm_shared_region_internal.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/memory_object_internal.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_object_internal.h>
 
 #include <machine/commpage.h>
 #include <machine/cpu_capabilities.h>
@@ -1255,10 +1257,10 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		    task_is_hardened_binary(task));
 
 		map_addr = si->si_slid_address;
-		kr = vm_map_enter_mem_object(task->map,
-		    &map_addr,
+		kr = mach_vm_map_kernel(task->map,
+		    vm_sanitize_wrap_addr_ref(&map_addr),
 		    si->si_end - si->si_start,
-		    (mach_vm_offset_t) 0,
+		    0,
 		    vmk_flags,
 		    (ipc_port_t)(uintptr_t) sr_pager,
 		    0,
@@ -1269,7 +1271,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		memory_object_deallocate(sr_pager);
 		sr_pager = MEMORY_OBJECT_NULL;
 		if (kr != KERN_SUCCESS) {
-			printf("%s(): vm_map_enter_mem_object() failed\n", __func__);
+			printf("%s(): mach_vm_map_kernel() failed\n", __func__);
 			goto done;
 		}
 		assertf(map_addr == si->si_slid_address,
@@ -1541,17 +1543,6 @@ vm_shared_region_map_file_setup(
 			break;
 		}
 
-#if __arm64__
-		if ((shared_region->sr_64bit ||
-		    page_shift_user32 == SIXTEENK_PAGE_SHIFT) &&
-		    ((srfmp->slide & SIXTEENK_PAGE_MASK) != 0)) {
-			printf("FOURK_COMPAT: %s: rejecting mis-aligned slide 0x%x\n",
-			    __FUNCTION__, srfmp->slide);
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-#endif /* __arm64__ */
-
 		/*
 		 * An FD of -1 means we need to copyin the data to an anonymous object.
 		 */
@@ -1816,10 +1807,11 @@ vm_shared_region_map_file_setup(
 				}
 			} else {
 				object = VM_OBJECT_NULL; /* no anonymous memory here */
-				kr = vm_map_enter_mem_object(
+				kr = mach_vm_map_kernel(
 					sr_map,
-					&target_address,
-					vm_map_round_page(mappings[i].sms_size, VM_MAP_PAGE_MASK(sr_map)),
+					vm_sanitize_wrap_addr_ref(&target_address),
+					vm_map_round_page(
+						mappings[i].sms_size, VM_MAP_PAGE_MASK(sr_map)),
 					0,
 					vmk_flags,
 					map_port,
@@ -2214,6 +2206,7 @@ vm_shared_region_map_file_final(
 		primary_system_shared_region = shared_region;
 	}
 
+#ifndef NO_NESTED_PMAP
 	/*
 	 * If we succeeded, we know the bounds of the shared region.
 	 * Trim our pmaps to only cover this range (if applicable to
@@ -2222,6 +2215,7 @@ vm_shared_region_map_file_final(
 	if (VM_MAP_PAGE_SHIFT(current_map()) == VM_MAP_PAGE_SHIFT(sr_map)) {
 		pmap_trim(current_map()->pmap, sr_map->pmap, sfm_min_address, sfm_max_address - sfm_min_address);
 	}
+#endif
 }
 
 /*
@@ -2250,10 +2244,12 @@ vm_shared_region_trim_and_get(task_t task)
 	sr_mem_entry = mach_memory_entry_from_port(sr_handle);
 	sr_map = sr_mem_entry->backing.map;
 
+#ifndef NO_NESTED_PMAP
 	/* Trim the pmap if possible. */
 	if (VM_MAP_PAGE_SHIFT(task->map) == VM_MAP_PAGE_SHIFT(sr_map)) {
 		pmap_trim(task->map->pmap, sr_map->pmap, 0, 0);
 	}
+#endif
 
 	return shared_region;
 }
@@ -2343,9 +2339,9 @@ vm_shared_region_enter(
 		/* we need to map a range without pmap-nesting first */
 		target_address = sr_address;
 		mapping_size = sr_pmap_nesting_start - sr_address;
-		kr = vm_map_enter_mem_object(
+		kr = mach_vm_map_kernel(
 			map,
-			&target_address,
+			vm_sanitize_wrap_addr_ref(&target_address),
 			mapping_size,
 			0,
 			vmk_flags,
@@ -2394,9 +2390,9 @@ vm_shared_region_enter(
 	 */
 	assert((sr_address + sr_offset) == sr_pmap_nesting_start);
 	target_address = sr_pmap_nesting_start;
-	kr = vm_map_enter_mem_object(
+	kr = mach_vm_map_kernel(
 		map,
-		&target_address,
+		vm_sanitize_wrap_addr_ref(&target_address),
 		sr_pmap_nesting_size,
 		0,
 		vmk_flags,
@@ -2437,9 +2433,9 @@ vm_shared_region_enter(
 		vmk_flags.vmkf_nested_pmap = false; /* no pmap nesting */
 		target_address = sr_address + sr_offset;
 		mapping_size = sr_size;
-		kr = vm_map_enter_mem_object(
+		kr = mach_vm_map_kernel(
 			map,
-			&target_address,
+			vm_sanitize_wrap_addr_ref(&target_address),
 			mapping_size,
 			0,
 			VM_MAP_KERNEL_FLAGS_FIXED(),
@@ -2520,7 +2516,7 @@ vm_shared_region_remove(
 
 	/* range_id is set by mach_vm_map_kernel */
 	kr = mach_vm_map_kernel(map,
-	    &start,
+	    vm_sanitize_wrap_addr_ref(&start),
 	    size,
 	    0,                     /* mask */
 	    vmk_flags,
@@ -2734,10 +2730,10 @@ vm_shared_region_slide_mapping(
 	    tmp_entry->max_protection);
 	vmk_flags.vmf_tpro = shared_region_tpro_protect(sr,
 	    prot);
-	kr = vm_map_enter_mem_object(sr_map,
-	    &map_addr,
-	    (tmp_entry->vme_end - tmp_entry->vme_start),
-	    (mach_vm_offset_t) 0,
+	kr = mach_vm_map_kernel(sr_map,
+	    vm_sanitize_wrap_addr_ref(&map_addr),
+	    tmp_entry->vme_end - tmp_entry->vme_start,
+	    0,
 	    vmk_flags,
 	    (ipc_port_t)(uintptr_t) sr_pager,
 	    0,
@@ -3740,9 +3736,9 @@ vm_commpage_enter(
 
 	/* map the comm page in the task's address space */
 	assert(commpage_handle != IPC_PORT_NULL);
-	kr = vm_map_enter_mem_object(
+	kr = mach_vm_map_kernel(
 		map,
-		&commpage_address,
+		vm_sanitize_wrap_addr_ref(&commpage_address),
 		commpage_size,
 		0,
 		vmk_flags,
@@ -3764,9 +3760,9 @@ vm_commpage_enter(
 
 	/* map the comm text page in the task's address space */
 	assert(commpage_text_handle != IPC_PORT_NULL);
-	kr = vm_map_enter_mem_object(
+	kr = mach_vm_map_kernel(
 		map,
-		&commpage_text_address,
+		vm_sanitize_wrap_addr_ref(&commpage_text_address),
 		commpage_text_size,
 		0,
 		vmk_flags,
@@ -3791,9 +3787,9 @@ vm_commpage_enter(
 	 * Objective-C run-time, if needed...
 	 */
 	if (objc_size != 0) {
-		kr = vm_map_enter_mem_object(
+		kr = mach_vm_map_kernel(
 			map,
-			&objc_address,
+			vm_sanitize_wrap_addr_ref(&objc_address),
 			objc_size,
 			0,
 			vmk_flags,

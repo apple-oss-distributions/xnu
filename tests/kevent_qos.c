@@ -1779,7 +1779,7 @@ special_reply_port_thread(void *ctxt)
 }
 
 T_DECL(special_reply_port, "basic special reply port robustness checks",
-    T_META_RUN_CONCURRENTLY(true))
+    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
 {
 	pthread_t thread;
 	mach_port_t srp = thread_get_special_reply_port();
@@ -1796,7 +1796,7 @@ T_DECL(special_reply_port, "basic special reply port robustness checks",
 #define TEST_QOS(server_name, client_name, name, wl_function_name, qos_bo, qos_bo_name, qos_qo, qos_qo_name, qos_ao, qos_ao_name) \
 	T_DECL(server_kevent_id_##name, \
 	                "Event delivery at " qos_ao_name " QoS using a kevent_id", \
-	                T_META_ASROOT(YES)) \
+	                T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED) \
 	{ \
 	        qos_class_t qos_array[ENV_VAR_QOS] = {qos_bo, qos_qo, qos_ao};  \
 	        const char *qos_name_array[ENV_VAR_QOS] = {qos_bo_name, qos_qo_name, qos_ao_name}; \

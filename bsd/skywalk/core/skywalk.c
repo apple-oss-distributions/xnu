@@ -247,7 +247,8 @@ SKMEM_TAG_DEFINE(skmem_tag_oid, SKMEM_TAG_OID);
 #define SKMEM_TAG_DUMP  "com.apple.skywalk.dump"
 static SKMEM_TAG_DEFINE(skmem_tag_dump, SKMEM_TAG_DUMP);
 
-static char *sk_dump_buf;
+static uint32_t sk_dump_buf_size;
+static char *__sized_by(sk_dump_buf_size) sk_dump_buf;
 #define SK_DUMP_BUF_SIZE        2048
 #define SK_DUMP_BUF_ALIGN       16
 #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
@@ -271,7 +272,7 @@ skywalk_netif_direct_allowed(const char *ifname)
 	uint32_t i;
 
 	for (i = 0; i < sk_netif_direct_cnt; i++) {
-		if (strncmp(ifname, sk_netif_direct[i], IFXNAMSIZ) == 0) {
+		if (strlcmp(sk_netif_direct[i], ifname, IFXNAMSIZ) == 0) {
 			return TRUE;
 		}
 	}
@@ -290,7 +291,7 @@ parse_netif_direct(void)
 	}
 
 	curr = 0;
-	len = strlen(buf);
+	len = strbuflen(buf);
 	for (i = 0; i < len + 1 &&
 	    sk_netif_direct_cnt < SK_NETIF_DIRECT_MAX; i++) {
 		if (buf[i] != ',' && buf[i] != '\0') {
@@ -300,8 +301,8 @@ parse_netif_direct(void)
 		buf[i] = '\0';
 		iflen = i - curr;
 		if (iflen > 0 && iflen < IFXNAMSIZ) {
-			(void) strlcpy(sk_netif_direct[sk_netif_direct_cnt],
-			    buf + curr, IFXNAMSIZ);
+			(void) strbufcpy(sk_netif_direct[sk_netif_direct_cnt],
+			    IFXNAMSIZ, buf + curr, IFXNAMSIZ);
 			sk_netif_direct_cnt++;
 		}
 		curr = i + 1;
@@ -326,8 +327,9 @@ skywalk_fini(void)
 
 #if (SK_LOG || DEVELOPMENT || DEBUG)
 		if (sk_dump_buf != NULL) {
-			sk_free_data(sk_dump_buf, SK_DUMP_BUF_SIZE);
+			sk_free_data_sized_by(sk_dump_buf, sk_dump_buf_size);
 			sk_dump_buf = NULL;
+			sk_dump_buf_size = 0;
 		}
 #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
 
@@ -496,6 +498,7 @@ skywalk_init(void)
 		/* allocate space for sk_dump_buf */
 		sk_dump_buf = sk_alloc_data(SK_DUMP_BUF_SIZE, Z_WAITOK | Z_NOFAIL,
 		    skmem_tag_dump);
+		sk_dump_buf_size = SK_DUMP_BUF_SIZE;
 #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
 
 		netns_init();
@@ -696,11 +699,12 @@ sk_gen_guard_id(boolean_t isch, const uuid_t uuid, guardid_t *guard)
 }
 
 
-extern const char *
+extern char *
+__counted_by(sizeof(uuid_string_t))
 sk_uuid_unparse(const uuid_t uu, uuid_string_t out)
 {
 	uuid_unparse_upper(uu, out);
-	return (const char *)out;
+	return out;
 }
 
 #if SK_LOG
@@ -719,35 +723,42 @@ sk_uuid_unparse(const uuid_t uu, uuid_string_t out)
  * @param lim
  *   destination char buffer max length. Not used if dst is NULL.
  *
+ * -fbounds-safety: Note that all callers of this function pass NULL and 0 for
+ * dst and lim, respectively.
  */
 const char *
-sk_dump(const char *label, const void *obj, int len, int dumplen,
-    char *dst, int lim)
+__counted_by(lim)
+sk_dump(const char *label, const void *__sized_by(len) obj, int len, int dumplen,
+    char *__counted_by(lim) dst, int lim)
 {
 	int i, j, i0, n = 0;
 	static char hex[] = "0123456789abcdef";
 	const char *p = obj;    /* dump cursor */
-	char *o;        /* output position */
+	uint32_t size;
+	char *__sized_by(size) o;        /* output position */
 
 #define P_HI(x) hex[((x) & 0xf0) >> 4]
 #define P_LO(x) hex[((x) & 0xf)]
 #define P_C(x)  ((x) >= 0x20 && (x) <= 0x7e ? (x) : '.')
-	if (lim <= 0 || lim > len) {
-		lim = len;
-	}
 	if (dst == NULL) {
 		dst = sk_dump_buf;
 		lim = SK_DUMP_BUF_SIZE;
+	} else if (lim <= 0 || lim > len) {
+		dst = dst;
+		lim = len;  /* rdar://117789233 */
 	}
 	dumplen = MIN(len, dumplen);
 	o = dst;
-	n += scnprintf(o, lim, "%s 0x%llx len %d lim %d\n", label,
+	size = lim;
+	n = scnprintf(o, lim, "%s 0x%llx len %d lim %d\n", label,
 	    SK_KVA(p), len, lim);
-	o += strlen(o);
+	o += strbuflen(o, n);
+	size -= n;
 	/* hexdump routine */
 	for (i = 0; i < dumplen;) {
-		n += scnprintf(o, lim - n, "%5d: ", i);
-		o += strlen(o);
+		n = scnprintf(o, size, "%5d: ", i);
+		o += n;
+		size -= n;
 		memset(o, ' ', 48);
 		i0 = i;
 		for (j = 0; j < 16 && i < dumplen; i++, j++) {
@@ -760,6 +771,7 @@ sk_dump(const char *label, const void *obj, int len, int dumplen,
 		}
 		o[j + 48] = '\n';
 		o += j + 49;
+		size -= (j + 49);
 	}
 	*o = '\0';
 #undef P_HI
@@ -769,7 +781,7 @@ sk_dump(const char *label, const void *obj, int len, int dumplen,
 }
 
 /*
- * "Safe" variant of proc_name_address(), mean to be used only for logging.
+ * "Safe" variant of proc_name_address(), meant to be used only for logging.
  */
 const char *
 sk_proc_name_address(struct proc *p)
@@ -795,9 +807,10 @@ sk_proc_pid(struct proc *p)
 }
 
 const char *
-sk_sa_ntop(struct sockaddr *sa, char *addr_str, size_t addr_strlen)
+sk_sa_ntop(struct sockaddr *sa, char *__counted_by(addr_strlen)addr_str,
+    size_t addr_strlen)
 {
-	const char *str = NULL;
+	const char *__null_terminated str = NULL;
 
 	addr_str[0] = '\0';
 
@@ -813,7 +826,7 @@ sk_sa_ntop(struct sockaddr *sa, char *addr_str, size_t addr_strlen)
 		break;
 
 	default:
-		str = addr_str;
+		str = __unsafe_null_terminated_from_indexable(addr_str);
 		break;
 	}
 
@@ -823,7 +836,7 @@ sk_sa_ntop(struct sockaddr *sa, char *addr_str, size_t addr_strlen)
 const char *
 sk_memstatus2str(uint32_t status)
 {
-	const char *str = NULL;
+	const char *__null_terminated str = NULL;
 
 	switch (status) {
 	case kMemorystatusInvalid:
@@ -1031,8 +1044,9 @@ skywalk_kill_process(struct proc *p, uint64_t reason_code)
 } while (0)
 
 static inline int
-skywalk_memcmp_mask_ref(const uint8_t *src1, const uint8_t *src2,
-    const uint8_t *byte_mask, size_t n)
+skywalk_memcmp_mask_ref(const uint8_t *__sized_by(n)src1,
+    const uint8_t *__sized_by(n)src2, const uint8_t *__sized_by(n)byte_mask,
+    size_t n)
 {
 	uint32_t result = 0;
 	for (size_t i = 0; i < n; i++) {
@@ -1302,15 +1316,17 @@ skywalk_memcmp_mask_self_tests(void)
 	 * 3rd section is s3 -> (mask = hdr2 + SK_MEMCMP_LEN)
 	 */
 	void *s1, *s2, *s3;
+	uintptr_t diff;
 
 	s1 = sk_dump_buf;
 	if (!IS_P2ALIGNED(s1, SK_DUMP_BUF_ALIGN)) {
-		s1 = (void *)P2ROUNDUP(s1, SK_DUMP_BUF_ALIGN);
+		diff = P2ROUNDUP(s1, SK_DUMP_BUF_ALIGN) - (uintptr_t)s1;
+		s1 = (void *)((char *)s1 + diff);
 	}
 	ASSERT(IS_P2ALIGNED(s1, SK_DUMP_BUF_ALIGN));
-	s2 = (void *)((uintptr_t)s1 + SK_MEMCMP_LEN);
+	s2 = (void *)((char *)s1 + SK_MEMCMP_LEN);
 	ASSERT(IS_P2ALIGNED(s2, SK_DUMP_BUF_ALIGN));
-	s3 = (void *)((uintptr_t)s2 + SK_MEMCMP_LEN);
+	s3 = (void *)((char *)s2 + SK_MEMCMP_LEN);
 	ASSERT(IS_P2ALIGNED(s3, SK_DUMP_BUF_ALIGN));
 
 	uint8_t *hdr1 = s1;
@@ -1445,6 +1461,7 @@ skywalk_self_tests(void)
 {
 	void *s1, *s2, *s3;
 	void *_s1, *_s2, *_s3;
+	uintptr_t diff;
 
 	VERIFY(sk_dump_buf != NULL);
 
@@ -1465,12 +1482,13 @@ skywalk_self_tests(void)
 
 	s1 = sk_dump_buf;
 	if (!IS_P2ALIGNED(s1, SK_DUMP_BUF_ALIGN)) {
-		s1 = (void *)P2ROUNDUP(s1, SK_DUMP_BUF_ALIGN);
+		diff = P2ROUNDUP(s1, SK_DUMP_BUF_ALIGN) - (uintptr_t)s1;
+		s1 = (void *)((char *)s1 + diff);
 	}
 	ASSERT(IS_P2ALIGNED(s1, SK_DUMP_BUF_ALIGN));
-	s2 = (void *)((uintptr_t)s1 + SK_COPY_LEN);
+	s2 = (void *)((char *)s1 + SK_COPY_LEN);
 	ASSERT(IS_P2ALIGNED(s2, SK_DUMP_BUF_ALIGN));
-	s3 = (void *)((uintptr_t)s2 + SK_COPY_LEN);
+	s3 = (void *)((char *)s2 + SK_COPY_LEN);
 	ASSERT(IS_P2ALIGNED(s3, SK_DUMP_BUF_ALIGN));
 
 	/* fill s1 with random data */
@@ -1486,10 +1504,10 @@ skywalk_self_tests(void)
 
 	/* Copy 8-bytes, 32-bit aligned */
 	SK_COPY_PREPARE(sk_copy32_8);
-	bcopy((void *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (void *)((uintptr_t)s2 + sizeof(uint32_t)), 8);
-	sk_copy32_8((uint32_t *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (uint32_t *)((uintptr_t)s3 + sizeof(uint32_t)));
+	bcopy((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s2 + sizeof(uint32_t)), 8);
+	sk_copy32_8((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s3 + sizeof(uint32_t)));
 	SK_COPY_VERIFY(sk_copy32_8);
 
 	/* Copy 16-bytes, 64-bit aligned */
@@ -1500,10 +1518,10 @@ skywalk_self_tests(void)
 
 	/* Copy 16-bytes, 32-bit aligned */
 	SK_COPY_PREPARE(sk_copy32_16);
-	bcopy((void *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (void *)((uintptr_t)s2 + sizeof(uint32_t)), 16);
-	sk_copy32_16((uint32_t *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (uint32_t *)((uintptr_t)s3 + sizeof(uint32_t)));
+	bcopy((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s2 + sizeof(uint32_t)), 16);
+	sk_copy32_16((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s3 + sizeof(uint32_t)));
 	SK_COPY_VERIFY(sk_copy32_16);
 
 	/* Copy 20-bytes, 64-bit aligned */
@@ -1526,10 +1544,10 @@ skywalk_self_tests(void)
 
 	/* Copy 32-bytes, 32-bit aligned */
 	SK_COPY_PREPARE(sk_copy32_32);
-	bcopy((void *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (void *)((uintptr_t)s2 + sizeof(uint32_t)), 32);
-	sk_copy32_32((uint32_t *)((uintptr_t)s1 + sizeof(uint32_t)),
-	    (uint32_t *)((uintptr_t)s3 + sizeof(uint32_t)));
+	bcopy((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s2 + sizeof(uint32_t)), 32);
+	sk_copy32_32((void *)((char *)s1 + sizeof(uint32_t)),
+	    (void *)((char *)s3 + sizeof(uint32_t)));
 	SK_COPY_VERIFY(sk_copy32_32);
 
 	/* Copy 40-bytes, 64-bit aligned */

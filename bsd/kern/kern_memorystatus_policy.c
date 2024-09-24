@@ -35,9 +35,11 @@
 #include <sys/coalition.h>
 #include <sys/proc.h>
 #include <sys/proc_internal.h>
+#include <sys/sysctl.h>
 #include <sys/kdebug.h>
 #include <sys/kern_memorystatus.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_compressor_xnu.h>
 
 #include <kern/kern_memorystatus_internal.h>
 
@@ -63,11 +65,6 @@ static bool memorystatus_check_aggressive_jetsam_needed(int *jld_idle_kills);
  * Memorystatus Thread Actions section below.
  */
 
-extern bool vm_compressor_needs_to_swap(bool wake_memorystatus_thread);
-extern boolean_t vm_compressor_low_on_space(void);
-extern bool vm_compressor_compressed_pages_nearing_limit(void);
-extern bool vm_compressor_is_thrashing(void);
-extern bool vm_compressor_swapout_is_ripe(void);
 
 #if XNU_TARGET_OS_WATCH
 #define FREEZE_PREVENT_REFREEZE_OF_LAST_THAWED true
@@ -140,7 +137,7 @@ memorystatus_is_system_healthy(const memorystatus_system_health_t *status)
  * function returns MEMORYSTATUS_KILL_NONE. At that point the thread will block.
  */
 memorystatus_action_t
-memorystatus_pick_action(struct jetsam_thread_state *jetsam_thread,
+memorystatus_pick_action(jetsam_state_t state,
     uint32_t *kill_cause,
     bool highwater_remaining,
     bool suspended_swappable_apps_remaining,
@@ -206,7 +203,7 @@ memorystatus_pick_action(struct jetsam_thread_state *jetsam_thread,
 	 * more highwatermark processes to kill.
 	 */
 
-	if (!jetsam_thread->limit_to_low_bands) {
+	if (!state->limit_to_low_bands) {
 		if (memorystatus_check_aggressive_jetsam_needed(jld_idle_kills)) {
 			memorystatus_log("memorystatus: Starting aggressive jetsam.\n");
 			*kill_cause = kMemorystatusKilledProcThrashing;
@@ -222,7 +219,7 @@ memorystatus_pick_action(struct jetsam_thread_state *jetsam_thread,
 	*kill_cause = memorystatus_pick_kill_cause(&status);
 	return MEMORYSTATUS_KILL_TOP_PROCESS;
 #else /* CONFIG_JETSAM */
-	(void) jetsam_thread;
+	(void) state;
 	(void) jld_idle_kills;
 	(void) suspended_swappable_apps_remaining;
 	(void) swappable_apps_remaining;
@@ -261,7 +258,10 @@ memorystatus_aggressive_jetsam_needed_sysproc_aging(__unused int jld_eval_aggres
  * in the idle & deferred bands that need to be bad candidates in order to trigger
  * aggressive jetsam.
  */
-#define kJetsamHighRelaunchCandidatesThreshold  (100)
+TUNABLE_DEV_WRITEABLE(unsigned int, kJetsamHighRelaunchCandidatesThreshold, "jetsam_high_relaunch_candidates_threshold_percent", 100);
+#if DEVELOPMENT || DEBUG
+SYSCTL_UINT(_kern, OID_AUTO, jetsam_high_relaunch_candidates_threshold_percent, CTLFLAG_RW | CTLFLAG_LOCKED, &kJetsamHighRelaunchCandidatesThreshold, 100, "");
+#endif /* DEVELOPMENT || DEBUG */
 
 /* kJetsamMinCandidatesThreshold defines the minimum number of candidates in the
  * idle/deferred bands to trigger aggressive jetsam. This value basically decides
@@ -269,7 +269,10 @@ memorystatus_aggressive_jetsam_needed_sysproc_aging(__unused int jld_eval_aggres
  * aggressive jetsam. This number should ideally be tuned based on the memory config
  * of the device.
  */
-#define kJetsamMinCandidatesThreshold           (5)
+TUNABLE_DT_DEV_WRITEABLE(unsigned int, kJetsamMinCandidatesThreshold, "/defaults", "kern.jetsam_min_candidates_threshold", "jetsam_min_candidates_threshold", 5, TUNABLE_DT_CHECK_CHOSEN);
+#if DEVELOPMENT || DEBUG
+SYSCTL_UINT(_kern, OID_AUTO, jetsam_min_candidates_threshold, CTLFLAG_RW | CTLFLAG_LOCKED, &kJetsamMinCandidatesThreshold, 5, "");
+#endif /* DEVELOPMENT || DEBUG */
 
 static bool
 memorystatus_check_aggressive_jetsam_needed(int *jld_idle_kills)
@@ -287,7 +290,7 @@ memorystatus_check_aggressive_jetsam_needed(int *jld_idle_kills)
 
 	if (memorystatus_jld_enabled == FALSE) {
 		/* If aggressive jetsam is disabled, nothing to do here */
-		return FALSE;
+		return false;
 	}
 
 	/* Get current timestamp (msecs only) */
@@ -304,34 +307,31 @@ memorystatus_check_aggressive_jetsam_needed(int *jld_idle_kills)
 	    jld_idle_kills, jld_idle_kill_candidates, &total_candidates);
 
 	/*
-	 * Check if its been really long since the aggressive jetsam evaluation
-	 * parameters have been refreshed. This logic also resets the jld_eval_aggressive_count
-	 * counter to make sure we reset the aggressive jetsam severity.
-	 */
-	boolean_t param_reval = false;
-
-	if ((total_candidates == 0) ||
-	    (jld_now_msecs > (jld_timestamp_msecs + memorystatus_jld_eval_period_msecs))) {
-		jld_timestamp_msecs      = jld_now_msecs;
-		jld_idle_kill_candidates = total_candidates;
-		*jld_idle_kills          = 0;
-		jld_eval_aggressive_count = 0;
-		jld_priority_band_max   = JETSAM_PRIORITY_UI_SUPPORT;
-		param_reval = true;
-	}
-
-	/*
 	 * It is also possible that the system is down to a very small number of processes in the candidate
 	 * bands. In that case, the decisions made by the memorystatus_aggressive_jetsam_needed_* routines
 	 * would not be useful. In that case, do not trigger aggressive jetsam.
 	 */
 	if (total_candidates < kJetsamMinCandidatesThreshold) {
-#if DEVELOPMENT || DEBUG
-		memorystatus_log_info(
-			"memorystatus: aggressive: [FAILED] Low Candidate Count (current: %d, threshold: %d)\n", total_candidates, kJetsamMinCandidatesThreshold);
-#endif /* DEVELOPMENT || DEBUG */
+		memorystatus_log_debug(
+			"memorystatus: aggressive: [FAILED] Low Candidate "
+			"Count (current: %d, threshold: %d)\n",
+			total_candidates, kJetsamMinCandidatesThreshold);
 		aggressive_jetsam_needed = false;
 	}
+
+	/*
+	 * Check if its been really long since the aggressive jetsam evaluation
+	 * parameters have been refreshed. This logic also resets the jld_eval_aggressive_count
+	 * counter to make sure we reset the aggressive jetsam severity.
+	 */
+	if ((total_candidates == 0) ||
+	    (jld_now_msecs > (jld_timestamp_msecs + memorystatus_jld_eval_period_msecs))) {
+		jld_timestamp_msecs       = jld_now_msecs;
+		jld_idle_kill_candidates  = total_candidates;
+		*jld_idle_kills           = 0;
+		jld_eval_aggressive_count = 0;
+	}
+
 	return aggressive_jetsam_needed;
 }
 
@@ -634,6 +634,18 @@ memorystatus_freeze_pick_process(struct memorystatus_freeze_list_iterator *itera
 				&memorystatus_freezer_stats.mfs_freeze_pid_mismatches);
 
 			if (p != PROC_NULL && memorystatus_is_process_eligible_for_freeze(p)) {
+#if FREEZE_PREVENT_REFREEZE_OF_LAST_THAWED
+				/*
+				 * Don't refreeze the last process we just thawed if still within the timeout window
+				 */
+				if (p->p_pid == memorystatus_freeze_last_pid_thawed) {
+					uint64_t timeout_delta_abs;
+					nanoseconds_to_absolutetime(FREEZE_PREVENT_REFREEZE_OF_LAST_THAWED_TIMEOUT_SECONDS * NSEC_PER_SEC, &timeout_delta_abs);
+					if (mach_absolute_time() < (memorystatus_freeze_last_pid_thawed_ts + timeout_delta_abs)) {
+						continue;
+					}
+				}
+#endif
 				iterator->last_p = p;
 				return iterator->last_p;
 			}

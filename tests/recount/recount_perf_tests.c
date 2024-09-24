@@ -528,7 +528,7 @@ task_absolutetime_info_measurement(metrics_t metric, void *ctx)
 	}
 }
 
-T_DECL(task_usage_perf, "measure the performance of task usage interfaces")
+T_DECL(task_usage_perf, "measure the performance of task usage interfaces", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct proc_taskinfo pti = { 0 };
 	struct usage_scenario pti_scenario = {
@@ -592,7 +592,7 @@ T_DECL(task_usage_perf, "measure the performance of task usage interfaces")
 	interface_scaling_test(&tibc_scenario);
 }
 
-T_DECL(thread_usage_perf, "measure the performance of thread usage interfaces")
+T_DECL(thread_usage_perf, "measure the performance of thread usage interfaces", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct thsc_time_cpi counts = { 0 };
 	struct usage_scenario tsc_scenario = {

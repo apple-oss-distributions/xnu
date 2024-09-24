@@ -132,6 +132,10 @@ boolean_t kdp_has_polled_corefile(void);
 kern_return_t kdp_polled_corefile_error(void);
 IOPolledCoreFileMode_t kdp_polled_corefile_mode(void);
 
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+bool kern_dump_should_enforce_encryption(void);
+#endif /* CONFIG_KDP_COREDUMP_ENCRYPTION */
+
 void kdp_core_init(void);
 
 extern boolean_t kdp_corezip_disabled;

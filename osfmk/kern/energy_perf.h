@@ -35,7 +35,12 @@
 #ifndef _KERN_ENERGY_PERF_H_
 #define _KERN_ENERGY_PERF_H_
 
+#include <sys/cdefs.h>
+
 #include <stdint.h>
+
+#include <kern/kern_types.h>
+#include <mach/mach_types.h>
 
 #ifdef KERNEL
 __BEGIN_DECLS
@@ -56,6 +61,105 @@ void gpu_describe(gpu_descriptor_t);
 
 /* GPU utilisation update for the current thread. */
 uint64_t gpu_accumulate_time(uint32_t scope, uint32_t gpu_id, uint32_t gpu_domain, uint64_t gpu_accumulated_ns, uint64_t gpu_tstamp_ns);
+
+
+#ifdef KERNEL_PRIVATE
+
+#define SUPPORT_ENERGY_ID_REPORT_ENERGY 1
+
+/*
+ * An energy id is an unreferenced unique identifier
+ * that can be used to account energy to a previously identified kernel object
+ * without having to hold a reference on it.  That kernel object may become
+ * terminated before this energy ID is used.
+ *
+ * As an implementation detail, this may be an identifier for a resource
+ * coalition or a task.
+ *
+ * Prefer to use accounting interfaces through IOPerfControl instead, unless
+ * energy data is not available immediately after a work item is complete.
+ */
+typedef uint64_t energy_id_t;
+
+/*!
+ * @function current_energy_id()
+ *
+ * @abstract
+ * Produces an energy id that the current context should account to.
+ *
+ * @param energy_id energy id for the current context
+ *
+ * @returns        KERN_SUCCESS     An energy id is produced
+ *                 KERN_FAILURE     The current task is kernel_task or doesn't support accounting.
+ */
+extern kern_return_t
+current_energy_id(energy_id_t *energy_id);
+
+/*!
+ * @function task_id_token_to_energy_id()
+ *
+ * @abstract
+ * Produces an energy id from a task identity token port name found
+ * in the current task's IPC space. (e.g. from task_create_identity_token)
+ *
+ * This does a task identity port to task_t translation via proc_find_ident,
+ * which may stall while the targeted task is execing.
+ *
+ * @param name          port name for the task identity token to operate on
+ * @param energy_id     energy id for the provided task
+ *
+ * @returns        KERN_SUCCESS           A valid energy id is produced
+ *                 KERN_INVALID_ARGUMENT  Passed identity token is invalid
+ *                 KERN_NOT_FOUND         Cannot find task represented by token
+ */
+extern kern_return_t
+task_id_token_to_energy_id(mach_port_name_t name, energy_id_t *energy_id);
+
+#define ENERGY_ID_NONE (0x0)
+
+__enum_decl(energy_id_source_t, uint32_t, {
+	ENERGY_ID_SOURCE_GPU = 1,
+});
+
+/*!
+ * @function energy_id_report_energy()
+ *
+ * @abstract
+ * Report energy use for an energy ID.
+ * Optionally, report that this energy use was done on behalf of another
+ * energy ID, which can be the same ID.
+ * To indicate that the energy use is not on behalf of any other ID, provide
+ * ENERGY_ID_NONE for the on_behalf_of_id.
+ *
+ * If the primary and secondary IDs refer to the same entity, then energy
+ * will be reported as work it did on behalf of itself (it will not be double
+ * counted)
+ *
+ * If the provided primary ID is no longer valid, energy use will either be ignored
+ * or accounted to a global 'dead' accounting bucket.
+ * If the secondary ID is no longer valid, energy use will still be reported
+ * in the 'on behalf of' field of the primary, and will either be ignored or
+ * accounted to the global 'dead' bucket's on behalf of field.
+ *
+ * Note that the energy ID may still be valid temporarily after energy data has been
+ * snapshotted by launchd for reporting to powerlog, so energy accounted during
+ * this window may be lost.
+ *
+ * @param energy_source     what HW entity used the energy
+ * @param self_id           energy ID for the entity directly responsible for this work
+ * @param on_behalf_of_id   energy ID for the entity that this work was done on behalf of
+ * @param energy            energy to report in nanojoules
+ *
+ * @returns        KERN_SUCCESS                 Energy accounting accepted
+ *                 KERN_INVALID_ARGUMENT        The entity identified by self_id is invalid
+ *                 KERN_NOT_FOUND               The entity identified by self_id doesn't exist
+ *                 KERN_NOT_SUPPORTED           Unknown type of energy_source
+ */
+extern kern_return_t
+energy_id_report_energy(energy_id_source_t energy_source, energy_id_t self_id,
+    energy_id_t on_behalf_of_id, uint64_t energy);
+
+#endif /* KERNEL_PRIVATE */
 
 /* Interfaces for the block storage driver to advise the perf. controller of
  * recent IOs

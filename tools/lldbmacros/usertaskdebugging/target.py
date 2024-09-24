@@ -17,7 +17,7 @@ class Process(object):
         - readMemory
     """
     def __init__(self, cputype, cpusubtype, ptrsize):
-        super(Process, self).__init__()
+        super().__init__()
         self.hinfo = {
             'cputype': cputype, 'cpusubtype': cpusubtype,
             'triple': None, 'vendor': 'apple', 'ostype': 'macosx',

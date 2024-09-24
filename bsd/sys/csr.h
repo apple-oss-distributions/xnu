@@ -44,14 +44,15 @@ typedef uint32_t csr_op_t;
 #define CSR_ALLOW_TASK_FOR_PID                  (1 << 2)
 #define CSR_ALLOW_KERNEL_DEBUGGER               (1 << 3)
 #define CSR_ALLOW_APPLE_INTERNAL                (1 << 4)
-#define CSR_ALLOW_DESTRUCTIVE_DTRACE                    (1 << 5) /* name deprecated */
-#define CSR_ALLOW_UNRESTRICTED_DTRACE                   (1 << 5)
-#define CSR_ALLOW_UNRESTRICTED_NVRAM                    (1 << 6)
-#define CSR_ALLOW_DEVICE_CONFIGURATION                  (1 << 7)
-#define CSR_ALLOW_ANY_RECOVERY_OS                       (1 << 8)
-#define CSR_ALLOW_UNAPPROVED_KEXTS                      (1 << 9)
+#define CSR_ALLOW_DESTRUCTIVE_DTRACE            (1 << 5) /* name deprecated */
+#define CSR_ALLOW_UNRESTRICTED_DTRACE           (1 << 5)
+#define CSR_ALLOW_UNRESTRICTED_NVRAM            (1 << 6)
+#define CSR_ALLOW_DEVICE_CONFIGURATION          (1 << 7)
+#define CSR_ALLOW_ANY_RECOVERY_OS               (1 << 8)
+#define CSR_ALLOW_UNAPPROVED_KEXTS              (1 << 9)
 #define CSR_ALLOW_EXECUTABLE_POLICY_OVERRIDE    (1 << 10)
-#define CSR_ALLOW_UNAUTHENTICATED_ROOT                  (1 << 11)
+#define CSR_ALLOW_UNAUTHENTICATED_ROOT          (1 << 11)
+#define CSR_ALLOW_RESEARCH_GUESTS               (1 << 12)
 
 #define CSR_VALID_FLAGS (CSR_ALLOW_UNTRUSTED_KEXTS | \
 	                         CSR_ALLOW_UNRESTRICTED_FS | \
@@ -64,7 +65,8 @@ typedef uint32_t csr_op_t;
 	                         CSR_ALLOW_ANY_RECOVERY_OS | \
 	                         CSR_ALLOW_UNAPPROVED_KEXTS | \
 	                         CSR_ALLOW_EXECUTABLE_POLICY_OVERRIDE | \
-	                         CSR_ALLOW_UNAUTHENTICATED_ROOT)
+	                         CSR_ALLOW_UNAUTHENTICATED_ROOT | \
+	                         CSR_ALLOW_RESEARCH_GUESTS)
 
 #define CSR_ALWAYS_ENFORCED_FLAGS (CSR_ALLOW_DEVICE_CONFIGURATION | CSR_ALLOW_ANY_RECOVERY_OS)
 

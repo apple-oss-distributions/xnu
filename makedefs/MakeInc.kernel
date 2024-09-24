@@ -309,7 +309,7 @@ lastkerneldataconst.o: $(SRCROOT)/libsa/lastkerneldataconst.c
 	${C_RULE_2}
 
 
-lastkernelconstructor.o_CFLAGS_RM = -fprofile-instr-generate
+lastkernelconstructor.o_CFLAGS_RM = -fprofile-instr-generate -fcoverage-mapping
 # the LAST segment is mapped read-only on arm, so if we include llvm profiling
 # here it will segfault the kernel.  (see arm_vm_init.c) We don't currently have
 # a way of retrieving these counters from LAST anyway, so there's no harm in just

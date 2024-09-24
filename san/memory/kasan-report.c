@@ -143,8 +143,8 @@ kasan_log_report(uptr p, uptr width, access_t access, violation_t reason)
 	const size_t len = 256;
 	char buf[len];
 	size_t l = 0;
-	uint32_t nframes = 14;
-	uintptr_t frames[nframes];
+	uintptr_t frames[14];
+	uint32_t nframes = ARRAY_COUNT(frames);
 	uintptr_t *bt = frames;
 
 	kasan_log_report_internal(p, width, access, reason);

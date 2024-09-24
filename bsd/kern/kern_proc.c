@@ -97,6 +97,8 @@
 #include <sys/codesign.h>
 #include <sys/kernel_types.h>
 #include <sys/ubc.h>
+#include <kern/clock.h>
+#include <kern/debug.h>
 #include <kern/kalloc.h>
 #include <kern/smr_hash.h>
 #include <kern/task.h>
@@ -105,8 +107,9 @@
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_map.h>          /* vm_map_switch_protect() */
+#include <vm/vm_map_xnu.h>          /* vm_map_switch_protect() */
 #include <vm/vm_pageout.h>
+#include <vm/vm_compressor_xnu.h>
 #include <mach/task.h>
 #include <mach/message.h>
 #include <sys/priv.h>
@@ -134,10 +137,23 @@
 #include <security/mac_framework.h>
 #include <security/mac_mach_internal.h>
 #endif
+#include <security/audit/audit.h>
 
 #include <libkern/crypto/sha1.h>
 #include <IOKit/IOKitKeys.h>
+#include <mach/mach_traps.h>
+#include <mach/task_access.h>
+#include <kern/extmod_statistics.h>
+#include <security/mac.h>
+#include <sys/socketvar.h>
+#include <sys/kern_memorystatus_freeze.h>
+#include <net/necp.h>
+#include <bsm/audit_kevents.h>
 
+
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 /*
  * Structure associated with user cacheing.
  */
@@ -158,11 +174,6 @@ static struct smr_hash pgrp_hash;
 
 SECURITY_READ_ONLY_LATE(struct sesshashhead *) sesshashtbl;
 SECURITY_READ_ONLY_LATE(u_long) sesshash;
-
-#if PROC_REF_DEBUG
-/* disable panics on leaked proc refs across syscall boundary */
-static TUNABLE(bool, proc_ref_tracking_disabled, "-disable_procref_tracking", false);
-#endif
 
 struct proclist allproc = LIST_HEAD_INITIALIZER(allproc);
 struct proclist zombproc = LIST_HEAD_INITIALIZER(zombproc);
@@ -222,7 +233,7 @@ int proc_threadname_kdp(void * uth, char * buf, size_t size);
 void proc_starttime_kdp(void * p, unaligned_u64 *tv_sec, unaligned_u64 *tv_usec, unaligned_u64 *abstime);
 void proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
 uint64_t proc_getcsflags_kdp(void * p);
-char * proc_name_address(void * p);
+const char * proc_name_address(void * p);
 char * proc_longname_address(void *);
 
 static void pgrp_destroy(struct pgrp *pgrp);
@@ -440,7 +451,7 @@ uthread_reset_proc_refcount(uthread_t uth)
 	uth->uu_proc_refcount = 0;
 
 #if PROC_REF_DEBUG
-	if (proc_ref_tracking_disabled) {
+	if (kern_feature_override(KF_DISABLE_PROCREF_TRACKING_OVRD)) {
 		return;
 	}
 
@@ -456,14 +467,14 @@ uthread_reset_proc_refcount(uthread_t uth)
 		bzero(upri->upri_proc_stacks, sizeof(btref_t) * n);
 		bzero(upri->upri_proc_ps, sizeof(proc_t) * n);
 	}
-#endif
+#endif /* PROC_REF_DEBUG */
 }
 
 #if PROC_REF_DEBUG
 void
 uthread_init_proc_refcount(uthread_t uth)
 {
-	if (proc_ref_tracking_disabled) {
+	if (kern_feature_override(KF_DISABLE_PROCREF_TRACKING_OVRD)) {
 		return;
 	}
 
@@ -474,7 +485,7 @@ uthread_init_proc_refcount(uthread_t uth)
 void
 uthread_destroy_proc_refcount(uthread_t uth)
 {
-	if (proc_ref_tracking_disabled) {
+	if (kern_feature_override(KF_DISABLE_PROCREF_TRACKING_OVRD)) {
 		return;
 	}
 
@@ -491,7 +502,7 @@ uthread_destroy_proc_refcount(uthread_t uth)
 void
 uthread_assert_zero_proc_refcount(uthread_t uth)
 {
-	if (proc_ref_tracking_disabled) {
+	if (kern_feature_override(KF_DISABLE_PROCREF_TRACKING_OVRD)) {
 		return;
 	}
 
@@ -500,7 +511,7 @@ uthread_assert_zero_proc_refcount(uthread_t uth)
 		    uth->uu_proc_refcount, uth);
 	}
 }
-#endif
+#endif /* PROC_REF_DEBUG */
 
 bool
 proc_list_exited(proc_t p)
@@ -550,7 +561,7 @@ record_procref(proc_t p __unused, int count)
 	uth->uu_proc_refcount += count;
 
 #if PROC_REF_DEBUG
-	if (proc_ref_tracking_disabled) {
+	if (kern_feature_override(KF_DISABLE_PROCREF_TRACKING_OVRD)) {
 		return;
 	}
 	struct uthread_proc_ref_info *upri = uth->uu_proc_ref_info;
@@ -903,17 +914,17 @@ proc_ref_hold_proc_task_struct(proc_t proc)
 }
 
 static void
-proc_free(proc_t proc)
+proc_free(proc_t proc, proc_ro_t proc_ro)
 {
-	proc_ro_t proc_ro = proc->p_proc_ro;
 	kauth_cred_t cred;
 
-	if (proc_ro) {
-		cred = smr_serialized_load(&proc_ro->p_ucred);
+	assert(proc_ro != NULL);
 
-		kauth_cred_set(&cred, NOCRED);
-		zfree_ro(ZONE_ID_PROC_RO, proc_ro);
-	}
+	cred = smr_serialized_load(&proc_ro->p_ucred);
+	kauth_cred_set(&cred, NOCRED);
+
+	zfree_ro(ZONE_ID_PROC_RO, proc_ro);
+
 	zfree(proc_task_zone, proc);
 }
 
@@ -922,7 +933,7 @@ proc_release_proc_task_struct(proc_t proc)
 {
 	uint32_t old_ref = os_atomic_andnot_orig(&proc->p_refcount, P_REF_PROC_HOLD, relaxed);
 	if ((old_ref & P_REF_TASK_HOLD) == 0) {
-		proc_free(proc);
+		proc_free(proc, proc->p_proc_ro);
 	}
 }
 
@@ -934,13 +945,13 @@ task_ref_hold_proc_task_struct(task_t task)
 }
 
 void
-task_release_proc_task_struct(task_t task)
+task_release_proc_task_struct(task_t task, proc_ro_t proc_ro)
 {
 	proc_t proc_from_task = task_get_proc_raw(task);
 	uint32_t old_ref = os_atomic_andnot_orig(&proc_from_task->p_refcount, P_REF_TASK_HOLD, relaxed);
 
 	if ((old_ref & P_REF_PROC_HOLD) == 0) {
-		proc_free(proc_from_task);
+		proc_free(proc_from_task, proc_ro);
 	}
 }
 
@@ -1322,7 +1333,7 @@ proc_name(int pid, char * buf, int size)
 	bzero(buf, size);
 
 	if ((p = proc_find(pid)) != PROC_NULL) {
-		strlcpy(buf, &p->p_comm[0], size);
+		strlcpy(buf, &p->p_comm[0], MIN((int)sizeof(p->p_comm), size));
 		proc_rele(p);
 	}
 }
@@ -1407,7 +1418,7 @@ proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype)
 	}
 }
 
-char *
+const char *
 proc_name_address(void *p)
 {
 	return &((proc_t)p)->p_comm[0];
@@ -1419,7 +1430,7 @@ proc_longname_address(void *p)
 	return &((proc_t)p)->p_name[0];
 }
 
-char *
+const char *
 proc_best_name(proc_t p)
 {
 	if (p->p_name[0] != '\0') {
@@ -1429,12 +1440,39 @@ proc_best_name(proc_t p)
 }
 
 void
+proc_best_name_for_pid(int pid, char * buf, int size)
+{
+	proc_t p;
+
+	if (size <= 0) {
+		return;
+	}
+
+	bzero(buf, size);
+
+	if ((p = proc_find(pid)) != PROC_NULL) {
+		if (p->p_name[0] != '\0') {
+			strlcpy(buf, &p->p_name[0], MIN((int)sizeof(p->p_name), size));
+		} else {
+			strlcpy(buf, &p->p_comm[0], MIN((int)sizeof(p->p_comm), size));
+		}
+		proc_rele(p);
+	}
+}
+
+void
 proc_selfname(char * buf, int  size)
 {
 	proc_t p;
 
+	if (size <= 0) {
+		return;
+	}
+
+	bzero(buf, size);
+
 	if ((p = current_proc()) != (proc_t)0) {
-		strlcpy(buf, &p->p_name[0], size);
+		strlcpy(buf, &p->p_name[0], MIN((int)sizeof(p->p_name), size));
 	}
 }
 
@@ -1842,7 +1880,7 @@ proc_getexecutableuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
 }
 
 void
-proc_getresponsibleuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
+proc_getresponsibleuuid(proc_t p, unsigned char *__counted_by(size)uuidbuf, unsigned long size)
 {
 	if (size >= sizeof(uuid_t)) {
 		memcpy(uuidbuf, p->p_responsible_uuid, sizeof(uuid_t));
@@ -1850,7 +1888,7 @@ proc_getresponsibleuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
 }
 
 void
-proc_setresponsibleuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
+proc_setresponsibleuuid(proc_t p, unsigned char *__counted_by(size)uuidbuf, unsigned long size)
 {
 	if (p != NULL && uuidbuf != NULL && size >= sizeof(uuid_t)) {
 		memcpy(p->p_responsible_uuid, uuidbuf, sizeof(uuid_t));
@@ -3000,7 +3038,25 @@ proc_ignores_node_permissions(proc_t p)
 bool
 proc_skip_mtime_update(proc_t p)
 {
-	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE;
+	struct uthread *ut = NULL;
+
+	/*
+	 * We only check the thread's policy if the current proc matches the given
+	 * proc.
+	 */
+	if (current_proc() == p) {
+		ut = get_bsdthread_info(current_thread());
+	}
+
+	if (ut && (os_atomic_load(&ut->uu_flag, relaxed) & UT_SKIP_MTIME_UPDATE)) {
+		return true;
+	}
+
+	if (p && (os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_SKIP_MTIME_UPDATE)) {
+		return true;
+	}
+
+	return false;
 }
 
 bool
@@ -3019,15 +3075,6 @@ bool
 proc_use_alternative_symlink_ea(proc_t p)
 {
 	return os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_ALTLINK;
-}
-
-bool
-proc_allow_nocache_write_fs_blksize(proc_t p)
-{
-	struct uthread *ut = get_bsdthread_info(current_thread());
-
-	return (ut && (ut->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES)) ||
-	       os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE;
 }
 
 bool
@@ -3057,6 +3104,9 @@ proc_core_name(const char *format, const char * name, uid_t uid, pid_t pid, char
 	char id_buf[sizeof(OS_STRINGIFY(INT32_MAX))];          /* Buffer for pid/uid -- max 4B */
 	_Static_assert(sizeof(id_buf) == 11, "size mismatch");
 	char timestamp_buf[sizeof(OS_STRINGIFY(UINT64_MAX))];  /* Buffer for timestamp, including null terminator */
+	clock_sec_t secs = 0;
+	_Static_assert(sizeof(clock_sec_t) <= sizeof(uint64_t), "size mismatch");
+	clock_usec_t microsecs = 0;
 	size_t i, l, n;
 
 	if (cf_name == NULL) {
@@ -3082,8 +3132,13 @@ proc_core_name(const char *format, const char * name, uid_t uid, pid_t pid, char
 				snprintf(id_buf, sizeof(id_buf), "%u", uid);
 				appendstr = id_buf;
 				break;
-			case 'T':       /* timestamp */
+			case 'T':       /* MCT timestamp */
 				snprintf(timestamp_buf, sizeof(timestamp_buf), "%llu", mach_continuous_time());
+				appendstr = timestamp_buf;
+				break;
+			case 't':       /* Unix timestamp */
+				clock_gettimeofday(&secs, &microsecs);
+				snprintf(timestamp_buf, sizeof(timestamp_buf), "%lu", secs);
 				appendstr = timestamp_buf;
 				break;
 			case '\0': /* format string ended in % symbol */
@@ -4506,31 +4561,34 @@ proc_pcontrol_null(__unused proc_t p, __unused void *arg)
 
 #define NO_PAGING_SPACE_DEBUG   0
 
-extern uint64_t vm_compressor_pages_compressed(void);
-
-struct timeval  last_no_space_action = {.tv_sec = 0, .tv_usec = 0};
+uint64_t last_no_space_action_ts = 0;
+TUNABLE(uint64_t, no_paging_space_action_throttle_delay_ns, "no_paging_space_action_throttle_delay_ns", 5 * NSEC_PER_SEC);
 
 #define MB_SIZE (1024 * 1024ULL)
 boolean_t       memorystatus_kill_on_VM_compressor_space_shortage(boolean_t);
 
 extern int32_t  max_kill_priority;
 
+
 int
 no_paging_space_action()
 {
 	proc_t          p;
 	struct no_paging_space nps;
-	struct timeval  now;
+	uint64_t now;
 	os_reason_t kill_reason;
 
 	/*
 	 * Throttle how often we come through here.  Once every 5 seconds should be plenty.
 	 */
-	microtime(&now);
-
-	if (now.tv_sec <= last_no_space_action.tv_sec + 5) {
+	now = mach_absolute_time();
+	uint64_t delta_since_last_no_space_ns;
+	absolutetime_to_nanoseconds(now - last_no_space_action_ts, &delta_since_last_no_space_ns);
+	if (delta_since_last_no_space_ns <= no_paging_space_action_throttle_delay_ns) {
 		return 0;
 	}
+
+	printf("low swap: triggering no paging space action\n");
 
 	/*
 	 * Examine all processes and find the biggest (biggest is based on the number of pages this
@@ -4566,7 +4624,7 @@ no_paging_space_action()
 				 * in case the proc exited and the pid got reused while
 				 * we were finishing the proc_iterate and getting to this point
 				 */
-				last_no_space_action = now;
+				last_no_space_action_ts = now;
 
 				printf("low swap: killing largest compressed process with pid %d (%s) and size %llu MB\n", proc_getpid(p), p->p_comm, (nps.npcs_max_size / MB_SIZE));
 				kill_reason = os_reason_create(OS_REASON_JETSAM, JETSAM_REASON_LOWSWAP);
@@ -4586,7 +4644,7 @@ no_paging_space_action()
 	 * So we will invoke the memorystatus thread to go ahead and kill something.
 	 */
 	if (memorystatus_get_proccnt_upto_priority(max_kill_priority) > 0) {
-		last_no_space_action = now;
+		last_no_space_action_ts = now;
 		/*
 		 * TODO(jason): This is only mac OS right now, but we'll need
 		 * something like this on iPad...
@@ -4608,7 +4666,7 @@ no_paging_space_action()
 				 * in case the proc exited and the pid got reused while
 				 * we were finishing the proc_iterate and getting to this point
 				 */
-				last_no_space_action = now;
+				last_no_space_action_ts = now;
 
 				proc_dopcontrol(p);
 
@@ -4620,7 +4678,7 @@ no_paging_space_action()
 			proc_rele(p);
 		}
 	}
-	last_no_space_action = now;
+	last_no_space_action_ts = now;
 
 	printf("low swap: unable to find any eligible processes to take action on\n");
 
@@ -4664,7 +4722,6 @@ out:
 }
 
 #if VM_SCAN_FOR_SHADOW_CHAIN
-extern int vm_map_shadow_max(vm_map_t map);
 int proc_shadow_max(void);
 int
 proc_shadow_max(void)
@@ -4758,6 +4815,21 @@ proc_get_syscall_filter_mask_size(int which)
 		return mach_kobj_count;
 	default:
 		return 0;
+	}
+}
+
+unsigned char *
+proc_get_syscall_filter_mask(proc_t p, int which)
+{
+	switch (which) {
+	case SYSCALL_MASK_UNIX:
+		return proc_syscall_filter_mask(p);
+	case SYSCALL_MASK_MACH:
+		return mac_task_get_mach_filter_mask(proc_task(p));
+	case SYSCALL_MASK_KOBJ:
+		return mac_task_get_kobj_filter_mask(proc_task(p));
+	default:
+		return NULL;
 	}
 }
 
@@ -5093,3 +5165,1265 @@ proc_ro_task(proc_ro_t pr)
 {
 	return pr->pr_task;
 }
+
+/*
+ * pid_for_task
+ *
+ * Find the BSD process ID for the Mach task associated with the given Mach port
+ * name
+ *
+ * Parameters:	args		User argument descriptor (see below)
+ *
+ * Indirect parameters:	args->t		Mach port name
+ *                      args->pid	Process ID (returned value; see below)
+ *
+ * Returns:	KERL_SUCCESS	Success
+ *              KERN_FAILURE	Not success
+ *
+ * Implicit returns: args->pid		Process ID
+ *
+ */
+kern_return_t
+pid_for_task(
+	struct pid_for_task_args *args)
+{
+	mach_port_name_t        t = args->t;
+	user_addr_t             pid_addr  = args->pid;
+	proc_t p;
+	task_t          t1;
+	int     pid = -1;
+	kern_return_t   err = KERN_SUCCESS;
+
+	AUDIT_MACH_SYSCALL_ENTER(AUE_PIDFORTASK);
+	AUDIT_ARG(mach_port1, t);
+
+	t1 = port_name_to_task_name(t);
+
+	if (t1 == TASK_NULL) {
+		err = KERN_FAILURE;
+		goto pftout;
+	} else {
+		p = get_bsdtask_info(t1);
+		if (p) {
+			pid  = proc_pid(p);
+			err = KERN_SUCCESS;
+		} else if (task_is_a_corpse(t1)) {
+			pid = task_pid(t1);
+			err = KERN_SUCCESS;
+		} else {
+			err = KERN_FAILURE;
+		}
+	}
+	task_deallocate(t1);
+pftout:
+	AUDIT_ARG(pid, pid);
+	(void) copyout((char *) &pid, pid_addr, sizeof(int));
+	AUDIT_MACH_SYSCALL_EXIT(err);
+	return err;
+}
+
+/*
+ *
+ * tfp_policy = KERN_TFP_POLICY_DENY; Deny Mode: None allowed except for self
+ * tfp_policy = KERN_TFP_POLICY_DEFAULT; default mode: all posix checks and upcall via task port for authentication
+ *
+ */
+static  int tfp_policy = KERN_TFP_POLICY_DEFAULT;
+
+static int
+sysctl_settfp_policy(__unused struct sysctl_oid *oidp, void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+	int error = 0;
+	int new_value;
+
+	error = SYSCTL_OUT(req, arg1, sizeof(int));
+	if (error || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+
+	if (!kauth_cred_issuser(kauth_cred_get())) {
+		return EPERM;
+	}
+
+	if ((error = SYSCTL_IN(req, &new_value, sizeof(int)))) {
+		goto out;
+	}
+	if ((new_value == KERN_TFP_POLICY_DENY)
+	    || (new_value == KERN_TFP_POLICY_DEFAULT)) {
+		tfp_policy = new_value;
+	} else {
+		error = EINVAL;
+	}
+out:
+	return error;
+}
+
+SYSCTL_NODE(_kern, KERN_TFP, tfp, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "tfp");
+SYSCTL_PROC(_kern_tfp, KERN_TFP_POLICY, policy, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tfp_policy, sizeof(uint32_t), &sysctl_settfp_policy, "I", "policy");
+
+/*
+ *	Routine:	task_for_pid_posix_check
+ *	Purpose:
+ *			Verify that the current process should be allowed to
+ *			get the target process's task port. This is only
+ *			permitted if:
+ *			- The current process is root
+ *			OR all of the following are true:
+ *			- The target process's real, effective, and saved uids
+ *			  are the same as the current proc's euid,
+ *			- The target process's group set is a subset of the
+ *			  calling process's group set, and
+ *			- The target process hasn't switched credentials.
+ *
+ *	Returns:	TRUE: permitted
+ *			FALSE: denied
+ */
+static int
+task_for_pid_posix_check(proc_t target)
+{
+	kauth_cred_t targetcred, mycred;
+	bool checkcredentials;
+	uid_t myuid;
+	int allowed;
+
+	/* No task_for_pid on bad targets */
+	if (target->p_stat == SZOMB) {
+		return FALSE;
+	}
+
+	mycred = kauth_cred_get();
+	myuid = kauth_cred_getuid(mycred);
+
+	/* If we're running as root, the check passes */
+	if (kauth_cred_issuser(mycred)) {
+		return TRUE;
+	}
+
+	/* We're allowed to get our own task port */
+	if (target == current_proc()) {
+		return TRUE;
+	}
+
+	/*
+	 * Under DENY, only root can get another proc's task port,
+	 * so no more checks are needed.
+	 */
+	if (tfp_policy == KERN_TFP_POLICY_DENY) {
+		return FALSE;
+	}
+
+	targetcred = kauth_cred_proc_ref(target);
+	allowed = TRUE;
+
+	checkcredentials = !proc_is_third_party_debuggable_driver(target);
+
+	if (checkcredentials) {
+		/* Do target's ruid, euid, and saved uid match my euid? */
+		if ((kauth_cred_getuid(targetcred) != myuid) ||
+		    (kauth_cred_getruid(targetcred) != myuid) ||
+		    (kauth_cred_getsvuid(targetcred) != myuid)) {
+			allowed = FALSE;
+			goto out;
+		}
+		/* Are target's groups a subset of my groups? */
+		if (kauth_cred_gid_subset(targetcred, mycred, &allowed) ||
+		    allowed == 0) {
+			allowed = FALSE;
+			goto out;
+		}
+	}
+
+	/* Has target switched credentials? */
+	if (target->p_flag & P_SUGID) {
+		allowed = FALSE;
+		goto out;
+	}
+
+out:
+	kauth_cred_unref(&targetcred);
+	return allowed;
+}
+
+/*
+ *	__KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__
+ *
+ *	Description:	Waits for the user space daemon to respond to the request
+ *			we made. Function declared non inline to be visible in
+ *			stackshots and spindumps as well as debugging.
+ */
+static __attribute__((noinline)) int
+__KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(
+	mach_port_t task_access_port, int32_t calling_pid, uint32_t calling_gid, int32_t target_pid, mach_task_flavor_t flavor)
+{
+	return check_task_access_with_flavor(task_access_port, calling_pid, calling_gid, target_pid, flavor);
+}
+
+/*
+ *	Routine:	task_for_pid
+ *	Purpose:
+ *		Get the task port for another "process", named by its
+ *		process ID on the same host as "target_task".
+ *
+ *		Only permitted to privileged processes, or processes
+ *		with the same user ID.
+ *
+ *		Note: if pid == 0, an error is return no matter who is calling.
+ *
+ * XXX This should be a BSD system call, not a Mach trap!!!
+ */
+kern_return_t
+task_for_pid(
+	struct task_for_pid_args *args)
+{
+	mach_port_name_t        target_tport = args->target_tport;
+	int                     pid = args->pid;
+	user_addr_t             task_addr = args->t;
+	proc_t                  p = PROC_NULL;
+	task_t                  t1 = TASK_NULL;
+	task_t                  task = TASK_NULL;
+	mach_port_name_t        tret = MACH_PORT_NULL;
+	ipc_port_t              tfpport = MACH_PORT_NULL;
+	void                    * sright = NULL;
+	int                     error = 0;
+	boolean_t               is_current_proc = FALSE;
+	struct proc_ident       pident = {0};
+
+	AUDIT_MACH_SYSCALL_ENTER(AUE_TASKFORPID);
+	AUDIT_ARG(pid, pid);
+	AUDIT_ARG(mach_port1, target_tport);
+
+	/* Always check if pid == 0 */
+	if (pid == 0) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
+		return KERN_FAILURE;
+	}
+
+	t1 = port_name_to_task(target_tport);
+	if (t1 == TASK_NULL) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
+		return KERN_FAILURE;
+	}
+
+
+	p = proc_find(pid);
+	if (p == PROC_NULL) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+	pident = proc_ident(p);
+	is_current_proc = (p == current_proc());
+
+#if CONFIG_AUDIT
+	AUDIT_ARG(process, p);
+#endif
+
+	if (!(task_for_pid_posix_check(p))) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+
+	if (proc_task(p) == TASK_NULL) {
+		error = KERN_SUCCESS;
+		goto tfpout;
+	}
+
+	/*
+	 * Grab a task reference and drop the proc reference as the proc ref
+	 * shouldn't be held accross upcalls.
+	 */
+	task = proc_task(p);
+	task_reference(task);
+
+	proc_rele(p);
+	p = PROC_NULL;
+
+	/* IPC is not active on the task until after `exec_resettextvp` has been called.
+	 * We don't want to call into MAC hooks until we know that this has occured, otherwise
+	 * AMFI and others will read uninitialized fields from the csproc
+	 */
+	if (!task_is_ipc_active(task)) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+
+#if CONFIG_MACF
+	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_CONTROL);
+	if (error) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+#endif
+
+	/* If we aren't root and target's task access port is set... */
+	if (!kauth_cred_issuser(kauth_cred_get()) &&
+	    !is_current_proc &&
+	    (task_get_task_access_port(task, &tfpport) == 0) &&
+	    (tfpport != IPC_PORT_NULL)) {
+		if (tfpport == IPC_PORT_DEAD) {
+			error = KERN_PROTECTION_FAILURE;
+			goto tfpout;
+		}
+
+		/* Call up to the task access server */
+		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
+
+		if (error != MACH_MSG_SUCCESS) {
+			if (error == MACH_RCV_INTERRUPTED) {
+				error = KERN_ABORTED;
+			} else {
+				error = KERN_FAILURE;
+			}
+			goto tfpout;
+		}
+	}
+
+	/* Grant task port access */
+	extmod_statistics_incr_task_for_pid(task);
+
+	/* this reference will be consumed during conversion */
+	task_reference(task);
+	if (task == current_task()) {
+		/* return pinned self if current_task() so equality check with mach_task_self_ passes */
+		sright = (void *)convert_task_to_port_pinned(task);
+	} else {
+		sright = (void *)convert_task_to_port(task);
+	}
+	/* extra task ref consumed */
+
+	/*
+	 * Check if the task has been corpsified. We must do so after conversion
+	 * since we don't hold locks and may have grabbed a corpse control port
+	 * above which will prevent no-senders notification delivery.
+	 */
+	if (task_is_a_corpse(task)) {
+		ipc_port_release_send(sright);
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+
+	tret = ipc_port_copyout_send(
+		sright,
+		get_task_ipcspace(current_task()));
+
+	error = KERN_SUCCESS;
+
+tfpout:
+	task_deallocate(t1);
+	AUDIT_ARG(mach_port2, tret);
+	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+	if (task != TASK_NULL) {
+		task_deallocate(task);
+	}
+	if (p != PROC_NULL) {
+		proc_rele(p);
+	}
+	AUDIT_MACH_SYSCALL_EXIT(error);
+	return error;
+}
+
+/*
+ *	Routine:	task_name_for_pid
+ *	Purpose:
+ *		Get the task name port for another "process", named by its
+ *		process ID on the same host as "target_task".
+ *
+ *		Only permitted to privileged processes, or processes
+ *		with the same user ID.
+ *
+ * XXX This should be a BSD system call, not a Mach trap!!!
+ */
+
+kern_return_t
+task_name_for_pid(
+	struct task_name_for_pid_args *args)
+{
+	mach_port_name_t        target_tport = args->target_tport;
+	int                     pid = args->pid;
+	user_addr_t             task_addr = args->t;
+	proc_t                  p = PROC_NULL;
+	task_t                  t1 = TASK_NULL;
+	mach_port_name_t        tret = MACH_PORT_NULL;
+	void * sright;
+	int error = 0, refheld = 0;
+	kauth_cred_t target_cred;
+
+	AUDIT_MACH_SYSCALL_ENTER(AUE_TASKNAMEFORPID);
+	AUDIT_ARG(pid, pid);
+	AUDIT_ARG(mach_port1, target_tport);
+
+	t1 = port_name_to_task(target_tport);
+	if (t1 == TASK_NULL) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
+		return KERN_FAILURE;
+	}
+
+	p = proc_find(pid);
+	if (p != PROC_NULL) {
+		AUDIT_ARG(process, p);
+		target_cred = kauth_cred_proc_ref(p);
+		refheld = 1;
+
+		if ((p->p_stat != SZOMB)
+		    && ((current_proc() == p)
+		    || kauth_cred_issuser(kauth_cred_get())
+		    || ((kauth_cred_getuid(target_cred) == kauth_cred_getuid(kauth_cred_get())) &&
+		    ((kauth_cred_getruid(target_cred) == kauth_getruid())))
+		    || IOCurrentTaskHasEntitlement("com.apple.system-task-ports.name.safe")
+		    )) {
+			if (proc_task(p) != TASK_NULL) {
+				struct proc_ident pident = proc_ident(p);
+
+				task_t task = proc_task(p);
+
+				task_reference(task);
+				proc_rele(p);
+				p = PROC_NULL;
+#if CONFIG_MACF
+				error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_NAME);
+				if (error) {
+					task_deallocate(task);
+					goto noperm;
+				}
+#endif
+				sright = (void *)convert_task_name_to_port(task);
+				task = NULL;
+				tret = ipc_port_copyout_send(sright,
+				    get_task_ipcspace(current_task()));
+			} else {
+				tret  = MACH_PORT_NULL;
+			}
+
+			AUDIT_ARG(mach_port2, tret);
+			(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+			task_deallocate(t1);
+			error = KERN_SUCCESS;
+			goto tnfpout;
+		}
+	}
+
+#if CONFIG_MACF
+noperm:
+#endif
+	task_deallocate(t1);
+	tret = MACH_PORT_NULL;
+	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+	error = KERN_FAILURE;
+tnfpout:
+	if (refheld != 0) {
+		kauth_cred_unref(&target_cred);
+	}
+	if (p != PROC_NULL) {
+		proc_rele(p);
+	}
+	AUDIT_MACH_SYSCALL_EXIT(error);
+	return error;
+}
+
+/*
+ *	Routine:	task_inspect_for_pid
+ *	Purpose:
+ *		Get the task inspect port for another "process", named by its
+ *		process ID on the same host as "target_task".
+ */
+int
+task_inspect_for_pid(struct proc *p __unused, struct task_inspect_for_pid_args *args, int *ret)
+{
+	mach_port_name_t        target_tport = args->target_tport;
+	int                     pid = args->pid;
+	user_addr_t             task_addr = args->t;
+
+	proc_t                  proc = PROC_NULL;
+	task_t                  t1 = TASK_NULL;
+	task_inspect_t          task_insp = TASK_INSPECT_NULL;
+	mach_port_name_t        tret = MACH_PORT_NULL;
+	ipc_port_t              tfpport = MACH_PORT_NULL;
+	int                     error = 0;
+	void                    *sright = NULL;
+	boolean_t               is_current_proc = FALSE;
+	struct proc_ident       pident = {0};
+
+	/* Disallow inspect port for kernel_task */
+	if (pid == 0) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		return EPERM;
+	}
+
+	t1 = port_name_to_task(target_tport);
+	if (t1 == TASK_NULL) {
+		(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+		return EINVAL;
+	}
+
+	proc = proc_find(pid);
+	if (proc == PROC_NULL) {
+		error = ESRCH;
+		goto tifpout;
+	}
+	pident = proc_ident(proc);
+	is_current_proc = (proc == current_proc());
+
+	if (!(task_for_pid_posix_check(proc))) {
+		error = EPERM;
+		goto tifpout;
+	}
+
+	task_insp = proc_task(proc);
+	if (task_insp == TASK_INSPECT_NULL) {
+		goto tifpout;
+	}
+
+	/*
+	 * Grab a task reference and drop the proc reference before making any upcalls.
+	 */
+	task_reference(task_insp);
+
+	proc_rele(proc);
+	proc = PROC_NULL;
+
+#if CONFIG_MACF
+	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_INSPECT);
+	if (error) {
+		error = EPERM;
+		goto tifpout;
+	}
+#endif
+
+	/* If we aren't root and target's task access port is set... */
+	if (!kauth_cred_issuser(kauth_cred_get()) &&
+	    !is_current_proc &&
+	    (task_get_task_access_port(task_insp, &tfpport) == 0) &&
+	    (tfpport != IPC_PORT_NULL)) {
+		if (tfpport == IPC_PORT_DEAD) {
+			error = EACCES;
+			goto tifpout;
+		}
+
+
+		/* Call up to the task access server */
+		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_INSPECT);
+
+		if (error != MACH_MSG_SUCCESS) {
+			if (error == MACH_RCV_INTERRUPTED) {
+				error = EINTR;
+			} else {
+				error = EPERM;
+			}
+			goto tifpout;
+		}
+	}
+
+	/* Check if the task has been corpsified */
+	if (task_is_a_corpse(task_insp)) {
+		error = EACCES;
+		goto tifpout;
+	}
+
+	/* could be IP_NULL, consumes a ref */
+	sright = (void*) convert_task_inspect_to_port(task_insp);
+	task_insp = TASK_INSPECT_NULL;
+	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
+
+tifpout:
+	task_deallocate(t1);
+	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+	if (proc != PROC_NULL) {
+		proc_rele(proc);
+	}
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+	if (task_insp != TASK_INSPECT_NULL) {
+		task_deallocate(task_insp);
+	}
+
+	*ret = error;
+	return error;
+}
+
+/*
+ *	Routine:	task_read_for_pid
+ *	Purpose:
+ *		Get the task read port for another "process", named by its
+ *		process ID on the same host as "target_task".
+ */
+int
+task_read_for_pid(struct proc *p __unused, struct task_read_for_pid_args *args, int *ret)
+{
+	mach_port_name_t        target_tport = args->target_tport;
+	int                     pid = args->pid;
+	user_addr_t             task_addr = args->t;
+
+	proc_t                  proc = PROC_NULL;
+	task_t                  t1 = TASK_NULL;
+	task_read_t             task_read = TASK_READ_NULL;
+	mach_port_name_t        tret = MACH_PORT_NULL;
+	ipc_port_t              tfpport = MACH_PORT_NULL;
+	int                     error = 0;
+	void                    *sright = NULL;
+	boolean_t               is_current_proc = FALSE;
+	struct proc_ident       pident = {0};
+
+	/* Disallow read port for kernel_task */
+	if (pid == 0) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		return EPERM;
+	}
+
+	t1 = port_name_to_task(target_tport);
+	if (t1 == TASK_NULL) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		return EINVAL;
+	}
+
+	proc = proc_find(pid);
+	if (proc == PROC_NULL) {
+		error = ESRCH;
+		goto trfpout;
+	}
+	pident = proc_ident(proc);
+	is_current_proc = (proc == current_proc());
+
+	if (!(task_for_pid_posix_check(proc))) {
+		error = EPERM;
+		goto trfpout;
+	}
+
+	task_read = proc_task(proc);
+	if (task_read == TASK_INSPECT_NULL) {
+		goto trfpout;
+	}
+
+	/*
+	 * Grab a task reference and drop the proc reference before making any upcalls.
+	 */
+	task_reference(task_read);
+
+	proc_rele(proc);
+	proc = PROC_NULL;
+
+#if CONFIG_MACF
+	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_READ);
+	if (error) {
+		error = EPERM;
+		goto trfpout;
+	}
+#endif
+
+	/* If we aren't root and target's task access port is set... */
+	if (!kauth_cred_issuser(kauth_cred_get()) &&
+	    !is_current_proc &&
+	    (task_get_task_access_port(task_read, &tfpport) == 0) &&
+	    (tfpport != IPC_PORT_NULL)) {
+		if (tfpport == IPC_PORT_DEAD) {
+			error = EACCES;
+			goto trfpout;
+		}
+
+
+		/* Call up to the task access server */
+		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_READ);
+
+		if (error != MACH_MSG_SUCCESS) {
+			if (error == MACH_RCV_INTERRUPTED) {
+				error = EINTR;
+			} else {
+				error = EPERM;
+			}
+			goto trfpout;
+		}
+	}
+
+	/* Check if the task has been corpsified */
+	if (task_is_a_corpse(task_read)) {
+		error = EACCES;
+		goto trfpout;
+	}
+
+	/* could be IP_NULL, consumes a ref */
+	sright = (void*) convert_task_read_to_port(task_read);
+	task_read = TASK_READ_NULL;
+	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
+
+trfpout:
+	task_deallocate(t1);
+	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+	if (proc != PROC_NULL) {
+		proc_rele(proc);
+	}
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+	if (task_read != TASK_READ_NULL) {
+		task_deallocate(task_read);
+	}
+
+	*ret = error;
+	return error;
+}
+
+kern_return_t
+pid_suspend(struct proc *p __unused, struct pid_suspend_args *args, int *ret)
+{
+	task_t  target = NULL;
+	proc_t  targetproc = PROC_NULL;
+	int     pid = args->pid;
+	int     error = 0;
+	mach_port_t tfpport = MACH_PORT_NULL;
+
+	if (pid == 0) {
+		error = EPERM;
+		goto out;
+	}
+
+	targetproc = proc_find(pid);
+	if (targetproc == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	if (!task_for_pid_posix_check(targetproc) &&
+	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
+		error = EPERM;
+		goto out;
+	}
+
+#if CONFIG_MACF
+	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_SUSPEND);
+	if (error) {
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+	target = proc_task(targetproc);
+#if XNU_TARGET_OS_OSX
+	if (target != TASK_NULL) {
+		/* If we aren't root and target's task access port is set... */
+		if (!kauth_cred_issuser(kauth_cred_get()) &&
+		    targetproc != current_proc() &&
+		    (task_get_task_access_port(target, &tfpport) == 0) &&
+		    (tfpport != IPC_PORT_NULL)) {
+			if (tfpport == IPC_PORT_DEAD) {
+				error = EACCES;
+				goto out;
+			}
+
+			/* Call up to the task access server */
+			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
+
+			if (error != MACH_MSG_SUCCESS) {
+				if (error == MACH_RCV_INTERRUPTED) {
+					error = EINTR;
+				} else {
+					error = EPERM;
+				}
+				goto out;
+			}
+		}
+	}
+#endif /* XNU_TARGET_OS_OSX */
+
+	task_reference(target);
+	error = task_pidsuspend(target);
+	if (error) {
+		if (error == KERN_INVALID_ARGUMENT) {
+			error = EINVAL;
+		} else {
+			error = EPERM;
+		}
+	}
+#if CONFIG_MEMORYSTATUS
+	else {
+		memorystatus_on_suspend(targetproc);
+	}
+#endif
+
+	task_deallocate(target);
+
+out:
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+
+	if (targetproc != PROC_NULL) {
+		proc_rele(targetproc);
+	}
+	*ret = error;
+	return error;
+}
+
+kern_return_t
+debug_control_port_for_pid(struct debug_control_port_for_pid_args *args)
+{
+	mach_port_name_t        target_tport = args->target_tport;
+	int                     pid = args->pid;
+	user_addr_t             task_addr = args->t;
+	proc_t                  p = PROC_NULL;
+	task_t                  t1 = TASK_NULL;
+	task_t                  task = TASK_NULL;
+	mach_port_name_t        tret = MACH_PORT_NULL;
+	ipc_port_t              tfpport = MACH_PORT_NULL;
+	ipc_port_t              sright = NULL;
+	int                     error = 0;
+	boolean_t               is_current_proc = FALSE;
+	struct proc_ident       pident = {0};
+
+	AUDIT_MACH_SYSCALL_ENTER(AUE_DBGPORTFORPID);
+	AUDIT_ARG(pid, pid);
+	AUDIT_ARG(mach_port1, target_tport);
+
+	/* Always check if pid == 0 */
+	if (pid == 0) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
+		return KERN_FAILURE;
+	}
+
+	t1 = port_name_to_task(target_tport);
+	if (t1 == TASK_NULL) {
+		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
+		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
+		return KERN_FAILURE;
+	}
+
+	p = proc_find(pid);
+	if (p == PROC_NULL) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+	pident = proc_ident(p);
+	is_current_proc = (p == current_proc());
+
+#if CONFIG_AUDIT
+	AUDIT_ARG(process, p);
+#endif
+
+	if (!(task_for_pid_posix_check(p))) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+
+	if (proc_task(p) == TASK_NULL) {
+		error = KERN_SUCCESS;
+		goto tfpout;
+	}
+
+	/*
+	 * Grab a task reference and drop the proc reference before making any upcalls.
+	 */
+	task = proc_task(p);
+	task_reference(task);
+
+	proc_rele(p);
+	p = PROC_NULL;
+
+	if (!IOCurrentTaskHasEntitlement(DEBUG_PORT_ENTITLEMENT)) {
+#if CONFIG_MACF
+		error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_CONTROL);
+		if (error) {
+			error = KERN_FAILURE;
+			goto tfpout;
+		}
+#endif
+
+		/* If we aren't root and target's task access port is set... */
+		if (!kauth_cred_issuser(kauth_cred_get()) &&
+		    !is_current_proc &&
+		    (task_get_task_access_port(task, &tfpport) == 0) &&
+		    (tfpport != IPC_PORT_NULL)) {
+			if (tfpport == IPC_PORT_DEAD) {
+				error = KERN_PROTECTION_FAILURE;
+				goto tfpout;
+			}
+
+
+			/* Call up to the task access server */
+			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
+
+			if (error != MACH_MSG_SUCCESS) {
+				if (error == MACH_RCV_INTERRUPTED) {
+					error = KERN_ABORTED;
+				} else {
+					error = KERN_FAILURE;
+				}
+				goto tfpout;
+			}
+		}
+	}
+
+	/* Check if the task has been corpsified */
+	if (task_is_a_corpse(task)) {
+		error = KERN_FAILURE;
+		goto tfpout;
+	}
+
+	error = task_get_debug_control_port(task, &sright);
+	if (error != KERN_SUCCESS) {
+		goto tfpout;
+	}
+
+	tret = ipc_port_copyout_send(
+		sright,
+		get_task_ipcspace(current_task()));
+
+	error = KERN_SUCCESS;
+
+tfpout:
+	task_deallocate(t1);
+	AUDIT_ARG(mach_port2, tret);
+	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
+
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+	if (task != TASK_NULL) {
+		task_deallocate(task);
+	}
+	if (p != PROC_NULL) {
+		proc_rele(p);
+	}
+	AUDIT_MACH_SYSCALL_EXIT(error);
+	return error;
+}
+
+kern_return_t
+pid_resume(struct proc *p __unused, struct pid_resume_args *args, int *ret)
+{
+	task_t  target = NULL;
+	proc_t  targetproc = PROC_NULL;
+	int     pid = args->pid;
+	int     error = 0;
+	mach_port_t tfpport = MACH_PORT_NULL;
+
+	if (pid == 0) {
+		error = EPERM;
+		goto out;
+	}
+
+	targetproc = proc_find(pid);
+	if (targetproc == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	if (!task_for_pid_posix_check(targetproc) &&
+	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
+		error = EPERM;
+		goto out;
+	}
+
+#if CONFIG_MACF
+	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_RESUME);
+	if (error) {
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+	target = proc_task(targetproc);
+#if XNU_TARGET_OS_OSX
+	if (target != TASK_NULL) {
+		/* If we aren't root and target's task access port is set... */
+		if (!kauth_cred_issuser(kauth_cred_get()) &&
+		    targetproc != current_proc() &&
+		    (task_get_task_access_port(target, &tfpport) == 0) &&
+		    (tfpport != IPC_PORT_NULL)) {
+			if (tfpport == IPC_PORT_DEAD) {
+				error = EACCES;
+				goto out;
+			}
+
+			/* Call up to the task access server */
+			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
+			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
+
+			if (error != MACH_MSG_SUCCESS) {
+				if (error == MACH_RCV_INTERRUPTED) {
+					error = EINTR;
+				} else {
+					error = EPERM;
+				}
+				goto out;
+			}
+		}
+	}
+#endif /* XNU_TARGET_OS_OSX */
+
+#if !XNU_TARGET_OS_OSX
+#if SOCKETS
+	resume_proc_sockets(targetproc);
+#endif /* SOCKETS */
+#endif /* !XNU_TARGET_OS_OSX */
+
+	task_reference(target);
+
+#if CONFIG_MEMORYSTATUS
+	memorystatus_on_resume(targetproc);
+#endif
+
+	error = task_pidresume(target);
+	if (error) {
+		if (error == KERN_INVALID_ARGUMENT) {
+			error = EINVAL;
+		} else {
+			if (error == KERN_MEMORY_ERROR) {
+				psignal(targetproc, SIGKILL);
+				error = EIO;
+			} else {
+				error = EPERM;
+			}
+		}
+	}
+
+	task_deallocate(target);
+
+out:
+	if (tfpport != IPC_PORT_NULL) {
+		ipc_port_release_send(tfpport);
+	}
+
+	if (targetproc != PROC_NULL) {
+		proc_rele(targetproc);
+	}
+
+	*ret = error;
+	return error;
+}
+
+#if !XNU_TARGET_OS_OSX
+/*
+ * Freeze the specified process (provided in args->pid), or find and freeze a PID.
+ * When a process is specified, this call is blocking, otherwise we wake up the
+ * freezer thread and do not block on a process being frozen.
+ */
+int
+pid_hibernate(struct proc *p __unused, struct pid_hibernate_args *args, int *ret)
+{
+	int     error = 0;
+	proc_t  targetproc = PROC_NULL;
+	int     pid = args->pid;
+
+	/*
+	 * TODO: Create a different interface for compressor sweeps,
+	 * gated by an entitlement: rdar://116490432
+	 */
+	if (pid == -2) {
+		error = mach_to_bsd_errno(vm_pageout_anonymous_pages());
+	}
+
+#ifndef CONFIG_FREEZE
+	if (pid != -2) {
+		os_log(OS_LOG_DEFAULT, "%s: pid %d not supported when freezer is disabled.",
+		    __func__, pid);
+		error = ENOTSUP;
+	}
+#else
+
+	/*
+	 * If a pid has been provided, we obtain the process handle and call task_for_pid_posix_check().
+	 */
+
+	if (pid >= 0) {
+		targetproc = proc_find(pid);
+
+		if (targetproc == PROC_NULL) {
+			error = ESRCH;
+			goto out;
+		}
+
+		if (!task_for_pid_posix_check(targetproc)) {
+			error = EPERM;
+			goto out;
+		}
+	}
+
+#if CONFIG_MACF
+	//Note that targetproc may be null
+	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_HIBERNATE);
+	if (error) {
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+	if (pid == -1) {
+		memorystatus_on_inactivity(targetproc);
+	} else if (pid >= 0) {
+		error = memorystatus_freeze_process_sync(targetproc);
+	}
+	/* We already handled the pid == -2 case */
+
+out:
+
+#endif /* CONFIG_FREEZE */
+
+	if (targetproc != PROC_NULL) {
+		proc_rele(targetproc);
+	}
+	*ret = error;
+	return error;
+}
+#endif /* !XNU_TARGET_OS_OSX */
+
+#if SOCKETS
+
+#if SKYWALK
+/*
+ * Since we make multiple passes across the fileproc array, record the
+ * first MAX_CHANNELS channel handles found.  MAX_CHANNELS should be
+ * large enough to accomodate most, if not all cases.  If we find more,
+ * we'll go to the slow path during second pass.
+ */
+#define MAX_CHANNELS    8       /* should be more than enough */
+#endif /* SKYWALK */
+
+static int
+networking_defunct_callout(proc_t p, void *arg)
+{
+	struct pid_shutdown_sockets_args *args = arg;
+	int pid = args->pid;
+	int level = args->level;
+	struct fileproc *fp;
+#if SKYWALK
+	int i;
+	int channel_count = 0;
+	struct kern_channel *channel_array[MAX_CHANNELS];
+
+	bzero(&channel_array, sizeof(channel_array));
+
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
+
+	proc_fdlock(p);
+
+	fdt_foreach(fp, p) {
+		struct fileglob *fg = fp->fp_glob;
+
+		switch (FILEGLOB_DTYPE(fg)) {
+		case DTYPE_SOCKET: {
+			struct socket *so = (struct socket *)fg_get_data(fg);
+			if (proc_getpid(p) == pid || so->last_pid == pid ||
+			    ((so->so_flags & SOF_DELEGATED) && so->e_pid == pid)) {
+				/* Call networking stack with socket and level */
+				(void)socket_defunct(p, so, level);
+			}
+			break;
+		}
+#if NECP
+		case DTYPE_NETPOLICY:
+			/* first pass: defunct necp and get stats for ntstat */
+			if (proc_getpid(p) == pid) {
+				necp_fd_defunct(p,
+				    (struct necp_fd_data *)fg_get_data(fg));
+			}
+			break;
+#endif /* NECP */
+#if SKYWALK
+		case DTYPE_CHANNEL:
+			/* first pass: get channels and total count */
+			if (proc_getpid(p) == pid) {
+				if (channel_count < MAX_CHANNELS) {
+					channel_array[channel_count] =
+					    (struct kern_channel *)fg_get_data(fg);
+				}
+				++channel_count;
+			}
+			break;
+#endif /* SKYWALK */
+		default:
+			break;
+		}
+	}
+
+#if SKYWALK
+	/*
+	 * Second pass: defunct channels/flows (after NECP).  Handle
+	 * the common case of up to MAX_CHANNELS count with fast path,
+	 * and traverse the fileproc array again only if we exceed it.
+	 */
+	if (channel_count != 0 && channel_count <= MAX_CHANNELS) {
+		ASSERT(proc_getpid(p) == pid);
+		for (i = 0; i < channel_count; i++) {
+			ASSERT(channel_array[i] != NULL);
+			kern_channel_defunct(p, channel_array[i]);
+		}
+	} else if (channel_count != 0) {
+		ASSERT(proc_getpid(p) == pid);
+		fdt_foreach(fp, p) {
+			struct fileglob *fg = fp->fp_glob;
+
+			if (FILEGLOB_DTYPE(fg) == DTYPE_CHANNEL) {
+				kern_channel_defunct(p,
+				    (struct kern_channel *)fg_get_data(fg));
+			}
+		}
+	}
+
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
+
+	proc_fdunlock(p);
+
+	return PROC_RETURNED;
+}
+
+int
+pid_shutdown_sockets(struct proc *p __unused, struct pid_shutdown_sockets_args *args, int *ret)
+{
+	int                             error = 0;
+	proc_t                          targetproc = PROC_NULL;
+	int                             pid = args->pid;
+	int                             level = args->level;
+
+	if (level != SHUTDOWN_SOCKET_LEVEL_DISCONNECT_SVC &&
+	    level != SHUTDOWN_SOCKET_LEVEL_DISCONNECT_ALL) {
+		error = EINVAL;
+		goto out;
+	}
+
+	targetproc = proc_find(pid);
+	if (targetproc == PROC_NULL) {
+		error = ESRCH;
+		goto out;
+	}
+
+	if (!task_for_pid_posix_check(targetproc) &&
+	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
+		error = EPERM;
+		goto out;
+	}
+
+#if CONFIG_MACF
+	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_SHUTDOWN_SOCKETS);
+	if (error) {
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+	proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS,
+	    networking_defunct_callout, args, NULL, NULL);
+
+out:
+	if (targetproc != PROC_NULL) {
+		proc_rele(targetproc);
+	}
+	*ret = error;
+	return error;
+}
+
+#endif /* SOCKETS */

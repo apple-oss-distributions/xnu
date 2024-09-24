@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -180,6 +180,8 @@ enum vtagtype   {
 #define IO_SWAP_DISPATCH                0x200000        /* I/O was originated from the swap layer */
 #define IO_SKIP_ENCRYPTION              0x400000        /* Skips en(de)cryption on the IO. Must be initiated from kernel */
 #define IO_EVTONLY                      0x800000        /* the i/o is being done on an fd that's marked O_EVTONLY */
+#define IO_NOCACHE_SYSSPACE             0x1000000       /* same as IO_NOCACHE but also for UIO_SYSSPACE */
+#define IO_NOCACHE_SWRITE               0x2000000       /* same as IO_NOCACHE but also lossens retrictions for nocache writes */
 
 /*
  * Component Name: this structure describes the pathname
@@ -860,6 +862,7 @@ struct vnodeop_desc;
 
 extern  int desiredvnodes;              /* number of vnodes desired */
 
+extern struct smr apfs_smr; /* SMR domain for apfs kext, equivalent to _vfs_smr */
 
 /*
  * This structure is used to configure the new vnodeops vector.
@@ -1699,9 +1702,17 @@ int vnode_getwithvid_drainok(vnode_t, uint32_t);
  */
 int     vnode_getwithref(vnode_t vp);
 
-#ifdef BSD_KERNEL_PRIVATE
+#ifdef KERNEL_PRIVATE
+/*!
+ *  @function vnode_getwithref_noblock
+ *  @abstract Increase the iocount on a vnode on which a usecount (persistent reference) is held.
+ *  @discussion Similar to vnode_getwithref() but returns ENOENT instead of
+ *  blocking when the vnode is being reclaimed.
+ *  @return 0 for success, ENOENT if the vnode is dead, in the process of being
+ *  reclaimed, or has been recycled and reused.
+ */
 int vnode_getwithref_noblock(vnode_t vp);
-#endif /* BSD_KERNEL_PRIVATE */
+#endif /* KERNEL_PRIVATE */
 
 /*!
  *  @function vnode_put
@@ -2101,6 +2112,7 @@ int     vfs_get_notify_attributes(struct vnode_attr *vap);
 #define VNODE_LOOKUP_NOFOLLOW           0x01
 #define VNODE_LOOKUP_NOCROSSMOUNT       0x02
 #define VNODE_LOOKUP_CROSSMOUNTNOWAIT   0x04
+#define VNODE_LOOKUP_NOFOLLOW_ANY       0x08
 /*!
  *  @function vnode_lookup
  *  @abstract Convert a path into a vnode.
@@ -2108,6 +2120,7 @@ int     vfs_get_notify_attributes(struct vnode_attr *vap);
  *  it returns with an iocount held on the resulting vnode which must be dropped with vnode_put().
  *  @param path Path to look up.
  *  @param flags VNODE_LOOKUP_NOFOLLOW: do not follow symbolic links.  VNODE_LOOKUP_NOCROSSMOUNT: do not cross mount points.
+ *  VNODE_LOOKUP_NOFOLLOW_ANY: no symlinks allowed in path
  *  @return Results 0 for success or an error code.
  */
 errno_t vnode_lookup(const char *path, int flags, vnode_t *vpp, vfs_context_t ctx);
@@ -2120,6 +2133,7 @@ errno_t vnode_lookup(const char *path, int flags, vnode_t *vpp, vfs_context_t ct
  *  it returns with an iocount held on the resulting vnode which must be dropped with vnode_put().
  *  @param path Path to look up.
  *  @param flags VNODE_LOOKUP_NOFOLLOW: do not follow symbolic links.  VNODE_LOOKUP_NOCROSSMOUNT: do not cross mount points.
+ *  VNODE_LOOKUP_NOFOLLOW_ANY: no symlinks allowed in path
  *  @param start_dvp vnode of directory to start lookup from. This parameter is ignored if path is absolute. start_dvp should
  *         have an iocount on it.
  *  @return Results 0 for success or an error code.
@@ -2332,6 +2346,39 @@ int vn_searchfs_inappropriate_name(const char *name, int len);
 int     vn_rdwr(enum uio_rw rw, struct vnode *vp, caddr_t base, int len, off_t offset, enum uio_seg segflg, int ioflg, kauth_cred_t cred, int *aresid, proc_t p);
 
 /*!
+ *  @function vn_rdwr_64
+ *  @abstract Read from or write to a file.
+ *  @discussion vn_rdwr_64() abstracts the details of constructing a uio and picking a vnode operation to allow
+ *  simple in-kernel file I/O.
+ *  @param rw UIO_READ for a read, UIO_WRITE for a write.
+ *  @param vp The vnode on which to perform I/O.
+ *  @param base Start of buffer into which to read or from which to write data.
+ *  @param len Length of buffer.
+ *  @param offset Offset within the file at which to start I/O.
+ *  @param segflg What kind of address "base" is.   See uio_seg definition in sys/uio.h.  UIO_SYSSPACE for kernelspace, UIO_USERSPACE for userspace.
+ *  UIO_USERSPACE32 and UIO_USERSPACE64 are in general preferred, but vn_rdwr will make sure that has the correct address sizes.
+ *  @param ioflg Defined in vnode.h, e.g. IO_NOAUTH, IO_NOCACHE.
+ *  @param cred Credential to pass down to filesystem for authentication.
+ *  @param aresid Destination for amount of requested I/O which was not completed, as with uio_resid().
+ *  @param p Process requesting I/O.
+ *  @return 0 for success; errors from filesystem, and EIO if did not perform all requested I/O and the "aresid" parameter is NULL.
+ */
+int     vn_rdwr_64(enum uio_rw rw, struct vnode *vp, uint64_t base, int64_t len, off_t offset, enum uio_seg segflg, int ioflg, kauth_cred_t cred, int64_t *aresid, struct proc *p);
+
+#ifdef KERNEL_PRIVATE
+/*!
+ *  @function vnode_radvise
+ *  @abstract perform an advisory read on the vnode.
+ *  @param vp vnode on which to perform I/O. Caller should have acquired an iocount prior to calling this function.
+ *  @param offset offset to begin reading from.
+ *  @param len number of bytes to read.
+ *  @param ctx Context against which to validate operation.
+ *  @return 0 for success; errors from filesystem, and EINVAL if offset or len is not valid.
+ */
+errno_t vnode_rdadvise(vnode_t vp, off_t offset, int len, vfs_context_t ctx);
+#endif
+
+/*!
  *  @function vnode_getname
  *  @abstract Get the name of a vnode from the VFS namecache.
  *  @discussion Not all vnodes have names, and vnode names can change (notably, hardlinks).  Use this routine at your own risk.
@@ -2437,6 +2484,18 @@ int vnode_getfromfd(vfs_context_t ctx, int fd, vnode_t *vpp);
  * @return Parent if available, else NULL.
  */
 vnode_t vnode_parent(vnode_t vp);
+
+/*
+ * @function vnode_getparent_and_name
+ * @abstract Get an iocount on the parent of a vnode and the name of a vnode from the VFS namecache.
+ * @discussion Combined version of vnode_getparent() and vnode_getname() to acquire both vnode name and parent
+ * without releasing the name cache lock in interim. The parent is returned with an iocount which must
+ * subsequently be dropped with vnode_put(). callers must call vnode_putname() to release the name reference.
+ * @param vp The vnode whose parent and name to grab.
+ * @param out_pvp A pointer to the output vnode parent.
+ * @param out_name A pointer to the output vnode name.
+ */
+void vnode_getparent_and_name(vnode_t vp, vnode_t *out_pvp, const char **out_name);
 
 /*
  * @function vfs_context_thread
@@ -2580,6 +2639,9 @@ errno_t vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *al
 
 #ifdef KERNEL_PRIVATE
 
+/* vnode manipulations for devices */
+int vnode_cmp_chrtoblk(vnode_t vp, vnode_t blk_vp);
+
 // Returns a value suitable, safe and consistent for tracing and logging
 vm_offset_t kdebug_vnode(vnode_t vp);
 int vn_pathconf(vnode_t, int, int32_t *, vfs_context_t);
@@ -2623,6 +2685,10 @@ errno_t vnio_openfd(int fd, vniodesc_t *vniop);
 errno_t vnio_close(vniodesc_t);
 errno_t vnio_read(vniodesc_t, uio_t);
 vnode_t vnio_vnode(vniodesc_t);
+
+int     cache_lookup_ext(vnode_t dvp, vnode_t *vpp, struct componentname *cnp,
+    int flags);
+#define CACHE_LOOKUP_ALLHITS    0x01    /* report all hits, even negatives for CREATE or RENAME */
 
 #endif // KERNEL_PRIVATE
 

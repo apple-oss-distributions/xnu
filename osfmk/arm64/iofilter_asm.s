@@ -35,7 +35,7 @@
 
 #include "assym.s"
 
-#if HAS_GUARDED_IO_FILTER
+#if HAS_GUARDED_IO_FILTER && !CONFIG_SPTM
 
     .section __PPLTEXT,__text,regular,pure_instructions
     .align 2
@@ -53,4 +53,4 @@ LEXT(io_filter_vtop)
     csel    x0, x10, xzr, eq          // If translation was successful return PA, else 0.
 
     ARM64_STACK_EPILOG
-#endif /* HAS_GUARDED_IO_FILTER */
+#endif /* HAS_GUARDED_IO_FILTER && !CONFIG_SPTM */

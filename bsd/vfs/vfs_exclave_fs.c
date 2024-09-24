@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -43,24 +43,34 @@
 __private_extern__ int unlink1(vfs_context_t, vnode_t, user_addr_t,
     enum uio_seg, int);
 
+// Flags for open vnodes, currently used only in DEVELOPMENT or DEBUG builds
+#define OV_EXCLAVE_BASE 1
+#define OV_FORCE_ENOSPC 2 // When this flag is set, writes fail with ENOSPC
+
 struct open_vnode {
 	LIST_ENTRY(open_vnode) chain;
 	vnode_t vp;
 	dev_t dev;
 	uint64_t file_id;
 	uint32_t open_count;
+#if (DEVELOPMENT || DEBUG)
+	uint32_t flags;
+#endif
 };
 
 #define ROOT_DIR_INO_NUM 2
 
 #define VFS_EXCLAVE_FS_BASE_DIR_GRAFT 1
+#define VFS_EXCLAVE_FS_BASE_DIR_SEALED 2
 
-typedef struct {
+typedef struct registered_fs_tag {
+	LIST_ENTRY(registered_fs_tag) link;
+	uint32_t fstag;
 	uint32_t flags;
 	vnode_t vp;
 	dev_t dev;
 	fsioc_graft_info_t graft_info;
-} base_dir_t;
+} registered_fs_tag_t;
 
 /* hash table that maps from file_id to a vnode and its open count */
 typedef LIST_HEAD(open_vnode_head, open_vnode) open_vnodes_list_head_t;
@@ -70,13 +80,17 @@ static int open_vnodes_hashsize = 0;
 static uint32_t num_open_vnodes = 0;
 
 /* registered base directories */
-static base_dir_t base_dirs[EFT_FS_NUM_TAGS] = {0};
-static uint32_t num_base_dirs = 0;
+typedef LIST_HEAD(registered_tags_head, registered_fs_tag) registered_tags_head_t;
+static registered_tags_head_t *registered_tags_hash = NULL;
+static uint32_t num_tags_registered = 0;
+static u_long rft_hashmask;
+
+#define REGFSTAG_HASH_WIDTH 32
 
 static LCK_GRP_DECLARE(vfs_exclave_lck_grp, "vfs_exclave");
 
-/* protects base_dirs */
-static lck_mtx_t base_dirs_mtx;
+/* protects registered_tags list and num_tags_registered counter */
+static lck_mtx_t regtag_mtx;
 
 /* protects open vnodes hash table */
 static lck_mtx_t open_vnodes_mtx;
@@ -84,11 +98,27 @@ static lck_mtx_t open_vnodes_mtx;
 #define HASHFUNC(dev, file_id) (((dev) + (file_id)) & open_vnodes_hashmask)
 #define OPEN_VNODES_HASH(dev, file_id) (&open_vnodes_hashtbl[HASHFUNC(dev, file_id)])
 
-static bool integrity_checks_enabled = false;
-#define EXCLAVE_INTEGRITY_CHECKS_ENABLED_BOOTARG "enable_integrity_checks"
+#if (DEVELOPMENT || DEBUG)
+static bool integrity_checks_disabled = false;
+#define EXCLAVE_INTEGRITY_CHECKS_DISABLED_BOOTARG "disable_integrity_checks"
+static bool vfs_exclave_is_enospc_exclave(const char *exclave_id);
+#endif
 
-static int exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
-    int flags, uint64_t *file_id);
+static int exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id,
+    const char *path, int flags, uint32_t ov_flags, uint64_t *file_id);
+static int vfs_exclave_fs_unregister_internal(vnode_t vp, bool take_basedir_lock);
+
+static uint32_t
+hash_fstag(uint32_t tag)
+{
+	return tag % (rft_hashmask + 1);
+}
+
+static registered_tags_head_t *
+get_registered_tags_chain(uint32_t tag)
+{
+	return registered_tags_hash + hash_fstag(tag);
+}
 
 /*
  * Get the fsid and fileid attributes of the given vnode.
@@ -141,9 +171,15 @@ get_vnode_info(vnode_t vp, dev_t *dev, fsid_t *fsid, uint64_t *file_id)
 }
 
 static inline bool
-is_graft(base_dir_t *base_dir)
+is_graft(registered_fs_tag_t *rft)
 {
-	return base_dir->flags & VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
+	return rft->flags & VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
+}
+
+static inline bool
+is_sealed(registered_fs_tag_t *rft)
+{
+	return rft->flags & VFS_EXCLAVE_FS_BASE_DIR_SEALED;
 }
 
 static int
@@ -241,21 +277,28 @@ out:
  * Set a base directory for the given fs tag.
  */
 static int
-set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info)
+set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info, bool is_sealed)
 {
 	dev_t dev;
-	base_dir_t *base_dir;
 	int error = 0;
+	registered_fs_tag_t *rft;
 
-	if (fs_tag >= EFT_FS_NUM_TAGS) {
-		return EINVAL;
-	}
+	lck_mtx_lock(&regtag_mtx);
 
-	lck_mtx_lock(&base_dirs_mtx);
+	registered_tags_head_t *rfthead = get_registered_tags_chain(fs_tag);
 
-	if (base_dirs[fs_tag].vp) {
-		error = EBUSY;
-		goto out;
+	LIST_FOREACH(rft, rfthead, link) {
+		if (rft->fstag == fs_tag) {
+			// Check if the registered vp is DEAD, it can be the case in edu mode where the original location was unmounted
+			// if the vnode is dead unregister it, and continue with setting new base_dir
+			if (vnode_vtype(rft->vp) == VBAD) {
+				vfs_exclave_fs_unregister_internal(rft->vp, false);
+				break;
+			}
+
+			error = (rft->vp == vp) ? EALREADY : EBUSY;
+			goto out;
+		}
 	}
 
 	error = get_vnode_info(vp, &dev, NULL, NULL);
@@ -270,34 +313,50 @@ set_base_dir(uint32_t fs_tag, vnode_t vp, fsioc_graft_info_t *graft_info)
 	 */
 	if (fs_tag == EFT_EXCLAVE) {
 		int i;
-		for (i = 0; i < EFT_FS_NUM_TAGS; i++) {
-			if (!base_dirs[i].vp) {
-				continue;
+
+		for (i = 0; i <= rft_hashmask; i++) {
+			registered_tags_head_t *head = registered_tags_hash + i;
+			LIST_FOREACH(rft, head, link) {
+				if (rft->dev == dev) {
+					error = EBUSY;
+					goto out;
+				}
 			}
-			if (base_dirs[i].dev == dev) {
+		}
+	} else {
+		registered_tags_head_t *head = get_registered_tags_chain(EFT_EXCLAVE);
+
+		LIST_FOREACH(rft, head, link) {
+			if ((rft->fstag == EFT_EXCLAVE) && (rft->dev == dev)) {
 				error = EBUSY;
 				goto out;
 			}
 		}
-	} else if (base_dirs[EFT_EXCLAVE].vp && (base_dirs[EFT_EXCLAVE].dev == dev)) {
-		error = EBUSY;
+	}
+
+	rft = kalloc_type(registered_fs_tag_t, Z_WAITOK | Z_ZERO);
+	if (rft == NULL) {
+		error = ENOMEM;
 		goto out;
 	}
 
-	base_dir = &base_dirs[fs_tag];
-
 	if (graft_info) {
-		base_dir->flags |= VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
-		base_dir->graft_info = *graft_info;
+		rft->flags |= VFS_EXCLAVE_FS_BASE_DIR_GRAFT;
+		if (is_sealed) {
+			rft->flags |= VFS_EXCLAVE_FS_BASE_DIR_SEALED;
+		}
+		rft->graft_info = *graft_info;
 	}
 
-	base_dir->vp = vp;
-	base_dir->dev = dev;
+	rft->fstag = fs_tag;
+	rft->vp = vp;
+	rft->dev = dev;
+	LIST_INSERT_HEAD(rfthead, rft, link);
 
-	num_base_dirs++;
+	num_tags_registered++;
 
 out:
-	lck_mtx_unlock(&base_dirs_mtx);
+	lck_mtx_unlock(&regtag_mtx);
 	return error;
 }
 
@@ -306,51 +365,46 @@ out:
  * with an iocount taken on the vnode.
  */
 static int
-get_base_dir(uint32_t fs_tag, base_dir_t *base_dir, vnode_t *vpp)
+get_base_dir(uint32_t fs_tag, registered_fs_tag_t *base_dir, vnode_t *vpp)
 {
-	vnode_t base_vp;
-	int error = 0;
+	int error = ENOENT;
+	registered_fs_tag_t *rft;
 
 	if (!base_dir && !vpp) {
 		return EINVAL;
 	}
 
-	if (fs_tag >= EFT_FS_NUM_TAGS) {
-		return EINVAL;
-	}
+	lck_mtx_lock(&regtag_mtx);
 
-	lck_mtx_lock(&base_dirs_mtx);
+	registered_tags_head_t *rfthead = get_registered_tags_chain(fs_tag);
 
-	base_vp = base_dirs[fs_tag].vp;
+	LIST_FOREACH(rft, rfthead, link) {
+		if (rft->fstag == fs_tag) {
+			if (vpp) {
+				vnode_t base_vp = rft->vp;
+				error = vnode_getwithref(base_vp);
+				if (error) {
+					break;
+				}
+				*vpp = base_vp;
+			}
 
-	if (base_vp == NULLVP) {
-		error = ENOENT;
-		goto out;
-	}
-
-	if (vpp) {
-		error = vnode_getwithref(base_vp);
-		if (error) {
-			goto out;
+			if (base_dir) {
+				*base_dir = *rft;
+			}
+			error = 0;
+			break;
 		}
-		*vpp = base_vp;
 	}
 
-	if (base_dir) {
-		*base_dir = base_dirs[fs_tag];
-	}
-
-out:
-	lck_mtx_unlock(&base_dirs_mtx);
+	lck_mtx_unlock(&regtag_mtx);
 	return error;
 }
 
 int
 vfs_exclave_fs_start(void)
 {
-	uint32_t bootarg_val;
-
-	lck_mtx_init(&base_dirs_mtx, &vfs_exclave_lck_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&regtag_mtx, &vfs_exclave_lck_grp, LCK_ATTR_NULL);
 	lck_mtx_init(&open_vnodes_mtx, &vfs_exclave_lck_grp, LCK_ATTR_NULL);
 
 	assert(open_vnodes_hashtbl == NULL);
@@ -362,11 +416,22 @@ vfs_exclave_fs_start(void)
 		return ENOMEM;
 	}
 
-	if (PE_parse_boot_argn(EXCLAVE_INTEGRITY_CHECKS_ENABLED_BOOTARG, &bootarg_val, sizeof(bootarg_val))) {
+	registered_tags_hash = hashinit(REGFSTAG_HASH_WIDTH, M_VNODE /*unused*/, &rft_hashmask);
+	if (registered_tags_hash == NULL) {
+		hashdestroy(open_vnodes_hashtbl, M_VNODE, open_vnodes_hashmask);
+		open_vnodes_hashtbl = NULL;
+		open_vnodes_hashmask = open_vnodes_hashsize = 0;
+		return ENOMEM;
+	}
+
+#if (DEVELOPMENT || DEBUG)
+	uint32_t bootarg_val;
+	if (PE_parse_boot_argn(EXCLAVE_INTEGRITY_CHECKS_DISABLED_BOOTARG, &bootarg_val, sizeof(bootarg_val))) {
 		if (bootarg_val) {
-			integrity_checks_enabled = true;
+			integrity_checks_disabled = true;
 		}
 	}
+#endif
 
 	return 0;
 }
@@ -377,18 +442,40 @@ exclave_fs_started(void)
 	return open_vnodes_hashtbl != NULL;
 }
 
+static void release_open_vnodes(registered_fs_tag_t *);
+
+static void
+drop_registered_tag(registered_fs_tag_t *rft)
+{
+	release_open_vnodes(rft);
+
+	vnode_rele(rft->vp);
+	LIST_REMOVE(rft, link);
+	kfree_type(registered_fs_tag_t, rft);
+	num_tags_registered--;
+}
+
 void
 vfs_exclave_fs_stop(void)
 {
+	registered_fs_tag_t *rft, *nxt;
 	int i;
 
 	if (!exclave_fs_started()) {
 		return;
 	}
 
-	for (i = 0; i < EFT_FS_NUM_TAGS; i++) {
-		vfs_exclave_fs_unregister_tag(i);
+	/* No need to lock regtag_mtx - this function assumes
+	 * single-threaded context */
+	for (i = 0; i <= rft_hashmask; i++) {
+		registered_tags_head_t *rfthead = registered_tags_hash + i;
+
+		LIST_FOREACH_SAFE(rft, rfthead, link, nxt) {
+			drop_registered_tag(rft);
+		}
 	}
+
+	hashdestroy(registered_tags_hash, M_VNODE, rft_hashmask);
 
 	assert(num_open_vnodes == 0);
 	assert(open_vnodes_hashtbl);
@@ -397,10 +484,12 @@ vfs_exclave_fs_stop(void)
 	open_vnodes_hashtbl = NULL;
 	open_vnodes_hashmask = open_vnodes_hashsize = 0;
 
-	lck_mtx_destroy(&base_dirs_mtx, &vfs_exclave_lck_grp);
+	lck_mtx_destroy(&regtag_mtx, &vfs_exclave_lck_grp);
 	lck_mtx_destroy(&open_vnodes_mtx, &vfs_exclave_lck_grp);
 
-	integrity_checks_enabled = false;
+#if (DEVELOPMENT || DEBUG)
+	integrity_checks_disabled = false;
+#endif
 }
 
 static bool
@@ -421,9 +510,11 @@ vfs_exclave_fs_register(uint32_t fs_tag, vnode_t vp)
 		return ENXIO;
 	}
 
-	if (fs_tag >= EFT_FS_NUM_TAGS) {
-		return EINVAL;
+#if !defined(XNU_TARGET_OS_OSX)
+	if (fs_tag == EFT_EXCLAVE_MAIN) {
+		return ENOTSUP;
 	}
+#endif
 
 	vnode_vfsname(vp, vfs_name);
 	if (strcmp(vfs_name, "apfs")) {
@@ -448,9 +539,22 @@ vfs_exclave_fs_register(uint32_t fs_tag, vnode_t vp)
 		return error;
 	}
 
-	error = set_base_dir(fs_tag, vp, is_graft ? &graft_info : NULL);
+	// Check if tag is sealed, RW tags are always not sealed
+	bool is_sealed = false;
+	if (!is_fs_writeable(fs_tag)) {
+		error = VNOP_IOCTL(vp, FSIOC_EVAL_ROOTAUTH, NULL, 0, vfs_context_kernel());
+		if (!error) {
+			is_sealed = true;
+		}
+	}
+
+	error = set_base_dir(fs_tag, vp, is_graft ? &graft_info : NULL, is_sealed);
 	if (error) {
 		vnode_rele(vp);
+		// if this directory is already registered in this tag do not consider it as an error
+		if (error == EALREADY) {
+			error = 0;
+		}
 		return error;
 	}
 
@@ -465,10 +569,6 @@ vfs_exclave_fs_register_path(uint32_t fs_tag, const char *base_path)
 
 	if (!exclave_fs_started()) {
 		return ENXIO;
-	}
-
-	if (fs_tag >= EFT_FS_NUM_TAGS) {
-		return EINVAL;
 	}
 
 	NDINIT(&nd, LOOKUP, OP_LOOKUP, FOLLOW, UIO_SYSSPACE,
@@ -489,26 +589,32 @@ vfs_exclave_fs_register_path(uint32_t fs_tag, const char *base_path)
 
 /*
  * Release open vnodes for the given fs_tag.
- * base_dirs_mtx and open_vnodes_mtx must be locked by caller.
+ * regtag_mtx must be locked by caller.
  */
 static void
-release_open_vnodes(uint32_t fs_tag)
+release_open_vnodes(registered_fs_tag_t *base_dir)
 {
 	dev_t dev;
 	int i;
 
+	lck_mtx_lock(&open_vnodes_mtx);
+
 	if (num_open_vnodes == 0) {
-		return;
+		goto done;
 	}
 
-	dev = base_dirs[fs_tag].dev;
+	dev = base_dir->dev;
 
-	if (num_base_dirs > 1) {
+	if (num_tags_registered > 1) {
 		/* skip release if another base dir has the same device */
-		for (i = 0; i < EFT_FS_NUM_TAGS; i++) {
-			if ((i != fs_tag) && base_dirs[i].vp
-			    && (base_dirs[i].dev == dev)) {
-				return;
+		for (i = 0; i <= rft_hashmask; i++) {
+			registered_tags_head_t *rfthead = registered_tags_hash + i;
+			registered_fs_tag_t *rft;
+
+			LIST_FOREACH(rft, rfthead, link) {
+				if ((rft != base_dir) && (rft->dev == dev)) {
+					goto done;
+				}
 			}
 		}
 	}
@@ -529,110 +635,99 @@ release_open_vnodes(uint32_t fs_tag)
 			num_open_vnodes--;
 		}
 	}
+
+done:
+	lck_mtx_unlock(&open_vnodes_mtx);
 }
 
 static int
-vfs_exclave_fs_unregister_internal(uint32_t fs_tag, vnode_t vp)
+vfs_exclave_fs_unregister_internal(vnode_t vp, bool take_basedir_lock)
 {
-	int error = 0;
+	int error = ENOENT;
+	int i;
 
 	if (!exclave_fs_started()) {
 		return ENXIO;
 	}
 
-	if (fs_tag >= EFT_FS_NUM_TAGS) {
-		return EINVAL;
+	if (take_basedir_lock) {
+		lck_mtx_lock(&regtag_mtx);
 	}
 
-	lck_mtx_lock(&base_dirs_mtx);
+	for (i = 0; i <= rft_hashmask; i++) {
+		registered_tags_head_t *rfthead = registered_tags_hash + i;
+		registered_fs_tag_t *rft, *nxt;
 
-	if (vp) {
-		for (fs_tag = 0; fs_tag < EFT_FS_NUM_TAGS; fs_tag++) {
-			if (base_dirs[fs_tag].vp == vp) {
-				break;
+		LIST_FOREACH_SAFE(rft, rfthead, link, nxt) {
+			if (rft->vp == vp) {
+				drop_registered_tag(rft);
+				error = 0;
+				goto done;
 			}
 		}
-	} else {
-		vp = base_dirs[fs_tag].vp;
 	}
 
-	if (!vp || (fs_tag == EFT_FS_NUM_TAGS)) {
-		lck_mtx_unlock(&base_dirs_mtx);
-		return ENOENT;
+done:
+
+	if (take_basedir_lock) {
+		lck_mtx_unlock(&regtag_mtx);
 	}
 
-	lck_mtx_lock(&open_vnodes_mtx);
-
-	release_open_vnodes(fs_tag);
-
-	vnode_rele(vp);
-	base_dirs[fs_tag].vp = NULL;
-	base_dirs[fs_tag].dev = 0;
-	memset(&base_dirs[fs_tag], 0, sizeof(base_dirs[fs_tag]));
-	num_base_dirs--;
-
-	lck_mtx_unlock(&base_dirs_mtx);
-	lck_mtx_unlock(&open_vnodes_mtx);
 	return error;
 }
 
 int
 vfs_exclave_fs_unregister(vnode_t vp)
 {
-	return vfs_exclave_fs_unregister_internal(0, vp);
-}
-
-int
-vfs_exclave_fs_unregister_tag(uint32_t fs_tag)
-{
-	return vfs_exclave_fs_unregister_internal(fs_tag, NULLVP);
+	return vfs_exclave_fs_unregister_internal(vp, true);
 }
 
 int
 vfs_exclave_fs_get_base_dirs(void *buf, uint32_t *count)
 {
 	int error = 0;
-	uint32_t i, num_copied = 0;
+	uint32_t num_copied = 0;
 	exclave_fs_base_dir_t *dirs = (exclave_fs_base_dir_t *)buf;
+	int i;
 
 	if (!count || (dirs && !*count)) {
 		return EINVAL;
 	}
 
-	lck_mtx_lock(&base_dirs_mtx);
+	lck_mtx_lock(&regtag_mtx);
 
 	if (!dirs) {
-		*count = num_base_dirs;
+		*count = num_tags_registered;
 		goto out;
-	} else if (*count < num_base_dirs) {
+	} else if (*count < num_tags_registered) {
 		error = ENOSPC;
 		goto out;
 	}
 
-	for (i = 0; (i < EFT_FS_NUM_TAGS) && (num_copied < num_base_dirs); i++) {
-		base_dir_t *base_dir = &base_dirs[i];
-		exclave_fs_base_dir_t *out_dir = &dirs[num_copied];
+	for (i = 0; i <= rft_hashmask; i++) {
+		registered_tags_head_t *rfthead = registered_tags_hash + i;
+		registered_fs_tag_t *base_dir;
 
-		if (base_dir->vp == NULLVP) {
-			continue;
+		LIST_FOREACH(base_dir, rfthead, link) {
+			exclave_fs_base_dir_t *out_dir = &dirs[num_copied];
+
+			memset(out_dir, 0, sizeof(exclave_fs_base_dir_t));
+
+			error = get_vnode_info(base_dir->vp, NULL, &out_dir->fsid, &out_dir->base_dir);
+			if (error) {
+				goto out;
+			}
+
+			out_dir->fs_tag = base_dir->fstag;
+			out_dir->graft_file = is_graft(base_dir) ? base_dir->graft_info.gi_graft_file : 0;
+			num_copied++;
 		}
-
-		memset(out_dir, 0, sizeof(exclave_fs_base_dir_t));
-
-		error = get_vnode_info(base_dir->vp, NULL, &out_dir->fsid, &out_dir->base_dir);
-		if (error) {
-			goto out;
-		}
-
-		out_dir->fs_tag = i;
-		out_dir->graft_file = is_graft(base_dir) ? base_dir->graft_info.gi_graft_file : 0;
-		num_copied++;
 	}
 
 	*count = num_copied;
 
 out:
-	lck_mtx_unlock(&base_dirs_mtx);
+	lck_mtx_unlock(&regtag_mtx);
 	return error;
 }
 
@@ -718,6 +813,7 @@ int
 vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
 {
 	int error;
+	uint32_t ov_flags = 0;
 
 	if (!exclave_fs_started()) {
 		return ENXIO;
@@ -728,8 +824,14 @@ vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
 		return EINVAL;
 	}
 
+#if (DEVELOPMENT || DEBUG)
+	if (vfs_exclave_is_enospc_exclave(exclave_id)) {
+		ov_flags = OV_EXCLAVE_BASE | OV_FORCE_ENOSPC;
+	}
+#endif
+
 	error = exclave_fs_open_internal(EFT_EXCLAVE, EXCLAVE_FS_BASEDIR_ROOT_ID,
-	    exclave_id, O_DIRECTORY, root_id);
+	    exclave_id, O_DIRECTORY, ov_flags, root_id);
 
 	if (error == ENOENT) {
 		vnode_t base_vp;
@@ -742,7 +844,7 @@ vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
 		error = create_exclave_dir(base_vp, exclave_id);
 		if (!error) {
 			error = exclave_fs_open_internal(EFT_EXCLAVE, EXCLAVE_FS_BASEDIR_ROOT_ID,
-			    exclave_id, O_DIRECTORY, root_id);
+			    exclave_id, O_DIRECTORY, ov_flags, root_id);
 		}
 
 		vnode_put(base_vp);
@@ -757,7 +859,7 @@ vfs_exclave_fs_root(const char *exclave_id, uint64_t *root_id)
  * If base dir is a graft, file_id should be the graft inode number.
  */
 static int
-get_open_vnode(base_dir_t *base_dir, uint64_t file_id, vnode_t *vpp)
+get_open_vnode(registered_fs_tag_t *base_dir, uint64_t file_id, vnode_t *vpp, uint32_t *ov_flags)
 {
 	uint64_t vp_file_id;
 	struct open_vnode *entry;
@@ -781,6 +883,13 @@ get_open_vnode(base_dir_t *base_dir, uint64_t file_id, vnode_t *vpp)
 			error = vnode_getwithref(entry->vp);
 			if (!error) {
 				*vpp = entry->vp;
+				if (ov_flags) {
+#if (DEVELOPMENT || DEBUG)
+					*ov_flags = entry->flags;
+#else
+					*ov_flags = 0;
+#endif
+				}
 			}
 			break;
 		}
@@ -793,9 +902,10 @@ get_open_vnode(base_dir_t *base_dir, uint64_t file_id, vnode_t *vpp)
 /*
  * Increment a vnode open count in the open vnodes hash table.
  * If base dir is a graft, file_id should be the host inode number.
+ * Also update entry's flags
  */
 static int
-increment_vnode_open_count(vnode_t vp, base_dir_t *base_dir, uint64_t file_id)
+increment_vnode_open_count(vnode_t vp, registered_fs_tag_t *base_dir, uint64_t file_id, uint32_t flags)
 {
 	struct open_vnode *entry;
 	open_vnodes_list_head_t *list;
@@ -825,6 +935,11 @@ increment_vnode_open_count(vnode_t vp, base_dir_t *base_dir, uint64_t file_id)
 	}
 
 	entry->open_count++;
+#if (DEVELOPMENT || DEBUG)
+	entry->flags |= flags;
+#else
+#pragma unused(flags)
+#endif
 
 out:
 	lck_mtx_unlock(&open_vnodes_mtx);
@@ -837,7 +952,7 @@ out:
  * If base dir is a graft, file_id should be the graft inode number.
  */
 static int
-decrement_vnode_open_count(base_dir_t *base_dir, uint64_t file_id, vnode_t *vpp)
+decrement_vnode_open_count(registered_fs_tag_t *base_dir, uint64_t file_id, vnode_t *vpp)
 {
 	struct open_vnode *entry;
 	vnode_t vp;
@@ -887,18 +1002,26 @@ out:
 
 static int
 exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
-    int flags, uint64_t *file_id)
+    int flags, uint32_t ov_flags, uint64_t *file_id)
 {
 	vnode_t dvp = NULLVP, vp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	vfs_context_t ctx;
 	struct nameidata *ndp = NULL;
 	struct vnode_attr *vap = NULL;
 	uint64_t vp_file_id;
 	int error;
+	uint32_t ndflags = NOCROSSMOUNT;
+	uint32_t root_ov_flags = 0;
 
 	if (flags & ~(O_CREAT | O_DIRECTORY)) {
 		return EINVAL;
+	}
+
+	if (is_fs_writeable(fs_tag)) {
+		ndflags |= NOFOLLOW;
+	} else {
+		ndflags |= FOLLOW;
 	}
 
 	if ((flags & O_CREAT) && !is_fs_writeable(fs_tag)) {
@@ -910,9 +1033,14 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 	} else {
 		error = get_base_dir(fs_tag, &base_dir, NULL);
 		if (!error) {
-			error = get_open_vnode(&base_dir, root_id, &dvp);
+			error = get_open_vnode(&base_dir, root_id, &dvp, &root_ov_flags);
 		}
 	}
+
+#if (DEVELOPMENT || DEBUG)
+	// inherit the ENOSPC flag from the root
+	ov_flags |= (root_ov_flags & OV_FORCE_ENOSPC);
+#endif
 
 	if (error) {
 		return error;
@@ -926,7 +1054,7 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 
 	ctx = vfs_context_kernel();
 
-	NDINIT(ndp, LOOKUP, OP_OPEN, NOFOLLOW | NOCROSSMOUNT, UIO_SYSSPACE,
+	NDINIT(ndp, LOOKUP, OP_OPEN, ndflags, UIO_SYSSPACE,
 	    CAST_USER_ADDR_T(path), ctx);
 
 	ndp->ni_rootdir = dvp;
@@ -970,7 +1098,7 @@ exclave_fs_open_internal(uint32_t fs_tag, uint64_t root_id, const char *path,
 		*file_id = vp_file_id;
 	}
 
-	error = increment_vnode_open_count(vp, &base_dir, vp_file_id);
+	error = increment_vnode_open_count(vp, &base_dir, vp_file_id, ov_flags);
 
 out:
 	if (dvp) {
@@ -1000,7 +1128,7 @@ vfs_exclave_fs_open(uint32_t fs_tag, uint64_t root_id, const char *name, uint64_
 		return EINVAL;
 	}
 
-	return exclave_fs_open_internal(fs_tag, root_id, name, 0, file_id);
+	return exclave_fs_open_internal(fs_tag, root_id, name, 0, 0, file_id);
 }
 
 int
@@ -1014,14 +1142,14 @@ vfs_exclave_fs_create(uint32_t fs_tag, uint64_t root_id, const char *name, uint6
 		return EINVAL;
 	}
 
-	return exclave_fs_open_internal(fs_tag, root_id, name, O_CREAT, file_id);
+	return exclave_fs_open_internal(fs_tag, root_id, name, O_CREAT, 0, file_id);
 }
 
 int
 vfs_exclave_fs_close(uint32_t fs_tag, uint64_t file_id)
 {
 	vnode_t vp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	int flags = FREAD;
 	int error;
 
@@ -1057,10 +1185,11 @@ static int
 exclave_fs_io(uint32_t fs_tag, uint64_t file_id, uint64_t offset, uint64_t length, uint8_t *data, bool read)
 {
 	vnode_t vp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	UIO_STACKBUF(uio_buf, 1);
 	uio_t auio = NULL;
 	int error = 0;
+	uint32_t ov_flags = 0;
 
 	if (!read && !is_fs_writeable(fs_tag)) {
 		return EROFS;
@@ -1071,8 +1200,13 @@ exclave_fs_io(uint32_t fs_tag, uint64_t file_id, uint64_t offset, uint64_t lengt
 		return error;
 	}
 
-	error = get_open_vnode(&base_dir, file_id, &vp);
+	error = get_open_vnode(&base_dir, file_id, &vp, &ov_flags);
 	if (error) {
+		goto out;
+	}
+
+	if (!read && (ov_flags & OV_FORCE_ENOSPC)) {
+		error = ENOSPC;
 		goto out;
 	}
 
@@ -1130,7 +1264,7 @@ int
 vfs_exclave_fs_remove(uint32_t fs_tag, uint64_t root_id, const char *name)
 {
 	vnode_t rvp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	int error;
 
 	if (!exclave_fs_started()) {
@@ -1146,7 +1280,7 @@ vfs_exclave_fs_remove(uint32_t fs_tag, uint64_t root_id, const char *name)
 		return error;
 	}
 
-	error = get_open_vnode(&base_dir, root_id, &rvp);
+	error = get_open_vnode(&base_dir, root_id, &rvp, NULL);
 	if (error) {
 		return error;
 	}
@@ -1164,7 +1298,7 @@ int
 vfs_exclave_fs_sync(uint32_t fs_tag, uint64_t file_id, uint64_t sync_op)
 {
 	vnode_t vp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	u_long command;
 	int error;
 
@@ -1189,7 +1323,7 @@ vfs_exclave_fs_sync(uint32_t fs_tag, uint64_t file_id, uint64_t sync_op)
 		return error;
 	}
 
-	error = get_open_vnode(&base_dir, file_id, &vp);
+	error = get_open_vnode(&base_dir, file_id, &vp, NULL);
 	if (error) {
 		goto out;
 	}
@@ -1229,7 +1363,7 @@ vfs_exclave_fs_readdir(uint32_t fs_tag, uint64_t file_id, void *dirent_buf,
     uint32_t buf_size, int32_t *count)
 {
 	vnode_t dvp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	UIO_STACKBUF(uio_buf, 1);
 	uio_t auio = NULL;
 	vfs_context_t ctx;
@@ -1244,22 +1378,34 @@ vfs_exclave_fs_readdir(uint32_t fs_tag, uint64_t file_id, void *dirent_buf,
 		return ENXIO;
 	}
 
-	if (fs_tag != EFT_EXCLAVE) {
-#if (DEVELOPMENT || DEBUG)
-		if (integrity_checks_enabled) {
-			return ENOTSUP;
-		}
-#else
-		return ENOTSUP;
-#endif
-	}
-
 	error = get_base_dir(fs_tag, &base_dir, NULL);
 	if (error) {
 		return error;
 	}
 
-	error = get_open_vnode(&base_dir, file_id, &dvp);
+	/*
+	 * For ExclaveOS readdir through VFS is not permitted in RELEASE xnu
+	 * variants. Directory enumeration should be based on the data in the
+	 * integrity catalogue. Error out here if a request is routed here
+	 * in this circumstance.
+	 */
+	if (fs_tag == EFT_SYSTEM) {
+#if (DEVELOPMENT || DEBUG)
+		/*
+		 * For non-RELEASE xnu variants, we allow readdir to
+		 * be routed through VFS if the relevant integrity checks
+		 * are disabled, or if the underlying volume is not sealed.
+		 */
+		if (!integrity_checks_disabled && is_sealed(&base_dir)) {
+			return ENOTSUP;
+		}
+#else
+		// This is the RELEASE xnu case above
+		return ENOTSUP;
+#endif
+	}
+
+	error = get_open_vnode(&base_dir, file_id, &dvp, NULL);
 	if (error) {
 		goto out;
 	}
@@ -1342,7 +1488,7 @@ int
 vfs_exclave_fs_getsize(uint32_t fs_tag, uint64_t file_id, uint64_t *size)
 {
 	vnode_t vp = NULLVP;
-	base_dir_t base_dir;
+	registered_fs_tag_t base_dir;
 	vfs_context_t ctx;
 	struct vnode_attr *vap = NULL;
 	int error;
@@ -1356,7 +1502,7 @@ vfs_exclave_fs_getsize(uint32_t fs_tag, uint64_t file_id, uint64_t *size)
 		return error;
 	}
 
-	error = get_open_vnode(&base_dir, file_id, &vp);
+	error = get_open_vnode(&base_dir, file_id, &vp, NULL);
 	if (error) {
 		goto out;
 	}
@@ -1400,3 +1546,72 @@ out:
 	return error;
 }
 
+int
+vfs_exclave_fs_sealstate(uint32_t fs_tag, bool *sealed)
+{
+	registered_fs_tag_t base_dir;
+	int error;
+
+	if (!exclave_fs_started()) {
+		return ENXIO;
+	}
+
+	error = get_base_dir(fs_tag, &base_dir, NULL);
+	if (error) {
+		return error;
+	}
+
+	*sealed = is_sealed(&base_dir);
+
+	return 0;
+}
+
+#if DEVELOPMENT || DEBUG
+
+#define ENOSPC_EXCLAVES_LEN 256
+static char enospc_exclaves[ENOSPC_EXCLAVES_LEN];
+
+static bool
+vfs_exclave_is_enospc_exclave(const char *exclave_id)
+{
+	char *element;
+	char *scratch_base;
+	char *scratch;
+	size_t buf_len = strlen(enospc_exclaves) + 1;
+	bool is_enospc_exclave = false;
+
+	/* allocate a scratch buffer the size of the string */
+	scratch_base = kalloc_data(buf_len, Z_WAITOK);
+	if (scratch_base == NULL) {
+		goto out;
+	}
+
+	/* copy the elementlist to the scratch buffer */
+	strlcpy(scratch_base, enospc_exclaves, buf_len);
+
+	/*
+	 * set up a temporary pointer that can be used to iterate the
+	 * scratch buffer without losing the allocation address
+	 */
+	scratch = scratch_base;
+
+	/* iterate the scratch buffer; NOTE: buffer contents modified! */
+	while ((element = strsep(&scratch, ",")) != NULL) {
+		if (strcmp(element, exclave_id) == 0) {
+			printf("%s is enospc exclave\n", exclave_id);
+			is_enospc_exclave = true;
+			goto out;
+		}
+	}
+
+out:
+	if (scratch_base != NULL) {
+		kfree_data(scratch_base, buf_len);
+	}
+
+	return is_enospc_exclave;
+}
+
+SYSCTL_STRING(_kern, OID_AUTO, enospc_exclaves, CTLFLAG_RW | CTLFLAG_LOCKED, enospc_exclaves, sizeof(enospc_exclaves), "List of comma-separated exclave_ids for writing immediately returns ENOSPC");
+
+#endif /* DEVELOPMENT || DEBUG */

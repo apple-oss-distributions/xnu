@@ -92,7 +92,7 @@
  * May block (use CA_EVENT_ALLOCATE_FLAGS with Z_NOWAIT for an allocation which can't block but may fail).
  */
 #define CA_EVENT_ALLOCATE(name) \
-	core_analytics_allocate_event(sizeof(CA_EVENT_TYPE(name)), _CA_EVENT_NAME_PREFIX(name), Z_WAITOK | Z_ZERO | Z_NOFAIL)
+	core_analytics_allocate_event(sizeof(CA_EVENT_TYPE(name)), _CA_EVENT_NAME_PREFIX(name), (zalloc_flags_t)(Z_WAITOK | Z_ZERO | Z_NOFAIL))
 
 /*
  * Allocate a new event struct with custom zalloc flags.

@@ -127,11 +127,11 @@ kern_channel_get_next_slot(const kern_channel_ring_t kring,
 		if (__improbable(KRING_EMPTY_TX(kring, slot_idx))) {
 			SK_DF(SK_VERB_SYNC | SK_VERB_TX,
 			    "EMPTY_TX: na \"%s\" kr \"%s\" "
-			    "i %u (kc %u kt %u kl %u | rh %u rt %u)",
+			    "i %u (kc %u kt %u | rh %u rt %u)",
 			    KRNA(kring)->na_name,
 			    kring->ckr_name, slot_idx, kring->ckr_khead,
-			    kring->ckr_ktail, kring->ckr_klease,
-			    kring->ckr_rhead, kring->ckr_rtail);
+			    kring->ckr_ktail, kring->ckr_rhead,
+			    kring->ckr_rtail);
 			slot = NULL;
 		} else {
 			slot = &kring->ckr_ksds[slot_idx];
@@ -140,11 +140,11 @@ kern_channel_get_next_slot(const kern_channel_ring_t kring,
 		if (__improbable(KRING_FULL_RX(kring, slot_idx))) {
 			SK_DF(SK_VERB_SYNC | SK_VERB_RX,
 			    "FULL_RX: na \"%s\" kr \"%s\" "
-			    "i %u (kc %u kt %u kl %u | rh %u rt %u)",
+			    "i %u (kc %u kt %u | rh %u rt %u)",
 			    KRNA(kring)->na_name,
 			    kring->ckr_name, slot_idx, kring->ckr_khead,
-			    kring->ckr_ktail, kring->ckr_klease,
-			    kring->ckr_rhead, kring->ckr_rtail);
+			    kring->ckr_ktail, kring->ckr_rhead,
+			    kring->ckr_rtail);
 			slot = NULL;
 		} else {
 			slot = &kring->ckr_ksds[slot_idx];
@@ -221,15 +221,21 @@ kern_channel_ring_get_container(const kern_channel_ring_t kring,
 	return 0;
 }
 
+/*
+ * -fbounds-safety: This function is only used by kpipe (kplo_slot_fini), which
+ * we won't adopt -fbounds-safety until later. And kplo_slot_fini casts this to
+ * uintptr_t in the KPLO_VERIFY_CTX macro anyway. So having it as a plain void *
+ * without bounds information could be okay.
+ */
 void *
 kern_channel_slot_get_context(const kern_channel_ring_t kring,
     const kern_channel_slot_t slot)
 {
 	slot_idx_t i = KR_SLOT_INDEX(kring, slot);
-	void *slot_ctx = NULL;
+	void *__single slot_ctx = 0;
 
 	if (kring->ckr_slot_ctxs != NULL) {
-		slot_ctx = (void *)(kring->ckr_slot_ctxs[i].slot_ctx_arg);
+		slot_ctx = kring->ckr_slot_ctxs[i].slot_ctx_arg;
 	}
 
 	return slot_ctx;
@@ -609,7 +615,6 @@ _kern_channel_defunct_eligible(struct kern_channel *ch)
 void
 kern_channel_defunct(struct proc *p, struct kern_channel *ch)
 {
-#pragma unused(p)
 	uint32_t ch_mode = ch->ch_info->cinfo_ch_mode;
 
 	SK_LOCK_ASSERT_NOTHELD();

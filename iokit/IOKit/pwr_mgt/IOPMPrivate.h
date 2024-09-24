@@ -112,6 +112,9 @@ enum {
 #define kIOPMMessageRequestUserActive \
                 iokit_family_msg(sub_iokit_powermanagement, 0x460)
 
+#define kIOPMMessageRequestSystemShutdown \
+                iokit_family_msg(sub_iokit_powermanagement, 0x470)
+
 /* @enum SystemSleepReasons
  * @abstract The potential causes for system sleep as logged in the system event record.
  */
@@ -147,6 +150,7 @@ enum {
 
 // Private keys for kIOPMPSAdapterDetailsKey dictionary
 #define kIOPMPSAdapterDetailsIsWirelessKey          "IsWireless"
+#define kIOPMPSAdapterDetailsPowerTierKey           "AdapterPowerTier"
 
 #pragma mark Stray Bitfields
 // Private power commands issued to root domain
@@ -757,6 +761,7 @@ enum {
     kIOPMAOTMetricsKernelWakeCountMax = 24
 };
 
+// This supports the "kern.aotmetrics" sysctl, and is reset when aotMode is disabled.
 struct IOPMAOTMetrics
 {
     uint32_t sleepCount;
@@ -773,6 +778,16 @@ struct IOPMAOTMetrics
 	// 54:10 secs:ms calendar time
     uint64_t kernelSleepTime[kIOPMAOTMetricsKernelWakeCountMax];
     uint64_t kernelWakeTime[kIOPMAOTMetricsKernelWakeCountMax];
+};
+
+// This is a subset of IOPMAOTMetrics that is used for Core Analytics support.
+// It is not reset until after the analytics have been reported to CA.
+struct IOPMAOTAnalytics
+{
+    uint32_t possibleCount;
+    uint32_t confirmedPossibleCount;
+    uint32_t rejectedPossibleCount;
+    uint32_t expiredPossibleCount;
 };
 
 #define kIOPMAOTPowerKey    "aot-power"

@@ -7,6 +7,9 @@
 #include <stdatomic.h>
 
 #include <kern/thread_group.h>
+#include <kern/task.h>
+#include <sys/coalition.h>
+#include <kern/coalition.h>
 
 #undef super
 #define super OSObject
@@ -167,6 +170,26 @@ IOPerfControlClient::tokenToGlobalUniqueToken(uint64_t token)
 	return token | (static_cast<uint64_t>(driverIndex) << kWorkTableIndexBits);
 }
 
+/* Accounting resources used in a work item to the containing coalition.
+ * Contigent upon the PerfController signaling that it wants resource accounting
+ * in the registerDevice()/registerDriverDevice calls. More device types can
+ * be added here in the future.
+ */
+void
+IOPerfControlClient::accountResources(coalition_t coal, PerfControllerInterface::PerfDeviceID device_type, PerfControllerInterface::ResourceAccounting *resources)
+{
+	switch (device_type) {
+	case PerfControllerInterface::PerfDeviceID::kANE:
+		if (coal != nullptr) {
+			coalition_update_ane_stats(coal, resources->mach_time_delta, resources->energy_nj_delta);
+		}
+		break;
+
+	default:
+		assertf(false, "Unexpected device type for IOPerfControlClient::accountResources: %llu", static_cast<uint64_t>(device_type));
+	}
+}
+
 /* With this implementation, tokens returned to the driver differ from tokens
  * passed to the performance controller. This implementation has the nice
  * property that tokens returns to the driver will aways be between 1 and
@@ -189,6 +212,12 @@ IOPerfControlClient::allocateToken(thread_group *thread_group)
 		if (workTable[index].thread_group == nullptr) {
 			thread_group_retain(thread_group);
 			workTable[index].thread_group = thread_group;
+			if (clientData.driverState.resource_accounting) {
+				auto *coalition = task_get_coalition(current_task(), COALITION_TYPE_RESOURCE);
+				assert(coalition != nullptr);
+				coalition_retain(coalition);
+				workTable[index].coal = coalition;
+			}
 			token = index;
 			// next integer between 1 and workTableLength - 1
 			workTableNextIndex = (index % (workTableLength - 1)) + 1;
@@ -228,6 +257,7 @@ IOPerfControlClient::deallocateToken(uint64_t token)
 
 	auto &entry = workTable[token];
 	auto *thread_group = entry.thread_group;
+	auto *coal = entry.coal;
 	bzero(&entry, sizeof(entry));
 	workTableNextIndex = token;
 
@@ -236,6 +266,9 @@ IOPerfControlClient::deallocateToken(uint64_t token)
 	// This can call into the performance controller if the last reference is dropped here. Are we sure
 	// the driver isn't holding any locks? If not, we may want to async this to another context.
 	thread_group_release(thread_group);
+	if (coal != nullptr) {
+		coalition_release(coal);
+	}
 #endif
 }
 
@@ -468,7 +501,16 @@ IOPerfControlClient::workEnd(IOService *device, uint64_t token, WorkEndArgs *arg
 		.started = entry->started,
 		.driver_state = &clientData.driverState
 	};
-	shared->interface.workEnd(device, tokenToGlobalUniqueToken(token), &state, args, done);
+
+	if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_4) {
+		PerfControllerInterface::ResourceAccounting resources;
+		shared->interface.workEndWithResources(device, tokenToGlobalUniqueToken(token), &state, args, &resources, done);
+		if (clientData.driverState.resource_accounting) {
+			accountResources(workTable[token].coal, clientData.driverState.device_type, &resources);
+		}
+	} else {
+		shared->interface.workEnd(device, tokenToGlobalUniqueToken(token), &state, args, done);
+	}
 
 	if (done) {
 		deallocateToken(token);
@@ -487,6 +529,7 @@ class IOPerfControlWorkContext : public OSObject
 public:
 	uint64_t id;
 	struct thread_group *thread_group;
+	coalition_t coal;
 	bool started;
 	uint8_t perfcontrol_data[32];
 
@@ -512,6 +555,7 @@ void
 IOPerfControlWorkContext::reset()
 {
 	thread_group = nullptr;
+	coal = nullptr;
 	started = false;
 	bzero(perfcontrol_data, sizeof(perfcontrol_data));
 }
@@ -520,6 +564,7 @@ void
 IOPerfControlWorkContext::free()
 {
 	assertf(thread_group == nullptr, "IOPerfControlWorkContext ID %llu being released without calling workEnd!\n", id);
+	assertf(coal == nullptr, "IOPerfControlWorkContext ID %llu being released without calling workEnd!\n", id);
 	super::free();
 }
 
@@ -599,6 +644,12 @@ IOPerfControlClient::workSubmitWithContext(IOService *device, OSObject *context,
 	}
 
 	work_context->thread_group = thread_group_retain(thread_group);
+	if (clientData.driverState.resource_accounting) {
+		auto *coalition = task_get_coalition(current_task(), COALITION_TYPE_RESOURCE);
+		assert(coalition != nullptr);
+		work_context->coal = coalition;
+		coalition_retain(coalition);
+	}
 
 	state.work_data = &work_context->perfcontrol_data;
 	state.work_data_size = sizeof(work_context->perfcontrol_data);
@@ -691,10 +742,21 @@ IOPerfControlClient::workEndWithContext(IOService *device, OSObject *context, Wo
 		.driver_state = &clientData.driverState
 	};
 
-	shared->interface.workEnd(device, work_context->id, &state, args, done);
+	if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_4) {
+		PerfControllerInterface::ResourceAccounting resources;
+		shared->interface.workEndWithResources(device, work_context->id, &state, args, &resources, done);
+		if (clientData.driverState.resource_accounting) {
+			accountResources(work_context->coal, clientData.driverState.device_type, &resources);
+		}
+	} else {
+		shared->interface.workEnd(device, work_context->id, &state, args, done);
+	}
 
 	if (done) {
 		thread_group_release(work_context->thread_group);
+		if (work_context->coal != nullptr) {
+			coalition_release(work_context->coal);
+		}
 		work_context->reset();
 	} else {
 		work_context->started = false;
@@ -736,6 +798,11 @@ IOPerfControlClient::registerPerformanceController(PerfControllerInterface *pci)
 			assert(pci->registerDriverDevice && pci->unregisterDriverDevice);
 			shared->interface.registerDriverDevice = pci->registerDriverDevice;
 			shared->interface.unregisterDriverDevice = pci->unregisterDriverDevice;
+		}
+
+		if (pci->version >= PERFCONTROL_INTERFACE_VERSION_4) {
+			assert(pci->workEndWithResources);
+			shared->interface.workEndWithResources = pci->workEndWithResources;
 		}
 
 		result = kIOReturnSuccess;

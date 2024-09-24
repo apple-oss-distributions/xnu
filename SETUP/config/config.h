@@ -84,9 +84,14 @@ struct file_list {
 #define CONFIGDEP            0x01    /* obsolete? */
 #define OPTIONSDEF           0x02    /* options definition entry */
 #define LIBRARYDEP           0x04    /* include file in library build */
-#define BOUND_CHECKS         0x08    /* build with -fbounds-safety */
-#define BOUND_CHECKS_SOFT    0x10    /* emit non-panicking traps for bound-checked source */
-#define BOUND_CHECKS_DEBUG       0x20    /* emit one panicking trap per bounds check */
+#define BOUND_CHECKS_MASK        0x78    /* options for -fbounds-safety */
+
+#define BOUND_CHECKS_NONE        0x00    /* do not use -fbounds-safety */
+#define BOUND_CHECKS_PENDING 0x08        /* do not use -fbounds-safety but disable associated warnings */
+#define BOUND_CHECKS         0x10    /* build with -fbounds-safety */
+#define BOUND_CHECKS_SOFT    0x18    /* emit non-panicking traps for bound-checked source */
+#define BOUND_CHECKS_DEBUG   0x20    /* emit one panicking trap per bounds check */
+#define BOUND_CHECKS_SEED    0x40    /* emit panicking traps on !RELEASE builds */
 
 struct device {
 	int     d_type;                 /* CONTROLLER, DEVICE, bus adaptor */

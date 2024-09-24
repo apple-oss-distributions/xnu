@@ -36,7 +36,7 @@ tests()
 	static_assert(!std::is_convertible_v<test_safe_allocation<T>, bool>);
 }
 
-T_DECL(operator_bool, "safe_allocation.operator.bool") {
+T_DECL(operator_bool, "safe_allocation.operator.bool", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

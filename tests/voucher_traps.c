@@ -60,7 +60,7 @@ get_user_data_port(mach_msg_type_number_t *size)
 }
 
 
-T_DECL(voucher_extract_attr_recipe, "voucher_extract_attr_recipe")
+T_DECL(voucher_extract_attr_recipe, "voucher_extract_attr_recipe", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_size_t alloc_sz;

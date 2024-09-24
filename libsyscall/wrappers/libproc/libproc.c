@@ -447,9 +447,46 @@ proc_terminate(pid_t pid, int *sig)
 }
 
 int
+proc_signal_delegate(audit_token_t instigator, audit_token_t target, int sig)
+{
+	struct proc_delegated_signal_info args = {
+		.instigator = instigator,
+		.target = target,
+	};
+	int retval = __proc_info(PROC_INFO_CALL_DELEGATE_SIGNAL, 0, sig, 0, &args, sizeof(struct proc_delegated_signal_info));
+	if (retval == -1) {
+		return errno;
+	}
+
+	return 0;
+}
+
+int
+proc_terminate_delegate(audit_token_t instigator, audit_token_t target, int *sig)
+{
+	struct proc_delegated_signal_info args = {
+		.instigator = instigator,
+		.target = target,
+	};
+
+	if (!sig) {
+		return EINVAL;
+	}
+
+	int retval = __proc_info(PROC_INFO_CALL_DELEGATE_TERMINATE, 0, 0, 0, &args, sizeof(struct proc_delegated_signal_info));
+	if (retval == -1) {
+		return errno;
+	}
+
+	// Retval contains the type of signal that was sent, either SIGKILL or SIGTERM
+	*sig = retval;
+	return 0;
+}
+
+int
 proc_signal_with_audittoken(audit_token_t *audittoken, int sig)
 {
-	int retval = __proc_info(PROC_INFO_CALL_SIGNAL_AUDITTOKEN, 0, sig, 0, audittoken, 0);
+	int retval = __proc_info(PROC_INFO_CALL_SIGNAL_AUDITTOKEN, 0, sig, 0, audittoken, sizeof(audit_token_t));
 	if (retval == -1) {
 		return errno;
 	}
@@ -466,7 +503,7 @@ proc_terminate_with_audittoken(audit_token_t *audittoken, int *sig)
 		return EINVAL;
 	}
 
-	retval = __proc_info(PROC_INFO_CALL_TERMINATE_AUDITTOKEN, 0, 0, 0, audittoken, 0);
+	retval = __proc_info(PROC_INFO_CALL_TERMINATE_AUDITTOKEN, 0, 0, 0, audittoken, sizeof(audit_token_t));
 	if (retval == -1) {
 		return errno;
 	}

@@ -408,7 +408,7 @@ again:
 		}
 	}
 
-	if ((fmode & O_NOFOLLOW_ANY) && (fmode & (O_SYMLINK | O_NOFOLLOW))) {
+	if ((fmode & O_NOFOLLOW_ANY) && (fmode & O_NOFOLLOW)) {
 		error = EINVAL;
 		goto out;
 	}
@@ -1266,8 +1266,18 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	if (fp->fp_glob->fg_flag & FNONBLOCK) {
 		ioflag |= IO_NDELAY;
 	}
+	assert(!(fp->fp_glob->fg_flag & O_NOCTTY) || (fp->fp_glob->fg_flag & FNOCACHE));
 	if ((fp->fp_glob->fg_flag & FNOCACHE) || vnode_isnocache(vp)) {
 		ioflag |= IO_NOCACHE;
+		/*
+		 * O_NOCTTY is repurposed to indicate the preference for relaxed
+		 * alignment and size restrictions. O_NOCTTY has no meaning beyond
+		 * the open of the fd and is used only for ttys and the use
+		 * is mutually exclusive with nocache io for regular files.
+		 */
+		if (fp->fp_glob->fg_flag & O_NOCTTY || vfs_context_allow_fs_blksize_nocache_write(ctx)) {
+			ioflag |= IO_NOCACHE_SWRITE;
+		}
 	}
 	if (fp->fp_glob->fg_flag & FNODIRECT) {
 		ioflag |= IO_NODIRECT;

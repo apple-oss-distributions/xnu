@@ -71,7 +71,7 @@ server(void *arg __unused)
 
 T_DECL(accept_race,
     "Exercises a race condition between socantrcvmore() and accept()",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_NOT_PREFERRED)
 {
 	// Pick a random port
 	port += arc4random_uniform(1024);

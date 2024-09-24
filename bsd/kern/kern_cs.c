@@ -63,7 +63,7 @@
 #include <kern/startup.h>
 #include <kern/task.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
 

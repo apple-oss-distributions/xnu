@@ -422,7 +422,7 @@ typedef struct zone_security_flags {
 	    z_pgz_use_guards   :1,  /* this zone uses guards with PGZ */
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
-	    z_unused           :1;
+	    z_tag              :1;  /* zone supports TBI tagging */
 	/*
 	 * Signature equivalance zone
 	 */
@@ -484,6 +484,15 @@ typedef struct zone_security_flags {
 #else
 #   define ZSECURITY_CONFIG_KT_BUDGET                   260
 #   define ZSECURITY_CONFIG_KT_VAR_BUDGET               6
+#endif
+
+/*
+ * Zsecurity config to enable (KASAN) tagging of memory allocations
+ */
+#if CONFIG_KERNEL_TAGGING
+#   define ZSECURITY_CONFIG_ZONE_TAGGING                ON
+#else
+#   define ZSECURITY_CONFIG_ZONE_TAGGING                OFF
 #endif
 
 
@@ -803,9 +812,6 @@ __enum_closed_decl(zone_gc_level_t, uint32_t, {
  * @param level         The zone GC level requested.
  */
 extern void     zone_gc(zone_gc_level_t level);
-
-extern void     zone_gc_trim(void);
-extern void     zone_gc_drain(void);
 
 #define ZONE_WSS_UPDATE_PERIOD  15
 /*!

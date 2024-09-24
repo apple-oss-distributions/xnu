@@ -17,7 +17,7 @@ T_GLOBAL_META(
     T_META_CHECK_LEAKS(false));
 
 T_DECL(rusage_kernel_cpu_time_sanity,
-    "ensure the CPU time for kernel_task is sane", T_META_ASROOT(true))
+    "ensure the CPU time for kernel_task is sane", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct rusage_info_v5 usage_info = { 0 };
 	T_SETUPBEGIN;
@@ -34,7 +34,7 @@ T_DECL(rusage_kernel_cpu_time_sanity,
 }
 
 T_DECL(rusage_user_time_sanity,
-    "ensure the user CPU time for a user space task is sane")
+    "ensure the user CPU time for a user space task is sane", T_META_TAG_VM_PREFERRED)
 {
 	struct rusage_info_v5 usage_info = { 0 };
 	T_SETUPBEGIN;

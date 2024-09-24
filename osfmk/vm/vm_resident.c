@@ -81,29 +81,32 @@
 #include <kern/ledger.h>
 #include <kern/ecc.h>
 #include <vm/pmap.h>
-#include <vm/vm_init.h>
-#include <vm/vm_map.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_kern.h>                 /* kmem_alloc() */
+#include <vm/vm_init_xnu.h>
+#include <vm/vm_map_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_pageout_internal.h>
+#include <vm/vm_kern_xnu.h>                 /* kmem_alloc() */
+#include <vm/vm_compressor_pager_internal.h>
 #include <kern/misc_protos.h>
 #include <mach_debug/zone_info.h>
-#include <vm/cpm.h>
+#include <vm/cpm_internal.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <san/kasan.h>
 #include <os/log.h>
 
-#include <vm/vm_protos.h>
+#include <vm/vm_protos_internal.h>
 #include <vm/memory_object.h>
 #include <vm/vm_purgeable_internal.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_compressor_internal.h>
+#include <vm/vm_iokit.h>
+#include <vm/vm_object_internal.h>
 #if defined (__x86_64__)
 #include <i386/misc_protos.h>
 #endif
 
 #if CONFIG_PHANTOM_CACHE
-#include <vm/vm_phantom_cache.h>
+#include <vm/vm_phantom_cache_internal.h>
 #endif
 
 #if HIBERNATION
@@ -164,7 +167,7 @@ boolean_t       vm_lopage_needed = FALSE;
 
 int             speculative_age_index = 0;
 int             speculative_steal_index = 0;
-struct vm_speculative_age_q vm_page_queue_speculative[VM_PAGE_MAX_SPECULATIVE_AGE_Q + 1];
+struct vm_speculative_age_q vm_page_queue_speculative[VM_PAGE_RESERVED_SPECULATIVE_AGE_Q + 1];
 
 boolean_t       hibernation_vmqueues_inspection = FALSE; /* Tracks if the hibernation code is looking at the VM queues.
                                                           * Updated and checked behind the vm_page_queues_lock. */
@@ -404,8 +407,6 @@ vm_page_queue_head_t    vm_page_queue_anonymous VM_PAGE_PACKED_ALIGNED;  /* inac
 vm_page_queue_head_t    vm_page_queue_throttled VM_PAGE_PACKED_ALIGNED;
 
 queue_head_t    vm_objects_wired;
-
-void vm_update_darkwake_mode(boolean_t);
 
 vm_page_queue_head_t    vm_page_queue_donate VM_PAGE_PACKED_ALIGNED;
 uint32_t        vm_page_donate_mode;
@@ -971,7 +972,7 @@ vm_page_bootstrap(
 	vm_page_queue_init(&vm_page_queue_anonymous);
 	queue_init(&vm_objects_wired);
 
-	for (i = 0; i <= VM_PAGE_MAX_SPECULATIVE_AGE_Q; i++) {
+	for (i = 0; i <= vm_page_max_speculative_age_q; i++) {
 		vm_page_queue_init(&vm_page_queue_speculative[i].age_q);
 
 		vm_page_queue_speculative[i].age_ts.tv_sec = 0;
@@ -1378,16 +1379,7 @@ pmap_steal_freeable_memory(
 	return pmap_steal_memory_internal(size, 0, TRUE, 0, PMAP_MAPPING_TYPE_RESTRICTED);
 }
 
-void *
-pmap_steal_zone_memory(
-	vm_size_t size,
-	vm_size_t alignment)
-{
-	unsigned int flags = 0;
 
-
-	return pmap_steal_memory_internal(size, alignment, FALSE, flags, PMAP_MAPPING_TYPE_RESTRICTED);
-}
 
 
 #if CONFIG_SECLUDED_MEMORY
@@ -1678,7 +1670,7 @@ vm_page_module_init(void)
 	    ~(VM_PAGE_PACKED_PTR_ALIGNMENT - 1);
 
 	vm_page_zone = zone_create_ext("vm pages", vm_page_with_ppnum_size,
-	    ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NOTBITAG,
+	    ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NO_TBI_TAG,
 	    ZONE_ID_ANY, ^(zone_t z) {
 		/*
 		 * The number "10" is a small number that is larger than the number
@@ -1789,6 +1781,8 @@ vm_page_insert_internal(
 	int                     ledger_idx_nonvolatile;
 	int                     ledger_idx_volatile_compressed;
 	int                     ledger_idx_nonvolatile_compressed;
+	int                     ledger_idx_composite;
+	int                     ledger_idx_external_wired;
 	boolean_t               do_footprint;
 
 #if 0
@@ -1940,9 +1934,12 @@ vm_page_insert_internal(
 		    &ledger_idx_nonvolatile,
 		    &ledger_idx_volatile_compressed,
 		    &ledger_idx_nonvolatile_compressed,
+		    &ledger_idx_composite,
+		    &ledger_idx_external_wired,
 		    &do_footprint);
 	}
 	if (owner &&
+	    object->internal &&
 	    (object->purgable == VM_PURGABLE_NONVOLATILE ||
 	    object->purgable == VM_PURGABLE_DENY ||
 	    VM_PAGE_WIRED(mem))) {
@@ -1958,9 +1955,14 @@ vm_page_insert_internal(
 				ledger_credit(owner->ledger,
 				    task_ledgers.phys_footprint,
 				    PAGE_SIZE);
+			} else if (ledger_idx_composite != -1) {
+				ledger_credit(owner->ledger,
+				    ledger_idx_composite,
+				    PAGE_SIZE);
 			}
 		}
 	} else if (owner &&
+	    object->internal &&
 	    (object->purgable == VM_PURGABLE_VOLATILE ||
 	    object->purgable == VM_PURGABLE_EMPTY)) {
 		assert(!VM_PAGE_WIRED(mem));
@@ -2133,6 +2135,8 @@ vm_page_remove(
 	int             ledger_idx_nonvolatile;
 	int             ledger_idx_volatile_compressed;
 	int             ledger_idx_nonvolatile_compressed;
+	int             ledger_idx_composite;
+	int             ledger_idx_external_wired;
 	int             do_footprint;
 
 	m_object = VM_PAGE_OBJECT(mem);
@@ -2260,9 +2264,12 @@ vm_page_remove(
 		    &ledger_idx_nonvolatile,
 		    &ledger_idx_volatile_compressed,
 		    &ledger_idx_nonvolatile_compressed,
+		    &ledger_idx_composite,
+		    &ledger_idx_external_wired,
 		    &do_footprint);
 	}
 	if (owner &&
+	    m_object->internal &&
 	    (m_object->purgable == VM_PURGABLE_NONVOLATILE ||
 	    m_object->purgable == VM_PURGABLE_DENY ||
 	    VM_PAGE_WIRED(mem))) {
@@ -2275,8 +2282,13 @@ vm_page_remove(
 			ledger_debit(owner->ledger,
 			    task_ledgers.phys_footprint,
 			    PAGE_SIZE);
+		} else if (ledger_idx_composite != -1) {
+			ledger_debit(owner->ledger,
+			    ledger_idx_composite,
+			    PAGE_SIZE);
 		}
 	} else if (owner &&
+	    m_object->internal &&
 	    (m_object->purgable == VM_PURGABLE_VOLATILE ||
 	    m_object->purgable == VM_PURGABLE_EMPTY)) {
 		assert(!VM_PAGE_WIRED(mem));
@@ -2285,6 +2297,7 @@ vm_page_remove(
 		    ledger_idx_volatile,
 		    PAGE_SIZE);
 	}
+
 	if (m_object->purgable == VM_PURGABLE_VOLATILE) {
 		if (VM_PAGE_WIRED(mem)) {
 			assert(vm_page_purgeable_wired_count > 0);
@@ -3109,7 +3122,7 @@ vm_page_grablo(void)
 	VM_PAGE_ZERO_PAGEQ_ENTRY(mem);
 
 	counter_inc(&vm_page_grab_count);
-	VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, 0, 1, 0, 0);
+	VM_DEBUG_EVENT(vm_page_grab, DBG_VM_PAGE_GRAB, DBG_FUNC_NONE, 0, 1, 0, 0);
 
 	return mem;
 }
@@ -3187,6 +3200,20 @@ vm_page_grab(void)
 boolean_t       hibernate_rebuild_needed = FALSE;
 #endif /* HIBERNATION */
 
+static void
+vm_page_finalize_grabed_page(vm_page_t mem)
+{
+	task_t cur_task = current_task_early();
+	if (cur_task && cur_task != kernel_task) {
+		/* tag:DONATE this is where the donate state of the page is decided according to what task grabs it */
+		if (cur_task->donates_own_pages) {
+			vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_DONATE);
+		} else {
+			vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_BG);
+		}
+	}
+}
+
 vm_page_t
 vm_page_grab_options(
 	int grab_options)
@@ -3210,7 +3237,7 @@ restart:
 		vm_offset_t pcpu_base = current_percpu_base();
 		counter_inc_preemption_disabled(&vm_page_grab_count);
 		*PERCPU_GET_WITH_BASE(pcpu_base, free_pages) = mem->vmp_snext;
-		VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
+		VM_DEBUG_EVENT(vm_page_grab, DBG_VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
 
 		VM_PAGE_ZERO_PAGEQ_ENTRY(mem);
 		mem->vmp_q_state = VM_PAGE_NOT_ON_Q;
@@ -3227,15 +3254,7 @@ restart:
 		assert(!mem->vmp_realtime);
 
 		vm_page_validate_no_references(mem);
-
-		task_t  cur_task = current_task_early();
-		if (cur_task && cur_task != kernel_task) {
-			if (cur_task->donates_own_pages) {
-				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_DONATE);
-			} else {
-				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_BG);
-			}
-		}
+		vm_page_finalize_grabed_page(mem);
 		return mem;
 	}
 	enable_preemption();
@@ -3266,6 +3285,7 @@ restart:
 	    vm_page_free_count <= vm_page_free_target &&
 	    (mem = vm_get_delayed_page(grab_options)) != NULL)) {
 		assert(!mem->vmp_realtime);
+		// TODO: missing vm_page_finalize_grabed_page()?
 		return mem;
 	}
 
@@ -3298,9 +3318,10 @@ restart:
 
 				vm_page_grab_diags();
 				counter_inc(&vm_page_grab_count);
-				VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
+				VM_DEBUG_EVENT(vm_page_grab, DBG_VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
 
 				assert(!mem->vmp_realtime);
+				// TODO: missing vm_page_finalize_grabed_page()?
 				return mem;
 			}
 		}
@@ -3314,6 +3335,15 @@ restart:
 		unsigned int     color;
 		unsigned int clump_end, sub_count;
 
+		/*
+		 * Replenishing our per-CPU cache of free pages might take
+		 * too long to keep holding the "free_page" lock as a spinlock,
+		 * so convert to the full mutex to prevent other threads trying
+		 * to acquire the "free_page" lock from timing out spinning on
+		 * the mutex interlock.
+		 */
+		vm_free_page_lock_convert();
+
 		while (vm_page_free_count == 0) {
 			vm_free_page_unlock();
 			/*
@@ -3323,7 +3353,7 @@ restart:
 			 * under the vm_page_free_reserved mark
 			 */
 			VM_PAGE_WAIT();
-			vm_free_page_lock_spin();
+			vm_free_page_lock();
 		}
 
 		/*
@@ -3461,14 +3491,7 @@ restart:
 		assert(!mem->vmp_realtime);
 //		dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 4);	/* (TEST/DEBUG) */
 
-		task_t  cur_task = current_task_early();
-		if (cur_task && cur_task != kernel_task) {
-			if (cur_task->donates_own_pages) {
-				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_DONATE);
-			} else {
-				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_BG);
-			}
-		}
+		vm_page_finalize_grabed_page(mem);
 	}
 	return mem;
 }
@@ -3580,7 +3603,7 @@ reactivate_secluded_page:
 	if (mem->vmp_dirty || mem->vmp_precious) {
 		/* can't grab a dirty page; re-activate */
 //		printf("SECLUDED: dirty page %p\n", mem);
-		PAGE_WAKEUP_DONE(mem);
+		vm_page_wakeup_done(object, mem);
 		vm_page_secluded.grab_failure_dirty++;
 		vm_object_unlock(object);
 		goto reactivate_secluded_page;
@@ -3853,7 +3876,7 @@ vm_page_release(
 
 	vm_free_page_unlock();
 
-	VM_DEBUG_CONSTANT_EVENT(vm_page_release, VM_PAGE_RELEASE, DBG_FUNC_NONE, 1, 0, 0, 0);
+	VM_DEBUG_CONSTANT_EVENT(vm_page_release, DBG_VM_PAGE_RELEASE, DBG_FUNC_NONE, 1, 0, 0, 0);
 
 	if (need_priv_wakeup) {
 		wakeup_event = &vm_page_free_wanted_privileged;
@@ -4016,7 +4039,7 @@ vm_page_wait(
 		 * we don't get back THREAD_WAITING from lck_mtx_sleep_with_inheritor.
 		 * We just block in that routine.
 		 */
-		VM_DEBUG_CONSTANT_EVENT(vm_page_wait_block, VM_PAGE_WAIT_BLOCK, DBG_FUNC_START,
+		VM_DEBUG_CONSTANT_EVENT(vm_page_wait_block, DBG_VM_PAGE_WAIT_BLOCK, DBG_FUNC_START,
 		    vm_page_free_wanted_privileged,
 		    vm_page_free_wanted,
 #if CONFIG_SECLUDED_MEMORY
@@ -4041,7 +4064,7 @@ vm_page_wait(
 		}
 
 		if (wait_result == THREAD_WAITING) {
-			VM_DEBUG_CONSTANT_EVENT(vm_page_wait_block, VM_PAGE_WAIT_BLOCK, DBG_FUNC_START,
+			VM_DEBUG_CONSTANT_EVENT(vm_page_wait_block, DBG_VM_PAGE_WAIT_BLOCK, DBG_FUNC_START,
 			    vm_page_free_wanted_privileged,
 			    vm_page_free_wanted,
 #if CONFIG_SECLUDED_MEMORY
@@ -4052,7 +4075,7 @@ vm_page_wait(
 			    0);
 			wait_result = thread_block(THREAD_CONTINUE_NULL);
 			VM_DEBUG_CONSTANT_EVENT(vm_page_wait_block,
-			    VM_PAGE_WAIT_BLOCK, DBG_FUNC_END, 0, 0, 0, 0);
+			    DBG_VM_PAGE_WAIT_BLOCK, DBG_FUNC_END, 0, 0, 0, 0);
 		}
 	}
 
@@ -4161,6 +4184,15 @@ vm_page_free_prepare_queues(
 		assert(mem->vmp_wire_count > 0);
 
 		if (m_object) {
+			task_t          owner;
+			int             ledger_idx_volatile;
+			int             ledger_idx_nonvolatile;
+			int             ledger_idx_volatile_compressed;
+			int             ledger_idx_nonvolatile_compressed;
+			int             ledger_idx_composite;
+			int             ledger_idx_external_wired;
+			boolean_t       do_footprint;
+
 			VM_OBJECT_WIRED_PAGE_UPDATE_START(m_object);
 			VM_OBJECT_WIRED_PAGE_REMOVE(m_object, mem);
 			VM_OBJECT_WIRED_PAGE_UPDATE_END(m_object, m_object->wire_tag);
@@ -4173,16 +4205,10 @@ vm_page_free_prepare_queues(
 				assert(vm_page_purgeable_wired_count > 0);
 				OSAddAtomic(-1, &vm_page_purgeable_wired_count);
 			}
-			if ((m_object->purgable == VM_PURGABLE_VOLATILE ||
-			    m_object->purgable == VM_PURGABLE_EMPTY) &&
-			    m_object->vo_owner != TASK_NULL) {
-				task_t          owner;
-				int             ledger_idx_volatile;
-				int             ledger_idx_nonvolatile;
-				int             ledger_idx_volatile_compressed;
-				int             ledger_idx_nonvolatile_compressed;
-				boolean_t       do_footprint;
-
+			if (m_object->internal &&
+			    m_object->vo_owner != TASK_NULL &&
+			    (m_object->purgable == VM_PURGABLE_VOLATILE ||
+			    m_object->purgable == VM_PURGABLE_EMPTY)) {
 				owner = VM_OBJECT_OWNER(m_object);
 				vm_object_ledger_tag_ledgers(
 					m_object,
@@ -4190,6 +4216,8 @@ vm_page_free_prepare_queues(
 					&ledger_idx_nonvolatile,
 					&ledger_idx_volatile_compressed,
 					&ledger_idx_nonvolatile_compressed,
+					&ledger_idx_composite,
+					&ledger_idx_external_wired,
 					&do_footprint);
 				/*
 				 * While wired, this page was accounted
@@ -4204,6 +4232,10 @@ vm_page_free_prepare_queues(
 					/* ... and "phys_footprint" */
 					ledger_debit(owner->ledger,
 					    task_ledgers.phys_footprint,
+					    PAGE_SIZE);
+				} else if (ledger_idx_composite != -1) {
+					ledger_debit(owner->ledger,
+					    ledger_idx_composite,
 					    PAGE_SIZE);
 				}
 				/* one more "volatile" */
@@ -4237,7 +4269,7 @@ vm_page_free_prepare_object(
 	if (mem->vmp_tabled) {
 		vm_page_remove(mem, remove_from_hash);  /* clears tabled, object, offset */
 	}
-	PAGE_WAKEUP(mem);               /* clears wanted */
+	vm_page_wakeup(VM_OBJECT_NULL, mem);               /* clears wanted */
 
 	if (mem->vmp_private) {
 		mem->vmp_private = FALSE;
@@ -4447,7 +4479,7 @@ vm_page_free_list(
 			vm_page_free_count += pg_count;
 			avail_free_count = vm_page_free_count;
 
-			VM_DEBUG_CONSTANT_EVENT(vm_page_release, VM_PAGE_RELEASE, DBG_FUNC_NONE, pg_count, 0, 0, 0);
+			VM_DEBUG_CONSTANT_EVENT(vm_page_release, DBG_VM_PAGE_RELEASE, DBG_FUNC_NONE, pg_count, 0, 0, 0);
 
 			if (vm_page_free_wanted_privileged > 0 && avail_free_count > 0) {
 				if (avail_free_count < vm_page_free_wanted_privileged) {
@@ -4667,11 +4699,20 @@ vm_page_wire(
 			/* Object and PageQ locks are held*/
 			mem->vmp_unmodified_ro = false;
 			os_atomic_dec(&compressor_ro_uncompressed, relaxed);
-			VM_COMPRESSOR_PAGER_STATE_CLR(VM_PAGE_OBJECT(mem), mem->vmp_offset);
+			vm_object_compressor_pager_state_clr(VM_PAGE_OBJECT(mem), mem->vmp_offset);
 		}
 #endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 
 		if (m_object) {
+			task_t          owner;
+			int             ledger_idx_volatile;
+			int             ledger_idx_nonvolatile;
+			int             ledger_idx_volatile_compressed;
+			int             ledger_idx_nonvolatile_compressed;
+			int             ledger_idx_composite;
+			int             ledger_idx_external_wired;
+			boolean_t       do_footprint;
+
 			VM_OBJECT_WIRED_PAGE_UPDATE_START(m_object);
 			VM_OBJECT_WIRED_PAGE_ADD(m_object, mem);
 			VM_OBJECT_WIRED_PAGE_UPDATE_END(m_object, tag);
@@ -4683,16 +4724,10 @@ vm_page_wire(
 				OSAddAtomic(-1, &vm_page_purgeable_count);
 				OSAddAtomic(1, &vm_page_purgeable_wired_count);
 			}
-			if ((m_object->purgable == VM_PURGABLE_VOLATILE ||
-			    m_object->purgable == VM_PURGABLE_EMPTY) &&
-			    m_object->vo_owner != TASK_NULL) {
-				task_t          owner;
-				int             ledger_idx_volatile;
-				int             ledger_idx_nonvolatile;
-				int             ledger_idx_volatile_compressed;
-				int             ledger_idx_nonvolatile_compressed;
-				boolean_t       do_footprint;
-
+			if (m_object->internal &&
+			    m_object->vo_owner != TASK_NULL &&
+			    (m_object->purgable == VM_PURGABLE_VOLATILE ||
+			    m_object->purgable == VM_PURGABLE_EMPTY)) {
 				owner = VM_OBJECT_OWNER(m_object);
 				vm_object_ledger_tag_ledgers(
 					m_object,
@@ -4700,6 +4735,8 @@ vm_page_wire(
 					&ledger_idx_nonvolatile,
 					&ledger_idx_volatile_compressed,
 					&ledger_idx_nonvolatile_compressed,
+					&ledger_idx_composite,
+					&ledger_idx_external_wired,
 					&do_footprint);
 				/* less volatile bytes */
 				ledger_debit(owner->ledger,
@@ -4714,8 +4751,13 @@ vm_page_wire(
 					ledger_credit(owner->ledger,
 					    task_ledgers.phys_footprint,
 					    PAGE_SIZE);
+				} else if (ledger_idx_composite != -1) {
+					ledger_credit(owner->ledger,
+					    ledger_idx_composite,
+					    PAGE_SIZE);
 				}
 			}
+
 			if (m_object->all_reusable) {
 				/*
 				 * Wired pages are not counted as "re-usable"
@@ -4785,6 +4827,15 @@ vm_page_unwire(
 	vm_object_lock_assert_exclusive(m_object);
 	LCK_MTX_ASSERT(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
 	if (--mem->vmp_wire_count == 0) {
+		task_t          owner;
+		int             ledger_idx_volatile;
+		int             ledger_idx_nonvolatile;
+		int             ledger_idx_volatile_compressed;
+		int             ledger_idx_nonvolatile_compressed;
+		int             ledger_idx_composite;
+		int             ledger_idx_external_wired;
+		boolean_t       do_footprint;
+
 		mem->vmp_q_state = VM_PAGE_NOT_ON_Q;
 
 		VM_OBJECT_WIRED_PAGE_UPDATE_START(m_object);
@@ -4801,16 +4852,10 @@ vm_page_unwire(
 			assert(vm_page_purgeable_wired_count > 0);
 			OSAddAtomic(-1, &vm_page_purgeable_wired_count);
 		}
-		if ((m_object->purgable == VM_PURGABLE_VOLATILE ||
-		    m_object->purgable == VM_PURGABLE_EMPTY) &&
-		    m_object->vo_owner != TASK_NULL) {
-			task_t          owner;
-			int             ledger_idx_volatile;
-			int             ledger_idx_nonvolatile;
-			int             ledger_idx_volatile_compressed;
-			int             ledger_idx_nonvolatile_compressed;
-			boolean_t       do_footprint;
-
+		if (m_object->internal &&
+		    m_object->vo_owner != TASK_NULL &&
+		    (m_object->purgable == VM_PURGABLE_VOLATILE ||
+		    m_object->purgable == VM_PURGABLE_EMPTY)) {
 			owner = VM_OBJECT_OWNER(m_object);
 			vm_object_ledger_tag_ledgers(
 				m_object,
@@ -4818,6 +4863,8 @@ vm_page_unwire(
 				&ledger_idx_nonvolatile,
 				&ledger_idx_volatile_compressed,
 				&ledger_idx_nonvolatile_compressed,
+				&ledger_idx_composite,
+				&ledger_idx_external_wired,
 				&do_footprint);
 			/* more volatile bytes */
 			ledger_credit(owner->ledger,
@@ -4831,6 +4878,10 @@ vm_page_unwire(
 				/* less footprint */
 				ledger_debit(owner->ledger,
 				    task_ledgers.phys_footprint,
+				    PAGE_SIZE);
+			} else if (ledger_idx_composite != -1) {
+				ledger_debit(owner->ledger,
+				    ledger_idx_composite,
 				    PAGE_SIZE);
 			}
 		}
@@ -5177,13 +5228,13 @@ vm_page_speculate(
 			if (CMP_MACH_TIMESPEC(&ts, &aq->age_ts) >= 0) {
 				speculative_age_index++;
 
-				if (speculative_age_index > VM_PAGE_MAX_SPECULATIVE_AGE_Q) {
+				if (speculative_age_index > vm_page_max_speculative_age_q) {
 					speculative_age_index = VM_PAGE_MIN_SPECULATIVE_AGE_Q;
 				}
 				if (speculative_age_index == speculative_steal_index) {
 					speculative_steal_index = speculative_age_index + 1;
 
-					if (speculative_steal_index > VM_PAGE_MAX_SPECULATIVE_AGE_Q) {
+					if (speculative_steal_index > vm_page_max_speculative_age_q) {
 						speculative_steal_index = VM_PAGE_MIN_SPECULATIVE_AGE_Q;
 					}
 				}
@@ -5889,6 +5940,268 @@ pmap_enter_check(
 extern boolean_t(*volatile consider_buffer_cache_collect)(int);
 
 /*
+ *	CONTIGUOUS PAGE ALLOCATION AND HELPER FUNCTIONS
+ */
+
+/*
+ * Helper function used to determine if a page can be relocated
+ * A page is relocatable if it is in a stable non-transient state
+ */
+static inline boolean_t
+vm_page_is_relocatable(vm_page_t m)
+{
+
+	if (VM_PAGE_WIRED(m) || m->vmp_gobbled || m->vmp_laundry || m->vmp_wanted ||
+	    m->vmp_cleaning || m->vmp_overwriting || m->vmp_free_when_done) {
+		/*
+		 * Page is in a transient state
+		 * or a state we don't want to deal with.
+		 */
+		return FALSE;
+	} else if ((m->vmp_q_state == VM_PAGE_NOT_ON_Q) ||
+	    (m->vmp_q_state == VM_PAGE_ON_FREE_LOCAL_Q) ||
+	    (m->vmp_q_state == VM_PAGE_ON_FREE_LOPAGE_Q) ||
+	    (m->vmp_q_state == VM_PAGE_ON_PAGEOUT_Q)) {
+		/*
+		 * Page needs to be on one of our queues (other then the pageout or special
+		 * free queues) or it needs to belong to the compressor pool (which is now
+		 * indicated by vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR and falls out from
+		 * the check for VM_PAGE_NOT_ON_Q) in order for it to be stable behind the
+		 * locks we hold at this point...
+		 */
+		return FALSE;
+	} else if ((m->vmp_q_state != VM_PAGE_ON_FREE_Q) &&
+	    (!m->vmp_tabled || m->vmp_busy)) {
+		/*
+		 * pages on the free list are always 'busy'
+		 * so we couldn't test for 'busy' in the check
+		 * for the transient states... pages that are
+		 * 'free' are never 'tabled', so we also couldn't
+		 * test for 'tabled'.  So we check here to make
+		 * sure that a non-free page is not busy and is
+		 * tabled on an object...
+		 */
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/*
+ * Free up the given page by possibily relocating its contents to a new page
+ * If the page is on an object the object lock must be held.
+ */
+static kern_return_t
+vm_page_relocate(vm_page_t m1, int *compressed_pages)
+{
+	int refmod = 0;
+	vm_object_t object = VM_PAGE_OBJECT(m1);
+	kern_return_t kr;
+
+	if (object == VM_OBJECT_NULL) {
+		return KERN_FAILURE;
+	}
+
+	vm_object_lock_assert_held(object);
+
+	if (VM_PAGE_WIRED(m1) ||
+	    m1->vmp_gobbled ||
+	    m1->vmp_laundry ||
+	    m1->vmp_wanted ||
+	    m1->vmp_cleaning ||
+	    m1->vmp_overwriting ||
+	    m1->vmp_free_when_done ||
+	    m1->vmp_busy ||
+	    m1->vmp_q_state == VM_PAGE_ON_PAGEOUT_Q) {
+		return KERN_FAILURE;
+	}
+
+	boolean_t disconnected = FALSE;
+	boolean_t reusable = FALSE;
+
+	/*
+	 * Pages from reusable objects can be reclaimed directly.
+	 */
+	if ((m1->vmp_reusable || object->all_reusable) &&
+	    m1->vmp_q_state == VM_PAGE_ON_INACTIVE_INTERNAL_Q && !m1->vmp_dirty &&
+	    !m1->vmp_reference) {
+		/*
+		 * reusable page...
+		 */
+
+		refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m1));
+		disconnected = TRUE;
+		if (refmod == 0) {
+			/*
+			 * ... not reused: can steal without relocating contents.
+			 */
+			reusable = TRUE;
+		}
+	}
+
+	if ((m1->vmp_pmapped && !reusable) || m1->vmp_dirty || m1->vmp_precious) {
+		vm_object_offset_t offset;
+
+		/* page is not reusable, we need to allocate a new page
+		 * and move its contents there.
+		 */
+		vm_page_t m2 = vm_page_grab_options(VM_PAGE_GRAB_Q_LOCK_HELD);
+
+		if (m2 == VM_PAGE_NULL) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
+
+		if (!disconnected) {
+			if (m1->vmp_pmapped) {
+				refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m1));
+			} else {
+				refmod = 0;
+			}
+		}
+
+		/* copy the page's contents */
+		pmap_copy_page(VM_PAGE_GET_PHYS_PAGE(m1), VM_PAGE_GET_PHYS_PAGE(m2));
+
+		/* copy the page's state */
+		assert(!VM_PAGE_WIRED(m1));
+		assert(m1->vmp_q_state != VM_PAGE_ON_FREE_Q);
+		assert(m1->vmp_q_state != VM_PAGE_ON_PAGEOUT_Q);
+		assert(!m1->vmp_laundry);
+		m2->vmp_reference = m1->vmp_reference;
+		assert(!m1->vmp_gobbled);
+		assert(!m1->vmp_private);
+		m2->vmp_no_cache = m1->vmp_no_cache;
+		m2->vmp_xpmapped = 0;
+		assert(!m1->vmp_busy);
+		assert(!m1->vmp_wanted);
+		assert(!m1->vmp_fictitious);
+		m2->vmp_pmapped = m1->vmp_pmapped; /* should flush cache ? */
+		m2->vmp_wpmapped = m1->vmp_wpmapped;
+		assert(!m1->vmp_free_when_done);
+		m2->vmp_absent = m1->vmp_absent;
+		m2->vmp_error = VMP_ERROR_GET(m1);
+		m2->vmp_dirty = m1->vmp_dirty;
+		assert(!m1->vmp_cleaning);
+		m2->vmp_precious = m1->vmp_precious;
+		m2->vmp_clustered = m1->vmp_clustered;
+		assert(!m1->vmp_overwriting);
+		m2->vmp_restart = m1->vmp_restart;
+		m2->vmp_unusual = m1->vmp_unusual;
+		m2->vmp_cs_validated = m1->vmp_cs_validated;
+		m2->vmp_cs_tainted = m1->vmp_cs_tainted;
+		m2->vmp_cs_nx = m1->vmp_cs_nx;
+
+		m2->vmp_realtime = m1->vmp_realtime;
+		m1->vmp_realtime = false;
+
+		/*
+		 * If m1 had really been reusable,
+		 * we would have just stolen it, so
+		 * let's not propagate its "reusable"
+		 * bit and assert that m2 is not
+		 * marked as "reusable".
+		 */
+		// m2->vmp_reusable	= m1->vmp_reusable;
+		assert(!m2->vmp_reusable);
+
+		// assert(!m1->vmp_lopage);
+
+		if (m1->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
+			m2->vmp_q_state = VM_PAGE_USED_BY_COMPRESSOR;
+			/*
+			 * We just grabbed m2 up above and so it isn't
+			 * going to be on any special Q as yet and so
+			 * we don't need to 'remove' it from the special
+			 * queues. Just resetting the state should be enough.
+			 */
+			m2->vmp_on_specialq = VM_PAGE_SPECIAL_Q_EMPTY;
+		}
+
+		/*
+		 * page may need to be flushed if
+		 * it is marshalled into a UPL
+		 * that is going to be used by a device
+		 * that doesn't support coherency
+		 */
+		m2->vmp_written_by_kernel = TRUE;
+
+		/*
+		 * make sure we clear the ref/mod state
+		 * from the pmap layer... else we risk
+		 * inheriting state from the last time
+		 * this page was used...
+		 */
+		pmap_clear_refmod(VM_PAGE_GET_PHYS_PAGE(m2),
+		    VM_MEM_MODIFIED | VM_MEM_REFERENCED);
+
+		if (refmod & VM_MEM_REFERENCED) {
+			m2->vmp_reference = TRUE;
+		}
+		if (refmod & VM_MEM_MODIFIED) {
+			SET_PAGE_DIRTY(m2, TRUE);
+		}
+		offset = m1->vmp_offset;
+
+		/*
+		 * completely cleans up the state
+		 * of the page so that it is ready
+		 * to be put onto the free list, or
+		 * for this purpose it looks like it
+		 * just came off of the free list
+		 */
+		vm_page_free_prepare(m1);
+
+		/*
+		 * now put the substitute page on the object
+		 */
+		vm_page_insert_internal(m2, object, offset, VM_KERN_MEMORY_NONE, TRUE,
+		    TRUE, FALSE, FALSE, NULL);
+
+		if (m2->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
+			m2->vmp_pmapped = TRUE;
+			m2->vmp_wpmapped = TRUE;
+
+			kr = pmap_enter_check(kernel_pmap, (vm_map_offset_t)m2->vmp_offset, m2,
+			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE);
+
+			assert(kr == KERN_SUCCESS);
+
+			if (compressed_pages) {
+				++*compressed_pages;
+			}
+		} else {
+			/* relocated page was not used by the compressor
+			 * put it on either the active or inactive lists */
+			if (m2->vmp_reference) {
+				vm_page_activate(m2);
+			} else {
+				vm_page_deactivate(m2);
+			}
+		}
+
+		/* unset the busy flag (pages on the free queue are busy) and notify if wanted */
+		vm_page_wakeup_done(object, m2);
+
+		return KERN_SUCCESS;
+	} else {
+		assert(m1->vmp_q_state != VM_PAGE_USED_BY_COMPRESSOR);
+
+		/*
+		 * completely cleans up the state
+		 * of the page so that it is ready
+		 * to be put onto the free list, or
+		 * for this purpose it looks like it
+		 * just came off of the free list
+		 */
+		vm_page_free_prepare(m1);
+
+		/* we're done here */
+		return KERN_SUCCESS;
+	}
+
+	return KERN_FAILURE;
+}
+
+/*
  *	CONTIGUOUS PAGE ALLOCATION
  *
  *	Find a region large enough to contain at least n pages
@@ -6054,43 +6367,9 @@ retry:
 			 * not aligned
 			 */
 			RESET_STATE_OF_RUN();
-		} else if (VM_PAGE_WIRED(m) || m->vmp_gobbled ||
-		    m->vmp_laundry || m->vmp_wanted ||
-		    m->vmp_cleaning || m->vmp_overwriting || m->vmp_free_when_done) {
+		} else if (!vm_page_is_relocatable(m)) {
 			/*
-			 * page is in a transient state
-			 * or a state we don't want to deal
-			 * with, so don't consider it which
-			 * means starting a new run
-			 */
-			RESET_STATE_OF_RUN();
-		} else if ((m->vmp_q_state == VM_PAGE_NOT_ON_Q) ||
-		    (m->vmp_q_state == VM_PAGE_ON_FREE_LOCAL_Q) ||
-		    (m->vmp_q_state == VM_PAGE_ON_FREE_LOPAGE_Q) ||
-		    (m->vmp_q_state == VM_PAGE_ON_PAGEOUT_Q)) {
-			/*
-			 * page needs to be on one of our queues (other then the pageout or special free queues)
-			 * or it needs to belong to the compressor pool (which is now indicated
-			 * by vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR and falls out
-			 * from the check for VM_PAGE_NOT_ON_Q)
-			 * in order for it to be stable behind the
-			 * locks we hold at this point...
-			 * if not, don't consider it which
-			 * means starting a new run
-			 */
-			RESET_STATE_OF_RUN();
-		} else if ((m->vmp_q_state != VM_PAGE_ON_FREE_Q) && (!m->vmp_tabled || m->vmp_busy)) {
-			/*
-			 * pages on the free list are always 'busy'
-			 * so we couldn't test for 'busy' in the check
-			 * for the transient states... pages that are
-			 * 'free' are never 'tabled', so we also couldn't
-			 * test for 'tabled'.  So we check here to make
-			 * sure that a non-free page is not busy and is
-			 * tabled on an object...
-			 * if not, don't consider it which
-			 * means starting a new run
-			 */
+			 * page is not relocatable */
 			RESET_STATE_OF_RUN();
 		} else {
 			if (VM_PAGE_GET_PHYS_PAGE(m) != prevcontaddr + 1) {
@@ -6181,7 +6460,8 @@ did_consider:
 			goto retry;
 		}
 		considered++;
-	}
+	} /* main for-loop end */
+
 	m = VM_PAGE_NULL;
 
 	if (npages != contig_pages) {
@@ -6204,12 +6484,11 @@ did_consider:
 		}
 		vm_free_page_unlock();
 	} else {
-		vm_page_t       m1;
-		vm_page_t       m2;
-		unsigned int    cur_idx;
-		unsigned int    tmp_start_idx;
-		vm_object_t     locked_object = VM_OBJECT_NULL;
-		boolean_t       abort_run = FALSE;
+		vm_page_t m1;
+		unsigned int cur_idx;
+		unsigned int tmp_start_idx;
+		vm_object_t locked_object = VM_OBJECT_NULL;
+		boolean_t abort_run = FALSE;
 
 		assert(page_idx - start_idx == contig_pages);
 
@@ -6291,17 +6570,16 @@ did_consider:
 				assert(!m1->vmp_wanted);
 				assert(!m1->vmp_laundry);
 			} else {
-				vm_object_t object;
-				int refmod;
-				boolean_t disconnected, reusable;
-
+				/*
+				 * try to relocate/steal the page
+				 */
 				if (abort_run == TRUE) {
 					continue;
 				}
 
 				assert(m1->vmp_q_state != VM_PAGE_NOT_ON_Q);
 
-				object = VM_PAGE_OBJECT(m1);
+				vm_object_t object = VM_PAGE_OBJECT(m1);
 
 				if (object != locked_object) {
 					if (locked_object) {
@@ -6310,13 +6588,16 @@ did_consider:
 					}
 					if (vm_object_lock_try(object)) {
 						locked_object = object;
+					} else {
+						/* object must be locked to relocate its pages */
+						tmp_start_idx = cur_idx;
+						abort_run = TRUE;
+						continue;
 					}
 				}
-				if (locked_object == VM_OBJECT_NULL ||
-				    (VM_PAGE_WIRED(m1) || m1->vmp_gobbled ||
-				    m1->vmp_laundry || m1->vmp_wanted ||
-				    m1->vmp_cleaning || m1->vmp_overwriting || m1->vmp_free_when_done || m1->vmp_busy) ||
-				    (m1->vmp_q_state == VM_PAGE_ON_PAGEOUT_Q)) {
+
+				kr = vm_page_relocate(m1, &compressed_pages);
+				if (kr != KERN_SUCCESS) {
 					if (locked_object) {
 						vm_object_unlock(locked_object);
 						locked_object = VM_OBJECT_NULL;
@@ -6326,180 +6607,11 @@ did_consider:
 					continue;
 				}
 
-				disconnected = FALSE;
-				reusable = FALSE;
-
-				if ((m1->vmp_reusable ||
-				    object->all_reusable) &&
-				    (m1->vmp_q_state == VM_PAGE_ON_INACTIVE_INTERNAL_Q) &&
-				    !m1->vmp_dirty &&
-				    !m1->vmp_reference) {
-					/* reusable page... */
-					refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m1));
-					disconnected = TRUE;
-					if (refmod == 0) {
-						/*
-						 * ... not reused: can steal
-						 * without relocating contents.
-						 */
-						reusable = TRUE;
-					}
-				}
-
-				if ((m1->vmp_pmapped &&
-				    !reusable) ||
-				    m1->vmp_dirty ||
-				    m1->vmp_precious) {
-					vm_object_offset_t offset;
-
-					m2 = vm_page_grab_options(VM_PAGE_GRAB_Q_LOCK_HELD);
-
-					if (m2 == VM_PAGE_NULL) {
-						if (locked_object) {
-							vm_object_unlock(locked_object);
-							locked_object = VM_OBJECT_NULL;
-						}
-						tmp_start_idx = cur_idx;
-						abort_run = TRUE;
-						continue;
-					}
-					if (!disconnected) {
-						if (m1->vmp_pmapped) {
-							refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m1));
-						} else {
-							refmod = 0;
-						}
-					}
-
-					/* copy the page's contents */
-					pmap_copy_page(VM_PAGE_GET_PHYS_PAGE(m1), VM_PAGE_GET_PHYS_PAGE(m2));
-					/* copy the page's state */
-					assert(!VM_PAGE_WIRED(m1));
-					assert(m1->vmp_q_state != VM_PAGE_ON_FREE_Q);
-					assert(m1->vmp_q_state != VM_PAGE_ON_PAGEOUT_Q);
-					assert(!m1->vmp_laundry);
-					m2->vmp_reference       = m1->vmp_reference;
-					assert(!m1->vmp_gobbled);
-					assert(!m1->vmp_private);
-					m2->vmp_no_cache        = m1->vmp_no_cache;
-					m2->vmp_xpmapped        = 0;
-					assert(!m1->vmp_busy);
-					assert(!m1->vmp_wanted);
-					assert(!m1->vmp_fictitious);
-					m2->vmp_pmapped = m1->vmp_pmapped; /* should flush cache ? */
-					m2->vmp_wpmapped        = m1->vmp_wpmapped;
-					assert(!m1->vmp_free_when_done);
-					m2->vmp_absent  = m1->vmp_absent;
-					m2->vmp_error   = VMP_ERROR_GET(m1);
-					m2->vmp_dirty   = m1->vmp_dirty;
-					assert(!m1->vmp_cleaning);
-					m2->vmp_precious        = m1->vmp_precious;
-					m2->vmp_clustered       = m1->vmp_clustered;
-					assert(!m1->vmp_overwriting);
-					m2->vmp_restart = m1->vmp_restart;
-					m2->vmp_unusual = m1->vmp_unusual;
-					m2->vmp_cs_validated = m1->vmp_cs_validated;
-					m2->vmp_cs_tainted      = m1->vmp_cs_tainted;
-					m2->vmp_cs_nx   = m1->vmp_cs_nx;
-
-					m2->vmp_realtime = m1->vmp_realtime;
-					m1->vmp_realtime = false;
-
-					/*
-					 * If m1 had really been reusable,
-					 * we would have just stolen it, so
-					 * let's not propagate it's "reusable"
-					 * bit and assert that m2 is not
-					 * marked as "reusable".
-					 */
-					// m2->vmp_reusable	= m1->vmp_reusable;
-					assert(!m2->vmp_reusable);
-
-					// assert(!m1->vmp_lopage);
-
-					if (m1->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
-						m2->vmp_q_state = VM_PAGE_USED_BY_COMPRESSOR;
-						/*
-						 * We just grabbed m2 up above and so it isn't
-						 * going to be on any special Q as yet and so
-						 * we don't need to 'remove' it from the special
-						 * queues. Just resetting the state should be enough.
-						 */
-						m2->vmp_on_specialq = VM_PAGE_SPECIAL_Q_EMPTY;
-					}
-
-					/*
-					 * page may need to be flushed if
-					 * it is marshalled into a UPL
-					 * that is going to be used by a device
-					 * that doesn't support coherency
-					 */
-					m2->vmp_written_by_kernel = TRUE;
-
-					/*
-					 * make sure we clear the ref/mod state
-					 * from the pmap layer... else we risk
-					 * inheriting state from the last time
-					 * this page was used...
-					 */
-					pmap_clear_refmod(VM_PAGE_GET_PHYS_PAGE(m2), VM_MEM_MODIFIED | VM_MEM_REFERENCED);
-
-					if (refmod & VM_MEM_REFERENCED) {
-						m2->vmp_reference = TRUE;
-					}
-					if (refmod & VM_MEM_MODIFIED) {
-						SET_PAGE_DIRTY(m2, TRUE);
-					}
-					offset = m1->vmp_offset;
-
-					/*
-					 * completely cleans up the state
-					 * of the page so that it is ready
-					 * to be put onto the free list, or
-					 * for this purpose it looks like it
-					 * just came off of the free list
-					 */
-					vm_page_free_prepare(m1);
-
-					/*
-					 * now put the substitute page
-					 * on the object
-					 */
-					vm_page_insert_internal(m2, locked_object, offset, VM_KERN_MEMORY_NONE, TRUE, TRUE, FALSE, FALSE, NULL);
-
-					if (m2->vmp_q_state == VM_PAGE_USED_BY_COMPRESSOR) {
-						m2->vmp_pmapped = TRUE;
-						m2->vmp_wpmapped = TRUE;
-
-						kr = pmap_enter_check(kernel_pmap, (vm_map_offset_t)m2->vmp_offset, m2,
-						    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE);
-
-						assert(kr == KERN_SUCCESS);
-
-						compressed_pages++;
-					} else {
-						if (m2->vmp_reference) {
-							vm_page_activate(m2);
-						} else {
-							vm_page_deactivate(m2);
-						}
-					}
-					PAGE_WAKEUP_DONE(m2);
-				} else {
-					assert(m1->vmp_q_state != VM_PAGE_USED_BY_COMPRESSOR);
-
-					/*
-					 * completely cleans up the state
-					 * of the page so that it is ready
-					 * to be put onto the free list, or
-					 * for this purpose it looks like it
-					 * just came off of the free list
-					 */
-					vm_page_free_prepare(m1);
-				}
-
 				stolen_pages++;
 			}
+
+			/* m1 is ours at this point ... */
+
 			if (m1->vmp_q_state != VM_PAGE_USED_BY_COMPRESSOR) {
 				/*
 				 * The Q state is preserved on m1 because vm_page_queues_remove doesn't
@@ -6511,6 +6623,7 @@ did_consider:
 			m1->vmp_snext = m;
 			m = m1;
 		}
+
 		if (locked_object) {
 			vm_object_unlock(locked_object);
 			locked_object = VM_OBJECT_NULL;
@@ -6874,7 +6987,7 @@ vm_page_do_delayed_work(
 			}
 
 			if (dwp->dw_mask & DW_PAGE_WAKEUP) {
-				PAGE_WAKEUP(m);
+				vm_page_wakeup(object, m);
 			}
 		}
 	}
@@ -6917,7 +7030,8 @@ vm_page_alloc_list(
 			if (flags & KMA_LOMEM) {
 				mem = vm_page_grablo();
 			} else {
-				mem = vm_page_grab();
+				uint_t options = VM_PAGE_GRAB_OPTIONS_NONE;
+				mem = vm_page_grab_options(options);
 			}
 
 			if (mem != VM_PAGE_NULL) {
@@ -6936,7 +7050,7 @@ vm_page_alloc_list(
 			/* VM privileged threads should have waited in vm_page_grab() and not get here. */
 			assert(!(current_thread()->options & TH_OPT_VMPRIV));
 
-			if ((flags & KMA_NOFAIL) == 0) {
+			if ((flags & KMA_NOFAIL) == 0 && ptoa_64(page_size) > max_mem / 4) {
 				uint64_t unavailable = ptoa_64(vm_page_wire_count + vm_page_free_target);
 				if (unavailable > max_mem || ptoa_64(page_count) > (max_mem - unavailable)) {
 					kr = KERN_RESOURCE_SHORTAGE;
@@ -7054,7 +7168,15 @@ struct hibernate_statistics {
 	int cd_count_wire;
 } hibernate_stats;
 
-
+#if CONFIG_SPTM
+/**
+ * On SPTM-based systems don't save any executable pages into the hibernation
+ * image. The SPTM has stronger guarantees around not allowing write access to
+ * the executable pages than on older systems, which prevents XNU from being
+ * able to restore any pages mapped as executable.
+ */
+#define HIBERNATE_XPMAPPED_LIMIT        0ULL
+#else /* CONFIG_SPTM */
 /*
  * clamp the number of 'xpmapped' pages we'll sweep into the hibernation image
  * so that we don't overrun the estimated image size, which would
@@ -7068,7 +7190,7 @@ struct hibernate_statistics {
  * xpmapped size.
  */
 #define HIBERNATE_XPMAPPED_LIMIT        ((160 * 1024 * 1024ULL) / PAGE_SIZE)
-
+#endif /* CONFIG_SPTM */
 
 static int
 hibernate_drain_pageout_queue(struct vm_pageout_queue *q)
@@ -7341,7 +7463,7 @@ hibernate_flush_dirty_pages(int pass)
 		}
 	}
 
-	for (i = 0; i <= VM_PAGE_MAX_SPECULATIVE_AGE_Q; i++) {
+	for (i = 0; i <= vm_page_max_speculative_age_q; i++) {
 		int             qcount;
 		vm_page_t       m;
 
@@ -7727,6 +7849,16 @@ hibernate_vm_unlock_queues(void)
 	vm_object_unlock(compressor_object);
 }
 
+#if CONFIG_SPTM
+static bool
+hibernate_sptm_should_force_page_to_wired_pagelist(sptm_paddr_t paddr)
+{
+	const sptm_frame_type_t frame_type = sptm_get_frame_type(paddr);
+
+	return frame_type == XNU_USER_JIT || frame_type == XNU_USER_DEBUG;
+}
+#endif
+
 /*
  *  Bits zero in the bitmaps => page needs to be saved. All pages default to be saved,
  *  pages known to VM to not need saving are subtracted.
@@ -7900,7 +8032,10 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 	m = (vm_page_t)vm_page_queue_first(&vm_page_queue_anonymous);
 	while (m && !vm_page_queue_end(&vm_page_queue_anonymous, (vm_page_queue_entry_t)m)) {
 		assert(m->vmp_q_state == VM_PAGE_ON_INACTIVE_INTERNAL_Q);
-
+		bool force_to_wired_list = false;       /* Default to NOT forcing page into the wired page list */
+#if CONFIG_SPTM
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+#endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;
 		if ((kIOHibernateModeDiscardCleanInactive & gIOHibernateMode) &&
@@ -7915,11 +8050,27 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 			}
 			discard = discard_all;
 		} else {
-			count_anonymous++;
+			/*
+			 * If the page must be force-added to the wired page list, prevent it from appearing
+			 * in the unwired page list.
+			 */
+			if (force_to_wired_list) {
+				if (!preflight) {
+					hibernate_page_bitset(page_list, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+				}
+			} else {
+				count_anonymous++;
+			}
 		}
-		count_wire--;
-		if (!preflight) {
-			hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+		/*
+		 * If the page is NOT being forced into the wired page list, remove it from the
+		 * wired page list here.
+		 */
+		if (!force_to_wired_list) {
+			count_wire--;
+			if (!preflight) {
+				hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+			}
 		}
 		if (discard) {
 			hibernate_discard_page(m);
@@ -7960,7 +8111,10 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 	m = (vm_page_t) vm_page_queue_first(&vm_page_queue_active);
 	while (m && !vm_page_queue_end(&vm_page_queue_active, (vm_page_queue_entry_t)m)) {
 		assert(m->vmp_q_state == VM_PAGE_ON_ACTIVE_Q);
-
+		bool force_to_wired_list = false;       /* Default to NOT forcing page into the wired page list */
+#if CONFIG_SPTM
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+#endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;
 		if ((kIOHibernateModeDiscardCleanActive & gIOHibernateMode) &&
@@ -7975,11 +8129,27 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 			}
 			discard = discard_all;
 		} else {
-			count_active++;
+			/*
+			 * If the page must be force-added to the wired page list, prevent it from appearing
+			 * in the unwired page list.
+			 */
+			if (force_to_wired_list) {
+				if (!preflight) {
+					hibernate_page_bitset(page_list, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+				}
+			} else {
+				count_active++;
+			}
 		}
-		count_wire--;
-		if (!preflight) {
-			hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+		/*
+		 * If the page is NOT being forced into the wired page list, remove it from the
+		 * wired page list here.
+		 */
+		if (!force_to_wired_list) {
+			count_wire--;
+			if (!preflight) {
+				hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+			}
 		}
 		if (discard) {
 			hibernate_discard_page(m);
@@ -7990,7 +8160,10 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 	m = (vm_page_t) vm_page_queue_first(&vm_page_queue_inactive);
 	while (m && !vm_page_queue_end(&vm_page_queue_inactive, (vm_page_queue_entry_t)m)) {
 		assert(m->vmp_q_state == VM_PAGE_ON_INACTIVE_EXTERNAL_Q);
-
+		bool force_to_wired_list = false;        /* Default to NOT forcing page into the wired page list */
+#if CONFIG_SPTM
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+#endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;
 		if ((kIOHibernateModeDiscardCleanInactive & gIOHibernateMode) &&
@@ -8005,11 +8178,27 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 			}
 			discard = discard_all;
 		} else {
-			count_inactive++;
+			/*
+			 * If the page must be force-added to the wired page list, prevent it from appearing
+			 * in the unwired page list.
+			 */
+			if (force_to_wired_list) {
+				if (!preflight) {
+					hibernate_page_bitset(page_list, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+				}
+			} else {
+				count_inactive++;
+			}
 		}
-		count_wire--;
-		if (!preflight) {
-			hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+		/*
+		 * If the page is NOT being forced into the wired page list, remove it from the
+		 * wired page list here.
+		 */
+		if (!force_to_wired_list) {
+			count_wire--;
+			if (!preflight) {
+				hibernate_page_bitset(page_list_wired, TRUE, VM_PAGE_GET_PHYS_PAGE(m));
+			}
 		}
 		if (discard) {
 			hibernate_discard_page(m);
@@ -8018,7 +8207,7 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 	}
 	/* XXX FBDP TODO: secluded queue */
 
-	for (i = 0; i <= VM_PAGE_MAX_SPECULATIVE_AGE_Q; i++) {
+	for (i = 0; i <= vm_page_max_speculative_age_q; i++) {
 		m = (vm_page_t) vm_page_queue_first(&vm_page_queue_speculative[i].age_q);
 		while (m && !vm_page_queue_end(&vm_page_queue_speculative[i].age_q, (vm_page_queue_entry_t)m)) {
 			assertf(m->vmp_q_state == VM_PAGE_ON_SPECULATIVE_Q,
@@ -8191,7 +8380,7 @@ hibernate_page_list_discard(hibernate_page_list_t * page_list)
 		m = next;
 	}
 
-	for (i = 0; i <= VM_PAGE_MAX_SPECULATIVE_AGE_Q; i++) {
+	for (i = 0; i <= vm_page_max_speculative_age_q; i++) {
 		m = (vm_page_t) vm_page_queue_first(&vm_page_queue_speculative[i].age_q);
 		while (m && !vm_page_queue_end(&vm_page_queue_speculative[i].age_q, (vm_page_queue_entry_t)m)) {
 			assert(m->vmp_q_state == VM_PAGE_ON_SPECULATIVE_Q);
@@ -8632,7 +8821,7 @@ hibernate_teardown_vm_structs(hibernate_page_list_t *page_list, hibernate_page_l
 #if     MACH_VM_DEBUG
 
 #include <mach_debug/hash_info.h>
-#include <vm/vm_debug.h>
+#include <vm/vm_debug_internal.h>
 
 /*
  *	Routine:	vm_page_info
@@ -9073,7 +9262,7 @@ vm_page_check_pageable_safe(vm_page_t page)
 
 	if (is_kernel_object(page_object)) {
 		panic("vm_page_check_pageable_safe: trying to add page"
-		    "from kernel object (%p) to pageable queue", page_object);
+		    "from a kernel object to pageable queue");
 	}
 
 	if (page_object == compressor_object) {
@@ -9466,14 +9655,10 @@ vm_tag_zone_stats_alloc(vm_tag_t tag, zalloc_flags_t flags)
 }
 
 vm_tag_t
-vm_tag_will_update_zone(vm_tag_t tag, uint32_t zidx, uint32_t zflags)
+vm_tag_will_update_zone(vm_tag_t tag, uint32_t zflags)
 {
 	assert(VM_KERN_MEMORY_NONE != tag);
 	assert(tag < VM_MAX_TAG_VALUE);
-
-	if (zidx >= VM_TAG_SIZECLASSES) {
-		return VM_KERN_MEMORY_NONE;
-	}
 
 	if (__probable(vm_allocation_zone_totals[tag])) {
 		return tag;
@@ -9510,7 +9695,7 @@ vm_tag_update_zone_size(vm_tag_t tag, uint32_t zidx, long delta)
 #endif /* VM_TAG_SIZECLASSES */
 
 void
-kern_allocation_update_subtotal(kern_allocation_name_t allocation, uint32_t subtag, int64_t delta)
+kern_allocation_update_subtotal(kern_allocation_name_t allocation, vm_tag_t subtag, int64_t delta)
 {
 	kern_allocation_name_t other;
 	struct vm_allocation_total * total;
@@ -9585,12 +9770,6 @@ kern_allocation_name_release(kern_allocation_name_t allocation)
 		kfree_data(allocation,
 		    KA_SIZE(KA_NAME_LEN(allocation), allocation->subtotalscount));
 	}
-}
-
-vm_tag_t
-kern_allocation_name_get_vm_tag(kern_allocation_name_t allocation)
-{
-	return vm_tag_alloc(allocation);
 }
 
 #if !VM_TAG_ACTIVE_UPDATE

@@ -37,23 +37,11 @@
 #include <kern/kalloc.h>
 #include <sys/cprotect.h>
 #include <sys/disk.h>
-#include <vm/vm_protos.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_pageout_xnu.h>
 #include <sys/content_protection.h>
-
-void vm_swapfile_open(const char *path, vnode_t *vp);
-void vm_swapfile_close(uint64_t path, vnode_t vp);
-int vm_swapfile_preallocate(vnode_t vp, uint64_t *size, boolean_t *pin);
-uint64_t vm_swapfile_get_blksize(vnode_t vp);
-uint64_t vm_swapfile_get_transfer_size(vnode_t vp);
-int vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flags, void *);
-int vm_record_file_write(struct vnode *vp, uint64_t offset, char *buf, int size);
-int vm_swap_vol_get_capacity(const char *volume_name, uint64_t *capacity);
-
-#if CONFIG_FREEZE
-int vm_swap_vol_get_budget(vnode_t vp, uint64_t *freeze_daily_budget);
-#endif /* CONFIG_FREEZE */
-
+#include <vm/vm_ubc.h>
+#include <vm/vm_compressor_backing_store_internal.h>
 
 void
 vm_swapfile_open(const char *path, vnode_t *vp)

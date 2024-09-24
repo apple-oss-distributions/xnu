@@ -109,7 +109,8 @@ struct tcp_cc_debug_state {
 #define TCP_CC_ALGO_NEWRENO_INDEX       1
 #define TCP_CC_ALGO_BACKGROUND_INDEX    2 /* CC for background transport */
 #define TCP_CC_ALGO_CUBIC_INDEX         3 /* default CC algorithm */
-#define TCP_CC_ALGO_COUNT               4 /* Count of CC algorithms */
+#define TCP_CC_ALGO_PRAGUE_INDEX        4 /* L4S CC algorithm */
+#define TCP_CC_ALGO_COUNT               5 /* Count of CC algorithms */
 
 /*
  * Values of ccd_event
@@ -213,6 +214,12 @@ struct tcp_cc_algo {
 
 	/* Whether or not to delay the ack */
 	int (*delay_ack)(struct tcpcb *tp, struct tcphdr *th);
+
+	/* called to process ECN markings, used by Prague only */
+	void (*process_ecn) (struct tcpcb *tp, struct tcphdr *th, uint32_t new_bytes_marked, uint32_t packets_marked, uint32_t packets_acked);
+
+	/* called to set bytes acked in this ACK which are later update to exclude CE marked bytes */
+	void (*set_bytes_acked) (struct tcpcb *tp, uint32_t acked);
 
 	/* Switch a connection to this CC algorithm after sending some packets */
 	void (*switch_to)(struct tcpcb *tp);

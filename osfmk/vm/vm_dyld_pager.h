@@ -45,21 +45,6 @@
 #define MWL_MIN_LINK_INFO_SIZE sizeof(struct mwl_info_hdr)
 #define MWL_MAX_LINK_INFO_SIZE (64 * 1024 * 1024)   /* just a guess for now, may have to increase */
 
-extern uint32_t dyld_pager_count;
-extern uint32_t dyld_pager_count_max;
-
-/*
- * VM call to implement map_with_linking_np() system call.
- */
-extern kern_return_t
-vm_map_with_linking(
-	task_t                  task,
-	struct mwl_region       *regions,
-	uint32_t                region_cnt,
-	void                    *link_info,
-	uint32_t                link_info_size,
-	memory_object_control_t file_control);
-
 #endif /* KERNEL_PRIVATE */
 
-#endif  /* _VM_DYLD_PAGER_H_ */
+#endif /* _VM_DYLD_PAGER_H_ */

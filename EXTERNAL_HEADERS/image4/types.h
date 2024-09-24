@@ -1,3 +1,30 @@
+/*
+ * Copyright © 2017-2024 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
 /*!
  * @header
  * Common types shared across the Image4 trust evaluation API.
@@ -13,6 +40,19 @@ __BEGIN_DECLS
 OS_ASSUME_NONNULL_BEGIN
 OS_ASSUME_PTR_ABI_SINGLE_BEGIN
 
+#pragma mark Definitions
+/*!
+ * @const IMAGE4_DIGEST_MAX_LEN
+ * The maximum size of a digest.
+ */
+#define IMAGE4_DIGEST_MAX_LEN (64u)
+
+/*!
+ * @const IMAGE4_NONCE_MAX_LEN
+ * The maximum size of a nonce.
+ */
+#define IMAGE4_NONCE_MAX_LEN (16u)
+
 #pragma mark Supporting Types
 /*!
  * @typedef image4_struct_version_t
@@ -20,7 +60,6 @@ OS_ASSUME_PTR_ABI_SINGLE_BEGIN
  */
 typedef uint16_t image4_struct_version_t;
 
-#pragma mark Supporting Types
 /*!
  * @typedef image4_coprocessor_handle_t
  * A handle which specifies a particular execution environment within a
@@ -87,85 +126,6 @@ image4_secure_boot_check(image4_secure_boot_t sb)
 	}
 	return 0;
 }
-
-/*!
- * @const IMAGE4_NONCE_MAX_LEN
- * The maximum size of a boot nonce.
- */
-#define IMAGE4_NONCE_MAX_LEN (16u)
-
-/*!
- * @const IMAGE4_NONCE_DIGEST_STRUCT_VERSION
- * The version of the {@link image4_nonce_digest_t} structure supported by the
- * implementation.
- */
-#define IMAGE4_NONCE_DIGEST_STRUCT_VERSION (0u)
-
-/*!
- * @const IMAGE4_NONCE_DIGEST_MAX_LEN
- * The maximum size of a nonce digest.
- */
-#define IMAGE4_NONCE_DIGEST_MAX_LEN (64u)
-
-/*!
- * @typedef image4_nonce_digest_t
- * A structure representing a nonce digest.
- *
- * @field nd_version
- * The version of the structure. Initialize to
- * {@link IMAGE4_NONCE_DIGEST_STRUCT_VERSION}.
- *
- * @field nd_length
- * The length of the digest.
- *
- * @field nd_bytes
- * The digest bytes.
- */
-typedef struct _image4_nonce_digest {
-	image4_struct_version_t nd_version;
-	size_t nd_length;
-	uint8_t nd_bytes[IMAGE4_NONCE_DIGEST_MAX_LEN];
-} image4_nonce_digest_t;
-
-/*!
- * @const IMAGE4_NONCE_DIGEST_INIT
- * Initializer for an {@link image4_nonce_digest_t} structure.
- */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-#define IMAGE4_NONCE_DIGEST_INIT (image4_nonce_digest_t){ \
-	.nd_version = IMAGE4_NONCE_DIGEST_STRUCT_VERSION, \
-	.nd_length = 0, \
-	.nd_bytes = { \
-		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, \
-	}, \
-}
-#elif defined(__cplusplus) && __cplusplus >= 201103L
-#define IMAGE4_NONCE_DIGEST_INIT (image4_nonce_digest_t {\
-	IMAGE4_NONCE_DIGEST_STRUCT_VERSION, \
-	0, \
-	{ \
-		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, \
-	}, \
-})
-#elif defined(__cplusplus)
-#define IMAGE4_NONCE_DIGEST_INIT (image4_nonce_digest_t(\
-	(image4_nonce_digest_t){ \
-		IMAGE4_NONCE_DIGEST_STRUCT_VERSION, \
-		0, \
-		{ \
-			0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, \
-		}, \
-	} \
-))
-#else
-#define IMAGE4_NONCE_DIGEST_INIT { \
-	IMAGE4_NONCE_DIGEST_STRUCT_VERSION, \
-	0, \
-	{ \
-		0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, \
-	}, \
-}
-#endif
 
 #pragma mark API Objects
 /*!

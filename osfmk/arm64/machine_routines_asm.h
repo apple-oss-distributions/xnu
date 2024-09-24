@@ -117,10 +117,36 @@
 #endif
 
 /**
+ * Performs the appropriate SoC specific routine for a blended AUTDA operation.
+ * On success, falls through with stripped result in \value. Faults otherwise.
+ *
+ * value (inout): The register holding the PAC'd pointer to authenticate.
+ * Stripped result will be returned in this register.
+ * address (input, clobbered): The register holding the address from which
+ * \value was loaded. This forms a part of the diversification.
+ * diversifier (input): The diversifier constant to blend with \address.
+ */
+.macro AUTDA_DIVERSIFIED value, address, diversifier
+#if __has_feature(ptrauth_calls)
+	/* Blend */
+	movk		\address, \diversifier, lsl #48
+	autda		\value, \address
+#if !__ARM_ARCH_8_6__
+	mov		\address, \value
+	xpacd	\address
+	cmp		\address, \value
+	b.eq	Lautda_ok_\@
+	brk		#BRK_AUTDA_FAILURE
+Lautda_ok_\@:
+#endif /* !__ARM_ARCH_8_6__ */
+#endif /* __has_feature(ptrauth_calls) */
+.endmacro
+
+/**
  * Loads and auths the top of a thread's kernel stack pointer.
  *
- * Faults on auth failure.  src and dst can be the same register, as long as
- * the caller doesn't mind clobbering the input.
+ * Faults on auth failure.  src and dst can be the same register, as long as the
+ * caller doesn't mind clobbering the input.
  *
  * src (input): struct thread *
  * dst (output): ptrauth_auth(src->machine.kstackptr)
@@ -129,25 +155,14 @@
 .macro LOAD_KERN_STACK_TOP	dst, src, tmp
 	add		\tmp, \src, TH_KSTACKPTR
 	ldr		\dst, [\tmp]
-#if __has_feature(ptrauth_calls)
-	movk		\tmp, TH_KSTACKPTR_DIVERSIFIER, lsl #48
-	autda		\dst, \tmp
-#if !__ARM_ARCH_8_6__
-	mov		\tmp, \dst
-	xpacd		\tmp
-	cmp		\tmp, \dst
-	b.eq		Lkstackptr_ok_\@
-	brk		BRK_AUTDA_FAILURE
-Lkstackptr_ok_\@:
-#endif /* !__ARM_ARCH_8_6__ */
-#endif /* __has_feature(ptrauth_calls) */
+	AUTDA_DIVERSIFIED \dst, address=\tmp, diversifier=TH_KSTACKPTR_DIVERSIFIER
 .endmacro
 
 /**
  * Loads and auths a thread's user context data.
  *
- * Faults on auth failure.  src and dst can be the same register, as long as
- * the caller doesn't mind clobbering the input.
+ * Faults on auth failure.  src and dst can be the same register, as long as the
+ * caller doesn't mind clobbering the input.
  *
  * src (input): struct thread *
  * dst (output): ptrauth_auth(src->machine.upcb)
@@ -156,47 +171,69 @@ Lkstackptr_ok_\@:
 .macro LOAD_USER_PCB	dst, src, tmp
 	add		\tmp, \src, TH_UPCB
 	ldr		\dst, [\tmp]
-#if __has_feature(ptrauth_calls)
-	movk		\tmp, TH_UPCB_DIVERSIFIER, lsl #48
-	autda		\dst, \tmp
-#if !__ARM_ARCH_8_6__
-	mov		\tmp, \dst
-	xpacd		\tmp
-	cmp		\tmp, \dst
-	b.eq		Lupcb_ok_\@
-	brk		BRK_AUTDA_FAILURE
-Lupcb_ok_\@:
-#endif /* !__ARM_ARCH_8_6__ */
-#endif /* __has_feature(ptrauth_calls) */
+	AUTDA_DIVERSIFIED \dst, address=\tmp, diversifier=TH_UPCB_DIVERSIFIER
 .endmacro
 
 /**
  * Loads and auths a thread's interrupt stack pointer.
  *
- * Faults on auth failure.  src and dst can be the same register, as long as
- * the caller doesn't mind clobbering the input.
+ * Faults on auth failure.  src and dst can be the same register, as long as the
+ * caller doesn't mind clobbering the input.
  *
  * src (input): struct thread *
  * dst (output): ptrauth_auth(src->cpuDataP.istackptr)
  * tmp: clobbered
  */
-.macro LOAD_INT_STACK	dst, src, tmp
-	ldr		\tmp, [\src, ACT_CPUDATAP]
-	add		\tmp, \tmp, CPU_ISTACKPTR
+.macro LOAD_INT_STACK_THREAD	dst, src, tmp
+	ldr		\tmp, [\src, #ACT_CPUDATAP]
+	LOAD_INT_STACK_CPU_DATA \dst, src=\tmp, tmp=\tmp
+.endmacro
+
+/**
+ * Loads and auths a CPU's interrupt stack pointer.
+ *
+ * Faults on auth failure.
+ *
+ * src (input): cpu_data_t *
+ * dst (output): ptrauth_auth(cpuDataP.istackptr)
+ * tmp (clobber): Temporary register. Can be the same as \src if callers don't
+ * care to preserve it.
+ */
+.macro LOAD_INT_STACK_CPU_DATA	dst, src, tmp
+	add		\tmp, \src, #CPU_ISTACKPTR
 	ldr		\dst, [\tmp]
-#if __has_feature(ptrauth_calls)
-	movk		\tmp, CPU_ISTACKPTR_DIVERSIFIER, lsl #48
-	autda		\dst, \tmp
-#if !__ARM_ARCH_8_6__
-	mov		\tmp, \dst
-	xpacd		\tmp
-	cmp		\tmp, \dst
-	b.eq		Listackptr_ok_\@
-	brk		BRK_AUTDA_FAILURE
-Listackptr_ok_\@:
-#endif /* !__ARM_ARCH_8_6__ */
-#endif /* __has_feature(ptrauth_calls) */
+	AUTDA_DIVERSIFIED \dst, address=\tmp, diversifier=CPU_ISTACKPTR_DIVERSIFIER
+.endmacro
+
+/**
+ * Loads and auths a thread's exception stack pointer.
+ *
+ * Faults on auth failure.  src and dst can be the same register, as long as
+ * the caller doesn't mind clobbering the input.
+ *
+ * src (input): struct thread *
+ * dst (output): ptrauth_auth(src->cpuDataP.excepstackptr)
+ * tmp: clobbered
+ */
+.macro LOAD_EXCEP_STACK_THREAD	dst, src, tmp
+	ldr		\tmp, [\src, #ACT_CPUDATAP]
+	LOAD_EXCEP_STACK_CPU_DATA \dst, src=\tmp, tmp=\tmp
+.endmacro
+
+/**
+ * Loads and auths a CPU's exception stack pointer.
+ *
+ * Faults on auth failure.
+ *
+ * src (input): cpu_data_t *
+ * dst (output): ptrauth_auth(cpuDataP.excepstackptr)
+ * tmp (clobber): Temporary register. Can be the same as \src if callers don't
+ * care to preserve it.
+ */
+.macro LOAD_EXCEP_STACK_CPU_DATA	dst, src, tmp
+	add		\tmp, \src, #CPU_EXCEPSTACKPTR
+	ldr		\dst, [\tmp]
+	AUTDA_DIVERSIFIED \dst, address=\tmp, diversifier=CPU_EXCEPSTACKPTR_DIVERSIFIER
 .endmacro
 /* END IGNORE CODESTYLE */
-
 /* vim: set ft=asm: */

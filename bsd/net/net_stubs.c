@@ -265,6 +265,8 @@ STUB(mbuf_register_tx_compl_callback);
 STUB(mbuf_unregister_tx_compl_callback);
 STUB(mbuf_get_keepalive_flag);
 STUB(mbuf_set_keepalive_flag);
+STUB(mbuf_get_wake_packet_flag);
+STUB(mbuf_set_wake_packet_flag);
 STUB(net_init_add);
 STUB(proto_inject);
 STUB(proto_input);

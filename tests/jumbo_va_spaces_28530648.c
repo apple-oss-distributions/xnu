@@ -18,7 +18,7 @@ T_GLOBAL_META(
 T_DECL(TESTNAME,
 	"Verify that a required entitlement is present in order to be granted an extra-large "
 	"VA space on arm64",
-	T_META_CHECK_LEAKS(false))
+	T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	if (!dt_64_bit_kernel()) {
 		T_SKIP("This test is only applicable to arm64");

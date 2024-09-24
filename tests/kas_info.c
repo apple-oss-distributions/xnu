@@ -50,7 +50,7 @@ kernel_slide(int selector)
 }
 
 T_DECL(kernel_text_slide,
-    "ensures that kas_info can return the kernel text slide")
+    "ensures that kas_info can return the kernel text slide", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	if (!slide_enabled()) {
 		T_SKIP("KASLR is not enabled");
@@ -85,7 +85,7 @@ test_kas_info_invalid_args(int selector)
 }
 
 T_DECL(kernel_text_slide_invalid,
-    "ensures that kas_info handles invalid input to KERNEL_TEXT_SLIDE_SELECTOR")
+    "ensures that kas_info handles invalid input to KERNEL_TEXT_SLIDE_SELECTOR", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	test_kas_info_invalid_args(KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR);
 }
@@ -101,7 +101,7 @@ sptm_enabled(void)
 }
 
 T_DECL(sptm_txm_text_slide,
-    "ensures that kas_info can return the SPTM/TXM text slides")
+    "ensures that kas_info can return the SPTM/TXM text slides", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	const uint64_t sptm_slide = kernel_slide(KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR);
 	const uint64_t txm_slide = kernel_slide(KAS_INFO_TXM_TEXT_SLIDE_SELECTOR);
@@ -117,7 +117,7 @@ T_DECL(sptm_txm_text_slide,
 }
 
 T_DECL(sptm_txm_text_slide_invalid,
-    "ensures that kas_info handles invalid input to [SPTM|TXM]_TEXT_SLIDE_SELECTOR")
+    "ensures that kas_info handles invalid input to [SPTM|TXM]_TEXT_SLIDE_SELECTOR", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	test_kas_info_invalid_args(KAS_INFO_SPTM_TEXT_SLIDE_SELECTOR);
 	test_kas_info_invalid_args(KAS_INFO_TXM_TEXT_SLIDE_SELECTOR);
@@ -236,7 +236,7 @@ is_fileset_kc(void)
 #define KAS_INFO_KERNEL_SEGMENT_LOCATION_SELECTOR 1
 
 T_DECL(kernel_segment_location,
-    "ensures that KAS_INFO_KERNEL_SEGMENT_LOCATION returns correct segment locations")
+    "ensures that KAS_INFO_KERNEL_SEGMENT_LOCATION returns correct segment locations", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int err;
 

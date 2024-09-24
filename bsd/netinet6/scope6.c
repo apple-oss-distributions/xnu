@@ -96,7 +96,7 @@ SYSCTL_INT(_net_inet6_ip6, OID_AUTO,
 void
 scope6_ifattach(struct ifnet *ifp)
 {
-	struct scope6_id *sid;
+	struct scope6_id *__single sid;
 
 	VERIFY(IN6_IFEXTRA(ifp) != NULL);
 	if_inet6data_lock_exclusive(ifp);
@@ -177,7 +177,7 @@ in6_addr2scopeid(struct ifnet *ifp, struct in6_addr *addr)
 {
 	int scope = in6_addrscope(addr);
 	int retid = 0;
-	struct scope6_id *sid;
+	struct scope6_id *__single sid;
 
 	if_inet6data_lock_shared(ifp);
 	if (IN6_IFEXTRA(ifp) == NULL) {
@@ -217,7 +217,7 @@ err:
 int
 sa6_embedscope(struct sockaddr_in6 *sin6, int defaultok, uint32_t *ret_ifscope)
 {
-	struct ifnet *ifp;
+	struct ifnet *__single ifp;
 	u_int32_t zoneid;
 
 	if ((zoneid = sin6->sin6_scope_id) == 0 && defaultok) {
@@ -388,7 +388,7 @@ in6_setscope(struct in6_addr *in6, struct ifnet *ifp, u_int32_t *ret_id)
 {
 	int scope;
 	u_int32_t zoneid = 0;
-	struct scope6_id *sid;
+	struct scope6_id *__single sid;
 
 	/*
 	 * special case: the loopback address can only belong to a loopback

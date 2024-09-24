@@ -78,7 +78,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_move, "intrusive_shared_ptr.ctor.move") {
+T_DECL(ctor_move, "intrusive_shared_ptr.ctor.move", T_META_TAG_VM_PREFERRED) {
 	tests</*stored*/ Derived, /*from*/ Derived, /*to*/ Derived>();
 	tests</*stored*/ Derived, /*from*/ Derived, /*to*/ Derived const>();
 	tests</*stored*/ Derived, /*from*/ Derived const, /*to*/ Derived const>();

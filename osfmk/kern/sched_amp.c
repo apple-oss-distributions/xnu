@@ -48,7 +48,7 @@
 
 #include <sys/kdebug.h>
 
-#if __AMP__
+#if __AMP__ && !CONFIG_SCHED_EDGE
 
 static thread_t
 sched_amp_steal_thread(processor_set_t pset);
@@ -88,7 +88,7 @@ static void
 sched_amp_processor_init(processor_t processor);
 
 static thread_t
-sched_amp_choose_thread(processor_t processor, int priority, ast_t reason);
+sched_amp_choose_thread(processor_t processor, int priority, __unused thread_t prev, ast_t reason);
 
 static void
 sched_amp_processor_queue_shutdown(processor_t processor);
@@ -145,7 +145,6 @@ const struct sched_dispatch_table sched_amp_dispatch = {
 	.processor_bound_count                          = sched_amp_processor_bound_count,
 	.thread_update_scan                             = sched_amp_thread_update_scan,
 	.multiple_psets_enabled                         = TRUE,
-	.sched_groups_enabled                           = FALSE,
 	.avoid_processor_enabled                        = TRUE,
 	.thread_avoid_processor                         = sched_amp_thread_avoid_processor,
 	.processor_balance                              = sched_amp_balance,
@@ -233,6 +232,7 @@ static thread_t
 sched_amp_choose_thread(
 	processor_t      processor,
 	int              priority,
+	__unused thread_t         prev_thread,
 	__unused ast_t            reason)
 {
 	processor_set_t pset = processor->processor_set;
@@ -753,30 +753,4 @@ sched_amp_cpu_init_completed(void)
 	}
 }
 
-#if DEVELOPMENT || DEBUG
-
-extern char sysctl_get_bound_cluster_type(void);
-char
-sysctl_get_bound_cluster_type(void)
-{
-	thread_t self = current_thread();
-
-	if (self->th_bound_cluster_id == THREAD_BOUND_CLUSTER_NONE) {
-		return '0';
-	} else if (pset_array[self->th_bound_cluster_id]->pset_cluster_type == PSET_AMP_E) {
-		return 'E';
-	} else {
-		return 'P';
-	}
-}
-
-extern void sysctl_thread_bind_cluster_type(char cluster_type);
-void
-sysctl_thread_bind_cluster_type(char cluster_type)
-{
-	thread_bind_cluster_type(current_thread(), cluster_type, false);
-}
-
-#endif /* DEVELOPMENT || DEBUG */
-
-#endif /* __AMP__ */
+#endif /* __AMP__ && !CONFIG_SCHED_EDGE */

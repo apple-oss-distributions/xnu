@@ -27,10 +27,15 @@
  */
 
 #include <kern/energy_perf.h>
+
 #include <libsa/types.h>
 #include <sys/kdebug.h>
 #include <stddef.h>
 #include <machine/machine_routines.h>
+
+#include <kern/coalition.h>
+#include <kern/task.h>
+#include <kern/task_ident.h>
 
 void
 gpu_describe(__unused gpu_descriptor_t gdesc)
@@ -98,4 +103,81 @@ gpu_submission_telemetry(
 	__unused uint64_t gpu_telemetry_valid_flags,
 	__unused uint64_t gpu_telemetry_misc)
 {
+}
+
+kern_return_t
+current_energy_id(energy_id_t *energy_id)
+{
+	coalition_t coalition = task_get_coalition(current_task(),
+	    COALITION_TYPE_RESOURCE);
+
+	if (coalition == COALITION_NULL) {
+		*energy_id = ENERGY_ID_NONE;
+		return KERN_FAILURE;
+	}
+
+	uint64_t cid = coalition_id(coalition);
+
+	*energy_id = cid;
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+task_id_token_to_energy_id(mach_port_name_t name, energy_id_t *energy_id)
+{
+	if (current_task() == kernel_task) {
+		panic("cannot translate task id token from a kernel thread");
+	}
+
+	task_t task = TASK_NULL;
+	kern_return_t kr = task_id_token_port_name_to_task(name, &task);
+	/* holds task reference upon success */
+
+	if (kr != KERN_SUCCESS) {
+		assert(task == TASK_NULL);
+		return kr;
+	}
+
+	coalition_t coalition = task_get_coalition(task, COALITION_TYPE_RESOURCE);
+
+	assert(coalition != COALITION_NULL);
+
+	uint64_t cid = coalition_id(coalition);
+
+	*energy_id = cid;
+
+	task_deallocate(task);
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+energy_id_report_energy(energy_id_source_t energy_source, energy_id_t self_id,
+    energy_id_t on_behalf_of_id, uint64_t energy)
+{
+	if (energy_source != ENERGY_ID_SOURCE_GPU) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	if (self_id == ENERGY_ID_NONE) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	bool exists;
+
+	if (on_behalf_of_id == ENERGY_ID_NONE) {
+		exists = coalition_add_to_gpu_energy(self_id, CGE_SELF, energy);
+	} else {
+		exists = coalition_add_to_gpu_energy(self_id, CGE_SELF | CGE_OTHERS,
+		    energy);
+		coalition_add_to_gpu_energy(on_behalf_of_id, CGE_BILLED,
+		    energy);
+	}
+
+	if (exists) {
+		return KERN_SUCCESS;
+	} else {
+		return KERN_NOT_FOUND;
+	}
 }

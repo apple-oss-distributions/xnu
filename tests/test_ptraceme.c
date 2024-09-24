@@ -44,7 +44,7 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(true)
 	);
 
-T_DECL(test_ptraceme, "Test that ptraced process is stopped when it execs", T_META_ASROOT(true), T_META_ENABLED(TARGET_OS_OSX))
+T_DECL(test_ptraceme, "Test that ptraced process is stopped when it execs", T_META_ASROOT(true), T_META_ENABLED(TARGET_OS_OSX), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 

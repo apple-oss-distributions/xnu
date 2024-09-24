@@ -78,6 +78,20 @@ COMP_SUBDIRS =
 tcp_cubic.o_CWARNFLAGS_ADD += -Wno-error=implicit-int-float-conversion
 
 #
+# Enforce semantic types
+#
+
+SEMANTIC_TYPES_SRC = $(notdir $(wildcard ${SRCROOT}/bsd/vm/*.c))
+SEMANTIC_TYPES_OBJ = $(SEMANTIC_TYPES_SRC:.c=.o)
+
+define FORCE_UNSAFE_TYPES
+$1_CFLAGS_ADD += -DVM_UNSAFE_TYPES
+endef
+
+$(foreach file,$(SEMANTIC_TYPES_OBJ),$(eval $(call FORCE_UNSAFE_TYPES, $(file))))
+kern_mman.o_CFLAGS_ADD += -DVM_UNSAFE_TYPES
+
+#
 # Diagnostic opt-outs.  We need to make this list empty.
 #
 # DO NOT ADD MORE HERE.
@@ -90,7 +104,9 @@ esp_input.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 esp_output.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 frag6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 icmp6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
+if_bridge.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 if_ipsec.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
+if_ports_used.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 if_stf.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 in6_cksum.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 in6_gif.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
@@ -107,6 +123,7 @@ nd6_prproxy.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 nd6_rtr.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 necp.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 packet_mangler.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
+pf_ioctl.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 pf_norm.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 pktap.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
 raw_ip6.o_CWARNFLAGS_ADD += -Wno-address-of-packed-member
@@ -126,6 +143,7 @@ fasttrap_isa.o_CWARNFLAGS_ADD += -Wno-cast-align
 fbt.o_CWARNFLAGS_ADD += -Wno-cast-align
 fbt_arm.o_CWARNFLAGS_ADD += -Wno-cast-align
 fbt_x86.o_CWARNFLAGS_ADD += -Wno-cast-align
+if_bridge.o_CWARNFLAGS_ADD += -Wno-cast-align
 if_bond.o_CWARNFLAGS_ADD += -Wno-cast-align
 kern_credential.o_CWARNFLAGS_ADD += -Wno-cast-align
 kern_descrip.o_CWARNFLAGS_ADD += -Wno-cast-align
@@ -523,6 +541,24 @@ vfs_xattr.o_CWARNFLAGS_ADD += -Wconditional-uninitialized
 vnode_if.o_CWARNFLAGS_ADD += -Wconditional-uninitialized
 # -Wxnu-typed-allocators
 kern_malloc.o_CWARNFLAGS_ADD += -Wno-xnu-typed-allocators
+# -Wno-vla
+ah_core.o_CWARNFLAGS_ADD += -Wno-vla
+bpf.o_CWARNFLAGS_ADD += -Wno-vla
+dtrace.o_CWARNFLAGS_ADD += -Wno-vla
+esp_rijndael.o_CWARNFLAGS_ADD += -Wno-vla
+kern_debug.o_CWARNFLAGS_ADD += -Wno-vla
+kern_exec.o_CWARNFLAGS_ADD += -Wno-vla
+kpi_socket.o_CWARNFLAGS_ADD += -Wno-vla
+monotonic.o_CWARNFLAGS_ADD += -Wno-vla
+necp.o_CWARNFLAGS_ADD += -Wno-vla
+ntstat.o_CWARNFLAGS_ADD += -Wno-vla
+sysv_sem.o_CWARNFLAGS_ADD += -Wno-vla
+
+# In the case of PGO/coverage build, disable LTO for profile_runtime_data.
+# This is to prevent a global compiler_rt variable from being optimized out.
+ifneq (,$(filter 1,$(BUILD_PROFILE) $(BUILD_CODE_COVERAGE)))
+profile_runtime_data.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
+endif
 
 #
 # Machine-independent per-file flags

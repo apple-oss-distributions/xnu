@@ -144,14 +144,25 @@ struct nexus_adapter {
 	/* number of large buffer alloc rings */
 	uint32_t na_num_large_buf_alloc_rings;
 
+	/* XXX -fbounds-safety: duplicate counts to avoid self-assignments */
+	uint32_t na_rx_rings_cnt;
+	uint32_t na_tx_rings_cnt;
+	uint32_t na_alloc_free_rings_cnt;
+	uint32_t na_event_rings_cnt;
+	uint32_t na_large_buf_alloc_rings_cnt;
+	uint32_t na_slot_ctxs_cnt;
+	uint32_t na_scratch_cnt;
+	uint32_t na_all_rings_cnt;
+
 	uint64_t na_work_ts;            /* when we last worked on it */
 
 	/*
 	 * na_{tx,rx,alloc,free,event}_rings are private but allocated
 	 * as a contiguous chunk of memory.
 	 */
-	struct __kern_channel_ring *na_tx_rings; /* array of TX rings. */
-	struct __kern_channel_ring *na_rx_rings; /* array of RX rings. */
+	struct __kern_channel_ring *__counted_by(na_tx_rings_cnt) na_tx_rings; /* array of TX rings. */
+	struct __kern_channel_ring *__counted_by(na_rx_rings_cnt) na_rx_rings; /* array of RX rings. */
+	struct __kern_channel_ring *__counted_by(na_all_rings_cnt) na_all_rings;
 
 	/*
 	 * na_nx refers to the nexus instance associated with this
@@ -204,10 +215,10 @@ struct nexus_adapter {
 	/*
 	 * Array of packet allocator and event rings
 	 */
-	struct __kern_channel_ring *na_alloc_rings;
-	struct __kern_channel_ring *na_free_rings;
-	struct __kern_channel_ring *na_event_rings;
-	struct __kern_channel_ring *na_large_buf_alloc_rings;
+	struct __kern_channel_ring *__counted_by(na_alloc_free_rings_cnt)na_alloc_rings;
+	struct __kern_channel_ring *__counted_by(na_alloc_free_rings_cnt)na_free_rings;
+	struct __kern_channel_ring *__counted_by(na_event_rings_cnt)na_event_rings;
+	struct __kern_channel_ring *__counted_by(na_large_buf_alloc_rings_cnt)na_large_buf_alloc_rings;
 
 	uint64_t na_ch_mit_ival;        /* mitigation interval */
 
@@ -221,16 +232,16 @@ struct nexus_adapter {
 	 * slot contexts of slot_ctx size for all of the TX and RX rings,
 	 * It is optional and is requested at na_krings_create() time.
 	 */
-	struct slot_ctx *na_slot_ctxs;
+	struct slot_ctx *__counted_by(na_slot_ctxs_cnt)na_slot_ctxs;
 
 	/*
 	 * Array of packet handlers, enough for all slots in the
 	 * TX and RX rings of this adapter.  It is automatically
 	 * created at na_krings_create() time.
 	 */
-	kern_packet_t *na_scratch;
+	kern_packet_t *__counted_by(na_scratch_cnt)na_scratch;
 
-	struct __kern_channel_ring *na_tail; /* pointer past the last ring */
+	struct __kern_channel_ring *__counted_by(0) na_tail; /* pointer past the last ring */
 
 #if CONFIG_NEXUS_FLOWSWITCH || CONFIG_NEXUS_NETIF
 	/*
@@ -257,7 +268,7 @@ struct nexus_adapter {
 	uint32_t na_next_pipe;  /* next free slot in the array */
 	uint32_t na_max_pipes;  /* size of the array */
 	/* array of pipes that have this adapter as a parent */
-	struct nexus_upipe_adapter **na_pipes;
+	struct nexus_upipe_adapter **__counted_by(na_max_pipes) na_pipes;
 #endif /* CONFIG_NEXUS_USER_PIPE */
 
 	char na_name[NEXUS_ADAPTER_NAMELEN];    /* diagnostics */
@@ -298,7 +309,7 @@ struct nexus_adapter {
 #define NA_SYNCF_SYNC_ONLY              0x200   /* sync only, no doorbell */
 
 	/*
-	 * na_notify() is used to act ater data have become available,
+	 * na_notify() is used to act after data have become available,
 	 * or the state of the ring has changed.  Depending on the nexus
 	 * type, this may involve triggering an event and/or performing
 	 * additional work such as calling na_txsync().
@@ -501,7 +512,7 @@ na_set_nrings(struct nexus_adapter *na, enum txrx t, uint32_t v)
 }
 
 __attribute__((always_inline))
-static inline struct __kern_channel_ring *
+static inline struct __kern_channel_ring *__header_indexable
 NAKR(struct nexus_adapter *na, enum txrx t)
 {
 	switch (t) {
@@ -523,6 +534,8 @@ NAKR(struct nexus_adapter *na, enum txrx t)
 		__builtin_unreachable();
 	}
 }
+
+#define KR_SINGLE(kr) (__unsafe_forge_single(struct __kern_channel_ring *, (kr)))
 
 /*
  * If the adapter is owned by the kernel, neither another flow switch nor user

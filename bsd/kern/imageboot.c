@@ -57,7 +57,7 @@
 
 #include <kern/kalloc.h>
 #include <os/overflow.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <pexpert/pexpert.h>
 #include <kern/chunklist.h>

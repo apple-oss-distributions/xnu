@@ -237,7 +237,7 @@ __attribute__((__const__));
 static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_begin(MACH_HEADER_TYPE *_header, const char *_set)
 {
-	char *_set_begin;
+	char *__unsafe_indexable _set_begin;
 	SECTDATA_SIZE_TYPE _size;
 
 	_set_begin = (char *)GETSECTIONDATA_VARIANT(_header, LINKER_SET_SEGMENT_CSTR, _set, &_size);
@@ -251,7 +251,7 @@ __attribute__((__const__));
 static __inline void *__unsafe_indexable *__unsafe_indexable
 __linker_set_object_limit(MACH_HEADER_TYPE *_header, const char *_set)
 {
-	char *_set_begin;
+	char *__unsafe_indexable _set_begin;
 	SECTDATA_SIZE_TYPE _size;
 
 	_set_begin = (char *)GETSECTIONDATA_VARIANT(_header, LINKER_SET_SEGMENT_CSTR, _set, &_size);

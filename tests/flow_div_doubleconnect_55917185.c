@@ -27,7 +27,7 @@ connect_race(void *data)
 	return NULL;
 }
 
-T_DECL(flow_div_doubleconnect_55917185, "Bad error path in double-connect for flow_divert_kctl_connect")
+T_DECL(flow_div_doubleconnect_55917185, "Bad error path in double-connect for flow_divert_kctl_connect", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	int tmp_s;

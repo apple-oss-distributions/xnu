@@ -757,6 +757,8 @@ _lck_rw_lock_exclusive_to_shared
 _lck_rw_lock_shared
 _lck_rw_lock_shared_to_exclusive
 _lck_rw_try_lock
+_lck_rw_try_lock_shared
+_lck_rw_try_lock_exclusive
 _lck_rw_unlock
 _lck_rw_unlock_exclusive
 _lck_rw_unlock_shared
@@ -783,6 +785,15 @@ _os_log_coprocessor_register_with_type
 _os_log_create
 _os_log_debug_enabled
 _os_log_info_enabled
+_os_pcpu_ref_count
+_os_pcpu_ref_destroy
+_os_pcpu_ref_init
+_os_pcpu_ref_kill
+_os_pcpu_ref_release
+_os_pcpu_ref_release_live
+_os_pcpu_ref_retain
+_os_pcpu_ref_retain_try
+_os_pcpu_ref_wait_for_death
 _os_ref_init_count_external:_os_ref_init_count_internal
 _os_ref_release_barrier_external:_os_ref_release_barrier_internal
 _os_ref_release_external:_os_ref_release_internal

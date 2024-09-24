@@ -146,7 +146,8 @@ struct nexus_vp_adapter {
 	pid_t           vpna_pid;
 };
 
-#define VPNA(_na)       ((struct nexus_vp_adapter *)(_na))
+#define VPNA(_na)       __unsafe_forge_single(struct nexus_vp_adapter *,    \
+	                    ((struct nexus_vp_adapter *)(_na)))
 
 #define NEXUS_PROVIDER_FLOW_SWITCH      "com.apple.nexus.flowswitch"
 
@@ -304,6 +305,7 @@ struct nx_flowswitch {
 	uint64_t                fsw_reap_last;
 	uint64_t                fsw_drain_channel_chk_last;
 	uint64_t                fsw_drain_netif_chk_last;
+	uint64_t                fsw_rx_stall_chk_last;
 
 	decl_lck_mtx_data(, fsw_linger_lock);
 	struct flow_entry_linger_head fsw_linger_head;
@@ -314,7 +316,7 @@ struct nx_flowswitch {
 
 #if (DEVELOPMENT || DEBUG)
 	uint32_t                fsw_rps_nthreads;
-	struct fsw_rps_thread   *fsw_rps_threads;
+	struct fsw_rps_thread   *__counted_by(fsw_rps_nthreads)fsw_rps_threads;
 #endif /* !DEVELOPMENT && !DEBUG */
 };
 

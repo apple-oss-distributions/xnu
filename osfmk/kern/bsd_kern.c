@@ -40,7 +40,7 @@
 #include <machine/monotonic.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_object.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
 #include <vm/vm_protos.h> /* last */
@@ -62,7 +62,6 @@ thread_t get_firstthread(task_t);
 int get_task_userstop(task_t);
 int get_thread_userstop(thread_t);
 boolean_t current_thread_aborted(void);
-void task_act_iterate_wth_args_locked(task_t, void (*)(thread_t, void *), void *);
 void task_act_iterate_wth_args(task_t, void (*)(thread_t, void *), void *);
 kern_return_t get_signalact(task_t, thread_t *, int);
 int fill_task_rusage(task_t task, rusage_info_current *ri);
@@ -79,7 +78,7 @@ extern int proc_pidversion(void *p);
 extern int proc_getcdhash(void *p, char *cdhash);
 
 int mach_to_bsd_errno(kern_return_t mach_err);
-kern_return_t bsd_to_mach_failure(int bsd_err);
+kern_return_t kern_return_for_errno(int bsd_errno);
 
 #if MACH_BSD
 extern void psignal(void *, int);
@@ -782,6 +781,52 @@ get_task_neural_footprint_compressed(task_t task)
 }
 
 uint64_t
+get_task_neural_nofootprint_total(task_t task)
+{
+	kern_return_t ret;
+	ledger_amount_t credit, debit;
+
+	ret = ledger_get_entries(task->ledger, task_ledgers.neural_nofootprint_total, &credit, &debit);
+	if (KERN_SUCCESS == ret) {
+		return credit - debit;
+	}
+
+	return 0;
+}
+
+#if CONFIG_LEDGER_INTERVAL_MAX
+uint64_t
+get_task_neural_nofootprint_total_interval_max(task_t task, int reset)
+{
+	kern_return_t ret;
+	ledger_amount_t max;
+
+	ret = ledger_get_interval_max(task->ledger, task_ledgers.neural_nofootprint_total, &max, reset);
+
+	if (KERN_SUCCESS == ret) {
+		return max;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_LEDGER_INTERVAL_MAX */
+
+uint64_t
+get_task_neural_nofootprint_total_lifetime_max(task_t task)
+{
+	kern_return_t ret;
+	ledger_amount_t max;
+
+	ret = ledger_get_lifetime_max(task->ledger, task_ledgers.neural_nofootprint_total, &max);
+
+	if (KERN_SUCCESS == ret) {
+		return max;
+	}
+
+	return 0;
+}
+
+uint64_t
 get_task_cpu_time(task_t task)
 {
 	return get_task_ledger_balance(task, task_ledgers.cpu_time);
@@ -985,28 +1030,22 @@ current_thread_aborted(
 	return FALSE;
 }
 
-/* Iterate over a task that is already protected by a held lock. */
-void
-task_act_iterate_wth_args_locked(
-	task_t                  task,
-	void                    (*func_callback)(thread_t, void *),
-	void                    *func_arg)
-{
-	for (thread_t inc = (thread_t)(void *)queue_first(&task->threads);
-	    !queue_end(&task->threads, (queue_entry_t)inc);) {
-		(void) (*func_callback)(inc, func_arg);
-		inc = (thread_t)(void *)queue_next(&inc->task_threads);
-	}
-}
-
 void
 task_act_iterate_wth_args(
 	task_t                  task,
 	void                    (*func_callback)(thread_t, void *),
 	void                    *func_arg)
 {
+	thread_t        inc;
+
 	task_lock(task);
-	task_act_iterate_wth_args_locked(task, func_callback, func_arg);
+
+	for (inc  = (thread_t)(void *)queue_first(&task->threads);
+	    !queue_end(&task->threads, (queue_entry_t)inc);) {
+		(void) (*func_callback)(inc, func_arg);
+		inc = (thread_t)(void *)queue_next(&inc->task_threads);
+	}
+
 	task_unlock(task);
 }
 
@@ -1225,6 +1264,8 @@ fill_task_rusage(task_t task, rusage_info_current *ri)
 	    (ledger_amount_t *)&ri->ri_resident_size);
 	ri->ri_wired_size = get_task_wired_mem(task);
 
+	ledger_get_balance(task->ledger, task_ledgers.neural_nofootprint_total,
+	    (ledger_amount_t *)&ri->ri_neural_footprint);
 	ri->ri_pageins = counter_load(&task->pageins);
 
 	task_unlock(task);
@@ -1399,6 +1440,15 @@ get_task_cdhash(task_t task, char cdhash[static CS_CDHASH_LEN])
 	return result;
 }
 
+bool
+current_thread_in_kernel_fault(void)
+{
+	if (current_thread()->recover) {
+		return true;
+	}
+	return false;
+}
+
 /* moved from ubc_subr.c */
 int
 mach_to_bsd_errno(kern_return_t mach_err)
@@ -1484,10 +1534,15 @@ mach_to_bsd_errno(kern_return_t mach_err)
 	}
 }
 
+/*
+ * Return the mach return value corresponding to a given BSD errno.
+ */
 kern_return_t
-bsd_to_mach_failure(int bsd_err)
+kern_return_for_errno(int bsd_errno)
 {
-	switch (bsd_err) {
+	switch (bsd_errno) {
+	case 0:
+		return KERN_SUCCESS;
 	case EIO:
 	case EACCES:
 	case ENOMEM:

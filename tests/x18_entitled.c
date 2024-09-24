@@ -37,7 +37,8 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("arm"),
 	T_META_OWNER("joster"),
 	T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm_kernel_protect", 0), // entitlement will crash on arm_kernel_protect devices
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED);
 
 T_DECL(x18_entitled,
     "Test that x18 is preserved on hardware that supports it, if entitled.")

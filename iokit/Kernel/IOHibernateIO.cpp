@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -167,6 +167,8 @@
 #include <IOKit/IONVRAM.h>
 #include "IOHibernateInternal.h"
 #include <vm/vm_protos.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_iokit.h>
 #include "IOKitKernelInternal.h"
 #include <pexpert/device_tree.h>
 
@@ -184,6 +186,7 @@
 
 
 extern "C" addr64_t             kvtophys(vm_offset_t va);
+extern "C" vm_offset_t          phystokv(addr64_t phys);
 extern "C" ppnum_t              pmap_find_phys(pmap_t pmap, addr64_t va);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -259,10 +262,39 @@ static void     IOHibernateSystemPostWakeTrim(void * p1, void * p2);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-enum { kDefaultIOSize = 128 * 1024 };
 enum { kVideoMapSize  = 80 * 1024 * 1024 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#if CONFIG_SPTM
+/**
+ * Copies the handoff pages in the order passed in, into the already-IOKit-allocated
+ * handoff region memory pages.
+ *
+ * @param page_array The source page array to use that contains the handoff region's pages.
+ * @param page_count The number of pages to copy from the page array.
+ */
+void
+HibernationCopyHandoffRegionFromPageArray(uint32_t page_array[], uint32_t page_count)
+{
+	IOHibernateVars *vars = &gIOHibernateVars;
+
+	if (!vars->handoffBuffer) {
+		/* Nothing to do! */
+		return;
+	}
+
+	uint8_t *copyDest = (uint8_t *)vars->handoffBuffer->getBytesNoCopy();
+
+	for (unsigned i = 0; i < page_count; i++) {
+		/*
+		 * Each entry in the page array is a physical page number, so convert
+		 * that to a physical address, then access it via the physical aperture.
+		 */
+		memcpy(&copyDest[i * PAGE_SIZE], (void *)phystokv(ptoa_64(page_array[i])), PAGE_SIZE);
+	}
+}
+#endif /* CONFIG_SPTM */
 
 // copy from phys addr to MD
 
@@ -1726,7 +1758,7 @@ hibernate_write_image(void)
 	fileExtents = (IOPolledFileExtent *) vars->fileVars->fileExtents->getBytesNoCopy();
 
 #if 0
-	count = vars->fileExtents->getLength() / sizeof(IOPolledFileExtent);
+	count = vars->fileVars->fileExtents->getLength() / sizeof(IOPolledFileExtent);
 	for (page = 0; page < count; page++) {
 		HIBLOG("fileExtents[%d] %qx, %qx (%qx)\n", page,
 		    fileExtents[page].start, fileExtents[page].length,
@@ -1759,6 +1791,7 @@ hibernate_write_image(void)
 		if (!pollerOpen) {
 			break;
 		}
+
 
 		if (vars->volumeCryptKeySize) {
 			err = IOPolledFilePollersSetEncryptionKey(vars->fileVars, &vars->volumeCryptKey[0], vars->volumeCryptKeySize);
@@ -1931,7 +1964,7 @@ hibernate_write_image(void)
 #elif defined(__arm64__)
 		// the segments described in IOHibernateHibSegInfo are stored directly in the
 		// hibernation file, so they don't need to be saved again
-		extern unsigned long gPhysBase, gPhysSize;
+		extern unsigned long gPhysBase, gPhysSize, gVirtBase;
 		for (size_t i = 0; i < NUM_HIBSEGINFO_SEGMENTS; i++) {
 			page = segInfo->segments[i].physPage;
 			count = segInfo->segments[i].pageCount;
@@ -2155,7 +2188,7 @@ hibernate_write_image(void)
 			}
 			if (kWiredClear == pageType) {
 				// enlarge wired image for test
-//              err = IOHibernatePolledFileWrite(vars, 0, 0x60000000, cryptvars);
+				// err = IOHibernatePolledFileWrite(vars, 0, 0x60000000, cryptvars);
 
 				// end wired image
 				header->encryptStart = vars->fileVars->encryptStart;
@@ -2200,6 +2233,9 @@ hibernate_write_image(void)
 		if (header->compression < HIB_COMPR_RATIO_ARM64) {
 			header->compression  = HIB_COMPR_RATIO_ARM64;
 		}
+
+		/* Compute the "mem slide" -- difference between the virtual base and the physical base */
+		header->kernelSlide = gVirtBase - gPhysBase;
 #endif /* __arm64__ */
 
 		gIOHibernateCompression = header->compression;
@@ -2224,11 +2260,19 @@ hibernate_write_image(void)
 		    (uint8_t *) header, sizeof(IOHibernateImageHeader),
 		    cryptvars);
 		if (kIOReturnSuccess != err) {
+#if DEVELOPMENT || DEBUG
+			printf("Polled write of header failed (error %x)\n", err);
+#endif
 			break;
 		}
 
 		err = IOHibernatePolledFileWrite(vars, NULL, 0, cryptvars);
-	}while (false);
+#if DEVELOPMENT || DEBUG
+		if (kIOReturnSuccess != err) {
+			printf("NULL polled write (flush) failed (error %x)\n", err);
+		}
+#endif
+	} while (false);
 
 	clock_get_uptime(&endTime);
 
@@ -2508,6 +2552,7 @@ hibernate_machine_init(void)
 		    (uint8_t *) vars->videoMapping, 0, kIOHibernateProgressCount);
 	}
 
+
 	uint8_t * src = (uint8_t *) vars->srcBuffer->getBytesNoCopy();
 	uint8_t * compressed = src + page_size;
 	uint8_t * scratch    = compressed + page_size;
@@ -2554,7 +2599,6 @@ hibernate_machine_init(void)
 	// --
 
 	HIBLOG("hibernate_machine_init reading\n");
-
 
 	uint32_t * header = (uint32_t *) src;
 	sum = 0;

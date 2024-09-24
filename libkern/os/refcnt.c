@@ -4,8 +4,11 @@
 #include <pexpert/pexpert.h>
 #include <kern/btlog.h>
 #include <kern/backtrace.h>
+#include <kern/zalloc.h>
+#include <kern/sched_prim.h>
 #include <libkern/libkern.h>
 #endif
+#include <os/overflow.h>
 #include <os/atomic_private.h>
 
 #include "refcnt.h"
@@ -30,9 +33,11 @@ __enum_closed_decl(reflog_op_t, uint8_t, {
 	REFLOG_RELEASE = 2
 });
 
-#define __debug_only
+# define __debug_only
+# define __os_refgrp_arg(arg)   , arg
 #else
 # define __debug_only __unused
+# define __os_refgrp_arg(arg)
 #endif /* OS_REFCNT_DEBUG */
 
 void
@@ -267,21 +272,38 @@ ref_drop_group(struct os_refgrp *grp)
 
 __attribute__((cold, noinline))
 static void
-ref_init_debug(os_ref_atomic_t *rc, struct os_refgrp * __debug_only grp, os_ref_count_t count)
+ref_init_debug(void *rc, struct os_refgrp *grp, os_ref_count_t count)
 {
 	ref_attach_to_group(rc, grp, count);
 
 	for (os_ref_count_t i = 0; i < count; i++) {
-		ref_log_op(grp, (void *)rc, REFLOG_RETAIN);
+		ref_log_op(grp, rc, REFLOG_RETAIN);
 	}
 }
 
 __attribute__((cold, noinline))
 static void
-ref_retain_debug(os_ref_atomic_t *rc, struct os_refgrp * __debug_only grp)
+ref_retain_debug(void *rc, struct os_refgrp * __debug_only grp)
 {
 	ref_retain_group(grp);
-	ref_log_op(grp, (void *)rc, REFLOG_RETAIN);
+	ref_log_op(grp, rc, REFLOG_RETAIN);
+}
+
+__attribute__((cold, noinline))
+static void
+ref_release_debug(void *rc, struct os_refgrp * __debug_only grp)
+{
+	ref_log_op(grp, rc, REFLOG_RELEASE);
+	ref_release_group(grp);
+}
+
+__attribute__((cold, noinline))
+static os_ref_count_t
+ref_drop_debug(void *rc, struct os_refgrp * __debug_only grp)
+{
+	ref_log_drop(grp, rc);
+	ref_drop_group(grp);
+	return 0;
 }
 #endif
 
@@ -377,8 +399,7 @@ _os_ref_release_inline(os_ref_atomic_t *rc, os_ref_count_t n,
 		 * Care not to use 'rc' after the decrement because it might be deallocated
 		 * under us.
 		 */
-		ref_log_op(grp, (void *)rc, REFLOG_RELEASE);
-		ref_release_group(grp);
+		ref_release_debug(rc, grp);
 	}
 #endif
 
@@ -395,9 +416,8 @@ _os_ref_release_inline(os_ref_atomic_t *rc, os_ref_count_t n,
 	 * decrementing the count is when the count is zero (as the caller won't
 	 * see the zero until the function returns).
 	 */
-	if (val == 0 && (REFLOG_GRP_DEBUG_ENABLED(grp))) {
-		ref_drop_group(grp);
-		ref_log_drop(grp, (void *)rc); /* rc is only used as an identifier */
+	if (val == 0 && REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		return ref_drop_debug(rc, grp);
 	}
 #endif
 
@@ -492,8 +512,7 @@ os_ref_release_locked_internal(os_ref_atomic_t *rc, struct os_refgrp * __debug_o
 {
 #if OS_REFCNT_DEBUG
 	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
-		ref_release_group(grp);
-		ref_log_op(grp, (void *)rc, REFLOG_RELEASE);
+		ref_release_debug(rc, grp);
 	}
 #endif
 
@@ -502,9 +521,8 @@ os_ref_release_locked_internal(os_ref_atomic_t *rc, struct os_refgrp * __debug_o
 	atomic_store_explicit(rc, --val, memory_order_relaxed);
 
 #if OS_REFCNT_DEBUG
-	if (val == 0 && (REFLOG_GRP_DEBUG_ENABLED(grp))) {
-		ref_drop_group(grp);
-		ref_log_drop(grp, (void *)rc);
+	if (val == 0 && REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		return ref_drop_debug(rc, grp);
 	}
 #endif
 
@@ -638,3 +656,417 @@ os_ref_retain_try_acquire_mask_internal(os_ref_atomic_t *rc, uint32_t n,
 
 	return true;
 }
+
+#pragma mark os_pcpu
+
+#define OS_PCPU_REF_LIVE        1ull
+#define OS_PCPU_REF_WAITER      2ull
+#define OS_PCPU_REF_INC         4ull
+
+typedef uint64_t _Atomic *__zpercpu     __os_pcpu_ref_t;
+
+static inline __os_pcpu_ref_t
+os_pcpu_get(os_pcpu_ref_t ref)
+{
+	return (__os_pcpu_ref_t)ref;
+}
+
+static inline uint64_t
+os_pcpu_count_to_value(os_ref_count_t cnt)
+{
+	return cnt * OS_PCPU_REF_INC;
+}
+
+static inline os_ref_count_t
+os_pcpu_value_to_count(uint64_t v)
+{
+	return (os_ref_count_t)(v / OS_PCPU_REF_INC);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_destroy_panic(os_pcpu_ref_t *ref, uint64_t n)
+{
+	if (n & OS_PCPU_REF_LIVE) {
+		panic("os_pcpu_ref: destroying live refcount %p at %p",
+		    os_pcpu_get(*ref), ref);
+	}
+	if (n & OS_PCPU_REF_WAITER) {
+		panic("os_pcpu_ref: destroying refcount %p with a waiter at %p",
+		    os_pcpu_get(*ref), ref);
+	}
+	panic("os_pcpu_ref: destroying non-zero refcount %p at %p",
+	    os_pcpu_get(*ref), ref);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_overflow_panic(__os_pcpu_ref_t rc)
+{
+	panic("os_pcpu_ref: overflow (rc=%p)", rc);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_retain_panic(__os_pcpu_ref_t rc, uint64_t v)
+{
+	if (v == 0) {
+		panic("os_pcpu_ref: attempted resurrection (rc=%p)", rc);
+	} else {
+		__os_pcpu_ref_overflow_panic(rc);
+	}
+}
+
+__abortlike
+static void
+__os_pcpu_ref_release_live_panic(__os_pcpu_ref_t rc)
+{
+	panic("os_pcpu_ref: unexpected release of final reference (rc=%p)", rc);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_release_panic(__os_pcpu_ref_t rc)
+{
+	panic("os_pcpu_ref: over-release (rc=%p)", rc);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_kill_panic(__os_pcpu_ref_t rc)
+{
+	panic("os_pcpu_ref: double-kill (rc=%p)", rc);
+}
+
+__abortlike
+static void
+__os_pcpu_ref_invalid_wait_panic(__os_pcpu_ref_t rc, uint64_t ov)
+{
+	if (ov & OS_PCPU_REF_WAITER) {
+		panic("os_pcpu_ref: double-wait (rc=%p)", rc);
+	} else {
+		panic("os_pcpu_ref: wait while still live (rc=%p)", rc);
+	}
+}
+
+void
+(os_pcpu_ref_init)(os_pcpu_ref_t * ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc;
+
+	rc = zalloc_percpu(percpu_u64_zone, Z_WAITOK | Z_NOFAIL);
+	zpercpu_foreach_cpu(cpu) {
+		os_atomic_init(zpercpu_get_cpu(rc, cpu),
+		    OS_PCPU_REF_LIVE + (cpu ? 0 : OS_PCPU_REF_INC));
+	}
+
+	*ref = (os_pcpu_ref_t)rc;
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		ref_retain_debug(rc, grp);
+	}
+#endif
+}
+
+void
+(os_pcpu_ref_destroy)(os_pcpu_ref_t * ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(*ref);
+	uint64_t n = 0;
+
+	n = os_atomic_load_wide(zpercpu_get_cpu(rc, 0), relaxed);
+	if (n & OS_PCPU_REF_LIVE) {
+		n = os_pcpu_ref_kill(*ref, grp);
+	} else {
+		for (int cpu = zpercpu_count(); cpu-- > 1;) {
+			n |= os_atomic_load_wide(zpercpu_get_cpu(rc, cpu), relaxed);
+		}
+	}
+	if (n) {
+		__os_pcpu_ref_destroy_panic(ref, n);
+	}
+
+	*ref = 0;
+	zfree_percpu(percpu_u64_zone, rc);
+}
+
+os_ref_count_t
+os_pcpu_ref_count(os_pcpu_ref_t ref)
+{
+	uint64_t v;
+
+	v = os_atomic_load_wide(zpercpu_get_cpu(os_pcpu_get(ref), 0), relaxed);
+	if (v & OS_PCPU_REF_LIVE) {
+		return OS_REFCNT_MAX_COUNT;
+	}
+	return os_pcpu_value_to_count(v);
+}
+
+static inline uint64_t
+__os_pcpu_ref_delta(__os_pcpu_ref_t rc, int delta, int *cpup)
+{
+	_Atomic uint64_t *rcp;
+	uint64_t v;
+	int cpu;
+
+	cpu  = cpu_number();
+	rcp  = zpercpu_get_cpu(rc, cpu);
+	v    = os_atomic_load_wide(rcp, relaxed);
+	if (__improbable((v & OS_PCPU_REF_LIVE) == 0)) {
+		*cpup = -1;
+		return v;
+	}
+
+	*cpup = cpu;
+	if (delta > 0) {
+		return os_atomic_add_orig(rcp, OS_PCPU_REF_INC, relaxed);
+	} else {
+		return os_atomic_sub_orig(rcp, OS_PCPU_REF_INC, release);
+	}
+}
+
+__attribute__((noinline))
+static void
+__os_pcpu_ref_retain_slow(__os_pcpu_ref_t rc, int cpu, uint64_t v)
+{
+	if (cpu > 0) {
+		os_atomic_sub(zpercpu_get_cpu(rc, cpu),
+		    OS_PCPU_REF_INC, relaxed);
+	}
+
+	if (cpu != 0) {
+		v = os_atomic_add_orig(zpercpu_get_cpu(rc, 0),
+		    OS_PCPU_REF_INC, relaxed);
+		if (v & OS_PCPU_REF_LIVE) {
+			/* we're doing this concurrently to an os_pcpu_ref_kill */
+			return;
+		}
+	}
+
+	if (v == 0 || v >= os_pcpu_count_to_value(OS_REFCNT_MAX_COUNT)) {
+		__os_pcpu_ref_retain_panic(rc, v);
+	}
+}
+
+void
+(os_pcpu_ref_retain)(os_pcpu_ref_t ref, struct os_refgrp * __debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	uint64_t v;
+	int cpu;
+
+	v = __os_pcpu_ref_delta(rc, +1, &cpu);
+	if (__improbable((v & OS_PCPU_REF_LIVE) == 0)) {
+		__os_pcpu_ref_retain_slow(rc, cpu, v);
+	}
+
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		ref_retain_debug(rc, grp);
+	}
+#endif
+}
+
+bool
+(os_pcpu_ref_retain_try)(os_pcpu_ref_t ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	_Atomic uint64_t *rcp = zpercpu_get(rc);
+	uint64_t ov, nv;
+
+	os_atomic_rmw_loop(rcp, ov, nv, relaxed, {
+		if ((ov & OS_PCPU_REF_LIVE) == 0) {
+		        os_atomic_rmw_loop_give_up(return false);
+		}
+		nv = ov + OS_PCPU_REF_INC;
+	});
+
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		ref_retain_debug(rc, grp);
+	}
+#endif
+	return true;
+}
+
+__attribute__((noinline))
+static void
+__os_pcpu_ref_release_live_slow(__os_pcpu_ref_t rc, int cpu, uint64_t v)
+{
+	if (cpu > 0) {
+		os_atomic_add(zpercpu_get_cpu(rc, cpu),
+		    OS_PCPU_REF_INC, relaxed);
+	}
+	if (cpu != 0) {
+		v = os_atomic_sub_orig(zpercpu_get_cpu(rc, 0),
+		    OS_PCPU_REF_INC, release);
+		if (v & OS_PCPU_REF_LIVE) {
+			/* we're doing this concurrently to an os_pcpu_ref_kill */
+			return;
+		}
+	}
+
+	if (v < os_pcpu_count_to_value(2)) {
+		__os_pcpu_ref_release_live_panic(rc);
+	}
+}
+
+void
+(os_pcpu_ref_release_live)(os_pcpu_ref_t ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	uint64_t v;
+	int cpu;
+
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		/*
+		 * Care not to use 'rc' after the decrement because it might be deallocated
+		 * under us.
+		 */
+		ref_release_debug(rc, grp);
+	}
+#endif
+
+	v = __os_pcpu_ref_delta(rc, -1, &cpu);
+
+	if (__improbable((v & OS_PCPU_REF_LIVE) == 0)) {
+		__os_pcpu_ref_release_live_slow(rc, cpu, v);
+	}
+}
+
+__attribute__((noinline))
+static os_ref_count_t
+__os_pcpu_ref_release_slow(
+	__os_pcpu_ref_t         rc,
+	int                     cpu,
+	uint64_t                v
+	__os_refgrp_arg(struct os_refgrp *grp))
+{
+	uint64_t _Atomic *rc0 = zpercpu_get_cpu(rc, 0);
+
+	if (cpu > 0) {
+		os_atomic_add(zpercpu_get_cpu(rc, cpu),
+		    OS_PCPU_REF_INC, relaxed);
+	}
+	if (cpu != 0) {
+		v = os_atomic_sub_orig(rc0, OS_PCPU_REF_INC, release);
+		if (v & OS_PCPU_REF_LIVE) {
+			/* we're doing this concurrently to an os_pcpu_ref_kill */
+			return OS_REFCNT_MAX_COUNT;
+		}
+	}
+
+	if (os_sub_overflow(v, OS_PCPU_REF_INC, &v)) {
+		__os_pcpu_ref_release_panic(rc);
+	}
+
+	os_atomic_thread_fence(acquire);
+	if (v == OS_PCPU_REF_WAITER) {
+		os_atomic_andnot(rc0, OS_PCPU_REF_WAITER, release);
+		thread_wakeup(rc);
+		v = 0;
+	}
+#if OS_REFCNT_DEBUG
+	if (v == 0 && REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		return ref_drop_debug(rc, grp);
+	}
+#endif
+	return os_pcpu_value_to_count(v);
+}
+
+os_ref_count_t
+(os_pcpu_ref_release)(os_pcpu_ref_t ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	uint64_t v;
+	int cpu;
+
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		ref_release_debug(rc, grp);
+	}
+#endif
+
+	v = __os_pcpu_ref_delta(rc, -1, &cpu);
+	if (__improbable((v & OS_PCPU_REF_LIVE) == 0)) {
+		return __os_pcpu_ref_release_slow(rc, cpu, v __os_refgrp_arg(grp));
+	}
+
+	return OS_REFCNT_MAX_COUNT;
+}
+
+os_ref_count_t
+(os_pcpu_ref_kill)(os_pcpu_ref_t ref, struct os_refgrp *__debug_only grp)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	uint64_t v = 0, t = 0;
+
+#if OS_REFCNT_DEBUG
+	if (REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		ref_release_debug(rc, grp);
+	}
+#endif
+
+	for (int cpu = zpercpu_count(); cpu-- > 1;) {
+		v = os_atomic_xchg(zpercpu_get_cpu(rc, cpu), 0, relaxed);
+		if ((v & OS_PCPU_REF_LIVE) == 0) {
+			__os_pcpu_ref_kill_panic(rc);
+		}
+		t += v - OS_PCPU_REF_LIVE;
+	}
+	t -= OS_PCPU_REF_LIVE + OS_PCPU_REF_INC;
+
+	v = os_atomic_add(zpercpu_get_cpu(rc, 0), t, acq_rel);
+	if (v & OS_PCPU_REF_LIVE) {
+		__os_pcpu_ref_kill_panic(rc);
+	}
+
+	if (v >= os_pcpu_count_to_value(OS_REFCNT_MAX_COUNT)) {
+		__os_pcpu_ref_overflow_panic(rc);
+	}
+
+#if OS_REFCNT_DEBUG
+	if (v == 0 && REFLOG_GRP_DEBUG_ENABLED(grp)) {
+		return ref_drop_debug(rc, grp);
+	}
+#endif
+	return os_pcpu_value_to_count(v);
+}
+
+#if KERNEL
+
+void
+os_pcpu_ref_wait_for_death(os_pcpu_ref_t ref)
+{
+	__os_pcpu_ref_t rc = os_pcpu_get(ref);
+	uint64_t _Atomic *rc0 = zpercpu_get_cpu(rc, 0);
+	uint64_t ov, nv;
+
+	ov = os_atomic_load(rc0, relaxed);
+	if (ov == 0) {
+		os_atomic_thread_fence(acquire);
+		return;
+	}
+
+	assert_wait(rc, THREAD_UNINT);
+
+	os_atomic_rmw_loop(rc0, ov, nv, relaxed, {
+		if (ov & (OS_PCPU_REF_WAITER | OS_PCPU_REF_LIVE)) {
+		        __os_pcpu_ref_invalid_wait_panic(rc, ov);
+		}
+		if (ov == 0) {
+		        os_atomic_rmw_loop_give_up(break);
+		}
+		nv = ov | OS_PCPU_REF_WAITER;
+	});
+
+	if (ov == 0) {
+		os_atomic_thread_fence(acquire);
+		clear_wait(current_thread(), THREAD_AWAKENED);
+	} else {
+		thread_block(THREAD_CONTINUE_NULL);
+	}
+}
+
+#endif

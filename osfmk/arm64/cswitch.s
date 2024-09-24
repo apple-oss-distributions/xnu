@@ -185,10 +185,8 @@
 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
 	msr		TPIDRRO_EL0, $1
 
-#if DEBUG || DEVELOPMENT
 	ldr		$1, [$0, TH_THREAD_ID]				// Save the bottom 32-bits of the thread ID into
 	msr		CONTEXTIDR_EL1, $1					// CONTEXTIDR_EL1 (top 32-bits are RES0).
-#endif /* DEBUG || DEVELOPMENT */
 .endmacro
 
 #define CSWITCH_ROP_KEYS	(HAS_APPLE_PAC && HAS_PARAVIRTUALIZED_PAC)
@@ -269,6 +267,7 @@ Lskip_jop_keys_\@:
 	.globl	EXT(machine_load_context)
 
 LEXT(machine_load_context)
+	ARM64_PROLOG
 	set_thread_registers 	x0, x1, x2
 	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get top of kernel stack
 	load_general_registers 	x1, 2
@@ -289,6 +288,7 @@ LEXT(machine_load_context)
 	.globl	EXT(Call_continuation)
 
 LEXT(Call_continuation)
+	ARM64_PROLOG
 	mrs		x4, TPIDR_EL1						// Get the current thread pointer
 
 	/* ARM64_TODO arm loads the kstack top instead of arg4. What should we use? */
@@ -329,6 +329,7 @@ LEXT(Call_continuation)
 	.globl	EXT(Switch_context)
 
 LEXT(Switch_context)
+	ARM64_PROLOG
 	cbnz	x1, Lswitch_threads					// Skip saving old state if blocking on continuation
 	LOAD_KERN_STACK_TOP	dst=x3, src=x0, tmp=x4	// Get the old kernel stack top
 	save_general_registers	x3, 4
@@ -348,11 +349,12 @@ Lswitch_threads:
 	.globl	EXT(Shutdown_context)
 
 LEXT(Shutdown_context)
+	ARM64_PROLOG
 	mrs		x10, TPIDR_EL1							// Get thread pointer
 	LOAD_KERN_STACK_TOP	dst=x11, src=x10, tmp=x12	// Get the top of the kernel stack
 	save_general_registers	x11, 12
-	msr		DAIFSet, #(DAIFSC_FIQF | DAIFSC_IRQF)	// Disable interrupts
-	LOAD_INT_STACK	dst=x12, src=x10, tmp=x11
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)	// Disable interrupts
+	LOAD_INT_STACK_THREAD dst=x12, src=x10, tmp=x11
 	mov		sp, x12
 	b		EXT(cpu_doshutdown)
 
@@ -365,10 +367,11 @@ LEXT(Shutdown_context)
 	.globl	EXT(Idle_context)
 
 LEXT(Idle_context)
+	ARM64_PROLOG
 	mrs		x0, TPIDR_EL1						// Get thread pointer
 	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
 	save_general_registers	x1, 2
-	LOAD_INT_STACK	dst=x2, src=x0, tmp=x1
+	LOAD_INT_STACK_THREAD	dst=x2, src=x0, tmp=x1
 	mov		sp, x2
 	b		EXT(cpu_idle)
 
@@ -381,6 +384,7 @@ LEXT(Idle_context)
 	.globl	EXT(Idle_load_context)
 
 LEXT(Idle_load_context)
+	ARM64_PROLOG
 	mrs		x0, TPIDR_EL1						// Get thread pointer
 	LOAD_KERN_STACK_TOP	dst=x1, src=x0, tmp=x2	// Get the top of the kernel stack
 	load_general_registers	x1, 2
@@ -390,6 +394,7 @@ LEXT(Idle_load_context)
 	.align	2
 	.globl	EXT(machine_set_current_thread)
 LEXT(machine_set_current_thread)
+	ARM64_PROLOG
 	set_thread_registers x0, x1, x2
 	ret
 

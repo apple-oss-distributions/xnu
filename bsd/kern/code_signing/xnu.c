@@ -59,6 +59,14 @@ code_signing_init()
 	lck_mtx_init(&compilation_service_lock, &xnu_codesigning_lck_grp, 0);
 }
 
+kern_return_t
+xnu_secure_channel_shared_page(
+	__unused uint64_t *secure_channel_phys,
+	__unused size_t *secure_channel_size)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
 #pragma mark Developer Mode
 
 static bool developer_mode_storage = true;
@@ -70,6 +78,35 @@ xnu_toggle_developer_mode(
 {
 	/* No extra validation needed within XNU */
 	os_atomic_store(developer_mode_enabled, state, relaxed);
+}
+
+#pragma mark Restricted Execution Mode
+
+kern_return_t
+xnu_rem_enable(void)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+xnu_rem_state(void)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+#pragma mark Device State
+
+void
+xnu_update_device_state(void)
+{
+	/* Does nothing */
+}
+
+void
+xnu_complete_security_boot_mode(
+	__unused uint32_t security_boot_mode)
+{
+	/* Does nothing */
 }
 
 #pragma mark Code Signing

@@ -1281,12 +1281,14 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 	    kt_size(0, sizeof(type), __kfree_count));                          \
 })
 
-#define kfree_type_counted_by_3(type, count_var, elem_var) ({              \
-	void *__bidi_indexable __elem_copy = (elem_var);                       \
+// rdar://123257599
+#define kfree_type_counted_by_3(type, count_var, elem_var) ({                  \
+	void *__header_bidi_indexable __elem_copy = (elem_var);                \
 	__auto_type __kfree_count = (count_var);                               \
 	(elem_var) = 0;                                                        \
 	(count_var) = 0;                                                       \
-	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(__elem_copy, type);              \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(                                 \
+	    (os_get_pointee_type(elem_var) *)NULL, type);                      \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
 	kfree_type_var_impl(kt_view_var, __elem_copy,                          \
 	    kt_size(0, sizeof(type), __kfree_count));                          \
@@ -1306,7 +1308,7 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 #ifdef XNU_KERNEL_PRIVATE
 #define kalloc_type_tag_3(type, flags, tag) ({                                 \
 	static _KALLOC_TYPE_DEFINE(kt_view_var, type, KT_SHARED_ACCT);         \
-	__unsafe_forge_single(type *, zalloc_flags(kt_view_var,                \
+	__unsafe_forge_single(type *, kalloc_type_impl(kt_view_var,            \
 	    Z_VM_TAG(flags, tag)));                                            \
 })
 
@@ -1416,11 +1418,18 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 
 #endif /* !XNU_KERNEL_PRIVATE */
 
-#define __kfree_data_elem_count_size(elem_var, count_var, size) ({             \
-	void *__bidi_indexable __elem_copy = (elem_var);                           \
-	(elem_var) = 0;                                                            \
-	(count_var) = 0;                                                           \
-	kfree_data(__elem_copy, size);                                             \
+#define __kfree_data_elem_count_size(elem_var, count_var, size) ({              \
+	void *__header_bidi_indexable __elem_copy = (elem_var);                 \
+	(elem_var) = 0;                                                         \
+	(count_var) = 0;                                                        \
+	kfree_data(__elem_copy, size);                                          \
+})
+
+#define __kfree_data_addr_count_size(addr_var, count_var) ({                    \
+	void *__header_bidi_indexable __addr_copy = (addr_var);                 \
+	(addr_var) = 0;                                                         \
+	(count_var) = 0;                                                        \
+	kfree_data_addr(__addr_copy);                                           \
 })
 
 /*
@@ -1429,9 +1438,13 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
  * semantics, `size` must be the byte size of the allocation that is freed (for
  * instance, 20 for an array of 5 uint32_t).
  */
-#define kfree_data_sized_by(elem, size) ({                                     \
-	__auto_type __size = (size);                                               \
-	__kfree_data_elem_count_size(elem, size, __size);                          \
+#define kfree_data_sized_by(elem, size) ({                                      \
+	__auto_type __size = (size);                                            \
+	__kfree_data_elem_count_size(elem, size, __size);                       \
+})
+
+#define kfree_data_addr_sized_by(addr, size) ({                                 \
+	__kfree_data_addr_count_size(addr, size);                               \
 })
 
 /*
@@ -1441,8 +1454,8 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
  * that is freed (for instance, 5 for an array of 5 uint32_t).
  */
 #define kfree_data_counted_by(elem, count) ({                                  \
-	__auto_type __size = (count) * sizeof(*(elem));                            \
-	__kfree_data_elem_count_size(elem, count, __size);                         \
+	__auto_type __size = (count) * sizeof(*(elem));                        \
+	__kfree_data_elem_count_size(elem, count, __size);                     \
 })
 
 #if __has_feature(address_sanitizer)

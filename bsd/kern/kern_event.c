@@ -112,6 +112,7 @@
 
 #include <os/log.h>
 
+#include "mach/kern_return.h"
 #include "net/net_str_id.h"
 
 #if SKYWALK && defined(XNU_TARGET_OS_OSX)
@@ -132,6 +133,15 @@ extern bool net_check_compatible_alf(void);
 #define KEVENT_PANIC_ON_NON_ENQUEUED_PROCESS     (1U << 1)
 TUNABLE(uint32_t, kevent_debug_flags, "kevent_debug", 0);
 #endif
+
+/* Enable bound thread support for kqworkloop. */
+static TUNABLE(int, bootarg_thread_bound_kqwl_support_enabled,
+    "enable_thread_bound_kqwl_support", 0);
+SYSCTL_NODE(_kern, OID_AUTO, kern_event, CTLFLAG_RD | CTLFLAG_LOCKED, 0, NULL);
+SYSCTL_INT(_kern_kern_event, OID_AUTO, thread_bound_kqwl_support_enabled,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    &bootarg_thread_bound_kqwl_support_enabled, 0,
+    "Whether thread bound kqwl support is enabled");
 
 static LCK_GRP_DECLARE(kq_lck_grp, "kqueue");
 SECURITY_READ_ONLY_EARLY(vm_packing_params_t) kn_kq_packing_params =
@@ -175,17 +185,23 @@ static thread_qos_t kqworkq_unbind_locked(struct kqworkq *kqwq, workq_threadreq_
 static workq_threadreq_t kqworkq_get_request(struct kqworkq *kqwq, kq_index_t qos_index);
 static void kqueue_update_iotier_override(kqueue_t kqu);
 
-static void kqworkloop_unbind(struct kqworkloop *kwql);
+static void kqworkloop_unbind(struct kqworkloop *kqwl);
 
 enum kqwl_unbind_locked_mode {
 	KQWL_OVERRIDE_DROP_IMMEDIATELY,
 	KQWL_OVERRIDE_DROP_DELAYED,
 };
-static void kqworkloop_unbind_locked(struct kqworkloop *kwql, thread_t thread,
-    enum kqwl_unbind_locked_mode how);
+// The soft unbinding of kqworkloop only applies to kqwls configured
+// with a permanently bound thread.
+#define KQUEUE_THREADREQ_UNBIND_SOFT 0x1
+static void kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
+    enum kqwl_unbind_locked_mode how, unsigned int flags);
 static void kqworkloop_unbind_delayed_override_drop(thread_t thread);
 static kq_index_t kqworkloop_override(struct kqworkloop *kqwl);
 static void kqworkloop_set_overcommit(struct kqworkloop *kqwl);
+static void kqworkloop_bound_thread_park(struct kqworkloop *kqwl, thread_t thread);
+static void kqworkloop_bound_thread_wakeup(struct kqworkloop *kqwl);
+
 enum {
 	KQWL_UTQ_NONE,
 	/*
@@ -243,11 +259,11 @@ static void knote_reset_priority(kqueue_t kqu, struct knote *kn, pthread_priorit
 static ZONE_DEFINE(knote_zone, "knote zone",
     sizeof(struct knote), ZC_CACHING | ZC_ZFREE_CLEARMEM);
 static ZONE_DEFINE(kqfile_zone, "kqueue file zone",
-    sizeof(struct kqfile), ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
+    sizeof(struct kqfile), ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
 static ZONE_DEFINE(kqworkq_zone, "kqueue workq zone",
-    sizeof(struct kqworkq), ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
+    sizeof(struct kqworkq), ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
 static ZONE_DEFINE(kqworkloop_zone, "kqueue workloop zone",
-    sizeof(struct kqworkloop), ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
+    sizeof(struct kqworkloop), ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_NO_TBI_TAG);
 
 #define KN_HASH(val, mask)      (((val) ^ (val >> 8)) & (mask))
 
@@ -390,6 +406,12 @@ static inline bool
 kqr_thread_bound(workq_threadreq_t kqr)
 {
 	return kqr->tr_state == WORKQ_TR_STATE_BOUND;
+}
+
+static inline bool
+kqr_thread_permanently_bound(workq_threadreq_t kqr)
+{
+	return kqr_thread_bound(kqr) && (kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND);
 }
 
 static inline bool
@@ -601,7 +623,7 @@ knote_lock_slow(kqueue_t kqu, struct knote *kn,
 	kqlock_held(kqu);
 
 	owner_lc = knote_lock_ctx_find(kqu, kn);
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	knlc->knlc_state = KNOTE_LOCK_CTX_WAITING;
 #endif
 	owner_lc->knlc_waiters++;
@@ -621,7 +643,7 @@ knote_lock_slow(kqueue_t kqu, struct knote *kn,
 		 * We need to cleanup the state since no one did.
 		 */
 		uth->uu_knlock = NULL;
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 		assert(knlc->knlc_state == KNOTE_LOCK_CTX_WAITING);
 		knlc->knlc_state = KNOTE_LOCK_CTX_UNLOCKED;
 #endif
@@ -635,13 +657,11 @@ knote_lock_slow(kqueue_t kqu, struct knote *kn,
 		if (kqlocking == KNOTE_KQ_LOCK_ALWAYS ||
 		    kqlocking == KNOTE_KQ_LOCK_ON_SUCCESS) {
 			kqlock(kqu);
-#if DEBUG || DEVELOPMENT
 			/*
 			 * This state is set under the lock so we can't
 			 * really assert this unless we hold the lock.
 			 */
 			assert(knlc->knlc_state == KNOTE_LOCK_CTX_LOCKED);
-#endif
 		}
 		return true;
 	}
@@ -660,7 +680,7 @@ knote_lock(kqueue_t kqu, struct knote *kn, struct knote_lock_ctx *knlc,
 {
 	kqlock_held(kqu);
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	assert(knlc->knlc_state == KNOTE_LOCK_CTX_UNLOCKED);
 #endif
 	knlc->knlc_knote = kn;
@@ -679,7 +699,7 @@ knote_lock(kqueue_t kqu, struct knote *kn, struct knote_lock_ctx *knlc,
 	assert((kn->kn_status & KN_DROPPING) == 0);
 	LIST_INSERT_HEAD(&kqu.kq->kq_knlocks, knlc, knlc_link);
 	kn->kn_status |= KN_LOCKED;
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	knlc->knlc_state = KNOTE_LOCK_CTX_LOCKED;
 #endif
 
@@ -705,9 +725,7 @@ knote_unlock(kqueue_t kqu, struct knote *kn,
 
 	assert(knlc->knlc_knote == kn);
 	assert(kn->kn_status & KN_LOCKED);
-#if DEBUG || DEVELOPMENT
 	assert(knlc->knlc_state == KNOTE_LOCK_CTX_LOCKED);
-#endif
 
 	LIST_REMOVE(knlc, knlc_link);
 
@@ -729,7 +747,7 @@ knote_unlock(kqueue_t kqu, struct knote *kn,
 		assert(next_owner_lc->knlc_knote == kn);
 		next_owner_lc->knlc_waiters = knlc->knlc_waiters - 1;
 		LIST_INSERT_HEAD(&kqu.kq->kq_knlocks, next_owner_lc, knlc_link);
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 		next_owner_lc->knlc_state = KNOTE_LOCK_CTX_LOCKED;
 #endif
 		ut->uu_knlock = NULL;
@@ -749,7 +767,7 @@ knote_unlock(kqueue_t kqu, struct knote *kn,
 	if (kqlocking == KNOTE_KQ_UNLOCK) {
 		kqunlock(kqu);
 	}
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	knlc->knlc_state = KNOTE_LOCK_CTX_UNLOCKED;
 #endif
 }
@@ -778,7 +796,7 @@ knote_unlock_cancel(struct kqueue *kq, struct knote *kn,
 	if (knlc->knlc_waiters) {
 		wakeup_all_with_inheritor(knote_lock_wev(kn), THREAD_RESTART);
 	}
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 	knlc->knlc_state = KNOTE_LOCK_CTX_UNLOCKED;
 #endif
 }
@@ -2290,7 +2308,7 @@ out:
 
 	if (wl_inheritor_updated) {
 		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_NOT_HELD);
-		turnstile_deallocate_safe(ts);
+		turnstile_deallocate(ts);
 	}
 
 	if (cur_owner && new_owner != cur_owner) {
@@ -3414,6 +3432,11 @@ kqworkloop_dealloc(struct kqworkloop *kqwl, bool hash_remove)
 	}
 #endif
 
+	workq_threadreq_t kqr = &kqwl->kqwl_request;
+	if ((kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND) && kqr->tr_work_interval) {
+		kern_work_interval_release(kqr->tr_work_interval);
+	}
+
 	assert(TAILQ_EMPTY(&kqwl->kqwl_suppressed));
 	assert(kqwl->kqwl_owner == THREAD_NULL);
 	assert(kqwl->kqwl_turnstile == TURNSTILE_NULL);
@@ -3430,11 +3453,8 @@ kqworkloop_dealloc(struct kqworkloop *kqwl, bool hash_remove)
  */
 static void
 kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
-    kqueue_id_t id, workq_threadreq_param_t *trp
-#if CONFIG_PREADOPT_TG
-    , struct thread_group *trp_permanent_preadopt_tg
-#endif
-    )
+    kqueue_id_t id, workq_threadreq_param_t *trp,
+    struct workq_threadreq_extended_param_s *trp_extended)
 {
 	kqwl->kqwl_state     = KQ_WORKLOOP | KQ_DYNAMIC | KQ_KEV_QOS;
 	os_ref_init_raw(&kqwl->kqwl_retains, NULL);
@@ -3449,6 +3469,9 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 		if (trp->trp_flags & TRP_PRIORITY) {
 			tr_flags |= WORKQ_TR_FLAG_WL_OUTSIDE_QOS;
 		}
+		if (trp->trp_flags & TRP_BOUND_THREAD) {
+			tr_flags |= WORKQ_TR_FLAG_PERMANENT_BIND;
+		}
 		if (trp->trp_flags) {
 			tr_flags |= WORKQ_TR_FLAG_WL_PARAMS;
 		}
@@ -3457,15 +3480,15 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 	kqwl->kqwl_request.tr_flags = tr_flags;
 	os_atomic_store(&kqwl->kqwl_iotier_override, (uint8_t)THROTTLE_LEVEL_END, relaxed);
 #if CONFIG_PREADOPT_TG
-	if (trp_permanent_preadopt_tg) {
+	if (trp_extended && trp_extended->trp_permanent_preadopt_tg) {
 		/*
 		 * This kqwl is permanently configured with a thread group.
 		 * By using THREAD_QOS_LAST, we make sure kqueue_set_preadopted_thread_group
 		 * has no effect on kqwl_preadopt_tg. At this point, +1 ref on
-		 * trp_permanent_preadopt_tg is transferred to the kqwl.
+		 * trp_extended->trp_permanent_preadopt_tg is transferred to the kqwl.
 		 */
 		thread_group_qos_t kqwl_preadopt_tg;
-		kqwl_preadopt_tg = KQWL_ENCODE_PERMANENT_PREADOPTED_TG(trp_permanent_preadopt_tg);
+		kqwl_preadopt_tg = KQWL_ENCODE_PERMANENT_PREADOPTED_TG(trp_extended->trp_permanent_preadopt_tg);
 		os_atomic_store(&kqwl->kqwl_preadopt_tg, kqwl_preadopt_tg, relaxed);
 	} else if (task_is_app(current_task())) {
 		/*
@@ -3477,7 +3500,15 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 		os_atomic_store(&kqwl->kqwl_preadopt_tg, KQWL_PREADOPTED_TG_NEVER, relaxed);
 	}
 #endif
-
+	if (trp_extended) {
+		if (trp_extended->trp_work_interval) {
+			/*
+			 * The +1 ref on the work interval is transferred to the kqwl.
+			 */
+			assert(tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND);
+			kqwl->kqwl_request.tr_work_interval = trp_extended->trp_work_interval;
+		}
+	}
 	for (int i = 0; i < KQWL_NBUCKETS; i++) {
 		TAILQ_INIT_AFTER_BZERO(&kqwl->kqwl_queue[i]);
 	}
@@ -3521,9 +3552,7 @@ kqworkloop_check_limit_exceeded(struct filedesc *fdp)
 static int
 kqworkloop_get_or_create(struct proc *p, kqueue_id_t id,
     workq_threadreq_param_t *trp,
-#if CONFIG_PREADOPT_TG
-    struct thread_group *trp_permanent_preadopt_tg,
-#endif
+    struct workq_threadreq_extended_param_s *trp_extended,
     unsigned int flags, struct kqworkloop **kqwlp)
 {
 	struct filedesc *fdp = &p->p_fd;
@@ -3587,13 +3616,84 @@ kqworkloop_get_or_create(struct proc *p, kqueue_id_t id,
 			fdp->num_kqwls++;
 			kqworkloop_check_limit_exceeded(fdp);
 #endif
-			kqworkloop_init(alloc_kqwl, p, id, trp
-#if CONFIG_PREADOPT_TG
-			    , trp_permanent_preadopt_tg
-#endif
-			    );
+			kqworkloop_init(alloc_kqwl, p, id, trp, trp_extended);
+			/*
+			 * The newly allocated and initialized kqwl has a retain count of 1.
+			 */
 			kqworkloop_hash_insert_locked(fdp, id, alloc_kqwl);
+			if (trp && (trp->trp_flags & TRP_BOUND_THREAD)) {
+				/*
+				 * If this kqworkloop is configured to be permanently bound to
+				 * a thread, we take +1 ref on that thread's behalf before we
+				 * unlock the kqhash below. The reason being this new kqwl is
+				 * findable in the hash table as soon as we unlock the kqhash
+				 * and we want to make sure this kqwl does not get deleted from
+				 * under us by the time we create a new thread and bind to it.
+				 *
+				 * This ref is released when the bound thread unbinds itself
+				 * from the kqwl on its way to termination.
+				 * See uthread_cleanup -> kqueue_threadreq_unbind.
+				 *
+				 * The kqwl now has a retain count of 2.
+				 */
+				kqworkloop_retain(alloc_kqwl);
+			}
 			kqhash_unlock(fdp);
+			/*
+			 * We do not want to keep holding kqhash lock when workq is
+			 * busy creating and initializing a new thread to bind to this
+			 * kqworkloop.
+			 */
+			if (trp && (trp->trp_flags & TRP_BOUND_THREAD)) {
+				error = workq_kern_threadreq_permanent_bind(p, &alloc_kqwl->kqwl_request);
+				if (error != KERN_SUCCESS) {
+					/*
+					 * The kqwl we just created and initialized has a retain
+					 * count of 2 at this point i.e. 1 from kqworkloop_init and
+					 * 1 on behalf of the bound thread. We need to release
+					 * both the references here to successfully deallocate this
+					 * kqwl before we return an error.
+					 *
+					 * The latter release should take care of deallocating
+					 * the kqwl itself and removing it from the kqhash.
+					 */
+					kqworkloop_release(alloc_kqwl);
+					kqworkloop_release(alloc_kqwl);
+					alloc_kqwl = NULL;
+					if (trp_extended) {
+						/*
+						 * Since we transferred these refs to kqwl during
+						 * kqworkloop_init, the kqwl takes care of releasing them.
+						 * We don't have any refs to return to our caller
+						 * in this case.
+						 */
+#if CONFIG_PREADOPT_TG
+						if (trp_extended->trp_permanent_preadopt_tg) {
+							trp_extended->trp_permanent_preadopt_tg = NULL;
+						}
+#endif
+						if (trp_extended->trp_work_interval) {
+							trp_extended->trp_work_interval = NULL;
+						}
+					}
+					return error;
+				} else {
+					/*
+					 * For kqwl configured with a bound thread, KQ_SLEEP is used
+					 * to track whether the bound thread needs to be woken up
+					 * when such a kqwl is woken up.
+					 *
+					 * See kqworkloop_bound_thread_wakeup and
+					 * kqworkloop_bound_thread_park_prepost.
+					 *
+					 * Once the kqwl is initialized, this state
+					 * should always be manipulated under kqlock.
+					 */
+					kqlock(alloc_kqwl);
+					alloc_kqwl->kqwl_state |= KQ_SLEEP;
+					kqunlock(alloc_kqwl);
+				}
+			}
 			*kqwlp = alloc_kqwl;
 			return 0;
 		}
@@ -4407,13 +4507,13 @@ kqworkq_acknowledge_events(struct kqworkq *kqwq, workq_threadreq_t kqr,
 		thread_t thread = kqr_thread_fast(kqr);
 		thread_qos_t old_override;
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 		thread_t self = current_thread();
 		struct uthread *ut = get_bsdthread_info(self);
 
 		assert(thread == self);
 		assert(ut->uu_kqr_bound == kqr);
-#endif // DEBUG || DEVELOPMENT
+#endif // MACH_ASSERT
 
 		old_override = kqworkq_unbind_locked(kqwq, kqr, thread);
 		if (!TAILQ_EMPTY(queue)) {
@@ -4506,15 +4606,17 @@ kqworkloop_begin_processing(struct kqworkloop *kqwl, unsigned int kevent_flags)
 	if (kevent_flags & KEVENT_FLAG_PARKING) {
 		/*
 		 * When "parking" we want to process events and if no events are found
-		 * unbind.
+		 * unbind. (Except for WORKQ_TR_FLAG_PERMANENT_BIND where the soft unbind
+		 * and bound thread park happen in the caller.)
 		 *
 		 * However, non overcommit threads sometimes park even when they have
 		 * more work so that the pool can narrow.  For these, we need to unbind
 		 * early, so that calling kqworkloop_update_threads_qos() can ask the
 		 * workqueue subsystem whether the thread should park despite having
 		 * pending events.
+		 *
 		 */
-		if (kqr->tr_flags & WORKQ_TR_FLAG_OVERCOMMIT) {
+		if (kqr->tr_flags & (WORKQ_TR_FLAG_OVERCOMMIT | WORKQ_TR_FLAG_PERMANENT_BIND)) {
 			op = KQWL_UTQ_PARKING;
 		} else {
 			op = KQWL_UTQ_UNBINDING;
@@ -4531,27 +4633,33 @@ kqworkloop_begin_processing(struct kqworkloop *kqwl, unsigned int kevent_flags)
 
 		if (op == KQWL_UTQ_UNBINDING) {
 			kqworkloop_unbind_locked(kqwl, thread,
-			    KQWL_OVERRIDE_DROP_IMMEDIATELY);
+			    KQWL_OVERRIDE_DROP_IMMEDIATELY, 0);
 			kqworkloop_release_live(kqwl);
 		}
 		kqworkloop_update_threads_qos(kqwl, op, qos_override);
 		if (op == KQWL_UTQ_PARKING &&
 		    (!kqwl->kqwl_count || kqwl->kqwl_owner)) {
-			kqworkloop_unbind_locked(kqwl, thread,
-			    KQWL_OVERRIDE_DROP_DELAYED);
-			kqworkloop_release_live(kqwl);
-			rc = -1;
+			if ((kqr->tr_flags & WORKQ_TR_FLAG_OVERCOMMIT) &&
+			    (!(kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND))) {
+				kqworkloop_unbind_locked(kqwl, thread,
+				    KQWL_OVERRIDE_DROP_DELAYED, 0);
+				kqworkloop_release_live(kqwl);
+			}
+			rc = -1; /* To indicate stop begin processing. */
 		} else if (op == KQWL_UTQ_UNBINDING &&
 		    kqr_thread(kqr) != thread) {
-			rc = -1;
+			rc = -1; /* To indicate stop begin processing. */
 		}
 
 		if (rc == -1) {
 			kq->kq_state &= ~KQ_PROCESSING;
+			if (kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND) {
+				goto done;
+			}
 			kqworkloop_unbind_delayed_override_drop(thread);
 		}
 	}
-
+done:
 	KDBG_DEBUG(KEV_EVTID(BSD_KEVENT_KQWL_PROCESS_BEGIN) | DBG_FUNC_END,
 	    kqwl->kqwl_dynamicid, 0, 0);
 
@@ -4675,12 +4783,20 @@ kqworkloop_end_processing(struct kqworkloop *kqwl, int flags, int kevent_flags)
 		kqworkloop_update_threads_qos(kqwl, KQWL_UTQ_PARKING, qos_override);
 
 		if (kqwl->kqwl_wakeup_qos && !kqwl->kqwl_owner) {
-			rc = -1;
+			rc = -1; /* To indicate we should continue processing. */
 		} else {
-			kqworkloop_unbind_locked(kqwl, thread, KQWL_OVERRIDE_DROP_DELAYED);
-			kqworkloop_release_live(kqwl);
-			kq->kq_state &= ~flags;
-			kqworkloop_unbind_delayed_override_drop(thread);
+			if (kqr_thread_permanently_bound(kqr)) {
+				/*
+				 * For these, the actual soft unbind and bound thread park
+				 * happen in the caller.
+				 */
+				kq->kq_state &= ~flags;
+			} else {
+				kqworkloop_unbind_locked(kqwl, thread, KQWL_OVERRIDE_DROP_DELAYED, 0);
+				kqworkloop_release_live(kqwl);
+				kq->kq_state &= ~flags;
+				kqworkloop_unbind_delayed_override_drop(thread);
+			}
 		}
 	} else {
 		kq->kq_state &= ~flags;
@@ -4743,11 +4859,9 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 	struct kqworkloop *kqwl;
 	struct filedesc *fdp = &p->p_fd;
 	workq_threadreq_param_t trp = { };
-#if CONFIG_PREADOPT_TG
-	struct thread_group *trp_permanent_preadopt_tg = NULL;
+	struct workq_threadreq_extended_param_s trp_extended = {0};
 	integer_t trp_preadopt_priority = 0;
 	integer_t trp_preadopt_policy = 0;
-#endif /* CONFIG_PREADOPT_TG */
 
 	switch (cmd) {
 	case KQ_WORKLOOP_CREATE:
@@ -4778,14 +4892,38 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 			break;
 		}
 
+		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD) {
+			if (!bootarg_thread_bound_kqwl_support_enabled) {
+				error = ENOTSUP;
+				break;
+			}
+			trp.trp_flags |= TRP_BOUND_THREAD;
+		}
+
 		if (params->kqwlp_flags & KQ_WORKLOOP_CREATE_WORK_INTERVAL) {
-#if CONFIG_PREADOPT_TG
+			/*
+			 * This flag serves the purpose of preadopting tg from work interval
+			 * on servicer/creator/bound thread at wakeup/creation time in kernel.
+			 *
+			 * Additionally, it helps the bound thread join the work interval
+			 * before it comes out to userspace for the first time.
+			 */
+			struct work_interval *work_interval = NULL;
 			kern_return_t kr;
-			kr = kern_work_interval_get_policy_from_port(params->kqwl_wi_port,
-			    &trp_preadopt_policy,
-			    &trp_preadopt_priority,
-			    &trp_permanent_preadopt_tg);
+
+			kr = kern_port_name_to_work_interval(params->kqwl_wi_port,
+			    &work_interval);
 			if (kr != KERN_SUCCESS) {
+				error = EINVAL;
+				break;
+			}
+			/* work_interval has a +1 ref */
+
+			kr = kern_work_interval_get_policy(work_interval,
+			    &trp_preadopt_policy,
+			    &trp_preadopt_priority);
+			if (kr != KERN_SUCCESS) {
+				kern_work_interval_release(work_interval);
 				error = EINVAL;
 				break;
 			}
@@ -4797,16 +4935,34 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 				trp.trp_flags |= TRP_PRIORITY;
 				trp.trp_pri = (uint8_t)trp_preadopt_priority;
 			}
+#if CONFIG_PREADOPT_TG
+			kr = kern_work_interval_get_thread_group(work_interval,
+			    &trp_extended.trp_permanent_preadopt_tg);
+			if (kr != KERN_SUCCESS) {
+				kern_work_interval_release(work_interval);
+				error = EINVAL;
+				break;
+			}
 			/*
-			 * We take +1 ref on a thread group backing this work interval
-			 * via kern_work_interval_get_policy_from_port and pass it on to kqwl.
-			 * If, for whatever reasons, kqworkloop_get_or_create fails, we
-			 * get back this ref.
+			 * In case of KERN_SUCCESS, we take
+			 * : +1 ref on a thread group backing this work interval
+			 * via kern_work_interval_get_thread_group and pass it on to kqwl.
+			 * If, for whatever reasons, kqworkloop_get_or_create fails and we
+			 * get back this ref, we release them before returning.
 			 */
-#else
-			error = ENOTSUP;
-			break;
-#endif /* CONFIG_PREADOPT_TG */
+#endif
+			if (trp.trp_flags & TRP_BOUND_THREAD) {
+				/*
+				 * For TRP_BOUND_THREAD, we pass +1 ref on the work_interval on to
+				 * kqwl so the bound thread can join it before coming out to
+				 * userspace.
+				 * If, for whatever reasons, kqworkloop_get_or_create fails and we
+				 * get back this ref, we release them before returning.
+				 */
+				trp_extended.trp_work_interval = work_interval;
+			} else {
+				kern_work_interval_release(work_interval);
+			}
 		}
 
 		if (!(trp.trp_flags & (TRP_POLICY | TRP_PRIORITY))) {
@@ -4830,19 +4986,30 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 			}
 		}
 
-		error = kqworkloop_get_or_create(p, params->kqwlp_id, &trp,
 #if CONFIG_PREADOPT_TG
-		    trp_permanent_preadopt_tg,
-#endif /* CONFIG_PREADOPT_TG */
+		if ((trp.trp_flags == 0) &&
+		    (trp_extended.trp_permanent_preadopt_tg == NULL)) {
+#else
+		if (trp.trp_flags == 0) {
+#endif
+			error = EINVAL;
+			break;
+		}
+
+		error = kqworkloop_get_or_create(p, params->kqwlp_id, &trp,
+		    &trp_extended,
 		    KEVENT_FLAG_DYNAMIC_KQUEUE | KEVENT_FLAG_WORKLOOP |
 		    KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST, &kqwl);
 		if (error) {
+			/* kqworkloop_get_or_create did not consume these refs. */
 #if CONFIG_PREADOPT_TG
-			/* In case of success, kqwl consumes this +1 ref. */
-			if (trp_permanent_preadopt_tg) {
-				thread_group_release(trp_permanent_preadopt_tg);
+			if (trp_extended.trp_permanent_preadopt_tg) {
+				thread_group_release(trp_extended.trp_permanent_preadopt_tg);
 			}
 #endif
+			if (trp_extended.trp_work_interval) {
+				kern_work_interval_release(trp_extended.trp_work_interval);
+			}
 			break;
 		}
 
@@ -4857,10 +5024,7 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 		}
 		break;
 	case KQ_WORKLOOP_DESTROY:
-		error = kqworkloop_get_or_create(p, params->kqwlp_id, NULL,
-#if CONFIG_PREADOPT_TG
-		    NULL,
-#endif /* CONFIG_PREADOPT_TG */
+		error = kqworkloop_get_or_create(p, params->kqwlp_id, NULL, NULL,
 		    KEVENT_FLAG_DYNAMIC_KQUEUE | KEVENT_FLAG_WORKLOOP |
 		    KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST, &kqwl);
 		if (error) {
@@ -4871,6 +5035,9 @@ kqueue_workloop_ctl_internal(proc_t p, uintptr_t cmd, uint64_t __unused options,
 		if (trp.trp_flags && !(trp.trp_flags & TRP_RELEASED)) {
 			trp.trp_flags |= TRP_RELEASED;
 			kqwl->kqwl_params = trp.trp_value;
+			if (trp.trp_flags & TRP_BOUND_THREAD) {
+				kqworkloop_bound_thread_wakeup(kqwl);
+			}
 			kqworkloop_release_live(kqwl);
 		} else {
 			error = EINVAL;
@@ -5267,6 +5434,130 @@ kqueue_threadreq_bind_commit(struct proc *p, thread_t thread)
 	kqunlock(kqu);
 }
 
+void
+kqworkloop_bound_thread_terminate(workq_threadreq_t kqr,
+    uint16_t *uu_workq_flags_orig)
+{
+	struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+	struct kqworkloop *kqwl = __container_of(kqr, struct kqworkloop, kqwl_request);
+
+	assert(uth == current_uthread());
+
+	kqlock(kqwl);
+
+	*uu_workq_flags_orig = uth->uu_workq_flags;
+
+	uth->uu_workq_flags &= ~UT_WORKQ_NEW;
+	uth->uu_workq_flags &= ~UT_WORKQ_WORK_INTERVAL_JOINED;
+	uth->uu_workq_flags &= ~UT_WORKQ_WORK_INTERVAL_FAILED;
+
+	workq_kern_bound_thread_reset_pri(NULL, uth);
+
+	kqunlock(kqwl);
+}
+
+/*
+ * This is called from kqueue_process with kqlock held.
+ */
+__attribute__((noreturn, noinline))
+static void
+kqworkloop_bound_thread_park(struct kqworkloop *kqwl, thread_t thread)
+{
+	assert(thread == current_thread());
+
+	kqlock_held(kqwl);
+
+	assert(!kqwl->kqwl_count);
+
+	/*
+	 * kevent entry points will take a reference on workloops so we need to
+	 * undo it before we park for good.
+	 */
+	kqworkloop_release_live(kqwl);
+
+	workq_threadreq_t kqr = &kqwl->kqwl_request;
+	workq_threadreq_param_t trp = kqueue_threadreq_workloop_param(kqr);
+
+	if (trp.trp_flags & TRP_RELEASED) {
+		/*
+		 * We need this check since the kqlock is dropped and retaken
+		 * multiple times during kqueue_process and because KQ_SLEEP is not
+		 * set, kqworkloop_bound_thread_wakeup is going to be a no-op.
+		 */
+		kqunlock(kqwl);
+		workq_kern_bound_thread_terminate(kqr);
+	} else {
+		kqworkloop_unbind_locked(kqwl,
+		    thread, KQWL_OVERRIDE_DROP_DELAYED, KQUEUE_THREADREQ_UNBIND_SOFT);
+		workq_kern_bound_thread_park(kqr);
+	}
+	__builtin_unreachable();
+}
+
+/*
+ * A helper function for pthread workqueue subsystem.
+ *
+ * This is used to keep things that the workq code needs to do after
+ * the bound thread's assert_wait minimum.
+ */
+void
+kqworkloop_bound_thread_park_prepost(workq_threadreq_t kqr)
+{
+	assert(current_thread() == kqr->tr_thread);
+
+	struct kqworkloop *kqwl = __container_of(kqr, struct kqworkloop, kqwl_request);
+
+	kqlock_held(kqwl);
+
+	kqwl->kqwl_state |= KQ_SLEEP;
+
+	/* uu_kqueue_override is protected under kqlock. */
+	kqworkloop_unbind_delayed_override_drop(kqr->tr_thread);
+
+	kqunlock(kqwl);
+}
+
+/*
+ * A helper function for pthread workqueue subsystem.
+ *
+ * This is used to keep things that the workq code needs to do after
+ * the bound thread's assert_wait minimum.
+ */
+void
+kqworkloop_bound_thread_park_commit(workq_threadreq_t kqr,
+    event_t event,
+    thread_continue_t continuation)
+{
+	assert(current_thread() == kqr->tr_thread);
+
+	struct kqworkloop *kqwl = __container_of(kqr, struct kqworkloop, kqwl_request);
+	struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+
+	kqlock(kqwl);
+	if (!(kqwl->kqwl_state & KQ_SLEEP)) {
+		/*
+		 * When we dropped the kqlock to unset the voucher, someone came
+		 * around and made us runnable.  But because we weren't waiting on the
+		 * event their thread_wakeup() was ineffectual.  To correct for that,
+		 * we just run the continuation ourselves.
+		 */
+		assert((uth->uu_workq_flags & (UT_WORKQ_RUNNING | UT_WORKQ_DYING)));
+		if (uth->uu_workq_flags & UT_WORKQ_DYING) {
+			__assert_only workq_threadreq_param_t trp = kqueue_threadreq_workloop_param(kqr);
+			assert(trp.trp_flags & TRP_RELEASED);
+		}
+		kqunlock(kqwl);
+		continuation(NULL, THREAD_AWAKENED);
+	} else {
+		assert((uth->uu_workq_flags & (UT_WORKQ_RUNNING | UT_WORKQ_DYING)) == 0);
+		thread_set_pending_block_hint(get_machthread(uth),
+		    kThreadWaitParkedBoundWorkQueue);
+		assert_wait(event, THREAD_INTERRUPTIBLE);
+		kqunlock(kqwl);
+		thread_block(continuation);
+	}
+}
+
 static void
 kqueue_threadreq_modify(kqueue_t kqu, workq_threadreq_t kqr, kq_index_t qos,
     workq_kern_threadreq_flags_t flags)
@@ -5329,6 +5620,9 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 	if (kqr->tr_state == WORKQ_TR_STATE_BINDING) {
 		assert(ut->uu_kqr_bound == kqr);
 		assert(kqr->tr_thread == thread);
+	} else if (kqr->tr_state == WORKQ_TR_STATE_BOUND) {
+		assert(flags & KQUEUE_THREADREQ_BIND_SOFT);
+		assert(kqr_thread_permanently_bound(kqr));
 	} else {
 		assert(kqr_thread_requested_pending(kqr));
 		assert(kqr->tr_thread == THREAD_NULL);
@@ -5363,7 +5657,7 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 			}
 		}
 
-		if (ts && (flags & KQUEUE_THREADERQ_BIND_NO_INHERITOR_UPDATE) == 0) {
+		if (ts && (flags & KQUEUE_THREADREQ_BIND_NO_INHERITOR_UPDATE) == 0) {
 			/*
 			 * Past this point, the interlock is the kq req lock again,
 			 * so we can fix the inheritor for good.
@@ -5421,6 +5715,12 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 			if (KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
 				struct thread_group *tg = KQWL_GET_PREADOPTED_TG(old_tg);
 				assert(tg != NULL);
+				/*
+				 * For KQUEUE_THREADREQ_BIND_SOFT, technically the following
+				 * set_preadopt should be a no-op since this bound servicer thread
+				 * preadopts kqwl's permanent tg at first-initial bind time and
+				 * never leaves it until its termination.
+				 */
 				thread_set_preadopt_thread_group(thread, tg);
 				/*
 				 * From this point on, kqwl and thread both have +1 ref on this tg.
@@ -5671,17 +5971,22 @@ recompute:
 		os_atomic_store(&kqwl->kqwl_preadopt_tg_needs_redrive, KQWL_PREADOPT_TG_CLEAR_REDRIVE, relaxed);
 #endif
 
-		struct uthread *ut = get_bsdthread_info(servicer);
-		if (ut->uu_kqueue_override != new_override) {
-			if (ut->uu_kqueue_override == THREAD_QOS_UNSPECIFIED) {
-				thread_add_servicer_override(servicer, new_override);
-			} else if (new_override == THREAD_QOS_UNSPECIFIED) {
-				thread_drop_servicer_override(servicer);
-			} else { /* ut->uu_kqueue_override != new_override */
-				thread_update_servicer_override(servicer, new_override);
+		if (kqr_thread_permanently_bound(kqr) && (kqwl->kqwl_state & KQ_SLEEP)) {
+			kqr->tr_qos = new_override;
+			workq_kern_bound_thread_reset_pri(kqr, get_bsdthread_info(servicer));
+		} else {
+			struct uthread *ut = get_bsdthread_info(servicer);
+			if (ut->uu_kqueue_override != new_override) {
+				if (ut->uu_kqueue_override == THREAD_QOS_UNSPECIFIED) {
+					thread_add_servicer_override(servicer, new_override);
+				} else if (new_override == THREAD_QOS_UNSPECIFIED) {
+					thread_drop_servicer_override(servicer);
+				} else { /* ut->uu_kqueue_override != new_override */
+					thread_update_servicer_override(servicer, new_override);
+				}
+				ut->uu_kqueue_override = new_override;
+				qos_changed = TRUE;
 			}
-			ut->uu_kqueue_override = new_override;
-			qos_changed = TRUE;
 		}
 	} else if (new_override == THREAD_QOS_UNSPECIFIED) {
 		/*
@@ -5723,6 +6028,31 @@ kqworkloop_update_iotier_override(struct kqworkloop *kqwl)
 }
 
 static void
+kqworkloop_bound_thread_wakeup(struct kqworkloop *kqwl)
+{
+	workq_threadreq_t kqr = &kqwl->kqwl_request;
+
+	kqlock_held(kqwl);
+
+	assert(kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND);
+
+	__assert_only struct uthread *uth = get_bsdthread_info(kqr->tr_thread);
+	assert(workq_thread_is_permanently_bound(uth));
+
+	/*
+	 * The bound thread takes up the responsibility of setting the KQ_SLEEP
+	 * on its way to parking. See kqworkloop_bound_thread_park_prepost.
+	 * This state is always manipulated under kqlock.
+	 */
+	if (kqwl->kqwl_state & KQ_SLEEP) {
+		kqwl->kqwl_state &= ~KQ_SLEEP;
+		kqueue_threadreq_bind(current_proc(),
+		    kqr, kqr->tr_thread, KQUEUE_THREADREQ_BIND_SOFT);
+		workq_kern_bound_thread_wakeup(kqr);
+	}
+}
+
+static void
 kqworkloop_wakeup(struct kqworkloop *kqwl, kq_index_t qos)
 {
 	if (qos <= kqwl->kqwl_wakeup_qos) {
@@ -5742,6 +6072,15 @@ kqworkloop_wakeup(struct kqworkloop *kqwl, kq_index_t qos)
 	}
 
 	kqworkloop_update_threads_qos(kqwl, KQWL_UTQ_UPDATE_WAKEUP_QOS, qos);
+
+	/*
+	 * In case of thread bound kqwl, we let the kqworkloop_update_threads_qos
+	 * take care of overriding the servicer first before it waking up. This
+	 * simplifies the soft bind of the parked bound thread later.
+	 */
+	if (kqr_thread_permanently_bound(&kqwl->kqwl_request)) {
+		kqworkloop_bound_thread_wakeup(kqwl);
+	}
 }
 
 static struct kqtailq *
@@ -5919,7 +6258,7 @@ kqueue_update_override(kqueue_t kqu, struct knote *kn, thread_qos_t qos)
 
 static void
 kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
-    enum kqwl_unbind_locked_mode how)
+    enum kqwl_unbind_locked_mode how, unsigned int flags)
 {
 	struct uthread *ut = get_bsdthread_info(thread);
 	workq_threadreq_t kqr = &kqwl->kqwl_request;
@@ -5930,7 +6269,11 @@ kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
 	kqlock_held(kqwl);
 
 	assert(ut->uu_kqr_bound == kqr);
-	ut->uu_kqr_bound = NULL;
+
+	if ((flags & KQUEUE_THREADREQ_UNBIND_SOFT) == 0) {
+		ut->uu_kqr_bound = NULL;
+	}
+
 	if (how == KQWL_OVERRIDE_DROP_IMMEDIATELY &&
 	    ut->uu_kqueue_override != THREAD_QOS_UNSPECIFIED) {
 		thread_drop_servicer_override(thread);
@@ -5956,16 +6299,24 @@ kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
 	});
 
 	if (ret) {
-		KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, KQWL_PREADOPT_OP_SERVICER_UNBIND, old_tg, KQWL_PREADOPTED_TG_NULL);
-		// Servicer can drop any preadopt thread group it has since it has
-		// unbound.
-		thread_set_preadopt_thread_group(thread, NULL);
+		if ((flags & KQUEUE_THREADREQ_UNBIND_SOFT) &&
+		    KQWL_HAS_PERMANENT_PREADOPTED_TG(old_tg)) {
+			// The permanently configured bound thread remains a part of the
+			// thread group until its termination.
+		} else {
+			// Servicer can drop any preadopt thread group it has since it has
+			// unbound.
+			KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, KQWL_PREADOPT_OP_SERVICER_UNBIND, old_tg, KQWL_PREADOPTED_TG_NULL);
+			thread_set_preadopt_thread_group(thread, NULL);
+		}
 	}
 #endif
 	thread_update_servicer_iotier_override(thread, THROTTLE_LEVEL_END);
 
-	kqr->tr_thread = THREAD_NULL;
-	kqr->tr_state = WORKQ_TR_STATE_IDLE;
+	if ((flags & KQUEUE_THREADREQ_UNBIND_SOFT) == 0) {
+		kqr->tr_thread = THREAD_NULL;
+		kqr->tr_state = WORKQ_TR_STATE_IDLE;
+	}
 	kqwl->kqwl_state &= ~KQ_R2K_ARMED;
 }
 
@@ -5973,7 +6324,9 @@ static void
 kqworkloop_unbind_delayed_override_drop(thread_t thread)
 {
 	struct uthread *ut = get_bsdthread_info(thread);
-	assert(ut->uu_kqr_bound == NULL);
+	if (!workq_thread_is_permanently_bound(ut)) {
+		assert(ut->uu_kqr_bound == NULL);
+	}
 	if (ut->uu_kqueue_override != THREAD_QOS_UNSPECIFIED) {
 		thread_drop_servicer_override(thread);
 		ut->uu_kqueue_override = THREAD_QOS_UNSPECIFIED;
@@ -5999,24 +6352,36 @@ kqworkloop_unbind(struct kqworkloop *kqwl)
 	int op = KQWL_UTQ_PARKING;
 	kq_index_t qos_override = THREAD_QOS_UNSPECIFIED;
 
+	/*
+	 * For kqwl permanently bound to a thread, this path is only
+	 * exercised when the thread is on its way to terminate.
+	 * We don't care about asking for a new thread in that case.
+	 */
+	bool kqwl_had_bound_thread = kqr_thread_permanently_bound(kqr);
+
 	assert(thread == current_thread());
 
 	kqlock(kqwl);
 
-	/*
-	 * Forcing the KQ_PROCESSING flag allows for QoS updates because of
-	 * unsuppressing knotes not to be applied until the eventual call to
-	 * kqworkloop_update_threads_qos() below.
-	 */
-	assert((kq->kq_state & KQ_PROCESSING) == 0);
-	if (!TAILQ_EMPTY(&kqwl->kqwl_suppressed)) {
-		kq->kq_state |= KQ_PROCESSING;
-		qos_override = kqworkloop_acknowledge_events(kqwl);
-		kq->kq_state &= ~KQ_PROCESSING;
+	if (!kqwl_had_bound_thread) {
+		/*
+		 * Forcing the KQ_PROCESSING flag allows for QoS updates because of
+		 * unsuppressing knotes not to be applied until the eventual call to
+		 * kqworkloop_update_threads_qos() below.
+		 */
+		assert((kq->kq_state & KQ_PROCESSING) == 0);
+		if (!TAILQ_EMPTY(&kqwl->kqwl_suppressed)) {
+			kq->kq_state |= KQ_PROCESSING;
+			qos_override = kqworkloop_acknowledge_events(kqwl);
+			kq->kq_state &= ~KQ_PROCESSING;
+		}
 	}
 
-	kqworkloop_unbind_locked(kqwl, thread, KQWL_OVERRIDE_DROP_DELAYED);
-	kqworkloop_update_threads_qos(kqwl, op, qos_override);
+	kqworkloop_unbind_locked(kqwl, thread, KQWL_OVERRIDE_DROP_DELAYED, 0);
+
+	if (!kqwl_had_bound_thread) {
+		kqworkloop_update_threads_qos(kqwl, op, qos_override);
+	}
 
 	kqunlock(kqwl);
 
@@ -7401,7 +7766,8 @@ kevent_cleanup(kqueue_t kqu, int flags, int error, kevent_ctx_t kectx)
 	if (flags & KEVENT_FLAG_PARKING) {
 		thread_t th = current_thread();
 		struct uthread *uth = get_bsdthread_info(th);
-		if (uth->uu_kqr_bound) {
+		workq_threadreq_t kqr = uth->uu_kqr_bound;
+		if (kqr && !(kqr->tr_flags & WORKQ_TR_FLAG_PERMANENT_BIND)) {
 			thread_unfreeze_base_pri(th);
 		}
 	}
@@ -7427,6 +7793,10 @@ kevent_cleanup(kqueue_t kqu, int flags, int error, kevent_ctx_t kectx)
  *
  * This is only called by kqueue_scan() so that the compiler can inline it.
  *
+ * For kqworkloops that are permanently configured with a bound thread, this
+ * function parks the bound thread (instead of returning) if there are no events
+ * or errors to be returned and KEVENT_FLAG_PARKING was specified.
+ *
  * @returns
  * - 0:            no event was returned, no other error occured
  * - EBADF:        the kqueue is being destroyed (KQ_DRAIN is set)
@@ -7443,10 +7813,12 @@ kqueue_process(kqueue_t kqu, int flags, kevent_ctx_t kectx,
 	int error = 0, rc = 0;
 	struct kqtailq *base_queue, *queue;
 	uint16_t kq_type = (kqu.kq->kq_state & (KQ_WORKQ | KQ_WORKLOOP));
+	bool kqwl_permanently_bound = false;
 
 	if (kq_type & KQ_WORKQ) {
 		rc = kqworkq_begin_processing(kqu.kqwq, kqr, flags);
 	} else if (kq_type & KQ_WORKLOOP) {
+		kqwl_permanently_bound = kqr_thread_permanently_bound(kqr);
 		rc = kqworkloop_begin_processing(kqu.kqwl, flags);
 	} else {
 kqfile_retry:
@@ -7458,6 +7830,10 @@ kqfile_retry:
 
 	if (rc == -1) {
 		/* Nothing to process */
+		if ((kq_type & KQ_WORKLOOP) && (flags & KEVENT_FLAG_PARKING) &&
+		    kqwl_permanently_bound) {
+			goto kqwl_bound_thread_park;
+		}
 		return 0;
 	}
 
@@ -7524,6 +7900,12 @@ stop_processing:
 
 	if (__probable(rc >= 0)) {
 		assert(rc == 0 || rc == EBADF);
+		if (rc == 0) {
+			if ((kq_type & KQ_WORKLOOP) && (flags & KEVENT_FLAG_PARKING) &&
+			    kqwl_permanently_bound) {
+				goto kqwl_bound_thread_park;
+			}
+		}
 		return rc;
 	}
 
@@ -7533,6 +7915,14 @@ stop_processing:
 	} else {
 		goto kqfile_retry;
 	}
+
+kqwl_bound_thread_park:
+#if DEVELOPMENT | DEBUG
+	assert(current_thread() == kqr_thread_fast(kqr));
+	assert(workq_thread_is_permanently_bound(current_uthread()));
+#endif
+	kqworkloop_bound_thread_park(kqu.kqwl, kqr_thread_fast(kqr));
+	__builtin_unreachable();
 }
 
 /*!
@@ -7915,10 +8305,7 @@ kevent_id(struct proc *p, struct kevent_id_args *uap, int32_t *retval)
 	} else if (__improbable(kevent_args_requesting_events(flags, uap->nevents))) {
 		return EXDEV;
 	} else {
-		error = kqworkloop_get_or_create(p, uap->id, NULL,
-#if CONFIG_PREADOPT_TG
-		    NULL,
-#endif /* CONFIG_PREADOPT_TG */
+		error = kqworkloop_get_or_create(p, uap->id, NULL, NULL,
 		    flags, &kqu.kqwl);
 		if (__improbable(error)) {
 			return error;
@@ -8255,6 +8642,9 @@ SYSCTL_PROC(_net_systm_kevt, OID_AUTO, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     kevt_pcblist, "S,xkevtpcb", "");
 
+SYSCTL_UINT(_net_systm_kevt, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
+    (unsigned int *)&kevtstat.kes_pcbcount, 0, "");
+
 static lck_mtx_t *
 event_getlock(struct socket *so, int flags)
 {
@@ -8514,9 +8904,9 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 	    event_msg->kev_class == KEV_NKE_CLASS &&
 	    event_msg->kev_subclass == KEV_NKE_ALF_SUBCLASS &&
 	    event_msg->event_code == KEV_NKE_ALF_STATE_CHANGED) {
-#if (DEBUG || DEVELOPMENT)
+#if MACH_ASSERT
 		os_log_info(OS_LOG_DEFAULT, "KEV_NKE_ALF_STATE_CHANGED posted");
-#endif /* DEBUG || DEVELOPMENT */
+#endif /* MACH_ASSERT */
 		net_filter_event_mark(NET_FILTER_EVENT_ALF,
 		    net_check_compatible_alf());
 	}
@@ -8610,7 +9000,7 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 			 * unsafe to use "m2"
 			 */
 			so_inc_recv_data_stat(ev_pcb->evp_socket,
-			    1, m->m_len, MBUF_TC_BE);
+			    1, m->m_len);
 
 			sorwakeup(ev_pcb->evp_socket);
 			os_atomic_inc(&kevtstat.kes_posted, relaxed);
@@ -8770,7 +9160,7 @@ kevt_pcblist SYSCTL_HANDLER_ARGS
 
 		xk->kep_len = sizeof(struct xkevtpcb);
 		xk->kep_kind = XSO_EVT;
-		xk->kep_evtpcb = (uint64_t)VM_KERNEL_ADDRPERM(ev_pcb);
+		xk->kep_evtpcb = (uint64_t)VM_KERNEL_ADDRHASH(ev_pcb);
 		xk->kep_vendor_code_filter = ev_pcb->evp_vendor_code_filter;
 		xk->kep_class_filter = ev_pcb->evp_class_filter;
 		xk->kep_subclass_filter = ev_pcb->evp_subclass_filter;

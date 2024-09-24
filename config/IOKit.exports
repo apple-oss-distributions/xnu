@@ -114,10 +114,11 @@ _PE_cpu_halt
 _PE_cpu_machine_init
 _PE_cpu_machine_quiesce
 _PE_cpu_signal
-_PE_cpu_start
+_PE_cpu_start:_PE_cpu_start_from_kext
 _PE_enter_debugger
 _PE_halt_restart
 _PE_parse_boot_argn
+_PE_parse_boot_arg_str
 
 __ZN9IOService28CreateNameMatchingDictionaryEP8OSStringP12OSDictionary
 __ZN9IOService28CreateNameMatchingDictionaryEPKcP12OSDictionary

@@ -208,6 +208,9 @@ enum{
 // Options used by IOMapper. example IOMappers are DART and VT-d
 enum {
 	kIOMapperUncached      = 0x0001,
+#ifdef KERNEL_PRIVATE
+	kIOMapperTransient     = 0x0002,
+#endif
 };
 
 #ifdef KERNEL_PRIVATE
@@ -1246,6 +1249,14 @@ public:
 
 	virtual IOReturn complete(IODirection forDirection = kIODirectionNone) APPLE_KEXT_OVERRIDE;
 
+	virtual LIBKERN_RETURNS_NOT_RETAINED IOMemoryMap *      makeMapping(
+		IOMemoryDescriptor *    owner,
+		task_t                  intoTask,
+		IOVirtualAddress        atAddress,
+		IOOptionBits            options,
+		IOByteCount             offset,
+		IOByteCount             length ) APPLE_KEXT_OVERRIDE;
+
 	virtual IOReturn doMap(
 		vm_map_t                addressMap,
 		IOVirtualAddress *      atAddress,
@@ -1263,6 +1274,8 @@ public:
 // Factory method for cloning a persistent IOMD, see IOMemoryDescriptor
 	static OSPtr<IOMemoryDescriptor>
 	withPersistentMemoryDescriptor(IOGeneralMemoryDescriptor *originalMD);
+
+	IOOptionBits memoryReferenceCreateOptions(IOOptionBits options, IOMemoryMap * map);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

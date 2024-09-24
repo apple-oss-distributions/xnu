@@ -121,6 +121,7 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_SHAREDCACHE_AOTINFO' : 0x944,
     'STACKSHOT_KCTYPE_SHAREDCACHE_ID' : 0x945,
     'STACKSHOT_KCTYPE_CODESIGNING_INFO' : 0x946,
+    'STACKSHOT_KCTYPE_OS_BUILD_VERSION' : 0x947,
     'STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO' : 0x948,
     'STACKSHOT_KCCONTAINER_EXCLAVES' : 0x949,
     'STACKSHOT_KCCONTAINER_EXCLAVE_SCRESULT' : 0x94a,
@@ -135,6 +136,7 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO' : 0x953,
     'STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS' : 0x954,
     'STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO' : 0x955,
+    'STACKSHOT_KCTYPE_LATENCY_INFO_CPU': 0x956,
 
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
@@ -168,6 +170,7 @@ kcdata_type_def = {
     'TASK_CRASHINFO_DIRTY_FLAGS':          0x819,
     'TASK_CRASHINFO_CRASHED_THREADID':     0x81A,
     'TASK_CRASHINFO_COALITION_ID':         0x81B,
+    'TASK_CRASHINFO_JIT_ADDRESS_RANGE':    0x840,
     'EXIT_REASON_SNAPSHOT':                0x1001,
     'EXIT_REASON_USER_DESC':               0x1002,
     'EXIT_REASON_USER_PAYLOAD':            0x1003,
@@ -525,7 +528,7 @@ class KCObject(object):
 
     def ParseData(self):
 
-
+        logging.info(self.i_type)
         if self.i_type == GetTypeForName('KCDATA_TYPE_CONTAINER_BEGIN'):
             self.obj['uniqID'] = self.i_flags
             self.i_name = str(self.obj['uniqID'])
@@ -1220,9 +1223,30 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO')] = KCType
                         KCSubTypeElement.FromBasicCtype('latency_version', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
                         KCSubTypeElement.FromBasicCtype('setup_latency', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
                         KCSubTypeElement.FromBasicCtype('total_task_iteration_latency', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
-                        KCSubTypeElement.FromBasicCtype('total_terminated_task_iteration', KCSUBTYPE_TYPE.KC_ST_UINT64, 24)
+                        KCSubTypeElement.FromBasicCtype('total_terminated_task_iteration', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+                        KCSubTypeElement.FromBasicCtype('task_queue_building_latency_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 32),
+                        KCSubTypeElement.FromBasicCtype('terminated_task_queue_building_latency_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 40),
+                        KCSubTypeElement.FromBasicCtype('cpu_wait_latency_mt', KCSUBTYPE_TYPE.KC_ST_INT32, 48),
+                        KCSubTypeElement.FromBasicCtype('calling_cpu_number', KCSUBTYPE_TYPE.KC_ST_INT32, 56),
             ),
             'stackshot_latency_collection')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_CPU')] = KCTypeDescription(GetTypeForName('STACKSHOT_LATENCY_INFO_CPU'),
+            (
+                        KCSubTypeElement.FromBasicCtype('cpu_number', KCSUBTYPE_TYPE.KC_ST_INT32, 0),
+                        KCSubTypeElement.FromBasicCtype('cluster_type', KCSUBTYPE_TYPE.KC_ST_INT32, 4),
+                        KCSubTypeElement.FromBasicCtype('init_latency_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+                        KCSubTypeElement.FromBasicCtype('workqueue_latency_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
+                        KCSubTypeElement.FromBasicCtype('total_latency_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+                        KCSubTypeElement.FromBasicCtype('total_cycles', KCSUBTYPE_TYPE.KC_ST_UINT64, 32),
+                        KCSubTypeElement.FromBasicCtype('total_instrs', KCSUBTYPE_TYPE.KC_ST_UINT64, 40),
+                        KCSubTypeElement.FromBasicCtype('tasks_processed', KCSUBTYPE_TYPE.KC_ST_UINT64, 48),
+                        KCSubTypeElement.FromBasicCtype('threads_processed', KCSUBTYPE_TYPE.KC_ST_UINT64, 56),
+                        KCSubTypeElement.FromBasicCtype('faulting_time_mt', KCSUBTYPE_TYPE.KC_ST_UINT64, 64),
+                        KCSubTypeElement.FromBasicCtype('total_buf', KCSUBTYPE_TYPE.KC_ST_UINT64, 72),
+                        KCSubTypeElement.FromBasicCtype('intercluster_buf_used', KCSUBTYPE_TYPE.KC_ST_UINT64, 80),
+            ),
+            'stackshot_latency_cpu')
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_TASK')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_TASK'),
             (
@@ -1356,6 +1380,12 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_VALIDATION_CATEGORY')] 
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_CS_TRUST_LEVEL')] = KCSubTypeElement('cs_trust_level', KCSUBTYPE_TYPE.KC_ST_UINT32, 4, 0, 0)
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('TASK_CRASHINFO_JIT_ADDRESS_RANGE')] = KCTypeDescription(GetTypeForName('TASK_CRASHINFO_JIT_ADDRESS_RANGE'),
+    (
+        KCSubTypeElement.FromBasicCtype('start_address', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+        KCSubTypeElement.FromBasicCtype('end_address', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
+    ), 'jit_address_range')
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_CPU_TIMES'),
     (
         KCSubTypeElement.FromBasicCtype('user_usec', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
@@ -1449,6 +1479,9 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_SUSPENSION_SOURCE')] = K
     KCSubTypeElement('tss_procname', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(65, 1), 20, 1)
 ), 'suspension_source')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_OS_BUILD_VERSION')] = KCSubTypeElement('os_build_version', KCSUBTYPE_TYPE.KC_ST_CHAR,
+                          KCSubTypeElement.GetSizeForArray(256, 1), 0, 1)
+
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_KERN_EXCLAVES_THREADINFO'),
     (
         KCSubTypeElement.FromBasicCtype('tei_scid', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
@@ -1481,6 +1514,7 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_INF
         KCSubTypeElement.FromBasicCtype('eas_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
         KCSubTypeElement.FromBasicCtype('eas_layoutid', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
         KCSubTypeElement.FromBasicCtype('eas_slide', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+        KCSubTypeElement.FromBasicCtype('eas_asroot', KCSUBTYPE_TYPE.KC_ST_UINT64, 32),
     ), 'exclave_addressspace_info')
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_ADDRESSSPACE_NAME')] = KCSubTypeElement('exclave_addressspace_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
@@ -1578,7 +1612,7 @@ def format_uuid(elementValues):
         return elementValues
     return ''.join("%02x" % i for i in elementValues)
 
-kThreadWaitNone			= 0x00
+kThreadWaitNone                 = 0x00
 kThreadWaitKernelMutex          = 0x01
 kThreadWaitPortReceive          = 0x02
 kThreadWaitPortSetReceive       = 0x03
@@ -1599,6 +1633,15 @@ kThreadWaitOnProcess            = 0x11
 kThreadWaitSleepWithInheritor   = 0x12
 kThreadWaitEventlink            = 0x13
 kThreadWaitCompressor           = 0x14
+kThreadWaitParkedBoundWorkQueue = 0x15
+kThreadWaitPageBusy             = 0x16
+kThreadWaitPagerInit            = 0x17
+kThreadWaitPagerReady           = 0x18
+kThreadWaitPagingActivity       = 0x19
+kThreadWaitMappingInProgress    = 0x1a
+kThreadWaitMemoryBlocked        = 0x1b
+kThreadWaitPagingInProgress     = 0x1c
+kThreadWaitPageInThrottle       = 0x1d
 
 
 UINT64_MAX = 0xffffffffffffffff
@@ -1772,7 +1815,22 @@ def formatWaitInfo(info, wantHex, portlabels):
             s += "eventlink, signaled by thread %s" % ownerThread
     elif type == kThreadWaitCompressor:
         s += "in compressor segment %x, busy for thread %s" % (context, ownerThread)
-
+    elif type == kThreadWaitPageBusy:
+        s += f"busy page 0x{context:x}"
+    elif type == kThreadWaitPagerInit:
+        s += f"pager initialization for vm object 0x{context:x}"
+    elif type == kThreadWaitPagerReady:
+        s += f"pager ready for vm object 0x{context:x}"
+    elif type == kThreadWaitPagingActivity:
+        s += f"paging/activity in progress for vm object 0x{context:x}"
+    elif type == kThreadWaitMappingInProgress:
+        s += f"mapping in progress for vm object 0x{context:x}"
+    elif type == kThreadWaitMemoryBlocked:
+        s += f"blocked vm object 0x{context:x}"
+    elif type == kThreadWaitPagingInProgress:
+        s += f"paging in progress for vm object 0x{context:x}"
+    elif type == kThreadWaitPageInThrottle:
+        s += f"throttled vm object 0x{context:x}"
     else:
         s += "unknown type %d (owner %s, context %x)" % (type, ownerThread, context)
 
@@ -1824,6 +1882,149 @@ def formatWaitInfoWithTurnstiles(waitinfos, tsinfos, portlabels):
             wis_tis.append((w, None))
 
     return [formatWaitInfo(wi, False, portlabels) + formatTurnstileInfo(ti, wi.get('portlabel_id', 0), portlabels) for (wi, ti) in wis_tis]
+
+
+def FindTextLayout(text_layouts, text_layout_id):
+    for layout in text_layouts.values():
+        if layout['exclave_textlayout_info']['layout_id'] == text_layout_id:
+            return layout
+    return None
+
+
+def GetExclaveLibs(text_layouts, text_layout_id):
+    from operator import itemgetter
+    textlayout = FindTextLayout(text_layouts, text_layout_id)
+    exclave_libs = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
+    exclave_libs.sort(key=itemgetter(1))
+    return exclave_libs
+    
+
+# kcdata is json at path 'kcdata_stackshot/threads_exclave/0'
+def GetEASFrames(AllImageCatalog, kcdata, ipc_entry, notes, scid):
+    info = ipc_entry['exclave_ipcstackentry_info']
+    asid = info['eise_asid']
+
+    address_spaces = kcdata.get('exclave_addressspace')
+    if not address_spaces:
+        notes.warn("PID ${PID} TID ${TID} SCID %d Missing address spaces info" % scid)
+        return []
+    as_info = address_spaces.get(str(asid))
+    if not as_info:
+        notes.warn("PID ${PID} TID ${TID} SCID %d Missing address space info for ASID 0x%x" % (scid, asid))
+        return []
+    text_layout_id = as_info['exclave_addressspace_info']['eas_layoutid']
+    addr_space_name = as_info['exclave_addressspace_name']
+    
+    exclave_libs = GetExclaveLibs(kcdata['exclave_textlayout'], text_layout_id)
+    
+    frames = []
+    stack = ipc_entry.get('secure_ecstack_entry', [])
+    for stack_item in stack:
+        lr = GetLongForAddress(stack_item['lr'])
+        # this is a buggy value of unknown origin
+        # rdar://123508690 (Some Exclave Stackshot frames ends with invalid value 0xFFFF000000000000)
+        if lr == 0xFFFF000000000000:
+            continue
+        frames.append(GetSymbolInfoForFrame(AllImageCatalog, exclave_libs, lr))
+
+    if frames:
+        frame_info = "frames %d to %d" % (notes.offset, notes.offset + len(frames) - 1)
+    else:
+        frame_info = "no frames"
+    notes.info("PID ${PID} TID ${TID} SCID %d ASID 0x%x has address space name '%s' (%s)" % (scid, asid, addr_space_name, frame_info))
+    notes.addToOffset(len(frames))
+    return frames
+    
+
+def GetExclavesFrames(AllImageCatalog, json, scid, notes):
+    kcdata = json['kcdata_stackshot']
+    threads_exclave = kcdata.get('threads_exclave')
+    if not threads_exclave:
+        notes.warn("PID ${PID} TID ${TID} no threads_exclave info found, skipping exclaves frames")
+        return []
+
+    exclaves_content = threads_exclave.get('0')
+    if not exclaves_content:
+        notes.warn("PID ${PID} TID ${TID} threads_exclave data not found, skipping exclaves frames")
+        return []
+
+    threads_info = exclaves_content.get('thread_exclave')
+    if not threads_info:
+        notes.warn("PID ${PID} TID ${TID} no thread_exclave info found, skipping exclaves frames")
+        return []
+
+    scid_info = threads_info.get(str(scid))
+    if not scid_info:
+        notes.warn("PID ${PID} TID ${TID} no exclaves info available for SCID %d, skipping exclaves frames" % scid)
+        return []
+
+    frames = []
+
+    ipc_stack = scid_info.get("exclave_ipcstackentry")
+    if not ipc_stack:
+        notes.info("\nPID ${PID} TID ${TID} SCID %d IPC chain is missing" % scid)
+        return []
+    notes.info("\nPID ${PID} TID ${TID} SCID %d has IPC chain with %d items:" % (scid, len(ipc_stack)))
+    for i in reversed(range(len(ipc_stack))):
+        ipc_entry = ipc_stack[str(i)]
+        entry_frames = GetEASFrames(AllImageCatalog, exclaves_content, ipc_entry, notes, scid)
+        frames.extend(entry_frames)
+
+    return frames
+    
+
+def InsertExclavesFrames(AllImageCatalog, json, thdata, notes, kernel_frames):
+    thread_info = thdata.get('exclaves_thread_info')
+    if not thread_info:
+        # this is not exclave thread
+        return
+
+    scid = thread_info["tei_scid"]
+    offset = thread_info["tei_thread_offset"]
+    notes.offset = offset
+
+    exclaves_frames = GetExclavesFrames(AllImageCatalog, json, scid, notes)
+    
+    # insert exclaves frames to offset
+    for i in range(len(exclaves_frames)):
+        kernel_frames.insert(offset + i, exclaves_frames[i])
+
+class NotesBuilder:
+    
+    notes = []
+    pid = None
+    tis = None
+    offset = 0
+
+    def __init__(self, pid, tid):
+        self.pid = pid
+        self.tid = tid
+        self.notes = []
+        self.offset = 0 # offset of next IPC stack in kernel stack
+
+    # Replace ${PID} with a PID and ${TID} with TID and add newline
+    def format(self, note):
+        note = note.replace('${PID}', str(self.pid))
+        note = note.replace('${TID}', str(self.tid))
+        return note + '\n'
+    
+    def warn(self, note):
+        note = self.format(note)
+        sys.stdout.write(note)
+        self.notes.append(note)
+
+    def info(self, note):
+        note = self.format(note)
+        self.notes.append(note)
+        
+    def isEmpty(self):
+        return len(self.notes) == 0
+
+    def text(self):
+        return ''.join(self.notes)
+
+    def addToOffset(self, frame_count):
+        self.offset += frame_count
 
 def SaveStackshotReport(j, outfile_name, incomplete):
     import time
@@ -1960,8 +2161,12 @@ def SaveStackshotReport(j, outfile_name, incomplete):
         pr_libs.extend(kern_load_info)
         pr_libs.extend(dsc_libs)
 
+        if 'jit_address_range' in piddata:
+            address_range = piddata.get('jit_address_range', {})
+            tsnap['jitStartAddress'] = address_range['start_address']
+            tsnap['jitEndAddress'] = address_range['end_address']
+            pr_libs.append([format_uuid("00000000000000000000000000000000"), tsnap['jitStartAddress'] , "J"])
         pr_libs.sort(key=itemgetter(1))
-
         ttsnap = piddata.get('transitioning_task_snapshot', None)
         if ttsnap is not None:
             # Transitioning task snapshots have "tts_" prefixes; change them to
@@ -2022,6 +2227,10 @@ def SaveStackshotReport(j, outfile_name, incomplete):
                 kuserframes = []
                 for f in thdata["kernel_stack_frames"]:
                     kuserframes.append(GetSymbolInfoForFrame(AllImageCatalog, pr_libs, f['lr']))
+                notesBuilder = NotesBuilder(tsnap['pid'], tid)
+                InsertExclavesFrames(AllImageCatalog, j, thdata, notesBuilder, kuserframes)
+                if not notesBuilder.isEmpty():
+                    obj['notes'] += notesBuilder.text()
                 thsnap["kernelFrames"] = kuserframes
 
             if "user_stack_frames" in thdata:
@@ -2044,8 +2253,8 @@ def SaveStackshotReport(j, outfile_name, incomplete):
             tsnap['waitInfo'] = [formatWaitInfo(x, False, portlabels) for x in piddata['thread_waitinfo']]
         if 'stackshot_task_codesigning_info' in piddata:
             csinfo = piddata.get('stackshot_task_codesigning_info', {})
-            tsnap['csflags'] = csinfo['csflags']
-            tsnap['cs_trust_level'] = csinfo['cs_trust_level']
+            tsnap['csFlags'] = csinfo['csflags']
+            tsnap['csTrustLevel'] = csinfo['cs_trust_level']
         if 'suspension_info' in piddata:
             suspinfo = piddata.get('suspension_info', {})
             tsnap['suspension_count'] = suspinfo['tss_count']
@@ -2062,8 +2271,8 @@ def SaveStackshotReport(j, outfile_name, incomplete):
                     'suspension_pid': source['tss_pid'],
                     'suspension_procname': source['tss_procname'],
                 })
-            tsnap['suspension_sources'] = suspension_sources
 
+            tsnap['suspension_sources'] = suspension_sources
             # check if process is currently suspended
             if tsnap['suspension_last_start'] > tsnap['suspension_last_end']:
                 obj['notes'] += "\nPID {} ({}) is currently suspended (count: {}, total duration: {:.4f}s, last_start: {:.4f}, last_end: {:.4f}) - recent suspensions are:\n".format(pid, tsnap['procname'], tsnap['suspension_count'], tsnap['suspension_duration_secs'], tsnap['suspension_last_start'], tsnap['suspension_last_end'])
@@ -2206,6 +2415,7 @@ PRETTIFY_FLAGS = {
         'disable_latency_info',
         'save_dyld_compactinfo',
         'include_driver_threads_in_kernel',
+        'exclaves',
     ],
     'system_state_flags': [
         'kUser64_p',
@@ -2294,6 +2504,8 @@ PRETTIFY_FLAGS = {
         'kTaskDyldCompactInfoFaultedIn',
         'kTaskDyldCompactInfoMissing',
         'kTaskDyldCompactInfoTriedFault',
+        'kTaskWqExceededCooperativeThreadLimit',
+        'kTaskWqExceededActiveConstrainedThreadLimit',
     ],
     'turnstile_flags': [
         'turnstile_status_unknown',

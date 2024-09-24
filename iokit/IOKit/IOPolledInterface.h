@@ -128,6 +128,9 @@ enum{
 	kIOPolledFileSSD    = 0x00000001
 };
 
+enum { kDefaultIOSize = 128 * 1024 };
+enum { kDefaultIONumBuffers = 2 };
+
 #if !defined(__cplusplus)
 typedef struct IORegistryEntry IORegistryEntry;
 typedef struct OSData OSData;

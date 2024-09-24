@@ -54,6 +54,6 @@ tests()
 	}
 }
 
-T_DECL(ctor_aggregate_init, "bounded_array.ctor.aggregate_init") {
+T_DECL(ctor_aggregate_init, "bounded_array.ctor.aggregate_init", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

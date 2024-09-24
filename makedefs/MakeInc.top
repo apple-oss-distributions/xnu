@@ -203,6 +203,9 @@ ifneq ($(PRODUCT_CONFIGS),)
 # generate TARGET_CONFIGS using KERNEL_CONFIGS and PRODUCT_CONFIGS
 TARGET_CONFIGS := $(foreach my_devicemap_config,$(foreach my_product_config,$(shell printf "%s" "$(PRODUCT_CONFIGS)" | $(TR) A-Z a-z),$(call function_lookup_product,$(my_product_config))),$(foreach my_kernel_config,$(KERNEL_CONFIGS),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
 TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_product_config,$(shell printf "%s" "$(PRODUCT_CONFIGS)" | $(TR) A-Z a-z),$(call function_lookup_product_alias,$(my_product_config))),$(foreach my_kernel_config,$(KERNEL_CONFIGS),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+else ifeq (xnu_headers_driverkit,$(RC_ProjectName))
+# generate TARGET_CONFIGS for all kernel configs for B&I
+TARGET_CONFIGS = DEVELOPMENT arm64 DEFAULT DEVELOPMENT X86_64 DEFAULT
 else ifneq ($(filter %_release_embedded,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for RELEASE kernel configs and products in the device map
 TARGET_CONFIGS := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,RELEASE,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
@@ -211,15 +214,25 @@ TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config
 else ifneq ($(filter %_development_embedded,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for DEVELOPMENT kernel configs and products in the device map
 TARGET_CONFIGS := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,DEVELOPMENT,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+TARGET_CONFIGS += $(EXTRA_TARGET_CONFIGS_DEVELOPMENT)
 TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product_alias,$(my_product_config)))),$(foreach my_kernel_config,DEVELOPMENT,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
 else ifneq ($(filter %_embedded,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for all kernel configs and products in the device map
 TARGET_CONFIGS := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,$(KERNEL_CONFIGS_EMBEDDED),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
 TARGET_CONFIGS += $(foreach my_kernel_config,$(KERNEL_CONFIGS_EMBEDDED),$(EXTRA_TARGET_CONFIGS_$(my_kernel_config)))
 TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product_alias,$(my_product_config)))),$(foreach my_kernel_config,$(KERNEL_CONFIGS_EMBEDDED),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
-else ifeq (xnu_headers_driverkit,$(RC_ProjectName))
-# generate TARGET_CONFIGS for all kernel configs for B&I
-TARGET_CONFIGS = DEVELOPMENT arm64 DEFAULT DEVELOPMENT X86_64 DEFAULT
+else ifneq ($(filter %_release_desktop,$(MAKECMDGOALS)),)
+# generate TARGET_CONFIGS for B&I release builds
+TARGET_CONFIGS := $(foreach my_kern_config, RELEASE, $(foreach my_arch_config, $(ARCH_CONFIGS_DESKTOP), $(foreach my_machine_config, $(MACHINE_CONFIGS), $(my_kern_config) $(my_arch_config) $(my_machine_config))))
+TARGET_CONFIGS += $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_OSX_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,RELEASE,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+TARGET_CONFIGS += $(EXTRA_TARGET_CONFIGS_RELEASE)
+TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_OSX_$(my_arch_config)),$(call function_lookup_product_alias,$(my_product_config)))),$(foreach my_kernel_config,RELEASE,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+else ifneq ($(filter %_development_desktop,$(MAKECMDGOALS)),)
+# generate TARGET_CONFIGS for B&I development builds
+TARGET_CONFIGS := $(foreach my_kern_config, DEVELOPMENT, $(foreach my_arch_config, $(ARCH_CONFIGS_DESKTOP), $(foreach my_machine_config, $(MACHINE_CONFIGS), $(my_kern_config) $(my_arch_config) $(my_machine_config))))
+TARGET_CONFIGS += $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_OSX_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,DEVELOPMENT,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+TARGET_CONFIGS += $(EXTRA_TARGET_CONFIGS_DEVELOPMENT)
+TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_OSX_$(my_arch_config)),$(call function_lookup_product_alias,$(my_product_config)))),$(foreach my_kernel_config,DEVELOPMENT,$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
 else ifneq ($(filter %_desktop,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for all kernel configs for B&I
 TARGET_CONFIGS := $(foreach my_kern_config, $(KERNEL_CONFIGS_DESKTOP), $(foreach my_arch_config, $(ARCH_CONFIGS_DESKTOP), $(foreach my_machine_config, $(MACHINE_CONFIGS), $(my_kern_config) $(my_arch_config) $(my_machine_config))))
@@ -454,11 +467,14 @@ else
 installhdrs: installhdrs_mi installhdrs_md
 endif
 
-.PHONY: installhdrs_embedded installhdrs_release_embedded installhdrs_development_embedded installhdrs_desktop
+.PHONY: installhdrs_embedded installhdrs_release_embedded installhdrs_development_embedded
+.PHONY: installhdrs_desktop installhdrs_release_desktop installhdrs_development_desktop
 
-installhdrs_embedded installhdrs_release_embedded installhdrs_desktop: installhdrs
+installhdrs_embedded installhdrs_release_embedded: installhdrs
+installhdrs_desktop installhdrs_release_desktop: installhdrs
 
 installhdrs_development_embedded:
+installhdrs_development_desktop:
 
 #
 # Install machine independent header files
@@ -540,9 +556,11 @@ $(eval $(generated_top_level_config_all))
 
 all config: config_all_bootstrap
 
-.PHONY: all_embedded all_release_embedded all_development_embedded all_desktop
+.PHONY: all_embedded all_release_embedded all_development_embedded
+.PHONY: all_desktop all_release_desktop all_development_desktop
 
-all_embedded all_release_embedded all_development_embedded all_desktop: all
+all_embedded all_release_embedded all_development_embedded: all
+all_desktop all_release_desktop all_development_desktop: all
 
 #
 # Install kernel files
@@ -633,13 +651,14 @@ else
 install: installhdrs install_textfiles install_config install_kernels install_aliases
 endif
 
-.PHONY: install_embedded install_release_embedded install_development_embedded install_desktop
+.PHONY: install_embedded install_release_embedded install_development_embedded
+.PHONY: install_desktop install_release_desktop install_development_desktop
 
 # By default, all kernel files, headers, text files, and pseudo-kexts are installed
-install_embedded install_release_embedded install_desktop: install
+install_embedded install_release_embedded install_desktop install_release_desktop: install
 
 # These special configs only install the kernel files
-install_development_embedded: install_kernels install_aliases
+install_development_embedded install_development_desktop: install_kernels install_aliases
 
 .PHONY: install_kernels final_touch_kernel_timestamps install_aliases
 

@@ -156,25 +156,3 @@ raw_disconnect(struct rawcb *rp)
 		kfree_type(struct rawcb, rp);
 	}
 }
-
-#ifdef notdef
-#include <sys/mbuf.h>
-
-int
-raw_bind(struct socket *so, struct mbuf *nam)
-{
-	struct sockaddr *addr = mtod(nam, struct sockaddr *);
-	struct rawcb *rp;
-
-	if (ifnet == 0) {
-		return EADDRNOTAVAIL;
-	}
-	rp = sotorawcb(so);
-	nam = m_copym(nam, 0, M_COPYALL, M_WAITOK);
-	if (nam == NULL) {
-		return ENOBUFS;
-	}
-	rp->rcb_laddr = mtod(nam, struct sockaddr *);
-	return 0;
-}
-#endif

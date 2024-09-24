@@ -26,17 +26,17 @@ run_sysctl_test(const char *t, int64_t value)
 }
 
 T_DECL(hw_lck_ticket_allow_invalid, "hw_lck_ticket_allow_invalid",
-    T_META_RUN_CONCURRENTLY(false))
+    T_META_RUN_CONCURRENTLY(false), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("hw_lck_ticket_allow_invalid", 0), "test succeeded");
 }
 
-T_DECL(smr_hash_basic, "smr_hash basic test")
+T_DECL(smr_hash_basic, "smr_hash basic test", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("smr_hash_basic", 0), "test succeeded");
 }
 
-T_DECL(smr_shash_basic, "smr_shash basic test")
+T_DECL(smr_shash_basic, "smr_shash basic test", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("smr_shash_basic", 0), "test succeeded");
 }
@@ -80,7 +80,7 @@ toggle_cpus_thread(void *donep)
 }
 
 T_DECL(smr_sleepable_stress, "smr_sleepable_stress_test",
-    T_META_RUN_CONCURRENTLY(false))
+    T_META_RUN_CONCURRENTLY(false), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	uint32_t secs = 4;
 	pthread_t pth;

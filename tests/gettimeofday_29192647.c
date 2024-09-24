@@ -10,7 +10,7 @@
 
 T_GLOBAL_META(T_META_TAG_PERF);
 
-T_DECL(gettimeofday_tl, "gettimeofday performance in tight loop") {
+T_DECL(gettimeofday_tl, "gettimeofday performance in tight loop", T_META_TAG_VM_NOT_ELIGIBLE) {
 	{
 		struct timeval time;
 		dt_stat_time_t s = dt_stat_time_create("gettimeofday tight loop");
@@ -22,7 +22,7 @@ T_DECL(gettimeofday_tl, "gettimeofday performance in tight loop") {
 }
 
 extern int __gettimeofday(struct timeval *, struct timezone *);
-T_DECL(__gettimeofday_tl, "__gettimeofday performance in tight loop") {
+T_DECL(__gettimeofday_tl, "__gettimeofday performance in tight loop", T_META_TAG_VM_NOT_ELIGIBLE) {
 	{
 		struct timeval time;
 
@@ -34,7 +34,7 @@ T_DECL(__gettimeofday_tl, "__gettimeofday performance in tight loop") {
 	}
 }
 
-T_DECL(gettimeofday_sl, "gettimeofday performance in loop with sleep") {
+T_DECL(gettimeofday_sl, "gettimeofday performance in loop with sleep", T_META_TAG_VM_NOT_ELIGIBLE) {
 	{
 		struct timeval time;
 		dt_stat_time_t s = dt_stat_time_create("gettimeofday loop with sleep");

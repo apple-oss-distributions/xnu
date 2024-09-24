@@ -96,7 +96,7 @@
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <kern/task.h>
 #include <kern/locks.h>
 

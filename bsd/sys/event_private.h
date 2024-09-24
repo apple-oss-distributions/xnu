@@ -326,12 +326,18 @@ typedef uint64_t kqueue_id_t;
 #endif /* KERNEL_PRIVATE */
 
 typedef enum vm_pressure_level {
-	kVMPressureNormal   = 0,
-	kVMPressureWarning  = 1,
-	kVMPressureUrgent   = 2,
-	kVMPressureCritical = 3,
-	kVMPressureJetsam   = 4,  /* jetsam approaching FG bands */
+	kVMPressureNormal             = 0,
+	kVMPressureWarning            = 1,
+	kVMPressureUrgent             = 2,
+	kVMPressureCritical           = 3,
+	/* Jetsam is approaching the Foreground bands */
+	kVMPressureForegroundJetsam   = 4,
+	/* Jetsam is approaching the Background bands */
+	kVMPressureBackgroundJetsam   = 5,
 } vm_pressure_level_t;
+
+/* Legacy */
+#define kVMPressureJetsam kVMPressureForegroundJetsam
 
 /*
  * data/hint fflags for EVFILT_SOCK, shared with userspace.

@@ -75,6 +75,7 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 	STARTUP_SUB_MACH_IPC,         /**< Mach IPC                            */
 	STARTUP_SUB_THREAD_CALL,      /**< Thread calls                        */
 	STARTUP_SUB_SYSCTL,           /**< registers sysctls                   */
+	STARTUP_SUB_EXCLAVES,         /**< initialize exclaves                 */
 	STARTUP_SUB_EARLY_BOOT,       /**< interrupts/preemption are turned on */
 
 	STARTUP_SUB_LOCKDOWN = ~0u,   /**< reserved for the startup subsystem  */
@@ -812,14 +813,11 @@ extern void kernel_bootstrap(void);
 /* Initialize machine dependent stuff */
 extern void machine_init(void);
 
-extern void slave_main(void *machine_param);
+extern void secondary_cpu_main(void *machine_param);
 
-/*
- * The following must be implemented in machine dependent code.
- */
-
-/* Slave cpu initialization */
-extern void slave_machine_init(void *machine_param);
+/* Secondary cpu initialization */
+extern void machine_cpu_reinit(void *machine_param);
+extern void processor_cpu_reinit(void* machine_param, bool wait_for_cpu_signal, bool is_final_system_sleep);
 
 /* Device subsystem initialization */
 extern void device_service_create(void);
@@ -842,6 +840,22 @@ extern void event_register_handler(struct event_hdr *event_hdr);
 
 /* BSD subsystem initialization */
 extern void bsd_init(void);
+
+extern int serverperfmode;
+
+#if defined(XNU_TARGET_OS_OSX)
+static inline bool
+kernel_is_macos_or_server(void)
+{
+	return true;
+}
+#else /* XNU_TARGET_OS_OSX */
+static inline bool
+kernel_is_macos_or_server(void)
+{
+	return !!serverperfmode;
+}
+#endif /* XNU_TARGET_OS_OSX */
 
 #endif  /* MACH_BSD */
 

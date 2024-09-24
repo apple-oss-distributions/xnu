@@ -163,6 +163,13 @@ Lnext_cpu_data_entry:
 	b		Lcheck_cpu_data_entry	// loop
 Lfound_cpu_data_entry:
 
+#ifdef APPLEEVEREST
+	/*
+	 * On H15, we need to configure PIO-only tunables and to apply
+	 * PIO lockdown as early as possible.
+	 */
+	SET_PIO_ONLY_REGISTERS x21, x2, x3, x4, x5, x6
+#endif /* APPLEEVEREST */
 
 	adrp	x20, EXT(const_boot_args)@page
 	add		x20, x20, EXT(const_boot_args)@pageoff
@@ -668,8 +675,6 @@ common_start:
 	mov		x0, xzr
 	mov		x1, #(MAIR_WRITEBACK << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITEBACK))
 	orr		x0, x0, x1
-	mov		x1, #(MAIR_DISABLE << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_DISABLE))
-	orr		x0, x0, x1
 	mov		x1, #(MAIR_WRITETHRU << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITETHRU))
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_WRITECOMB << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITECOMB))
@@ -678,8 +683,10 @@ common_start:
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_POSTED_COMBINED_REORDERED << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED))
 	orr		x0, x0, x1
+	mov		x1, #(MAIR_DISABLE << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_DISABLE))
+	orr		x0, x0, x1
 #if HAS_FEAT_XS
-	mov		x1, #(MAIR_POSTED_XS << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_XS))
+	mov		x1, #(MAIR_DISABLE_XS << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_DISABLE_XS))
 	orr		x0, x0, x1
 	mov		x1, #(MAIR_POSTED_COMBINED_REORDERED_XS << MAIR_ATTR_SHIFT(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS))
 	orr		x0, x0, x1
@@ -694,19 +701,6 @@ common_start:
 	tlbi	vmalle1
 	dsb		ish
 
-
-#if defined(BCM2837)
-	// Setup timer interrupt routing; must be done before MMU is enabled
-	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
-	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
-	mov		x0, #0x4000
-	lsl		x0, x0, #16
-	add		x0, x0, #0x0040						// x0: 0x4000004X Core Timers interrupt control
-	add		x0, x0, x15, lsl #2
-	mov		w1, #0xF0 						// x1: 0xF0 	  Route to Core FIQs
-	str		w1, [x0]
-	isb		sy
-#endif
 
 #ifndef __ARM_IC_NOALIAS_ICACHE__
 	/* Invalidate the TLB and icache on systems that do not guarantee that the
@@ -835,6 +829,7 @@ Ltrampoline:
 	.text
 	.align 2
 arm_init_tramp:
+	ARM64_JUMP_TARGET
 	/* On a warm boot, the full kernel translation table is initialized in
 	 * addition to the bootstrap tables. The layout is as follows:
 	 *

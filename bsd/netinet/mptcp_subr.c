@@ -1249,9 +1249,9 @@ mptcp_sched_create_subflows(struct mptses *mpte)
  * Allocate an MPTCP socket option structure.
  */
 struct mptopt *
-mptcp_sopt_alloc(zalloc_flags_t how)
+mptcp_sopt_alloc(void)
 {
-	return zalloc_flags(mptopt_zone, how | Z_ZERO);
+	return zalloc_flags(mptopt_zone, Z_WAITOK | Z_ZERO);
 }
 
 /*
@@ -4444,6 +4444,14 @@ mptcp_subflow_sosetopt(struct mptses *mpte, struct mptsub *mpts, struct mptopt *
 
 	mp_so = mptetoso(mpte);
 	so = mpts->mpts_socket;
+
+	/* Don't try to apply an IP or IPv6 option on an IPv6 or IP socket */
+	if (mpo->mpo_level == IPPROTO_IP && SOCK_CHECK_DOM(so, PF_INET6)) {
+		return 0;
+	}
+	if (mpo->mpo_level == IPPROTO_IPV6 && SOCK_CHECK_DOM(so, PF_INET)) {
+		return 0;
+	}
 
 	socket_lock_assert_owned(mp_so);
 

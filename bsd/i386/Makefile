@@ -10,10 +10,10 @@ DATAFILES = \
 	endian.h fasttrap_isa.h param.h \
 	profile.h signal.h limits.h _limits.h \
 	types.h vmparam.h _types.h _param.h \
-	_mcontext.h
+	_mcontext.h _endian.h
 
 DRIVERKIT_DATAFILES = \
-	limits.h types.h _types.h endian.h
+	limits.h types.h _types.h endian.h _endian.h
 
 PRIVATE_DATAFILES = \
 	disklabel.h
@@ -22,7 +22,7 @@ KERNELFILES = \
 	endian.h param.h \
 	profile.h signal.h limits.h _limits.h \
 	types.h vmparam.h _types.h _param.h \
-	_mcontext.h
+	_mcontext.h _endian.h
 
 # These are covered by ../machine/machine.modulemap.
 INSTALL_MD_LIST = ${DATAFILES}

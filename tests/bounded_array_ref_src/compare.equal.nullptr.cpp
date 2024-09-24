@@ -41,6 +41,6 @@ tests()
 	}
 }
 
-T_DECL(compare_equal_nullptr, "bounded_array_ref.compare.equal.nullptr") {
+T_DECL(compare_equal_nullptr, "bounded_array_ref.compare.equal.nullptr", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

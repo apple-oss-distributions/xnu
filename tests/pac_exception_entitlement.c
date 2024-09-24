@@ -152,7 +152,7 @@ run_pac_exception_test(void (*ptrauth_failure_fn)(void))
 
 T_DECL(pac_exception_naked_auth,
     "Test the com.apple.private.pac.exception entitlement (naked auth failure)",
-    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_FPAC", 1))
+    T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm.FEAT_FPAC", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if __arm64e__
 	run_pac_exception_test(naked_auth);
@@ -163,7 +163,7 @@ T_DECL(pac_exception_naked_auth,
 
 
 T_DECL(pac_exception_ptrauth_brk,
-    "Test the com.apple.private.pac.exception entitlement (brk with comment indicating ptrauth failure)")
+    "Test the com.apple.private.pac.exception entitlement (brk with comment indicating ptrauth failure)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if __arm64e__
 	run_pac_exception_test(ptrauth_brk);
@@ -173,7 +173,7 @@ T_DECL(pac_exception_ptrauth_brk,
 }
 
 T_DECL(pac_exception_combined_branch_auth,
-    "Test the com.apple.private.pac.exception entitlement (combined branch + auth failure)")
+    "Test the com.apple.private.pac.exception entitlement (combined branch + auth failure)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if __arm64e__
 	run_pac_exception_test(combined_branch_auth);
@@ -183,7 +183,7 @@ T_DECL(pac_exception_combined_branch_auth,
 }
 
 T_DECL(pac_exception_combined_load_auth,
-    "Test the com.apple.private.pac.exception entitlement (combined branch + auth failure)")
+    "Test the com.apple.private.pac.exception entitlement (combined branch + auth failure)", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if __arm64e__
 	run_pac_exception_test(combined_load_auth);

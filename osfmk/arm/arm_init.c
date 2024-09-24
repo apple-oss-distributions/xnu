@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -109,6 +109,8 @@ int             debug_task;
 
 SECURITY_READ_ONLY_LATE(bool) static_kernelcache = false;
 
+TUNABLE(bool, restore_boot, "-restore", false);
+
 #if HAS_BP_RET
 /* Enable both branch target retention (0x2) and branch direction retention (0x1) across sleep */
 uint32_t bp_ret = 3;
@@ -122,6 +124,8 @@ boolean_t sched_hygiene_debug_pmc = 1;
 #if SCHED_HYGIENE_DEBUG
 
 #if XNU_PLATFORM_iPhoneOS
+#define DEFAULT_INTERRUPT_MASKED_TIMEOUT 12000   /* 500us */
+#elif XNU_PLATFORM_XROS
 #define DEFAULT_INTERRUPT_MASKED_TIMEOUT 12000   /* 500us */
 #else
 #define DEFAULT_INTERRUPT_MASKED_TIMEOUT 0xd0000 /* 35.499ms */
@@ -175,11 +179,14 @@ SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
 
 SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
-#ifdef XNU_ENABLE_PROCESSOR_EXIT
-SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = true;
-#else
-SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
+
+#if HAS_ARM_FEAT_SME
+static SECURITY_READ_ONLY_LATE(bool) enable_sme = true;
 #endif
+
+#if APPLEVIRTUALPLATFORM
+SECURITY_READ_ONLY_LATE(vm_offset_t) reset_vector_vaddr = 0;
+#endif /* APPLEVIRTUALPLATFORM */
 
 
 /*
@@ -361,6 +368,10 @@ arm_init(
 	const_boot_args = *args;
 	BootArgs = args = &const_boot_args;
 
+#if APPLEVIRTUALPLATFORM
+	reset_vector_vaddr = (vm_offset_t) &LowResetVectorBase;
+#endif /* APPLEVIRTUALPLATFORM */
+
 	cpu_data_init(&BootCpuData);
 #if defined(HAS_APPLE_PAC)
 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
@@ -428,6 +439,12 @@ arm_init(
 #endif
 	}
 #endif
+#if HAS_ARM_FEAT_SME
+	(void)PE_parse_boot_argn("enable_sme", &enable_sme, sizeof(enable_sme));
+	if (enable_sme) {
+		arm_sme_init(true);
+	}
+#endif
 
 	ml_parse_cpu_topology();
 
@@ -440,6 +457,7 @@ arm_init(
 	BootCpuData.istackptr = &intstack_top;
 #if __arm64__
 	BootCpuData.excepstack_top = (vm_offset_t) &excepstack_top;
+	BootCpuData.excepstackptr = &excepstack_top;
 #endif
 	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
@@ -448,7 +466,8 @@ arm_init(
 
 	thread = thread_bootstrap();
 	thread->machine.CpuDatap = &BootCpuData;
-	thread->machine.pcpu_data_base = (vm_offset_t)0;
+	thread->machine.pcpu_data_base_and_cpu_number =
+	    ml_make_pcpu_base_and_cpu_number(0, BootCpuData.cpu_number);
 	machine_set_current_thread(thread);
 
 	/*
@@ -519,6 +538,31 @@ arm_init(
 	__builtin_arm_wsr("pan", 1);
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
+
+	/*
+	 * gPhysBase/Size only represent kernel-managed memory. These globals represent
+	 * the actual DRAM base address and size as reported by iBoot through the
+	 * device tree.
+	 */
+	unsigned long const *dram_base;
+	unsigned long const *dram_size;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
+		panic("%s: Unable to find 'chosen' DT node", __FUNCTION__);
+	}
+
+	if (SecureDTGetProperty(chosen, "dram-base", (void const **)&dram_base, &dt_entry_size) != kSuccess) {
+		panic("%s: Unable to find 'dram-base' entry in the 'chosen' DT node", __FUNCTION__);
+	}
+
+	if (SecureDTGetProperty(chosen, "dram-size", (void const **)&dram_size, &dt_entry_size) != kSuccess) {
+		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
+	}
+
+	gDramBase = *dram_base;
+	gDramSize = *dram_size;
+
+
 	arm_vm_init(xmaxmem, args);
 
 	if (debug_boot_arg) {
@@ -541,7 +585,7 @@ arm_init(
 		/* Do we want a serial keyboard and/or console? */
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
-		enable_dklog_serial_output = (serialmode & SERIALMODE_DKLOG) != 0;
+		enable_dklog_serial_output = restore_boot || (serialmode & SERIALMODE_DKLOG) != 0;
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
@@ -619,29 +663,6 @@ arm_init(
 #endif /* HIBERNATION */
 
 	/*
-	 * gPhysBase/Size only represent kernel-managed memory. These globals represent
-	 * the actual DRAM base address and size as reported by iBoot through the
-	 * device tree.
-	 */
-	unsigned long const *dram_base;
-	unsigned long const *dram_size;
-
-	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess) {
-		panic("%s: Unable to find 'chosen' DT node", __FUNCTION__);
-	}
-
-	if (SecureDTGetProperty(chosen, "dram-base", (void const **)&dram_base, &dt_entry_size) != kSuccess) {
-		panic("%s: Unable to find 'dram-base' entry in the 'chosen' DT node", __FUNCTION__);
-	}
-
-	if (SecureDTGetProperty(chosen, "dram-size", (void const **)&dram_size, &dt_entry_size) != kSuccess) {
-		panic("%s: Unable to find 'dram-size' entry in the 'chosen' DT node", __FUNCTION__);
-	}
-
-	gDramBase = *dram_base;
-	gDramSize = *dram_size;
-
-	/*
 	 * Initialize the stack protector for all future calls
 	 * to C code. Since kernel_bootstrap() eventually
 	 * switches stack context without returning through this
@@ -664,28 +685,36 @@ arm_init(
 
 void
 arm_init_cpu(
-	cpu_data_t      *cpu_data_ptr)
+	cpu_data_t      *cpu_data_ptr,
+	uint64_t __unused hib_header_phys)
 {
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif
 
+
 #ifdef __arm64__
 	configure_timer_apple_regs();
 	configure_misc_apple_regs(false);
 #endif
+#if HAS_ARM_FEAT_SME
+	if (enable_sme) {
+		arm_sme_init(false);
+	}
+#endif
 
-	cpu_data_ptr->cpu_flags &= ~SleepState;
+	os_atomic_andnot(&cpu_data_ptr->cpu_flags, SleepState, relaxed);
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+
 
 #if APPLE_ARM64_ARCH_FAMILY
 	configure_late_apple_regs(false);
 #endif
 
 #if HIBERNATION
-	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate)) {
+	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate) && ml_is_quiescing()) {
 		// the "normal" S2R code captures wake_abstime too early, so on a hibernation resume we fix it up here
 		extern uint64_t wake_abstime;
 		wake_abstime = gIOHibernateCurrentHeader->lastHibAbsTime;
@@ -733,7 +762,7 @@ arm_init_cpu(
 	kptimer_curcpu_up();
 #endif /* KPERF */
 
-	if (cpu_data_ptr == &BootCpuData) {
+	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
 #if __arm64__ && __ARM_GLOBAL_SLEEP_BIT__
 		/*
 		 * Prevent CPUs from going into deep sleep until all
@@ -767,7 +796,7 @@ arm_init_cpu(
 		kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
 	}
 
-	if (cpu_data_ptr == &BootCpuData) {
+	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
 		if (kdebug_enable == 0) {
 			__kdebug_only uint64_t elapsed = kdebug_wake();
 			KDBG(IOKDBG_CODE(DBG_HIBERNATE, 15), mach_absolute_time() - elapsed);
@@ -791,7 +820,7 @@ arm_init_cpu(
 #endif
 
 
-	slave_main(NULL);
+	secondary_cpu_main(NULL);
 }
 
 /*
@@ -812,8 +841,6 @@ arm_init_idle_cpu(
 	wfe_timeout_init();
 	pmap_clear_user_ttb();
 	flush_mmu_tlb();
-	/* Enable asynchronous exceptions */
-	__builtin_arm_wsr("DAIFClr", DAIFSC_ASYNCF);
 #endif
 
 #ifdef  APPLETYPHOON

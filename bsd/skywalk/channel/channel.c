@@ -254,7 +254,7 @@ csi_destroy(struct ch_selinfo *csi)
 		/* must have been set by above atomic op */
 		VERIFY(csi->csi_flags & CSI_DESTROYED);
 		if (csi->csi_flags & CSI_MITIGATION) {
-			thread_call_t tcall = csi->csi_tcall;
+			thread_call_t __single tcall = csi->csi_tcall;
 			VERIFY(tcall != NULL);
 			CSI_UNLOCK(csi);
 
@@ -453,7 +453,7 @@ static void
 csi_tcall(thread_call_param_t arg0, thread_call_param_t arg1)
 {
 #pragma unused(arg1)
-	struct ch_selinfo *csi = arg0;
+	struct ch_selinfo *csi = (struct ch_selinfo *__single)arg0;
 
 	CSI_LOCK(csi);
 	csi_selwakeup(csi, FALSE, FALSE, 0);
@@ -544,7 +544,8 @@ static int
 filt_chrw(struct knote *kn, long hint, int events)
 {
 #if SK_LOG
-	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
+	struct kern_channel *ch = (struct kern_channel *__single)
+	    knote_kn_hook_get_raw(kn);
 #else
 #pragma unused(kn)
 #pragma unused(hint)
@@ -587,7 +588,12 @@ static int
 filt_chtouch(struct knote *kn, struct kevent_qos_s *kev, int events)
 {
 #pragma unused(kev)
-	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
+	/*
+	 * -fbounds-safety: This seems like an example of interop with code that
+	 * has -fbounds-safety disabled, which means we can use __unsafe_forge_*
+	 */
+	struct kern_channel *ch = __unsafe_forge_single(struct kern_channel *,
+	    knote_kn_hook_get_raw(kn));
 	int ev = kn->kn_filter;
 	enum txrx dir = (ev == EVFILT_WRITE) ? NR_TX : NR_RX;
 	int event_error = 0;
@@ -669,7 +675,12 @@ filt_chwtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_chprocess(struct knote *kn, struct kevent_qos_s *kev, int events)
 {
-	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
+	/*
+	 * -fbounds-safety: This seems like an example of interop with code that
+	 * has -fbounds-safety disabled, which means we can use __unsafe_forge_*
+	 */
+	struct kern_channel *ch = __unsafe_forge_single(struct kern_channel *,
+	    knote_kn_hook_get_raw(kn));
 	struct ch_event_result result;
 	uint32_t lowat;
 	int trigger_event = 1;
@@ -1016,7 +1027,13 @@ filt_che_process(struct knote *kn, struct kevent_qos_s *kev)
 {
 	int ret;
 	long hint = 0;
-	struct kern_channel *ch = knote_kn_hook_get_raw(kn);
+
+	/*
+	 * -fbounds-safety: This seems like an example of interop with code that
+	 * has -fbounds-safety disabled, which means we can use __unsafe_forge_*
+	 */
+	struct kern_channel *ch = __unsafe_forge_single(struct kern_channel *,
+	    knote_kn_hook_get_raw(kn));
 
 	ASSERT(kn->kn_filter == EVFILT_NW_CHANNEL);
 	lck_mtx_lock(&ch->ch_lock);
@@ -1589,7 +1606,12 @@ ch_open(struct ch_init *init, struct proc *p, int fd, int *err)
 	 * for PRIV_SKYWALK_OBSERVE_ALL privilege has been done above.
 	 */
 	if (!(mode & CHMODE_MONITOR) && !NX_ANONYMOUS_PROV(nx)) {
-		void *key = (void *)(init->ci_key);
+		/*
+		 * -fbounds-safety: ci_key is user_addr_t (aka uint64_t), so
+		 * can't mark it as __sized_by. Forge it instead.
+		 */
+		void *key = __unsafe_forge_bidi_indexable(void *, init->ci_key,
+		    init->ci_key_len);
 
 #if SK_LOG
 		if (__improbable(sk_verbose != 0)) {
@@ -1757,8 +1779,10 @@ ch_close_common(struct kern_channel *ch, boolean_t locked, boolean_t special)
 	uuid_string_t uuidstr;
 	const char *na_name = (ch->ch_na != NULL) ?
 	    ch->ch_na->na_name : "";
-	const char *nxdom_name = (ch->ch_nexus != NULL) ?
-	    NX_DOM(ch->ch_nexus)->nxdom_name : "";
+	const char *__null_terminated nxdom_name = "";
+	if (ch->ch_nexus != NULL) {
+		nxdom_name = NX_DOM(ch->ch_nexus)->nxdom_name;
+	}
 	const char *nxdom_prov_name = (ch->ch_nexus != NULL) ?
 	    NX_DOM_PROV(ch->ch_nexus)->nxdom_prov_name : "";
 
@@ -2103,8 +2127,8 @@ ch_connect(struct kern_nexus *nx, struct chreq *chr, struct kern_channel *ch0,
 	cinfo = ch->ch_info;
 	uuid_copy(cinfo->cinfo_nx_uuid, nx->nx_uuid);
 	/* for easy access to immutables */
-	bcopy((void *)nx->nx_prov->nxprov_params,
-	    (void *)&cinfo->cinfo_nxprov_params, sizeof(struct nxprov_params));
+	bcopy(nx->nx_prov->nxprov_params, &cinfo->cinfo_nxprov_params,
+	    sizeof(struct nxprov_params));
 	cinfo->cinfo_ch_mode = ch_mode;
 	cinfo->cinfo_ch_ring_id = chr->cr_ring_id;
 	cinfo->cinfo_nx_port = chr->cr_port;
@@ -2508,8 +2532,11 @@ ch_release(struct kern_channel *ch)
 	return lastref;
 }
 
+/*
+ * -fbounds-safety: Why is the arg void *? All callers pass struct kern_channel *
+ */
 void
-ch_dtor(void *arg)
+ch_dtor(struct kern_channel *arg)
 {
 	struct kern_channel *ch = arg;
 

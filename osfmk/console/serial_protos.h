@@ -70,6 +70,11 @@ extern uint32_t serialmode;
  * serial. Requires SERIALMODE_INPUT set, ingored otherwise.  */
 #define SERIALMODE_ON_DEMAND  0x40
 
+#if CONFIG_EXCLAVES
+/* Prevent Exclave Logs writing to serial */
+#define SERIALMODE_NO_EXCLAVE  0x80
+#endif
+
 extern uint32_t cons_ops_index;
 extern const uint32_t nconsops;
 

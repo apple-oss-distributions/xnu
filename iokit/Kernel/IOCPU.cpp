@@ -49,6 +49,7 @@ extern void kperf_kernel_configure(char *);
 
 #include <kern/queue.h>
 #include <kern/sched_prim.h>
+#include <kern/processor.h>
 
 extern "C" void console_suspend();
 extern "C" void console_resume();
@@ -86,24 +87,32 @@ IOCPUInitialize(void)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-kern_return_t
-PE_cpu_start(cpu_id_t target,
+/*
+ * This is IOKit KPI, but not used by anyone today.
+ */
+kern_return_t __abortlike
+PE_cpu_start_from_kext(cpu_id_t target,
+    __unused vm_offset_t start_paddr, __unused vm_offset_t arg_paddr)
+{
+	panic("PE_cpu_start_from_kext unimplemented");
+}
+
+void
+PE_cpu_start_internal(cpu_id_t target,
     vm_offset_t start_paddr, vm_offset_t arg_paddr)
 {
 	IOCPU *targetCPU = (IOCPU *)target;
 
-	if (targetCPU == NULL) {
-		return KERN_FAILURE;
-	}
-	return targetCPU->startCPU(start_paddr, arg_paddr);
+	targetCPU->startCPU(start_paddr, arg_paddr);
 }
 
-void
+/*
+ * This is IOKit public KPI, though nothing uses it.
+ */
+void __abortlike
 PE_cpu_halt(cpu_id_t target)
 {
-	IOCPU *targetCPU = (IOCPU *)target;
-
-	targetCPU->haltCPU();
+	panic("PE_cpu_halt unimplemented");
 }
 
 void
@@ -142,10 +151,38 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 		panic("%s: invalid target CPU %p", __func__, target);
 	}
 
+#if defined(__arm64__)
+	assert_ml_cpu_signal_is_enabled(false);
+#endif /* defined(__arm64__) */
+
 	targetCPU->initCPU(bootb);
+
 #if defined(__arm64__)
 	if (!bootb && (targetCPU->getCPUNumber() == (UInt32)master_cpu)) {
-		ml_set_is_quiescing(false);
+		assert(ml_is_quiescing());
+	}
+
+	if (ml_get_interrupts_enabled()) {
+		assert(bootb);
+		assert3u(targetCPU->getCPUNumber(), ==, (UInt32)master_cpu);
+		/*
+		 * We want to assert that the AIC self-IPI actually arrives
+		 * here, but after much trials and tribulations, I found that
+		 * registering that interrupt handler is deeply entangled with
+		 * and asynchronous to the CPU booting, so it can only be a
+		 * 'hopefully it'll happen later' thing.  We will still check
+		 * that it did happen before we next enter S2R.
+		 *
+		 * We'll publish that the boot processor can have timers
+		 * migrated to it a little earlier than it is truly ready,
+		 * but fortunately that only happens on next S2R, by which time
+		 * setup should have completed.
+		 */
+		bool intr = ml_set_interrupts_enabled(FALSE);
+
+		ml_cpu_up();
+
+		ml_set_interrupts_enabled(intr);
 	}
 #endif /* defined(__arm64__) */
 }
@@ -156,7 +193,7 @@ PE_cpu_machine_quiesce(cpu_id_t target)
 	IOCPU *targetCPU = (IOCPU*)target;
 #if defined(__arm64__)
 	if (targetCPU->getCPUNumber() == (UInt32)master_cpu) {
-		ml_set_is_quiescing(true);
+		assert(ml_is_quiescing());
 	}
 #endif /* defined(__arm64__) */
 	targetCPU->quiesceCPU();
@@ -267,6 +304,7 @@ IOCPUSleepKernel(void)
 			currentShutdownTarget = target;
 #endif
 			target->haltCPU();
+			processor_sleep(target->getMachProcessor());
 		}
 	}
 
@@ -280,10 +318,18 @@ IOCPUSleepKernel(void)
 
 	/*
 	 * Now sleep the boot CPU, including calling the kQueueQuiesce actions.
-	 * The system sleeps here.
+	 * On Intel, the system sleeps here, and it does not actually sleep
+	 * the boot processor.
 	 */
 
 	bootCPU->haltCPU();
+#if __arm64__
+	/*
+	 * On ARM, we sleep the boot procesor, transitioning to the idle thread
+	 * and its interrupt stack drives the rest of sleep.
+	 */
+	processor_sleep(bootCPU->getMachProcessor());
+#endif /* __arm64__ */
 	ml_set_is_quiescing(false);
 
 	/*
@@ -308,7 +354,7 @@ IOCPUSleepKernel(void)
 			}
 
 			if (target->getCPUState() == kIOCPUStateStopped) {
-				processor_start(target->getMachProcessor());
+				processor_wake(target->getMachProcessor());
 			}
 		}
 	}

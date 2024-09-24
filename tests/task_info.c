@@ -15,7 +15,7 @@
 
 #include "test_utils.h"
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED);
 
 /* *************************************************************************************
  * Test the task_info API.
@@ -447,7 +447,8 @@ T_DECL(task_flags_info, "tests task_flags_info", T_META_ASROOT(true), T_META_LTE
 	    "Negative test case: task_info should verify that count is at least equal to what is defined in API.");
 }
 
-T_DECL(task_power_info_v2, "tests task_power_info_v2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(task_power_info_v2, "tests task_power_info_v2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT),
+    T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	int is_dev = is_development_kernel();
@@ -514,18 +515,21 @@ T_DECL(task_power_info_v2, "tests task_power_info_v2", T_META_ASROOT(true), T_ME
 	    err, mach_error_string(err));
 }
 
-T_DECL(test_task_basic_info_32, "tests TASK_BASIC_INFO_32", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(test_task_basic_info_32, "tests TASK_BASIC_INFO_32", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT),
+    T_META_TAG_VM_PREFERRED)
 {
 	test_task_basic_info(INFO_32);
 }
 
-T_DECL(test_task_basic_info_32_2, "tests TASK_BASIC_INFO_32_2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(test_task_basic_info_32_2, "tests TASK_BASIC_INFO_32_2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT),
+    T_META_TAG_VM_PREFERRED)
 {
 	test_task_basic_info(INFO_32_2);
 }
 
 #if defined(__arm64__)
-T_DECL(test_task_basic_info_64i_2, "tests TASK_BASIC_INFO_64_2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(test_task_basic_info_64i_2, "tests TASK_BASIC_INFO_64_2", T_META_ASROOT(true), T_META_LTEPHASE(LTE_POSTINIT),
+    T_META_TAG_VM_PREFERRED)
 {
 	test_task_basic_info(INFO_64_2);
 }

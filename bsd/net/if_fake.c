@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,6 +75,8 @@
 
 #include <mach/mach_time.h>
 
+#include <os/log.h>
+
 #ifdef INET
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
@@ -87,6 +89,47 @@
 #include <skywalk/nexus/netif/nx_netif.h>
 #include <skywalk/channel/channel_var.h>
 #endif /* SKYWALK */
+
+/*
+ * if_fake_debug, FE_DBGF_*
+ * - 'if_fake_debug' is a bitmask of FE_DBGF_* flags that can be set
+ *   to enable additional logs for the corresponding fake function
+ * - "sysctl net.link.fake.debug" controls the value of
+ *   'if_fake_debug'
+ */
+static uint32_t if_fake_debug = 0;
+
+#define FE_DBGF_LIFECYCLE               0x0001
+#define FE_DBGF_INPUT                   0x0002
+#define FE_DBGF_OUTPUT                  0x0004
+#define FE_DBGF_CONTROL                 0x0008
+#define FE_DBGF_MISC                    0x0010
+
+/*
+ * if_fake_log_level
+ * - 'if_fake_log_level' ensures that by default important logs are
+ *   logged regardless of if_fake_debug by comparing the log level
+ *   in FAKE_LOG to if_fake_log_level
+ * - use "sysctl net.link.fake.log_level" controls the value of
+ *   'if_fake_log_level'
+ * - the default value of 'if_fake_log_level' is LOG_NOTICE; important
+ *   logs must use LOG_NOTICE to ensure they appear by default
+ */
+#define FAKE_DBGF_ENABLED(__flag)     ((if_fake_debug & __flag) != 0)
+
+/*
+ * FAKE_LOG
+ * - macro to generate the specified log conditionally based on
+ *   the specified log level and debug flags
+ */
+#define FAKE_LOG(__level, __dbgf, __string, ...)              \
+	do {                                                            \
+	        if (__level <= if_fake_log_level ||                   \
+	            FAKE_DBGF_ENABLED(__dbgf)) {                      \
+	                os_log(OS_LOG_DEFAULT, "%s: " __string, \
+	                       __func__, ## __VA_ARGS__);       \
+	        }                                                       \
+	} while (0)
 
 static boolean_t
 is_power_of_two(unsigned int val)
@@ -108,6 +151,10 @@ static int if_fake_hwcsum = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, hwcsum, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_hwcsum, 0, "Fake interface simulate hardware checksum");
 
+static int if_fake_vlan_tagging = 1;
+SYSCTL_INT(_net_link_fake, OID_AUTO, vlan_tagging, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_vlan_tagging, 0, "Fake interface VLAN tagging");
+
 static int if_fake_nxattach = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, nxattach, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_nxattach, 0, "Fake interface auto-attach nexus");
@@ -116,12 +163,12 @@ static int if_fake_bsd_mode = 1;
 SYSCTL_INT(_net_link_fake, OID_AUTO, bsd_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_bsd_mode, 0, "Fake interface attach as BSD interface");
 
-static int if_fake_debug = 0;
-SYSCTL_INT(_net_link_fake, OID_AUTO, debug, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &if_fake_debug, 0, "Fake interface debug logs");
+static int if_fake_log_level = LOG_NOTICE;
+SYSCTL_INT(_net_link_fake, OID_AUTO, log_level, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_log_level, 0, "Fake interface log level");
 
-#define FETH_DPRINTF(fmt, ...)                                  \
-	{ if (if_fake_debug != 0) printf("%s " fmt, __func__, ## __VA_ARGS__); }
+SYSCTL_INT(_net_link_fake, OID_AUTO, debug, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_debug, 0, "Fake interface debug flags");
 
 static int if_fake_wmm_mode = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, wmm_mode, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -158,6 +205,11 @@ SYSCTL_INT(_net_link_fake, OID_AUTO, expiration_threshold, CTLFLAG_RW | CTLFLAG_
 static int if_fake_lro = 0;
 SYSCTL_INT(_net_link_fake, OID_AUTO, lro, CTLFLAG_RW | CTLFLAG_LOCKED,
     &if_fake_lro, 0, "Fake interface report LRO capability");
+
+static int if_fake_separate_frame_header = 0;
+SYSCTL_INT(_net_link_fake, OID_AUTO, separate_frame_header,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &if_fake_separate_frame_header, 0, "Put frame header in separate mbuf");
 
 typedef enum {
 	IFF_PP_MODE_GLOBAL = 0,         /* share a global pool */
@@ -457,7 +509,8 @@ feth_fake_tx_exp_policy_sysctl SYSCTL_HANDLER_ARGS
 
 	error = sysctl_io_number(req, if_fake_tx_exp_policy,
 	    sizeof(if_fake_tx_exp_policy), &new_value, &changed);
-	FETH_DPRINTF("if_fake_tx_exp_policy: %u -> %u (%d)",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+	    "if_fake_tx_exp_policy: %u -> %u (%d)",
 	    if_fake_tx_exp_policy, new_value, changed);
 	if (error == 0 && changed != 0) {
 		if (new_value > IFF_TX_EXP_POLICY_METADATA ||
@@ -572,6 +625,68 @@ SYSCTL_PROC(_net_link_fake, OID_AUTO, qset_cnt,
     feth_fake_qset_cnt_sysctl, "IU",
     "Fake interface queue set count");
 
+
+static void
+_mbuf_adjust_pkthdr_and_data(mbuf_t m, int len)
+{
+	mbuf_setdata(m, (char *)mbuf_data(m) + len, mbuf_len(m) - len);
+	mbuf_pkthdr_adjustlen(m, -len);
+}
+
+static inline void *
+get_bpf_header(mbuf_t m, struct ether_header * eh_p,
+    struct ether_vlan_header * evl_p, size_t * header_len)
+{
+	void *  header;
+
+	/* no VLAN tag, just use the ethernet header */
+	if ((m->m_pkthdr.csum_flags & CSUM_VLAN_TAG_VALID) == 0) {
+		header = eh_p;
+		*header_len = sizeof(*eh_p);
+		goto done;
+	}
+
+	/* has VLAN tag, populate the ether VLAN header */
+	bcopy(eh_p, evl_p,
+	    offsetof(struct ether_header, ether_type));   /* dst+src ether */
+	evl_p->evl_encap_proto = htons(ETHERTYPE_VLAN);   /* VLAN encap */
+	evl_p->evl_tag = htons(m->m_pkthdr.vlan_tag);     /* tag */
+	evl_p->evl_proto = eh_p->ether_type;              /* proto */
+	*header_len = sizeof(*evl_p);
+	header = evl_p;
+
+done:
+	return header;
+}
+
+typedef void (*_tap_func)(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
+    void *__sized_by(header_len) header, size_t header_len);
+
+static void
+fake_bpf_tap_common(ifnet_t ifp, mbuf_t m, struct ether_header * eh_p,
+    _tap_func func)
+{
+	struct ether_vlan_header        evl;
+	void *                          header;
+	size_t                          header_len;
+
+	header = get_bpf_header(m, eh_p, &evl, &header_len);
+	(*func)(ifp, DLT_EN10MB, m, header, header_len);
+}
+
+static inline void
+fake_bpf_tap_in(ifnet_t ifp, mbuf_t m, struct ether_header * eh_p)
+{
+	fake_bpf_tap_common(ifp, m, eh_p, bpf_tap_in);
+}
+
+
+static inline void
+fake_bpf_tap_out(ifnet_t ifp, mbuf_t m, struct ether_header * eh_p)
+{
+	fake_bpf_tap_common(ifp, m, eh_p, bpf_tap_out);
+}
+
 /**
 ** virtual ethernet structures, types
 **/
@@ -595,6 +710,9 @@ typedef uint16_t        iff_flags_t;
 #define IFF_FLAGS_MULTIBUFLETS          0x0010
 #define IFF_FLAGS_TSO_SUPPORT           0x0020
 #define IFF_FLAGS_LRO                   0x0040
+#define IFF_FLAGS_VLAN_MTU              0x0080
+#define IFF_FLAGS_VLAN_TAGGING          0x0100
+#define IFF_FLAGS_SEPARATE_FRAME_HEADER 0x0200
 
 #if SKYWALK
 
@@ -648,7 +766,6 @@ struct if_fake {
 	int                     iff_media_active;
 	uint32_t                iff_media_count;
 	int                     iff_media_list[IF_FAKE_MEDIA_LIST_MAX];
-	struct mbuf *           iff_pending_tx_packet;
 	boolean_t               iff_start_busy;
 	unsigned int            iff_max_mtu;
 	uint32_t                iff_fcs;
@@ -737,13 +854,44 @@ feth_has_intf_advisory_configured(if_fake_ref fakeif)
 {
 	return fakeif->iff_adv_interval > 0;
 }
+#endif /* SKYWALK */
 
 static inline bool
 feth_supports_tso(if_fake_ref fakeif)
 {
 	return (fakeif->iff_flags & IFF_FLAGS_TSO_SUPPORT) != 0;
 }
-#endif /* SKYWALK */
+
+static inline void
+feth_set_supports_tso(if_fake_ref fakeif)
+{
+	fakeif->iff_flags |= IFF_FLAGS_TSO_SUPPORT;
+}
+
+static inline bool
+feth_supports_vlan_mtu(if_fake_ref fakeif)
+{
+	return (fakeif->iff_flags & IFF_FLAGS_VLAN_MTU) != 0;
+}
+
+static inline void
+feth_set_supports_vlan_mtu(if_fake_ref fakeif)
+{
+	fakeif->iff_flags |= IFF_FLAGS_VLAN_MTU;
+}
+
+static inline bool
+feth_supports_vlan_tagging(if_fake_ref fakeif)
+{
+	return (fakeif->iff_flags & IFF_FLAGS_VLAN_TAGGING) != 0;
+}
+
+static inline void
+feth_set_supports_vlan_tagging(if_fake_ref fakeif)
+{
+	fakeif->iff_flags |= IFF_FLAGS_VLAN_TAGGING;
+}
+
 
 #define FETH_MAXUNIT    IF_MAXUNIT
 #define FETH_ZONE_MAX_ELEM      MIN(IFNETS_MAX, FETH_MAXUNIT)
@@ -767,9 +915,10 @@ static struct if_clone
 static  void interface_link_event(ifnet_t ifp, u_int32_t event_code);
 
 /* some media words to pretend to be ethernet */
+#define FAKE_DEFAULT_MEDIA      IFM_MAKEWORD(IFM_ETHER, IFM_10G_T, IFM_FDX, 0)
 static int default_media_words[] = {
 	IFM_MAKEWORD(IFM_ETHER, 0, 0, 0),
-	IFM_MAKEWORD(IFM_ETHER, IFM_10G_T, IFM_FDX, 0),
+	FAKE_DEFAULT_MEDIA,
 	IFM_MAKEWORD(IFM_ETHER, IFM_2500_T, IFM_FDX, 0),
 	IFM_MAKEWORD(IFM_ETHER, IFM_5000_T, IFM_FDX, 0),
 
@@ -841,13 +990,8 @@ static void
 feth_free(if_fake_ref fakeif)
 {
 	VERIFY(fakeif->iff_retain_count == 0);
-	if (feth_in_bsd_mode(fakeif)) {
-		if (fakeif->iff_pending_tx_packet) {
-			m_freem(fakeif->iff_pending_tx_packet);
-		}
-	}
 #if SKYWALK
-	else {
+	if (!feth_in_bsd_mode(fakeif)) {
 		if (fakeif->iff_pp_mode == IFF_PP_MODE_GLOBAL) {
 			VERIFY(fakeif->iff_rx_pp == S_pp);
 			VERIFY(fakeif->iff_tx_pp == S_pp);
@@ -856,7 +1000,7 @@ feth_free(if_fake_ref fakeif)
 			pp_release(fakeif->iff_tx_pp);
 			fakeif->iff_tx_pp = NULL;
 			feth_lock();
-			if (S_pp->pp_refcnt == 1) {
+			if (S_pp != NULL && S_pp->pp_refcnt == 1) {
 				pp_release(S_pp);
 				S_pp = NULL;
 			}
@@ -874,7 +1018,7 @@ feth_free(if_fake_ref fakeif)
 	}
 #endif /* SKYWALK */
 
-	FETH_DPRINTF("%s\n", fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s", fakeif->iff_name);
 	kfree_type(fake_llink, FETH_MAX_LLINKS, fakeif->iff_llink);
 	kfree_type(struct if_fake, fakeif);
 }
@@ -979,7 +1123,8 @@ feth_packet_pool_make(if_fake_ref fakeif)
 		pp_init.kbi_bufsize = if_fake_link_layer_aggregation_factor * 1024;
 		err = kern_pbufpool_create(&pp_init, &fakeif->iff_rx_pp, NULL);
 		if (err != 0) {
-			printf("%s: rx pp create failed %d\n", __func__, err);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "rx pp create failed %d", err);
 			return err;
 		}
 		pp_init.kbi_flags &= ~(KBIF_IODIR_IN | KBIF_IODIR_OUT |
@@ -991,7 +1136,8 @@ feth_packet_pool_make(if_fake_ref fakeif)
 		    sizeof(pp_init.kbi_name), "%s tx pp", fakeif->iff_name);
 		err = kern_pbufpool_create(&pp_init, &fakeif->iff_tx_pp, NULL);
 		if (err != 0) {
-			printf("%s: tx pp create failed %d\n", __func__, err);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "tx pp create failed %d", err);
 			pp_release(fakeif->iff_rx_pp);
 			return err;
 		}
@@ -1067,7 +1213,8 @@ feth_clone_packet(if_fake_ref dif, kern_packet_t sph, kern_packet_t *pdph)
 	} else {
 		err = kern_packet_clone_nosleep(dph0, &dph, KPKT_COPY_LIGHT);
 		if (err != 0) {
-			printf("%s: packet clone err %d\n", __func__, err);
+			FAKE_LOG(LOG_INFO, FE_DBGF_OUTPUT,
+			    "packet clone err %d", err);
 			return err;
 		}
 		dbuf = kern_packet_get_next_buflet(dph, NULL);
@@ -1147,7 +1294,7 @@ feth_add_packet_trailer(kern_packet_t ph, void *trailer, size_t trailer_len)
 	size_t trailer_room = dlim - doff - dlen;
 
 	if (trailer_room < trailer_len) {
-		printf("not enough room");
+		FAKE_LOG(LOG_INFO, FE_DBGF_OUTPUT, "not enough room");
 		return ERANGE;
 	}
 
@@ -1160,7 +1307,7 @@ feth_add_packet_trailer(kern_packet_t ph, void *trailer, size_t trailer_len)
 	err = kern_packet_finalize(ph);
 	VERIFY(err == 0);
 
-	FETH_DPRINTF("%s %zuB trailer added\n", __func__, trailer_len);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "%zuB trailer added", trailer_len);
 
 	return 0;
 }
@@ -1383,22 +1530,24 @@ feth_rx_queue_submit(if_fake_ref sif, if_fake_ref dif, uint32_t llink_idx,
 	fake_qset *qset;
 
 	if (llink_idx >= dif->iff_llink_cnt) {
-		printf("%s: invalid llink_idx idx %d (max %d) on peer %s\n",
-		    __func__, llink_idx, dif->iff_llink_cnt, dif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_INPUT,
+		    "invalid llink_idx idx %d (max %d) on peer %s",
+		    llink_idx, dif->iff_llink_cnt, dif->iff_name);
 		return;
 	}
 	llink = &dif->iff_llink[llink_idx];
 	if (qset_idx >= llink->fl_qset_cnt) {
-		printf("%s: invalid qset_idx %d (max %d) on peer %s\n",
-		    __func__, qset_idx, llink->fl_qset_cnt, dif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_INPUT,
+		    "invalid qset_idx %d (max %d) on peer %s",
+		    qset_idx, llink->fl_qset_cnt, dif->iff_name);
 		return;
 	}
 	qset = &dif->iff_llink[llink_idx].fl_qset[qset_idx];
 	queue = qset->fqs_rx_queue[0].fq_queue;
 	if (queue == NULL) {
-		printf("%s: NULL default queue (llink_idx %d, qset_idx %d) "
-		    "on peer %s\n", __func__, llink_idx, qset_idx,
-		    dif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_INPUT,
+		    "NULL default queue (llink_idx %d, qset_idx %d) on peer %s",
+		    llink_idx, qset_idx, dif->iff_name);
 		return;
 	}
 	for (uint32_t i = 0; i < n_pkts; i++) {
@@ -1501,7 +1650,9 @@ feth_packet_has_expired(if_fake_ref __unused fakeif, kern_packet_t ph,
 
 	if (if_fake_expiration_threshold_us < time_until_expiration) {
 		/* packet has some life ahead of it */
-		FETH_DPRINTF("Packet has %llu usec until expiration", time_until_expiration);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "Packet has %llu usec until expiration",
+		    time_until_expiration);
 		goto out;
 	}
 
@@ -1521,13 +1672,15 @@ feth_get_packet_notification_details(if_fake_ref fakeif, kern_packet_t ph,
 
 	err = kern_packet_get_packetid(ph, pkt_id);
 	if (err != 0) {
-		FETH_DPRINTF("%s err=%d getting packetid", fakeif->iff_name, err);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "%s err=%d getting packetid", fakeif->iff_name, err);
 		return err;
 	}
 
 	err = kern_packet_get_tx_nexus_port_id(ph, nx_port_id);
 	if (err != 0) {
-		FETH_DPRINTF("%s err=%d getting nx_port_id", fakeif->iff_name, err);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "%s err=%d getting nx_port_id", fakeif->iff_name, err);
 		return err;
 	}
 
@@ -1554,13 +1707,16 @@ feth_get_effective_expn_action(if_fake_ref fakeif, kern_packet_t ph)
 		err = kern_packet_get_expiry_action(ph, &expiry_action);
 		if (err != 0) {
 			if (err != ENOENT) {
-				FETH_DPRINTF("Error %d when getting expiry action", err);
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+				    "Error %d when getting expiry action",
+				    err);
 			}
 			expiry_action = PACKET_EXPIRY_ACTION_NONE;
 		}
 		break;
 	default:
-		FETH_DPRINTF("Unrecognized value %d for \"net.link.fake.tx_exp_policy\"",
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "Unrecognized value %d for \"net.link.fake.tx_exp_policy\"",
 		    fakeif->iff_tx_exp_policy);
 		expiry_action = PACKET_EXPIRY_ACTION_NONE;
 	}
@@ -1577,7 +1733,7 @@ feth_tx_expired_error(if_fake_ref fakeif, kern_packet_t ph)
 	os_channel_event_packet_transmit_expired_t expn = {0};
 	packet_expiry_action_t expiry_action = PACKET_EXPIRY_ACTION_NONE;
 
-	FETH_DPRINTF("%s\n", fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC, "%s", fakeif->iff_name);
 
 	if (feth_packet_has_expired(fakeif, ph, &expn.packet_tx_expiration_deadline)) {
 		expiry_action = feth_get_effective_expn_action(fakeif, ph);
@@ -1599,11 +1755,15 @@ feth_tx_expired_error(if_fake_ref fakeif, kern_packet_t ph)
 		if (err == 0) {
 			err = kern_channel_event_transmit_expired(
 				fakeif->iff_ifp, &expn, nx_port_id);
-			FETH_DPRINTF("%s sent epxiry notification on nexus port %u notif code %u\n",
-			    fakeif->iff_name, nx_port_id, expn.packet_tx_expiration_status);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+			    "%s sent expiry notification on nexus port "
+			    "%u notif code %u",
+			    fakeif->iff_name, nx_port_id,
+			    expn.packet_tx_expiration_status);
 		}
 		if (err != 0) {
-			FETH_DPRINTF("%s err=%d, nx_port_id: 0x%x\n",
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+			    "%s err=%d, nx_port_id: 0x%x",
 			    fakeif->iff_name, err, nx_port_id);
 		}
 	}
@@ -1640,7 +1800,8 @@ feth_tx_complete_error(if_fake_ref fakeif, kern_packet_t ph)
 				fakeif->iff_ifp, &pkt_tx_status, nx_port_id);
 		}
 		if (err != 0) {
-			FETH_DPRINTF("%s err=%d, nx_port_id: 0x%x\n",
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+			    "%s err=%d, nx_port_id: 0x%x",
 			    fakeif->iff_name, err, nx_port_id);
 		}
 	}
@@ -1670,7 +1831,7 @@ feth_if_adv(thread_call_param_t arg0, thread_call_param_t arg1)
 
 	error = ifnet_stat(fakeif->iff_ifp, &if_stat);
 	if (error != 0) {
-		FETH_DPRINTF("%s: ifnet_stat() failed %d\n",
+		FAKE_LOG(LOG_NOTICE, 0, "%s: ifnet_stat() failed %d",
 		    fakeif->iff_name, error);
 		goto done;
 	}
@@ -1691,7 +1852,8 @@ feth_if_adv(thread_call_param_t arg0, thread_call_param_t arg1)
 	error = fakeif->iff_intf_adv_notify(fakeif->iff_intf_adv_kern_ctx,
 	    &if_adv);
 	if (error != 0) {
-		FETH_DPRINTF("%s: interface advisory report failed %d\n",
+		FAKE_LOG(LOG_NOTICE, 0,
+		    "%s: interface advisory report failed %d",
 		    fakeif->iff_name, error);
 	}
 
@@ -1720,7 +1882,8 @@ feth_if_adv_tcall_create(if_fake_ref fakeif)
 	    (thread_call_param_t)fakeif, THREAD_CALL_PRIORITY_KERNEL,
 	    THREAD_CALL_OPTIONS_ONCE);
 	if (fakeif->iff_if_adv_tcall == NULL) {
-		printf("%s: %s if_adv tcall alloc failed\n", __func__,
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "%s if_adv tcall alloc failed",
 		    fakeif->iff_name);
 		return ENXIO;
 	}
@@ -1793,7 +1956,8 @@ feth_register_nexus_domain_provider(void)
 	    &dp_init, sizeof(dp_init),
 	    &feth_nx_dom_prov);
 	if (err != 0) {
-		printf("%s: failed to register domain provider\n", __func__);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "failed to register domain provider");
 		return err;
 	}
 	return 0;
@@ -1865,7 +2029,7 @@ feth_nx_ring_init(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	}
 	fakeif->iff_nifs = &NX_NETIF_PRIVATE(nexus)->nif_stats;
 	feth_unlock();
-	FETH_DPRINTF("%s: %s ring init\n",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s: %s ring init",
 	    fakeif->iff_name, is_tx_ring ? "TX" : "RX");
 	return 0;
 }
@@ -1882,7 +2046,8 @@ feth_nx_ring_fini(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	fakeif = feth_nexus_context(nexus);
 	if (fakeif->iff_rx_ring[0] == ring) {
 		fakeif->iff_rx_ring[0] = NULL;
-		FETH_DPRINTF("%s: RX ring fini\n", fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "%s: RX ring fini", fakeif->iff_name);
 	} else if (feth_in_wmm_mode(fakeif)) {
 		int i;
 		for (i = 0; i < IFF_MAX_TX_RINGS; i++) {
@@ -1900,7 +2065,8 @@ feth_nx_ring_fini(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			tcall = fakeif->iff_doorbell_tcall;
 			fakeif->iff_doorbell_tcall = NULL;
 		}
-		FETH_DPRINTF("%s: TX ring fini\n", fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "%s: TX ring fini", fakeif->iff_name);
 	} else if (fakeif->iff_tx_ring[0] == ring) {
 		tcall = fakeif->iff_doorbell_tcall;
 		fakeif->iff_doorbell_tcall = NULL;
@@ -1912,27 +2078,30 @@ feth_nx_ring_fini(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		boolean_t       success;
 
 		success = thread_call_cancel_wait(tcall);
-		FETH_DPRINTF("%s: thread_call_cancel %s\n",
-		    fakeif->iff_name,
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "%s: thread_call_cancel %s", fakeif->iff_name,
 		    success ? "SUCCESS" : "FAILURE");
 		if (!success) {
 			feth_lock();
 			if (fakeif->iff_doorbell_tcall_active) {
 				fakeif->iff_waiting_for_tcall = TRUE;
-				FETH_DPRINTF("%s: *waiting for threadcall\n",
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+				    "%s: *waiting for threadcall",
 				    fakeif->iff_name);
 				do {
 					msleep(fakeif, &feth_lck_mtx,
 					    PZERO, "feth threadcall", 0);
 				} while (fakeif->iff_doorbell_tcall_active);
-				FETH_DPRINTF("%s: ^threadcall done\n",
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+				    "%s: ^threadcall done",
 				    fakeif->iff_name);
 				fakeif->iff_waiting_for_tcall = FALSE;
 			}
 			feth_unlock();
 		}
 		success = thread_call_free(tcall);
-		FETH_DPRINTF("%s: thread_call_free %s\n",
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "%s: thread_call_free %s",
 		    fakeif->iff_name,
 		    success ? "SUCCESS" : "FAILURE");
 		feth_release(fakeif);
@@ -1972,7 +2141,7 @@ feth_nx_connected(kern_nexus_provider_t nxprov,
 			return err;
 		}
 	}
-	FETH_DPRINTF("%s: connected channel %p\n",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s: connected channel %p",
 	    fakeif->iff_name, channel);
 	return 0;
 }
@@ -1985,7 +2154,8 @@ feth_nx_pre_disconnect(kern_nexus_provider_t nxprov,
 	if_fake_ref fakeif;
 
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s: pre-disconnect channel %p\n",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+	    "%s: pre-disconnect channel %p",
 	    fakeif->iff_name, channel);
 	/* Quiesce the interface and flush any pending outbound packets. */
 	if_down(fakeif->iff_ifp);
@@ -2005,7 +2175,7 @@ feth_nx_disconnected(kern_nexus_provider_t nxprov,
 	if_fake_ref fakeif;
 
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s: disconnected channel %p\n",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s: disconnected channel %p",
 	    fakeif->iff_name, channel);
 	feth_release(fakeif);
 }
@@ -2048,7 +2218,8 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 
 	STATS_INC(nifs, NETIF_STATS_TX_SYNC);
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s ring %d flags 0x%x\n", fakeif->iff_name,
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+	    "%s ring %d flags 0x%x", fakeif->iff_name,
 	    tx_ring->ckr_ring_id, flags);
 	(void)flags;
 	feth_lock();
@@ -2062,25 +2233,30 @@ feth_nx_sync_tx(kern_nexus_provider_t nxprov,
 		peer_fakeif = ifnet_get_if_fake(peer_ifp);
 		if (peer_fakeif != NULL) {
 			if (feth_is_detaching(peer_fakeif)) {
-				FETH_DPRINTF("%s peer fakeif %s is detaching\n",
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+				    "%s peer fakeif %s is detaching",
 				    fakeif->iff_name, peer_fakeif->iff_name);
 				goto done;
 			}
 			if (!peer_fakeif->iff_channel_connected) {
 				if (fakeif->iff_tx_exp_policy ==
 				    IFF_TX_EXP_POLICY_DISABLED) {
-					FETH_DPRINTF("%s peer fakeif %s channel not connected, expn: %d\n",
+					FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+					    "%s peer fakeif %s channel not connected, expn: %d",
 					    fakeif->iff_name, peer_fakeif->iff_name,
 					    fakeif->iff_tx_exp_policy);
 					goto done;
 				}
 			}
 		} else {
-			FETH_DPRINTF("%s no peer fakeif (peer %p)\n", fakeif->iff_name, peer_ifp);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s no peer fakeif (peer %p)",
+			    fakeif->iff_name, peer_ifp);
 			goto done;
 		}
 	} else {
-		FETH_DPRINTF("%s no peer\n", fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s no peer", fakeif->iff_name);
 		goto done;
 	}
 	tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
@@ -2158,7 +2334,7 @@ feth_nx_sync_rx(kern_nexus_provider_t nxprov,
 
 	STATS_INC(nifs, NETIF_STATS_RX_SYNC);
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s:\n", fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_INPUT, "%s", fakeif->iff_name);
 	return 0;
 }
 
@@ -2176,14 +2352,16 @@ feth_nx_tx_dequeue_driver_managed(if_fake_ref fakeif, boolean_t doorbell_ctxt)
 			    UINT32_MAX, doorbell_ctxt, &more);
 		}
 		if (error != 0) {
-			FETH_DPRINTF("%s: TX refill ring %d (%s) %d\n",
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s: TX refill ring %d (%s) %d",
 			    fakeif->iff_name, ring->ckr_ring_id,
 			    doorbell_ctxt ? "sync" : "async", error);
 			if (!((error == EAGAIN) || (error == EBUSY))) {
 				break;
 			}
 		} else {
-			FETH_DPRINTF("%s: TX refilled ring %d (%s)\n",
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s: TX refilled ring %d (%s)",
 			    fakeif->iff_name, ring->ckr_ring_id,
 			    doorbell_ctxt ? "sync" : "async");
 		}
@@ -2216,18 +2394,19 @@ feth_async_doorbell(thread_call_param_t arg0, thread_call_param_t arg1)
 		    UINT32_MAX, FALSE, &more);
 	}
 	if (error != 0) {
-		FETH_DPRINTF("%s: TX refill failed %d\n",
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "%s: TX refill failed %d",
 		    fakeif->iff_name, error);
 	} else {
-		FETH_DPRINTF("%s: TX refilled\n", fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "%s: TX refilled",
+		    fakeif->iff_name);
 	}
 
 	feth_lock();
 done:
 	fakeif->iff_doorbell_tcall_active = FALSE;
 	if (fakeif->iff_waiting_for_tcall) {
-		FETH_DPRINTF("%s: threadcall waking up waiter\n",
-		    fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s: threadcall waking up waiter", fakeif->iff_name);
 		wakeup((caddr_t)fakeif);
 	}
 	feth_unlock();
@@ -2252,8 +2431,8 @@ feth_schedule_async_doorbell(if_fake_ref fakeif)
 		    THREAD_CALL_PRIORITY_KERNEL,
 		    THREAD_CALL_OPTIONS_ONCE);
 		if (tcall == NULL) {
-			printf("%s: %s tcall alloc failed\n",
-			    __func__, fakeif->iff_name);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_OUTPUT,
+			    "%s tcall alloc failed", fakeif->iff_name);
 		} else {
 			fakeif->iff_doorbell_tcall = tcall;
 			feth_retain(fakeif);
@@ -2272,7 +2451,7 @@ feth_nx_tx_doorbell(kern_nexus_provider_t nxprov,
 	if_fake_ref     fakeif;
 
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s\n", fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "%s", fakeif->iff_name);
 
 	if ((flags & KERN_NEXUS_TXDOORBELLF_ASYNC_REFILL) == 0) {
 		boolean_t       more;
@@ -2284,14 +2463,15 @@ feth_nx_tx_doorbell(kern_nexus_provider_t nxprov,
 			    UINT32_MAX, TRUE, &more);
 		}
 		if (error != 0) {
-			FETH_DPRINTF("%s: TX refill (sync) %d\n",
-			    fakeif->iff_name, error);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s: TX refill (sync) %d", fakeif->iff_name, error);
 		} else {
-			FETH_DPRINTF("%s: TX refilled (sync)\n",
-			    fakeif->iff_name);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s: TX refilled (sync)", fakeif->iff_name);
 		}
 	} else {
-		FETH_DPRINTF("%s: schedule async refill\n", fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s: schedule async refill", fakeif->iff_name);
 		feth_schedule_async_doorbell(fakeif);
 	}
 	return 0;
@@ -2315,7 +2495,8 @@ feth_nx_intf_adv_config(void *prov_ctx, bool enable)
 	feth_lock();
 	fakeif->iff_intf_adv_enabled = enable;
 	feth_unlock();
-	FETH_DPRINTF("%s enable %d\n", fakeif->iff_name, enable);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+	    "%s enable %d", fakeif->iff_name, enable);
 	return 0;
 }
 
@@ -2350,7 +2531,8 @@ feth_notify_steering_info(void *prov_ctx, void *qset_ctx,
 	if_fake_ref fakeif = prov_ctx;
 	fake_qset *qset = qset_ctx;
 
-	FETH_DPRINTF("%s: notify_steering_info: qset_id 0x%llx, %s\n",
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+	    "%s: notify_steering_info: qset_id 0x%llx, %s",
 	    fakeif->iff_name, qset->fqs_id, add ? "add" : "remove");
 	return 0;
 }
@@ -2381,7 +2563,7 @@ feth_nx_capab_config(kern_nexus_provider_t nxprov, kern_nexus_t nx,
 	if_fake_ref fakeif;
 
 	fakeif = feth_nexus_context(nx);
-	FETH_DPRINTF("%s\n", fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL, "%s", fakeif->iff_name);
 
 	switch (capab) {
 	case KERN_NEXUS_CAPAB_INTERFACE_ADVISORY:
@@ -2398,34 +2580,45 @@ feth_nx_capab_config(kern_nexus_provider_t nxprov, kern_nexus_t nx,
 }
 
 static int
-feth_set_tso(ifnet_t ifp)
+feth_set_tso_mtu(ifnet_t ifp, uint32_t tso_v4_mtu, uint32_t tso_v6_mtu)
 {
-	ifnet_offload_t offload;
-	uint32_t tso_v4_mtu, tso_v6_mtu;
-	int error;
+	int     error;
 
-	offload = IFNET_TSO_IPV4 | IFNET_TSO_IPV6;
-	tso_v4_mtu = if_fake_tso_buffer_size;
-	tso_v6_mtu = if_fake_tso_buffer_size;
-	error = ifnet_set_offload(ifp, offload);
-	if (error != 0) {
-		printf("%s: set TSO offload failed on %s, err %d\n", __func__,
-		    if_name(ifp), error);
-		return error;
-	}
 	error = ifnet_set_tso_mtu(ifp, AF_INET, tso_v4_mtu);
 	if (error != 0) {
-		printf("%s: set TSO MTU IPv4 failed on %s, err %d\n", __func__,
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_CONTROL,
+		    "set TSO MTU IPv4 failed on %s, err %d",
 		    if_name(ifp), error);
 		return error;
 	}
 	error = ifnet_set_tso_mtu(ifp, AF_INET6, tso_v6_mtu);
 	if (error != 0) {
-		printf("%s: set TSO MTU IPv6 failed on %s, err %d\n", __func__,
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_CONTROL,
+		    "set TSO MTU IPv6 failed on %s, err %d",
 		    if_name(ifp), error);
 		return error;
 	}
 	return 0;
+}
+
+static int
+feth_set_tso_offload(ifnet_t ifp)
+{
+	ifnet_offload_t offload;
+	int error;
+
+	offload = IFNET_TSO_IPV4 | IFNET_TSO_IPV6;
+	error = ifnet_set_offload(ifp, offload);
+	if (error != 0) {
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_CONTROL,
+		    "set TSO offload failed on %s, err %d",
+		    if_name(ifp), error);
+		goto done;
+	}
+	error = feth_set_tso_mtu(ifp, if_fake_tso_buffer_size,
+	    if_fake_tso_buffer_size);
+done:
+	return error;
 }
 
 static errno_t
@@ -2458,8 +2651,8 @@ create_netif_provider_and_instance(if_fake_ref fakeif,
 	_CASSERT(IFF_MAX_RX_RINGS == 1);
 	err = kern_nexus_attr_create(&nexus_attr);
 	if (err != 0) {
-		printf("%s nexus attribute creation failed, error %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "nexus attribute creation failed, error %d", err);
 		goto failed;
 	}
 	if (feth_in_wmm_mode(fakeif)) {
@@ -2486,8 +2679,8 @@ create_netif_provider_and_instance(if_fake_ref fakeif,
 	    nexus_attr,
 	    provider);
 	if (err != 0) {
-		printf("%s register provider failed, error %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "register provider failed, error %d", err);
 		goto failed;
 	}
 	bzero(&net_init, sizeof(net_init));
@@ -2506,15 +2699,15 @@ create_netif_provider_and_instance(if_fake_ref fakeif,
 	    &net_init,
 	    ifp);
 	if (err != 0) {
-		printf("%s alloc_net_provider_instance failed, %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "alloc_net_provider_instance failed, %d", err);
 		kern_nexus_controller_deregister_provider(controller,
 		    *provider);
 		uuid_clear(*provider);
 		goto failed;
 	}
 	if (feth_supports_tso(fakeif)) {
-		if ((err = feth_set_tso(*ifp)) != 0) {
+		if ((err = feth_set_tso_offload(*ifp)) != 0) {
 			goto failed;
 		}
 	}
@@ -2562,13 +2755,14 @@ feth_nx_qset_init(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	fakeif = feth_nexus_context(nexus);
 	if (feth_is_detaching(fakeif)) {
 		feth_unlock();
-		printf("%s: %s: detaching\n", __func__, fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+		    "%s: detaching", fakeif->iff_name);
 		return ENXIO;
 	}
 	if (qset_idx >= fl->fl_qset_cnt) {
 		feth_unlock();
-		printf("%s: %s: invalid qset_idx %d\n", __func__,
-		    fakeif->iff_name, qset_idx);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+		    "%s: invalid qset_idx %d", fakeif->iff_name, qset_idx);
 		return EINVAL;
 	}
 	fqs = &fl->fl_qset[qset_idx];
@@ -2613,22 +2807,23 @@ feth_nx_queue_init(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	feth_lock();
 	fakeif = feth_nexus_context(nexus);
 	if (feth_is_detaching(fakeif)) {
-		printf("%s: %s: detaching\n", __func__, fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+		    "%s: detaching", fakeif->iff_name);
 		feth_unlock();
 		return ENXIO;
 	}
 	if (tx) {
 		if (qidx >= fqs->fqs_tx_queue_cnt) {
-			printf("%s: %s: invalid tx qidx %d\n", __func__,
-			    fakeif->iff_name, qidx);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+			    "%s: invalid tx qidx %d", fakeif->iff_name, qidx);
 			feth_unlock();
 			return EINVAL;
 		}
 		fq = &fqs->fqs_tx_queue[qidx];
 	} else {
 		if (qidx >= fqs->fqs_rx_queue_cnt) {
-			printf("%s: %s: invalid rx qidx %d\n", __func__,
-			    fakeif->iff_name, qidx);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_CONTROL,
+			    "%s: invalid rx qidx %d", fakeif->iff_name, qidx);
 			feth_unlock();
 			return EINVAL;
 		}
@@ -2662,7 +2857,8 @@ feth_nx_tx_queue_deliver_pkt_chain(if_fake_ref fakeif, kern_packet_t sph,
 	kern_packet_t pkts[IFF_MAX_BATCH_SIZE];
 	uint32_t n_pkts = 0;
 
-	FETH_DPRINTF("%s -> %s\n", fakeif->iff_name, peer_fakeif->iff_name);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+	    "%s -> %s", fakeif->iff_name, peer_fakeif->iff_name);
 
 	while (sph != 0) {
 		uint16_t off;
@@ -2728,15 +2924,17 @@ feth_nx_tx_qset_notify(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 	STATS_INC(nifs, NETIF_STATS_TX_SYNC);
 	fakeif = feth_nexus_context(nexus);
-	FETH_DPRINTF("%s qset %p, idx %d, flags 0x%x\n", fakeif->iff_name, qset,
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+	    "%s qset %p, idx %d, flags 0x%x", fakeif->iff_name, qset,
 	    qset->fqs_idx, flags);
 
 	feth_lock();
 	detaching = feth_is_detaching(fakeif);
 	connected = fakeif->iff_channel_connected;
 	if (detaching || !connected) {
-		FETH_DPRINTF("%s: %s: detaching %s, channel connected %s\n",
-		    __func__, fakeif->iff_name,
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s: detaching %s, channel connected %s",
+		    fakeif->iff_name,
 		    (detaching ? "true" : "false"),
 		    (connected ? "true" : "false"));
 		feth_unlock();
@@ -2750,19 +2948,21 @@ feth_nx_tx_qset_notify(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			detaching = feth_is_detaching(peer_fakeif);
 			connected = peer_fakeif->iff_channel_connected;
 			if (detaching || !connected) {
-				FETH_DPRINTF("%s: peer %s: detaching %s, "
-				    "channel connected %s\n",
-				    __func__, peer_fakeif->iff_name,
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+				    "peer %s: detaching %s, "
+				    "channel connected %s",
+				    peer_fakeif->iff_name,
 				    (detaching ? "true" : "false"),
 				    (connected ? "true" : "false"));
 				goto done;
 			}
 		} else {
-			FETH_DPRINTF("%s: peer_fakeif is NULL\n", __func__);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "peer_fakeif is NULL");
 			goto done;
 		}
 	} else {
-		printf("%s: peer_ifp is NULL\n", __func__);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "peer_ifp is NULL");
 		goto done;
 	}
 
@@ -2785,8 +2985,9 @@ feth_nx_tx_qset_notify(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		err = kern_netif_queue_tx_dequeue(queue, UINT32_MAX, UINT32_MAX,
 		    &more, &sph);
 		if (err != 0 && err != EAGAIN) {
-			FETH_DPRINTF("%s queue %p dequeue failed: err "
-			    "%d\n", fakeif->iff_name, queue, err);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "%s queue %p dequeue failed: err "
+			    "%d", fakeif->iff_name, queue, err);
 		}
 		feth_nx_tx_queue_deliver_pkt_chain(fakeif, sph, nifs,
 		    peer_fakeif, qset->fqs_llink_idx, qset->fqs_idx);
@@ -2796,6 +2997,83 @@ done:
 	feth_unlock();
 	return 0;
 }
+
+
+static errno_t
+feth_nx_queue_tx_push(kern_nexus_provider_t nxprov,
+    kern_nexus_t nexus, void *queue_ctx, kern_packet_t *ph,
+    uint32_t *packetCount, uint32_t *byteCount)
+{
+#pragma unused(nxprov)
+	if_fake_ref             fakeif;
+	ifnet_t                 ifp;
+	ifnet_t                 peer_ifp;
+	if_fake_ref             peer_fakeif = NULL;
+	struct netif_stats     *nifs = &NX_NETIF_PRIVATE(nexus)->nif_stats;
+	fake_queue             *fq = queue_ctx;
+	boolean_t               detaching, connected;
+
+	STATS_INC(nifs, NETIF_STATS_TX_SYNC);
+	fakeif = feth_nexus_context(nexus);
+	FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "%s queue %p", fakeif->iff_name, fq);
+
+	feth_lock();
+
+	detaching = feth_is_detaching(fakeif);
+	connected = fakeif->iff_channel_connected;
+	if (detaching || !connected) {
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s: detaching %s, channel connected %s",
+		    fakeif->iff_name,
+		    (detaching ? "true" : "false"),
+		    (connected ? "true" : "false"));
+		goto done;
+	}
+	ifp = fakeif->iff_ifp;
+	peer_ifp = fakeif->iff_peer;
+	if (peer_ifp != NULL) {
+		peer_fakeif = ifnet_get_if_fake(peer_ifp);
+		if (peer_fakeif != NULL) {
+			detaching = feth_is_detaching(peer_fakeif);
+			connected = peer_fakeif->iff_channel_connected;
+			if (detaching || !connected) {
+				FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+				    "peer %s: detaching %s, "
+				    "channel connected %s",
+				    peer_fakeif->iff_name,
+				    (detaching ? "true" : "false"),
+				    (connected ? "true" : "false"));
+				goto done;
+			}
+		} else {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+			    "peer_fakeif is NULL");
+			goto done;
+		}
+	} else {
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT, "peer_ifp is NULL");
+		goto done;
+	}
+
+	*packetCount = *byteCount = 0;
+
+	kern_packet_t sph = *ph;
+	while (sph != 0) {
+		(*packetCount)++;
+		*byteCount += kern_packet_get_data_length(sph);
+		sph = kern_packet_get_next(sph);
+	}
+
+	feth_nx_tx_queue_deliver_pkt_chain(fakeif, *ph, nifs,
+	    peer_fakeif, 0, 0);
+
+	*ph = 0;
+
+done:
+	feth_unlock();
+	return 0;
+}
+
 
 static void
 fill_qset_info_and_params(if_fake_ref fakeif, fake_llink *llink_info,
@@ -2865,7 +3143,8 @@ create_non_default_llinks(if_fake_ref fakeif)
 
 	nx = nx_find(fnx->fnx_instance, FALSE);
 	if (nx == NULL) {
-		printf("%s: %s: nx not found\n", __func__, fakeif->iff_name);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+		    "%s: nx not found", fakeif->iff_name);
 		return ENXIO;
 	}
 	/* Default llink starts at index 0 */
@@ -2880,8 +3159,9 @@ create_non_default_llinks(if_fake_ref fakeif)
 		    llink_id, qset_init, if_fake_qset_cnt, 0);
 		err = kern_nexus_netif_llink_add(nx, &llink_init);
 		if (err != 0) {
-			printf("%s: %s: llink add failed, error %d\n",
-			    __func__, fakeif->iff_name, err);
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+			    "%s: llink add failed, error %d",
+			    fakeif->iff_name, err);
 			goto fail;
 		}
 		fakeif->iff_llink_cnt++;
@@ -2891,16 +3171,17 @@ create_non_default_llinks(if_fake_ref fakeif)
 
 fail:
 	for (i = 0; i < fakeif->iff_llink_cnt; i++) {
-		int e;
+		int                     error;
+		fake_llink * __single   ll = &fakeif->iff_llink[i];
 
-		e = kern_nexus_netif_llink_remove(nx, fakeif->
-		    iff_llink[i].fl_id);
-		if (e != 0) {
-			printf("%s: %s: llink remove failed, llink_id 0x%llx, "
-			    "error %d\n", __func__, fakeif->iff_name,
-			    fakeif->iff_llink[i].fl_id, e);
+		error = kern_nexus_netif_llink_remove(nx, ll->fl_id);
+		if (error != 0) {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
+			    "%s: llink remove failed, llink_id 0x%llx, "
+			    "error %d", fakeif->iff_name,
+			    ll->fl_id, error);
 		}
-		fakeif->iff_llink[i].fl_id = 0;
+		ll->fl_id = 0;
 	}
 	fakeif->iff_llink_cnt = 0;
 	nx_release(nx);
@@ -2933,12 +3214,13 @@ create_netif_llink_provider_and_instance(if_fake_ref fakeif,
 		.nxnpi_queue_fini = feth_nx_queue_fini,
 		.nxnpi_tx_qset_notify = feth_nx_tx_qset_notify,
 		.nxnpi_config_capab = feth_nx_capab_config,
+		.nxnpi_queue_tx_push = feth_nx_queue_tx_push
 	};
 
 	err = kern_nexus_attr_create(&nexus_attr);
 	if (err != 0) {
-		printf("%s nexus attribute creation failed, error %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "nexus attribute creation failed, error %d", err);
 		goto failed;
 	}
 
@@ -2955,8 +3237,8 @@ create_netif_llink_provider_and_instance(if_fake_ref fakeif,
 	    nexus_attr,
 	    provider);
 	if (err != 0) {
-		printf("%s register provider failed, error %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "register provider failed, error %d", err);
 		goto failed;
 	}
 	bzero(&net_init, sizeof(net_init));
@@ -2982,8 +3264,8 @@ create_netif_llink_provider_and_instance(if_fake_ref fakeif,
 	err = kern_nexus_controller_alloc_net_provider_instance(controller,
 	    *provider, fakeif, NULL, instance, &net_init, ifp);
 	if (err != 0) {
-		printf("%s alloc_net_provider_instance failed, %d\n",
-		    __func__, err);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "alloc_net_provider_instance failed, %d", err);
 		kern_nexus_controller_deregister_provider(controller,
 		    *provider);
 		uuid_clear(*provider);
@@ -2994,14 +3276,14 @@ create_netif_llink_provider_and_instance(if_fake_ref fakeif,
 	if (if_fake_llink_cnt > 1) {
 		err = create_non_default_llinks(fakeif);
 		if (err != 0) {
-			printf("%s create_non_default_llinks failed, %d\n",
-			    __func__, err);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "create_non_default_llinks failed, %d", err);
 			feth_detach_netif_nexus(fakeif);
 			goto failed;
 		}
 	}
 	if (feth_supports_tso(fakeif)) {
-		if ((err = feth_set_tso(*ifp)) != 0) {
+		if ((err = feth_set_tso_offload(*ifp)) != 0) {
 			goto failed;
 		}
 	}
@@ -3045,8 +3327,8 @@ remove_non_default_llinks(if_fake_ref fakeif)
 	}
 	nx = nx_find(fnx->fnx_instance, FALSE);
 	if (nx == NULL) {
-		printf("%s: %s: nx not found\n", __func__,
-		    fakeif->iff_name);
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "%s: nx not found", fakeif->iff_name);
 		return;
 	}
 	/* Default llink (at index 0) is freed separately */
@@ -3056,8 +3338,9 @@ remove_non_default_llinks(if_fake_ref fakeif)
 		err = kern_nexus_netif_llink_remove(nx, fakeif->
 		    iff_llink[i].fl_id);
 		if (err != 0) {
-			printf("%s: %s: llink remove failed, llink_id 0x%llx, "
-			    "error %d\n", __func__, fakeif->iff_name,
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+			    "%s: llink remove failed, llink_id 0x%llx, "
+			    "error %d", fakeif->iff_name,
 			    fakeif->iff_llink[i].fl_id, err);
 		}
 		fakeif->iff_llink[i].fl_id = 0;
@@ -3076,8 +3359,8 @@ detach_provider_and_instance(uuid_t provider, uuid_t instance)
 		err = kern_nexus_controller_free_provider_instance(controller,
 		    instance);
 		if (err != 0) {
-			printf("%s free_provider_instance failed %d\n",
-			    __func__, err);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "free_provider_instance failed %d", err);
 		}
 		uuid_clear(instance);
 	}
@@ -3085,7 +3368,8 @@ detach_provider_and_instance(uuid_t provider, uuid_t instance)
 		err = kern_nexus_controller_deregister_provider(controller,
 		    provider);
 		if (err != 0) {
-			printf("%s deregister_provider %d\n", __func__, err);
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "deregister_provider %d", err);
 		}
 		uuid_clear(provider);
 	}
@@ -3109,19 +3393,9 @@ feth_detach_netif_nexus(if_fake_ref fakeif)
 static void
 feth_ifnet_set_attrs(if_fake_ref fakeif, ifnet_t ifp)
 {
-	uint32_t        cap;
+	errno_t         error;
+	ifnet_offload_t offload = 0;
 
-	cap = ((fakeif->iff_flags & IFF_FLAGS_LRO) != 0) ? IFCAP_LRO : 0;
-	if (cap != 0) {
-		errno_t         error;
-
-		error = ifnet_set_capabilities_supported(ifp, cap, IFCAP_VALID);
-		if (error != 0) {
-			printf("%s: failed to enable LRO, %d\n",
-			    ifp->if_xname, error);
-		}
-	}
-	(void)ifnet_set_capabilities_enabled(ifp, cap, IFCAP_VALID);
 	ifnet_set_addrlen(ifp, ETHER_ADDR_LEN);
 	ifnet_set_baudrate(ifp, 0);
 	ifnet_set_mtu(ifp, ETHERMTU);
@@ -3129,12 +3403,30 @@ feth_ifnet_set_attrs(if_fake_ref fakeif, ifnet_t ifp)
 	    IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX,
 	    0xffff);
 	ifnet_set_hdrlen(ifp, sizeof(struct ether_header));
+	if ((fakeif->iff_flags & IFF_FLAGS_LRO) != 0) {
+		offload |= IFNET_LRO;
+	}
 	if ((fakeif->iff_flags & IFF_FLAGS_HWCSUM) != 0) {
-		ifnet_set_offload(ifp,
-		    IFNET_CSUM_IP | IFNET_CSUM_TCP | IFNET_CSUM_UDP |
-		    IFNET_CSUM_TCPIPV6 | IFNET_CSUM_UDPIPV6);
+		offload |= IFNET_CSUM_IP | IFNET_CSUM_TCP | IFNET_CSUM_UDP |
+		    IFNET_CSUM_TCPIPV6 | IFNET_CSUM_UDPIPV6;
+	}
+	if (feth_supports_tso(fakeif)) {
+		offload |= IFNET_TSO_IPV4 | IFNET_TSO_IPV6;
+	}
+	if (feth_supports_vlan_tagging(fakeif)) {
+		offload |= IFNET_VLAN_TAGGING;
+	} else if (feth_supports_vlan_mtu(fakeif)) {
+		offload |= IFNET_VLAN_MTU;
+	}
+	error = ifnet_set_offload(ifp, offload);
+	if (error != 0) {
+		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+		    "ifnet_set_offload(%s, 0x%x) failed, %d",
+		    ifp->if_xname, offload, error);
 	} else {
-		ifnet_set_offload(ifp, 0);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+		    "ifnet_set_offload(%s, 0x%x) succeeded",
+		    ifp->if_xname, offload);
 	}
 }
 
@@ -3170,12 +3462,43 @@ ifnet_get_if_fake(ifnet_t ifp)
 static int
 feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 {
+	bool                            bsd_mode;
 	int                             error;
 	if_fake_ref                     fakeif;
 	struct ifnet_init_eparams       feth_init;
+	fake_llink                     *iff_llink;
 	ifnet_t                         ifp;
 	uint8_t                         mac_address[ETHER_ADDR_LEN];
-	fake_llink                     *iff_llink;
+	bool                            multi_buflet;
+	iff_pktpool_mode_t              pktpool_mode;
+	bool                            tso_support;
+
+	/* make local copy of globals needed to make consistency checks below */
+	bsd_mode = (if_fake_bsd_mode != 0);
+	multi_buflet = (if_fake_multibuflet != 0);
+	tso_support = (if_fake_tso_support != 0);
+	pktpool_mode = if_fake_pktpool_mode;
+
+	if (!bsd_mode) {
+		/* consistency checks */
+		if (if_fake_llink_cnt == 0 &&
+		    strbufcmp(sk_ll_prefix, FAKE_ETHER_NAME) == 0) {
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
+			    "feth used as ifname prefix but logical link "
+			    "support in feth is disabled.");
+			return EINVAL;
+		}
+		if (tso_support && pktpool_mode != IFF_PP_MODE_GLOBAL) {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+			    "TSO mode requires global packet pool mode");
+			return EINVAL;
+		}
+		if (multi_buflet && pktpool_mode == IFF_PP_MODE_PRIVATE_SPLIT) {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+			    "multi-buflet not supported for split rx & tx pool");
+			return EINVAL;
+		}
+	}
 
 	iff_llink = kalloc_type(fake_llink, FETH_MAX_LLINKS, Z_WAITOK_ZERO);
 	if (iff_llink == NULL) {
@@ -3189,7 +3512,7 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	bcopy(FAKE_ETHER_NAME, mac_address, FAKE_ETHER_NAME_LEN);
 	mac_address[ETHER_ADDR_LEN - 2] = (unit & 0xff00) >> 8;
 	mac_address[ETHER_ADDR_LEN - 1] = unit & 0xff;
-	if (if_fake_bsd_mode != 0) {
+	if (bsd_mode) {
 		fakeif->iff_flags |= IFF_FLAGS_BSD_MODE;
 	}
 	if (if_fake_hwcsum != 0) {
@@ -3198,7 +3521,17 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	if (if_fake_lro != 0) {
 		fakeif->iff_flags |= IFF_FLAGS_LRO;
 	}
-	fakeif->iff_max_mtu = get_max_mtu(if_fake_bsd_mode, if_fake_max_mtu);
+	if (if_fake_vlan_tagging != 0) {
+		/* support VLAN tagging in hardware */
+		feth_set_supports_vlan_tagging(fakeif);
+	} else {
+		/* support VLAN mtu-sized packets */
+		feth_set_supports_vlan_mtu(fakeif);
+	}
+	if (if_fake_separate_frame_header != 0) {
+		fakeif->iff_flags |= IFF_FLAGS_SEPARATE_FRAME_HEADER;
+	}
+	fakeif->iff_max_mtu = get_max_mtu(bsd_mode, if_fake_max_mtu);
 	fakeif->iff_fcs = if_fake_fcs;
 	fakeif->iff_trailer_length = if_fake_trailer_length;
 
@@ -3219,6 +3552,9 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			feth_init.flags |= IFNET_INIT_LEGACY;
 			feth_init.output = feth_output;
 		}
+		if (tso_support) {
+			feth_set_supports_tso(fakeif);
+		}
 	}
 #if SKYWALK
 	else {
@@ -3231,26 +3567,13 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			fakeif->iff_flags |= IFF_FLAGS_WMM_MODE;
 		}
 
-		if (if_fake_multibuflet != 0) {
+		if (multi_buflet) {
 			fakeif->iff_flags |= IFF_FLAGS_MULTIBUFLETS;
 		}
 
-		if (if_fake_multibuflet != 0 &&
-		    if_fake_pktpool_mode == IFF_PP_MODE_PRIVATE_SPLIT) {
-			printf("%s: multi-buflet not supported for split rx &"
-			    " tx pool", __func__);
-			feth_release(fakeif);
-			return EINVAL;
-		}
-
-		fakeif->iff_pp_mode = if_fake_pktpool_mode;
-		if (if_fake_tso_support != 0) {
-			if (fakeif->iff_pp_mode != IFF_PP_MODE_GLOBAL) {
-				printf("%s: TSO mode requires global packet"
-				    " pool mode\n", __func__);
-				return EINVAL;
-			}
-			fakeif->iff_flags |= IFF_FLAGS_TSO_SUPPORT;
+		fakeif->iff_pp_mode = pktpool_mode;
+		if (tso_support) {
+			feth_set_supports_tso(fakeif);
 		}
 
 		fakeif->iff_tx_headroom = if_fake_tx_headroom;
@@ -3291,6 +3614,9 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			return error;
 		}
 		feth_ifnet_set_attrs(fakeif, ifp);
+		if (feth_supports_tso(fakeif)) {
+			feth_set_tso_mtu(ifp, IP_MAXPACKET, IP_MAXPACKET);
+		}
 	}
 #if SKYWALK
 	else {
@@ -3369,62 +3695,6 @@ feth_enqueue_input(ifnet_t ifp, struct mbuf * m)
 	ifnet_input(ifp, m, &stats);
 }
 
-static struct mbuf *
-copy_mbuf(struct mbuf *m)
-{
-	struct mbuf *   copy_m;
-	uint32_t        pkt_len;
-	uint32_t        offset;
-
-	if ((m->m_flags & M_PKTHDR) == 0) {
-		return NULL;
-	}
-	pkt_len = m->m_pkthdr.len;
-	MGETHDR(copy_m, M_DONTWAIT, MT_DATA);
-	if (copy_m == NULL) {
-		goto failed;
-	}
-	if (pkt_len > MHLEN) {
-		if (pkt_len <= MCLBYTES) {
-			MCLGET(copy_m, M_DONTWAIT);
-		} else if (pkt_len <= MBIGCLBYTES) {
-			copy_m = m_mbigget(copy_m, M_DONTWAIT);
-		} else if (pkt_len <= M16KCLBYTES && njcl > 0) {
-			copy_m = m_m16kget(copy_m, M_DONTWAIT);
-		} else {
-			printf("if_fake: copy_mbuf(): packet too large %d\n",
-			    pkt_len);
-			goto failed;
-		}
-		if (copy_m == NULL || (copy_m->m_flags & M_EXT) == 0) {
-			goto failed;
-		}
-	}
-	mbuf_setlen(copy_m, pkt_len);
-	copy_m->m_pkthdr.len = pkt_len;
-	copy_m->m_pkthdr.pkt_svc = m->m_pkthdr.pkt_svc;
-	offset = 0;
-	while (m != NULL && offset < pkt_len) {
-		uint32_t        frag_len;
-
-		frag_len = m->m_len;
-		if (frag_len > (pkt_len - offset)) {
-			printf("if_fake_: Large mbuf fragment %d > %d\n",
-			    frag_len, (pkt_len - offset));
-			goto failed;
-		}
-		m_copydata(m, 0, frag_len, mtodo(copy_m, offset));
-		offset += frag_len;
-		m = m->m_next;
-	}
-	return copy_m;
-
-failed:
-	if (copy_m != NULL) {
-		m_freem(copy_m);
-	}
-	return NULL;
-}
 
 static int
 feth_add_mbuf_trailer(struct mbuf *m, void *trailer, size_t trailer_len)
@@ -3434,10 +3704,11 @@ feth_add_mbuf_trailer(struct mbuf *m, void *trailer, size_t trailer_len)
 
 	ret = m_append(m, trailer_len, (caddr_t)trailer);
 	if (ret == 1) {
-		FETH_DPRINTF("%s %zuB trailer added\n", __func__, trailer_len);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%zuB trailer added", trailer_len);
 		return 0;
 	}
-	printf("%s m_append failed\n", __func__);
+	FAKE_LOG(LOG_NOTICE, FE_DBGF_OUTPUT, "m_append failed");
 	return ENOTSUP;
 }
 
@@ -3457,7 +3728,7 @@ feth_add_mbuf_fcs(struct mbuf *m)
 		ASSERT(frag_len <= (pkt_len - offset));
 		crc = crc32(crc, mtod(iter, void *), frag_len);
 		offset += frag_len;
-		iter = m->m_next;
+		iter = iter->m_next;
 	}
 
 	err = feth_add_mbuf_trailer(m, &crc, ETHER_CRC_LEN);
@@ -3474,9 +3745,8 @@ static void
 feth_output_common(ifnet_t ifp, struct mbuf * m, ifnet_t peer,
     iff_flags_t flags, bool fcs, void *trailer, size_t trailer_len)
 {
-	void *          frame_header;
+	void *                  frame_header;
 
-	frame_header = mbuf_data(m);
 	if ((flags & IFF_FLAGS_HWCSUM) != 0) {
 		m->m_pkthdr.csum_data = 0xffff;
 		m->m_pkthdr.csum_flags =
@@ -3485,36 +3755,58 @@ feth_output_common(ifnet_t ifp, struct mbuf * m, ifnet_t peer,
 	}
 
 	(void)ifnet_stat_increment_out(ifp, 1, m->m_pkthdr.len, 0);
-	bpf_tap_out(ifp, DLT_EN10MB, m, NULL, 0);
-
-	if (trailer != 0) {
+	if (trailer_len != 0 && trailer != NULL) {
 		feth_add_mbuf_trailer(m, trailer, trailer_len);
 	}
 	if (fcs) {
 		feth_add_mbuf_fcs(m);
 	}
+	if ((flags & IFF_FLAGS_SEPARATE_FRAME_HEADER) != 0) {
+		m = m_copyup(m, ETHER_HDR_LEN, 0);
+		if (m == NULL) {
+			FAKE_LOG(LOG_NOTICE, FE_DBGF_OUTPUT, "m_copyup failed");
+			goto done;
+		}
+		frame_header = mbuf_data(m);
+		mbuf_pkthdr_setheader(m, frame_header);
+		m_adj(m, ETHER_HDR_LEN);
+		FAKE_LOG(LOG_DEBUG, FE_DBGF_OUTPUT,
+		    "%s: frame 0x%llx data 0x%llx len %ld",
+		    ifp->if_xname,
+		    (uint64_t)VM_KERNEL_ADDRPERM(frame_header),
+		    (uint64_t)VM_KERNEL_ADDRPERM(mtod(m, void *)),
+		    mbuf_len(m));
+	} else {
+		frame_header = mbuf_data(m);
+		mbuf_pkthdr_setheader(m, frame_header);
+		_mbuf_adjust_pkthdr_and_data(m, ETHER_HDR_LEN);
+	}
+
+	/* tap it out */
+	if (ifp->if_bpf != NULL) {
+		fake_bpf_tap_out(ifp, m, frame_header);
+	}
+
+	/* tap it in */
+	if (peer->if_bpf != NULL) {
+		fake_bpf_tap_in(peer, m, frame_header);
+	}
 
 	(void)mbuf_pkthdr_setrcvif(m, peer);
-	mbuf_pkthdr_setheader(m, frame_header);
-	mbuf_pkthdr_adjustlen(m, -ETHER_HDR_LEN);
-	(void)mbuf_setdata(m, (char *)mbuf_data(m) + ETHER_HDR_LEN,
-	    mbuf_len(m) - ETHER_HDR_LEN);
-	bpf_tap_in(peer, DLT_EN10MB, m, frame_header,
-	    sizeof(struct ether_header));
 	feth_enqueue_input(peer, m);
+done:
+	return;
 }
 
 static void
 feth_start(ifnet_t ifp)
 {
-	struct mbuf *   copy_m = NULL;
 	if_fake_ref     fakeif;
 	iff_flags_t     flags = 0;
 	bool            fcs;
-	size_t          trailer_len;
-	ifnet_t         peer = NULL;
 	struct mbuf *   m;
-	struct mbuf *   save_m;
+	ifnet_t         peer = NULL;
+	size_t          trailer_len;
 
 	feth_lock();
 	fakeif = ifnet_get_if_fake(ifp);
@@ -3525,7 +3817,6 @@ feth_start(ifnet_t ifp)
 
 	if (fakeif->iff_start_busy) {
 		feth_unlock();
-		printf("if_fake: start is busy\n");
 		return;
 	}
 
@@ -3534,66 +3825,32 @@ feth_start(ifnet_t ifp)
 	fcs = fakeif->iff_fcs;
 	trailer_len = fakeif->iff_trailer_length;
 
-	/* check for pending TX */
-	m = fakeif->iff_pending_tx_packet;
-	if (m != NULL) {
-		if (peer != NULL) {
-			copy_m = copy_mbuf(m);
-			if (copy_m == NULL) {
-				feth_unlock();
-				return;
-			}
-		}
-		fakeif->iff_pending_tx_packet = NULL;
-		m_freem(m);
-		m = NULL;
-	}
 	fakeif->iff_start_busy = TRUE;
 	feth_unlock();
-	save_m = NULL;
 	for (;;) {
-		if (copy_m != NULL) {
-			VERIFY(peer != NULL);
-			feth_output_common(ifp, copy_m, peer, flags, fcs,
-			    feth_trailer, trailer_len);
-			copy_m = NULL;
-		}
 		if (ifnet_dequeue(ifp, &m) != 0) {
 			break;
 		}
 		if (peer == NULL) {
 			m_freem(m);
-		} else {
-			copy_m = copy_mbuf(m);
-			if (copy_m == NULL) {
-				save_m = m;
-				break;
-			}
-			m_freem(m);
+			continue;
+		}
+		if (m != NULL) {
+			feth_output_common(ifp, m, peer, flags, fcs,
+			    feth_trailer, trailer_len);
 		}
 	}
-	peer = NULL;
 	feth_lock();
 	fakeif = ifnet_get_if_fake(ifp);
 	if (fakeif != NULL) {
 		fakeif->iff_start_busy = FALSE;
-		if (save_m != NULL && fakeif->iff_peer != NULL) {
-			/* save it for next time */
-			fakeif->iff_pending_tx_packet = save_m;
-			save_m = NULL;
-		}
 	}
 	feth_unlock();
-	if (save_m != NULL) {
-		/* didn't save packet, so free it */
-		m_freem(save_m);
-	}
 }
 
 static int
 feth_output(ifnet_t ifp, struct mbuf * m)
 {
-	struct mbuf *           copy_m;
 	if_fake_ref             fakeif;
 	iff_flags_t             flags;
 	bool                    fcs;
@@ -3601,14 +3858,6 @@ feth_output(ifnet_t ifp, struct mbuf * m)
 	ifnet_t                 peer = NULL;
 
 	if (m == NULL) {
-		return 0;
-	}
-	copy_m = copy_mbuf(m);
-	m_freem(m);
-	m = NULL;
-	if (copy_m == NULL) {
-		/* count this as an output error */
-		ifnet_stat_increment_out(ifp, 0, 0, 1);
 		return 0;
 	}
 	feth_lock();
@@ -3621,12 +3870,11 @@ feth_output(ifnet_t ifp, struct mbuf * m)
 	}
 	feth_unlock();
 	if (peer == NULL) {
-		m_freem(copy_m);
+		m_freem(m);
 		ifnet_stat_increment_out(ifp, 0, 0, 1);
 		return 0;
 	}
-	feth_output_common(ifp, copy_m, peer, flags, fcs, feth_trailer,
-	    trailer_len);
+	feth_output_common(ifp, m, peer, flags, fcs, feth_trailer, trailer_len);
 	return 0;
 }
 
@@ -3865,7 +4113,7 @@ feth_ioctl(ifnet_t ifp, u_long cmd, void * data)
 	uint32_t                drv_len;
 	boolean_t               drv_set_command = FALSE;
 	int                     error = 0;
-	struct ifmediareq *     ifmr;
+	struct ifmediareq32 *   ifmr;
 	struct ifreq *          ifr;
 	if_fake_ref             fakeif;
 	int                     status;
@@ -3887,12 +4135,13 @@ feth_ioctl(ifnet_t ifp, u_long cmd, void * data)
 		}
 		status = (fakeif->iff_peer != NULL)
 		    ? (IFM_AVALID | IFM_ACTIVE) : IFM_AVALID;
-		ifmr = (struct ifmediareq *)data;
+		ifmr = (struct ifmediareq32 *)data;
 		user_addr = (cmd == SIOCGIFMEDIA64) ?
-		    ((struct ifmediareq64 *)ifmr)->ifmu_ulist :
-		    CAST_USER_ADDR_T(((struct ifmediareq32 *)ifmr)->ifmu_ulist);
+		    ((struct ifmediareq64 *)data)->ifmu_ulist :
+		    CAST_USER_ADDR_T(((struct ifmediareq32 *)data)->ifmu_ulist);
 		count = ifmr->ifm_count;
-		ifmr->ifm_active = IFM_ETHER;
+		ifmr->ifm_active = (fakeif->iff_peer != NULL)
+		    ? FAKE_DEFAULT_MEDIA : IFM_ETHER;
 		ifmr->ifm_current = IFM_ETHER;
 		ifmr->ifm_mask = 0;
 		ifmr->ifm_status = status;

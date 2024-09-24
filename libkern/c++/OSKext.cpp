@@ -36,7 +36,7 @@ extern "C" {
 #include <firehose/tracepoint_private.h>
 #include <firehose/chunk_private.h>
 #include <os/firehose_buffer_private.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <kextd/kextd_mach.h>
 #include <libkern/kernel_mach_header.h>
 #include <libkern/kext_panic_report.h>
@@ -66,7 +66,7 @@ extern "C" {
 #include <security/mac_framework.h>
 #endif
 
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <sys/sysctl.h>
 #include <kern/task.h>
 #include <os/cpp_util.h>
@@ -120,7 +120,6 @@ void * ubc_getobject(struct vnode *vp, __unused int flags);
 
 extern unsigned long gVirtBase;
 extern unsigned long gPhysBase;
-extern vm_map_t g_kext_map;
 
 bool pageableKCloaded = false;
 bool auxKCloaded = false;
@@ -535,10 +534,9 @@ static AbsoluteTime         sLastWakeTime;                       // last time we
  * to automatically parse the list of loaded kexts.
  **********/
 static IOLock                 * sKextSummariesLock                = NULL;
-extern "C" lck_ticket_t         vm_allocation_sites_lock;
 extern "C" lck_grp_t            vm_page_lck_grp_bucket;
-static lck_ticket_t           * sKextAccountsLock = &vm_allocation_sites_lock;
 static lck_grp_t              * sKextAccountsLockGrp = &vm_page_lck_grp_bucket;
+#define sKextAccountsLock       (&vm_allocation_sites_lock)
 
 void(*const sLoadedKextSummariesUpdated)(void) = OSKextLoadedKextSummariesUpdated;
 OSKextLoadedKextSummaryHeader * gLoadedKextSummaries __attribute__((used)) = NULL;
@@ -1236,7 +1234,7 @@ OSKext::removeKextBootstrap(void)
 		ml_static_mfree(ml_static_ptovirt(seg_kld->vmaddr - gVirtBase + gPhysBase),
 		    seg_kld->vmsize);
 #else
-		ml_static_mfree(seg_kld->vmaddr), seg_kld->vmsize);
+		ml_static_mfree((seg_kld->vmaddr), seg_kld->vmsize);
 #endif
 	}
 #endif
@@ -1331,7 +1329,7 @@ OSKext::removeKextBootstrap(void)
 
 		/* Set up the VM region.
 		 */
-		mem_result = vm_map_enter_mem_object(
+		mem_result = mach_vm_map_kernel(
 			kernel_map,
 			&seg_offset,
 			seg_length, /* mask */ 0,
@@ -1609,10 +1607,12 @@ OSKext::driverkitEnabled(void)
 bool
 OSKext::iokitDaemonAvailable(void)
 {
+#if !XNU_TARGET_OS_IOS && !XNU_TARGET_OS_OSX
 	int notused;
 	if (PE_parse_boot_argn("-restore", &notused, sizeof(notused))) {
 		return false;
 	}
+#endif //!XNU_TARGET_OS_IOS && !XNU_TARGET_OS_OSX
 	return driverkitEnabled();
 }
 
@@ -12886,6 +12886,9 @@ OSKext::requestDaemonLaunch(
 	if (!kextIdentifier || !serverName || !serverTag || !checkInToken) {
 		return kOSKextReturnInvalidArgument;
 	}
+	if (!iokitDaemonAvailable()) {
+		panic("Received unexpected request in environment where " kIOKitDaemonName " is unavailable");
+	}
 
 	if (serverDUI != NULL) {
 		dextUniqueIDCString = getDextUniqueIDCString(serverDUI, &size);
@@ -12938,7 +12941,10 @@ OSKext::requestDaemonLaunch(
 		result = kOSKextReturnNoMemory;
 		goto finish;
 	}
-	OSKext::pingIOKitDaemon();
+	result = OSKext::pingIOKitDaemon();
+	if (result != kOSReturnSuccess) {
+		goto finish;
+	}
 
 	result = kOSReturnSuccess;
 finish:

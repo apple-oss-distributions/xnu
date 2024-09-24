@@ -10,8 +10,7 @@
 
 struct T { int i; };
 
-T_DECL(dtor, "intrusive_shared_ptr.dtor") {
-	// Destroy a non-null shared pointer
+T_DECL(dtor, "intrusive_shared_ptr.dtor", T_META_TAG_VM_PREFERRED) {    // Destroy a non-null shared pointer
 	{
 		T obj{0};
 		test_policy::retain_count = 3;

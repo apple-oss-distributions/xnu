@@ -221,7 +221,7 @@ tests()
 	}
 }
 
-T_DECL(slice, "bounded_array_ref.slice") {
+T_DECL(slice, "bounded_array_ref.slice", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

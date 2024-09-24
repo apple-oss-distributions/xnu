@@ -411,4 +411,16 @@ routine thread_get_exception_ports_info(
 	out	old_behaviors	: exception_behavior_array_t, SameCount;
 	out	old_flavors	: exception_flavor_array_t, SameCount);
 
+/*
+ * Calls thread_set_exception_ports on thread using a previously registered
+ * hardened exception handler. Only one hardened exception handler is allowed
+ * per task.
+ */
+routine thread_adopt_exception_handler(
+		thread : thread_t;
+		exc_port : mach_port_t;
+		exc_mask : exception_mask_t;
+		behavior_mask : exception_behavior_t;
+		flavor_mask :thread_state_flavor_t);
+
 /* vim: set ft=c : */

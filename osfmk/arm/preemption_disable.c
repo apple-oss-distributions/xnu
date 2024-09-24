@@ -236,6 +236,9 @@ uint64_t _Atomic PERCPU_DATA_HACK_78750602(preemption_disable_max_mt);
 #if XNU_PLATFORM_iPhoneOS
 #define DEFAULT_PREEMPTION_TIMEOUT 120000 /* 5ms */
 #define DEFAULT_PREEMPTION_MODE SCHED_HYGIENE_MODE_PANIC
+#elif XNU_PLATFORM_XROS
+#define DEFAULT_PREEMPTION_TIMEOUT 24000  /* 1ms */
+#define DEFAULT_PREEMPTION_MODE SCHED_HYGIENE_MODE_PANIC
 #else
 #define DEFAULT_PREEMPTION_TIMEOUT 0      /* Disabled */
 #define DEFAULT_PREEMPTION_MODE SCHED_HYGIENE_MODE_OFF
@@ -264,7 +267,7 @@ _preemption_disable_snap_start(void)
 	struct _preemption_disable_pcpu *pcpu = PERCPU_GET(_preemption_disable_pcpu_data);
 	pcpu->pdp_abandon = false;
 	pcpu->pdp_start.pds_mach_time = ml_get_sched_hygiene_timebase();
-	pcpu->pdp_start.pds_int_mach_time = recount_current_processor_interrupt_time_mach();
+	pcpu->pdp_start.pds_int_mach_time = recount_current_processor_interrupt_duration_mach();
 #if CONFIG_CPU_COUNTERS
 	if (__probable(sched_hygiene_debug_pmc)) {
 		mt_cur_cpu_cycles_instrs_speculative(&pcpu->pdp_start.pds_cycles,
@@ -315,7 +318,7 @@ _preemption_disable_snap_end(
 	*start = pcpu->pdp_start;
 	uint64_t now_time = ml_get_sched_hygiene_timebase();
 	now->pds_mach_time = now_time;
-	now->pds_int_mach_time = recount_current_processor_interrupt_time_mach();
+	now->pds_int_mach_time = recount_current_processor_interrupt_duration_mach();
 	const bool abandon = pcpu->pdp_abandon;
 	const uint64_t max_duration = os_atomic_load(&pcpu->pdp_max_mach_duration, relaxed);
 

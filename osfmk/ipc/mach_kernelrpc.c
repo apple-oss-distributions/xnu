@@ -33,10 +33,12 @@
 #include <mach/mach_host_server.h>
 #include <mach/mach_voucher_server.h>
 #include <mach/vm_map.h>
+#include <mach/mach_vm.h>
 #include <kern/task.h>
 #include <kern/ipc_tt.h>
 #include <kern/kalloc.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_kern_xnu.h>
 #include <kdp/kdp_dyld.h>
 
 kern_return_t
@@ -46,13 +48,6 @@ mach_port_get_attributes(
 	int                     flavor,
 	mach_port_info_t        info,
 	mach_msg_type_number_t  *count);
-
-kern_return_t
-mach_vm_purgable_control(
-	vm_map_t         map,
-	mach_vm_offset_t address,
-	vm_purgable_t    control,
-	int              *state);
 
 extern lck_mtx_t g_dyldinfo_mtx;
 

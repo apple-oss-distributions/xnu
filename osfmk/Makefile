@@ -39,11 +39,6 @@ INSTINC_SUBDIRS_X86_64H = \
 	i386	\
 	x86_64
 
-INSTINC_SUBDIRS_ARM = \
-	mach	\
-	arm	\
-	arm64
-
 INSTINC_SUBDIRS_ARM64 = \
 	mach	\
 	arm	\
@@ -82,10 +77,6 @@ EXPINC_SUBDIRS_X86_64H = \
 	mach	\
 	i386	\
 	x86_64
-EXPINC_SUBDIRS_ARM = \
-	mach	\
-	arm	\
-	arm64
 EXPINC_SUBDIRS_ARM64 = \
 	mach	\
 	arm	\

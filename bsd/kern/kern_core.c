@@ -59,9 +59,9 @@
 
 #include <IOKit/IOBSD.h>
 
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_protos.h> /* last */
-#include <vm/vm_map.h>          /* current_map() */
+#include <vm/vm_map_xnu.h>          /* current_map() */
 #include <vm/pmap.h>            /* pmap_user_va_bits() */
 #include <mach/mach_vm.h>       /* mach_vm_region_recurse() */
 #include <mach/task.h>          /* task_suspend() */
@@ -110,13 +110,11 @@ typedef struct {
 } tir_t;
 
 extern int freespace_mb(vnode_t vp);
-extern void task_lock(task_t);
-extern void task_unlock(task_t);
 
 /* XXX not in a Mach header anywhere */
 kern_return_t thread_getstatus(thread_t act, int flavor,
     thread_state_t tstate, mach_msg_type_number_t *count);
-void task_act_iterate_wth_args_locked(task_t, void (*)(thread_t, void *), void *);
+void task_act_iterate_wth_args(task_t, void (*)(thread_t, void *), void *);
 
 #ifdef SECURE_KERNEL
 __XNU_PRIVATE_EXTERN int do_coredump = 0;       /* default: don't dump cores */
@@ -359,7 +357,6 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	size_t          alloced_format_len = 0;
 	bool            include_iokit_memory = task_is_driver(task);
 	bool            coredump_attempted = false;
-	bool            task_locked = false;
 
 	if (current_proc() != core_proc) {
 		COREDUMPLOG("Skipping coredump (called against proc that is not current_proc: %p)", core_proc);
@@ -409,7 +406,6 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		assert(printed_len == alloced_format_len);
 
 		format = alloced_format;
-		coredump_flags |= COREDUMP_IGNORE_ULIMIT;
 	} else {
 		if (proc_is_driver(core_proc)) {
 			format = drivercorefilename;
@@ -427,9 +423,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	/* log coredump failures from here */
 	coredump_attempted = true;
 
-	task_lock(task);
-	task_locked = true;
-	(void) task_suspend_internal_locked(task);
+	(void) task_suspend_internal(task);
 
 	alloced_name = zalloc_flags(ZV_NAMEI, Z_NOWAIT | Z_ZERO);
 
@@ -477,6 +471,12 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		error = ENOSPC;
 		goto out;
 	}
+
+	/*
+	 *	If the task is modified while dumping the file
+	 *	(e.g., changes in threads or VM, the resulting
+	 *	file will not necessarily be correct.
+	 */
 
 	thread_count = get_task_numacts(task);
 	segment_count = get_vmmap_entries(map); /* XXX */
@@ -736,7 +736,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	tir1.flavors = flavors;
 	tir1.tstate_size = tstate_size;
 	COREDUMPLOG("dumping %zu threads", thread_count);
-	task_act_iterate_wth_args_locked(task, collectth_state, &tir1);
+	task_act_iterate_wth_args(task, collectth_state, &tir1);
 
 	/*
 	 *	Write out the Mach header at the beginning of the
@@ -786,10 +786,6 @@ out2:
 		} else {
 			COREDUMPLOG("core dump succeeded");
 		}
-	}
-
-	if (task_locked) {
-		task_unlock(task);
 	}
 
 	return error;

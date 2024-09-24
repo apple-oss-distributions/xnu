@@ -116,11 +116,13 @@ struct kcdata_descriptor {
 #define KCFLAG_USE_COPYOUT 0x1
 #define KCFLAG_NO_AUTO_ENDBUFFER 0x2
 #define KCFLAG_USE_COMPRESSION 0x4
+#define KCFLAG_ALLOC_CALLBACK 0x8
 	uint16_t kcd_user_flags; /* reserved for subsystems using kcdata */
 	mach_vm_address_t kcd_addr_begin;
 	mach_vm_address_t kcd_addr_end;
 	struct kcdata_compress_descriptor kcd_comp_d;
 	uint32_t            kcd_endalloced;
+	struct kcdata_descriptor * (*kcd_alloc_callback) (struct kcdata_descriptor*, size_t);
 };
 
 typedef struct kcdata_descriptor * kcdata_descriptor_t;

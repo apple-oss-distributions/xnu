@@ -81,6 +81,7 @@
 #include <net/if_llc.h>
 #include <net/if_dl.h>
 #include <net/if_types.h>
+#include <net/kpi_interface.h>
 #include <net/kpi_protocol.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -124,7 +125,7 @@ ether_inet_arp_input(struct ifnet *ifp, struct mbuf *m)
 		return;
 	}
 
-	ea = mbuf_data(m);
+	ea = mtod(m, struct ether_arp *);
 
 	/* Verify this is an ethernet/ip arp and address lengths are correct */
 	if (ntohs(ea->arp_hrd) != ARPHRD_ETHER ||
@@ -181,7 +182,7 @@ ether_inet_input(ifnet_t ifp, protocol_family_t protocol_family,
 
 	/* Strip ARP and non-IP packets out of the list */
 	for (m = m_list; m; m = nextpkt) {
-		struct ether_header *eh = mbuf_pkthdr_header(m);
+		struct ether_header *eh __single = mbuf_pkthdr_header(m);
 		struct ifnet *mifp;
 
 		/*
@@ -242,6 +243,8 @@ ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 	struct mbuf *m = *m0;
 	const struct ether_header *eh;
 	errno_t result = 0;
+	uint8_t *frame_type = dlil_frame_type(type);
+	uint8_t *dst_host_lladdr = dlil_link_addr(edst);
 
 	if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING)) {
 		return ENETDOWN;
@@ -262,8 +265,8 @@ ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 		if (result == 0) {
 			u_int16_t ethertype_ip = htons(ETHERTYPE_IP);
 
-			bcopy(LLADDR(&ll_dest), edst, ETHER_ADDR_LEN);
-			bcopy(&ethertype_ip, type, sizeof(ethertype_ip));
+			bcopy(LLADDR(&ll_dest), dst_host_lladdr, ETHER_ADDR_LEN);
+			bcopy(&ethertype_ip, frame_type, sizeof(ethertype_ip));
 		}
 		break;
 	}
@@ -271,10 +274,9 @@ ether_inet_pre_output(ifnet_t ifp, protocol_family_t protocol_family,
 	case pseudo_AF_HDRCMPLT:
 	case AF_UNSPEC:
 		m->m_flags &= ~M_LOOP;
-		eh = (const struct ether_header *)(uintptr_t)(size_t)
-		    dst_netaddr->sa_data;
-		(void) memcpy(edst, eh->ether_dhost, 6);
-		bcopy(&eh->ether_type, type, sizeof(u_short));
+		eh = (const struct ether_header *)__DECONST(void *, dst_netaddr->sa_data);
+		bcopy(eh->ether_dhost, dst_host_lladdr, ETHER_ADDR_LEN);
+		bcopy(&eh->ether_type, frame_type, sizeof(eh->ether_type));
 		break;
 
 	default:
@@ -336,7 +338,7 @@ ether_inet_prmod_ioctl(ifnet_t ifp, protocol_family_t protocol_family,
 		 * struct ifaddr as parameter to SIOC{A,S}IFADDR, for
 		 * legacy reasons.
 		 */
-		struct ifaddr *ifa = data;
+		struct ifaddr *ifa __single = data;
 
 		if (!(ifnet_flags(ifp) & IFF_RUNNING)) {
 			ifnet_set_flags(ifp, IFF_UP, IFF_UP);
@@ -371,7 +373,7 @@ ether_inet_prmod_ioctl(ifnet_t ifp, protocol_family_t protocol_family,
 	}
 
 	case SIOCGIFADDR: {             /* struct ifreq */
-		struct ifreq *ifr = data;
+		struct ifreq *ifr __single = data;
 		ifnet_guarded_lladdr_copy_bytes(ifp, ifr->ifr_addr.sa_data,
 		    ETHER_ADDR_LEN);
 		break;
@@ -390,7 +392,8 @@ ether_inet_event(ifnet_t ifp, protocol_family_t protocol,
     const struct kev_msg *event)
 {
 #pragma unused(protocol)
-	ifaddr_t *addresses;
+	uint16_t address_count = 0;
+	ifaddr_ref_t * __counted_by(address_count) addresses = NULL;
 
 	if (event->vendor_code != KEV_VENDOR_APPLE ||
 	    event->kev_class != KEV_NETWORK_CLASS ||
@@ -399,14 +402,14 @@ ether_inet_event(ifnet_t ifp, protocol_family_t protocol,
 		return;
 	}
 
-	if (ifnet_get_address_list_family(ifp, &addresses, AF_INET) == 0) {
+	if (ifnet_get_address_list_family_with_count(ifp, &addresses, &address_count, AF_INET) == 0) {
 		int i;
 
 		for (i = 0; addresses[i] != NULL; i++) {
 			inet_arp_init_ifaddr(ifp, addresses[i]);
 		}
 
-		ifnet_free_address_list(addresses);
+		ifnet_address_list_free_counted_by(addresses, address_count);
 	}
 }
 
@@ -415,7 +418,7 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
     const struct sockaddr *sender_proto, const struct sockaddr_dl *target_hw,
     const struct sockaddr *target_proto)
 {
-	mbuf_t  m;
+	mbuf_ref_t  m;
 	errno_t result;
 	struct ether_header *eh;
 	struct ether_arp *ea;
@@ -443,11 +446,11 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 	mbuf_pkthdr_setlen(m, sizeof(*ea));
 
 	/* Move the data pointer in the mbuf to the end, aligned to 4 bytes */
-	datap = mbuf_datastart(m);
+	datap = mtod(m, char*);
 	datap += mbuf_trailingspace(m);
 	datap -= (((uintptr_t)datap) & 0x3);
 	mbuf_setdata(m, datap, sizeof(*ea));
-	ea = mbuf_data(m);
+	ea = mtod(m, struct ether_arp *);
 
 	/*
 	 * Prepend the ethernet header, we will send the raw frame;
@@ -458,7 +461,7 @@ ether_inet_arp(ifnet_t ifp, u_short arpop, const struct sockaddr_dl *sender_hw,
 		return result;
 	}
 
-	eh = mbuf_data(m);
+	eh = mtod(m, struct ether_header *);
 	eh->ether_type = htons(ETHERTYPE_ARP);
 
 	/* Fill out the arp header */
@@ -557,21 +560,17 @@ errno_t
 ether_attach_inet(struct ifnet *ifp, protocol_family_t proto_family)
 {
 #pragma unused(proto_family)
-	struct ifnet_attach_proto_param_v2 proto;
-	struct ifnet_demux_desc demux[2];
+	struct ifnet_attach_proto_param_v2 proto = {};
 	u_short en_native = htons(ETHERTYPE_IP);
 	u_short arp_native = htons(ETHERTYPE_ARP);
+	struct ifnet_demux_desc demux[2] = {
+		{ .type = DLIL_DESC_ETYPE2, .data = &en_native,
+		  .datalen = sizeof(en_native) },
+		{ .type = DLIL_DESC_ETYPE2, .data = &arp_native,
+		  .datalen = sizeof(arp_native) }
+	};
 	errno_t error;
 
-	bzero(&demux[0], sizeof(demux));
-	demux[0].type = DLIL_DESC_ETYPE2;
-	demux[0].data = &en_native;
-	demux[0].datalen = sizeof(en_native);
-	demux[1].type = DLIL_DESC_ETYPE2;
-	demux[1].data = &arp_native;
-	demux[1].datalen = sizeof(arp_native);
-
-	bzero(&proto, sizeof(proto));
 	proto.demux_list = demux;
 	proto.demux_count = sizeof(demux) / sizeof(demux[0]);
 	proto.input = ether_inet_input;

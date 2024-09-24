@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -38,15 +38,28 @@
 
 #include "kern/exclaves.tightbeam.h"
 #include "exclaves_boot.h"
+#include "exclaves_debug.h"
+#include "exclaves_resource.h"
 
-#define EXCLAVES_ID_LOGSERVER_EP \
-    (exclaves_endpoint_lookup("com.apple.service.LogServer_xnuproxy"))
+#define EXCLAVES_ID_LOGSERVER_EP                     \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.LogServer_xnuproxy"))
+
+#define EXCLAVES_LOGS_CATEGORY      "exclaves-logs"
+#define EXCLAVES_CONFIG_CATEGORY    "exclaves-config"
+
+extern bool os_log_disabled(void);
+extern kern_return_t exclaves_oslog_set_trace_mode(uint32_t);
+
+static bool oslog_exclaves_ready = false;
+static oslogdarwin_configadmin_s config_admin = {0};
+
+TUNABLE(bool, oslog_exclaves, "oslog_exclaves", true);
 
 #if DEVELOPMENT || DEBUG
 
 #define OS_LOG_MAX_SIZE (2048)
-
-TUNABLE(bool, oslog_exclaves, "oslog_exclaves", true);
+#define dbg_counter_inc(c) counter_inc((c))
 
 SCALABLE_COUNTER_DEFINE(oslog_e_log_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_log_dropped_count);
@@ -55,7 +68,9 @@ SCALABLE_COUNTER_DEFINE(oslog_e_metadata_dropped_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_signpost_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_signpost_dropped_count);
 SCALABLE_COUNTER_DEFINE(oslog_e_query_count);
-SCALABLE_COUNTER_DEFINE(oslog_e_error_query_count);
+SCALABLE_COUNTER_DEFINE(oslog_e_query_error_count);
+SCALABLE_COUNTER_DEFINE(oslog_e_trace_mode_set_count);
+SCALABLE_COUNTER_DEFINE(oslog_e_trace_mode_error_count);
 
 /*
  * Interpose kernel UUID until Exclaves cstring harvesting is in place. This
@@ -91,6 +106,7 @@ oslogdarwin_logdata_data(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size
 static void
 os_log_replay_log(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size_t ld_data_size)
 {
+	firehose_stream_t stream = (firehose_stream_t)ld->stream;
 	const size_t ld_size = oslogdarwin_logdata_data(ld, ld_data, ld_data_size);
 	assert3u(ld_size, <=, ld_data_size);
 	assert3u(ld->pubsize, <=, ld_size);
@@ -102,6 +118,7 @@ os_log_replay_log(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size_t ld_d
 	switch (ftid.ftid._namespace) {
 	case firehose_tracepoint_namespace_metadata:
 		counter_inc(&oslog_e_metadata_count);
+		assert3u(stream, ==, firehose_stream_metadata);
 		if (!os_log_encoded_metadata(ftid, ld->stamp, ld_data, ld_size)) {
 			counter_inc(&oslog_e_metadata_dropped_count);
 		}
@@ -109,14 +126,14 @@ os_log_replay_log(const oslogdarwin_logdata_s *ld, uint8_t *ld_data, size_t ld_d
 	case firehose_tracepoint_namespace_log:
 		counter_inc(&oslog_e_log_count);
 		interpose_kernel_uuid(ld_data, ld_size);
-		if (!os_log_encoded_log(ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
+		if (!os_log_encoded_log(stream, ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
 			counter_inc(&oslog_e_log_dropped_count);
 		}
 		break;
 	case firehose_tracepoint_namespace_signpost:
 		counter_inc(&oslog_e_signpost_count);
 		interpose_kernel_uuid(ld_data, ld_size);
-		if (!os_log_encoded_signpost(ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
+		if (!os_log_encoded_signpost(stream, ftid, ld->stamp, ld_data, ld_size, ld->pubsize)) {
 			counter_inc(&oslog_e_signpost_dropped_count);
 		}
 		break;
@@ -139,33 +156,33 @@ os_log_replay_logs(const oslogdarwin_logdata_v_s *logs, uint8_t *log_buffer, siz
  * and runs only when there are new logs in Exclaves to pick up and to replay.
  */
 static void
-log_server_retrieve_logs(void *arg, __unused wait_result_t w)
+log_server_retrieve_logs(__unused void *arg, __unused wait_result_t w)
 {
-	os_log_t log = arg;
+	os_log_t log = os_log_create(OS_LOG_SUBSYSTEM, EXCLAVES_LOGS_CATEGORY);
 
 	tb_endpoint_t ep = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
 	    EXCLAVES_ID_LOGSERVER_EP, TB_ENDPOINT_OPTIONS_NONE);
 	if (ep == NULL) {
-		os_log_error(log, "Exclaves logging: Failed to create the endpoint\n");
+		os_log_error(log, "Failed to create log server endpoint\n");
 		return;
 	}
 
-	oslogdarwin_consumer_s log_server = {0};
+	oslogdarwin_consumer_s consumer = {0};
 
-	tb_error_t err = oslogdarwin_consumer__init(&log_server, ep);
+	tb_error_t err = oslogdarwin_consumer__init(&consumer, ep);
 	if (err != TB_ERROR_SUCCESS) {
-		os_log_error(log, "Exclaves logging: Failed to initialize client with %d\n", err);
+		os_log_error(log, "Failed to initialize log consumer (error: %d)\n", err);
 		return;
 	}
 
 	uint8_t *log_buffer = kalloc_data_tag(OS_LOG_MAX_SIZE, Z_WAITOK_ZERO, VM_KERN_MEMORY_LOG);
 	if (!log_buffer) {
-		os_log_error(log, "Exclaves logging: Failed to allocate a log buffer\n");
+		os_log_error(log, "Failed to allocate the log buffer\n");
 		return;
 	}
 
 	do {
-		err = oslogdarwin_consumer_getlogs(&log_server, ^(oslogdarwin_logdata_v_s logs) {
+		err = oslogdarwin_consumer_getlogs(&consumer, ^(oslogdarwin_logdata_v_s logs) {
 			os_log_replay_logs(&logs, log_buffer, OS_LOG_MAX_SIZE);
 			counter_inc(&oslog_e_query_count);
 		});
@@ -173,17 +190,13 @@ log_server_retrieve_logs(void *arg, __unused wait_result_t w)
 
 	kfree_data(log_buffer, OS_LOG_MAX_SIZE);
 
-	counter_inc(&oslog_e_error_query_count);
-	os_log_error(log, "Exclaves logging: Failed to retrieve logs, error: %d. Exiting.\n", err);
+	counter_inc(&oslog_e_query_error_count);
+	os_log_error(log, "Failed to retrieve logs with (error: %d). Exiting.\n", err);
 }
 
 #else // DEVELOPMENT || DEBUG
 
-/*
- * Exclaves logging is temporarily disabled until all parts of the logging
- * pipeline land.
- */
-TUNABLE(bool, oslog_exclaves, "oslog_exclaves", false);
+#define dbg_counter_inc(c)
 
 static void
 replay_redacted_log(const oslogdarwin_redactedlogdata_log_s *log)
@@ -242,51 +255,101 @@ os_log_replay_redacted_logs(const oslogdarwin_redactedlogdata_v_s *logs)
  * and runs only when there are new logs in Exclaves to pick up and to replay.
  */
 static void
-redacted_log_server_retrieve_logs(void *arg, __unused wait_result_t w)
+redacted_log_server_retrieve_logs(__unused void *arg, __unused wait_result_t w)
 {
-	os_log_t log = arg;
+	os_log_t log = os_log_create(OS_LOG_SUBSYSTEM, EXCLAVES_LOGS_CATEGORY);
 
 	tb_endpoint_t ep = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
 	    EXCLAVES_ID_LOGSERVER_EP, TB_ENDPOINT_OPTIONS_NONE);
 	if (ep == NULL) {
-		os_log_error(log, "Exclaves logging: Failed to create the endpoint\n");
+		os_log_error(log, "Failed to create log server endpoint\n");
 		return;
 	}
 
-	oslogdarwin_redactedconsumer_s log_server = {0};
+	oslogdarwin_redactedconsumer_s consumer = {0};
 
-	tb_error_t err = oslogdarwin_redactedconsumer__init(&log_server, ep);
+	tb_error_t err = oslogdarwin_redactedconsumer__init(&consumer, ep);
 	if (err != TB_ERROR_SUCCESS) {
-		os_log_error(log, "Exclaves logging: Failed to initialize client with %d\n", err);
+		os_log_error(log, "Failed to initialize log consumer (error: %d)\n", err);
 		return;
 	}
 
 	do {
-		err = oslogdarwin_redactedconsumer_getlogs(&log_server, ^(oslogdarwin_redactedlogdata_v_s logs) {
+		err = oslogdarwin_redactedconsumer_getlogs(&consumer, ^(oslogdarwin_redactedlogdata_v_s logs) {
 			os_log_replay_redacted_logs(&logs);
 		});
 	} while (__probable(err == TB_ERROR_SUCCESS));
 
-	os_log_error(log, "Exclaves logging: Failed to retrieve logs, error: %d. Exiting.\n", err);
+	os_log_error(log, "Failed to retrieve logs (error: %d). Exiting.\n", err);
 }
 
 #endif // DEVELOPMENT || DEBUG
 
+kern_return_t
+exclaves_oslog_set_trace_mode(uint32_t mode)
+{
+	if (os_log_disabled() || !oslog_exclaves || !oslog_exclaves_ready) {
+		return KERN_SUCCESS;
+	}
+
+	os_log_t log = os_log_create(OS_LOG_SUBSYSTEM, EXCLAVES_CONFIG_CATEGORY);
+
+	tb_error_t err = oslogdarwin_configadmin_settracemode(&config_admin, mode);
+	if (err == TB_ERROR_SUCCESS) {
+		dbg_counter_inc(&oslog_e_trace_mode_set_count);
+		return KERN_SUCCESS;
+	}
+
+	dbg_counter_inc(&oslog_e_trace_mode_error_count);
+	os_log_error(log, "Failed to set exclaves trace mode (error: %d)\n", err);
+
+	return KERN_FAILURE;
+}
+
+static bool
+exclaves_oslog_init_config_admin(oslogdarwin_configadmin_s *admin)
+{
+	os_log_t log = os_log_create(OS_LOG_SUBSYSTEM, EXCLAVES_CONFIG_CATEGORY);
+
+	tb_endpoint_t ep = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
+	    EXCLAVES_ID_LOGSERVER_EP, TB_ENDPOINT_OPTIONS_NONE);
+	if (ep == NULL) {
+		os_log_error(log, "Failed to create log server endpoint\n");
+		return false;
+	}
+
+	tb_error_t err = oslogdarwin_configadmin__init(admin, ep);
+	if (err != TB_ERROR_SUCCESS) {
+		os_log_error(log, "Failed to initialize config client (error: %d)\n", err);
+		return false;
+	}
+
+	return true;
+}
+
 static kern_return_t
 exclaves_oslog_init(void)
 {
-	extern bool os_log_disabled(void);
-
 	if (os_log_disabled()) {
 		printf("Exclaves logging: Disabled by ATM\n");
 		return KERN_SUCCESS;
 	}
 
-	os_log_t log = os_log_create(OS_LOG_XNU_SUBSYSTEM, "oslog-exclaves-handler");
+	os_log_t log = os_log_create(OS_LOG_SUBSYSTEM, EXCLAVES_LOGS_CATEGORY);
 
 	if (!oslog_exclaves) {
 		os_log(log, "Exclaves logging: Disabled by boot argument\n");
 		return KERN_SUCCESS;
+	}
+
+	if (EXCLAVES_ID_LOGSERVER_EP == EXCLAVES_INVALID_ID) {
+		exclaves_requirement_assert(EXCLAVES_R_LOG_SERVER,
+		    "log server not found");
+		return KERN_SUCCESS;
+	}
+
+	if (!exclaves_oslog_init_config_admin(&config_admin)) {
+		return KERN_FAILURE;
 	}
 
 	thread_t oslog_exclaves_thread = THREAD_NULL;
@@ -296,14 +359,17 @@ exclaves_oslog_init(void)
 	thread_continue_t log_handler = redacted_log_server_retrieve_logs;
 #endif
 
-	kern_return_t err = kernel_thread_start(log_handler, log, &oslog_exclaves_thread);
+	kern_return_t err = kernel_thread_start(log_handler, NULL, &oslog_exclaves_thread);
 	if (err != KERN_SUCCESS) {
-		os_log_error(log, "Exclaves logging: Disabled. Starting the thread failed with %d\n", err);
+		os_log_error(log, "Exclaves logging: Disabled. Failed to start retrieval thread (error: %d)\n", err);
 		return KERN_FAILURE;
 	}
 	thread_deallocate(oslog_exclaves_thread);
 
+	oslog_exclaves_ready = true;
 	os_log(log, "Exclaves logging: Enabled\n");
+
+	(void) exclaves_oslog_set_trace_mode(atm_get_diagnostic_config());
 
 	return KERN_SUCCESS;
 }

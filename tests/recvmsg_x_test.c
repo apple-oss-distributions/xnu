@@ -160,7 +160,7 @@ recvPackets_x(int s, unsigned int numMsg, size_t buflen, socklen_t cmsgLen)
 	free(cmsgBuf);
 }
 
-T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter")
+T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter", T_META_TAG_VM_PREFERRED)
 {
 	struct sockaddr_in addr = {
 		.sin_len = sizeof(addr),
@@ -213,7 +213,7 @@ T_DECL(recvmsg_x_test, "exercise revcmsg_x() with various parameter")
 	close(recvSocket);
 }
 
-T_DECL(recvmsg_x_empty_packet, "exercise revcmsg_x() with an empty packet")
+T_DECL(recvmsg_x_empty_packet, "exercise revcmsg_x() with an empty packet", T_META_TAG_VM_PREFERRED)
 {
 	const size_t bufsize = 16;
 	int sockets[2];

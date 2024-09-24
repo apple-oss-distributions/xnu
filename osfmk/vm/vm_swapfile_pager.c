@@ -34,11 +34,12 @@
 #include <kern/kalloc.h>
 #include <kern/queue.h>
 
-#include <vm/memory_object.h>
-#include <vm/vm_kern.h>
+#include <vm/memory_object_internal.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_ubc.h>
 
 
 /*
@@ -501,7 +502,7 @@ swapfile_pager_terminate_internal(
 	}
 
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->swp_pgr_hdr.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
+	memory_object_destroy(pager->swp_pgr_hdr.mo_control, VM_OBJECT_DESTROY_PAGER);
 }
 
 /*

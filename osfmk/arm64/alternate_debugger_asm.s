@@ -34,6 +34,7 @@
 	.align 2
 	.globl EXT(alternate_debugger_just_return)
 LEXT(alternate_debugger_just_return)
+	ARM64_PROLOG
 	sub		sp, sp, #0x20 
 	stp		x29, x30, [sp, #0x10]
 	add		x29, sp, #0x10 
@@ -54,10 +55,11 @@ LEXT(alternate_debugger_just_return)
 	ldr		x1, [sp, #0x8]
 	blr		x1				// (*putc_address)('<');
 	mov		w0, #0xa
-	ldr		x1, [sp, #0x8]
+	ldr		x16, [sp, #0x8]
 	ldp		x29, x30, [sp, #0x10]
 	add		sp, sp, #0x20 
-	br		x1				// (*putc_address)('\n');
+	/* BTI calling convention requires tail calls use x16/x17 */
+	br		x16				// (*putc_address)('\n');
 	.align 2
 	.globl EXT(alternate_debugger_just_return_end)
 LEXT(alternate_debugger_just_return_end)

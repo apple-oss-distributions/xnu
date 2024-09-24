@@ -31,6 +31,7 @@
 #include <sys/kdebug.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <net/dlil_sysctl.h>
 
 extern kern_return_t thread_terminate(thread_t);
 
@@ -301,7 +302,7 @@ netif_rxpoll_poll_driver(struct ifnet *ifp, uint32_t m_lim,
     struct ifnet_stat_increment_param *s, struct timespec *start_time,
     struct timespec *poll_duration)
 {
-	struct mbuf *m_head = NULL, *m_tail = NULL;
+	struct mbuf *__single m_head = NULL, *__single m_tail = NULL;
 	uint32_t m_cnt = 0, m_totlen = 0;
 	struct timespec now;
 
@@ -345,7 +346,7 @@ __attribute__((noreturn))
 static void
 netif_rxpoll_compat_thread_cont(void *v, wait_result_t wres)
 {
-	struct ifnet *ifp = v;
+	struct ifnet *__single ifp = v;
 	struct timespec *ts = NULL;
 	struct timespec start_time, poll_intvl, poll_duration;
 	struct ifnet_stat_increment_param s;
@@ -489,15 +490,16 @@ void
 netif_rxpoll_compat_thread_func(void *v, wait_result_t w)
 {
 #pragma unused(w)
-	char thread_name[MAXTHREADNAMESIZE];
-	struct ifnet *ifp = v;
+	char thread_name_buf[MAXTHREADNAMESIZE];
+	const char *__null_terminated thread_name = NULL;
+	struct ifnet *__single ifp = v;
 
 	VERIFY(ifp->if_eflags & IFEF_RXPOLL);
 	VERIFY(current_thread() == ifp->if_poll_thread);
 
 	/* construct the name for this thread, and then apply it */
-	bzero(thread_name, sizeof(thread_name));
-	(void) snprintf(thread_name, sizeof(thread_name),
+	bzero(thread_name_buf, sizeof(thread_name_buf));
+	thread_name = tsnprintf(thread_name_buf, sizeof(thread_name_buf),
 	    "skywalk_netif_poller_%s", ifp->if_xname);
 	thread_set_thread_name(ifp->if_poll_thread, thread_name);
 

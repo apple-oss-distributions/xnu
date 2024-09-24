@@ -516,7 +516,8 @@ struct pr_usrreqs {
 	    struct sockaddr *, struct proc *, uint32_t,
 	    sae_associd_t, sae_connid_t *, uint32_t, void *, uint32_t,
 	    struct uio *, user_ssize_t *);
-	int     (*pru_control)(struct socket *, u_long, caddr_t,
+	int     (*pru_control)(struct socket *,
+	    u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data,
 	    struct ifnet *, struct proc *);
 	int     (*pru_detach)(struct socket *);
 	int     (*pru_disconnect)(struct socket *);
@@ -574,7 +575,8 @@ extern int pru_disconnectx_notsupp(struct socket *, sae_associd_t,
     sae_connid_t);
 extern int pru_socheckopt_null(struct socket *, struct sockopt *);
 #endif /* XNU_KERNEL_PRIVATE */
-extern int pru_control_notsupp(struct socket *so, u_long cmd, caddr_t data,
+extern int pru_control_notsupp(struct socket *so,
+    u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data,
     struct ifnet *ifp, struct proc *p);
 extern int pru_detach_notsupp(struct socket *so);
 extern int pru_disconnect_notsupp(struct socket *so);

@@ -150,7 +150,7 @@
 
 #define __STC_OBJ_TO_BYTES_CNV_IMPL(CV, TAG, TYPE, MAX_LEN, CNV_F)                                \
 __STC_CONV_ATTRS__                                                                                \
-static inline CV uint8_t* __indexable                                                             \
+static inline CV uint8_t* __header_indexable                                                      \
 CNV_F(const TAG TYPE *ptr __single)                                                               \
 {                                                                                                 \
     return __STC_CONV_TO_BYTES_LEN(__DECONST(TAG TYPE *__single, ptr), (MAX_LEN));                \

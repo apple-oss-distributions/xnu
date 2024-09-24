@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -478,6 +478,7 @@ extern errno_t mbuf_ring_cluster_activate(mbuf_t mbuf);
 extern errno_t mbuf_cluster_set_prop(mbuf_t mbuf, u_int32_t oldprop,
     u_int32_t newprop);
 extern errno_t mbuf_cluster_get_prop(mbuf_t mbuf, u_int32_t *prop);
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*!
@@ -2023,6 +2024,28 @@ extern errno_t mbuf_get_keepalive_flag(mbuf_t mbuf, boolean_t *is_keepalive);
  *               code will be EINVAL
  */
 extern errno_t mbuf_set_keepalive_flag(mbuf_t mbuf, boolean_t is_keepalive);
+
+/*!
+ *       @function mbuf_get_wake_packet_flag
+ *       @discussion Tell if the wake packet flag is set.
+ *       @param mbuf The mbuf representing the packet.
+ *       @param is_wake_packet A pointer that returns the truth value.
+ *       @result 0 upon success otherwise the errno error. If the mbuf
+ *               packet header does not have valid data bytes, the error
+ *               code will be EINVAL.
+ */
+extern errno_t mbuf_get_wake_packet_flag(mbuf_t mbuf, boolean_t *is_wake_packet);
+
+/*!
+ *       @function mbuf_set_wake_packet_flag
+ *       @discussion Set or clear the wake packet flag.
+ *       @param mbuf The mbuf representing the packet.
+ *       @param is_wake_packet The boolean value.
+ *       @result 0 upon success otherwise the errno error. If the mbuf
+ *               packet header does not have valid data bytes, the error
+ *               code will be EINVAL.
+ */
+extern errno_t mbuf_set_wake_packet_flag(mbuf_t mbuf, boolean_t is_wake_packet);
 
 #endif /* KERNEL_PRIVATE */
 

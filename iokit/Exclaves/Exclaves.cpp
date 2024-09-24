@@ -80,7 +80,9 @@ struct IOService::IOExclaveProxyState {
 	tb_endpoint_t edk_tb_endpoint;
 	ioservice_ioserviceprivate edk_client;
 	OSDictionary *exclave_interrupts;
+	IOLock *exclave_interrupts_lock;
 	OSDictionary *exclave_timers;
+	IOLock *exclave_timers_lock;
 	uint32_t nextExclaveTimerId;
 
 	// TODO: implement properly once ExclaveAperture removed
@@ -113,21 +115,22 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 
 	ref = NULL;
 #if CONFIG_EXCLAVES
-	uint64_t serviceID;
-	char key[16];
+	int err = 1;
 	do {
-		OSObject * prop;
-		OSData   * data;
-		bool       result;
-		uint64_t   mach_endpoint = 0;
-		tb_error_t tberr;
-		tb_endpoint_t tb_endpoint;
-		ioservice_ioserviceconcrete client;
-		bool edk_endpoint_exists = false;
-		uint64_t   edk_mach_endpoint = 0;
-		tb_endpoint_t edk_tb_endpoint;
-		ioservice_ioserviceprivate edk_client;
-		IOWorkLoop *wl;
+		char     key[16];
+		uint64_t serviceID;
+		uint64_t mach_endpoint = 0;
+		uint64_t edk_mach_endpoint = 0;
+		bool     edk_endpoint_exists = false;
+		tb_error_t                   tberr;
+		tb_endpoint_t                tb_endpoint;
+		tb_endpoint_t                edk_tb_endpoint;
+		ioservice_ioserviceconcrete  client;
+		ioservice_ioserviceprivate   edk_client;
+		OSObject *                   prop;
+		OSData *                     data;
+		IOWorkLoop *                 wl;
+		IOExclaveProxyStateWrapper * wrapper;
 
 		// exit early if Exclaves are not available
 		if (exclaves_get_status() == EXCLAVES_STATUS_NOT_SUPPORTED) {
@@ -190,7 +193,9 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 			ref->edk_client = edk_client;
 		}
 		ref->exclave_interrupts = OSDictionary::withCapacity(1);
+		ref->exclave_interrupts_lock = IOLockAlloc();
 		ref->exclave_timers = OSDictionary::withCapacity(1);
+		ref->exclave_timers_lock = IOLockAlloc();
 		ref->exclaveAsyncNotificationEventSourcesLock = IOLockAlloc();
 
 		// TODO: remove once workloop aperture workaround removed
@@ -209,7 +214,7 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		// Add proxy state to global lookup table
 		serviceID = getRegistryEntryID();
 		snprintf(key, sizeof(key), "%llu", serviceID);
-		IOExclaveProxyStateWrapper *wrapper = OSTypeAlloc(IOExclaveProxyStateWrapper);
+		wrapper = OSTypeAlloc(IOExclaveProxyStateWrapper);
 		wrapper->proxyState = ref;
 		IORecursiveLockLock(gExclaveProxyStateLock);
 		gExclaveProxyStates->setObject(key, wrapper);
@@ -218,6 +223,7 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 		if (ref->edk_endpoint_exists) {
 			// Start() called after lookup table registration in case upcalls are made during exclave start().
 			// Use registry ID as exclave's upcall identifer
+			bool result;
 			tberr = ioservice_ioserviceprivate_startprivate(&edk_client, serviceID, &result);
 			if (TB_ERROR_SUCCESS != tberr || !result) {
 				printf("%s ERROR: Failed StartPrivate\n", __func__);
@@ -226,12 +232,37 @@ IOService::exclaveStart(IOService * provider, IOExclaveProxyState ** pRef)
 				gExclaveProxyStates->removeObject(key);
 				IORecursiveLockUnlock(gExclaveProxyStateLock);
 				wrapper->release();
-				IODelete(ref, IOExclaveProxyState, 1);
-				ref = NULL;
 				break;
 			}
 		}
+
+		err = 0;
 	} while (false);
+
+	if (err) {
+		if (ref) {
+			OSSafeReleaseNULL(ref->exclave_interrupts);
+			if (ref->exclave_interrupts_lock) {
+				IOLockFree(ref->exclave_interrupts_lock);
+				ref->exclave_interrupts_lock = NULL;
+			}
+			OSSafeReleaseNULL(ref->exclave_timers);
+			if (ref->exclave_timers_lock) {
+				IOLockFree(ref->exclave_timers_lock);
+				ref->exclave_timers_lock = NULL;
+			}
+			if (ref->exclaveAsyncNotificationEventSourcesLock) {
+				IOLockFree(ref->exclaveAsyncNotificationEventSourcesLock);
+				ref->exclaveAsyncNotificationEventSourcesLock = NULL;
+			}
+			if (ref->ewla) {
+				IODelete(ref->ewla, IOExclaveWorkLoopAperture, 1);
+				ref->ewla = NULL;
+			}
+			IODelete(ref, IOExclaveProxyState, 1);
+			ref = NULL;
+		}
+	}
 #endif /* CONFIG_EXCLAVES */
 
 	if (!ref) {
@@ -413,7 +444,7 @@ getExclaveInterruptKey(int index, char *key, size_t size)
 }
 
 static IOInterruptEventSource *
-getExclaveInterruptEventSource(IOService::IOExclaveProxyState * pRef, int index)
+copyExclaveInterruptEventSource(IOService::IOExclaveProxyState * pRef, int index)
 {
 	OSObject *obj;
 	IOInterruptEventSource *ies;
@@ -424,12 +455,16 @@ getExclaveInterruptEventSource(IOService::IOExclaveProxyState * pRef, int index)
 	}
 
 	getExclaveInterruptKey(index, irqKey, sizeof(irqKey));
+	IOLockAssert(pRef->exclave_interrupts_lock, kIOLockAssertOwned);
 	obj = pRef->exclave_interrupts->getObject(irqKey);
 	if (!obj) {
 		return NULL;
 	}
 
 	ies = OSDynamicCast(IOInterruptEventSource, obj);
+	if (ies) {
+		ies->retain();
+	}
 	return ies;
 }
 
@@ -612,7 +647,7 @@ IOService::exclaveRegisterInterrupt(IOExclaveProxyState * pRef, int index, bool 
 	IOWorkLoop *wl;
 	char irqKey[5];
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
@@ -637,7 +672,10 @@ IOService::exclaveRegisterInterrupt(IOExclaveProxyState * pRef, int index, bool 
 
 	// Register IOIES in exclave proxy state
 	getExclaveInterruptKey(index, irqKey, sizeof(irqKey));
+	IOLockLock(pRef->exclave_interrupts_lock);
 	pRef->exclave_interrupts->setObject(irqKey, ies);
+	IOLockUnlock(pRef->exclave_interrupts_lock);
+	OSSafeReleaseNULL(ies);
 
 	EXLOG("%s: IRQ %d register success!\n", __func__, index);
 	return true;
@@ -654,25 +692,32 @@ IOService::exclaveRemoveInterrupt(IOExclaveProxyState * pRef, int index)
 	IOWorkLoop *wl;
 	char irqKey[5];
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
 	}
+	getExclaveInterruptKey(index, irqKey, sizeof(irqKey));
 
-	ies = getExclaveInterruptEventSource(pRef, index);
+	IOLockLock(pRef->exclave_interrupts_lock);
+
+	ies = copyExclaveInterruptEventSource(pRef, index);
+
 	if (!ies) {
+		IOLockUnlock(pRef->exclave_interrupts_lock);
+		OSSafeReleaseNULL(ies);
 		return false;
 	}
+	pRef->exclave_interrupts->removeObject(irqKey);
+	IOLockUnlock(pRef->exclave_interrupts_lock);
 
 	wl = getWorkLoop();
 	if (!wl) {
+		OSSafeReleaseNULL(ies);
 		return false;
 	}
 
-	getExclaveInterruptKey(index, irqKey, sizeof(irqKey));
 	wl->removeEventSource(ies);
-	pRef->exclave_interrupts->removeObject(irqKey);
 	OSSafeReleaseNULL(ies);
 
 	EXLOG("%s: IRQ %d removed successfully\n", __func__, index);
@@ -688,14 +733,17 @@ IOService::exclaveEnableInterrupt(IOExclaveProxyState * pRef, int index, bool en
 #if CONFIG_EXCLAVES
 	IOInterruptEventSource *ies;
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
 	}
 
-	ies = getExclaveInterruptEventSource(pRef, index);
+	IOLockLock(pRef->exclave_interrupts_lock);
+	ies = copyExclaveInterruptEventSource(pRef, index);
 	if (!ies) {
+		IOLockUnlock(pRef->exclave_interrupts_lock);
+		OSSafeReleaseNULL(ies);
 		return false;
 	}
 
@@ -704,6 +752,8 @@ IOService::exclaveEnableInterrupt(IOExclaveProxyState * pRef, int index, bool en
 	} else {
 		ies->disable();
 	}
+	IOLockUnlock(pRef->exclave_interrupts_lock);
+	OSSafeReleaseNULL(ies);
 
 	EXLOG("%s: IRQ %s success!\n", __func__, enable ? "enable" : "disable");
 	return true;
@@ -751,7 +801,7 @@ getExclaveTimerKey(uint32_t timer_id, char *key, size_t size)
 }
 
 static IOTimerEventSource *
-getExclaveTimerEventSource(IOService::IOExclaveProxyState * pRef, uint32_t timer_id)
+copyExclaveTimerEventSource(IOService::IOExclaveProxyState * pRef, uint32_t timer_id)
 {
 	OSObject *obj;
 	IOTimerEventSource *tes;
@@ -762,12 +812,16 @@ getExclaveTimerEventSource(IOService::IOExclaveProxyState * pRef, uint32_t timer
 	}
 
 	getExclaveTimerKey(timer_id, timerKey, sizeof(timerKey));
+	IOLockAssert(pRef->exclave_timers_lock, kIOLockAssertOwned);
 	obj = pRef->exclave_timers->getObject(timerKey);
 	if (!obj) {
 		return NULL;
 	}
 
 	tes = OSDynamicCast(IOTimerEventSource, obj);
+	if (tes) {
+		tes->retain();
+	}
 	return tes;
 }
 #endif /* CONFIG_EXCLAVES */
@@ -781,7 +835,7 @@ IOService::exclaveRegisterTimer(IOExclaveProxyState * pRef, uint32_t *timer_id)
 	IOWorkLoop *wl;
 	char timerKey[5];
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef || !timer_id) {
 		return false;
@@ -805,9 +859,12 @@ IOService::exclaveRegisterTimer(IOExclaveProxyState * pRef, uint32_t *timer_id)
 	}
 
 	// Register IOTES in exclave proxy state
+	IOLockLock(pRef->exclave_timers_lock);
 	*timer_id = pRef->nextExclaveTimerId++;
 	getExclaveTimerKey(*timer_id, timerKey, sizeof(timerKey));
 	pRef->exclave_timers->setObject(timerKey, tes);
+	IOLockUnlock(pRef->exclave_timers_lock);
+	OSSafeReleaseNULL(tes);
 
 	EXLOG("%s: timer %u register success!\n", __func__, *timer_id);
 	return true;
@@ -824,25 +881,31 @@ IOService::exclaveRemoveTimer(IOExclaveProxyState * pRef, uint32_t timer_id)
 	IOWorkLoop *wl;
 	char timerKey[5];
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
 	}
 
-	tes = getExclaveTimerEventSource(pRef, timer_id);
+	getExclaveTimerKey(timer_id, timerKey, sizeof(timerKey));
+
+	IOLockLock(pRef->exclave_timers_lock);
+	tes = copyExclaveTimerEventSource(pRef, timer_id);
 	if (!tes) {
+		IOLockUnlock(pRef->exclave_timers_lock);
+		OSSafeReleaseNULL(tes);
 		return false;
 	}
+	pRef->exclave_timers->removeObject(timerKey);
+	IOLockUnlock(pRef->exclave_timers_lock);
 
 	wl = getWorkLoop();
 	if (!wl) {
+		OSSafeReleaseNULL(tes);
 		return false;
 	}
 
 	wl->removeEventSource(tes);
-	getExclaveTimerKey(timer_id, timerKey, sizeof(timerKey));
-	pRef->exclave_timers->removeObject(timerKey);
 	OSSafeReleaseNULL(tes);
 
 	EXLOG("%s: timer %u removed successfully\n", __func__, timer_id);
@@ -858,14 +921,17 @@ IOService::exclaveEnableTimer(IOExclaveProxyState * pRef, uint32_t timer_id, boo
 #if CONFIG_EXCLAVES
 	IOTimerEventSource *tes;
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
 	}
 
-	tes = getExclaveTimerEventSource(pRef, timer_id);
+	IOLockLock(pRef->exclave_timers_lock);
+	tes = copyExclaveTimerEventSource(pRef, timer_id);
 	if (!tes) {
+		IOLockUnlock(pRef->exclave_timers_lock);
+		OSSafeReleaseNULL(tes);
 		return false;
 	}
 
@@ -874,6 +940,8 @@ IOService::exclaveEnableTimer(IOExclaveProxyState * pRef, uint32_t timer_id, boo
 	} else {
 		tes->disable();
 	}
+	IOLockUnlock(pRef->exclave_timers_lock);
+	OSSafeReleaseNULL(tes);
 
 	EXLOG("%s: timer %u %s success\n", __func__, timer_id, enable ? "enable" : "disable");
 	return true;
@@ -888,18 +956,23 @@ IOService::exclaveTimerSetTimeout(IOExclaveProxyState * pRef, uint32_t timer_id,
 #if CONFIG_EXCLAVES
 	IOTimerEventSource *tes;
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef || !kr) {
 		return false;
 	}
 
-	tes = getExclaveTimerEventSource(pRef, timer_id);
+	IOLockLock(pRef->exclave_timers_lock);
+	tes = copyExclaveTimerEventSource(pRef, timer_id);
 	if (!tes) {
+		IOLockUnlock(pRef->exclave_timers_lock);
+		OSSafeReleaseNULL(tes);
 		return false;
 	}
 
 	*kr = tes->setTimeout(options, interval, leeway);
+	IOLockUnlock(pRef->exclave_timers_lock);
+	OSSafeReleaseNULL(tes);
 
 	EXLOG("%s: timer %u setTimeout completed (kr %d)\n", __func__, timer_id, *kr);
 	return true;
@@ -914,18 +987,23 @@ IOService::exclaveTimerCancelTimeout(IOExclaveProxyState * pRef, uint32_t timer_
 #if CONFIG_EXCLAVES
 	IOTimerEventSource *tes;
 
-	assert(getWorkLoop() && getWorkLoop()->inGate());
+	assert(getWorkLoop());
 
 	if (!pRef) {
 		return false;
 	}
 
-	tes = getExclaveTimerEventSource(pRef, timer_id);
+	IOLockLock(pRef->exclave_timers_lock);
+	tes = copyExclaveTimerEventSource(pRef, timer_id);
 	if (!tes) {
+		IOLockUnlock(pRef->exclave_timers_lock);
+		OSSafeReleaseNULL(tes);
 		return false;
 	}
 
 	tes->cancelTimeout();
+	IOLockUnlock(pRef->exclave_timers_lock);
+	OSSafeReleaseNULL(tes);
 	EXLOG("%s: timer %u setTimeout success\n", __func__, timer_id);
 	return true;
 #else /* CONFIG_EXCLAVES */
@@ -954,6 +1032,7 @@ IOService::exclaveTimerFired(IOTimerEventSource *eventSource)
 	}
 
 	// Find timer ID
+	IOLockLock(ref->exclave_timers_lock);
 	ref->exclave_timers->iterateObjects(^bool (const OSSymbol * id, OSObject * obj)
 	{
 		if (obj == eventSource) {
@@ -964,6 +1043,7 @@ IOService::exclaveTimerFired(IOTimerEventSource *eventSource)
 		}
 		return false;
 	});
+	IOLockUnlock(ref->exclave_timers_lock);
 
 	if (!found) {
 		printf("%s ERROR: Could not find timer ID\n", __func__);

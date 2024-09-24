@@ -44,7 +44,7 @@ spawn_child_process_with_limits(int soft_limit, int hard_limit, int test_num)
 	posix_spawnattr_init(&attrs);
 
 	err = posix_spawnattr_set_kqworklooplimit_ext(&attrs, soft_limit, hard_limit);
-	T_EXPECT_POSIX_SUCCESS(err, "posix_spawnattr_set_kqworklooplimit_ext");
+	T_ASSERT_POSIX_SUCCESS(err, "posix_spawnattr_set_kqworklooplimit_ext");
 
 	char soft_limit_str[32];
 	sprintf(soft_limit_str, "%d", soft_limit);
@@ -62,12 +62,12 @@ spawn_child_process_with_limits(int soft_limit, int hard_limit, int test_num)
 	child_args[4] = NULL;
 
 	err = posix_spawn(&child_pid, child_args[0], NULL, &attrs, child_args, environ);
-	T_EXPECT_POSIX_SUCCESS(err, "posix_spawn kqworkloop_limits_client");
+	T_ASSERT_POSIX_SUCCESS(err, "posix_spawn kqworkloop_limits_client");
 	return child_pid;
 }
 
 T_DECL(test_kqworkloop_soft_limit, "Allocate kqworkloops up to soft limit",
-    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false))
+    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
@@ -89,7 +89,7 @@ T_DECL(test_kqworkloop_soft_limit, "Allocate kqworkloops up to soft limit",
 }
 
 T_DECL(test_kqworkloop_hard_limit, "Allocate kqworkloops up to hard limit",
-    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false))
+    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
@@ -111,7 +111,7 @@ T_DECL(test_kqworkloop_hard_limit, "Allocate kqworkloops up to hard limit",
 }
 
 T_DECL(test_kqworkloop_soft_and_hard_limit, "Allocate kqworkloops with soft and hard limit",
-    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false))
+    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");
@@ -211,7 +211,7 @@ server_setup(struct args *args)
 
 T_DECL(test_kqworkloop_hard_limit_with_resource_notify_port,
     "Allocate kqworkloops up to hard limit and trigger notification",
-    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false))
+    T_META_IGNORECRASHES(".*kqworkloop_limits_client.*"), T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_BRIDGE
 	T_SKIP("Not running on target platforms");

@@ -72,7 +72,7 @@ SYSCTL_UINT(_kern_skywalk_flowswitch, OID_AUTO, chain_enqueue,
  * dual sized buffers.
  * A non-zero value enables the support.
  */
-#if defined(XNU_TARGET_OS_IOS) || defined(XNU_TARGET_OS_OSX)
+#if defined(XNU_TARGET_OS_IOS) || defined(XNU_TARGET_OS_OSX) || defined(XNU_TARGET_OS_XR)
 uint32_t fsw_use_dual_sized_pool = 1;
 #else
 uint32_t fsw_use_dual_sized_pool = 0;
@@ -114,9 +114,10 @@ fsw_attach_vp(struct kern_nexus *nx, struct kern_channel *ch,
     struct chreq *chr, struct nxbind *nxb, struct proc *p,
     struct nexus_vp_adapter **vpna)
 {
-#pragma unused(ch)
 	struct nx_flowswitch *fsw = NX_FSW_PRIVATE(nx);
-	SK_LOG_VAR(char *cr_name = chr->cr_name);
+	/* -fbounds-safety: cr_name should be null terminated (via snprintf) */
+	SK_LOG_VAR(const char *__null_terminated cr_name =
+	    __unsafe_forge_null_terminated(const char *, chr->cr_name));
 	int err = 0;
 
 	SK_LOCK_ASSERT_HELD();
@@ -153,6 +154,7 @@ fsw_attach_vp(struct kern_nexus *nx, struct kern_channel *ch,
 
 out:
 	if ((*vpna) != NULL) {
+		(*vpna)->vpna_up.na_private = ch;
 		SK_DF(err ? SK_VERB_ERROR : SK_VERB_FSW,
 		    "vpna \"%s\" (0x%llx) refs %u to fsw \"%s\" "
 		    "nx_port %d (err %d)", (*vpna)->vpna_up.na_name,
@@ -265,7 +267,7 @@ static int
 fsw_rps_threads_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg2)
-	struct nx_flowswitch *fsw = arg1;
+	struct nx_flowswitch *__single fsw = arg1;
 	uint32_t nthreads;
 	int changed;
 	int error;
@@ -286,8 +288,11 @@ fsw_get_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu, uint32_t *tso_
 	*tso_v4_mtu = 0;
 	*tso_v6_mtu = 0;
 
-#ifdef XNU_TARGET_OS_OSX
 	struct nx_flowswitch *fsw;
+
+	if (!kernel_is_macos_or_server()) {
+		return;
+	}
 
 	fsw = fsw_ifp_to_fsw(ifp);
 	if (fsw == NULL) {
@@ -309,14 +314,16 @@ fsw_get_tso_capabilities(struct ifnet *ifp, uint32_t *tso_v4_mtu, uint32_t *tso_
 	default:
 		break;
 	}
-#endif /* XNU_TARGET_OS_OSX */
 }
 
 static void
 fsw_tso_setup(struct nx_flowswitch *fsw)
 {
+	if (!kernel_is_macos_or_server()) {
+		return;
+	}
+
 	fsw->fsw_tso_mode = FSW_TSO_MODE_NONE;
-#ifdef XNU_TARGET_OS_OSX
 	struct ifnet *ifp = fsw->fsw_ifp;
 	if (!SKYWALK_CAPABLE(ifp) || !SKYWALK_NATIVE(ifp)) {
 		DTRACE_SKYWALK2(tso__no__support, struct nx_flowswitch *, fsw,
@@ -349,7 +356,6 @@ fsw_tso_setup(struct nx_flowswitch *fsw)
 	}
 	DTRACE_SKYWALK3(tso__mode, struct nx_flowswitch *, fsw,
 	    fsw_tso_mode_t, fsw->fsw_tso_mode, uint32_t, large_buf_size);
-#endif /* XNU_TARGET_OS_OSX */
 }
 
 static int
@@ -465,7 +471,8 @@ fsw_setup_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	ASSERT(fsw->fsw_reap_thread != THREAD_NULL);
 	(void) snprintf(fsw->fsw_reap_name, sizeof(fsw->fsw_reap_name),
 	    FSW_REAP_THREADNAME, ifp->if_xname, "");
-	thread_set_thread_name(fsw->fsw_reap_thread, fsw->fsw_reap_name);
+	thread_set_thread_name(fsw->fsw_reap_thread,
+	    __unsafe_null_terminated_from_indexable(fsw->fsw_reap_name));
 
 	error = fsw_netagent_register(fsw, ifp);
 	SK_DF(error ? SK_VERB_ERROR : SK_VERB_FSW,
@@ -511,6 +518,7 @@ static void
 fsw_teardown_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 {
 	struct ifnet *ifp;
+	const char *__null_terminated reap_name = NULL;
 
 	SK_LOCK_ASSERT_HELD();
 
@@ -566,9 +574,9 @@ fsw_teardown_ifp(struct nx_flowswitch *fsw, struct nexus_adapter *hwna)
 	}
 
 	ASSERT(fsw->fsw_reap_thread != THREAD_NULL);
-	(void) snprintf(fsw->fsw_reap_name, sizeof(fsw->fsw_reap_name),
+	reap_name = tsnprintf(fsw->fsw_reap_name, sizeof(fsw->fsw_reap_name),
 	    FSW_REAP_THREADNAME, if_name(ifp), "_detached");
-	thread_set_thread_name(fsw->fsw_reap_thread, fsw->fsw_reap_name);
+	thread_set_thread_name(fsw->fsw_reap_thread, reap_name);
 }
 
 static int
@@ -636,16 +644,20 @@ fsw_ctl_attach_log(const struct nx_spec_req *nsr,
     const struct kern_nexus *nx, int err)
 {
 	uuid_string_t uuidstr, ifuuidstr;
-	const char *nustr;
+	const char *__null_terminated nustr = NULL;
 
 	if (nsr->nsr_flags & NXSPECREQ_UUID) {
-		nustr = sk_uuid_unparse(nsr->nsr_uuid, uuidstr);
+		/*
+		 * -fbounds-safety: We know the output of sk_uuid_unparse is
+		 * null-terminated.
+		 */
+		nustr = __unsafe_forge_null_terminated(const char *,
+		    sk_uuid_unparse(nsr->nsr_uuid, uuidstr));
 	} else if (nsr->nsr_flags & NXSPECREQ_IFP) {
-		(void) snprintf((char *)uuidstr, sizeof(uuidstr), "0x%llx",
+		nustr = tsnprintf((char *)uuidstr, sizeof(uuidstr), "0x%llx",
 		    SK_KVA(nsr->nsr_ifp));
-		nustr = uuidstr;
 	} else {
-		nustr = nsr->nsr_name;
+		nustr = __unsafe_null_terminated_from_indexable(nsr->nsr_name);
 	}
 
 	SK_DF(err ? SK_VERB_ERROR : SK_VERB_FSW,
@@ -899,7 +911,7 @@ static void
 fsw_cleanup(struct nx_flowswitch *fsw)
 {
 	int err;
-	struct ifnet *ifp = NULL;
+	struct ifnet *__single ifp = NULL;
 
 	if (fsw->fsw_dev_ch == NULL) {
 		ASSERT(fsw->fsw_host_ch == NULL);
@@ -983,8 +995,9 @@ static int
 fsw_netem_config(struct nx_flowswitch *fsw, void *data)
 {
 	struct ifnet *ifp = fsw->fsw_ifp;
-	struct if_netem_params *params = data;
+	struct if_netem_params *__single params = data;
 	int ret;
+	const char *__null_terminated name = NULL;
 
 	if (ifp == NULL) {
 		return ENODEV;
@@ -994,9 +1007,9 @@ fsw_netem_config(struct nx_flowswitch *fsw, void *data)
 #define fsw_INPUT_NETEM_THREADNAME   "if_input_netem_%s@fsw"
 #define fsw_INPUT_NETEM_THREADNAME_LEN       32
 	char netem_name[fsw_INPUT_NETEM_THREADNAME_LEN];
-	(void) snprintf(netem_name, sizeof(netem_name),
+	name = tsnprintf(netem_name, sizeof(netem_name),
 	    fsw_INPUT_NETEM_THREADNAME, if_name(ifp));
-	ret = netem_config(&ifp->if_input_netem, netem_name, ifp, params, fsw,
+	ret = netem_config(&ifp->if_input_netem, name, ifp, params, fsw,
 	    fsw_dev_input_netem_dequeue, FSW_VP_DEV_BATCH_MAX);
 
 	return ret;
@@ -1007,8 +1020,8 @@ fsw_ctl(struct kern_nexus *nx, nxcfg_cmd_t nc_cmd, struct proc *p,
     void *data)
 {
 	struct nx_flowswitch *fsw = NX_FSW_PRIVATE(nx);
-	struct nx_spec_req *nsr = data;
-	struct nx_flow_req *req = data;
+	struct nx_spec_req *__single nsr = data;
+	struct nx_flow_req *__single req = data;
 	boolean_t need_check;
 	int error = 0;
 
@@ -1048,7 +1061,7 @@ fsw_ctl(struct kern_nexus *nx, nxcfg_cmd_t nc_cmd, struct proc *p,
 			}
 		}
 		if (need_check) {
-			kauth_cred_t cred = kauth_cred_proc_ref(p);
+			kauth_cred_t __single cred = kauth_cred_proc_ref(p);
 			error = priv_check_cred(cred,
 			    PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, 0);
 			kauth_cred_unref(&cred);
@@ -1115,6 +1128,9 @@ fsw_ifnet_event_callback(struct eventhandler_entry_arg ee_arg __unused,
 {
 	struct nx_flowswitch *fsw = NULL;
 
+	evhlog(debug, "%s: eventhandler saw event type=intf_event event_code=%s",
+	    __func__, intf_event2str(intf_ev_code));
+
 	if (ifp->if_na == NULL) {
 		return;
 	}
@@ -1167,10 +1183,13 @@ fsw_protoctl_event_callback(struct eventhandler_entry_arg ee_arg,
     struct protoctl_ev_val *p_val)
 {
 #pragma unused(ee_arg)
-	struct nx_flowswitch *fsw = NULL;
-	struct flow_entry *fe = NULL;
+	struct nx_flowswitch *__single fsw = NULL;
+	struct flow_entry *__single fe = NULL;
 	boolean_t netagent_update_flow = FALSE;
 	uuid_t fe_uuid;
+
+	evhlog(debug, "%s: eventhandler saw event type=protoctl_event event_code=%d",
+	    __func__, proto);
 
 	if (proto != IPPROTO_TCP && proto != IPPROTO_UDP) {
 		return;
@@ -1615,6 +1634,7 @@ fsw_port_free(struct nx_flowswitch *fsw, struct nexus_vp_adapter *vpna,
 	vpna->vpna_pid_bound = FALSE;
 	vpna->vpna_pid = -1;
 	vpna->vpna_defunct = FALSE;
+	vpna->vpna_up.na_private = NULL;
 }
 
 int
@@ -1694,13 +1714,13 @@ fsw_port_na_defunct(struct nx_flowswitch *fsw, struct nexus_vp_adapter *vpna)
 
 static size_t
 fsw_mib_get_flow(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len)
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len)
 {
 	struct flow_mgr *fm = fsw->fsw_flow_mgr;
 	size_t sf_size = sizeof(struct sk_stats_flow);
 	__block size_t actual_space = 0;
 	__block struct sk_stats_flow *sf = out;
-	struct flow_entry *fe;
+	struct flow_entry *__single fe;
 
 	FSW_LOCK_ASSERT_HELD(fsw);
 
@@ -1719,8 +1739,8 @@ fsw_mib_get_flow(struct nx_flowswitch *fsw,
 		struct info_tuple *itpl = &filter->nmf_info_tuple;
 		struct flow_key fk;
 		bzero(&fk, sizeof(fk));
-		if (itpl->itpl_local_sa.sa_family == AF_INET &&
-		    itpl->itpl_remote_sa.sa_family == AF_INET) {
+		if (itpl->itpl_local_sah.sa_family == AF_INET &&
+		    itpl->itpl_remote_sah.sa_family == AF_INET) {
 			fk.fk_mask = FKMASK_5TUPLE;
 			fk.fk_ipver = IPVERSION;
 			fk.fk_proto = itpl->itpl_proto;
@@ -1728,8 +1748,8 @@ fsw_mib_get_flow(struct nx_flowswitch *fsw,
 			fk.fk_dst4 = itpl->itpl_remote_sin.sin_addr;
 			fk.fk_sport = itpl->itpl_local_sin.sin_port;
 			fk.fk_dport = itpl->itpl_remote_sin.sin_port;
-		} else if (itpl->itpl_local_sa.sa_family == AF_INET6 &&
-		    itpl->itpl_remote_sa.sa_family == AF_INET6) {
+		} else if (itpl->itpl_local_sah.sa_family == AF_INET6 &&
+		    itpl->itpl_remote_sah.sa_family == AF_INET6) {
 			fk.fk_mask = FKMASK_5TUPLE;
 			fk.fk_ipver = IPV6_VERSION;
 			fk.fk_proto = itpl->itpl_proto;
@@ -1739,8 +1759,8 @@ fsw_mib_get_flow(struct nx_flowswitch *fsw,
 			fk.fk_dport = itpl->itpl_remote_sin6.sin6_port;
 		} else {
 			SK_ERR("invalid info tuple: local af %d remote af %d",
-			    itpl->itpl_local_sa.sa_family,
-			    itpl->itpl_remote_sa.sa_family);
+			    itpl->itpl_local_sah.sa_family,
+			    itpl->itpl_remote_sah.sa_family);
 			return 0;
 		}
 
@@ -1786,15 +1806,15 @@ fsw_mib_get_flow(struct nx_flowswitch *fsw,
 
 static size_t
 fsw_mib_get_flow_adv(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len)
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len)
 {
 #pragma unused(filter)
 	uint32_t fae_idx;
 	size_t actual_space = 0;
-	struct kern_channel *ch = NULL;
+	struct kern_channel *__single ch = NULL;
 	struct sk_stats_flow_adv *sfa = NULL;
 	struct sk_stats_flow_adv_ent *sfae = NULL;
-	struct __flowadv_entry *fae = NULL;
+	struct __flowadv_entry *__single fae = NULL;
 	size_t sfa_size = sizeof(struct sk_stats_flow_adv);
 	size_t sfae_size = sizeof(struct sk_stats_flow_adv_ent);
 	uint32_t max_flowadv =
@@ -1829,14 +1849,13 @@ fsw_mib_get_flow_adv(struct nx_flowswitch *fsw,
 		/* fill out flowadv_table info */
 		if (out != NULL && actual_space <= len) {
 			uuid_copy(sfa->sfa_nx_uuid, fsw->fsw_nx->nx_uuid);
-			(void) strlcpy(sfa->sfa_if_name,
-			    fsw->fsw_flow_mgr->fm_name, IFNAMSIZ);
+			(void) strbufcpy(sfa->sfa_if_name,
+			    fsw->fsw_flow_mgr->fm_name);
 			sfa->sfa_owner_pid = ch->ch_pid;
 			sfa->sfa_entries_count = 0;
 		}
 
 		/* fill out flowadv_entries */
-		sfae = &sfa->sfa_entries[0];
 		for (fae_idx = 0; fae_idx < max_flowadv; fae_idx++) {
 			fae = &arn->arn_flowadv_obj[fae_idx];
 			if (!uuid_is_null(fae->fae_id)) {
@@ -1844,6 +1863,7 @@ fsw_mib_get_flow_adv(struct nx_flowswitch *fsw,
 				if (out == NULL || actual_space > len) {
 					continue;
 				}
+				sfae = &sfa->sfa_entries[0];
 
 				/* fill out entry */
 				uuid_copy(sfae->sfae_flow_id, fae->fae_id);
@@ -1853,7 +1873,7 @@ fsw_mib_get_flow_adv(struct nx_flowswitch *fsw,
 			}
 		}
 		sfa = (struct sk_stats_flow_adv *)
-		    ((uintptr_t)out + actual_space);
+		    (void *)((int8_t *)out + actual_space);
 		AR_UNLOCK(ar);
 	}
 
@@ -1867,8 +1887,7 @@ fsw_fo2sfo(struct nx_flowswitch *fsw, struct flow_owner *fo,
 	struct flow_mgr *fm = fsw->fsw_flow_mgr;
 
 	uuid_copy(sfo->sfo_nx_uuid, fsw->fsw_nx->nx_uuid);
-	(void) strlcpy(sfo->sfo_if_name, fsw->fsw_flow_mgr->fm_name,
-	    IFNAMSIZ);
+	(void) strbufcpy(sfo->sfo_if_name, fsw->fsw_flow_mgr->fm_name);
 	sfo->sfo_bucket_idx = flow_mgr_get_fob_idx(fm, FO_BUCKET(fo));
 
 	(void) snprintf(sfo->sfo_name, sizeof(sfo->sfo_name), "%s",
@@ -1881,7 +1900,7 @@ fsw_fo2sfo(struct nx_flowswitch *fsw, struct flow_owner *fo,
 
 static size_t
 fsw_mib_get_flow_owner(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len)
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len)
 {
 #pragma unused(filter)
 	uint32_t i;
@@ -1922,8 +1941,7 @@ fsw_fr2sfr(struct nx_flowswitch *fsw, struct flow_route *fr,
 {
 	uuid_copy(sfr->sfr_nx_uuid, fsw->fsw_nx->nx_uuid);
 	uuid_copy(sfr->sfr_uuid, fr->fr_uuid);
-	(void) strlcpy(sfr->sfr_if_name, fsw->fsw_flow_mgr->fm_name,
-	    IFNAMSIZ);
+	(void) strbufcpy(sfr->sfr_if_name, fsw->fsw_flow_mgr->fm_name);
 
 	sfr->sfr_bucket_idx = fr->fr_frb->frb_idx;
 	sfr->sfr_id_bucket_idx = fr->fr_frib->frib_idx;
@@ -1982,7 +2000,7 @@ extern int dlil_lladdr_ckreq;
 
 static size_t
 fsw_mib_get_flow_route(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len, struct proc *p)
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len, struct proc *p)
 {
 #pragma unused(filter)
 	uint32_t i;
@@ -2034,8 +2052,7 @@ fsw_nxs2nus(struct nx_flowswitch *fsw, struct nexus_mib_filter *filter,
     pid_t pid, struct __nx_stats_fsw *nxs, struct sk_stats_userstack *sus)
 {
 	uuid_copy(sus->sus_nx_uuid, fsw->fsw_nx->nx_uuid);
-	(void) strlcpy(sus->sus_if_name, fsw->fsw_flow_mgr->fm_name,
-	    IFNAMSIZ);
+	(void) strbufcpy(sus->sus_if_name, fsw->fsw_flow_mgr->fm_name);
 	sus->sus_owner_pid = pid;
 
 	if (filter->nmf_type & NXMIB_IP_STATS) {
@@ -2061,7 +2078,7 @@ fsw_nxs2nus(struct nx_flowswitch *fsw, struct nexus_mib_filter *filter,
 
 static size_t
 fsw_mib_get_userstack_stats(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len)
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len)
 {
 	size_t actual_space = 0;
 	struct kern_channel *ch;
@@ -2129,15 +2146,15 @@ fsw_mib_get_userstack_stats(struct nx_flowswitch *fsw,
 }
 
 static size_t
-fsw_mib_get_stats(struct nx_flowswitch *fsw, void *out, size_t len)
+fsw_mib_get_stats(struct nx_flowswitch *fsw, void *__sized_by(len)out, size_t len)
 {
 	struct sk_stats_flow_switch *sfs = out;
 	size_t actual_space = sizeof(struct sk_stats_flow_switch);
 
+	/* XXX -fbounds-safety: Come back and fix strlcpy */
 	if (out != NULL && actual_space <= len) {
 		uuid_copy(sfs->sfs_nx_uuid, fsw->fsw_nx->nx_uuid);
-		(void) strlcpy(sfs->sfs_if_name,
-		    fsw->fsw_flow_mgr->fm_name, IFNAMSIZ);
+		(void) strbufcpy(sfs->sfs_if_name, fsw->fsw_flow_mgr->fm_name);
 		sfs->sfs_fsws = fsw->fsw_stats;
 	}
 
@@ -2146,7 +2163,7 @@ fsw_mib_get_stats(struct nx_flowswitch *fsw, void *out, size_t len)
 
 size_t
 fsw_mib_get(struct nx_flowswitch *fsw, struct nexus_mib_filter *filter,
-    void *out, size_t len, struct proc *p)
+    void *__sized_by(len)out, size_t len, struct proc *p)
 {
 	size_t ret;
 
@@ -2191,7 +2208,7 @@ fsw_fold_stats(struct nx_flowswitch *fsw,
 	switch (type) {
 	case NEXUS_STATS_TYPE_FSW:
 	{
-		struct __nx_stats_fsw *d, *s;
+		struct __nx_stats_fsw *d, *__single s;
 		d = fsw->fsw_closed_na_stats;
 		s = data;
 		ip_stats_fold(&d->nxs_ipstat, &s->nxs_ipstat);
@@ -2203,7 +2220,7 @@ fsw_fold_stats(struct nx_flowswitch *fsw,
 	}
 	case NEXUS_STATS_TYPE_CHAN_ERRORS:
 	{
-		struct __nx_stats_channel_errors *s = data;
+		struct __nx_stats_channel_errors *__single s = data;
 		fsw_vp_channel_error_stats_fold(&fsw->fsw_stats, s);
 		break;
 	}
@@ -2348,13 +2365,13 @@ fsw_init(void)
 		 */
 		__nx_fsw_ifnet_eventhandler_tag =
 		    EVENTHANDLER_REGISTER(&ifnet_evhdlr_ctxt,
-		    ifnet_event, fsw_ifnet_event_callback,
+		    ifnet_event, &fsw_ifnet_event_callback,
 		    eventhandler_entry_dummy_arg, EVENTHANDLER_PRI_ANY);
 		VERIFY(__nx_fsw_ifnet_eventhandler_tag != NULL);
 
 		__nx_fsw_protoctl_eventhandler_tag =
 		    EVENTHANDLER_REGISTER(&protoctl_evhdlr_ctxt,
-		    protoctl_event, fsw_protoctl_event_callback,
+		    protoctl_event, &fsw_protoctl_event_callback,
 		    eventhandler_entry_dummy_arg, EVENTHANDLER_PRI_ANY);
 		VERIFY(__nx_fsw_protoctl_eventhandler_tag != NULL);
 		__nx_fsw_inited = 1;
@@ -2378,7 +2395,7 @@ struct nx_flowswitch *
 fsw_alloc(zalloc_flags_t how)
 {
 	struct nx_flowswitch *fsw;
-	struct __nx_stats_fsw *nsfw;
+	struct __nx_stats_fsw *__single nsfw;
 
 	SK_LOCK_ASSERT_HELD();
 

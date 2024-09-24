@@ -17,7 +17,7 @@ static_assert(sizeof(SharedPtr<T>) == sizeof(T*));
 static_assert(alignof(SharedPtr<T>) == alignof(T*));
 
 // Receive a shared pointer from a function that actually returns a raw pointer
-T_DECL(abi_caller_smart, "intrusive_shared_ptr.abi.caller.smart") {
+T_DECL(abi_caller_smart, "intrusive_shared_ptr.abi.caller.smart", T_META_TAG_VM_PREFERRED) {
 	T obj{3};
 	T* expected = &obj;
 	SharedPtr<T> result = return_raw_as_shared(expected);

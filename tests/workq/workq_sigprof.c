@@ -49,7 +49,7 @@ workq_block(void *unused __unused)
 	}
 }
 
-T_DECL(workq_sigprof, "test that workqueue threads can receive sigprof")
+T_DECL(workq_sigprof, "test that workqueue threads can receive sigprof", T_META_TAG_VM_PREFERRED)
 {
 	struct sigaction sa = {
 		.sa_sigaction = signal_handler

@@ -142,7 +142,7 @@ do_test(char const *msg, int expectation, ...)
 T_DECL(debug_syscall_rejection_tests,
     "Verify that syscall rejection works",
     T_META_SYSCTL_INT("kern.debug_syscall_rejection_mode=1"),
-    T_META_REQUIRES_SYSCTL_EQ("kern.debug_syscall_rejection_mode", 1))
+    T_META_REQUIRES_SYSCTL_EQ("kern.debug_syscall_rejection_mode", 1), T_META_TAG_VM_PREFERRED)
 {
 	int old_mode;
 	size_t old_mode_size = sizeof(old_mode);
@@ -206,7 +206,8 @@ T_DECL(debug_syscall_rejection_tests,
 
 T_DECL(debug_enable_syscall_rejection_crash_count,
     "count syscall rejection crash reports",
-    T_META_ENABLED(FALSE) /* currently a manual test */
+    T_META_ENABLED(FALSE), /* currently a manual test */
+    T_META_TAG_VM_PREFERRED
     )
 {
 	syscall_rejection_selector_t masks[] = {

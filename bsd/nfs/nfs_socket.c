@@ -101,6 +101,39 @@ extern int nfsv3_procid[NFS_NPROCS];
 
 #define NFS_TRYLOCK_MSEC_SLEEP 1
 
+const nfserr_info_t nfserrs_common[NFSERR_INFO_COMMON_SIZE] = {
+	NFSERR_INFO_COMMON
+};
+
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(A) (sizeof(A) / sizeof(A[0]))
+#endif
+
+static int
+is_error_in_range(const nfserr_info_t *arr, int arr_size, int error)
+{
+	if (arr_size == 0) {
+		return 0;
+	}
+	return error >= arr[0].nei_error && error <= arr[arr_size - 1].nei_error;
+}
+
+static void
+nfsstat_update_nfserror(int error)
+{
+	if (is_error_in_range(nfserrs_common, ARRAY_SIZE(nfserrs_common), error)) {
+		for (uint32_t i = 0; i < ARRAY_SIZE(nfserrs_common); i++) {
+			if (error == nfserrs_common[i].nei_error) {
+				nfsrvstats.nfs_errs.errs_common[nfserrs_common[i].nei_index]++;
+				return;
+			}
+		}
+	}
+
+	/* Unknown error */
+	nfsrvstats.nfs_errs.errs_unknown++;
+}
+
 /*
  * compare two sockaddr structures
  */
@@ -144,7 +177,7 @@ nfsrv_rephead(
 	mbuf_t mrep;
 	u_int32_t *tl;
 	struct nfsm_chain nmrep;
-	int err, error;
+	int err, error, mappederr;
 
 	err = nd->nd_repstat;
 	if (err && (nd->nd_vers == NFS_VER2)) {
@@ -223,8 +256,9 @@ nfsrv_rephead(
 				error = nfs_gss_svc_prepare_reply(nd, &nmrep);
 			}
 			if (err != NFSERR_RETVOID) {
-				nfsm_chain_add_32(error, &nmrep,
-				    (err ? nfsrv_errmap(nd, err) : 0));
+				mappederr = err ? nfsrv_errmap(nd, err) : 0;
+				nfsm_chain_add_32(error, &nmrep, mappederr);
+				nfsstat_update_nfserror(mappederr);
 			}
 			break;
 		}

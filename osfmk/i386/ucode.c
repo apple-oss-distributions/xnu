@@ -36,7 +36,7 @@
 #include <sys/errno.h>
 #include <i386/proc_reg.h>
 #include <i386/cpuid.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <i386/cpu_data.h> // mp_*_preemption
 #include <i386/mp.h> // mp_cpus_call
 #include <i386/commpage/commpage.h>

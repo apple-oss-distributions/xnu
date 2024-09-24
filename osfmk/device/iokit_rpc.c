@@ -49,7 +49,7 @@
 #include <kern/misc_protos.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern.h>
 
 #include <device/device_types.h>

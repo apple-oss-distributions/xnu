@@ -53,6 +53,6 @@ tests()
 	}
 }
 
-T_DECL(data, "bounded_array.data") {
+T_DECL(data, "bounded_array.data", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

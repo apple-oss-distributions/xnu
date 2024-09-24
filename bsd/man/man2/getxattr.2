@@ -83,6 +83,9 @@ normally returns information from the target of
 if it is a symbolic link.  With this option,
 .Fn getxattr
 will return extended attribute data from the symbolic link instead.
+.It Dv XATTR_NOFOLLOW_ANY
+do not follow any symbolic links encountered during pathname resolution. An
+error is returned if a symlink is encountered before the last component of path.
 .It Dv XATTR_SHOWCOMPRESSION
 .Fn getxattr
 and 
@@ -125,6 +128,9 @@ The named attribute is not permitted for this type of object.
 is invalid or
 .Fa options
 has an unsupported bit set.
+.It Bq Er EINVAL
+XATTR_NOFOLLOW or XATTR_NOFOLLOW_ANY option was passed in
+.Fn fgetxattr .
 .It Bq Er EISDIR
 .Fa path
 or
@@ -156,6 +162,9 @@ or the attribute is not allowed to be read (e.g. an ACL prohibits reading
 the attributes of this file).
 .It Bq Er ELOOP
 Too many symbolic links were encountered in translating the pathname.
+.It Bq Er ELOOP
+If XATTR_NOFOLLOW_ANY option was passed and a symbolic link was encountered in
+translating the pathname.
 .It Bq Er EFAULT
 .Fa path
 or

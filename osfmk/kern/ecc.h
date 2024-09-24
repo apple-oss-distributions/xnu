@@ -87,6 +87,8 @@ __options_decl(ecc_flags_t, uint32_t, {
 	ECC_IS_TEST_ERROR               = 0x00000004,
 	/* Do not trigger a CA report, just record to the DB (for testing purposes) */
 	ECC_DB_ONLY                     = 0x00000008,
+	/* Filter out the given address from the DB*/
+	ECC_REMOVE_ADDR                     = 0x00000010
 });
 
 /**

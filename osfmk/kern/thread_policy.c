@@ -3380,7 +3380,11 @@ static TUNABLE(
 	bool,
 	rt_allow_policy_enabled,
 	"-rt-allow_policy-enable",
+#if XNU_TARGET_OS_XR
+	true
+#else
 	false
+#endif /* XNU_TARGET_OS_XR */
 	);
 
 /*

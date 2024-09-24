@@ -192,7 +192,7 @@ tests()
 	}
 }
 
-T_DECL(arith_add_assign, "bounded_ptr.arith.add_assign") {
+T_DECL(arith_add_assign, "bounded_ptr.arith.add_assign", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

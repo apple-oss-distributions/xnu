@@ -59,7 +59,7 @@ nx_netif_filter_tx_mbuf_enqueue(struct nexus_netif_adapter *nifna,
 
 SK_NO_INLINE_ATTRIBUTE
 static struct mbuf *
-get_next_mbuf(struct nx_mbq *mbqs, int *curr, int end)
+get_next_mbuf(struct nx_mbq mbqs[MBUF_TC_MAX], int *curr, int end)
 {
 	int i;
 	struct mbuf *m = NULL;
@@ -81,7 +81,8 @@ nx_netif_filter_tx_processed_mbuf_dequeue(struct nexus_netif_adapter *nifna,
 	struct nx_netif *nif = nifna->nifna_netif;
 	int curr, end;
 	uint32_t cnt = 0, bytes = 0;
-	struct mbuf *m, *m_head = NULL, **m_tailp = &m_head;
+	struct mbuf *m, *__single m_head = NULL;
+	struct mbuf **m_tailp = &m_head;
 
 	if (sc == MBUF_SC_UNSPEC) {
 		/*
@@ -121,7 +122,7 @@ nx_netif_filter_tx_processed_mbuf_enqueue(struct nexus_netif_adapter *nifna,
 {
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct netif_stats *nifs = &nif->nif_stats;
-	struct mbuf *m_tail = NULL;
+	struct mbuf *__single m_tail = NULL;
 	uint32_t cnt = 0, bytes = 0, qlen = 0, tc;
 	struct nx_mbq *q;
 
@@ -209,7 +210,7 @@ fix_dequeue_mbuf_return_args(struct mbuf *m_chain, classq_pkt_t *head,
     classq_pkt_t *tail, uint32_t *cnt, uint32_t *len, errno_t orig_err,
     errno_t *err)
 {
-	struct mbuf *m_tail = NULL;
+	struct mbuf *__single m_tail = NULL;
 	uint32_t c = 0, l = 0;
 
 	nx_netif_mbuf_chain_info(m_chain, &m_tail, &c, &l);

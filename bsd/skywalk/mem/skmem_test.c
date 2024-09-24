@@ -509,7 +509,7 @@ skmem_buflet_tests(uint32_t flags)
 		mbuf_setlen(mbary[i], mblen);
 		mbuf_pkthdr_setlen(mbary[i], mblen);
 		VERIFY((size_t)m_pktlen(mbary[i]) == mblen);
-		(void) memset(mbuf_data(mbary[i]), i, mblen);
+		(void) memset(mtod(mbary[i], void *), i, mblen);
 		kpkt->pkt_mbuf = mbary[i];
 		kpkt->pkt_pflags |= PKT_F_MBUF_DATA;
 		VERIFY(__packet_finalize_with_mbuf(kpkt) == 0);
@@ -559,11 +559,11 @@ skmem_buflet_tests(uint32_t flags)
 		    kern_buflet_get_data_length(buflet)) == 0);
 		VERIFY(kpkt->pkt_mbuf != NULL);
 		VERIFY(kpkt2->pkt_mbuf != NULL);
-		VERIFY(mbuf_data(kpkt->pkt_mbuf) != mbuf_data(kpkt2->pkt_mbuf));
+		VERIFY(mtod(kpkt->pkt_mbuf, void *) != mtod(kpkt2->pkt_mbuf, void *));
 		VERIFY(mbuf_len(kpkt->pkt_mbuf) == mbuf_len(kpkt2->pkt_mbuf));
 		/* mbuf contents must have been copied */
-		VERIFY(memcmp(mbuf_data(kpkt->pkt_mbuf),
-		    mbuf_data(kpkt2->pkt_mbuf), mbuf_len(kpkt->pkt_mbuf)) == 0);
+		VERIFY(memcmp(mtod(kpkt->pkt_mbuf, void *),
+		    mtod(kpkt2->pkt_mbuf, void *), mbuf_len(kpkt->pkt_mbuf)) == 0);
 		VERIFY(__packet_finalize(pharyc[i]) == 0);
 		++phcloned;
 	}

@@ -75,18 +75,53 @@ kern_work_interval_create(thread_t thread, struct kern_work_interval_create_args
 extern kern_return_t
 kern_work_interval_get_flags_from_port(mach_port_name_t port_name, uint32_t*flags);
 
+/*
+ * A private interface for kevent subsystem.
+ * Returns a +1 ref to the work_interval associated with a given port.
+ */
+extern kern_return_t
+kern_port_name_to_work_interval(mach_port_name_t name,
+    struct work_interval **work_interval);
+
+/*
+ * A private interface for kevent subsystem.
+ * Returns following scheduling policies associated with a work interval,
+ * if available.
+ * : Priority
+ * : Scheduling policy/mode
+ */
+extern kern_return_t
+kern_work_interval_get_policy(struct work_interval *work_interval,
+    integer_t *policy,
+    integer_t *priority);
+
 #if CONFIG_THREAD_GROUPS
 /*
  * A private interface for kevent subsystem.
- * Returns following scheduling policies associated with a work interval, if available.
- * : Priority
- * : Scheduling policy/mode
- * : +1 ref on the backing thread group
+ * Returns a +1 ref on the backing thread group associated with a work interval,
+ * if available.
  */
 extern kern_return_t
-kern_work_interval_get_policy_from_port(mach_port_name_t port_name,
-    integer_t *policy, integer_t *priority, struct thread_group **tg);
+kern_work_interval_get_thread_group(struct work_interval *work_interval,
+    struct thread_group **tg);
 #endif /* CONFIG_THREAD_GROUPS */
+
+/*
+ * A private interface for kevent subsystem.
+ * Routine to release a ref count on the work interval.
+ * For more information, see work_interval_release.
+ */
+extern void
+kern_work_interval_release(struct work_interval *work_interval);
+
+/*
+ * A private interface for workqueue subsystem.
+ * Routine to join a work interval specified in @work_interval argument.
+ * It takes +1 ref on the work interval and passes it to the thread as a part of
+ * join the work interval. Expects @thread to be the calling thread.
+ */
+extern kern_return_t
+kern_work_interval_explicit_join(thread_t thread, struct work_interval *work_interval);
 
 
 extern kern_return_t

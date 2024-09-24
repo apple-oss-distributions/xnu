@@ -41,6 +41,8 @@
 #include <kern/smr_hash.h>
 #include <kern/thread_group.h>
 #include <kern/zalloc.h>
+#include <kern/policy_internal.h>
+
 #include <vm/vm_pageout.h>
 
 #include <libkern/OSAtomic.h>
@@ -57,7 +59,6 @@
  * BSD interface functions
  */
 size_t coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, size_t list_sz);
-coalition_t task_get_coalition(task_t task, int type);
 boolean_t coalition_is_leader(task_t task, coalition_t coal);
 task_t coalition_get_leader(coalition_t coal);
 int coalition_get_task_count(coalition_t coal);
@@ -163,8 +164,9 @@ struct coalition_type {
 	/*
 	 * iterate_tasks
 	 * pre-condition: coalition locked
+	 * if the callback returns true, stop iteration and return the task
 	 */
-	void (*iterate_tasks)(coalition_t coal, void *ctx, void (*callback)(coalition_t, void *, task_t));
+	task_t (*iterate_tasks)(coalition_t coal, coalition_for_each_task_block_t);
 };
 
 /*
@@ -178,8 +180,8 @@ static kern_return_t i_coal_resource_remove_task(coalition_t coal, task_t task);
 static kern_return_t i_coal_resource_set_taskrole(coalition_t coal,
     task_t task, int role);
 static int           i_coal_resource_get_taskrole(coalition_t coal, task_t task);
-static void          i_coal_resource_iterate_tasks(coalition_t coal, void *ctx,
-    void (*callback)(coalition_t, void *, task_t));
+static task_t        i_coal_resource_iterate_tasks(coalition_t coal,
+    coalition_for_each_task_block_t block);
 
 /*
  * Ensure COALITION_NUM_THREAD_QOS_TYPES defined in mach/coalition.h still
@@ -209,6 +211,13 @@ struct i_resource_coalition {
 	uint64_t cpu_time_rqos[COALITION_NUM_THREAD_QOS_TYPES];      /* cpu time per requested QoS class */
 	uint64_t cpu_instructions;
 	uint64_t cpu_cycles;
+	uint64_t ane_mach_time;
+	uint64_t ane_energy_nj;
+
+	_Atomic uint64_t gpu_energy_nj;
+	_Atomic uint64_t gpu_energy_nj_billed_to_me;
+	_Atomic uint64_t gpu_energy_nj_billed_to_others;
+
 	struct recount_coalition co_recount;
 
 	uint64_t task_count;      /* tasks that have started in this coalition */
@@ -244,8 +253,7 @@ static kern_return_t i_coal_jetsam_remove_task(coalition_t coal, task_t task);
 static kern_return_t i_coal_jetsam_set_taskrole(coalition_t coal,
     task_t task, int role);
 int           i_coal_jetsam_get_taskrole(coalition_t coal, task_t task);
-static void          i_coal_jetsam_iterate_tasks(coalition_t coal, void *ctx,
-    void (*callback)(coalition_t, void *, task_t));
+static task_t i_coal_jetsam_iterate_tasks(coalition_t coal, coalition_for_each_task_block_t block);
 
 struct i_jetsam_coalition {
 	task_t       leader;
@@ -254,6 +262,15 @@ struct i_jetsam_coalition {
 	queue_head_t other;
 	struct thread_group *thread_group;
 	bool swap_enabled;
+
+	struct coalition_requested_policy {
+		uint64_t        crp_darwinbg        :1, /* marked as darwinbg via setpriority */
+		    crp_reserved        :63;
+	} c_requested_policy;
+	struct coalition_effective_policy {
+		uint64_t        cep_darwinbg        :1, /* marked as darwinbg via setpriority */
+		    cep_reserved        :63;
+	} c_effective_policy;
 };
 
 
@@ -271,6 +288,7 @@ struct coalition {
 	uint32_t focal_task_count;   /* Number of TASK_FOREGROUND_APPLICATION tasks in the coalition */
 	uint32_t nonfocal_task_count; /* Number of TASK_BACKGROUND_APPLICATION tasks in the coalition */
 	uint32_t game_task_count;    /* Number of GAME_MODE tasks in the coalition */
+	uint32_t carplay_task_count;    /* Number of CARPLAY_MODE tasks in the coalition */
 
 	/* coalition flags */
 	uint32_t privileged : 1;    /* Members of this coalition may create
@@ -327,25 +345,26 @@ SMRH_TRAITS_DEFINE_SCALAR(coal_hash_traits, struct coalition, id, link,
  */
 static const struct coalition_type s_coalition_types[COALITION_NUM_TYPES] = {
 	{
-		COALITION_TYPE_RESOURCE,
-		1,
-		i_coal_resource_init,
-		i_coal_resource_dealloc,
-		i_coal_resource_adopt_task,
-		i_coal_resource_remove_task,
-		i_coal_resource_set_taskrole,
-		i_coal_resource_get_taskrole,
-		i_coal_resource_iterate_tasks,
-	}, {
-		COALITION_TYPE_JETSAM,
-		1,
-		i_coal_jetsam_init,
-		i_coal_jetsam_dealloc,
-		i_coal_jetsam_adopt_task,
-		i_coal_jetsam_remove_task,
-		i_coal_jetsam_set_taskrole,
-		i_coal_jetsam_get_taskrole,
-		i_coal_jetsam_iterate_tasks,
+		.type           = COALITION_TYPE_RESOURCE,
+		.has_default    = 1,
+		.init           = i_coal_resource_init,
+		.dealloc        = i_coal_resource_dealloc,
+		.adopt_task     = i_coal_resource_adopt_task,
+		.remove_task    = i_coal_resource_remove_task,
+		.set_taskrole   = i_coal_resource_set_taskrole,
+		.get_taskrole   = i_coal_resource_get_taskrole,
+		.iterate_tasks  = i_coal_resource_iterate_tasks,
+	},
+	{
+		.type           = COALITION_TYPE_JETSAM,
+		.has_default    = 1,
+		.init           = i_coal_jetsam_init,
+		.dealloc        = i_coal_jetsam_dealloc,
+		.adopt_task     = i_coal_jetsam_adopt_task,
+		.remove_task    = i_coal_jetsam_remove_task,
+		.set_taskrole   = i_coal_jetsam_set_taskrole,
+		.get_taskrole   = i_coal_jetsam_get_taskrole,
+		.iterate_tasks  = i_coal_jetsam_iterate_tasks,
 	},
 };
 
@@ -716,14 +735,20 @@ i_coal_resource_get_taskrole(__unused coalition_t coal, __unused task_t task)
 	return -1;
 }
 
-static void
-i_coal_resource_iterate_tasks(coalition_t coal, void *ctx, void (*callback)(coalition_t, void *, task_t))
+static task_t
+i_coal_resource_iterate_tasks(coalition_t coal, coalition_for_each_task_block_t block)
 {
 	task_t t;
 	assert(coal && coal->type == COALITION_TYPE_RESOURCE);
 
-	qe_foreach_element(t, &coal->r.tasks, task_coalition[COALITION_TYPE_RESOURCE])
-	callback(coal, ctx, t);
+	qe_foreach_element(t, &coal->r.tasks, task_coalition[COALITION_TYPE_RESOURCE]) {
+		bool should_return = block(t);
+		if (should_return) {
+			return t;
+		}
+	}
+
+	return TASK_NULL;
 }
 
 #if CONFIG_PHYS_WRITE_ACCT
@@ -771,13 +796,17 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	uint64_t logical_deferred_writes_to_external = coal->r.logical_deferred_writes_to_external;
 	uint64_t logical_invalidated_writes_to_external = coal->r.logical_invalidated_writes_to_external;
 	uint64_t logical_metadata_writes_to_external = coal->r.logical_metadata_writes_to_external;
+	uint64_t ane_mach_time = os_atomic_load(&coal->r.ane_mach_time, relaxed);
+	uint64_t ane_energy_nj = os_atomic_load(&coal->r.ane_energy_nj, relaxed);
 #if CONFIG_PHYS_WRITE_ACCT
 	uint64_t fs_metadata_writes = coal->r.fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
+	int64_t conclave_mem = 0;
 	int64_t cpu_time_billed_to_me = 0;
 	int64_t cpu_time_billed_to_others = 0;
 	int64_t energy_billed_to_me = 0;
 	int64_t energy_billed_to_others = 0;
+	int64_t phys_footprint = 0;
 	struct recount_usage stats_sum = { 0 };
 	struct recount_usage stats_perf_only = { 0 };
 	recount_coalition_usage_perf_only(&coal->r.co_recount, &stats_sum,
@@ -821,6 +850,11 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		recount_task_usage_perf_only(task, &stats_sum, &stats_perf_only);
 	}
 
+	kr = ledger_get_balance(sum_ledger, task_ledgers.conclave_mem, (int64_t *)&conclave_mem);
+	if (kr != KERN_SUCCESS || conclave_mem < 0) {
+		conclave_mem = 0;
+	}
+
 	kr = ledger_get_balance(sum_ledger, task_ledgers.cpu_time_billed_to_me, (int64_t *)&cpu_time_billed_to_me);
 	if (kr != KERN_SUCCESS || cpu_time_billed_to_me < 0) {
 		cpu_time_billed_to_me = 0;
@@ -841,12 +875,21 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 		energy_billed_to_others = 0;
 	}
 
+	kr = ledger_get_balance(sum_ledger, task_ledgers.phys_footprint, (int64_t *)&phys_footprint);
+	if (kr != KERN_SUCCESS || phys_footprint < 0) {
+		phys_footprint = 0;
+	}
+
 	/* collect information from the coalition itself */
 	cru_out->tasks_started = coal->r.task_count;
 	cru_out->tasks_exited = coal->r.dead_task_count;
 
 	uint64_t time_nonempty = coal->r.time_nonempty;
 	uint64_t last_became_nonempty_time = coal->r.last_became_nonempty_time;
+
+	cru_out->gpu_energy_nj = os_atomic_load(&coal->r.gpu_energy_nj, relaxed);
+	cru_out->gpu_energy_nj_billed_to_me = os_atomic_load(&coal->r.gpu_energy_nj_billed_to_me, relaxed);
+	cru_out->gpu_energy_nj_billed_to_others = os_atomic_load(&coal->r.gpu_energy_nj_billed_to_others, relaxed);
 
 	coalition_unlock(coal);
 
@@ -856,11 +899,13 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	if (kr != KERN_SUCCESS) {
 		credit = 0;
 	}
+	cru_out->conclave_mem = conclave_mem;
 	cru_out->cpu_time = credit;
 	cru_out->cpu_time_billed_to_me = (uint64_t)cpu_time_billed_to_me;
 	cru_out->cpu_time_billed_to_others = (uint64_t)cpu_time_billed_to_others;
 	cru_out->energy_billed_to_me = (uint64_t)energy_billed_to_me;
 	cru_out->energy_billed_to_others = (uint64_t)energy_billed_to_others;
+	cru_out->phys_footprint = phys_footprint;
 
 	kr = ledger_get_entries(sum_ledger, task_ledgers.interrupt_wakeups,
 	    &credit, &debit);
@@ -879,6 +924,8 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	cru_out->bytesread = bytesread;
 	cru_out->byteswritten = byteswritten;
 	cru_out->gpu_time = gpu_time;
+	cru_out->ane_mach_time = ane_mach_time;
+	cru_out->ane_energy_nj = ane_energy_nj;
 	cru_out->logical_immediate_writes = logical_immediate_writes;
 	cru_out->logical_deferred_writes = logical_deferred_writes;
 	cru_out->logical_invalidated_writes = logical_invalidated_writes;
@@ -929,6 +976,55 @@ coalition_resource_usage_internal(coalition_t coal, struct coalition_resource_us
 	return KERN_SUCCESS;
 }
 
+bool
+coalition_add_to_gpu_energy(uint64_t coalition_id,
+    coalition_gpu_energy_t which, uint64_t energy)
+{
+	assert(coalition_id != 0);
+	bool exists = false;
+
+	smrh_key_t key = SMRH_SCALAR_KEY(coalition_id);
+
+	smrht_enter(&coal_hash_traits);
+
+	coalition_t coal = smr_hash_entered_find(&coalition_hash, key, &coal_hash_traits);
+	/* Preemption is disabled, and until we leave, coalition_free won't be called. */
+
+	if (coal != COALITION_NULL &&
+	    coal->type == COALITION_TYPE_RESOURCE &&
+	    !coal->terminated && !coal->reaped) {
+		/*
+		 * After termination, there are no more member tasks and
+		 * launchd is about to capture the final snapshot, so
+		 * a terminated energy id considered invalid.
+		 *
+		 * Note that we don't lock against the termination transition
+		 * here, so it's possible for a race to occur where new energy
+		 * is accounted past the final snapshot.
+		 */
+		exists = true;
+
+		if (which & CGE_SELF) {
+			os_atomic_add(&coal->r.gpu_energy_nj, energy, relaxed);
+		}
+
+		if (which & CGE_BILLED) {
+			os_atomic_add(&coal->r.gpu_energy_nj_billed_to_me,
+			    energy, relaxed);
+		}
+
+		if (which & CGE_OTHERS) {
+			os_atomic_add(&coal->r.gpu_energy_nj_billed_to_others,
+			    energy, relaxed);
+		}
+	}
+
+	smrht_leave(&coal_hash_traits);
+
+	return exists;
+}
+
+
 kern_return_t
 coalition_debug_info_internal(coalition_t coal,
     struct coalinfo_debuginfo *c_debuginfo)
@@ -944,6 +1040,7 @@ coalition_debug_info_internal(coalition_t coal,
 		c_debuginfo->focal_task_count = coal->focal_task_count;
 		c_debuginfo->nonfocal_task_count = coal->nonfocal_task_count;
 		c_debuginfo->game_task_count = coal->game_task_count;
+		c_debuginfo->carplay_task_count = coal->carplay_task_count;
 	}
 
 #if CONFIG_THREAD_GROUPS
@@ -1158,8 +1255,10 @@ i_coal_jetsam_get_taskrole(coalition_t coal, task_t task)
 	return COALITION_TASKROLE_NONE;
 }
 
-static void
-i_coal_jetsam_iterate_tasks(coalition_t coal, void *ctx, void (*callback)(coalition_t, void *, task_t))
+static task_t
+i_coal_jetsam_iterate_tasks(
+	coalition_t coal,
+	coalition_for_each_task_block_t block)
 {
 	struct i_jetsam_coalition *cj;
 	task_t t;
@@ -1169,17 +1268,35 @@ i_coal_jetsam_iterate_tasks(coalition_t coal, void *ctx, void (*callback)(coalit
 	cj = &coal->j;
 
 	if (cj->leader) {
-		callback(coal, ctx, cj->leader);
+		t = cj->leader;
+		bool should_return = block( t);
+		if (should_return) {
+			return t;
+		}
 	}
 
-	qe_foreach_element(t, &cj->services, task_coalition[COALITION_TYPE_JETSAM])
-	callback(coal, ctx, t);
+	qe_foreach_element(t, &cj->services, task_coalition[COALITION_TYPE_JETSAM]) {
+		bool should_return = block(t);
+		if (should_return) {
+			return t;
+		}
+	}
 
-	qe_foreach_element(t, &cj->extensions, task_coalition[COALITION_TYPE_JETSAM])
-	callback(coal, ctx, t);
+	qe_foreach_element(t, &cj->extensions, task_coalition[COALITION_TYPE_JETSAM]) {
+		bool should_return = block(t);
+		if (should_return) {
+			return t;
+		}
+	}
 
-	qe_foreach_element(t, &cj->other, task_coalition[COALITION_TYPE_JETSAM])
-	callback(coal, ctx, t);
+	qe_foreach_element(t, &cj->other, task_coalition[COALITION_TYPE_JETSAM]) {
+		bool should_return = block(t);
+		if (should_return) {
+			return t;
+		}
+	}
+
+	return TASK_NULL;
 }
 
 
@@ -1288,6 +1405,7 @@ coalition_retire(coalition_t coal)
 	assert(coal->focal_task_count == 0);
 	assert(coal->nonfocal_task_count == 0);
 	assert(coal->game_task_count == 0);
+	assert(coal->carplay_task_count == 0);
 #if CONFIG_THREAD_GROUPS
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_COALITION, MACH_COALITION_FREE),
 	    coal->id, coal->type,
@@ -1305,6 +1423,15 @@ coalition_retire(coalition_t coal)
 	lck_mtx_destroy(&coal->lock, &coalitions_lck_grp);
 
 	smr_proc_task_call(&coal->smr_node, sizeof(*coal), coalition_free);
+}
+
+/*
+ * coalition_retain
+ * */
+void
+coalition_retain(coalition_t coal)
+{
+	coal_ref_retain(coal);
 }
 
 /*
@@ -1496,6 +1623,15 @@ task_coalition_update_gpu_stats(task_t task, uint64_t gpu_ns_delta)
 	coalition_unlock(coal);
 }
 
+void
+coalition_update_ane_stats(coalition_t coalition, uint64_t ane_mach_time, uint64_t ane_energy_nj)
+{
+	assert(coalition != COALITION_NULL);
+
+	os_atomic_add(&coalition->r.ane_mach_time, ane_mach_time, relaxed);
+	os_atomic_add(&coalition->r.ane_energy_nj, ane_energy_nj, relaxed);
+}
+
 boolean_t
 task_coalition_adjust_focal_count(task_t task, int count, uint32_t *new_count)
 {
@@ -1531,6 +1667,15 @@ task_coalition_game_mode_count(task_t task)
 	return coal->game_task_count;
 }
 
+uint32_t
+task_coalition_carplay_mode_count(task_t task)
+{
+	coalition_t coal = task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING];
+	if (coal == COALITION_NULL) {
+		return 0;
+	}
+	return coal->carplay_task_count;
+}
 
 boolean_t
 task_coalition_adjust_nonfocal_count(task_t task, int count, uint32_t *new_count)
@@ -1565,6 +1710,19 @@ task_coalition_adjust_game_mode_count(task_t task, int count, uint32_t *new_coun
 	}
 
 	*new_count = os_atomic_add(&coal->game_task_count, count, relaxed);
+	assert(*new_count != UINT32_MAX);
+	return true;
+}
+
+bool
+task_coalition_adjust_carplay_mode_count(task_t task, int count, uint32_t *new_count)
+{
+	coalition_t coal = task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING];
+	if (coal == COALITION_NULL) {
+		return false;
+	}
+
+	*new_count = os_atomic_add(&coal->carplay_task_count, count, relaxed);
 	assert(*new_count != UINT32_MAX);
 	return true;
 }
@@ -1653,6 +1811,19 @@ task_coalition_thread_group_game_mode_update(task_t task)
 }
 
 void
+task_coalition_thread_group_carplay_mode_update(task_t task)
+{
+	assert(task->coalition[COALITION_FOCAL_TASKS_ACCOUNTING] != COALITION_NULL);
+	thread_group_flags_update_lock();
+	if (task_coalition_carplay_mode_count(task)) {
+		thread_group_set_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_CARPLAY_MODE);
+	} else {
+		thread_group_clear_flags_locked(task_coalition_get_thread_group(task), THREAD_GROUP_FLAGS_CARPLAY_MODE);
+	}
+	thread_group_flags_update_unlock();
+}
+
+void
 task_coalition_thread_group_application_set(task_t task)
 {
 	/*
@@ -1667,9 +1838,35 @@ task_coalition_thread_group_application_set(task_t task)
 
 #endif /* CONFIG_THREAD_GROUPS */
 
+static void
+coalition_for_each_task_locked(coalition_t coal, OS_NOESCAPE coalition_for_each_task_block_t block)
+{
+	assert(coal != COALITION_NULL);
+
+	coal_dbg("iterating tasks in coalition %p id:%llu type:%s, active_count:%u",
+	    coal, coal->id, coal_type_str(coal->type), coal->active_count);
+
+	__assert_only task_t selected_task;
+
+	selected_task = coal_call(coal, iterate_tasks, block);
+
+	assert(selected_task == TASK_NULL);
+}
+
 void
-coalition_for_each_task(coalition_t coal, void *ctx,
-    void (*callback)(coalition_t, void *, task_t))
+coalition_for_each_task(coalition_t coal, OS_NOESCAPE coalition_for_each_task_block_t block)
+{
+	assert(coal != COALITION_NULL);
+
+	coalition_lock(coal);
+
+	coalition_for_each_task_locked(coal, block);
+
+	coalition_unlock(coal);
+}
+
+static task_t
+coalition_select_task(coalition_t coal, OS_NOESCAPE coalition_for_each_task_block_t block)
 {
 	assert(coal != COALITION_NULL);
 
@@ -1678,9 +1875,14 @@ coalition_for_each_task(coalition_t coal, void *ctx,
 
 	coalition_lock(coal);
 
-	coal_call(coal, iterate_tasks, ctx, callback);
+	task_t selected_task = coal_call(coal, iterate_tasks, block);
+
+	if (selected_task != TASK_NULL) {
+		task_reference(selected_task);
+	}
 
 	coalition_unlock(coal);
+	return selected_task;
 }
 
 
@@ -2599,12 +2801,6 @@ unlock_coal:
 	return ntasks;
 }
 
-static void
-mark_coalition_member_as_swappable(__unused coalition_t coal, __unused void *ctx, task_t task)
-{
-	vm_task_set_selfdonate_pages(task, true);
-}
-
 void
 coalition_mark_swappable(coalition_t coal)
 {
@@ -2616,7 +2812,10 @@ coalition_mark_swappable(coalition_t coal)
 	cj = &coal->j;
 	cj->swap_enabled = true;
 
-	i_coal_jetsam_iterate_tasks(coal, NULL, mark_coalition_member_as_swappable);
+	i_coal_jetsam_iterate_tasks(coal, ^bool (task_t task) {
+		vm_task_set_selfdonate_pages(task, true);
+		return false;
+	});
 
 	coalition_unlock(coal);
 }
@@ -2635,4 +2834,223 @@ coalition_is_swappable(coalition_t coal)
 	coalition_unlock(coal);
 
 	return enabled;
+}
+
+
+/*
+ * Coalition policy functions
+ */
+
+static uintptr_t
+crequested(coalition_t coal)
+{
+	static_assert(sizeof(struct coalition_requested_policy) == sizeof(uint64_t), "size invariant violated");
+
+	uintptr_t* raw = (uintptr_t*)&coal->j.c_requested_policy;
+
+	return raw[0];
+}
+
+static uintptr_t
+ceffective(coalition_t coal)
+{
+	static_assert(sizeof(struct coalition_requested_policy) == sizeof(uint64_t), "size invariant violated");
+
+	uintptr_t* raw = (uintptr_t*)&coal->j.c_effective_policy;
+
+	return raw[0];
+}
+
+static uint32_t
+cpending(coalition_pend_token_t pend_token)
+{
+	static_assert(sizeof(struct coalition_pend_token) == sizeof(uint32_t), "size invariant violated");
+
+	return *(uint32_t*)(void*)(pend_token);
+}
+
+
+static void
+jetsam_coalition_policy_update_locked(coalition_t coal, coalition_pend_token_t pend_token)
+{
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    (IMPORTANCE_CODE(IMP_UPDATE, TASK_POLICY_COALITION) | DBG_FUNC_START),
+	    coalition_id(coal), ceffective(coal), 0, 0, 0);
+
+	struct coalition_requested_policy requested = coal->j.c_requested_policy;
+	struct coalition_effective_policy next = {};
+
+	/* Update darwinbg state */
+	next.cep_darwinbg = requested.crp_darwinbg;
+
+	/* TODO: should termrequested cause darwinbg to be unset */
+
+	struct coalition_effective_policy prev = coal->j.c_effective_policy;
+
+	coal->j.c_effective_policy = next;
+
+	/* */
+	if (prev.cep_darwinbg != next.cep_darwinbg) {
+		pend_token->cpt_update_j_coal_tasks = 1;
+	}
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    (IMPORTANCE_CODE(IMP_UPDATE, TASK_POLICY_COALITION)) | DBG_FUNC_END,
+	    coalition_id(coal), ceffective(coal), 0, 0, 0);
+}
+
+/*
+ * Returns task reference or TASK_NULL if none left.
+ * Called without coalition lock held.
+ * Called with global coalition_policy_lock held.
+ */
+static task_t
+coalition_find_next_task_with_pending_work(coalition_t coal)
+{
+	return coalition_select_task(coal, ^bool (task_t task){
+		if (task->pended_coalition_changes.tpt_value != 0) {
+		        return true;
+		}
+		return false;
+	});
+}
+
+/*
+ * Called with coalition unlocked to do things that can't be done
+ * while holding the coalition lock.
+ * Called with global coalition_policy_lock held.
+ */
+static void
+coalition_policy_update_complete_unlocked(
+	coalition_t coal,
+	coalition_pend_token_t coalition_pend_token)
+{
+	/*
+	 * Note that because we dropped the coalition lock, a task may have
+	 * exited since we set the pending bit, so we can't assert that
+	 * no task exits with a change pending.
+	 */
+
+	if (coalition_pend_token->cpt_update_j_coal_tasks) {
+		task_t task;
+
+		while ((task = coalition_find_next_task_with_pending_work(coal)) != TASK_NULL) {
+			task_policy_update_complete_unlocked(task, &task->pended_coalition_changes);
+			task->pended_coalition_changes.tpt_value = 0;
+			task_deallocate(task);
+		}
+	}
+
+
+	if (coalition_pend_token->cpt_update_timers) {
+		ml_timer_evaluate();
+	}
+}
+
+/*
+ * This lock covers the coalition_pend_token fields
+ * in all tasks, so that we don't have to have stack storage
+ * for all of them.  We could also use a gate or busy bit
+ * on each coalition, but this is less complex.
+ */
+LCK_MTX_DECLARE(coalition_policy_lock, &coalitions_lck_grp);
+
+kern_return_t
+jetsam_coalition_set_policy(coalition_t coal,
+    int        flavor,
+    int        value)
+{
+	struct coalition_pend_token pend_token = {};
+	coalition_pend_token_t pend_token_ref = &pend_token;
+
+	assert(coalition_type(coal) == COALITION_TYPE_JETSAM);
+
+	lck_mtx_lock(&coalition_policy_lock);
+
+	coalition_lock(coal);
+
+	struct coalition_requested_policy requested = coal->j.c_requested_policy;
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    (IMPORTANCE_CODE(flavor, TASK_POLICY_COALITION)) | DBG_FUNC_START,
+	    coalition_id(coal), crequested(coal), 0, value, 0);
+
+	switch (flavor) {
+	case TASK_POLICY_DARWIN_BG:
+		requested.crp_darwinbg = value;
+		break;
+	default:
+		panic("unknown coalition policy: %d %d", flavor, value);
+		break;
+	}
+
+	coal->j.c_requested_policy = requested;
+
+	jetsam_coalition_policy_update_locked(coal, &pend_token);
+
+	if (pend_token.cpt_update_j_coal_tasks) {
+		coalition_for_each_task_locked(coal, ^bool (task_t task) {
+			coalition_policy_update_task(task, pend_token_ref);
+			return false;
+		});
+	}
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    (IMPORTANCE_CODE(flavor, TASK_POLICY_COALITION)) | DBG_FUNC_END,
+	    coalition_id(coal), crequested(coal), 0, cpending(&pend_token), 0);
+
+	coalition_unlock(coal);
+
+	coalition_policy_update_complete_unlocked(coal, &pend_token);
+
+	lck_mtx_unlock(&coalition_policy_lock);
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+jetsam_coalition_get_policy(coalition_t coal, int flavor, int *value)
+{
+	lck_mtx_lock(&coalition_policy_lock);
+
+	coalition_lock(coal);
+
+	struct coalition_requested_policy requested = coal->j.c_requested_policy;
+
+	switch (flavor) {
+	case TASK_POLICY_DARWIN_BG:
+		*value = requested.crp_darwinbg;
+		break;
+	default:
+		panic("unknown coalition policy: %d", flavor);
+		break;
+	}
+
+	coalition_unlock(coal);
+
+	lck_mtx_unlock(&coalition_policy_lock);
+
+	return KERN_SUCCESS;
+}
+
+bool
+task_get_effective_jetsam_coalition_policy(task_t task, int flavor)
+{
+	coalition_t coal = task->coalition[COALITION_TYPE_JETSAM];
+
+	if (coal == NULL) {
+		return false;
+	}
+
+	struct coalition_effective_policy effective = coal->j.c_effective_policy;
+
+	switch (flavor) {
+	case TASK_POLICY_DARWIN_BG:
+		return effective.cep_darwinbg;
+	default:
+		panic("unknown coalition policy: %d", flavor);
+		break;
+	}
+
+	return false;
 }

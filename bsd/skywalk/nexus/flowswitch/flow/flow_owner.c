@@ -44,8 +44,8 @@ RB_GENERATE_PREV(flow_owner_tree, flow_owner, fo_link, fo_cmp);
 KALLOC_TYPE_VAR_DEFINE(KT_SK_FOB, struct flow_owner_bucket, KT_DEFAULT);
 
 struct flow_owner_bucket *
-flow_owner_buckets_alloc(size_t fob_cnt, size_t *fob_sz, size_t *tot_sz)
-{
+__sized_by(*tot_sz)
+flow_owner_buckets_alloc(size_t fob_cnt, size_t * fob_sz, size_t * tot_sz){
 	size_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_owner_bucket *fob;
 	size_t fob_tot_sz;
@@ -374,14 +374,17 @@ flow_owner_alloc(struct flow_owner_bucket *fob, struct proc *p,
 	if (fo != NULL) {
 		if (flowadv) {
 			uint32_t i;
+			bitmap_t *bmap;
 
-			if ((fo->fo_flowadv_bmap =
-			    skmem_cache_alloc(sk_fab_cache, SKMEM_SLEEP)) == NULL) {
+			bmap = skmem_cache_alloc(sk_fab_cache, SKMEM_SLEEP);
+			if (bmap == NULL) {
 				SK_ERR("failed to alloc flow advisory bitmap");
 				fo_free(fo);
 				return NULL;
 			}
-			bzero(fo->fo_flowadv_bmap, sk_fab_size);
+			bzero(bmap, sk_fab_size);
+			fo->fo_flowadv_bmap = bmap;
+			fo->fo_num_flowadv_bmaps = sk_fadv_nchunks;
 			fo->fo_flowadv_max = sk_max_flows;
 
 			/* set the bits for free indices */
@@ -432,6 +435,7 @@ flow_owner_free(struct flow_owner_bucket *fob, struct flow_owner *fo)
 	ASSERT(fo->fo_num_flowadv == 0);
 	skmem_cache_free(sk_fab_cache, fo->fo_flowadv_bmap);
 	fo->fo_flowadv_bmap = NULL;
+	fo->fo_num_flowadv_bmaps = 0;
 
 	/* wake up any thread blocked in flow_owner_bucket_destroy() */
 	if (RB_EMPTY(&fob->fob_owner_head) && fob->fob_dtor_waiters > 0) {
@@ -477,7 +481,7 @@ flow_owner_flowadv_index_alloc(struct flow_owner *fo, flowadv_idx_t *fadv_idx)
 		    fo->fo_flowadv_max);
 		VERIFY(fo->fo_num_flowadv == fo->fo_flowadv_max);
 		*fadv_idx = FLOWADV_IDX_NONE;
-		return ENOSPC;
+		return ENOMEM;
 	}
 
 	fo->fo_num_flowadv++;

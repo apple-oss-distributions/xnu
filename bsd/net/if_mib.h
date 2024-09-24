@@ -63,7 +63,7 @@
 #include <sys/types.h>
 
 struct ifmibdata {
-	char                            ifmd_name[IFNAMSIZ]; /* name of interface */
+	char                    ifmd_name[IFNAMSIZ]; /* name of interface */
 	unsigned int            ifmd_pcount;    /* number of promiscuous listeners */
 	unsigned int            ifmd_flags;     /* interface flags */
 	unsigned int            ifmd_snd_len;   /* instantaneous length of send queue */
@@ -72,16 +72,6 @@ struct ifmibdata {
 	unsigned int            ifmd_filler[4]; /* for future expansion */
 	struct if_data64        ifmd_data; /* generic information and statistics */
 };
-
-#ifdef PRIVATE
-struct ifmibdata_supplemental {
-	struct if_traffic_class ifmd_traffic_class;
-	struct if_data_extended ifmd_data_extended;
-	struct if_packet_stats  ifmd_packet_stats;
-	struct if_rxpoll_stats  ifmd_rxpoll_stats;
-	struct if_netif_stats   ifmd_netif_stats;
-};
-#endif /* PRIVATE */
 
 /*
  * sysctl MIB tags at the net.link.generic level
@@ -98,7 +88,7 @@ struct ifmibdata_supplemental {
 #define IFDATA_ADDRS            3       /* addresses assigned to interface */
 #define IFDATA_MULTIADDRS       4       /* multicast addresses assigned to interface */
 #ifdef PRIVATE
-#define IFDATA_SUPPLEMENTAL     5       /* supplemental link specific stats */
+/* See if_mib_private.h for extended tags */
 #endif /* PRIVATE */
 
 /*
@@ -214,15 +204,8 @@ enum {
  * header files if convenient ones already exist.
  */
 
-/*
- * Structure for interface family ID table
- */
-
-struct if_family_id {
-	u_int32_t               iffmid_len;
-	u_int32_t               iffmid_id;
-	char                    iffmid_str[1];  /* variable length string */
-};
-
+#ifdef PRIVATE
+#include <net/if_mib_private.h>
+#endif /* PRIVATE */
 
 #endif /* _NET_IF_MIB_H */

@@ -34,6 +34,6 @@ tests()
 	}
 }
 
-T_DECL(usage_two_dimensions, "safe_allocation.usage.two_dimensions") {
+T_DECL(usage_two_dimensions, "safe_allocation.usage.two_dimensions", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

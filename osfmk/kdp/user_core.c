@@ -30,7 +30,7 @@
 #include <kdp/kdp_core.h>
 #include <kdp/core_notes.h>
 #include <kdp/kdp_common.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 kern_return_t
 user_dump_init(void *refcon, void *context)

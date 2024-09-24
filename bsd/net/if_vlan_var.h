@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003, 2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -64,6 +64,15 @@
 #include <sys/types.h>
 
 #define ETHER_VLAN_ENCAP_LEN    4       /* len of 802.1Q VLAN encapsulation */
+
+#ifdef KERNEL_PRIVATE
+/* VLAN encapsulation header */
+struct ether_vlan_encap_header {
+	u_int16_t evle_tag;
+	u_int16_t evle_proto;
+};
+#endif /* KERNEL_PRIVATE */
+
 struct  ether_vlan_header {
 	u_char  evl_dhost[ETHER_ADDR_LEN];
 	u_char  evl_shost[ETHER_ADDR_LEN];

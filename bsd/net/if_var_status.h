@@ -269,15 +269,45 @@ enum ifnet_interface_advisory_interface_type : uint8_t {
 #endif /* XNU_KERNEL_PRIVATE */
 };
 
+enum ifnet_interface_advisory_notification_type_cell : uint8_t {
+	/* Reserved for MAV platform */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_DEFAULT= 0,
+	/* Used when sending Codec Rate Adaptation related notifications */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_UPLINK_CRA,
+	/*
+	 * Used when sending periodic measurement of parameters (RSRP,RSSI etc.)
+	 * during VoLTE/VoNR calls
+	 */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_MEASUREMENT_UPDATE,
+	/* Used when a TTI bundle enable/disable occurs during VoLTE/VoNR calls */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_BANDWIDTH_LIMITATION_EVENT,
+	/* Used when a configuration change occurs in CDRx during VoLTE/VoNR calls */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_DISCONTINUOUS_RECEPTION_EVENT,
+	/* Used when a handover start/end occurs during VoLTE/VoNR calls */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_OUTAGE_EVENT,
+	/* Used for Thermal Codec Rate Adaptation Events */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_CELLULAR_THERMAL_CRA_EVENT,
+};
+
+enum ifnet_interface_advisory_notification_type_wifi : uint8_t {
+	/* Unused for now */
+	IF_INTERFACE_ADVISORY_NOTIFICATION_TYPE_WIFI_UNDEFINED = 0,
+};
+
+typedef union {
+	enum ifnet_interface_advisory_notification_type_cell cell;
+	enum ifnet_interface_advisory_notification_type_wifi wifi;
+} ifnet_interface_advisory_notification_type_t;
+
 struct ifnet_interface_advisory_header {
 	/* The current structure version */
 	enum ifnet_interface_advisory_version         version;
-	/*  Specifies if the advisory is for transmit or receive path */
+	/* Specifies if the advisory is for transmit or receive path */
 	enum ifnet_interface_advisory_direction       direction;
 	/* Interface type */
 	enum ifnet_interface_advisory_interface_type  interface_type;
-	/* reserved for future use */
-	uint8_t                                       reserved;
+	/* Notification type */
+	ifnet_interface_advisory_notification_type_t  notification_type;
 };
 
 enum ifnet_interface_advisory_rate_trend : int32_t {

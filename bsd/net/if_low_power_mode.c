@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -61,12 +61,6 @@ struct eventhandler_lists_ctxt if_low_power_evhdlr_ctx;
 
 static void if_low_power_evhdlr_callback(__unused struct eventhandler_entry_arg arg,
     struct ifnet *ifp, if_low_power_ev_code_t event_code);
-
-#if 0
-static void if_low_power_nwk_ev_callback(void *arg);
-static void if_low_power_event_enqueue_nwk_wq_entry(struct ifnet *ifp,
-    if_low_power_ev_code_t event_code);
-#endif
 
 extern void shutdown_sockets_on_interface(struct ifnet *ifp);
 
@@ -135,44 +129,10 @@ if_low_power_evhdlr_init(void)
 
 	(void)EVENTHANDLER_REGISTER(&if_low_power_evhdlr_ctx,
 	    if_low_power_event,
-	    if_low_power_evhdlr_callback,
+	    &if_low_power_evhdlr_callback,
 	    eventhandler_entry_dummy_arg,
 	    EVENTHANDLER_PRI_ANY);
 }
-
-#if 0
-static void
-if_low_power_nwk_ev_callback(struct nwk_wq_entry *nwk_item)
-{
-	struct if_low_power_ev_nwk_wq_entry *p_ev;
-
-	p_ev = __container_of(nwk_item,
-	    struct if_low_power_ev_nwk_wq_entry, nwk_wqe);
-
-	EVENTHANDLER_INVOKE(&if_low_power_evhdlr_ctx,
-	    if_low_power_event, p_ev->ev_args.ifp,
-	    p_ev->ev_args.event_code);
-
-	kfree_type(struct if_low_power_ev_nwk_wq_entry, p_ev);
-}
-
-static void
-if_low_power_event_enqueue_nwk_wq_entry(struct ifnet *ifp,
-    if_low_power_ev_code_t event_code)
-{
-	struct if_low_power_ev_nwk_wq_entry *event_nwk_wq_entry = NULL;
-
-	event_nwk_wq_entry = kalloc_type(struct if_low_power_ev_nwk_wq_entry,
-	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
-
-	event_nwk_wq_entry->ev_args.ifp = ifp;
-	event_nwk_wq_entry->ev_args.event_code = event_code;
-
-	event_nwk_wq_entry->nwk_wqe.func = if_low_power_nwk_ev_callback;
-
-	nwk_wq_enqueue(&event_nwk_wq_entry->nwk_wqe);
-}
-#endif
 
 int
 if_set_low_power(ifnet_t ifp, bool on)

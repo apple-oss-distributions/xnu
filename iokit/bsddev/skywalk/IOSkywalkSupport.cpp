@@ -37,6 +37,8 @@
 #include <skywalk/os_skywalk_private.h>
 #include <sys/errno.h>
 #include <sys/queue.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
@@ -445,7 +447,7 @@ IOSKRegionMapper::mapOverwrite(
 	vmk_flags.vmf_overwrite = true;
 	vmk_flags.vm_tag = getVMTagForMap(fMapper->fTaskMap);
 
-	kr = vm_map_enter_mem_object(
+	kr = mach_vm_map_kernel(
 		fMapper->fTaskMap,
 		&addr,
 		size,
@@ -539,7 +541,7 @@ IOSKMapper::initWithTask(
 	vmk_flags.vm_tag = getVMTagForMap(fTaskMap);
 
 	// reserve address space on given task with PROT_NONE
-	kr = vm_map_enter_mem_object(
+	kr = mach_vm_map_kernel(
 		fTaskMap,
 		&addr,
 		size,

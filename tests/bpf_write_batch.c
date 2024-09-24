@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -82,7 +82,6 @@ HexDump(void *data, size_t len)
 	}
 }
 
-static int udp_fd = -1;
 static char ifname1[IF_NAMESIZE];
 static char ifname2[IF_NAMESIZE];
 static int default_fake_max_mtu = 0;
@@ -90,11 +89,12 @@ static int default_fake_max_mtu = 0;
 static void
 cleanup(void)
 {
-	if (udp_fd != -1) {
-		(void)ifnet_destroy(udp_fd, ifname1, false);
+	if (ifname1[0] != '\0') {
+		(void)ifnet_destroy(ifname1, false);
 		T_LOG("ifnet_destroy %s", ifname1);
-
-		(void)ifnet_destroy(udp_fd, ifname2, false);
+	}
+	if (ifname2[0] != '\0') {
+		(void)ifnet_destroy(ifname2, false);
 		T_LOG("ifnet_destroy %s", ifname2);
 	}
 
@@ -102,18 +102,12 @@ cleanup(void)
 		T_LOG("sysctl net.link.fake.max_mtu=%d", default_fake_max_mtu);
 		(void) sysctlbyname("net.link.fake.max_mtu", NULL, NULL, &default_fake_max_mtu, sizeof(int));
 	}
-
-	if (udp_fd != -1) {
-		(void) close(udp_fd);
-	}
 }
 
 static void
 init(int mtu)
 {
 	T_ATEND(cleanup);
-
-	udp_fd = inet_dgram_socket();
 
 	if (mtu > 0) {
 		size_t oldlen = sizeof(int);
@@ -123,46 +117,32 @@ init(int mtu)
 }
 
 static int
-set_if_mtu(const char *ifname, int mtu)
-{
-	int error = 0;
-	struct ifreq ifr = {};
-
-	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
-	ifr.ifr_mtu = mtu;
-
-	T_ASSERT_POSIX_SUCCESS(ioctl(udp_fd, SIOCSIFMTU, (caddr_t)&ifr), NULL);
-
-	return error;
-}
-
-static int
 setup_feth_pair(int mtu)
 {
 	int error = 0;
 
 	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
-	error = ifnet_create_2(udp_fd, ifname1, sizeof(ifname1));
+	error = ifnet_create_2(ifname1, sizeof(ifname1));
 	if (error != 0) {
+		ifname1[0] = '\0';
 		goto done;
 	}
 	T_LOG("created %s", ifname1);
 
 	strlcpy(ifname2, FETH_NAME, sizeof(ifname2));
-	error = ifnet_create_2(udp_fd, ifname2, sizeof(ifname2));
+	error = ifnet_create_2(ifname2, sizeof(ifname2));
 	if (error != 0) {
+		ifname2[0] = '\0';
 		goto done;
 	}
 	T_LOG("created %s", ifname2);
 
-	ifnet_attach_ip(udp_fd, ifname1);
+	ifnet_attach_ip(ifname1);
 
-	if ((error = fake_set_peer(udp_fd, ifname1, ifname2)) != 0) {
-		goto done;
-	}
+	fake_set_peer(ifname1, ifname2);
 	if (mtu != 0) {
-		set_if_mtu(ifname1, mtu);
-		set_if_mtu(ifname2, mtu);
+		ifnet_set_mtu(ifname1, mtu);
+		ifnet_set_mtu(ifname2, mtu);
 	}
 done:
 	return error;
@@ -239,13 +219,13 @@ make_bootp_packet(struct iovec *iov, u_int ip_len, int id)
 		payload_len = ip_len - (sizeof(struct ip) + sizeof(struct udphdr));
 	}
 
-	struct ether_addr src_eaddr = {};
-	ifnet_get_lladdr(udp_fd, ifname1, &src_eaddr);
+	struct ether_addr src_eaddr = { 0 };
+	ifnet_get_lladdr(ifname1, &src_eaddr);
 
 	struct in_addr src_ip = { .s_addr = INADDR_ANY };
 	uint16_t src_port = 68;
 
-	struct ether_addr dst_eaddr = {};
+	struct ether_addr dst_eaddr = { 0 };
 	memset(dst_eaddr.octet, 255, ETHER_ADDR_LEN);
 
 	struct in_addr dst_ip = { .s_addr = INADDR_BROADCAST };
@@ -275,7 +255,7 @@ make_bootp_packet(struct iovec *iov, u_int ip_len, int id)
 
 	T_ASSERT_EQ(sizeof(struct bpf_hdr), BPF_WORDALIGN(sizeof(struct bpf_hdr)), "bpfhdr.bh_hdrlen == BPF_WORDALIGN(sizeof(struct bpf_hdr))");
 
-	struct bpf_hdr bpfhdr = {};
+	struct bpf_hdr bpfhdr = { 0 };
 	bpfhdr.bh_caplen = frame_length;
 	bpfhdr.bh_datalen = frame_length;
 	bpfhdr.bh_hdrlen = sizeof(struct bpf_hdr);

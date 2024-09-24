@@ -26,6 +26,6 @@ tests()
 	}
 }
 
-T_DECL(size, "bounded_array.size") {
+T_DECL(size, "bounded_array.size", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

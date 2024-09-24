@@ -465,10 +465,11 @@ struct cfil_entry {
 
 #define CFI_ADD_TIME_LOG(cfil, t1, t0, op)                                                                                      \
 	        struct timeval64 _tdiff;                                                                                          \
-	        if ((cfil)->cfi_op_list_ctr < CFI_MAX_TIME_LOG_ENTRY) {                                                         \
+	        size_t offset = (cfil)->cfi_op_list_ctr;                                                                        \
+	        if (offset < CFI_MAX_TIME_LOG_ENTRY) {                                                                          \
 	                timersub(t1, t0, &_tdiff);                                                                              \
-	                (cfil)->cfi_op_time[(cfil)->cfi_op_list_ctr] = (uint32_t)(_tdiff.tv_sec * 1000 + _tdiff.tv_usec / 1000);\
-	                (cfil)->cfi_op_list[(cfil)->cfi_op_list_ctr] = (unsigned char)op;                                       \
+	                (cfil)->cfi_op_time[offset] = (uint32_t)(_tdiff.tv_sec * 1000 + _tdiff.tv_usec / 1000);                 \
+	                (cfil)->cfi_op_list[offset] = (unsigned char)op;                                                        \
 	                (cfil)->cfi_op_list_ctr ++;                                                                             \
 	        }
 
@@ -863,9 +864,9 @@ bool check_port(struct sockaddr *, u_short);
 static void
 cfil_rw_lock_exclusive(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_lock_exclusive(lck);
 
@@ -876,9 +877,9 @@ cfil_rw_lock_exclusive(lck_rw_t *lck)
 static void
 cfil_rw_unlock_exclusive(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_unlock_exclusive(lck);
 
@@ -889,9 +890,9 @@ cfil_rw_unlock_exclusive(lck_rw_t *lck)
 static void
 cfil_rw_lock_shared(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_lock_shared(lck);
 
@@ -902,9 +903,9 @@ cfil_rw_lock_shared(lck_rw_t *lck)
 static void
 cfil_rw_unlock_shared(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_unlock_shared(lck);
 
@@ -915,10 +916,10 @@ cfil_rw_unlock_shared(lck_rw_t *lck)
 static boolean_t
 cfil_rw_lock_shared_to_exclusive(lck_rw_t *lck)
 {
-	void *lr_saved;
 	boolean_t upgraded;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	upgraded = lck_rw_lock_shared_to_exclusive(lck);
 	if (upgraded) {
@@ -931,9 +932,9 @@ cfil_rw_lock_shared_to_exclusive(lck_rw_t *lck)
 static void
 cfil_rw_lock_exclusive_to_shared(lck_rw_t *lck)
 {
-	void *lr_saved;
+	void * __single lr_saved;
 
-	lr_saved = __builtin_return_address(0);
+	lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	lck_rw_lock_exclusive_to_shared(lck);
 
@@ -1226,7 +1227,7 @@ cfil_ctl_connect(kern_ctl_ref kctlref, struct sockaddr_ctl *sac,
     void **unitinfo)
 {
 	errno_t error = 0;
-	struct content_filter *cfc = NULL;
+	struct content_filter * __single cfc = NULL;
 
 	CFIL_LOG(LOG_NOTICE, "");
 
@@ -1262,7 +1263,7 @@ cfil_ctl_connect(kern_ctl_ref kctlref, struct sockaddr_ctl *sac,
 		if (global_cfil_stats_report_buffers[cfc->cf_kcunit - 1] == NULL) {
 			cfil_rw_unlock_exclusive(&cfil_lck_rw);
 
-			struct cfil_stats_report_buffer *buf;
+			struct cfil_stats_report_buffer * __single buf;
 
 			buf = kalloc_type(struct cfil_stats_report_buffer,
 			    Z_WAITOK | Z_ZERO | Z_NOFAIL);
@@ -1327,7 +1328,7 @@ cfil_ctl_disconnect(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo)
 {
 #pragma unused(kctlref)
 	errno_t error = 0;
-	struct content_filter *cfc;
+	struct content_filter * __single cfc;
 	struct cfil_entry *entry;
 	uint64_t sock_flow_id = 0;
 
@@ -1537,7 +1538,7 @@ done:
 static int
 cfil_acquire_sockbuf(struct socket *so, struct cfil_info *cfil_info, int outgoing)
 {
-	thread_t tp = current_thread();
+	thread_t __single tp = current_thread();
 	struct sockbuf *sb = outgoing ? &so->so_snd : &so->so_rcv;
 	lck_mtx_t *mutex_held;
 	int error = 0;
@@ -1595,7 +1596,7 @@ static void
 cfil_release_sockbuf(struct socket *so, int outgoing)
 {
 	struct sockbuf *sb = outgoing ? &so->so_snd : &so->so_rcv;
-	thread_t tp = current_thread();
+	thread_t __single tp = current_thread();
 
 	socket_lock_assert_owned(so);
 
@@ -1894,9 +1895,9 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 	struct cfil_msg_hdr *msghdr;
 	struct content_filter *cfc = (struct content_filter *)unitinfo;
 	struct socket *so;
-	struct cfil_msg_action *action_msg;
+	struct cfil_msg_action * __single action_msg;
 	struct cfil_entry *entry;
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	unsigned int data_len = 0;
 
 	CFIL_LOG(LOG_INFO, "");
@@ -1925,7 +1926,7 @@ cfil_ctl_send(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo, mbuf_t m,
 		error = EINVAL;
 		goto done;
 	}
-	msghdr = (struct cfil_msg_hdr *)mbuf_data(m);
+	msghdr = mtod(m, struct cfil_msg_hdr *);
 	if (msghdr->cfm_version != CFM_VERSION_CURRENT) {
 		CFIL_LOG(LOG_ERR, "bad version %u", msghdr->cfm_version);
 		error = EINVAL;
@@ -2142,7 +2143,7 @@ cfil_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
     int opt, void *data, size_t *len)
 {
 #pragma unused(kctlref, opt)
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	errno_t error = 0;
 	struct content_filter *cfc = (struct content_filter *)unitinfo;
 
@@ -2251,7 +2252,7 @@ cfil_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 		// Source and destination addresses
 		struct inpcb *inp = sotoinpcb(sock);
 		if (inp->inp_vflag & INP_IPV6) {
-			struct in6_addr *laddr = NULL, *faddr = NULL;
+			struct in6_addr * __single laddr = NULL, * __single faddr = NULL;
 			u_int16_t lport = 0, fport = 0;
 
 			cfil_get_flow_address_v6(cfil_info->cfi_hash_entry, inp,
@@ -2275,7 +2276,14 @@ cfil_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 		if (sock->so_flags & SOF_DELEGATED) {
 			sock_info->cfs_e_pid = sock->e_pid;
 			memcpy(sock_info->cfs_e_uuid, sock->e_uuid, sizeof(uuid_t));
-		} else {
+		}
+#if defined(XNU_TARGET_OS_OSX)
+		else if (!uuid_is_null(sock->so_ruuid)) {
+			sock_info->cfs_e_pid = sock->so_rpid;
+			memcpy(sock_info->cfs_e_uuid, sock->so_ruuid, sizeof(uuid_t));
+		}
+#endif
+		else {
 			sock_info->cfs_e_pid = sock->last_pid;
 			memcpy(sock_info->cfs_e_uuid, sock->last_uuid, sizeof(uuid_t));
 		}
@@ -2509,7 +2517,7 @@ m_tag_kalloc_cfil_udp(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 static void
 m_tag_kfree_cfil_udp(struct m_tag *tag)
 {
-	struct cflil_tag_container *tag_container = (struct cflil_tag_container *)tag;
+	struct cflil_tag_container * __single tag_container = (struct cflil_tag_container *)tag;
 
 	kfree_type(struct cflil_tag_container, tag_container);
 }
@@ -2988,7 +2996,7 @@ cfil_sock_attach(struct socket *so, struct sockaddr *local, struct sockaddr *rem
 
 	debug = DEBUG_FLOW(sotoinpcb(so), so, local, remote);
 	if (debug) {
-		CFIL_LOG(LOG_INFO, "CFIL: TCP (dir %d) - debug flow with port %d", dir, cfil_log_port);
+		CFIL_LOG(LOG_ERR, "CFIL: TCP (dir %d) - debug flow with port %d", dir, cfil_log_port);
 	}
 
 	filter_control_unit = necp_socket_get_content_filter_control_unit(so);
@@ -3043,10 +3051,14 @@ cfil_sock_attach(struct socket *so, struct sockaddr *local, struct sockaddr *rem
 	 * is needed.
 	 */
 	if (remote != NULL && (remote->sa_len <= sizeof(union sockaddr_in_4_6))) {
-		memcpy(&so->so_cfil->cfi_so_attach_faddr, remote, remote->sa_len);
+		SOCKADDR_COPY(remote, SA(&so->so_cfil->cfi_so_attach_faddr), remote->sa_len);
 	}
 	if (local != NULL && (local->sa_len <= sizeof(union sockaddr_in_4_6))) {
-		memcpy(&so->so_cfil->cfi_so_attach_laddr, local, local->sa_len);
+		SOCKADDR_COPY(local, SA(&so->so_cfil->cfi_so_attach_laddr), local->sa_len);
+	}
+
+	if (so->so_cfil->cfi_debug) {
+		cfil_info_log(LOG_ERR, so->so_cfil, "CFIL: ADDED");
 	}
 
 	error = cfil_dispatch_attach_event(so, so->so_cfil, 0, dir);
@@ -3109,7 +3121,7 @@ cfil_fill_event_msg_addresses(struct soflow_hash_entry *entry, struct inpcb *inp
 			fill_ip_sockaddr_4_6(sin_dst, laddr, lport);
 		}
 	} else {
-		struct in6_addr *laddr = NULL, *faddr = NULL;
+		struct in6_addr * __single laddr = NULL, * __single faddr = NULL;
 		u_int16_t lport = 0, fport = 0;
 		const u_int32_t lifscope = inp ? inp->inp_lifscope : IFSCOPE_UNKNOWN;
 		const u_int32_t fifscope = inp ? inp->inp_fifscope : IFSCOPE_UNKNOWN;
@@ -3153,9 +3165,10 @@ cfil_dispatch_attach_event_sign(cfil_crypto_state_t crypto_state,
 		data.local.sin6 = msg->cfs_dst.sin6;
 	}
 
-	if (strlen(msg->cfs_remote_domain_name) > 0) {
+	size_t len = strbuflen(msg->cfs_remote_domain_name, sizeof(msg->cfs_remote_domain_name));
+	if (len > 0) {
 		extra_data[0].iov_base = msg->cfs_remote_domain_name;
-		extra_data[0].iov_len = strlen(msg->cfs_remote_domain_name);
+		extra_data[0].iov_len = len;
 	}
 
 	// At attach, if local address is already present, no need to re-sign subsequent data messages.
@@ -3177,12 +3190,12 @@ cfil_dispatch_attach_event_sign(cfil_crypto_state_t crypto_state,
 struct cfil_sign_parameters {
 	cfil_crypto_state_t csp_state;
 	struct cfil_crypto_data *csp_data;
-	uint8_t *csp_signature;
+	uint8_t * __indexable csp_signature;
 	uint32_t *csp_signature_size;
 };
 
 static void
-cfil_sign_with_domain_name(char *domain_name, void *ctx)
+cfil_sign_with_domain_name(char *domain_name __null_terminated, void *ctx)
 {
 	struct cfil_sign_parameters *parameters = (struct cfil_sign_parameters *)ctx;
 	struct iovec extra_data[1] = { { NULL, 0 } };
@@ -3192,7 +3205,7 @@ cfil_sign_with_domain_name(char *domain_name, void *ctx)
 	}
 
 	if (domain_name != NULL) {
-		extra_data[0].iov_base = domain_name;
+		extra_data[0].iov_base = __unsafe_null_terminated_to_indexable(domain_name);
 		extra_data[0].iov_len = strlen(domain_name);
 	}
 
@@ -3223,7 +3236,14 @@ cfil_dispatch_data_event_sign(cfil_crypto_state_t crypto_state,
 	if (so->so_flags & SOF_DELEGATED) {
 		data.effective_pid = so->e_pid;
 		memcpy(data.effective_uuid, so->e_uuid, sizeof(uuid_t));
-	} else {
+	}
+#if defined(XNU_TARGET_OS_OSX)
+	else if (!uuid_is_null(so->so_ruuid)) {
+		data.effective_pid = so->so_rpid;
+		memcpy(data.effective_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
+	else {
 		data.effective_pid = so->last_pid;
 		memcpy(data.effective_uuid, so->last_uuid, sizeof(uuid_t));
 	}
@@ -3284,7 +3304,14 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 	if (so->so_flags & SOF_DELEGATED) {
 		data.effective_pid = so->e_pid;
 		memcpy(data.effective_uuid, so->e_uuid, sizeof(uuid_t));
-	} else {
+	}
+#if defined(XNU_TARGET_OS_OSX)
+	else if (!uuid_is_null(so->so_ruuid)) {
+		data.effective_pid = so->so_rpid;
+		memcpy(data.effective_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
+	else {
 		data.effective_pid = so->last_pid;
 		memcpy(data.effective_uuid, so->last_uuid, sizeof(uuid_t));
 	}
@@ -3299,8 +3326,8 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 		hash_entry_ptr = cfil_info->cfi_hash_entry;
 	} else if (cfil_info->cfi_so_attach_faddr.sa.sa_len > 0 ||
 	    cfil_info->cfi_so_attach_laddr.sa.sa_len > 0) {
-		soflow_fill_hash_entry_from_address(&hash_entry, TRUE, SA(&cfil_info->cfi_so_attach_laddr.sa), FALSE);
-		soflow_fill_hash_entry_from_address(&hash_entry, FALSE, SA(&cfil_info->cfi_so_attach_faddr.sa), FALSE);
+		soflow_fill_hash_entry_from_address(&hash_entry, TRUE, SA(&cfil_info->cfi_so_attach_laddr), FALSE);
+		soflow_fill_hash_entry_from_address(&hash_entry, FALSE, SA(&cfil_info->cfi_so_attach_faddr), FALSE);
 		hash_entry_ptr = &hash_entry;
 	}
 	if (hash_entry_ptr != NULL) {
@@ -3331,7 +3358,7 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 }
 
 static void
-cfil_populate_attached_msg_domain_name(char *domain_name, void *ctx)
+cfil_populate_attached_msg_domain_name(char *domain_name __null_terminated, void *ctx)
 {
 	struct cfil_msg_sock_attached *msg_attached = (struct cfil_msg_sock_attached *)ctx;
 
@@ -3350,7 +3377,7 @@ cfil_copy_audit_token(pid_t pid, audit_token_t *buffer)
 	bool success = false;
 	proc_t p = proc_find(pid);
 	if (p != PROC_NULL) {
-		task_t t = proc_task(p);
+		task_t __single t = proc_task(p);
 		if (t != TASK_NULL) {
 			audit_token_t audit_token = {};
 			mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
@@ -3370,7 +3397,7 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 {
 	errno_t error = 0;
 	struct cfil_entry *entry = NULL;
-	struct cfil_msg_sock_attached *msg_attached;
+	struct cfil_msg_sock_attached * __single msg_attached;
 	struct content_filter *cfc = NULL;
 	struct inpcb *inp = (struct inpcb *)so->so_pcb;
 	struct soflow_hash_entry *hash_entry_ptr = NULL;
@@ -3440,7 +3467,14 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 	if (so->so_flags & SOF_DELEGATED) {
 		msg_attached->cfs_e_pid = so->e_pid;
 		memcpy(msg_attached->cfs_e_uuid, so->e_uuid, sizeof(uuid_t));
-	} else {
+	}
+#if defined(XNU_TARGET_OS_OSX)
+	else if (!uuid_is_null(so->so_ruuid)) {
+		msg_attached->cfs_e_pid = so->so_rpid;
+		memcpy(msg_attached->cfs_e_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
+	else {
 		msg_attached->cfs_e_pid = so->last_pid;
 		memcpy(msg_attached->cfs_e_uuid, so->last_uuid, sizeof(uuid_t));
 	}
@@ -3454,8 +3488,8 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 		hash_entry_ptr = cfil_info->cfi_hash_entry;
 	} else if (cfil_info->cfi_so_attach_faddr.sa.sa_len > 0 ||
 	    cfil_info->cfi_so_attach_laddr.sa.sa_len > 0) {
-		soflow_fill_hash_entry_from_address(&hash_entry, TRUE, SA(&cfil_info->cfi_so_attach_laddr.sa), FALSE);
-		soflow_fill_hash_entry_from_address(&hash_entry, FALSE, SA(&cfil_info->cfi_so_attach_faddr.sa), FALSE);
+		soflow_fill_hash_entry_from_address(&hash_entry, TRUE, SA(&cfil_info->cfi_so_attach_laddr), FALSE);
+		soflow_fill_hash_entry_from_address(&hash_entry, FALSE, SA(&cfil_info->cfi_so_attach_faddr), FALSE);
 		hash_entry_ptr = &hash_entry;
 	}
 	if (hash_entry_ptr != NULL) {
@@ -3590,9 +3624,9 @@ cfil_dispatch_disconnect_event(struct socket *so, struct cfil_info *cfil_info, u
 	}
 
 	if (cfil_info->cfi_debug) {
-		cfil_info_log(LOG_ERR, cfil_info, outgoing ?
-		    "CFIL: OUT - SENDING DISCONNECT UP":
-		    "CFIL: IN - SENDING DISCONNECT UP");
+		const char * __null_terminated out = "CFIL: OUT - SENDING DISCONNECT UP";
+		const char * __null_terminated in = "CFIL: IN - SENDING DISCONNECT UP";
+		cfil_info_log(LOG_ERR, cfil_info, outgoing ? out : in);
 	}
 
 	bzero(&msg_disconnected, sizeof(struct cfil_msg_hdr));
@@ -3856,10 +3890,9 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 {
 	errno_t error = 0;
 	struct mbuf *copy = NULL;
-	struct mbuf *msg = NULL;
+	struct mbuf * __single msg = NULL;
 	unsigned int one = 1;
 	struct cfil_msg_data_event *data_req;
-	size_t hdrsize;
 	struct inpcb *inp = (struct inpcb *)so->so_pcb;
 	struct cfil_entry *entry;
 	struct cfe_buf *entrybuf;
@@ -3908,7 +3941,7 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	}
 
 	/* We need an mbuf packet for the message header */
-	hdrsize = sizeof(struct cfil_msg_data_event);
+	const size_t hdrsize = sizeof(struct cfil_msg_data_event);
 	error = mbuf_allocpacket(MBUF_DONTWAIT, hdrsize, &one, &msg);
 	if (error != 0) {
 		CFIL_LOG(LOG_ERR, "mbuf_allocpacket() failed");
@@ -3933,6 +3966,21 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	    entry->cfe_cfil_info->cfi_sock_id;
 	data_req->cfd_start_offset = entrybuf->cfe_peeked;
 	data_req->cfd_end_offset = entrybuf->cfe_peeked + copylen;
+	// The last_pid or e_pid is set here because a socket could have been
+	// accepted by launchd and a new process spawned (with a new pid).
+	// So the last pid associated with the socket is appended to the data event.
+	// for a provider that is peeking bytes.
+	if (so->so_flags & SOF_DELEGATED) {
+		data_req->cfd_delegated_pid = so->e_pid;
+	} else {
+		data_req->cfd_delegated_pid = so->last_pid;
+	}
+	if (data_req->cfd_delegated_pid != 0) {
+		if (!cfil_copy_audit_token(data_req->cfd_delegated_pid, (audit_token_t *)&data_req->cfd_delegated_audit_token)) {
+			CFIL_LOG(LOG_ERR, "CFIL: Failed to get audit token for <sockID %llu <%llx>> ",
+			    entry->cfe_cfil_info->cfi_sock_id, entry->cfe_cfil_info->cfi_sock_id);
+		}
+	}
 
 	data_req->cfd_flags = 0;
 	if (OPTIONAL_IP_HEADER(so)) {
@@ -4320,6 +4368,33 @@ done:
 	return error;
 }
 
+static void
+cfil_strip_ip_header(struct cfil_info *cfil_info, mbuf_t data, struct socket *so)
+{
+	struct ip *ip = NULL;
+	unsigned int hlen = 0;
+	mbuf_t data_start = NULL;
+	struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+
+	if (inp && (inp->inp_flags & INP_STRIPHDR)) {
+		data_start = cfil_data_start(data);
+		if (data_start != NULL && (data_start->m_flags & M_PKTHDR)) {
+			ip = mtod(data_start, struct ip *);
+			hlen = IP_VHL_HL(ip->ip_vhl) << 2;
+
+			if (cfil_info->cfi_debug && cfil_log_data) {
+				CFIL_LOG(LOG_ERR, "CFIL: IPHDR STRIPPING: <so %llx>: <hlen %d m_len %d>",
+				    (uint64_t)VM_KERNEL_ADDRPERM(so),
+				    hlen, data_start->m_len);
+			}
+			VERIFY(hlen <= data_start->m_len);
+			data_start->m_len -= hlen;
+			data_start->m_pkthdr.len -= hlen;
+			data_start->m_data += hlen;
+		}
+	}
+}
+
 /*
  * cfil_service_inject_queue() re-inject data that passed the
  * content filters
@@ -4336,9 +4411,6 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 	struct cfil_queue *inject_q;
 	int need_rwakeup = 0;
 	int count = 0;
-	struct inpcb *inp = NULL;
-	struct ip *ip = NULL;
-	unsigned int hlen;
 
 	if (cfil_info == NULL) {
 		return 0;
@@ -4403,20 +4475,10 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 			 */
 			if (NEED_DGRAM_FLOW_TRACKING(so)) {
 				if (OPTIONAL_IP_HEADER(so)) {
-					inp = sotoinpcb(so);
-					if (inp && (inp->inp_flags & INP_STRIPHDR)) {
-						mbuf_t data_start = cfil_data_start(data);
-						if (data_start != NULL && (data_start->m_flags & M_PKTHDR)) {
-							ip = mtod(data_start, struct ip *);
-							hlen = IP_VHL_HL(ip->ip_vhl) << 2;
-							data_start->m_len -= hlen;
-							data_start->m_pkthdr.len -= hlen;
-							data_start->m_data += hlen;
-						}
-					}
+					cfil_strip_ip_header(cfil_info, data, so);
 				}
 
-				if (sbappendchain(&so->so_rcv, data, 0)) {
+				if (sbappendchain(&so->so_rcv, data)) {
 					need_rwakeup = 1;
 				}
 			} else {
@@ -4682,9 +4744,9 @@ done:
 		entry->cfe_flags |= CFEF_CFIL_DETACHED;
 
 		if (cfil_info->cfi_debug) {
-			cfil_info_log(LOG_ERR, cfil_info, outgoing ?
-			    "CFIL: OUT - PASSED ALL - DETACH":
-			    "CFIL: IN - PASSED ALL - DETACH");
+			const char * __null_terminated out = "CFIL: OUT - PASSED ALL - DETACH";
+			const char * __null_terminated in = "CFIL: IN - PASSED ALL - DETACH";
+			cfil_info_log(LOG_ERR, cfil_info, outgoing ? out : in);
 		}
 
 		CFIL_LOG(LOG_INFO, "so %llx detached %u",
@@ -4944,7 +5006,7 @@ int
 cfil_action_bless_client(uint32_t kcunit, struct cfil_msg_hdr *msghdr)
 {
 	errno_t error = 0;
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 
 	bool cfil_attached = false;
 	struct cfil_msg_bless_client *blessmsg = (struct cfil_msg_bless_client *)msghdr;
@@ -5128,7 +5190,13 @@ cfil_data_common(struct socket *so, struct cfil_info *cfil_info, int outgoing, s
 	if (cfi_buf->cfi_pending_last <= cfi_buf->cfi_pass_offset) {
 		cfil_update_entry_offsets(so, cfil_info, outgoing, datalen);
 		if (cfil_info->cfi_debug && cfil_log_data) {
-			CFIL_LOG(LOG_ERR, "CFIL: QUEUEING DATA: FAST PATH");
+			CFIL_LOG(LOG_ERR, "CFIL: QUEUEING DATA: <so %llx> %s: FAST PATH",
+			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    outgoing ? "OUT" : "IN");
+		}
+		// For incoming packets, see if we need to strip off ip header
+		if (!outgoing && NEED_DGRAM_FLOW_TRACKING(so) && OPTIONAL_IP_HEADER(so)) {
+			cfil_strip_ip_header(cfil_info, data, so);
 		}
 	} else {
 		struct cfil_entry *iter_entry;
@@ -5856,7 +5924,15 @@ sysctl_cfil_sock_list(struct sysctl_oid *oidp, void *arg1, int arg2,
 				stat.cfs_e_pid = so->e_pid;
 				memcpy(stat.cfs_e_uuid, so->e_uuid,
 				    sizeof(uuid_t));
-			} else {
+			}
+#if defined(XNU_TARGET_OS_OSX)
+			else if (!uuid_is_null(so->so_ruuid)) {
+				stat.cfs_e_pid = so->so_rpid;
+				memcpy(stat.cfs_e_uuid, so->so_ruuid,
+				    sizeof(uuid_t));
+			}
+#endif
+			else {
 				stat.cfs_e_pid = so->last_pid;
 				memcpy(stat.cfs_e_uuid, so->last_uuid,
 				    sizeof(uuid_t));
@@ -6003,8 +6079,12 @@ static void
 cfil_inp_log(int level, struct socket *so, const char* msg)
 {
 	struct inpcb *inp = NULL;
+	struct sockaddr_in *sin = NULL;
+	struct sockaddr_in6 *sin6 = NULL;
 	char local[MAX_IPv6_STR_LEN + 6];
 	char remote[MAX_IPv6_STR_LEN + 6];
+	ushort lport = 0;
+	ushort fport = 0;
 	const void  *addr;
 
 	if (so == NULL) {
@@ -6022,24 +6102,53 @@ cfil_inp_log(int level, struct socket *so, const char* msg)
 		addr = &inp->in6p_laddr.s6_addr32;
 		inet_ntop(AF_INET6, addr, local, sizeof(local));
 		addr = &inp->in6p_faddr.s6_addr32;
-		inet_ntop(AF_INET6, addr, remote, sizeof(local));
+		inet_ntop(AF_INET6, addr, remote, sizeof(remote));
 	} else {
 		addr = &inp->inp_laddr.s_addr;
 		inet_ntop(AF_INET, addr, local, sizeof(local));
 		addr = &inp->inp_faddr.s_addr;
-		inet_ntop(AF_INET, addr, remote, sizeof(local));
+		inet_ntop(AF_INET, addr, remote, sizeof(remote));
+	}
+	lport = inp->inp_lport;
+	fport = inp->inp_fport;
+
+	if (so->so_cfil && so->so_cfil->cfi_so_attach_faddr.sa.sa_len > 0) {
+		if (so->so_cfil->cfi_so_attach_faddr.sa.sa_family == AF_INET6) {
+			sin6 = SIN6(&so->so_cfil->cfi_so_attach_faddr.sa);
+			addr = &sin6->sin6_addr;
+			inet_ntop(AF_INET6, addr, remote, sizeof(remote));
+			fport = sin6->sin6_port;
+		} else if (so->so_cfil->cfi_so_attach_faddr.sa.sa_family == AF_INET) {
+			sin = SIN(&so->so_cfil->cfi_so_attach_faddr.sa);
+			addr = &sin->sin_addr.s_addr;
+			inet_ntop(AF_INET, addr, remote, sizeof(remote));
+			fport = sin->sin_port;
+		}
+	}
+	if (so->so_cfil && so->so_cfil->cfi_so_attach_laddr.sa.sa_len > 0) {
+		if (so->so_cfil->cfi_so_attach_laddr.sa.sa_family == AF_INET6) {
+			sin6 = SIN6(&so->so_cfil->cfi_so_attach_laddr.sa);
+			addr = &sin6->sin6_addr;
+			inet_ntop(AF_INET6, addr, local, sizeof(remote));
+			fport = sin6->sin6_port;
+		} else if (so->so_cfil->cfi_so_attach_laddr.sa.sa_family == AF_INET) {
+			sin = SIN(&so->so_cfil->cfi_so_attach_laddr.sa);
+			addr = &sin->sin_addr.s_addr;
+			inet_ntop(AF_INET, addr, local, sizeof(remote));
+			fport = sin->sin_port;
+		}
 	}
 
 	if (so->so_cfil != NULL) {
 		CFIL_LOG(level, "<%s>: <%s so %llx cfil %p - flags 0x%x 0x%x, sockID %llu <%llx>> lport %d fport %d laddr %s faddr %s",
 		    msg, IS_UDP(so) ? "UDP" : "TCP",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so), so->so_cfil, inp->inp_flags, inp->inp_socket->so_flags, so->so_cfil->cfi_sock_id, so->so_cfil->cfi_sock_id,
-		    ntohs(inp->inp_lport), ntohs(inp->inp_fport), local, remote);
+		    ntohs(lport), ntohs(fport), local, remote);
 	} else {
 		CFIL_LOG(level, "<%s>: <%s so %llx - flags 0x%x 0x%x> lport %d fport %d laddr %s faddr %s",
 		    msg, IS_UDP(so) ? "UDP" : "TCP",
 		    (uint64_t)VM_KERNEL_ADDRPERM(so), inp->inp_flags, inp->inp_socket->so_flags,
-		    ntohs(inp->inp_lport), ntohs(inp->inp_fport), local, remote);
+		    ntohs(lport), ntohs(fport), local, remote);
 	}
 }
 
@@ -6094,7 +6203,7 @@ check_port(struct sockaddr *addr, u_short port)
 
 	switch (addr->sa_family) {
 	case AF_INET:
-		sin = satosin(addr);
+		sin = SIN(addr);
 		if (sin->sin_len < sizeof(*sin)) {
 			return FALSE;
 		}
@@ -6103,7 +6212,7 @@ check_port(struct sockaddr *addr, u_short port)
 		}
 		break;
 	case AF_INET6:
-		sin6 = satosin6(addr);
+		sin6 = SIN6(addr);
 		if (sin6->sin6_len < sizeof(*sin6)) {
 			return FALSE;
 		}
@@ -6308,7 +6417,7 @@ cfil_filters_udp_attached_per_flow(struct socket *so,
     void *context)
 {
 	struct cfil_udp_attached_context *apply_context = NULL;
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	struct cfil_entry *entry = NULL;
 	uint64_t sock_flow_id = 0;
 	struct timespec ts;
@@ -6426,7 +6535,7 @@ cfil_sock_udp_data_pending_per_flow(struct socket *so,
 {
 #pragma unused(so)
 	struct cfil_udp_data_pending_context *apply_context = NULL;
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	struct cfi_buf *cfi_buf;
 
 	uint64_t pending = 0;
@@ -6493,7 +6602,7 @@ cfil_sock_udp_notify_shutdown_per_flow(struct socket *so,
     void *context)
 {
 	struct cfil_udp_notify_shutdown_context *apply_context = NULL;
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	errno_t error = 0;
 	int kcunit;
 
@@ -6653,7 +6762,7 @@ cfil_sock_udp_is_closed_per_flow(struct socket *so,
     void *context)
 {
 #pragma unused(context)
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	errno_t error = 0;
 	int kcunit;
 
@@ -6704,7 +6813,7 @@ cfil_sock_udp_buf_update_per_flow(struct socket *so,
     struct soflow_hash_entry *hash_entry,
     void *context)
 {
-	struct cfil_info *cfil_info = NULL;
+	struct cfil_info * __single cfil_info = NULL;
 	struct sockbuf *sb = NULL;
 	errno_t error = 0;
 	int outgoing;
@@ -7136,7 +7245,7 @@ cfil_dispatch_stats_event_locked(int kcunit, struct cfil_stats_report_buffer *bu
 
 	error = ctl_enqueuedata(cfc->cf_kcref, cfc->cf_kcunit,
 	    buffer,
-	    msgsize,
+	    sizeof(struct cfil_stats_report_buffer),
 	    CTL_DATA_EOR);
 	if (error != 0) {
 		CFIL_LOG(LOG_ERR, "ctl_enqueuedata() failed:%d", error);

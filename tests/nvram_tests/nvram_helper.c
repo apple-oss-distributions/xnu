@@ -330,7 +330,7 @@ io_registry_entry_t
 CreateOptionsRef(void)
 {
 	io_registry_entry_t optionsRef = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/options");
-	T_ASSERT_NE(optionsRef, IO_OBJECT_NULL, "got options");
+	T_ASSERT_NE(optionsRef, IO_OBJECT_NULL, "Got options");
 	return optionsRef;
 }
 

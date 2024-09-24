@@ -32,13 +32,35 @@
 #include <sys/cdefs.h>
 #include <machine/_types.h>
 
+#if defined(KERNEL)
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Xcode doesn't currently set up search paths correctly for Kernel extensions,
+ * so the clang headers are not seen in the correct order to use their types.
+ */
+#endif
+#define USE_CLANG_TYPES 0
+#else
+#if defined(__has_feature) && __has_feature(modules)
+#define USE_CLANG_TYPES 1
+#else
+#define USE_CLANG_TYPES 0
+#endif
+#endif
+
+#if USE_CLANG_TYPES
+#include <sys/_types/_null.h>
+#endif
+
 /*
  * Type definitions; takes common type definitions that must be used
  * in multiple header files due to [XSI], removes them from the system
  * space, and puts them in the implementation space.
  */
 
-#ifdef __cplusplus
+#if USE_CLANG_TYPES
+#define __DARWIN_NULL NULL
+#elif defined(__cplusplus)
 #ifdef __GNUG__
 #define __DARWIN_NULL __null
 #else /* ! __GNUG__ */
@@ -50,7 +72,7 @@
 #endif /* __GNUG__ */
 #else /* ! __cplusplus */
 #define __DARWIN_NULL ((void *)0)
-#endif /* __cplusplus */
+#endif
 
 #if !defined(DRIVERKIT)
 typedef __int64_t       __darwin_blkcnt_t;      /* total blocks */
@@ -78,6 +100,8 @@ typedef __uint32_t      __darwin_useconds_t;    /* [???] microseconds */
 #endif /* !defined(DRIVERKIT) */
 typedef unsigned char   __darwin_uuid_t[16];
 typedef char    __darwin_uuid_string_t[37];
+
+#undef USE_CLANG_TYPES
 
 #if !defined(KERNEL) && !defined(DRIVERKIT)
 #include <sys/_pthread/_pthread_types.h>

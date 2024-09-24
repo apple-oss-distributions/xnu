@@ -103,6 +103,11 @@
 #include <vfs/vfs_io_compression_stats.h>
 #endif /* CONFIG_IO_COMPRESSION_STATS */
 
+#if CONFIG_IOSCHED
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_object_xnu.h>
+#endif /* CONFIG_IOSCHED */
+
 /* XXX following three prototypes should be in a header file somewhere */
 extern dev_t    chrtoblk(dev_t dev);
 extern boolean_t        iskmemdev(dev_t dev);
@@ -1456,7 +1461,6 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 }
 
 #if CONFIG_IOSCHED
-extern  void vm_io_reprioritize_init(void);
 int     iosched_enabled = 1;
 #endif
 
@@ -1969,6 +1973,10 @@ throttle_lowpri_io(int sleep_amount)
 	if (ut->uu_lowpri_window == 0) {
 		return 0;
 	}
+	if (current_thread_in_kernel_fault()) {
+		/* do not throttle kernel faults */
+		return 0;
+	}
 
 	info = ut->uu_throttle_info;
 
@@ -2379,6 +2387,20 @@ throttle_info_update(void *throttle_info, int flags)
 }
 
 /*
+ * KPI routine (private)
+ *
+ * similar to throttle_info_update() but takes an additional argument to
+ * indicate if the backing device type is SSD or not.
+ */
+void
+throttle_info_update_with_type(void *throttle_info, int flags, boolean_t isssd)
+{
+	if (throttle_info) {
+		throttle_info_update_internal(throttle_info, NULL, flags, isssd, FALSE, NULL);
+	}
+}
+
+/*
  * KPI routine
  *
  * this is usually called before every I/O, used for throttled I/O
@@ -2483,11 +2505,6 @@ throttle_lowpri_window(void)
 {
 	return current_uthread()->uu_lowpri_window;
 }
-
-
-#if CONFIG_IOSCHED
-int upl_get_cached_tier(void *);
-#endif
 
 #if CONFIG_PHYS_WRITE_ACCT
 extern thread_t pm_sync_thread;

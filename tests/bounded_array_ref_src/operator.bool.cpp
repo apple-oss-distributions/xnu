@@ -32,7 +32,7 @@ tests()
 	}
 }
 
-T_DECL(operator_bool, "bounded_array_ref.operator.bool") {
+T_DECL(operator_bool, "bounded_array_ref.operator.bool", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

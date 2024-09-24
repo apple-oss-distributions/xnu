@@ -51,6 +51,7 @@
 #include <kern/zalloc.h>
 #include <kern/queue.h>
 #include <kern/monotonic.h>
+#include <kern/kern_stackshot.h>
 #include <prng/random.h>
 
 #include <vm/vm_map.h>
@@ -1578,9 +1579,13 @@ i386_deactivate_cpu(void)
 	/*
 	 * Move all of this cpu's timers to the master/boot cpu,
 	 * and poke it in case there's a sooner deadline for it to schedule.
+	 * We don't need to wait for it to ack the IPI.
 	 */
-	timer_queue_shutdown(&cdp->rtclock_timer.queue);
-	mp_cpus_call(cpu_to_cpumask(master_cpu), ASYNC, timer_queue_expire_local, NULL);
+	timer_queue_shutdown(master_cpu,
+	    &cdp->rtclock_timer.queue,
+	    &cpu_datap(master_cpu)->rtclock_timer.queue);
+
+	mp_cpus_call(cpu_to_cpumask(master_cpu), NOSYNC, timer_queue_expire_local, NULL);
 
 #if CONFIG_CPU_COUNTERS
 	mt_cpu_down(cdp);
@@ -1620,10 +1625,10 @@ volatile boolean_t      mp_kdp_trap = FALSE;
 volatile boolean_t      mp_kdp_is_NMI = FALSE;
 volatile unsigned long  mp_kdp_ncpus;
 boolean_t               mp_kdp_state;
-
+bool                    mp_kdp_is_stackshot = false;
 
 void
-mp_kdp_enter(boolean_t proceed_on_failure)
+mp_kdp_enter(boolean_t proceed_on_failure, bool is_stackshot)
 {
 	unsigned int    cpu;
 	unsigned int    ncpus = 0;
@@ -1639,6 +1644,7 @@ mp_kdp_enter(boolean_t proceed_on_failure)
 	 */
 	mp_kdp_state = ml_set_interrupts_enabled(FALSE);
 	my_cpu = cpu_number();
+	mp_kdp_is_stackshot = is_stackshot;
 
 	if (my_cpu == (unsigned) debugger_cpu) {
 		kprintf("\n\nRECURSIVE DEBUGGER ENTRY DETECTED\n\n");
@@ -1869,7 +1875,18 @@ mp_kdp_wait(boolean_t flush, boolean_t isNMI)
 	mca_check_save();
 #endif
 
+	/* If this is a stackshot, setup the CPU state before signalling we've entered the debugger. */
+	if (mp_kdp_is_stackshot) {
+		stackshot_cpu_preflight();
+	}
+
 	atomic_incl((volatile long *)&mp_kdp_ncpus, 1);
+
+	/* If this is a stackshot, join in on the fun. */
+	if (mp_kdp_is_stackshot) {
+		stackshot_aux_cpu_entry();
+	}
+
 	while (mp_kdp_trap || (isNMI == TRUE)) {
 		/*
 		 * A TLB shootdown request may be pending--this would result
@@ -1898,6 +1915,7 @@ mp_kdp_exit(void)
 
 	debugger_exit_time = mach_absolute_time();
 
+	mp_kdp_is_stackshot = false;
 	mp_kdp_trap = FALSE;
 	mfence();
 
@@ -1946,6 +1964,8 @@ void
 cause_ast_check(
 	processor_t     processor)
 {
+	assert(processor != PROCESSOR_NULL);
+
 	int     cpu = processor->cpu_id;
 
 	if (cpu != cpu_number()) {
@@ -1955,12 +1975,12 @@ cause_ast_check(
 }
 
 void
-slave_machine_init(void *param)
+machine_cpu_reinit(void *param)
 {
 	/*
 	 * Here in process context, but with interrupts disabled.
 	 */
-	DBG("slave_machine_init() CPU%d\n", get_cpu_number());
+	DBG("machine_cpu_reinit() CPU%d\n", get_cpu_number());
 
 	if (param == FULL_SLAVE_INIT) {
 		/*

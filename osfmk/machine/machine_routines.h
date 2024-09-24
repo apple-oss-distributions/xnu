@@ -47,10 +47,10 @@ __BEGIN_DECLS
 /*!
  * @function      ml_cpu_can_exit
  * @brief         Check whether the platform code allows |cpu_id| to be
- *                shut down at runtime.
+ *                shut down at runtime outside of system sleep.
  * @return        true if allowed, false otherwise
  */
-bool ml_cpu_can_exit(int cpu_id, processor_reason_t reason);
+bool ml_cpu_can_exit(int cpu_id);
 
 /*!
  * @function      ml_cpu_begin_state_transition
@@ -272,6 +272,52 @@ int ml_io_increase_timeouts(uintptr_t iovaddr_base, unsigned int size, uint32_t 
 OS_WARN_RESULT
 int ml_io_reset_timeouts(uintptr_t iovaddr_base, unsigned int size);
 
+/*!
+ * @function                    ml_io_increase_timeouts_phys
+ * @brief                       Increase the ml_io_read* and ml_io_write*
+ *                              timeouts for a region of PA space
+ *                              [`iopaddr_base', `iopaddr_base' + `size').
+ * @discussion                  This function is intended for building an
+ *                              allowlist of known-misbehaving register spaces
+ *                              on specific peripherals.  `size' must be between
+ *                              1 and 4096 inclusive, and the PA range must not
+ *                              overlap with any ranges previously passed to
+ *                              ml_io_increase_timeouts().
+ * @note                        This function has no effect when the new timeouts are
+ *                              shorter than the global timeouts. In addition to
+ *                              global timeouts a larger timeout may be applied
+ *                              to regions of memory which may be susceptible to
+ *                              PCIe CTOs.
+ *                              For IOs performed through virtual addresses, the
+ *                              larger of the VA timeout (if one is set) and
+ *                              this timeout is used.
+ * @param iopaddr_base          Base PA of the target region
+ * @param size                  Size of the target region, in bytes
+ * @param read_timeout_us       New read timeout, in microseconds
+ * @param write_timeout_us      New write timeout, in microseconds
+ * @return                      0 if successful, or KERN_INVALID_ARGUMENT if either
+ *                              the PA range or timeout is invalid.
+ */
+OS_WARN_RESULT
+int ml_io_increase_timeouts_phys(vm_offset_t iopaddr_base, unsigned int size,
+    uint32_t read_timeout_us, uint32_t write_timeout_us);
+
+/*!
+ * @function            ml_io_reset_timeouts_phys
+ * @brief               Unregister custom timeouts previously registered by
+ *                      ml_io_increase_timeouts_phys().
+ * @discussion          The caller must use the exact `iopaddr_base' and `size'
+ *                      range passed to a previous ml_io_increase_timeouts_phys()
+ *                      call.  Unregistering a smaller subrange is unsupported
+ *                      and will return an error.
+ * @param iopaddr_base  Base PA previously passed to ml_io_increase_timeouts_phys()
+ * @param size          Size previously passed to ml_io_increase_timeouts_phys()
+ * @return              0 if successful, or KERN_NOT_FOUND if the specfied range
+ *                      does not match a previously-registered timeout.
+ */
+OS_WARN_RESULT
+int ml_io_reset_timeouts_phys(vm_offset_t iopaddr_base, unsigned int size);
+
 #endif /* KERNEL_PRIVATE */
 
 #if XNU_KERNEL_PRIVATE
@@ -320,6 +366,18 @@ bool ml_addr_in_non_xnu_stack(uintptr_t addr);
  */
 void ml_map_cpus_to_clusters(uint8_t *table);
 
+#endif /* MACH_KERNEL_PRIVATE */
+
+#if MACH_KERNEL_PRIVATE
+/*!
+ * @func          ml_task_post_signature_processing_hook
+ * @brief         Platform-specific hook called on the main thread of a new task
+ *                after process_signature() is completed by the parent and before
+ *                the main thread returns to EL0.
+ *
+ * @param task    The new task whose signature has been processed
+ */
+void ml_task_post_signature_processing_hook(task_t task);
 #endif /* MACH_KERNEL_PRIVATE */
 
 __END_DECLS

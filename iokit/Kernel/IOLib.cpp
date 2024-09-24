@@ -36,7 +36,8 @@
 #include <IOKit/system.h>
 #include <mach/sync_policy.h>
 #include <machine/machine_routines.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 #include <libkern/c++/OSCPPDebug.h>
 
 #include <IOKit/assert.h>
@@ -972,7 +973,7 @@ IOIteratePageableMaps(vm_size_t size,
 		lck_mtx_lock( gIOKitPageableSpace.lock );
 
 		index = gIOKitPageableSpace.count;
-		if (index >= (kIOMaxPageableMaps - 1)) {
+		if (index >= kIOMaxPageableMaps) {
 			lck_mtx_unlock( gIOKitPageableSpace.lock );
 			break;
 		}

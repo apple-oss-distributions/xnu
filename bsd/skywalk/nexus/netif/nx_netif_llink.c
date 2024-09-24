@@ -122,7 +122,7 @@ SK_NO_INLINE_ATTRIBUTE
 void
 nx_netif_llink_release(struct netif_llink **pllink)
 {
-	struct netif_llink *llink = *pllink;
+	struct netif_llink *__single llink = *pllink;
 
 	*pllink = NULL;
 	if (os_ref_release(&llink->nll_refcnt) == 0) {
@@ -141,6 +141,7 @@ nx_netif_qset_alloc(uint8_t nrxqs, uint8_t ntxqs)
 	qset = sk_alloc_type_header_array(struct netif_qset, struct netif_queue,
 	    nrxqs + ntxqs, Z_WAITOK | Z_NOFAIL, nx_netif_tag_qset);
 
+	qset->nqs_num_queues = nrxqs + ntxqs;
 	qset->nqs_num_rx_queues = nrxqs;
 	qset->nqs_num_tx_queues =  ntxqs;
 	return qset;
@@ -163,7 +164,7 @@ void
 nx_netif_qset_release(struct netif_qset **pqset)
 {
 	struct netif_qset *qset = *pqset;
-	struct netif_llink *llink = qset->nqs_llink;
+	struct netif_llink *__single llink = qset->nqs_llink;
 
 	*pqset = NULL;
 	nx_netif_llink_release(&llink);
@@ -446,7 +447,7 @@ nx_netif_llink_add(struct nx_netif *nif,
     struct kern_nexus_netif_llink_init *llink_init, struct netif_llink **pllink)
 {
 	int err;
-	struct netif_llink *llink;
+	struct netif_llink *__single llink;
 	struct netif_stats *nifs = &nif->nif_stats;
 
 	*pllink = NULL;
@@ -484,7 +485,7 @@ nx_netif_llink_remove(struct nx_netif *nif,
     kern_nexus_netif_llink_id_t llink_id)
 {
 	bool llink_found = false;
-	struct netif_llink *llink;
+	struct netif_llink *__single llink;
 	struct netif_stats *nifs = &nif->nif_stats;
 
 	lck_rw_lock_exclusive(&nif->nif_llink_lock);
@@ -559,7 +560,7 @@ nx_netif_default_llink_add(struct nx_netif *nif)
 static void
 nx_netif_default_llink_remove(struct nx_netif *nif)
 {
-	struct netif_llink *llink;
+	struct netif_llink *__single llink;
 
 	LCK_RW_ASSERT(&nif->nif_llink_lock, LCK_RW_ASSERT_EXCLUSIVE);
 	ASSERT(nif->nif_default_llink != NULL);
@@ -936,6 +937,7 @@ nx_netif_default_llink_config(struct nx_netif *nif,
 		*(&qsinit[i]) = *(&init->nli_qsets[i]);
 	}
 	nif->nif_default_llink_params->nli_qsets = qsinit;
+	nif->nif_default_llink_params->nli_num_qsets = init->nli_num_qsets;
 	return 0;
 }
 
@@ -945,10 +947,9 @@ nx_netif_llink_config_free(struct nx_netif *nif)
 	if (nif->nif_default_llink_params == NULL) {
 		return;
 	}
-	sk_free_type_array(struct kern_nexus_netif_llink_qset_init,
+	sk_free_type_array_counted_by(struct kern_nexus_netif_llink_qset_init,
 	    nif->nif_default_llink_params->nli_num_qsets,
 	    nif->nif_default_llink_params->nli_qsets);
-	nif->nif_default_llink_params->nli_qsets = NULL;
 
 	sk_free_type(struct kern_nexus_netif_llink_init,
 	    nif->nif_default_llink_params);

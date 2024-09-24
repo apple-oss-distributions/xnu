@@ -21,7 +21,7 @@
 #endif // !__arm64__
 
 #define _T_META_REQUIRES_CPC_SUPPORT \
-	T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", "1")
+	T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1)
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.cpc"),
@@ -29,6 +29,7 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("cpu counters"),
 	T_META_OWNER("mwidmann"),
 	T_META_CHECK_LEAKS(false),
+	T_META_ASROOT(true),
 	XNU_T_META_SOC_SPECIFIC,
 	T_META_ENABLED(HAS_CPC_SECURITY),
 	_T_META_REQUIRES_CPC_SUPPORT);
@@ -187,14 +188,14 @@ check_secure_cpmu(void)
 }
 
 T_DECL(secure_cpmu_event_restrictions, "secured CPMU should be restricted to known events",
-    _T_META_CPC_SECURE_ON_DEV)
+    _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	_skip_unless_development();
 	check_secure_cpmu();
 }
 
 T_DECL(release_cpmu_event_restrictions, "release CPMU should be restricted to known events",
-    XNU_T_META_REQUIRES_RELEASE_KERNEL)
+    XNU_T_META_REQUIRES_RELEASE_KERNEL, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	check_secure_cpmu();
 }
@@ -231,14 +232,14 @@ check_secure_upmu(void)
 }
 
 T_DECL(secure_upmu_event_restrictions, "secured UPMU should be restricted to no events",
-    _T_META_CPC_SECURE_ON_DEV)
+    _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	_skip_unless_development();
 	check_secure_upmu();
 }
 
 T_DECL(release_upmu_event_restrictions, "release UPMU should be restricted to no events",
-    XNU_T_META_REQUIRES_RELEASE_KERNEL)
+    XNU_T_META_REQUIRES_RELEASE_KERNEL, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	check_secure_upmu();
 }
@@ -300,22 +301,79 @@ check_event_coverage(kpep_db_flags_t flag, const char *kind)
 }
 
 T_DECL(secure_public_event_coverage, "all public events in kpep should be allowed",
-    _T_META_CPC_SECURE_ON_DEV)
+    _T_META_CPC_SECURE_ON_DEV, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	_skip_unless_development();
 	check_event_coverage(KPEP_DB_FLAG_PUBLIC_ONLY, "public");
 }
 
 T_DECL(release_public_event_coverage, "all public events in kpep should be allowed",
-    XNU_T_META_REQUIRES_RELEASE_KERNEL)
+    XNU_T_META_REQUIRES_RELEASE_KERNEL, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	check_event_coverage(KPEP_DB_FLAG_PUBLIC_ONLY, "public");
 }
 
 // Check for internal development behaviors.
-
 T_DECL(insecure_cpmu_unrestricted, "insecure CPMU should be unrestricted",
-    XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL, T_META_SYSCTL_INT("kern.cpc.secure=0"))
+    XNU_T_META_REQUIRES_DEVELOPMENT_KERNEL, T_META_SYSCTL_INT("kern.cpc.secure=0"), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	check_event_coverage(KPEP_DB_FLAG_INTERNAL_ONLY, "internal");
+}
+
+T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel when secure",
+    _T_META_CPC_SECURE_ON_DEV)
+{
+	kpep_db_t db = NULL;
+	int ret = kpep_db_createx(NULL, KPEP_DB_FLAG_PUBLIC_ONLY, &db);
+	_assert_kpep_ok(ret, "creating public event database");
+
+	size_t event_count = 0;
+	ret = kpep_db_events_count(db, &event_count);
+	_assert_kpep_ok(ret, "getting public event count");
+
+	kpep_event_t *events = calloc(event_count, sizeof(events[0]));
+	T_QUIET; T_WITH_ERRNO;
+	T_ASSERT_NOTNULL(events, "allocate space for events");
+
+	ret = kpep_db_events(db, events, event_count * sizeof(events[0]));
+	_assert_kpep_ok(ret, "getting public events");
+
+	kpep_config_t config = NULL;
+	ret = kpep_config_create(db, &config);
+	_assert_kpep_ok(ret, "creating event configuration");
+	ret = kpep_config_force_counters(config);
+	_assert_kpep_ok(ret, "forcing counters with configuration");
+
+
+	kpep_event_t event = NULL;
+	const char *name = NULL;
+	for (size_t i = 0; i < event_count; i++) {
+		event = events[i];
+		ret = kpep_event_name(event, &name);
+		_assert_kpep_ok(ret, "getting event name");
+		if (strncmp(name, "FIXED", strlen("FIXED")) != 0) {
+			break;
+		}
+		T_LOG("skipping non-configurable %s event", name);
+	}
+
+	ret = kpep_config_add_event(config, &event, KPEP_EVENT_FLAG_KERNEL, NULL);
+	_assert_kpep_ok(ret, "adding event %s to configuration", name);
+
+	ret = kpep_config_apply(config);
+	_assert_kpep_ok(ret, "applying configuration with event %s", name);
+
+	uint32_t config_count = kpc_get_config_count(KPC_CLASS_CONFIGURABLE_MASK);
+	uint64_t *configs = calloc(config_count, sizeof(configs[0]));
+	T_QUIET;
+	T_ASSERT_NOTNULL(configs, "allocated %u * %zu", config_count, sizeof(configs[0]));
+	ret = kpc_get_config(KPC_CLASS_CONFIGURABLE_MASK, configs);
+	for (uint32_t i = 0; i < config_count; i++) {
+		if ((configs[i] & 0x40000)) {
+			T_FAIL("found configurable counter %u with configuration 0x%llx", i, configs[i]);
+		}
+	}
+
+	kpep_config_free(config);
+	kpep_db_free(db);
 }

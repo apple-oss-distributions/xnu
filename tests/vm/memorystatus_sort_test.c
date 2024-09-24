@@ -112,7 +112,7 @@ T_HELPER_DECL(coalition_member, "Mock coalition member") {
  * is sorted properly by role.
  */
 T_DECL(memorystatus_sort_coalition, "Coalition sort order",
-    T_META_ASROOT(true)) {
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED) {
 	int ret;
 	sig_t res;
 	coalition_info_t coalition;
@@ -145,7 +145,7 @@ T_DECL(memorystatus_sort_coalition, "Coalition sort order",
  * and then ensures that they get sorted properly.
  */
 T_DECL(memorystatus_sort_footprint, "Footprint sort order",
-    T_META_ASROOT(true)) {
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED) {
 #define kNumChildren 3
 	static const int kChildrenFootprints[kNumChildren] = {500, 0, 2500};
 	/*

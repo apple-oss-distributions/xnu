@@ -31,7 +31,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_default, "bounded_array_ref.ctor.default") {
+T_DECL(ctor_default, "bounded_array_ref.ctor.default", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

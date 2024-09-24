@@ -269,6 +269,11 @@ timer_queue_expire_local(
 	pp = current_cpu_datap();
 
 	mytimer = &pp->rtclock_timer;
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_EXPIRE_LOCAL | DBG_FUNC_START,
+	    mytimer->deadline, 0, 0, 0, 0);
+
 	abstime = mach_absolute_time();
 
 	mytimer->has_expired = TRUE;
@@ -277,6 +282,10 @@ timer_queue_expire_local(
 	mytimer->when_set = mach_absolute_time();
 
 	timer_resync_deadlines();
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_EXPIRE_LOCAL | DBG_FUNC_END,
+	    mytimer->deadline, 0, 0, 0, 0);
 }
 
 void

@@ -33,6 +33,7 @@
 #endif /* __arm64__ */
 
 #include <arm/cpuid_internal.h>
+#include <arm/cpu_capabilities_public.h>
 #include <arm/pmap.h>
 #include <arm64/proc_reg.h>
 #include <machine/machine_cpuid.h>
@@ -75,6 +76,20 @@ cpu_needs_throttle_tunable(uint32_t midr_pnum)
 		return true;
 #endif /* APPLEAVALANCHE */
 
+#if defined(APPLEEVEREST)
+	case MIDR_IBIZA_ACCE:
+	case MIDR_IBIZA_ACCP:
+		return true;
+	case MIDR_LOBOS_ACCE:
+	case MIDR_LOBOS_ACCP:
+		return true;
+	case MIDR_PALMA_ACCE:
+	case MIDR_PALMA_ACCP:
+		return true;
+	case MIDR_COLL_ACCE:
+	case MIDR_COLL_ACCP:
+		return true;
+#endif /* APPLEEVEREST */
 	default:
 		return false;
 	}
@@ -101,6 +116,13 @@ configure_late_apple_regs(bool cold_boot)
 	uint64_t reg_val;
 
 	bool apply_late_pio_regs = cold_boot;
+#ifdef APPLEEVEREST
+	/*
+	 * On H15 CPUs PIO locks are applied early in the non-cold boot
+	 * path.
+	 */
+	apply_late_pio_regs = 0;
+#endif
 	if (apply_late_pio_regs) {
 		if (cpu_needs_throttle_tunable(midr_pnum)) {
 			vm_offset_t cpu_impl = tinfo->cpus[cpu_number()].cpu_IMPL_regs;
@@ -113,6 +135,15 @@ configure_late_apple_regs(bool cold_boot)
 	}
 
 #if defined(APPLEAVALANCHE)
+	if (tinfo->max_die_id > 0) {
+		if (midr_pnum == MIDR_RHODES_DIE_AVALANCHE || midr_pnum == MIDR_RHODES_DIE_BLIZZARD) {
+			// rdar://93675127 (Rhodes address match granularity for BIU)
+			reg_val = __builtin_arm_rsr64("HID5");
+			reg_val &= ~ARM64_REG_HID5_BiuBchMatchGran_mask;
+			reg_val |= ARM64_REG_HID5_BiuBchMatchGran_VALUE(0);
+			__builtin_arm_wsr64("HID5", reg_val);
+		}
+	}
 #endif /* APPLEAVALANCHE */
 
 }

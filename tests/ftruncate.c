@@ -65,13 +65,13 @@ fsize_test(bool use_fd)
 }
 
 T_DECL(ftruncate_fsize,
-    "ftruncate() should fail with EFBIG and send SIGXFSZ signal when length > RLIMIT_FSIZE")
+    "ftruncate() should fail with EFBIG and send SIGXFSZ signal when length > RLIMIT_FSIZE", T_META_TAG_VM_PREFERRED)
 {
 	fsize_test(true);
 }
 
 T_DECL(truncate_fsize,
-    "truncate() should fail with EFBIG and send SIGXFSZ signal when length > RLIMIT_FSIZE")
+    "truncate() should fail with EFBIG and send SIGXFSZ signal when length > RLIMIT_FSIZE", T_META_TAG_VM_PREFERRED)
 {
 	fsize_test(false);
 }

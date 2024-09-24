@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -175,12 +175,13 @@ extern int udp_shutdown(struct socket *so);
 extern int udp_lock(struct socket *, int, void *);
 extern int udp_unlock(struct socket *, int, void *);
 extern lck_mtx_t *udp_getlock(struct socket *, int);
-extern void udp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *);
+extern void udp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)));
 extern uint32_t udp_count_opportunistic(unsigned int, u_int32_t);
 extern uint32_t udp_find_anypcb_byaddr(struct ifaddr *);
 
 extern void udp_fill_keepalive_offload_frames(struct ifnet *,
-    struct ifnet_keepalive_offload_frame *, u_int32_t, size_t, u_int32_t *);
+    struct ifnet_keepalive_offload_frame *__counted_by(frames_count) frames_array,
+    uint32_t frames_count, size_t, u_int32_t *);
 
 __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -48,27 +48,30 @@ T_GLOBAL_META(
 	T_META_CHECK_LEAKS(false));
 
 static char ifname1[IF_NAMESIZE];
-static int s = -1;
 
 static void
 cleanup(void)
 {
-	if (s != -1) {
-		(void)ifnet_destroy(s, ifname1, false);
+	if (ifname1[0] != '\0') {
+		(void)ifnet_destroy(ifname1, false);
 		T_LOG("ifnet_destroy %s", ifname1);
 	}
 }
 
 T_DECL(if_creation_generation_id, "network interface creation generation id")
 {
+	int     error;
+	int     s = inet_dgram_socket_get();
+
 	T_ATEND(cleanup);
 
 #ifdef SIOCGIFGENERATIONID
-	s = inet_dgram_socket();
-
 	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
-	T_ASSERT_POSIX_SUCCESS(ifnet_create_2(s, ifname1, sizeof(ifname1)), NULL);
-
+	error = ifnet_create_2(ifname1, sizeof(ifname1));
+	if (error != 0) {
+		ifname1[0] = '\0';
+		T_ASSERT_POSIX_SUCCESS(error, "ifnet_create_2");
+	}
 	T_LOG("created %s", ifname1);
 
 	struct ifreq ifr = {};
@@ -80,13 +83,11 @@ T_DECL(if_creation_generation_id, "network interface creation generation id")
 	uint64_t if_generation_id = ifr.ifr_creation_generation_id;
 	T_LOG("interface creation generation id: %llu", if_generation_id);
 
-	(void)ifnet_destroy(s, ifname1, false);
+	(void)ifnet_destroy(ifname1, true);
 	T_LOG("destroyed %s", ifname1);
 
-	/* wait for the interface to be fully detached */
-	sleep(1);
-
-	T_ASSERT_POSIX_SUCCESS(ifnet_create(s, ifname1), NULL);
+	/* ifnet_create() will retry if creating fails due to EBUSY */
+	T_ASSERT_POSIX_SUCCESS(ifnet_create(ifname1), NULL);
 
 	T_LOG("re-created %s", ifname1);
 

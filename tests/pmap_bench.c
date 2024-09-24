@@ -11,7 +11,7 @@ T_GLOBAL_META(
 	T_META_OWNER("jharmening"),
 	XNU_T_META_SOC_SPECIFIC);
 
-T_DECL(pmap_call_benchmark, "pmap call overhead benchmark")
+T_DECL(pmap_call_benchmark, "pmap call overhead benchmark", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int num_loops = 100000;
 	dt_stat_time_t s = dt_stat_time_create("average pmap function call overhead for %d calls", num_loops);
@@ -24,7 +24,7 @@ T_DECL(pmap_call_benchmark, "pmap call overhead benchmark")
 	dt_stat_finalize(s);
 }
 
-T_DECL(pmap_page_protect_benchmark, "pmap_page_protect() overhead benchmark")
+T_DECL(pmap_page_protect_benchmark, "pmap_page_protect() overhead benchmark", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	struct {
 		unsigned int num_loops;

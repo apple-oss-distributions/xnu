@@ -59,8 +59,8 @@ diag_threshold_test_with_high_watermark(struct test_case *test_case, void *param
 }
 
 T_DECL(diag_threshold_test_with_high_watermark,
-    "Test on which a diag threshold is set and a watermark, the watermark is bigger than the diag threshold"
-    )
+    "Test on which a diag threshold is set and a watermark, the watermark is bigger than the diag threshold",
+    T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_threshold_test_with_high_watermark_test);
 }

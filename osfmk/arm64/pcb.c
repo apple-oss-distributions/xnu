@@ -51,8 +51,9 @@
 #include <arm/machdep_call.h>
 #include <arm/misc_protos.h>
 #include <arm/cpuid.h>
+#include <arm/cpu_capabilities_public.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_protos.h>
 
 #include <sys/kdebug.h>
@@ -62,7 +63,10 @@
 
 #include <IOKit/IOBSD.h>
 
+#include <pexpert/arm64/apple_arm64_cpu.h>
 #include <pexpert/pexpert.h>
+
+// fixme: rdar://114299113 tracks resolving the supportlib issue with hwtrace features
 
 extern int debug_task;
 
@@ -70,7 +74,33 @@ extern int debug_task;
 ZONE_DEFINE_TYPE(ads_zone, "arm debug state", arm_debug_state_t, ZC_NONE);
 ZONE_DEFINE_TYPE(user_ss_zone, "user save state", arm_context_t, ZC_NONE);
 
+#if HAS_ARM_FEAT_SME
+static SECURITY_READ_ONLY_LATE(uint16_t) sme_svl_b;
+/* zone for arm_sme_saved_state_t allocations */
+static SECURITY_READ_ONLY_LATE(zone_t) sme_ss_zone;
+#endif
 
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+struct arm_matrix_cpu_state {
+#if HAS_ARM_FEAT_SME
+	bool have_sme;
+	bool za_is_enabled;
+#endif
+};
+
+static void
+machine_get_matrix_cpu_state(struct arm_matrix_cpu_state *cpu_state)
+{
+#if HAS_ARM_FEAT_SME
+	cpu_state->have_sme = arm_sme_version() > 0;
+	if (cpu_state->have_sme) {
+		cpu_state->za_is_enabled = !!(__builtin_arm_rsr64("SVCR") & SVCR_ZA);
+	} else {
+		cpu_state->za_is_enabled = false;
+	}
+#endif /* HAS_ARM_FEAT_SME */
+}
+#endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
 /*
  * Routine: consider_machine_collect
@@ -93,7 +123,110 @@ consider_machine_adjust(void)
 
 
 
+#if HAS_ARM_FEAT_SME
+static inline bool
+machine_thread_has_valid_za(const arm_sme_saved_state_t *_Nullable sme_ss)
+{
+	return sme_ss && (sme_ss->svcr & SVCR_ZA);
+}
 
+arm_sme_saved_state_t *
+machine_thread_get_sme_state(thread_t thread)
+{
+	arm_state_hdr_t *hdr = thread->machine.umatrix_hdr;
+	if (hdr) {
+		assert(hdr->flavor == ARM_SME_SAVED_STATE);
+		return thread->machine.usme;
+	}
+
+	return NULL;
+}
+
+static void
+machine_save_sme_context(thread_t old, arm_sme_saved_state_t *old_sme_ss, const struct arm_matrix_cpu_state *cpu_state)
+{
+	/*
+	 * Note: we're deliberately not saving old_sme_ss->svcr, since it
+	 * already happened on kernel entry.  Likewise we're not restoring the
+	 * SM bit from new_sme_ss->svcr, since we don't want streaming SVE mode
+	 * active while we're in kernel space; we'll put it back on kernel exit.
+	 */
+
+	old->machine.tpidr2_el0 = __builtin_arm_rsr64("TPIDR2_EL0");
+
+
+	if (cpu_state->za_is_enabled) {
+		arm_save_sme_za_zt0(&old_sme_ss->context, old_sme_ss->svl_b);
+	}
+}
+
+static void
+machine_restore_sme_context(thread_t new, const arm_sme_saved_state_t *new_sme_ss, const struct arm_matrix_cpu_state *cpu_state)
+{
+	__builtin_arm_wsr64("TPIDR2_EL0", new->machine.tpidr2_el0);
+
+	if (new_sme_ss) {
+		if (machine_thread_has_valid_za(new_sme_ss)) {
+			if (!cpu_state->za_is_enabled) {
+				asm volatile ("smstart za");
+			}
+			arm_load_sme_za_zt0(&new_sme_ss->context, new_sme_ss->svl_b);
+		} else if (cpu_state->za_is_enabled) {
+			asm volatile ("smstop za");
+		}
+
+		arm_sme_trap_at_el0(false);
+	}
+}
+
+static void
+machine_disable_sme_context(const struct arm_matrix_cpu_state *cpu_state)
+{
+	if (cpu_state->za_is_enabled) {
+		asm volatile ("smstop za");
+	}
+
+	arm_sme_trap_at_el0(true);
+}
+#endif /* HAS_ARM_FEAT_SME */
+
+
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+static void
+machine_switch_matrix_context(thread_t old, thread_t new)
+{
+	struct arm_matrix_cpu_state cpu_state;
+	machine_get_matrix_cpu_state(&cpu_state);
+
+
+#if HAS_ARM_FEAT_SME
+	arm_sme_saved_state_t *old_sme_ss = machine_thread_get_sme_state(old);
+	const arm_sme_saved_state_t *new_sme_ss = machine_thread_get_sme_state(new);
+
+	if (cpu_state.have_sme) {
+		machine_save_sme_context(old, old_sme_ss, &cpu_state);
+	}
+#endif /* HAS_ARM_FEAT_SME */
+
+
+#if HAS_ARM_FEAT_SME
+	if (cpu_state.have_sme && !new_sme_ss) {
+		machine_disable_sme_context(&cpu_state);
+	}
+#endif /* HAS_ARM_FEAT_SME */
+
+
+#if HAS_ARM_FEAT_SME
+	if (cpu_state.have_sme) {
+		machine_restore_sme_context(new, new_sme_ss, &cpu_state);
+	}
+#endif /* HAS_ARM_FEAT_SME */
+
+
+}
+
+
+#endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
 
 
@@ -106,15 +239,15 @@ machine_thread_switch_cpu_data(thread_t old, thread_t new)
 	 * is required so that this generates a single load / store pair.
 	 */
 	cpu_data_t *datap = old->machine.CpuDatap;
-	vm_offset_t base  = old->machine.pcpu_data_base;
+	vm_offset_t base  = old->machine.pcpu_data_base_and_cpu_number;
 
 	/* TODO: Should this be ordered? */
 
 	old->machine.CpuDatap = NULL;
-	old->machine.pcpu_data_base = 0;
+	old->machine.pcpu_data_base_and_cpu_number = 0;
 
 	new->machine.CpuDatap = datap;
-	new->machine.pcpu_data_base = base;
+	new->machine.pcpu_data_base_and_cpu_number = base;
 }
 
 /**
@@ -132,6 +265,11 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 
 
 
+
+
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+	machine_switch_matrix_context(old, new);
+#endif
 
 
 
@@ -242,7 +380,8 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 	if (!first_thread) {
 		thread->machine.CpuDatap = (cpu_data_t *)0;
 		// setting this offset will cause trying to use it to panic
-		thread->machine.pcpu_data_base = (vm_offset_t)VM_MIN_KERNEL_ADDRESS;
+		thread->machine.pcpu_data_base_and_cpu_number =
+		    ml_make_pcpu_base_and_cpu_number(VM_MIN_KERNEL_ADDRESS, 0);
 	}
 	thread->machine.arm_machine_flags = 0;
 	thread->machine.preemption_count = 0;
@@ -294,8 +433,14 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 		thread->machine.contextData = NULL;
 	}
 
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+	thread->machine.umatrix_hdr = NULL;
+#endif
 
 
+#if HAS_ARM_FEAT_SME
+	thread->machine.tpidr2_el0 = 0;
+#endif
 
 	bzero(&thread->machine.perfctrl_state, sizeof(thread->machine.perfctrl_state));
 	machine_thread_state_initialize(thread);
@@ -338,7 +483,7 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 #if !__ARM_KERNEL_PROTECT__
 	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_PRESERVE_X18);
 #endif /* !__ARM_KERNEL_PROTECT__ */
-
+	thread->machine.arm_machine_flags &= ~(ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE);
 
 	/*
 	 * Set signature dependent state.
@@ -357,7 +502,13 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 		if (task->preserve_x18) {
 			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
 		}
+#endif /* !__ARM_KERNEL_PROTECT__ */
+
+		if (task->uses_1ghz_timebase) {
+			thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE;
+		}
 	} else {
+#if !__ARM_KERNEL_PROTECT__
 		/*
 		 * For informational value only, context switch only trashes
 		 * x18 for user threads.  (Except for devices with
@@ -366,8 +517,14 @@ machine_thread_process_signature(thread_t __unused thread, task_t __unused task)
 		 */
 		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_PRESERVE_X18;
 #endif /* !__ARM_KERNEL_PROTECT__ */
+		thread->machine.arm_machine_flags |= ARM_MACHINE_THREAD_USES_1GHZ_TIMBASE;
 	}
 
+	/**
+	 * Make sure the machine flags are observed before the thread becomes available
+	 * to run in user mode, especially in the posix_spawn() path.
+	 */
+	os_atomic_thread_fence(release);
 	return result;
 }
 
@@ -387,6 +544,9 @@ machine_thread_destroy(thread_t thread)
 		thread->machine.uNeon = NULL;
 		thread->machine.contextData = NULL;
 
+#if HAS_ARM_FEAT_SME
+		machine_thread_sme_state_free(thread);
+#endif
 
 		zfree(user_ss_zone, thread_user_ss);
 	}
@@ -403,7 +563,92 @@ machine_thread_destroy(thread_t thread)
 }
 
 
+#if HAS_ARM_FEAT_SME
+static arm_sme_saved_state_t *
+zalloc_sme_saved_state(void)
+{
+	arm_sme_saved_state_t *sme_ss = zalloc_flags(sme_ss_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	sme_ss->hdr.flavor = ARM_SME_SAVED_STATE;
+	sme_ss->hdr.count = arm_sme_saved_state_count(sme_svl_b);
+	sme_ss->svl_b = sme_svl_b;
+	return sme_ss;
+}
 
+kern_return_t
+machine_thread_sme_state_alloc(thread_t thread)
+{
+	assert(arm_sme_version());
+
+
+	if (thread->machine.usme) {
+		panic("thread %p already has SME saved state %p",
+		    thread, thread->machine.usme);
+	}
+
+	arm_sme_saved_state_t *sme_ss = zalloc_sme_saved_state();
+	disable_preemption();
+
+	arm_sme_trap_at_el0(false);
+	__builtin_arm_isb(ISB_SY);
+	thread->machine.usme = sme_ss;
+
+	enable_preemption();
+
+	return KERN_SUCCESS;
+}
+
+void
+machine_thread_sme_state_free(thread_t thread)
+{
+	arm_sme_saved_state_t *sme_ss = machine_thread_get_sme_state(thread);
+
+	if (sme_ss) {
+		thread->machine.usme = NULL;
+		zfree(sme_ss_zone, sme_ss);
+	}
+}
+
+static void
+machine_thread_sme_state_dup(const arm_sme_saved_state_t *src_sme_ss, thread_t target)
+{
+	arm_sme_saved_state_t *sme_ss = zalloc_sme_saved_state();
+	assert(sme_ss->svl_b == src_sme_ss->svl_b);
+
+	arm_sme_context_t *context = &sme_ss->context;
+	uint16_t svl_b = sme_ss->svl_b;
+
+	sme_ss->svcr = src_sme_ss->svcr;
+	/* Z and P are saved on kernel entry.  ZA and ZT0 may be stale. */
+	if (sme_ss->svcr & SVCR_SM) {
+		const arm_sme_context_t *src_context = &src_sme_ss->context;
+		memcpy(arm_sme_z(context), const_arm_sme_z(src_context), arm_sme_z_size(svl_b));
+		memcpy(arm_sme_p(context, svl_b), const_arm_sme_p(src_context, svl_b), arm_sme_p_size(svl_b));
+	}
+	if (sme_ss->svcr & SVCR_ZA) {
+		arm_save_sme_za_zt0(context, svl_b);
+	}
+
+	target->machine.usme = sme_ss;
+}
+#endif /* HAS_ARM_FEAT_SME */
+
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+void
+machine_thread_matrix_state_dup(thread_t target)
+{
+	assert(!target->machine.umatrix_hdr);
+	thread_t thread = current_thread();
+
+#if HAS_ARM_FEAT_SME
+	const arm_sme_saved_state_t *sme_ss = machine_thread_get_sme_state(thread);
+	if (sme_ss) {
+		machine_thread_sme_state_dup(sme_ss, target);
+		return;
+	}
+#endif
+
+}
+#endif /* HAVE_MACHINE_THREAD_MATRIX_STATE */
 
 /*
  * Routine: machine_thread_init
@@ -413,6 +658,13 @@ void
 machine_thread_init(void)
 {
 
+#if HAS_ARM_FEAT_SME
+	if (arm_sme_version()) {
+		sme_svl_b = arm_sme_svl_b();
+		vm_size_t size = arm_sme_saved_state_count(sme_svl_b) * sizeof(unsigned int);
+		sme_ss_zone = zone_create_ext("SME saved state", size, ZC_NONE, ZONE_ID_ANY, NULL);
+	}
+#endif
 }
 
 /*

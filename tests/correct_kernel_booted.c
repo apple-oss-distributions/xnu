@@ -113,7 +113,7 @@ out:
 T_DECL(correct_kernel_booted,
     "Make sure the kernel on disk matches the running kernel, by UUID.",
     T_META_RUN_CONCURRENTLY(true),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_NOT_PREFERRED)
 {
 	T_SETUPBEGIN;
 

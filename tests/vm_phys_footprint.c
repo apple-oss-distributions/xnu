@@ -240,7 +240,7 @@ pre_warm(
 
 T_DECL(phys_footprint_anonymous,
     "phys_footprint for anonymous memory",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -312,7 +312,7 @@ T_DECL(phys_footprint_anonymous,
 
 T_DECL(phys_footprint_file,
     "phys_footprint for mapped file",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -415,7 +415,7 @@ T_DECL(phys_footprint_file,
 
 T_DECL(phys_footprint_purgeable,
     "phys_footprint for purgeable memory",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -533,7 +533,7 @@ T_DECL(phys_footprint_purgeable,
 
 T_DECL(phys_footprint_purgeable_ownership,
     "phys_footprint for owned purgeable memory",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -735,7 +735,7 @@ T_DECL(phys_footprint_purgeable_ownership,
 T_DECL(phys_footprint_multiple_purgeable_ownership,
     "phys_footprint for owned purgeable memory (MAP_MEM_VM_SHARE)",
     T_META_NAMESPACE(TEST_VM_NAMESPACE),
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -921,7 +921,7 @@ T_DECL(phys_footprint_multiple_purgeable_ownership,
 #ifdef MAP_MEM_LEDGER_TAGGED
 T_DECL(phys_footprint_ledger_purgeable_owned,
     "phys_footprint for ledger-tagged purgeable memory ownership",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -1093,7 +1093,7 @@ T_DECL(phys_footprint_ledger_purgeable_owned,
 
 T_DECL(phys_footprint_ledger_owned,
     "phys_footprint for ledger-tagged memory ownership",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -1215,7 +1215,7 @@ T_DECL(phys_footprint_ledger_owned,
 
 T_DECL(phys_footprint_no_footprint_for_debug,
     "phys_footprint for no_footprint_for_debug",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t                footprint_before, pagetable_before;
 	uint64_t                footprint_after, pagetable_after;
@@ -1257,6 +1257,15 @@ T_DECL(phys_footprint_no_footprint_for_debug,
 	    "footprint %lld -> %lld expected %lld delta %lld",
 	    vm_size, footprint_before, footprint_after,
 	    footprint_expected, footprint_after - footprint_expected);
+
+	/* pretending to call from the kernel should fail */
+	kr = mach_memory_entry_ownership(me_port,
+	    mach_task_self(),
+	    VM_LEDGER_TAG_DEFAULT,
+	    VM_LEDGER_FLAG_FROM_KERNEL);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_INVALID_ARGUMENT,
+	    "mach_memory_entry_ownership(FROM_KERNEL) fails");
 
 	/* trying to hide debug memory from footprint while not allowed */
 	kr = mach_memory_entry_ownership(me_port,
@@ -1549,7 +1558,7 @@ CreateSurface(uint32_t pixelsWide, uint32_t pixelsHigh, uint32_t rowBytesAlignme
 }
 T_DECL(phys_footprint_purgeable_iokit,
     "phys_footprint for purgeable IOKit memory",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t        footprint_before, pagetable_before;
 	uint64_t        footprint_after, pagetable_after;
@@ -1676,7 +1685,7 @@ T_DECL(phys_footprint_purgeable_iokit,
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 T_DECL(phys_footprint_nonpurgeable_iokit,
     "phys_footprint for non-purgeable IOKit memory",
-    T_META_LTEPHASE(LTE_POSTINIT))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	uint64_t        footprint_before, pagetable_before;
 	uint64_t        footprint_after, pagetable_after;
@@ -1809,7 +1818,7 @@ T_DECL(phys_footprint_nonpurgeable_iokit,
 #if LEGACY_FOOTPRINT_ENTITLED && defined(__arm64__)
 T_DECL(legacy_footprint_entitled_set_and_query,
     "legacy footprint entitled is sticky with memlimit set properties and can be queried",
-    T_META_BOOTARGS_SET("legacy_footprint_entitlement_mode=3"))
+    T_META_BOOTARGS_SET("legacy_footprint_entitlement_mode=3"), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	int32_t max_task_pmem = 0, legacy_footprint_bonus_mb = 0;

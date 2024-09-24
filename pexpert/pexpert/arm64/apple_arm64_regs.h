@@ -69,6 +69,22 @@
 #define ARM64_IPISR_IPI_PENDING         (1ull << 0)
 #endif /* defined(HAS_IPI) */
 
+#if defined(HAS_OBJC_BP_HELPER)
+#define ARM64_REG_BP_OBJC_ADR_EL1_mask                 (0x00ffffffffffffffull)
+#define ARM64_REG_BP_OBJC_ADR_EL1_shift                (0)
+
+#define ARM64_REG_BP_OBJC_CTL_EL1_Mask_mask            (0x001ffffff8000000ull)
+#define ARM64_REG_BP_OBJC_CTL_EL1_Mask_shift           (27)
+
+#define ARM64_REG_BP_OBJC_CTL_EL1_AR_ClassPtr_mask     (0x00000000003e0000ull)
+#define ARM64_REG_BP_OBJC_CTL_EL1_AR_ClassPtr_shift    (17)
+
+#define ARM64_REG_BP_OBJC_CTL_EL1_AR_Selector_mask     (0x000000000001f000ull)
+#define ARM64_REG_BP_OBJC_CTL_EL1_AR_Selector_shift    (12)
+
+#define ARM64_REG_BP_OBJC_CTL_EL1_Br_Offset_mask       (0x000000000000007full)
+#define ARM64_REG_BP_OBJC_CTL_EL1_Br_Offset_shift      (0)
+#endif /* defined(HAS_OBJC_BP_HELPER) */
 
 
 #endif /* APPLE_ARM64_ARCH_FAMILY */
@@ -83,8 +99,12 @@
 
 
 
-#define MPIDR_PNE_SHIFT 16 // pcore not ecore
-#define MPIDR_PNE       (1 << MPIDR_PNE_SHIFT)
+#define MPIDR_CORETYPE_SHIFT  (16)
+#define MPIDR_CORETYPE_WIDTH  (3)
+#define MPIDR_CORETYPE_MASK   ((1ULL << MPIDR_CORETYPE_WIDTH) - 1)
+#define MPIDR_CORETYPE_ACC_E  (0ULL)
+#define MPIDR_CORETYPE_ACC_P  (1ULL)
+
 
 
 #define CPU_PIO_CPU_STS_OFFSET               (0x100ULL)
@@ -104,30 +124,59 @@
 #ifdef ASSEMBLER
 
 /*
- * arg0: register in which to store result
- *   0=>not a p-core, non-zero=>p-core
+ * Determines whether the executing core is a P-core.
+ *
+ * @param arg0 result register; will be non-zero if executed on a P-core, else
+ *             zero if executed on an E-core / non-PE core / non-AMP architectures.
  */
 .macro ARM64_IS_PCORE
 #if defined(APPLEMONSOON) || HAS_CLUSTER
-	mrs $0, MPIDR_EL1
-	and $0, $0, #(MPIDR_PNE)
-#endif /* defined(APPLEMONSOON) || HAS_CLUSTER */
+	mrs   $0, MPIDR_EL1
+	ubfx  $0, $0, #MPIDR_CORETYPE_SHIFT, #MPIDR_CORETYPE_WIDTH
+	and   $0, $0, #MPIDR_CORETYPE_ACC_P
+#else
+	mov   $0, xzr
+#endif
+.endmacro
+
+
+/*
+ * Determines whether the executing core is an E-core.
+ *
+ * @note Clobbers condition flags.
+ *
+ * @param arg0 result register; will be non-zero if executed on an E-core, else
+ *             zero if executed on a P-core / non-PE core / non-AMP architectures.
+ */
+.macro ARM64_IS_ECORE
+#if defined(APPLEMONSOON) || HAS_CLUSTER
+	mrs    $0, MPIDR_EL1
+	ands   $0, $0, #(MPIDR_CORETYPE_MASK << MPIDR_CORETYPE_SHIFT)
+	csinc  $0, xzr, xzr, ne
+#else
+	mov    $0, xzr
+#endif
 .endmacro
 
 /*
- * reads a special purpose register, using a different msr for e- vs. p-cores
- *   arg0: register indicating the current core type, see ARM64_IS_PCORE
- *   arg1: register in which to store the result of the read
- *   arg2: SPR to use for e-core
- *   arg3: SPR to use for p-core or non-AMP architecture
+ * Reads a system register using the appropriate name for E-cores, P-cores and
+ * non-PE cores.
+ *
+ * @note See also: ARM64_IS_ECORE
+ *
+ * @param arg0 GPR indicating the core type; non-zero if this is an E-core, else zero
+ * @param arg1 destination GPR
+ * @param arg2 system register name to use for E-cores
+ * @param arg3 system register name to use for P-cores, non-PE cores or
+ *             non-AMP architectures.
  */
-.macro ARM64_READ_EP_SPR
+.macro ARM64_READ_CORE_SYSREG
 #if defined(APPLEMONSOON) || HAS_CLUSTER
-	cbnz $0, 1f
-// e-core
+	cbz  $0, 1f
+// E-core
 	mrs  $1, $2
 	b    2f
-// p-core
+// non-PE core / P-core / non-AMP architecture
 1:
 #endif /* defined(APPLEMONSOON) || HAS_CLUSTER */
 	mrs  $1, $3
@@ -135,19 +184,24 @@
 .endmacro
 
 /*
- * writes a special purpose register, using a different msr for e- vs. p-cores
- * arg0: register indicating the current core type, see ARM64_IS_PCORE
- * arg1: register containing the value to write
- * arg2: SPR to use for e-core
- * arg3: SPR to use for p-core or non-AMP architecture
+ * Writes a system register using the appropriate name for E-cores, P-cores and
+ * non-PE cores.
+ *
+ * @note See also: ARM64_IS_ECORE
+ *
+ * @param arg0 GPR indicating the core type; non-zero if this is an E-core, else zero
+ * @param arg1 source GPR
+ * @param arg2 system register name to use for E-cores
+ * @param arg3 system register name to use for P-cores, non-PE cores or
+ *             non-AMP architectures.
  */
-.macro ARM64_WRITE_EP_SPR
+.macro ARM64_WRITE_CORE_SYSREG
 #if defined(APPLEMONSOON) || HAS_CLUSTER
-	cbnz $0, 1f
-// e-core
+	cbz  $0, 1f
+// E-core
 	msr  $2, $1
 	b    2f
-// p-core
+// non-PE core / P-core / non-AMP architecture
 1:
 #endif /* defined(APPLEMONSOON) || HAS_CLUSTER */
 	msr  $3, $1

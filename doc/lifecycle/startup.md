@@ -270,6 +270,19 @@ interrupts or preemption enabled may begin enforcement.
 - Middle: Initialize some early BSD subsystems
 
 
+`STARTUP_SUB_EXCLAVES`
+------------------------
+
+### Description
+
+Early exclaves initialization.
+
+### Rank usage
+
+- Rank 1: Determine run-time support for exclaves
+- Middle: Initialize tightbeam runtime
+
+
 `STARTUP_SUB_LOCKDOWN`
 ----------------------
 

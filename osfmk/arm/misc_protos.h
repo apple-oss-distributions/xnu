@@ -33,6 +33,7 @@
 #define _ARM_MISC_PROTOS_H_
 
 #include <kern/kern_types.h>
+#include <arm/cpu_capabilities_public.h>
 
 typedef struct boot_args boot_args;
 /* The address of the end of the kernelcache. */
@@ -71,6 +72,21 @@ extern thread_t Shutdown_context(void (*doshutdown)(processor_t), processor_t  p
 extern void __dead2 Call_continuation(thread_continue_t, void *, wait_result_t, boolean_t enable_interrupts);
 
 
+extern unsigned int arm_sme_version(void) __pure2;
+#if HAS_ARM_FEAT_SME
+extern void arm_sme_init(bool is_boot_cpu);
+extern uint16_t arm_sme_svl_b(void);
+extern void arm_save_sme_za(arm_sme_context_t *sme_ss, uint16_t svl_b);
+extern void arm_load_sme_za(const arm_sme_context_t *sme_ss, uint16_t svl_b);
+extern void arm_sme_trap_at_el0(bool trap_enabled);
+extern boolean_t arm_sme_is_active(void);
+#if HAS_ARM_FEAT_SME2
+extern void arm_save_sme_zt0(arm_sme_context_t *sme_ss);
+extern void arm_load_sme_zt0(const arm_sme_context_t *sme_ss);
+#endif /* HAS_ARM_FEAT_SME2 */
+extern void arm_save_sme_za_zt0(arm_sme_context_t *sme_ss, uint16_t svl_b);
+extern void arm_load_sme_za_zt0(const arm_sme_context_t *sme_ss, uint16_t svl_b);
+#endif /* HAS_ARM_FEAT_SME */
 
 /**
  * Indicate during a context-switch event that we have updated some CPU

@@ -36,11 +36,12 @@ PRIVATE_DATAFILES = \
 	mptcp_var.h \
 	tcp.h \
 	tcp_cc.h \
-	tcp_debug.h \
+	tcp_log.h \
 	tcp_private.h \
 	tcp_var.h \
 	tcp_cache.h \
 	udp.h \
+	udp_log.h \
 	in_stat.h
 
 # netinet_private.modulemap additionally excludes in6_private.h from
@@ -65,11 +66,9 @@ PRIVATE_KERNELFILES = ${KERNELFILES} \
 	inp_log.h \
 	ip_ecn.h \
 	ip_encap.h \
-	tcp_log.h \
 	tcp_includes.h \
 	tcp_utils.h \
-	tcp_sysctls.h \
-	udp_log.h
+	tcp_sysctls.h
 
 INSTALL_MI_LIST	= ${DATAFILES}
 

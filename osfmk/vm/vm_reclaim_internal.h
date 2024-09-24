@@ -31,52 +31,30 @@
 
 #if CONFIG_DEFERRED_RECLAIM
 
-#ifdef XNU_KERNEL_PRIVATE
+#include <vm/vm_reclaim_xnu.h>
 
-#include <mach/mach_types.h>
-#include <mach/mach_vm.h>
+#if MACH_KERNEL_PRIVATE
 
-extern uint64_t vm_reclaim_max_threshold;
-
-typedef struct vm_deferred_reclamation_metadata_s *vm_deferred_reclamation_metadata_t;
-
-kern_return_t vm_deferred_reclamation_buffer_init_internal(task_t task, user_addr_t address, mach_vm_size_t size);
-
-/*
- * Deallocate the kernel metadata associated with this reclamation buffer
- * Note that this does NOT free the memory in the buffer.
- * This is called from the task_destroy path, so we're about to reclaim all of the task's memory
- * anyways.
- */
-void vm_deferred_reclamation_buffer_deallocate(vm_deferred_reclamation_metadata_t metadata);
-
-/*
- * Uninstall the the kernel metadata associated with this reclamation buffer from all global queues. This
- * is called during task termination to ensure no kernel thread may start trying to reclaim from a task
- * that is about to exit
- */
-void vm_deferred_reclamation_buffer_uninstall(vm_deferred_reclamation_metadata_t metadata);
-
-kern_return_t vm_deferred_reclamation_buffer_synchronize_internal(task_t task, size_t max_entries_to_reclaim);
-
-__enum_decl(vm_deferred_reclamation_action_t, uint32_t, {
+__enum_closed_decl(vm_deferred_reclamation_action_t, uint32_t, {
 	RECLAIM_TRIM, // Reclaim a bit of memory from everyone
 	RECLAIM_FULL, // Fully drain every reclaim buffer
 	RECLAIM_ASYNC, // Drain the async reclaim queue
 });
 
+kern_return_t vm_deferred_reclamation_buffer_init_internal(
+	task_t            task,
+	mach_vm_address_t *address,
+	mach_vm_size_t    size);
+
+kern_return_t vm_deferred_reclamation_buffer_synchronize_internal(task_t task, size_t max_entries_to_reclaim);
+
 /*
  * Ask the deferred reclamation subsystem to reclaim memory.
  * See the documentation for vm_deferred_reclamation_action above.
  */
-void vm_deferred_reclamation_reclaim_memory(vm_deferred_reclamation_action_t action);
-/*
- * Equivalent to vm_deferred_reclamation_reclaim_memory(RECLAIM_FULL);
- */
-void vm_deferred_reclamation_reclaim_all_memory(void);
-
-bool vm_deferred_reclamation_reclaim_from_task_async(task_t task);
-bool vm_deferred_reclamation_reclaim_from_task_sync(task_t task, size_t max_entries_to_reclaim);
+void vm_deferred_reclamation_reclaim_memory(
+	vm_deferred_reclamation_action_t  action,
+	vm_deferred_reclamation_options_t options);
 
 kern_return_t vm_deferred_reclamation_buffer_update_reclaimable_bytes_internal(
 	task_t task, size_t reclaimable_bytes);
@@ -90,7 +68,7 @@ kern_return_t vm_deferred_reclamation_buffer_update_reclaimable_bytes_internal(
  * The caller must lock the parent's reclamation buffer BEFORE forking
  * the parent's vm_map. Otherwise the parent's buffer could get reclaimed
  * in between the map fork and the buffer fork causing the child's
- * data strucutres to be out of sync.
+ * data structures to be out of sync.
  */
 vm_deferred_reclamation_metadata_t vm_deferred_reclamation_buffer_fork(
 	task_t task,
@@ -106,6 +84,6 @@ void vm_deferred_reclamation_buffer_unlock(vm_deferred_reclamation_metadata_t me
 bool vm_deferred_reclamation_block_until_pid_has_been_reclaimed(int pid);
 #endif /* DEVELOPMENT || DEBUG */
 
-#endif /* XNU_KERNEL_PRIVATE */
+#endif /* MACH_KERNEL_PRIVATE */
 #endif /* CONFIG_DEFERRED_RECLAIM */
 #endif /*__VM_RECLAIM_INTERNAL__ */

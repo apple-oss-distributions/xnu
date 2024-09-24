@@ -70,6 +70,10 @@ subsystem
 #endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 		       mach_host 200;
 
+#if KERNEL_SERVER
+#define VM_KERNEL_SERVER 1
+#endif
+
 /*
  *	Basic types
  */
@@ -120,8 +124,8 @@ routine _host_page_size(
 routine mach_memory_object_memory_entry(
 		host		:host_t;
 		internal	:boolean_t;
-		size		:vm_size_t;
-		permission	:vm_prot_t;
+		size		:VM_USE_TMPTYPE(vm_size_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 		pager		:memory_object_t;
 	out	entry_handle	:mach_port_move_send_t);
 
@@ -207,8 +211,8 @@ routine processor_set_create(
 routine mach_memory_object_memory_entry_64(
 		host		:host_t;
 		internal	:boolean_t;
-		size		:memory_object_size_t;
-		permission	:vm_prot_t;
+		size		:VM_USE_TMPTYPE(memory_object_size_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 		pager		:memory_object_t;
 	out	entry_handle	:mach_port_move_send_t);
 

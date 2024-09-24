@@ -596,7 +596,8 @@ nx_upipe_dom_defunct(struct kern_nexus_domain_provider *nxdom_prov,
 {
 #pragma unused(nxdom_prov, nx)
 	struct nexus_adapter *na = ch->ch_na;
-	struct nexus_upipe_adapter *pna = (struct nexus_upipe_adapter *)na;
+	struct nexus_upipe_adapter *pna = __container_of(na,
+	    struct nexus_upipe_adapter, pna_up);
 	ring_id_t qfirst = ch->ch_first[NR_TX];
 	ring_id_t qlast = ch->ch_last[NR_TX];
 	uint32_t i;
@@ -733,7 +734,7 @@ nx_upipe_na_dealloc(struct nexus_adapter *na)
 			    "(%u dangling pipes)!", na->na_name,
 			    na->na_next_pipe);
 		}
-		sk_free_type_array(struct nexus_upipe_adapter *,
+		sk_free_type_array_counted_by(struct nexus_upipe_adapter *,
 		    na->na_max_pipes, na->na_pipes);
 		na->na_pipes = NULL;
 		na->na_max_pipes = 0;
@@ -1452,7 +1453,7 @@ nx_upipe_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 #pragma unused(ch, p)
 	struct nx_upipe *u = NX_UPIPE_PRIVATE(nx);
 	struct nxprov_params *nxp = NX_PROV(nx)->nxprov_params;
-	struct nexus_adapter *pna = NULL; /* parent adapter */
+	struct nexus_adapter *__single pna = NULL; /* parent adapter */
 	boolean_t anon = NX_ANONYMOUS_PROV(nx);
 	struct nexus_upipe_adapter *mna, *sna, *req;
 	ch_endpoint_t ep = chr->cr_endpoint;

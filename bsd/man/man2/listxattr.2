@@ -66,6 +66,9 @@ normally lists attributes of the target of
 if it is a symbolic link.  With this option,
 .Fn listxattr
 will list attributes of the link itself.
+.It Dv XATTR_NOFOLLOW_ANY
+do not follow any symbolic links encountered during pathname resolution. An
+error is returned if a symlink is encountered before the last component of path.
 .It Dv XATTR_SHOWCOMPRESSION
 .Fn listxattr
 and 
@@ -141,6 +144,9 @@ or permission is denied to read the list of attributes from this file.
 .It Bq Er ELOOP
 Too many symbolic links were encountered resolving
 .Fa path .
+.It Bq Er ELOOP
+If XATTR_NOFOLLOW_ANY option was passed and a symbolic link was encountered in
+translating the pathname.
 .It Bq Er EFAULT
 .Fa path
 points to an invalid address.
@@ -148,7 +154,10 @@ points to an invalid address.
 An I/O error occurred.
 .It Bq Er EINVAL
 .Fa options
-does not make sense.
+has an unsupported bit set.
+.It Bq Er EINVAL
+XATTR_NOFOLLOW or XATTR_NOFOLLOW_ANY option was passed in
+.Fn flistxattr .
 .El
 .Sh SEE ALSO
 .Xr getxattr 2 ,

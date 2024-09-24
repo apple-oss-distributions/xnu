@@ -45,7 +45,7 @@ def DecodeSysreg(cmd_args=None):
         raise ArgumentError("Missing arguments.")
 
     reg_name = cmd_args[0].upper()
-    reg_value = int(cmd_args[1], 0)
+    reg_value = ArgumentStringToInt(cmd_args[1])
 
     if reg_name not in _SUPPORTED_SYSREGS:
         raise ArgumentError("{} is not supported".format(reg_name))

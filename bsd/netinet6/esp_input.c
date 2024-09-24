@@ -214,6 +214,8 @@ esp4_input(struct mbuf *m, int off)
 struct mbuf *
 esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 {
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	struct ip *ip;
 	struct ip6_hdr *ip6;
 	struct esp *esp;
@@ -274,9 +276,10 @@ esp4_input_extended(struct mbuf *m, int off, ifnet_t interface)
 	/* find the sassoc. */
 	spi = esp->esp_spi;
 
-	if ((sav = key_allocsa_extended(AF_INET,
-	    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst, IFSCOPE_NONE,
-	    IPPROTO_ESP, spi, interface)) == 0) {
+	ipsec_fill_ip_sockaddr_4_6(&src, ip->ip_src, 0);
+	ipsec_fill_ip_sockaddr_4_6(&dst, ip->ip_dst, 0);
+
+	if ((sav = key_allocsa(&src, &dst, IPPROTO_ESP, spi, interface)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv4 ESP input: no key association found for spi %u (0x%08x)\n",
 		    (u_int32_t)ntohl(spi), (u_int32_t)ntohl(spi)));
@@ -919,6 +922,8 @@ esp6_input(struct mbuf **mp, int *offp, int proto)
 int
 esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 {
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	struct mbuf *m = *mp;
 	int off = *offp;
 	struct ip *ip;
@@ -978,23 +983,16 @@ esp6_input_extended(struct mbuf **mp, int *offp, int proto, ifnet_t interface)
 	/* find the sassoc. */
 	spi = esp->esp_spi;
 
-	if ((sav = key_allocsa_extended(AF_INET6,
-	    (caddr_t)&ip6->ip6_src, (caddr_t)&ip6->ip6_dst,
-	    interface != NULL ? interface->if_index : IFSCOPE_UNKNOWN,
-	    IPPROTO_ESP, spi, interface)) == 0) {
+	ipsec_fill_ip6_sockaddr_4_6(&src, &ip6->ip6_src, 0);
+	ipsec_fill_ip6_sockaddr_4_6_with_ifscope(&dst, &ip6->ip6_dst, 0,
+	    interface != NULL ? interface->if_index : IFSCOPE_UNKNOWN);
+
+	if ((sav = key_allocsa(&src, &dst, IPPROTO_ESP, spi, interface)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv6 ESP input: no key association found for spi %u (0x%08x) seq %u"
-		    " src %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x"
-		    " dst %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x if %s\n",
+		    " src %s dst %s if %s\n",
 		    (u_int32_t)ntohl(spi), (u_int32_t)ntohl(spi), ntohl(((struct newesp *)esp)->esp_seq),
-		    ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[0]), ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[1]),
-		    ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[2]), ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[3]),
-		    ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[4]), ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[5]),
-		    ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[6]), ntohs(ip6->ip6_src.__u6_addr.__u6_addr16[7]),
-		    ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[0]), ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[1]),
-		    ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[2]), ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[3]),
-		    ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[4]), ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[5]),
-		    ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[6]), ntohs(ip6->ip6_dst.__u6_addr.__u6_addr16[7]),
+		    ip6_sprintf(&ip6->ip6_src), ip6_sprintf(&ip6->ip6_dst),
 		    ((interface != NULL) ? if_name(interface) : "NONE")));
 		IPSEC_STAT_INCREMENT(ipsec6stat.in_nosa);
 		goto bad;
@@ -1618,14 +1616,16 @@ bad:
 void
 esp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 {
+	union sockaddr_in_4_6 src = {};
+	union sockaddr_in_4_6 dst = {};
 	const struct newesp *espp;
 	struct newesp esp;
 	struct ip6ctlparam *ip6cp = NULL, ip6cp1;
 	struct secasvar *sav;
 	struct ip6_hdr *ip6;
 	struct mbuf *m;
-	int off = 0;
 	struct sockaddr_in6 *sa6_src, *sa6_dst;
+	int off = 0;
 
 	if (sa->sa_family != AF_INET6 ||
 	    sa->sa_len != sizeof(struct sockaddr_in6)) {
@@ -1694,12 +1694,12 @@ esp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 			 * the address in the ICMP message payload.
 			 */
 			sa6_src = ip6cp->ip6c_src;
-			sa6_dst = (struct sockaddr_in6 *)(void *)sa;
-			sav = key_allocsa(AF_INET6,
-			    (caddr_t)&sa6_src->sin6_addr,
-			    (caddr_t)&sa6_dst->sin6_addr,
-			    sa6_dst->sin6_scope_id,
-			    IPPROTO_ESP, espp->esp_spi);
+			sa6_dst = SIN6(sa);
+			ipsec_fill_ip6_sockaddr_4_6(&src, &sa6_src->sin6_addr, 0);
+			ipsec_fill_ip6_sockaddr_4_6_with_ifscope(&dst,
+			    &sa6_dst->sin6_addr, 0, sa6_dst->sin6_scope_id);
+
+			sav = key_allocsa(&src, &dst, IPPROTO_ESP, espp->esp_spi, NULL);
 			if (sav) {
 				if (sav->state == SADB_SASTATE_MATURE ||
 				    sav->state == SADB_SASTATE_DYING) {
@@ -1727,13 +1727,13 @@ esp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 int
 esp_kpipe_input(ifnet_t interface, kern_packet_t sph, kern_packet_t dph)
 {
+	union sockaddr_in_4_6 src = {}, dst = {};
 	struct newesp *esp = NULL;
 	struct esptail *esptail = NULL;
 	struct secasvar *sav = NULL;
 	struct ipsecstat *stat = NULL;
 	const struct esp_algorithm *e_algo = NULL;
 	const struct ah_algorithm *a_algo = NULL;
-	caddr_t src_ip = NULL, dst_ip = NULL;
 	uint8_t *sbaddr = NULL, *dbaddr = NULL;
 	uint8_t *src_payload = NULL, *dst_payload = NULL;
 	uint8_t *iv = NULL;
@@ -1741,24 +1741,22 @@ esp_kpipe_input(ifnet_t interface, kern_packet_t sph, kern_packet_t dph)
 	size_t auth_size = 0;
 	size_t esphlen = 0;
 	u_int32_t replay_index = 0;
-	int af = 0, ivlen = 0;
+	int ivlen = 0;
 	int err = 0;
-	uint32_t slim = 0, slen = 0;
+	uint32_t slen = 0;
 	uint32_t dlim = 0;
 	uint8_t dscp = 0, nxt_proto = 0;
 
 	KERNEL_DEBUG(DBG_FNC_ESPIN | DBG_FUNC_START, 0, 0, 0, 0, 0);
 
-	MD_BUFLET_ADDR(SK_PTR_ADDR_KPKT(sph), sbaddr);
-	kern_buflet_t sbuf = __packet_get_next_buflet(sph, NULL);
+	kern_buflet_t __single sbuf = __packet_get_next_buflet(sph, NULL);
 	VERIFY(sbuf != NULL);
 	slen = __buflet_get_data_length(sbuf);
-	slim = __buflet_get_data_limit(sbuf);
-	slim -= __buflet_get_data_offset(sbuf);
+	sbaddr = ipsec_kern_buflet_to_buffer(sbuf);
 
-	MD_BUFLET_ADDR(SK_PTR_ADDR_KPKT(dph), dbaddr);
-	kern_buflet_t dbuf = __packet_get_next_buflet(dph, NULL);
+	kern_buflet_t __single dbuf = __packet_get_next_buflet(dph, NULL);
 	VERIFY(dbuf != NULL);
+	dbaddr = ipsec_kern_buflet_to_buffer(dbuf);
 	dlim = __buflet_get_data_limit(dbuf);
 	dlim -= __buflet_get_data_offset(dbuf);
 
@@ -1775,10 +1773,9 @@ esp_kpipe_input(ifnet_t interface, kern_packet_t sph, kern_packet_t dph)
 #endif /* _IP_VHL */
 		nxt_proto = ip_hdr->ip_p;
 		dscp = ip_hdr->ip_tos >> IPTOS_DSCP_SHIFT;
-		src_ip = (caddr_t)&ip_hdr->ip_src;
-		dst_ip = (caddr_t)&ip_hdr->ip_dst;
+		ipsec_fill_ip_sockaddr_4_6(&src, ip_hdr->ip_src, 0);
+		ipsec_fill_ip_sockaddr_4_6(&dst, ip_hdr->ip_dst, 0);
 		stat = &ipsecstat;
-		af = AF_INET;
 		break;
 	}
 	case 6: {
@@ -1786,10 +1783,10 @@ esp_kpipe_input(ifnet_t interface, kern_packet_t sph, kern_packet_t dph)
 		iphlen = sizeof(struct ip6_hdr);
 		nxt_proto = ip6->ip6_nxt;
 		dscp = (ntohl(ip6->ip6_flow) & IP6FLOW_DSCP_MASK) >> IP6FLOW_DSCP_SHIFT;
-		src_ip = (caddr_t)&ip6->ip6_src;
-		dst_ip = (caddr_t)&ip6->ip6_dst;
+		ipsec_fill_ip6_sockaddr_4_6(&src, &ip6->ip6_src, 0);
+		ipsec_fill_ip6_sockaddr_4_6_with_ifscope(&dst, &ip6->ip6_dst, 0,
+		    interface != NULL ? interface->if_index : IFSCOPE_UNKNOWN);
 		stat = &ipsec6stat;
-		af = AF_INET6;
 		if (__improbable(ip6->ip6_plen == 0)) {
 			esp_packet_log_err("esp kpipe input, jumbogram not supported");
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
@@ -1830,15 +1827,18 @@ esp_kpipe_input(ifnet_t interface, kern_packet_t sph, kern_packet_t dph)
 
 	esp = (struct newesp *)(void *)(sbaddr + iphlen);
 
-	sav = key_allocsa_extended(af, src_ip, dst_ip,
-	    interface != NULL ? interface->if_index: IFSCOPE_UNKNOWN,
-	    IPPROTO_ESP, esp->esp_spi, interface);
+	sav = key_allocsa(&src, &dst, IPPROTO_ESP, esp->esp_spi, interface);
 	if (__improbable(sav == NULL)) {
 		if (ipsec_debug) {
 			char src_buf[MAX_IPv6_STR_LEN] = {};
 			char dst_buf[MAX_IPv6_STR_LEN] = {};
-			inet_ntop(af, src_ip, src_buf, sizeof(src_buf));
-			inet_ntop(af, dst_ip, dst_buf, sizeof(src_buf));
+			if (src.sa.sa_family == AF_INET) {
+				inet_ntop(AF_INET, &src.sin.sin_addr, src_buf, sizeof(src_buf));
+				inet_ntop(AF_INET, &dst.sin.sin_addr, dst_buf, sizeof(src_buf));
+			} else {
+				inet_ntop(AF_INET6, &src.sin6.sin6_addr, src_buf, sizeof(src_buf));
+				inet_ntop(AF_INET6, &dst.sin6.sin6_addr, dst_buf, sizeof(src_buf));
+			}
 			esp_packet_log_err("esp kpipe input, no SA found for SPI=%x, "
 			    "packet %s<->%s", ntohl(esp->esp_spi), src_buf, dst_buf);
 		}

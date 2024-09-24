@@ -73,14 +73,11 @@ typedef struct exclaves_boot_task_entry {
 #define EXCLAVES_BOOT_TASK(func, rank)                            \
 	__EXCLAVES_BOOT_TASK(func, __LINE__, rank, func)
 
+/* Returns the exclaves boot status as a string, for panic log reporting. */
+extern const char *exclaves_get_boot_status_string(void);
+
 /* Boot the requested boot stage. */
 extern kern_return_t exclaves_boot(exclaves_boot_stage_t);
-
-/*
- * Wait until the specified boot stage has been reached (or return
- * KERN_NOT_SUPPORTED immediately if exclaves are not supported)
- */
-extern kern_return_t exclaves_boot_wait(exclaves_boot_stage_t);
 
 __END_DECLS
 

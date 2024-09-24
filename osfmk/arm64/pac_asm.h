@@ -161,6 +161,8 @@
 #endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
 
+
+
 /* END IGNORE CODESTYLE */
 
 #endif /* defined(HAS_APPLE_PAC) */

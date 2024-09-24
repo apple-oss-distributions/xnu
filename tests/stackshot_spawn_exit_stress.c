@@ -75,7 +75,7 @@ retry:
 	T_QUIET; T_EXPECT_POSIX_ZERO(ret, "deallocated stackshot config");
 }
 
-T_DECL(stackshot_spawn_exit, "tests taking many stackshots while children processes are spawning+exiting", T_META_TIMEOUT(120))
+T_DECL(stackshot_spawn_exit, "tests taking many stackshots while children processes are spawning+exiting", T_META_TIMEOUT(120), T_META_TAG_VM_PREFERRED)
 {
 	char path[PATH_MAX];
 	uint32_t path_size = sizeof(path);

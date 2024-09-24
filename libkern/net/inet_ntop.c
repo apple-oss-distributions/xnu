@@ -44,6 +44,7 @@ static char     *inet_ntop6(const u_char *src, char *dst, socklen_t size);
 const char *
 inet_ntop(int af, const void *src, char *dst, socklen_t size)
 {
+	memset(dst, 0, size);
 	switch (af) {
 	case AF_INET:
 		return inet_ntop4(src, dst, size);

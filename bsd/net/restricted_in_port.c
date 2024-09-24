@@ -53,7 +53,7 @@
 /*
  * Use a single bitmap for quickly checking if a TCP or UDP port is restricted
  */
-bitmap_t *restricted_port_bitmap = NULL;
+bitmap_t *__sized_by_or_null(BITMAP_SIZE(UINT16_MAX)) restricted_port_bitmap;
 
 struct restricted_port_entry {
 	const char      *rpe_entitlement;   // entitlement to check for this port
@@ -286,7 +286,7 @@ sysctl_restricted_port_test_common(struct sysctl_oid *oidp,
 		 */
 		if (restricted_port_test != 0) {
 			for (i = 0; i < RPE_ENTRY_COUNT; i++) {
-				struct restricted_port_entry *rpe = &restricted_port_list[i];
+				struct restricted_port_entry *__single rpe = &restricted_port_list[i];
 
 				if (rpe->rpe_entitlement == NULL) {
 					break;
@@ -382,7 +382,7 @@ restricted_in_port_init(void)
 	}
 
 	for (i = 0; i < RPE_ENTRY_COUNT; i++) {
-		struct restricted_port_entry *rpe = &restricted_port_list[i];
+		struct restricted_port_entry *__single rpe = &restricted_port_list[i];
 
 		if (rpe->rpe_entitlement == NULL) {
 			break;
@@ -421,7 +421,7 @@ bool
 current_task_can_use_restricted_in_port(in_port_t port, uint8_t protocol, uint32_t port_flags)
 {
 	unsigned int i;
-	struct proc *p = current_proc();
+	struct proc *__single p = current_proc();
 	pid_t pid = proc_pid(p);
 
 	/*
@@ -437,7 +437,7 @@ current_task_can_use_restricted_in_port(in_port_t port, uint8_t protocol, uint32
 	}
 
 	for (i = 0; i < RPE_ENTRY_COUNT; i++) {
-		struct restricted_port_entry *rpe = &restricted_port_list[i];
+		struct restricted_port_entry *__single rpe = &restricted_port_list[i];
 
 		if (rpe->rpe_entitlement == NULL) {
 			break;
@@ -460,7 +460,7 @@ current_task_can_use_restricted_in_port(in_port_t port, uint8_t protocol, uint32
 		 * - The process has the required entitlement
 		 * - The port is marked as usable by root
 		 */
-		task_t task = current_task();
+		task_t __single task = current_task();
 		if (rpe->rpe_flags & RPE_FLAG_SUPERUSER) {
 			if (task == kernel_task || proc_suser(current_proc()) == 0) {
 				os_log(OS_LOG_DEFAULT,

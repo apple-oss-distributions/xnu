@@ -65,6 +65,7 @@ __BEGIN_DECLS
 #include <mach/vm_param.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_kern_xnu.h>
 __END_DECLS
 
 
@@ -274,7 +275,8 @@ IODMACommandLocalMappedNonContig(int newValue)
 	}
 
 	buffer = 0;
-	kr = mach_vm_allocate_kernel(kernel_map, &buffer, bufSize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &buffer, bufSize,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_IOKIT));
 	assert(KERN_SUCCESS == kr);
 
 	// fragment the vmentries
@@ -1076,7 +1078,8 @@ IOMemoryDescriptorTest(int newValue)
 	kern_return_t kr;
 
 	data[0] = data[1] = 0;
-	kr = mach_vm_allocate_kernel(kernel_map, &data[0], bsize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &data[0], bsize,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_IOKIT));
 	assert(KERN_SUCCESS == kr);
 
 	mach_vm_inherit(kernel_map, data[0] + ptoa(1), ptoa(1), VM_INHERIT_NONE);

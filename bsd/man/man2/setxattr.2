@@ -75,6 +75,9 @@ if it is a symbolic link.
 With this option,
 .Fn setxattr
 will act on the link itself.
+.It Dv XATTR_NOFOLLOW_ANY
+do not follow any symbolic links encountered during pathname resolution. An
+error is returned if a symlink is encountered before the last component of path.
 .It Dv XATTR_CREATE
 fail if the named attribute already exists.
 .It Dv XATTR_REPLACE
@@ -148,6 +151,9 @@ is invalid.
 must be valid UTF-8 and
 .Fa options
 must make sense.
+.It Bq Er EINVAL
+XATTR_NOFOLLOW or XATTR_NOFOLLOW_ANY option was passed in
+.Fn fsetxattr .
 .It Bq Er ENOTDIR
 A component of
 .Fa path
@@ -172,6 +178,9 @@ or permission to set the attribute is denied.
 .It Bq Er ELOOP
 Too many symbolic links were encountered resolving
 .Fa path .
+.It Bq Er ELOOP
+If XATTR_NOFOLLOW_ANY option was passed and a symbolic link was encountered in
+translating the pathname.
 .It Bq Er EFAULT
 .Fa path
 or

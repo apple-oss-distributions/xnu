@@ -238,7 +238,7 @@ protons_init_netinet_protocol(void)
 	PROTONS_LOCK();
 
 	uint8_t proto = 0;
-	struct protons_token *pt = NULL;
+	struct protons_token *__single pt = NULL;
 	int error = 0;
 	struct protosw *pp = NULL;
 	TAILQ_FOREACH(pp, &inetdomain->dom_protosw, pr_entry) {

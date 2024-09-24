@@ -48,6 +48,7 @@
 #include <machine/monotonic.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
+#include <pexpert/arm64/apple_arm64_cpu.h>
 
 #include <mach/machine.h>
 #include <mach/machine/sdt.h>
@@ -819,7 +820,6 @@ __ml_interrupts_disabled_cpu_kind(thread_t thread)
 	if (!processor) {
 		return '!';
 	}
-
 	switch (processor->processor_set->pset_cluster_type) {
 	case PSET_AMP_P:
 		return 'P';
@@ -1026,7 +1026,11 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
 
 	state = __builtin_arm_rsr("DAIF");
 
-	if (enable && (state & DAIF_IRQF)) {
+	if (__improbable(!(state & DAIF_DEBUGF))) {
+		panic("%s: debug exceptions enabled in kernel mode", __func__);
+	}
+	if (enable && (state & DAIF_STANDARD_DISABLE)) {
+		assert3u(state & DAIF_STANDARD_DISABLE, ==, DAIF_STANDARD_DISABLE);
 		assert(getCpuDatap()->cpu_int_state == NULL); // Make sure we're not enabling interrupts from primary interrupt context
 #if SCHED_HYGIENE_DEBUG
 		if (__probable(debug && (interrupt_masked_debug_mode || sched_preemption_disable_debug_mode))) {
@@ -1053,7 +1057,8 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
 			}
 		}
 		__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
-	} else if (!enable && ((state & DAIF_IRQF) == 0)) {
+	} else if (!enable && ((state & DAIF_STANDARD_DISABLE) != DAIF_STANDARD_DISABLE)) {
+		assert3u(state & DAIF_STANDARD_DISABLE, ==, 0);
 		__builtin_arm_wsr("DAIFSet", DAIFSC_STANDARD_DISABLE);
 
 #if SCHED_HYGIENE_DEBUG
@@ -1063,7 +1068,7 @@ ml_set_interrupts_enabled_with_debug(boolean_t enable, boolean_t __unused debug)
 		}
 #endif
 	}
-	return (state & DAIF_IRQF) == 0;
+	return (state & DAIF_STANDARD_DISABLE) != DAIF_STANDARD_DISABLE;
 }
 
 boolean_t
@@ -1153,6 +1158,7 @@ static boolean_t ml_quiescing = FALSE;
 void
 ml_set_is_quiescing(boolean_t quiescing)
 {
+	assert(ml_quiescing != quiescing);
 	ml_quiescing = quiescing;
 	os_atomic_thread_fence(release);
 }

@@ -40,7 +40,7 @@ cpu_subtype32()
 static int
 grade_arm64e_binary(cpu_subtype_t execfeatures)
 {
-#if XNU_TARGET_OS_IOS
+#if XNU_TARGET_OS_IOS || XNU_TARGET_OS_XR
 	/*
 	 * iOS 13 toolchains produced unversioned arm64e slices which are not
 	 * ABI compatible with this release.
@@ -48,7 +48,7 @@ grade_arm64e_binary(cpu_subtype_t execfeatures)
 	if ((execfeatures & CPU_SUBTYPE_PTRAUTH_ABI) == 0) {
 		return 0;
 	}
-#endif /* XNU_TARGET_OS_IOS */
+#endif /* XNU_TARGET_OS_IOS || XNU_TARGET_OS_XR */
 
 	/* The current ABI version is preferred over arm64 */
 	if (CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION(execfeatures) ==

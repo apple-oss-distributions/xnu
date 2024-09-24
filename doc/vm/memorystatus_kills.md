@@ -10,21 +10,21 @@ The following table lists all of the kill reasons, their corresponding `memoryst
 
 More information on each kill type is provided below
 
-| Reason | memorystatus\_action\_t | context | Marches up jetsam bands? |
-| ----------- | ----------- | --- | --- |
-| `JETSAM_REASON_MEMORY_HIGHWATER` | `MEMORYSTATUS_KILL_HIWATER` | `memorystatus_thread` | Yes |
-| `JETSAM_REASON_VNODE` | N/A | synchronously on thread that tries to allocate a vnode | Yes |
-| `JETSAM_REASON_MEMORY_VMPAGESHORTAGE` | `MEMORYSTATUS_KILL_TOP_PROCESS` | `memorystatus_thread` | Yes |
-| `JETSAM_REASON_MEMORY_PROCTHRASHING` | `MEMORYSTATUS_KILL_AGGRESSIVE` | `memorystatus_thread` | Yes |
-| `JETSAM_REASON_MEMORY_FCTHRASHING` | `MEMORYSTATUS_KILL_TOP_PROCESS` | `memorystatus_thread` | No |
-| `JETSAM_REASON_MEMORY_PERPROCESSLIMIT` | N/A | thread that went over the process' memory limit | No |
-| `JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE` | N/A | thread that disabled the freezer | Yes |
-| `JETSAM_REASON_MEMORY_IDLE_EXIT` | N/A | `vm_pressure_thread` | No |
-| `JETSAM_REASON_ZONE_MAP_EXHAUSTION` | `MEMORYSTATUS_KILL_TOP_PROCESS` | `memorystatus_thread` or thread in a zalloc | No |
-| `JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING` | `MEMORYSTATUS_KILL_TOP_PROCESS` | `memorystatus_thread` | No |
-| `JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE` | `MEMORYSTATUS_KILL_TOP_PROCESS` | `memorystatus_thread` or thread in swapin | No |
-| `JETSAM_REASON_LOWSWAP` | `MEMORYSTATUS_KILL_SUSPENDED_SWAPPABLE` or `MEMORYSTATUS_KILL_SWAPPABLE` | `memorystatus_thread` | Yes |
-| `JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE` | N/A | `vm_pressure_thread` | No |
+| Reason                                             | memorystatus\_action\_t                                                  | context               | Marches up jetsam bands? |
+| -------------------------------------------------- | ------------------------------------------------------------------------ | --------------------- | ------------------------ |
+| `JETSAM_REASON_MEMORY_HIGHWATER`                   | `MEMORYSTATUS_KILL_HIWATER`                                              | `memorystatus_thread` | Yes                      |
+| `JETSAM_REASON_VNODE`                              | N/A                                                                      | synchronously on thread that tries to allocate a vnode | Yes |
+| `JETSAM_REASON_MEMORY_VMPAGESHORTAGE`              | `MEMORYSTATUS_KILL_TOP_PROCESS`                                          | `memorystatus_thread` | Yes                      |
+| `JETSAM_REASON_MEMORY_PROCTHRASHING`               | `MEMORYSTATUS_KILL_AGGRESSIVE`                                           | `memorystatus_thread` | Yes                      |
+| `JETSAM_REASON_MEMORY_FCTHRASHING`                 | `MEMORYSTATUS_KILL_TOP_PROCESS`                                          | `memorystatus_thread` | No                       |
+| `JETSAM_REASON_MEMORY_PERPROCESSLIMIT`             | N/A                                                                      | thread that went over the process' memory limit | No |
+| `JETSAM_REASON_MEMORY_DISK_SPACE_SHORTAGE`         | N/A                                                                      | thread that disabled the freezer | Yes |
+| `JETSAM_REASON_MEMORY_IDLE_EXIT`                   | N/A                                                                      | `vm_pressure_thread`  | No                       |
+| `JETSAM_REASON_ZONE_MAP_EXHAUSTION`                | `MEMORYSTATUS_KILL_TOP_PROCESS`                                          | `memorystatus_thread` or thread in a zalloc | No |
+| `JETSAM_REASON_MEMORY_VMCOMPRESSOR_THRASHING`      | `MEMORYSTATUS_KILL_TOP_PROCESS`                                          | `memorystatus_thread` | No                       |
+| `JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE` | `MEMORYSTATUS_KILL_TOP_PROCESS`                                          | `memorystatus_thread` or thread in swapin | No |
+| `JETSAM_REASON_LOWSWAP`                            | `MEMORYSTATUS_KILL_SUSPENDED_SWAPPABLE` or `MEMORYSTATUS_KILL_SWAPPABLE` | `memorystatus_thread` | Yes                      |
+| `JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE`          | N/A                                                                      | `vm_pressure_thread`  | No                       |
 
 ### JETSAM\_REASON\_MEMORY\_HIGHWATER
 

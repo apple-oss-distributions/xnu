@@ -239,6 +239,12 @@ _NumCPUs( void )
 
 #define _COMM_PAGE_CPU_TO_CLUSTER       (_COMM_PAGE_START_ADDRESS+0x108)        /* 256 bytes reserved for (logical) CPU_ID -> CLUSTER_ID mappings */
 
+// Apple Security Bounty random values
+#define _COMM_PAGE_ASB_TARGET_VALUE             (_COMM_PAGE_START_ADDRESS+0x320)        // uint64_t for random value
+#define _COMM_PAGE_ASB_TARGET_ADDRESS           (_COMM_PAGE_START_ADDRESS+0x328)        // uint64_t for random target address
+#define _COMM_PAGE_ASB_TARGET_KERN_VALUE        (_COMM_PAGE_START_ADDRESS+0x330)        // uint64_t for random kernel value
+#define _COMM_PAGE_ASB_TARGET_KERN_ADDRESS      (_COMM_PAGE_START_ADDRESS+0x338)        // uint64_t for random kernel target address
+
 #define _COMM_PAGE_END                  (_COMM_PAGE_START_ADDRESS+0xfff)        /* end of common page */
 
 /* Warning: kernel commpage.h has a matching c typedef for the following.  They must be kept in sync.  */

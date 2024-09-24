@@ -211,10 +211,10 @@ netsrc_ipv6(kern_ctl_ref kctl, uint32_t unit, struct netsrc_req *request)
 	};
 	netsrc_common(ro.ro_rt, &reply);
 	if (ro.ro_srcia == NULL && in6 != NULL) {
-		ro.ro_srcia = (struct ifaddr *)ifa_foraddr6_scoped(in6, reply.nrp_ifindex);
+		ro.ro_srcia = (struct ifaddr*)(ifa_foraddr6_scoped(in6, reply.nrp_ifindex));
 	}
 	if (ro.ro_srcia) {
-		struct in6_ifaddr *ia = (struct in6_ifaddr *)ro.ro_srcia;
+		struct in6_ifaddr *ia = ifatoia6(ro.ro_srcia);
 #define IA_TO_NRP_FLAG(flag)    \
 	        if (ia->ia6_flags & IN6_IFF_##flag) {                   \
 	                reply.nrp_flags |= NETSRC_FLAG_IP6_##flag;      \
@@ -261,7 +261,7 @@ netsrc_ipv4(kern_ctl_ref kctl, uint32_t unit, struct netsrc_req *request)
 		lck_rw_done(&in_ifaddr_rwlock);
 
 		if (ia) {
-			reply.nrp_sin = *IA_SIN(ia);
+			reply.nrp_sin = ia->ia_addr;
 			IFA_UNLOCK(&ia->ia_ifa);
 			ifa_remref(&ia->ia_ifa);
 			reply.nrp_flags |= NETSRC_FLAG_ROUTEABLE;
@@ -279,14 +279,14 @@ netsrc_ctlsend(kern_ctl_ref kctl, uint32_t unit, void *uinfo, mbuf_t m,
 {
 #pragma unused(uinfo, flags)
 	errno_t error;
-	struct netsrc_req *nrq, storage;
+	struct netsrc_req *__single nrq, storage;
 
 	if (mbuf_pkthdr_len(m) < sizeof(*nrq)) {
 		error = EINVAL;
 		goto out;
 	}
 	if (mbuf_len(m) >= sizeof(*nrq)) {
-		nrq = mbuf_data(m);
+		nrq = mtod(m, struct netsrc_req *);
 	} else {
 		mbuf_copydata(m, 0, sizeof(storage), &storage);
 		nrq = &storage;

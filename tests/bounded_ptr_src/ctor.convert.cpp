@@ -92,7 +92,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_convert, "bounded_ptr.ctor.convert") {
+T_DECL(ctor_convert, "bounded_ptr.ctor.convert", T_META_TAG_VM_PREFERRED) {
 	tests</*stored*/ Derived, /*from*/ Derived, /*to*/ Derived>();
 	tests</*stored*/ Derived, /*from*/ Derived const, /*to*/ Derived const>();
 	tests</*stored*/ Derived, /*from*/ Derived volatile, /*to*/ Derived volatile>();

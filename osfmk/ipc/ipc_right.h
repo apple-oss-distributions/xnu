@@ -111,17 +111,6 @@ extern kern_return_t ipc_right_request_alloc(
 	ipc_port_t              notify,
 	ipc_port_t              *previousp);
 
-/* Cancel a notification request and return the send-once right */
-extern ipc_port_t ipc_right_request_cancel(
-	ipc_space_t             space,
-	ipc_port_t              port,
-	mach_port_name_t        name,
-	ipc_entry_t             entry);
-
-#define ipc_right_request_cancel_macro(space, port, name, entry)                \
-	         ((entry->ie_request == IE_REQ_NONE) ? IP_NULL :                \
-	         ipc_right_request_cancel((space), (port), (name), (entry)))
-
 /* Check if an entry is being used */
 extern bool      ipc_right_inuse(
 	ipc_entry_t             entry);

@@ -101,8 +101,8 @@
 #include <mach/memory_object_types.h>
 #include <kern/sched_prim.h>    /* thread_block() */
 
-#include <vm/vm_kern.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <sys/kdebug.h>
 
@@ -1061,7 +1061,11 @@ buf_lblkno(buf_t bp)
 uint32_t
 buf_lblksize(buf_t bp)
 {
-	return bp->b_lblksize;
+	if (bp->b_flags & B_CLUSTER) {
+		return CLUSTER_IO_BLOCK_SIZE;
+	} else {
+		return (uint32_t)(bp->b_lblksize);
+	}
 }
 
 void
@@ -1079,7 +1083,9 @@ buf_setlblkno(buf_t bp, daddr64_t lblkno)
 void
 buf_setlblksize(buf_t bp, uint32_t lblksize)
 {
-	bp->b_lblksize = lblksize;
+	if (!(bp->b_flags & B_CLUSTER)) {
+		bp->b_lblksize = lblksize;
+	}
 }
 
 dev_t
@@ -1187,7 +1193,12 @@ buf_map_range_internal(buf_t bp, caddr_t *io_addr, boolean_t legacymode,
 			vaddr += bp->b_uploffset;
 		}
 	} else {
-		kret = ubc_upl_map_range(bp->b_upl, bp->b_uploffset, bp->b_bcount, prot, &vaddr);    /* Map it in */
+		upl_t upl = bp->b_upl;
+		upl_set_map_exclusive(upl);
+		kret = ubc_upl_map_range(upl, bp->b_uploffset, bp->b_bcount, prot, &vaddr);    /* Map it in */
+		if (kret != KERN_SUCCESS) {
+			upl_clear_map_exclusive(upl);
+		}
 	}
 
 	if (kret != KERN_SUCCESS) {
@@ -1263,6 +1274,7 @@ buf_unmap_range_internal(buf_t bp, boolean_t legacymode)
 		kret = ubc_upl_unmap(bp->b_upl);
 	} else {
 		kret = ubc_upl_unmap_range(bp->b_upl, bp->b_uploffset, bp->b_bcount);
+		upl_clear_map_exclusive(bp->b_upl);
 	}
 
 	if (kret != KERN_SUCCESS) {
@@ -1513,14 +1525,8 @@ buf_strategy(vnode_t devvp, void *ap)
 		if (cpx_use_offset_for_iv(cpx) && !cpx_synthetic_offset_for_iv(cpx)) {
 			off_t f_offset;
 
-			/*
-			 * this assert should be changed if cluster_io  ever
-			 * changes its logical block size.
-			 */
-			assert((bp->b_lblksize == CLUSTER_IO_BLOCK_SIZE) || !(bp->b_flags & B_CLUSTER));
-
-			if (bp->b_lblksize && bp->b_lblkno >= 0) {
-				f_offset = bp->b_lblkno * bp->b_lblksize;
+			if (bp->b_flags & B_CLUSTER) {
+				f_offset = bp->b_lblkno * CLUSTER_IO_BLOCK_SIZE;
 			} else if ((error = VNOP_BLKTOOFF(bp->b_vp, bp->b_lblkno, &f_offset))) {
 				return error;
 			}

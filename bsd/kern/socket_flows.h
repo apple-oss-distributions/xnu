@@ -75,6 +75,9 @@ struct soflow_hash_entry {
 #endif
 };
 
+#define SOFLOW_HASH_SIZE 16
+LIST_HEAD(soflow_hash_head, soflow_hash_entry);
+
 /*
  * struct soflow_db
  *
@@ -85,7 +88,7 @@ struct soflow_db {
 	os_refcnt_t                         soflow_db_ref_count;
 	struct socket                       *soflow_db_so;
 	uint32_t                            soflow_db_count;
-	struct soflow_hash_head             *soflow_db_hashbase;
+	struct soflow_hash_head             * __counted_by(SOFLOW_HASH_SIZE) soflow_db_hashbase;
 	u_long                              soflow_db_hashmask;
 	struct soflow_hash_entry            *soflow_db_only_entry;
 

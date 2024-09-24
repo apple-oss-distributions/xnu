@@ -29,12 +29,12 @@
 
 #include <kdp/kdp_common.h>
 #include <kdp/kdp_dyld.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_pageout.h>
-#include <vm/vm_fault.h>
+#include <vm/vm_fault_xnu.h>
 #include <vm/vm_shared_region.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_compressor_xnu.h>
 #include <sys/errno.h>
 
 extern unsigned int not_in_kdp;
@@ -171,7 +171,7 @@ kdp_find_phys(vm_map_t map, vm_offset_t target_addr, kdp_fault_flags_t fault_fla
 		size_t effective_page_mask;
 		(void)kdp_vm_map_get_page_size(map, &effective_page_mask);
 
-		cur_phys_addr = kdp_lightweight_fault(map, (target_addr & ~effective_page_mask));
+		cur_phys_addr = kdp_lightweight_fault(map, (target_addr & ~effective_page_mask), fault_flags & KDP_FAULT_FLAGS_MULTICPU);
 		fault_end_time = mach_absolute_time();
 
 		if (fault_results) {

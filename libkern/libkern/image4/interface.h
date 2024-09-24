@@ -83,6 +83,17 @@ typedef struct _image4_dlxk_interface {
 	image4_xnu_dlxk_fld_decl(trust_evaluation_boot);
 	image4_xnu_dlxk_fld_decl(cs_trap_resolve_handler);
 	image4_xnu_dlxk_fld_decl(cs_trap_vector_size);
+	image4_xnu_dlxk_fld_decl(trust_evaluation_normalize);
+	image4_xnu_dlxk_fld_decl(environment_identify);
+	image4_xnu_dlxk_fld_decl(environment_get_digest_info);
+	image4_xnu_dlxk_fld_decl(environment_flash);
+	image4_xnu_dlxk_fld_decl(coprocessor_resolve_from_manifest);
+	image4_xnu_dlxk_fld_decl(coprocessor_bootpc);
+	image4_xnu_dlxk_fld_decl(coprocessor_vma2);
+	image4_xnu_dlxk_fld_decl(coprocessor_vma3);
+#if IMAGE4_API_VERSION >= 20240503
+	image4_xnu_dlxk_fld_decl(trust_set_result_buffer);
+#endif
 } image4_dlxk_interface_t;
 
 OS_ASSUME_PTR_ABI_SINGLE_END

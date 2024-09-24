@@ -44,7 +44,7 @@
 #include <mach/memory_object_types.h>
 #include <mach/vm_types.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_pager.h>
+#include <vm/vm_pager_xnu.h>
 
 /*
  *  Vstructs are the internal (to us) description of a unit of backing store.
@@ -115,7 +115,7 @@ typedef enum {
  *  Basic vnode pager structure.  One per object, backing-store pair.
  */
 typedef struct vstruct {
-	boolean_t       is_device;      /* Must be first - see vm_pager.h */
+	boolean_t       is_device;      /* Must be first - see vm_pager_xnu.h */
 	pager_file_t    vs_pf;          /* Pager file this uses */
 	pf_entry        **vs_pmap;      /* Map of pages into paging file */
 	unsigned int

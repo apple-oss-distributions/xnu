@@ -30,8 +30,8 @@
 
 
 #define MAX_L2_CLINE                   7
-#define MAX_CPUS                       10
-#define MAX_CPU_CLUSTERS               3
+#define MAX_CPUS                       20
+#define MAX_CPU_CLUSTERS               6
 #define MAX_CPU_CLUSTER_PHY_ID         10
 #define HAS_IOA                        1
 
@@ -40,6 +40,8 @@
 #define XNU_MONITOR                    1 /* Secure pmap runtime */
 #define __ARM_42BIT_PA_SPACE__         1
 #define USE_APPLEARMSMP                1
+
+
 #if DEVELOPMENT || DEBUG
 #define XNU_ENABLE_PROCESSOR_EXIT      1 /* Enable xnu processor_exit() by default */
 #endif
@@ -55,24 +57,23 @@
 #define MAX_CPU_CLUSTER_PHY_ID         10
 #define HAS_IOA                        1
 
+#ifndef CONFIG_SPTM
 #define PMAP_CS                        1
 #define PMAP_CS_ENABLE                 1
 #define XNU_MONITOR                    1 /* Secure pmap runtime */
-#define XNU_MONITOR_NVME_PPL           1 /* NVMe PPL plugin for secure pmap runtime */
-#define XNU_MONITOR_ANS2_SART          1 /* ANS2 SART plugin for secure pmap runtime */
-#define XNU_MONITOR_UAT_PPL            1 /* UAT PPL plugin for secure pmap runtime */
-#if HIBERNATION
-#define XNU_MONITOR_PPL_HIB            1 /* HMAC SHA driver exposed as a PPL plugin */
-#endif /* HIBERNATION */
-#define XNU_MONITOR_T6000_DART         1
-#define XNU_MONITOR_T8110_DART         1 /* T8110 DART plugin for secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+
 #define __ARM_42BIT_PA_SPACE__         1
 #define USE_APPLEARMSMP                1
 #define XNU_CLUSTER_POWER_DOWN         1 /* Enable xnu cluster power down by default */
 #define RHODES_CLUSTER_POWERDOWN_WORKAROUND 1 /* Workaround for rdar://89107373 (Rhodes cluster power down: cannot manually power down and up a core multiple times without powering down the cluster) */
 #define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
+#ifndef CONFIG_SPTM
 #define XNU_HANDLE_ECC                 1 /* This platform may support ECC error recovery */
+#endif /* !CONFIG_SPTM */
 #define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+#define EXTENDED_USER_VA_SUPPORT       1 /* On certain OSes, support larger user address spaces */
 #endif  /* ARM64_BOARD_CONFIG_T6020 */
 
 
@@ -114,31 +115,126 @@
 #define MAX_CPUS                       8 /* Actually has 6 CPUs, see doc/xnu_build_consolidation.md for more info */
 #define MAX_CPU_CLUSTERS               2
 
+#ifndef CONFIG_SPTM
 #define PMAP_CS                        1
 #define PMAP_CS_ENABLE                 1
 #define XNU_MONITOR                    1 /* Secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+#if CONFIG_SPTM
+/* SPTM TODO: Add support for HWTRACE */
+#undef CPU_HAS_SW_TRACE_DATA
+#endif
+
 #define USE_APPLEARMSMP                1
 #endif  /* ARM64_BOARD_CONFIG_T8112 */
 
 
+#ifdef ARM64_BOARD_CONFIG_T8122_T8130
+#include <pexpert/arm64/H15.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       8
+#define MAX_CPU_CLUSTERS               2
+#define HAS_IOA                        1
+
+#ifndef CONFIG_SPTM
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+
+#if CONFIG_SPTM
+/* SPTM TODO: Add support for HWTRACE */
+#undef CPU_HAS_SW_TRACE_DATA
+#endif
+
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
+#define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+#endif  /* ARM64_BOARD_CONFIG_T8122_T8130 */
+
+#ifdef ARM64_BOARD_CONFIG_T8132
+#include <pexpert/arm64/H16.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       10
+#define MAX_CPU_CLUSTERS               2
+
+#ifndef CONFIG_SPTM
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+#if CONFIG_SPTM
+/* SPTM TODO: Add support for HWTRACE */
+#undef CPU_HAS_SW_TRACE_DATA
+#endif
+
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
+#define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+#define NO_CPU_OVRD                    1 /* CPU_OVRD register accesses are banned */
+
+
+#endif  /* ARM64_BOARD_CONFIG_T8132 */
 
 
 
 
 
 
+#ifdef ARM64_BOARD_CONFIG_T6030
+
+#include <pexpert/arm64/H15.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       12
+#define MAX_CPU_CLUSTERS               2
+#define HAS_IOA                        1
+
+#ifndef CONFIG_SPTM
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define XNU_PLATFORM_ERROR_HANDLER     1 /* This platform uses the platform error handler inside XNU rather than a kext */
+#define XNU_HANDLE_MCC                 1 /* This platform may support MCC error recovery */
+#endif  /* ARM64_BOARD_CONFIG_T6030 */
+
+
+#ifdef ARM64_BOARD_CONFIG_T6031
+
+#include <pexpert/arm64/H15.h>
+
+#define MAX_L2_CLINE                   7
+#define MAX_CPUS                       32
+#define MAX_CPU_CLUSTERS               6
+#define MAX_CPU_CLUSTER_PHY_ID         10
+#define HAS_IOA                        1
+
+#ifndef CONFIG_SPTM
+#define PMAP_CS                        1
+#define PMAP_CS_ENABLE                 1
+#define XNU_MONITOR                    1 /* Secure pmap runtime */
+#endif /* CONFIG_SPTM */
+
+#define __ARM_42BIT_PA_SPACE__         1
+#define USE_APPLEARMSMP                1
+#define XNU_CLUSTER_POWER_DOWN         1 /* Enable xnu cluster power down by default */
+#define RHODES_CLUSTER_POWERDOWN_WORKAROUND 1 /* Workaround for rdar://89107373 (Rhodes cluster power down: cannot manually power down and up a core multiple times without powering down the cluster) */
+#endif  /* ARM64_BOARD_CONFIG_T6031 */
 
 
 
-#ifdef ARM64_BOARD_CONFIG_BCM2837
-#include <pexpert/arm64/BCM2837.h>
 
-#define MAX_L2_CLINE                   6
-#define MAX_CPUS                       4
-#define MAX_CPU_CLUSTERS               1
-
-#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
-#endif  /* ARM64_BOARD_CONFIG_BCM2837 */
 
 #ifdef ARM64_BOARD_CONFIG_VMAPPLE
 #include <pexpert/arm64/VMAPPLE.h>
@@ -156,6 +252,7 @@
 #endif
 
 #endif  /* ARM64_BOARD_CONFIG_VMAPPLE */
+
 
 
 #ifndef HAS_UNCORE_CTRS
@@ -199,5 +296,7 @@
  * bits back to read/write.  However it will still catch xnu changes that
  * accidentally write to HID bits after they've been made read-only.
  */
+
+
 
 #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

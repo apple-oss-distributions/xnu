@@ -94,7 +94,7 @@ send_scm_rights(void *arg __unused)
 }
 
 
-T_DECL(uipc_uaf, "Tests that the UNIX Domain Socket GC doesn't panic", T_META_CHECK_LEAKS(false))
+T_DECL(uipc_uaf, "Tests that the UNIX Domain Socket GC doesn't panic", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if TARGET_OS_WATCH
 	T_SKIP("test doesn't work on watchOS");

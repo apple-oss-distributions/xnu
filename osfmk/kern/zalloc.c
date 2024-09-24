@@ -98,12 +98,12 @@
 #include <prng/random.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 #include <vm/vm_memtag.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_compressor.h> /* C_SLOT_PACKED_PTR* */
+#include <vm/vm_kern_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_pageout_internal.h>
+#include <vm/vm_compressor_xnu.h> /* C_SLOT_PACKED_PTR* */
 
 #include <pexpert/pexpert.h>
 
@@ -150,13 +150,13 @@ extern zone_t ipc_service_port_label_zone;
 ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
     ZC_PERCPU | ZC_ALIGNMENT_REQUIRED | ZC_KASAN_NOREDZONE);
 
-#if CONFIG_KERNEL_TAGGING
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
 #define ZONE_MIN_ELEM_SIZE      (sizeof(uint64_t) * 2)
 #define ZONE_ALIGN_SIZE         ZONE_MIN_ELEM_SIZE
-#else /* CONFIG_KERNEL_TAGGING */
+#else /* ZSECURITY_CONFIG_ZONE_TAGGING */
 #define ZONE_MIN_ELEM_SIZE      sizeof(uint64_t)
 #define ZONE_ALIGN_SIZE         ZONE_MIN_ELEM_SIZE
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* ZSECURITY_CONFIG_ZONE_TAGGING */
 
 #define ZONE_MAX_ALLOC_SIZE     (32 * 1024)
 #if ZSECURITY_CONFIG(SAD_FENG_SHUI)
@@ -507,11 +507,24 @@ SECURITY_READ_ONLY_LATE(zone_security_flags_t) zone_security_array[MAX_ZONES] = 
 		.z_noencrypt      = false,
 		.z_submap_idx     = Z_SUBMAP_IDX_GENERAL_0,
 		.z_kalloc_type    = false,
-		.z_sig_eq         = 0
+		.z_sig_eq         = 0,
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+		.z_tag            = 1,
+#else /* ZSECURITY_CONFIG(ZONE_TAGGING) */
+		.z_tag            = 0,
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 	},
 };
 SECURITY_READ_ONLY_LATE(struct zone_size_params) zone_ro_size_params[ZONE_ID__LAST_RO + 1];
 SECURITY_READ_ONLY_LATE(zone_cache_ops_t) zcache_ops[ZONE_ID__FIRST_DYNAMIC];
+
+#if DEBUG || DEVELOPMENT
+unsigned int
+zone_max_zones(void)
+{
+	return MAX_ZONES;
+}
+#endif
 
 /* Initialized in zone_bootstrap(), how many "copies" the per-cpu system does */
 static SECURITY_READ_ONLY_LATE(unsigned) zpercpu_early_count;
@@ -614,7 +627,7 @@ static Z_TUNABLE(uint32_t, zc_shrink_level, Z_WMA_UNIT / 2);
 static Z_TUNABLE(uint32_t, zc_pcpu_max, 128 << 10);
 static Z_TUNABLE(uint32_t, zc_autotrim_size, 16 << 10);
 static Z_TUNABLE(uint32_t, zc_autotrim_buckets, 8);
-static Z_TUNABLE(uint32_t, zc_free_batch_size, 256);
+static Z_TUNABLE(uint32_t, zc_free_batch_size, 128);
 
 static SECURITY_READ_ONLY_LATE(size_t)    zone_pages_wired_max;
 static SECURITY_READ_ONLY_LATE(vm_map_t)  zone_submaps[Z_SUBMAP_IDX_COUNT];
@@ -2318,9 +2331,7 @@ zone_index_from_tag_index(uint32_t sizeclass_idx)
 static inline void *
 zstack_tbi_fix(vm_offset_t elem)
 {
-#if CONFIG_KERNEL_TAGGING
 	elem = vm_memtag_fixup_ptr(elem);
-#endif /* CONFIG_KERNEL_TAGGING */
 	return (void *)elem;
 }
 
@@ -3820,9 +3831,6 @@ zone_kma_flags(zone_t z, zone_security_flags_t zsflags, zalloc_flags_t flags)
 		kmaflags |= KMA_LAST_FREE;
 	}
 
-	if (z->z_tbi_tag) {
-		kmaflags |= KMA_TAG;
-	}
 
 	return kmaflags;
 }
@@ -3857,14 +3865,11 @@ zone_remove_wired_pages(zone_t z, uint32_t pages)
 #endif
 }
 
-#if CONFIG_KERNEL_TAGGING
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
 static inline vm_address_t
 zone_tag_element(zone_t zone, vm_offset_t addr, vm_size_t elem_size)
 {
-	vm_offset_t tagged_address;
-
-	tagged_address = vm_memtag_assign_tag(addr, elem_size);
-
+	vm_offset_t tagged_address = vm_memtag_assign_tag(addr, elem_size);
 	vm_memtag_set_tag(tagged_address, elem_size);
 
 	if (zone->z_percpu) {
@@ -3876,9 +3881,25 @@ zone_tag_element(zone_t zone, vm_offset_t addr, vm_size_t elem_size)
 	return tagged_address;
 }
 
+static inline vm_address_t
+zone_tag_free_element(zone_t zone, vm_offset_t addr, vm_size_t elem_size)
+{
+	if (__improbable(addr > 0xFF00000000000000ULL)) {
+		return addr;
+	}
+
+	return zone_tag_element(zone, addr, elem_size);
+}
+
 static inline void
 zcram_memtag_init(zone_t zone, vm_offset_t base, uint32_t start, uint32_t end)
 {
+	zone_security_flags_t *zsflags = &zone_security_array[zone_index(zone)];
+
+	if (!zsflags->z_tag) {
+		return;
+	}
+
 	vm_offset_t elem_size = zone_elem_outer_size(zone);
 	vm_offset_t oob_offs = zone_elem_outer_offs(zone);
 
@@ -3888,7 +3909,10 @@ zcram_memtag_init(zone_t zone, vm_offset_t base, uint32_t start, uint32_t end)
 		(void)zone_tag_element(zone, elem_addr, elem_size);
 	}
 }
-#endif /* CONFIG_KERNEL_TAGGING */
+#else /* ZSECURITY_CONFIG(ZONE_TAGGING) */
+#define zone_tag_free_element(z, a, s)  (a)
+#define zcram_memtag_init(z, b, s, e)   do {} while (0)
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
 
 /*!
  * @function zcram_and_lock()
@@ -3984,14 +4008,10 @@ zcram_and_lock(zone_t zone, vm_offset_t addr, uint32_t pg_va_new,
 		free_start = (uint32_t)(ptoa(pg_start) - oob_offs) / elem_size;
 	}
 
-#if CONFIG_KERNEL_TAGGING
-	if (__probable(zone->z_tbi_tag)) {
-		zcram_memtag_init(zone, addr, free_end, free_start);
-	}
-#endif /* CONFIG_KERNEL_TAGGING */
+	zcram_memtag_init(zone, addr, free_start, free_end);
 
 #if KASAN_CLASSIC
-	assert(pg_start == 0); /* KASAN_CLASSIC never does partial chunks */
+	assert(pg_start == 0);         /* KASAN_CLASSIC never does partial chunks */
 	if (zone->z_permanent) {
 		kasan_poison_range(addr, ptoa(pg_end), ASAN_VALID);
 	} else if (zone->z_percpu) {
@@ -4537,7 +4557,7 @@ static inline void
 ZONE_TRACE_VM_KERN_REQUEST_START(vm_size_t size)
 {
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START,
 	    size, 0, 0, 0);
 #else
 	(void)size;
@@ -4552,7 +4572,7 @@ ZONE_TRACE_VM_KERN_REQUEST_END(uint32_t pages)
 	if (pages && task) {
 		ledger_credit(task->ledger, task_ledgers.pages_grabbed_kern, pages);
 	}
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 	    pages, 0, 0, 0);
 #else
 	(void)pages;
@@ -4824,7 +4844,7 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
 
 		if ((flags & Z_NOFAIL) && zone_exhausted(z)) {
 			__ZONE_EXHAUSTED_AND_WAITING_HARD__(z);
-			continue; /* reevaluate if we really need it */
+			continue;         /* reevaluate if we really need it */
 		}
 
 		/*
@@ -4872,7 +4892,8 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
 		ZONE_TRACE_VM_KERN_REQUEST_START(ptoa(z->z_chunk_pages - cur_pages));
 
 		while (pages < z->z_chunk_pages - cur_pages) {
-			vm_page_t m = vm_page_grab();
+			uint_t grab_options = VM_PAGE_GRAB_OPTIONS_NONE;
+			vm_page_t m = vm_page_grab_options(grab_options);
 
 			if (m) {
 				pages++;
@@ -4934,7 +4955,6 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
 			}
 			goto page_shortage;
 		}
-
 		vm_object_t object;
 		object = kernel_object_default;
 		vm_object_lock(object);
@@ -5362,6 +5382,7 @@ pgz_protect(zone_t zone, vm_offset_t addr, void *fp)
 {
 	kern_return_t kr;
 	uint32_t slot;
+	uint_t flags = 0;
 
 	if (!pgz_slot_alloc(&slot)) {
 		return addr;
@@ -5374,7 +5395,7 @@ pgz_protect(zone_t zone, vm_offset_t addr, void *fp)
 	pmap_paddr_t pa = kvtophys(trunc_page(addr));
 	vm_offset_t  new_addr = pgz_addr(slot);
 	kr = pmap_enter_options_addr(kernel_pmap, new_addr, pa,
-	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, 0, TRUE,
+	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, flags, TRUE,
 	    get_preemption_level() ? (PMAP_OPTIONS_NOWAIT | PMAP_OPTIONS_NOPREEMPT) : 0,
 	    NULL, PMAP_MAPPING_TYPE_INFER);
 
@@ -5729,6 +5750,14 @@ panic_display_pgz_uaf_info(bool has_syms, vm_offset_t addr)
 	paniclog_append_noflush("\n");
 }
 
+vm_offset_t pgz_protect_for_testing_only(zone_t zone, vm_offset_t addr, void *fp);
+vm_offset_t
+pgz_protect_for_testing_only(zone_t zone, vm_offset_t addr, void *fp)
+{
+	return pgz_protect(zone, addr, fp);
+}
+
+
 #endif /* CONFIG_PROB_GZALLOC */
 #endif /* !ZALLOC_TEST */
 #pragma mark zfree
@@ -6017,12 +6046,8 @@ __zcache_mark_invalid(zone_t zone, vm_offset_t elem, uint64_t combined_size)
 	    ZFREE_USER_SIZE(combined_size), zone_elem_redzone(zone),
 	    zone->z_percpu, __builtin_frame_address(0));
 #endif
-#if CONFIG_KERNEL_TAGGING
-	if (__probable(zone->z_tbi_tag)) {
-		elem = zone_tag_element(zone, elem, ZFREE_ELEM_SIZE(combined_size));
-	}
-#endif /* CONFIG_KERNEL_TAGGING */
 
+	elem = zone_tag_free_element(zone, elem, ZFREE_ELEM_SIZE(combined_size));
 	return elem;
 }
 
@@ -6244,7 +6269,6 @@ void
 
 	assert(zone > &zone_array[ZONE_ID__LAST_RO]);
 	assert(!zone->z_percpu && !zone->z_permanent && !zone->z_smr);
-
 	vm_memtag_bzero(addr, esize);
 
 	zfree_ext(zone, zstats, addr, ZFREE_PACK_SIZE(esize, esize));
@@ -6492,15 +6516,7 @@ __zcache_mark_valid(zone_t zone, vm_offset_t addr, zalloc_flags_t flags)
 	vm_offset_t esize = zone_elem_inner_size(zone);
 #endif
 
-#if CONFIG_KERNEL_TAGGING
-	if (__probable(zone->z_tbi_tag)) {
-		/*
-		 * Retrieve the memory tag assigned on free and update the pointer
-		 * metadata.
-		 */
-		addr = vm_memtag_fixup_ptr(addr);
-	}
-#endif /* CONFIG_KERNEL_TAGGING */
+	addr = vm_memtag_fixup_ptr(addr);
 
 #if VM_TAG_SIZECLASSES
 	if (__improbable(zone->z_uses_tags)) {
@@ -6861,7 +6877,7 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 			tag = vm_tag_bt() ?: tag;
 		}
 		if (tag != VM_KERN_MEMORY_NONE) {
-			tag = vm_tag_will_update_zone(tag, zone->z_tags_sizeclass,
+			tag = vm_tag_will_update_zone(tag,
 			    flags & (Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT));
 		}
 		if (tag == VM_KERN_MEMORY_NONE) {
@@ -7550,8 +7566,9 @@ zone_reclaim_chunk(
 #endif /* KASAN_CLASSIC */
 
 	if (sequester) {
+		kma_flags_t flags = zone_kma_flags(z, zsflags, 0) | KMA_KOBJECT;
 		kernel_memory_depopulate(page_addr, size_to_free,
-		    KMA_KOBJECT, VM_KERN_MEMORY_ZONE);
+		    flags, VM_KERN_MEMORY_ZONE);
 	} else {
 		assert(zsflags.z_submap_idx != Z_SUBMAP_IDX_VM);
 		kmem_free(zone_submap(zsflags), page_addr,
@@ -8595,7 +8612,8 @@ mach_memory_info_security_check(bool redact_info)
 
 	/* If does not have the memory entitlement, fail. */
 #if CONFIG_DEBUGGER_FOR_ZONE_INFO
-	if (!IOTaskHasEntitlement(current_task(), MEMORYINFO_ENTITLEMENT)) {
+	task_t task = current_task();
+	if (task != kernel_task && !IOTaskHasEntitlement(task, MEMORYINFO_ENTITLEMENT)) {
 		return KERN_DENIED;
 	}
 
@@ -8707,96 +8725,45 @@ zone_info_coalesce(
 	info[coalesce_index].mzi_count += zi->mzi_count;
 }
 
-static kern_return_t
-mach_memory_info_internal(
-	host_t                  host,
-	mach_zone_name_array_t  *namesp,
-	mach_msg_type_number_t  *namesCntp,
-	mach_zone_info_array_t  *infop,
-	mach_msg_type_number_t  *infoCntp,
-	mach_memory_info_array_t *memoryInfop,
-	mach_msg_type_number_t   *memoryInfoCntp,
-	bool                     redact_info)
+kern_return_t
+mach_memory_info_sample(
+	mach_zone_name_t *names,
+	mach_zone_info_t *info,
+	int              *coalesce,
+	unsigned int     *zonesCnt,
+	mach_memory_info_t *memoryInfo,
+	unsigned int       memoryInfoCnt,
+	bool               redact_info)
 {
-	mach_zone_name_t        *names;
-	vm_offset_t             names_addr;
-	vm_size_t               names_size;
-
-	mach_zone_info_t        *info;
-	vm_offset_t             info_addr;
-	vm_size_t               info_size;
-
-	int                     *coalesce;
-	vm_offset_t             coalesce_addr;
-	vm_size_t               coalesce_size;
 	int                     coalesce_count = 0;
-
-	mach_memory_info_t      *memory_info;
-	vm_offset_t             memory_info_addr;
-	vm_size_t               memory_info_size;
-	vm_size_t               memory_info_vmsize;
-	unsigned int            num_info;
-
-	unsigned int            max_zones, used_zones, i;
+	unsigned int            max_zones, used_zones = 0;
 	mach_zone_name_t        *zn;
 	mach_zone_info_t        *zi;
 	kern_return_t           kr;
 
 	uint64_t                zones_collectable_bytes = 0;
 
-	if (host == HOST_NULL) {
-		return KERN_INVALID_HOST;
-	}
-
 	kr = mach_memory_info_security_check(redact_info);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
 
-	/*
-	 *	We assume that zones aren't freed once allocated.
-	 *	We won't pick up any zones that are allocated later.
-	 */
+	max_zones = *zonesCnt;
 
-	max_zones = os_atomic_load(&num_zones, relaxed);
-
-	names_size = round_page(max_zones * sizeof *names);
-	kr = kmem_alloc(ipc_kernel_map, &names_addr, names_size,
-	    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-	names = (mach_zone_name_t *) names_addr;
-
-	info_size = round_page(max_zones * sizeof *info);
-	kr = kmem_alloc(ipc_kernel_map, &info_addr, info_size,
-	    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
-	if (kr != KERN_SUCCESS) {
-		kmem_free(ipc_kernel_map,
-		    names_addr, names_size);
-		return kr;
-	}
-	info = (mach_zone_info_t *) info_addr;
-
+	bzero(names, max_zones * sizeof(*names));
+	bzero(info, max_zones * sizeof(*info));
 	if (redact_info) {
-		coalesce_size = round_page(max_zones * sizeof *coalesce);
-		kr = kmem_alloc(ipc_kernel_map, &coalesce_addr, coalesce_size,
-		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
-		if (kr != KERN_SUCCESS) {
-			kmem_free(ipc_kernel_map,
-			    names_addr, names_size);
-			kmem_free(ipc_kernel_map,
-			    info_addr, info_size);
-			return kr;
-		}
-		coalesce = (int *)coalesce_addr;
+		bzero(coalesce, max_zones * sizeof(*coalesce));
 	}
 
 	zn = &names[0];
 	zi = &info[0];
 
-	used_zones = 0;
-	for (i = 0; i < max_zones; i++) {
+	zone_index_foreach(i) {
+		if (used_zones > max_zones) {
+			break;
+		}
+
 		if (!get_zone_info(&(zone_array[i]), zn, zi)) {
 			continue;
 		}
@@ -8839,21 +8806,96 @@ mach_memory_info_internal(
 		zone_info_coalesce(info, coalesce_index, zi);
 	}
 
-	if (redact_info) {
-		kmem_free(ipc_kernel_map, coalesce_addr, coalesce_size);
+	*zonesCnt = used_zones;
+
+	if (memoryInfo) {
+		bzero(memoryInfo, memoryInfoCnt * sizeof(*memoryInfo));
+		kr = vm_page_diagnose(memoryInfo, memoryInfoCnt, zones_collectable_bytes, redact_info);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
 	}
 
-	*namesp = (mach_zone_name_t *) create_vm_map_copy(names_addr, names_size, used_zones * sizeof *names);
-	*namesCntp = used_zones;
+	return kr;
+}
 
-	*infop = (mach_zone_info_t *) create_vm_map_copy(info_addr, info_size, used_zones * sizeof *info);
-	*infoCntp = used_zones;
+static kern_return_t
+mach_memory_info_internal(
+	host_t                  host,
+	mach_zone_name_array_t  *namesp,
+	mach_msg_type_number_t  *namesCntp,
+	mach_zone_info_array_t  *infop,
+	mach_msg_type_number_t  *infoCntp,
+	mach_memory_info_array_t *memoryInfop,
+	mach_msg_type_number_t   *memoryInfoCntp,
+	bool                     redact_info)
+{
+	mach_zone_name_t        *names;
+	vm_offset_t             names_addr;
+	vm_size_t               names_size;
 
-	num_info = 0;
-	memory_info_addr = 0;
+	mach_zone_info_t        *info;
+	vm_offset_t             info_addr;
+	vm_size_t               info_size;
+
+	int                     *coalesce;
+	vm_offset_t             coalesce_addr;
+	vm_size_t               coalesce_size;
+
+	mach_memory_info_t      *memory_info = NULL;
+	vm_offset_t             memory_info_addr = 0;
+	vm_size_t               memory_info_size;
+	vm_size_t               memory_info_vmsize;
+	vm_map_copy_t           memory_info_copy;
+	unsigned int            num_info = 0;
+
+	unsigned int            max_zones, used_zones;
+	kern_return_t           kr;
+
+	if (host == HOST_NULL) {
+		return KERN_INVALID_HOST;
+	}
+
+	/*
+	 *	We assume that zones aren't freed once allocated.
+	 *	We won't pick up any zones that are allocated later.
+	 */
+
+	max_zones = os_atomic_load(&num_zones, relaxed);
+
+	names_size = round_page(max_zones * sizeof *names);
+	kr = kmem_alloc(ipc_kernel_map, &names_addr, names_size,
+	    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+	names = (mach_zone_name_t *) names_addr;
+
+	info_size = round_page(max_zones * sizeof *info);
+	kr = kmem_alloc(ipc_kernel_map, &info_addr, info_size,
+	    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map,
+		    names_addr, names_size);
+		return kr;
+	}
+	info = (mach_zone_info_t *) info_addr;
+
+	if (redact_info) {
+		coalesce_size = round_page(max_zones * sizeof *coalesce);
+		kr = kmem_alloc(ipc_kernel_map, &coalesce_addr, coalesce_size,
+		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IPC);
+		if (kr != KERN_SUCCESS) {
+			kmem_free(ipc_kernel_map,
+			    names_addr, names_size);
+			kmem_free(ipc_kernel_map,
+			    info_addr, info_size);
+			return kr;
+		}
+		coalesce = (int *)coalesce_addr;
+	}
 
 	if (memoryInfop && memoryInfoCntp) {
-		vm_map_copy_t           copy;
 		num_info = vm_page_diagnose_estimate();
 		memory_info_size = num_info * sizeof(*memory_info);
 		memory_info_vmsize = round_page(memory_info_size);
@@ -8868,16 +8910,30 @@ mach_memory_info_internal(
 		assert(kr == KERN_SUCCESS);
 
 		memory_info = (mach_memory_info_t *) memory_info_addr;
-		vm_page_diagnose(memory_info, num_info, zones_collectable_bytes, redact_info);
+	}
 
+	used_zones = max_zones;
+	mach_memory_info_sample(names, info, coalesce, &used_zones, memory_info, num_info, redact_info);
+
+	if (redact_info) {
+		kmem_free(ipc_kernel_map, coalesce_addr, coalesce_size);
+	}
+
+	*namesp = (mach_zone_name_t *) create_vm_map_copy(names_addr, names_size, used_zones * sizeof *names);
+	*namesCntp = used_zones;
+
+	*infop = (mach_zone_info_t *) create_vm_map_copy(info_addr, info_size, used_zones * sizeof *info);
+	*infoCntp = used_zones;
+
+	if (memoryInfop && memoryInfoCntp) {
 		kr = vm_map_unwire(ipc_kernel_map, memory_info_addr, memory_info_addr + memory_info_vmsize, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)memory_info_addr,
-		    (vm_map_size_t)memory_info_size, TRUE, &copy);
+		    (vm_map_size_t)memory_info_size, TRUE, &memory_info_copy);
 		assert(kr == KERN_SUCCESS);
 
-		*memoryInfop = (mach_memory_info_t *) copy;
+		*memoryInfop = (mach_memory_info_t *) memory_info_copy;
 		*memoryInfoCntp = num_info;
 	}
 
@@ -9582,9 +9638,14 @@ zone_create_ext(
 		z->z_pgz_use_guards = true;
 	}
 #endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
-	if (!(flags & ZC_NOTBITAG)) {
-		z->z_tbi_tag = true;
+
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	if ((flags & ZC_NO_TBI_TAG)) {
+		zsflags->z_tag = false;
 	}
+
+#endif /* ZSECURITY_CONFIG(ZONE_TAGGING) */
+
 	if (flags & ZC_KALLOC_TYPE) {
 		zsflags->z_kalloc_type = true;
 	}
@@ -9807,6 +9868,12 @@ zone_create(
 	return zone_create_ext(name, size, flags, ZONE_ID_ANY, NULL);
 }
 
+vm_size_t
+zone_get_elem_size(zone_t zone)
+{
+	return zone->z_elem_size;
+}
+
 static_assert(ZONE_ID__LAST_RO_EXT - ZONE_ID__FIRST_RO_EXT == ZC_RO_ID__LAST);
 
 zone_id_t
@@ -9975,6 +10042,7 @@ zone_bootstrap(void)
 	}
 #endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
 
+
 	thread_call_setup_with_options(&zone_expand_callout,
 	    zone_expand_async, NULL, THREAD_CALL_PRIORITY_HIGH,
 	    THREAD_CALL_OPTIONS_ONCE);
@@ -10069,10 +10137,11 @@ zone_submap_init(
 	}
 
 	addr = submap_start;
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(
+		.vm_tag = VM_KERN_MEMORY_ZONE);
 	vm_object_t kobject = kernel_object_default;
 	kr = vm_map_enter(submap, &addr, ZONE_GUARD_SIZE / 2, 0,
-	    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(.vm_tag = VM_KERN_MEMORY_ZONE),
-	    kobject, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
+	    vmk_flags, kobject, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
 	if (kr != KERN_SUCCESS) {
 		panic("ksubmap[%s]: failed to make first entry (%d)",
 		    zone_submaps_names[idx], kr);
@@ -10080,8 +10149,7 @@ zone_submap_init(
 
 	addr = submap_end - ZONE_GUARD_SIZE / 2;
 	kr = vm_map_enter(submap, &addr, ZONE_GUARD_SIZE / 2, 0,
-	    VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(.vm_tag = VM_KERN_MEMORY_ZONE),
-	    kobject, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
+	    vmk_flags, kobject, addr, FALSE, prot, prot_max, VM_INHERIT_NONE);
 	if (kr != KERN_SUCCESS) {
 		panic("ksubmap[%s]: failed to make last entry (%d)",
 		    zone_submaps_names[idx], kr);
@@ -10216,17 +10284,26 @@ zone_metadata_init(void)
 	 * Step 3: Relocate the boostrap VM structs
 	 *         (including rewriting their content).
 	 */
+	kma_flags_t flags = KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL;
 
-	kernel_memory_populate(reloc_base, early_sz,
-	    KMA_KOBJECT | KMA_NOENCRYPT | KMA_NOFAIL | KMA_TAG,
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	flags |= KMA_TAG;
+#endif /* ZSECURITY_CONFIG_ZONE_TAGGING */
+
+
+	kernel_memory_populate(reloc_base, early_sz, flags,
 	    VM_KERN_MEMORY_OSFMK);
+
+	vm_memtag_disable_checking();
 	__nosan_memcpy((void *)reloc_base, (void *)early_r.min_address, early_sz);
+	vm_memtag_enable_checking();
+
+#if ZSECURITY_CONFIG(ZONE_TAGGING)
+	vm_memtag_relocate_tags(reloc_base, early_r.min_address, early_sz);
+#endif /* ZSECURITY_CONFIG_ZONE_TAGGING */
 
 #if KASAN
 	kasan_notify_address(reloc_base, early_sz);
-#if KASAN_TBI
-	kasan_tbi_copy_tags(reloc_base, early_r.min_address, early_sz);
-#endif /* KASAN_TBI */
 #endif /* KASAN */
 
 	vm_map_relocate_early_maps(reloc_delta);
@@ -10450,13 +10527,13 @@ zone_init(void)
 	zone_create_flags_t kma_flags = ZC_NOCACHING | ZC_NOGC | ZC_NOCALLOUT |
 	    ZC_KASAN_NOQUARANTINE | ZC_KASAN_NOREDZONE | ZC_VM;
 
-	(void)zone_create_ext("vm.permanent", 1, kma_flags | ZC_NOTBITAG,
+	(void)zone_create_ext("vm.permanent", 1, kma_flags | ZC_NO_TBI_TAG,
 	    ZONE_ID_PERMANENT, ^(zone_t z) {
 		z->z_permanent = true;
 		z->z_elem_size = 1;
 	});
 	(void)zone_create_ext("vm.permanent.percpu", 1,
-	    kma_flags | ZC_PERCPU | ZC_NOTBITAG, ZONE_ID_PERCPU_PERMANENT, ^(zone_t z) {
+	    kma_flags | ZC_PERCPU | ZC_NO_TBI_TAG, ZONE_ID_PERCPU_PERMANENT, ^(zone_t z) {
 		z->z_permanent = true;
 		z->z_elem_size = 1;
 	});
@@ -10524,6 +10601,7 @@ zone_early_mem_init(vm_size_t size)
 	 */
 	assert3u(size, <=, sizeof(zone_early_pages_to_cram));
 	mem = (vm_offset_t)zone_early_pages_to_cram;
+
 
 	zone_info.zi_meta_base = zone_early_meta_array_startup -
 	    zone_pva_from_addr(mem).packed_address;
@@ -10624,7 +10702,7 @@ zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc)
 	elemSize = (uint32_t)zone_elem_inner_size(zone);
 	maxElems = (zone->z_elems_avail + 1) & ~1ul;
 
-	array = kalloc_type_tag(vm_offset_t, maxElems, VM_KERN_MEMORY_DIAG);
+	array = kalloc_type_tag(vm_offset_t, maxElems, Z_WAITOK, VM_KERN_MEMORY_DIAG);
 	if (array == NULL) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -10820,7 +10898,8 @@ zone_basic_test_run(__unused int64_t in, int64_t *out)
 	{
 		zone_t test_pcpu_zone;
 		kern_return_t kr;
-		int idx, num_allocs = 8;
+		const int num_allocs = 8;
+		int idx;
 		vm_size_t elem_size = 2 * PAGE_SIZE / num_allocs;
 		void *allocs[num_allocs];
 		void **allocs_pcpu;

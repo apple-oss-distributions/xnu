@@ -211,7 +211,7 @@ print_sockaddr_dl(const char *pre, const struct sockaddr *sa, const char *post)
 	char nbuffer[256];
 	char abuffer[256];
 	char sbuffer[256];
-	struct sockaddr_dl sdl = {};
+	struct sockaddr_dl sdl = { 0 };
 
 	if (sa == NULL) {
 		return;
@@ -233,7 +233,7 @@ print_sockaddr_in(const char *pre, const struct sockaddr *sa, const char *post)
 {
 	char abuffer[256];
 	char zbuffer[256];
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	if (sa == NULL) {
 		return;
@@ -253,7 +253,7 @@ static void
 print_sockaddr_in6(const char *pre, const struct sockaddr *sa, const char *post)
 {
 	char abuffer[256];
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	if (sa == NULL) {
 		return;
@@ -511,11 +511,10 @@ find_unused_pattern_in_rt_if_list(unsigned char *pattern, size_t pattern_size)
 static const char *
 ioc_str(unsigned long cmd)
 {
-#define X(a) case a: return #a;
-
 	switch (cmd) {
+#define X(a) case a: return #a;
 		SIOC_LIST
-
+#undef X
 	default:
 		break;
 	}
@@ -598,7 +597,7 @@ static struct ioc_ifreq ioc_list[] = {
 static void
 test_sioc_ifr_bounds(struct ioc_ifreq *ioc_ifreq, int s, const char *ifname)
 {
-	struct ifreq ifr = {};
+	struct ifreq ifr = { 0 };
 	unsigned char pattern;
 	struct sockaddr_in *sin;
 
@@ -636,7 +635,7 @@ test_sioc_ifr_bounds(struct ioc_ifreq *ioc_ifreq, int s, const char *ifname)
 }
 
 T_DECL(sioc_ifr_bounds, "test bound checks on struct ifreq addresses passed to interface ioctls",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	char ifname[IFNAMSIZ];
@@ -811,7 +810,7 @@ static struct ioc_ifra ioc_ifra_list[] = {
 };
 
 T_DECL(sioc_ifra_addr_bounds, "test bound checks on socket address passed to interface ioctls",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 
@@ -831,7 +830,7 @@ T_DECL(sioc_ifra_addr_bounds, "test bound checks on socket address passed to int
 	struct ioc_ifra *ioc_ifra;
 
 	for (ioc_ifra = ioc_ifra_list; ioc_ifra->error != -1; ioc_ifra++) {
-		struct in_aliasreq ifra = {};
+		struct in_aliasreq ifra = { 0 };
 		unsigned char pattern;
 		int retval;
 
@@ -882,10 +881,10 @@ T_DECL(sioc_ifra_addr_bounds, "test bound checks on socket address passed to int
 }
 
 T_DECL(sioc_ifr_dstaddr_leak, "test bound checks on socket address passed to interface ioctls",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct ifreq ifr = {};
+	struct ifreq ifr = { 0 };
 	unsigned char pattern;
 	struct ifaddrs *ifap = NULL, *ifa;
 	bool found_gif0 = false;
@@ -940,7 +939,7 @@ static struct ioc_ifreq ioc_list_config[] = {
 static void
 test_sioc_ifr_addr_config_v4(struct ioc_ifreq *ioc_ifreq, int s, const char *ifname)
 {
-	struct ifreq ifr = {};
+	struct ifreq ifr = { 0 };
 	struct sockaddr_in *sin;
 
 	T_LOG("");
@@ -1007,7 +1006,7 @@ test_sioc_ifr_addr_config_v6(struct ioc_ifreq *ioc_ifreq, int s, const char *ifn
 
 
 T_DECL(sioc_ifr_addr_config, "test failure cases for interface address configuration ioctls",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	int s6 = -1;
@@ -1167,7 +1166,19 @@ test_proto_attach(void)
 }
 
 T_DECL(sioc_proto_attach, "test protocol attachment",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	test_proto_attach();
+}
+
+/*
+ * The following is only meant to be run from the command line
+ * when one adds a new socket interface ioctl
+ */
+T_DECL(sioc_print_all, "print all socket interface ioctls", T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
+{
+#define X(a) T_LOG("%-32s 0x%08lx GROUP %3lu BASECMD %3ld LEN %4lu\n", \
+    #a, a, (a & 0x00000ff00) >> 8, a & 0x000000ff, IOCPARM_LEN(a));
+	SIOC_LIST
+#undef X
 }

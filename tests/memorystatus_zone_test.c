@@ -771,7 +771,8 @@ T_DECL( memorystatus_vme_zone_test,
  */
     T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
+    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL),
+    T_META_TAG_VM_PREFERRED)
 {
 	current_test = (test_config_struct) {
 		.test_index = VME_ZONE_TEST,
@@ -792,7 +793,8 @@ T_DECL( memorystatus_vm_objects_zone_test,
  */
     T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
+    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL),
+    T_META_TAG_VM_PREFERRED)
 {
 	current_test = (test_config_struct) {
 		.test_index = VM_OBJECTS_ZONE_TEST,
@@ -814,7 +816,8 @@ T_DECL( memorystatus_generic_zone_test,
  */
     T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
-    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL))
+    T_META_SYSCTL_INT(ZONEMAP_JETSAM_LIMIT_SYSCTL),
+    T_META_TAG_VM_PREFERRED)
 {
 	current_test = (test_config_struct) {
 		.test_index = GENERIC_ZONE_TEST,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,6 +37,31 @@
 #include <stdint.h>
 #include <netinet/in.h>
 
+static inline const char *
+af_get_str(uint8_t af)
+{
+	return (af == AF_INET) ? "IPv4" : "IPv6";
+}
+
+static inline const char *
+ipproto_get_str(uint8_t proto)
+{
+	const char * str;
+
+	switch (proto) {
+	case IPPROTO_UDP:
+		str = "UDP";
+		break;
+	case IPPROTO_TCP:
+		str = "TCP";
+		break;
+	default:
+		str = "<?>";
+		break;
+	}
+	return str;
+}
+
 typedef union {
 	struct in_addr  v4;
 	struct in6_addr v6;
@@ -53,6 +78,11 @@ bool
 inet_transfer_local(inet_endpoint_t server_endpoint,
     int server_if_index,
     int client_if_index);
+
+void
+inet_test_traffic(uint8_t af, inet_address_t server,
+    const char * server_ifname, int server_if_index,
+    const char * client_ifname, int client_if_index);
 
 const char *
 inet_transfer_error_string(void);

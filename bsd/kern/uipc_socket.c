@@ -102,6 +102,7 @@
 #include <net/net_api_stats.h>
 #include <net/ntstat.h>
 #include <net/content_filter.h>
+#include <net/sockaddr_utils.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_tclass.h>
@@ -155,6 +156,7 @@ int     max_cached_sock_count = MAX_CACHED_SOCKETS;
 static uint64_t        so_cache_time;
 static int              socketinit_done;
 static struct zone      *so_cache_zone;
+ZONE_DECLARE(so_cache_zone, struct zone *);
 
 static LCK_GRP_DECLARE(so_cache_mtx_grp, "so_cache");
 static LCK_MTX_DECLARE(so_cache_mtx, &so_cache_mtx_grp);
@@ -459,13 +461,16 @@ cached_sock_alloc(struct socket **so, zalloc_flags_t how)
 		lck_mtx_unlock(&so_cache_mtx);
 
 		temp = (*so)->so_saved_pcb;
-		bzero((caddr_t)*so, sizeof(struct socket));
+		bzero(*so, sizeof(struct socket));
 
 		(*so)->so_saved_pcb = temp;
 	} else {
 		lck_mtx_unlock(&so_cache_mtx);
 
-		*so = zalloc_flags(so_cache_zone, how | Z_ZERO);
+		uint8_t *so_mem = zalloc_flags_buf(so_cache_zone, how | Z_ZERO);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+		*so = (struct socket *)so_mem;
 
 		/*
 		 * Define offsets for extra structures into our
@@ -473,18 +478,16 @@ cached_sock_alloc(struct socket **so, zalloc_flags_t how)
 		 * on longword boundaries.
 		 */
 
-		offset = (uintptr_t)*so;
+		offset = (uintptr_t)so_mem;
 		offset += sizeof(struct socket);
-
 		offset = ALIGN(offset);
+		struct inpcb *pcb = (struct inpcb *)(so_mem + (offset - (uintptr_t)so_mem));
+#pragma clang diagnostic pop
+		(*so)->so_saved_pcb = (caddr_t)pcb;
 
-		(*so)->so_saved_pcb = (caddr_t)offset;
 		offset += get_inpcb_str_size();
-
 		offset = ALIGN(offset);
-
-		((struct inpcb *)(void *)(*so)->so_saved_pcb)->inp_saved_ppcb =
-		    (caddr_t)offset;
+		pcb->inp_saved_ppcb = (caddr_t)(so_mem + (offset - (uintptr_t)so_mem));
 	}
 
 	OSBitOrAtomic(SOF1_CACHED_IN_SOCK_LAYER, &(*so)->so_flags1);
@@ -608,7 +611,7 @@ struct socket *
 soalloc(int waitok, int dom, int type)
 {
 	zalloc_flags_t how = waitok ? Z_WAITOK : Z_NOWAIT;
-	struct socket *so;
+	struct socket *__single so;
 
 	if ((dom == PF_INET) && (type == SOCK_STREAM)) {
 		cached_sock_alloc(&so, how);
@@ -635,10 +638,6 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	struct socket *so;
 	int error = 0;
 	pid_t rpid = -1;
-
-#if TCPDEBUG
-	extern int tcpconsdebug;
-#endif
 
 	VERIFY(aso != NULL);
 	*aso = NULL;
@@ -796,11 +795,6 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 
 	/* Attach socket filters for this protocol */
 	sflt_initsock(so);
-#if TCPDEBUG
-	if (tcpconsdebug == 2) {
-		so->so_options |= SO_DEBUG;
-	}
-#endif
 	so_set_default_traffic_class(so);
 
 	/*
@@ -1589,7 +1583,7 @@ soaccept(struct socket *so, struct sockaddr **nam)
 int
 soacceptfilter(struct socket *so, struct socket *head)
 {
-	struct sockaddr *local = NULL, *remote = NULL;
+	struct sockaddr *__single local = NULL, *__single remote = NULL;
 	int error = 0;
 
 	/*
@@ -1718,9 +1712,9 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED) {
 					so->so_flags1 |= SOF1_APPROVED_APP_DOMAIN;
 				}
-				if (necp_set_socket_domain_attributes(so, metadata.domain, metadata.domain_owner)) {
-					printf("connect() - failed necp_set_socket_domain_attributes");
-				}
+				necp_set_socket_domain_attributes(so,
+				    __unsafe_null_terminated_from_indexable(metadata.domain),
+				    __unsafe_null_terminated_from_indexable(metadata.domain_owner));
 			}
 		}
 
@@ -1842,9 +1836,8 @@ soconnectxlocked(struct socket *so, struct sockaddr *src,
 				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED) {
 					so->so_flags1 |= SOF1_APPROVED_APP_DOMAIN;
 				}
-				if (necp_set_socket_domain_attributes(so, metadata.domain, metadata.domain_owner)) {
-					printf("connectx() - failed necp_set_socket_domain_attributes");
-				}
+				necp_set_socket_domain_attributes(so, __unsafe_null_terminated_from_indexable(metadata.domain),
+				    __unsafe_null_terminated_from_indexable(metadata.domain_owner));
 			}
 		}
 
@@ -2174,9 +2167,9 @@ int
 sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
     struct mbuf *top, struct mbuf *control, int flags)
 {
-	struct mbuf **mp;
-	struct mbuf *m, *freelist = NULL;
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	mbuf_ref_ref_t mp;
+	mbuf_ref_t m, freelist = NULL;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
 	user_ssize_t space, len, resid, orig_resid;
 	int clen = 0, error, dontroute, sendflags;
 	int atomic = sosendallatonce(so) || top;
@@ -2721,8 +2714,8 @@ mbuf_detach_control_from_list(struct mbuf **mp)
 int
 sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pktcnt, int flags)
 {
-	struct mbuf *m;
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	mbuf_ref_t m;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
 	int error, dontroute;
 	int atomic = sosendallatonce(so);
 	int sblocked = 0;
@@ -2787,12 +2780,12 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 	}
 
 	if (!skip_filt) {
-		struct mbuf **prevnextp = NULL;
+		mbuf_ref_ref_t prevnextp = NULL;
 
 		for (m = top; m != NULL; m = m->m_nextpkt) {
-			struct mbuf *control = NULL;
-			struct mbuf *last_control = NULL;
-			struct mbuf *nextpkt;
+			mbuf_ref_t control = NULL;
+			mbuf_ref_t last_control = NULL;
+			mbuf_ref_t nextpkt;
 
 			/*
 			 * Remove packet from the list of packets
@@ -2868,7 +2861,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 		if (so->so_proto->pr_usrreqs->pru_send_list != pru_send_list_notsupp) {
 			error = (*so->so_proto->pr_usrreqs->pru_send_list)
 			    (so, top, pktcnt, flags);
-			if (error != 0) {
+			if (error != 0 && error != ENOBUFS) {
 				os_log(OS_LOG_DEFAULT, "sosend_list: pru_send_list error %d",
 				    error);
 			}
@@ -2891,8 +2884,10 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 				error = (*so->so_proto->pr_usrreqs->pru_send)
 				    (so, 0, m, NULL, control, current_proc());
 				if (error != 0) {
-					os_log(OS_LOG_DEFAULT, "sosend_list: pru_send error %d",
-					    error);
+					if (error != ENOBUFS) {
+						os_log(OS_LOG_DEFAULT, "sosend_list: pru_send error %d",
+						    error);
+					}
 					goto release;
 				}
 				*pktcnt += 1;
@@ -2911,8 +2906,10 @@ release:
 	}
 out:
 	if (top != NULL) {
-		os_log(OS_LOG_DEFAULT, "sosend_list: m_freem_list(top) with error %d",
-		    error);
+		if (error != ENOBUFS) {
+			os_log(OS_LOG_DEFAULT, "sosend_list: m_freem_list(top) with error %d",
+			    error);
+		}
 		m_freem_list(top);
 	}
 
@@ -3082,12 +3079,12 @@ soreceive_ctl(struct socket *so, struct mbuf **controlp, int flags,
     struct mbuf **mp, struct mbuf **nextrecordp)
 {
 	int error = 0;
-	struct mbuf *cm = NULL, *cmn;
-	struct mbuf **cme = &cm;
+	mbuf_ref_t cm = NULL, cmn;
+	mbuf_ref_ref_t cme = &cm;
 	struct sockbuf *sb_rcv = &so->so_rcv;
-	struct mbuf **msgpcm = NULL;
-	struct mbuf *m = *mp;
-	struct mbuf *nextrecord = *nextrecordp;
+	mbuf_ref_ref_t msgpcm = NULL;
+	mbuf_ref_t m = *mp;
+	mbuf_ref_t nextrecord = *nextrecordp;
 	struct protosw *pr = so->so_proto;
 
 	/*
@@ -3298,8 +3295,10 @@ int
 soreceive(struct socket *so, struct sockaddr **psa, struct uio *uio,
     struct mbuf **mp0, struct mbuf **controlp, int *flagsp)
 {
-	struct mbuf *m, **mp, *ml = NULL;
-	struct mbuf *nextrecord, *free_list;
+	mbuf_ref_t m;
+	mbuf_ref_ref_t mp;
+	mbuf_ref_t ml = NULL;
+	mbuf_ref_t nextrecord, free_list;
 	int flags, error, offset;
 	user_ssize_t len;
 	struct protosw *pr = so->so_proto;
@@ -4081,13 +4080,14 @@ int
 soreceive_m_list(struct socket *so, u_int *pktcntp, struct mbuf **maddrp,
     struct mbuf **mp0, struct mbuf **controlp, int *flagsp)
 {
-	struct mbuf *m, **mp;
-	struct mbuf *nextrecord;
+	mbuf_ref_t m;
+	mbuf_ref_ref_t mp;
+	mbuf_ref_t nextrecord;
 	int flags, error;
 	struct protosw *pr = so->so_proto;
 	struct proc *p = current_proc();
 	u_int npkts = 0;
-	struct mbuf *free_list = NULL;
+	mbuf_ref_t free_list = NULL;
 	int sblocked = 0;
 
 	/*
@@ -4249,7 +4249,7 @@ dontblock:
 	nextrecord = m->m_nextpkt;
 
 	if ((pr->pr_flags & PR_ADDR) && m->m_type == MT_SONAME) {
-		struct mbuf *maddr = NULL;
+		mbuf_ref_t maddr = NULL;
 
 		error = soreceive_addr(p, so, NULL, &maddr, flags, &m,
 		    &nextrecord, 1);
@@ -4278,7 +4278,7 @@ dontblock:
 	 * We call into the protocol to perform externalization.
 	 */
 	if (m != NULL && m->m_type == MT_CONTROL) {
-		struct mbuf *control = NULL;
+		mbuf_ref_t control = NULL;
 
 		error = soreceive_ctl(so, &control, flags, &m, &nextrecord);
 		if (error != 0) {
@@ -4397,10 +4397,10 @@ so_statistics_event_to_nstat_event(int64_t *input_options,
 	case SO_STATISTICS_EVENT_EXIT_CELLFALLBACK:
 		*nstat_event = NSTAT_EVENT_SRC_EXIT_CELLFALLBACK;
 		break;
-	case SO_STATISTICS_EVENT_ATTRIBUTION_CHANGE:
-		*nstat_event = NSTAT_EVENT_SRC_ATTRIBUTION_CHANGE;
-		break;
 #if (DEBUG || DEVELOPMENT)
+	case SO_STATISTICS_EVENT_RESERVED_1:
+		*nstat_event = NSTAT_EVENT_SRC_RESERVED_1;
+		break;
 	case SO_STATISTICS_EVENT_RESERVED_2:
 		*nstat_event = NSTAT_EVENT_SRC_RESERVED_2;
 		break;
@@ -4655,7 +4655,7 @@ sorflush(struct socket *so)
  *	copyin:EFAULT
  */
 int
-sooptcopyin(struct sockopt *sopt, void *buf, size_t len, size_t minlen)
+sooptcopyin(struct sockopt *sopt, void *__sized_by(len) buf, size_t len, size_t minlen)
 {
 	size_t  valsize;
 
@@ -4676,7 +4676,11 @@ sooptcopyin(struct sockopt *sopt, void *buf, size_t len, size_t minlen)
 		return copyin(sopt->sopt_val, buf, valsize);
 	}
 
-	bcopy(CAST_DOWN(caddr_t, sopt->sopt_val), buf, valsize);
+	caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+	    CAST_DOWN(caddr_t, sopt->sopt_val),
+	    valsize);
+	bcopy(tmp, buf, valsize);
+
 	return 0;
 }
 
@@ -4706,8 +4710,10 @@ sooptcopyin_timeval(struct sockopt *sopt, struct timeval *tv_p)
 				return error;
 			}
 		} else {
-			bcopy(CAST_DOWN(caddr_t, sopt->sopt_val), &tv64,
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
 			    sizeof(tv64));
+			bcopy(tmp, &tv64, sizeof(tv64));
 		}
 		if (tv64.tv_sec < 0 || tv64.tv_sec > LONG_MAX ||
 		    tv64.tv_usec < 0 || tv64.tv_usec >= 1000000) {
@@ -4730,8 +4736,10 @@ sooptcopyin_timeval(struct sockopt *sopt, struct timeval *tv_p)
 				return error;
 			}
 		} else {
-			bcopy(CAST_DOWN(caddr_t, sopt->sopt_val), &tv32,
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
 			    sizeof(tv32));
+			bcopy(tmp, &tv32, sizeof(tv32));
 		}
 #ifndef __LP64__
 		/*
@@ -4747,6 +4755,48 @@ sooptcopyin_timeval(struct sockopt *sopt, struct timeval *tv_p)
 		tv_p->tv_usec = tv32.tv_usec;
 	}
 	return 0;
+}
+
+int
+sooptcopyin_bindtodevice(struct sockopt *sopt, char * __sized_by(bufsize) buf, size_t bufsize)
+{
+#define MIN_BINDTODEVICE_NAME_SIZE    2
+	size_t maxlen = bufsize - 1;             /* the max string length that fits in the buffer */
+
+	if (bufsize < MIN_BINDTODEVICE_NAME_SIZE) {
+#if DEBUG || DEVELOPMENT
+		os_log(OS_LOG_DEFAULT, "%s: bufsize %lu < MIN_BINDTODEVICE_NAME_SIZE %d",
+		    __func__, bufsize, MIN_BINDTODEVICE_NAME_SIZE);
+#endif /* DEBUG || DEVELOPMENT */
+		return EINVAL;
+	}
+
+	memset(buf, 0, bufsize);
+
+	/*
+	 * bufsize includes the end-of-string because of the uncertainty wether
+	 * interface names are passed as strings or byte buffers.
+	 * If the user gives us more than the max string length return EINVAL.
+	 * On success, sopt->sopt_valsize is not modified
+	 */
+	maxlen = bufsize - 1;
+	if (sopt->sopt_valsize > maxlen) {
+		os_log(OS_LOG_DEFAULT, "%s: sopt_valsize %lu > maxlen %lu",
+		    __func__, sopt->sopt_valsize, maxlen);
+		return EINVAL;
+	}
+
+	if (sopt->sopt_p != kernproc) {
+		return copyin(sopt->sopt_val, buf, sopt->sopt_valsize);
+	} else {
+		caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+		    CAST_DOWN(caddr_t, sopt->sopt_val),
+		    sopt->sopt_valsize);
+		bcopy(tmp, buf, sopt->sopt_valsize);
+	}
+
+	return 0;
+#undef MIN_BINDTODEVICE_NAME_SIZE
 }
 
 int
@@ -4833,7 +4883,7 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 		goto out;
 	}
 
-	if (sopt->sopt_level != SOL_SOCKET) {
+	if (sopt->sopt_level != SOL_SOCKET || sopt->sopt_name == SO_BINDTODEVICE) {
 		if (so->so_proto != NULL &&
 		    so->so_proto->pr_ctloutput != NULL) {
 			error = (*so->so_proto->pr_ctloutput)(so, sopt);
@@ -5736,6 +5786,23 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			}
 			break;
 		}
+		case SO_MARK_DOMAIN_INFO_SILENT:
+			error = sooptcopyin(sopt, &optval, sizeof(optval),
+			    sizeof(optval));
+			if (error != 0) {
+				goto out;
+			}
+			if (optval < 0) {
+				error = EINVAL;
+				goto out;
+			}
+			if (optval == 0) {
+				so->so_flags1 &= ~SOF1_DOMAIN_INFO_SILENT;
+			} else {
+				so->so_flags1 |= SOF1_DOMAIN_INFO_SILENT;
+			}
+			break;
+
 		default:
 			error = ENOPROTOOPT;
 			break;
@@ -5754,7 +5821,7 @@ out:
 
 /* Helper routines for getsockopt */
 int
-sooptcopyout(struct sockopt *sopt, void *buf, size_t len)
+sooptcopyout(struct sockopt *sopt, void *__sized_by(len) buf, size_t len)
 {
 	int     error;
 	size_t  valsize;
@@ -5772,11 +5839,14 @@ sooptcopyout(struct sockopt *sopt, void *buf, size_t len)
 	 */
 	valsize = MIN(len, sopt->sopt_valsize);
 	sopt->sopt_valsize = valsize;
-	if (sopt->sopt_val != USER_ADDR_NULL) {
+	if (sopt->sopt_valsize != 0 && sopt->sopt_val != USER_ADDR_NULL) {
 		if (sopt->sopt_p != kernproc) {
 			error = copyout(buf, sopt->sopt_val, valsize);
 		} else {
-			bcopy(buf, CAST_DOWN(caddr_t, sopt->sopt_val), valsize);
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
+			    valsize);
+			bcopy(buf, tmp, valsize);
 		}
 	}
 	return error;
@@ -5810,7 +5880,10 @@ sooptcopyout_timeval(struct sockopt *sopt, const struct timeval *tv_p)
 		if (sopt->sopt_p != kernproc) {
 			error = copyout(val, sopt->sopt_val, valsize);
 		} else {
-			bcopy(val, CAST_DOWN(caddr_t, sopt->sopt_val), valsize);
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
+			    valsize);
+			bcopy(val, tmp, valsize);
 		}
 	}
 	return error;
@@ -5846,7 +5919,7 @@ sogetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 		goto out;
 	}
 
-	if (sopt->sopt_level != SOL_SOCKET) {
+	if (sopt->sopt_level != SOL_SOCKET || sopt->sopt_name == SO_BINDTODEVICE) {
 		if (so->so_proto != NULL &&
 		    so->so_proto->pr_ctloutput != NULL) {
 			error = (*so->so_proto->pr_ctloutput)(so, sopt);
@@ -6241,6 +6314,10 @@ integer:
 			error = sooptcopyout(sopt, &application_id, sizeof(so_application_id_t));
 			break;
 		}
+		case SO_MARK_DOMAIN_INFO_SILENT:
+			optval = ((so->so_flags1 & SOF1_DOMAIN_INFO_SILENT) > 0)
+			    ? 1 : 0;
+			goto integer;
 		default:
 			error = ENOPROTOOPT;
 			break;
@@ -6332,8 +6409,10 @@ soopt_mcopyin(struct sockopt *sopt, struct mbuf *m)
 				return error;
 			}
 		} else {
-			bcopy(CAST_DOWN(caddr_t, sopt->sopt_val),
-			    mtod(m, char *), m->m_len);
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
+			    m->m_len);
+			bcopy(tmp, mtod(m, char *), m->m_len);
 		}
 		sopt->sopt_valsize -= m->m_len;
 		sopt->sopt_val += m->m_len;
@@ -6368,8 +6447,11 @@ soopt_mcopyout(struct sockopt *sopt, struct mbuf *m)
 				return error;
 			}
 		} else {
-			bcopy(mtod(m, char *),
-			    CAST_DOWN(caddr_t, sopt->sopt_val), m->m_len);
+			caddr_t tmp = __unsafe_forge_bidi_indexable(caddr_t,
+			    CAST_DOWN(caddr_t, sopt->sopt_val),
+			    m->m_len);
+
+			bcopy(mtod(m, char *), tmp, m->m_len);
 		}
 		sopt->sopt_valsize -= m->m_len;
 		sopt->sopt_val += m->m_len;
@@ -7165,7 +7247,7 @@ solockhistory_nr(struct socket *so)
 		    so->lock_lr[(so->next_lock_lr + i) % SO_LCKDBG_MAX],
 		    so->unlock_lr[(so->next_unlock_lr + i) % SO_LCKDBG_MAX]);
 	}
-	return lock_history_str;
+	return __unsafe_null_terminated_from_indexable(lock_history_str);
 }
 
 lck_mtx_t *
@@ -7181,9 +7263,7 @@ socket_getlock(struct socket *so, int flags)
 void
 socket_lock(struct socket *so, int refcount)
 {
-	void *lr_saved;
-
-	lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	if (so->so_proto->pr_lock) {
 		(*so->so_proto->pr_lock)(so, refcount, lr_saved);
@@ -7232,10 +7312,8 @@ socket_try_lock(struct socket *so)
 void
 socket_unlock(struct socket *so, int refcount)
 {
-	void *lr_saved;
 	lck_mtx_t *mutex_held;
-
-	lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 
 	if (so == NULL || so->so_proto == NULL) {
 		panic("%s: null so_proto so=%p", __func__, so);
@@ -8117,7 +8195,7 @@ void
 socket_post_kev_msg_closed(struct socket *so)
 {
 	struct kev_socket_closed ev = {};
-	struct sockaddr *socksa = NULL, *peersa = NULL;
+	struct sockaddr *__single socksa = NULL, *__single peersa = NULL;
 	int err;
 
 	if ((so->so_flags1 & SOF1_WANT_KEV_SOCK_CLOSED) == 0) {
@@ -8128,10 +8206,10 @@ socket_post_kev_msg_closed(struct socket *so)
 		err = (*so->so_proto->pr_usrreqs->pru_peeraddr)(so,
 		    &peersa);
 		if (err == 0) {
-			memcpy(&ev.ev_data.kev_sockname, socksa,
+			SOCKADDR_COPY(socksa, &ev.ev_data.kev_sockname,
 			    min(socksa->sa_len,
 			    sizeof(ev.ev_data.kev_sockname)));
-			memcpy(&ev.ev_data.kev_peername, peersa,
+			SOCKADDR_COPY(peersa, &ev.ev_data.kev_peername,
 			    min(peersa->sa_len,
 			    sizeof(ev.ev_data.kev_peername)));
 			socket_post_kev_msg(KEV_SOCKET_CLOSED,

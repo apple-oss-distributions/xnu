@@ -39,7 +39,7 @@
 #include <kern/ledger.h>
 #include <kern/policy_internal.h>
 
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <kern/thread_call.h>
 #include <kern/timer_call.h>

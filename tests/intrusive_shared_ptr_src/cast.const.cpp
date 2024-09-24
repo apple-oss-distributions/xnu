@@ -60,7 +60,7 @@ tests()
 	}
 }
 
-T_DECL(cast_const, "intrusive_shared_ptr.cast.const") {
+T_DECL(cast_const, "intrusive_shared_ptr.cast.const", T_META_TAG_VM_PREFERRED) {
 	tests</*stored*/ T, /*from*/ T, /*to*/ T>();
 	tests</*stored*/ T, /*from*/ T, /*to*/ T const>();
 	tests</*stored*/ T, /*from*/ T const, /*to*/ T>();

@@ -57,7 +57,9 @@
 #define LOCK_PRIVATE 1
 
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_kern_xnu.h>
 #include <kern/kalloc.h>
 #include <kern/cpu_number.h>
 #include <kern/locks.h>
@@ -101,6 +103,12 @@ kern_return_t arm64_ropjop_test(void);
 kern_return_t ctrr_test(void);
 kern_return_t ctrr_test_cpu(void);
 #endif
+#if BTI_ENFORCED
+kern_return_t arm64_bti_test(void);
+#endif /* BTI_ENFORCED */
+#if HAS_SPECRES
+extern kern_return_t specres_test(void);
+#endif
 
 // exception handler ignores this fault address during PAN test
 #if __ARM_PAN_AVAILABLE__
@@ -117,6 +125,7 @@ kern_return_t arm64_panic_lockdown_test(void);
 
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
+#define LOCK_TEST_SETUP_TIMEOUT_SEC 15
 static hw_lock_data_t   lt_hw_lock;
 static lck_spin_t       lt_lck_spin_t;
 static lck_mtx_t        lt_mtx;
@@ -130,6 +139,7 @@ static volatile uint32_t lt_num_holders = 0;
 static volatile uint32_t lt_done_threads;
 static volatile uint32_t lt_target_done_threads;
 static volatile uint32_t lt_cpu_bind_id = 0;
+static uint64_t          lt_setup_timeout = 0;
 
 static void
 lt_note_another_blocking_lock_holder()
@@ -292,7 +302,7 @@ lck_grp_t lt_ticket_grp;
 static void
 lt_stress_ticket_lock()
 {
-	int local_counter = 0;
+	uint local_counter = 0;
 
 	uint cpuid = cpu_number();
 
@@ -303,8 +313,33 @@ lt_stress_ticket_lock()
 	local_counter++;
 	lck_ticket_unlock(&lt_ticket_lock);
 
+	/* Wait until all test threads have finished any binding */
 	while (lt_counter < lt_target_done_threads) {
-		;
+		if (mach_absolute_time() > lt_setup_timeout) {
+			kprintf("%s>cpu %d noticed that we exceeded setup timeout of %d seconds during initial setup phase (only %d out of %d threads checked in)",
+			    __FUNCTION__, cpuid, LOCK_TEST_SETUP_TIMEOUT_SEC, lt_counter, lt_target_done_threads);
+			return;
+		}
+		/* Yield to keep the CPUs available for the threads to bind */
+		thread_yield_internal(1);
+	}
+
+	lck_ticket_lock(&lt_ticket_lock, &lt_ticket_grp);
+	lt_counter++;
+	local_counter++;
+	lck_ticket_unlock(&lt_ticket_lock);
+
+	/*
+	 * Now that the test threads have finished any binding, wait
+	 * until they are all actively spinning on-core (done yielding)
+	 * so we get a fairly timed start.
+	 */
+	while (lt_counter < 2 * lt_target_done_threads) {
+		if (mach_absolute_time() > lt_setup_timeout) {
+			kprintf("%s>cpu %d noticed that we exceeded setup timeout of %d seconds during secondary setup phase (only %d out of %d threads checked in)",
+			    __FUNCTION__, cpuid, LOCK_TEST_SETUP_TIMEOUT_SEC, lt_counter - lt_target_done_threads, lt_target_done_threads);
+			return;
+		}
 	}
 
 	kprintf("%s>cpu %d started\n", __FUNCTION__, cpuid);
@@ -387,6 +422,9 @@ lt_reset()
 	lt_done_threads = 0;
 	lt_target_done_threads = 0;
 	lt_cpu_bind_id = 0;
+	/* Reset timeout deadline out from current time */
+	nanoseconds_to_absolutetime(LOCK_TEST_SETUP_TIMEOUT_SEC * NSEC_PER_SEC, &lt_setup_timeout);
+	lt_setup_timeout += mach_absolute_time();
 
 	OSMemoryBarrier();
 }
@@ -676,41 +714,17 @@ lt_p_thread(void *arg, wait_result_t wres __unused)
 }
 
 static void
-lt_start_lock_thread_e(thread_continue_t func)
+lt_start_lock_thread_with_bind(thread_continue_t bind_type, thread_continue_t func)
 {
 	thread_t thread;
 	kern_return_t kr;
 
-	kr = kernel_thread_start(lt_e_thread, func, &thread);
+	kr = kernel_thread_start(bind_type, func, &thread);
 	assert(kr == KERN_SUCCESS);
 
 	thread_deallocate(thread);
 }
-
-static void
-lt_start_lock_thread_p(thread_continue_t func)
-{
-	thread_t thread;
-	kern_return_t kr;
-
-	kr = kernel_thread_start(lt_p_thread, func, &thread);
-	assert(kr == KERN_SUCCESS);
-
-	thread_deallocate(thread);
-}
-
-static void
-lt_start_lock_thread_bound(thread_continue_t func)
-{
-	thread_t thread;
-	kern_return_t kr;
-
-	kr = kernel_thread_start(lt_bound_thread, func, &thread);
-	assert(kr == KERN_SUCCESS);
-
-	thread_deallocate(thread);
-}
-#endif
+#endif /* __AMP__ */
 
 static kern_return_t
 lt_test_locks()
@@ -922,9 +936,12 @@ lt_test_locks()
 	lck_ticket_init(&lt_ticket_lock, &lt_ticket_grp);
 	lt_reset();
 	lt_target_done_threads = real_ncpus;
+	uint thread_count = 0;
 	for (processor_t processor = processor_list; processor != NULL; processor = processor->processor_list) {
-		lt_start_lock_thread_bound(lt_stress_ticket_lock);
+		lt_start_lock_thread_with_bind(lt_bound_thread, lt_stress_ticket_lock);
+		thread_count++;
 	}
+	T_EXPECT_GE_UINT(thread_count, lt_target_done_threads, "Spawned enough threads for valid test");
 	lt_wait_for_lock_test_threads();
 	bool starvation = false;
 	uint total_local_count = 0;
@@ -932,30 +949,39 @@ lt_test_locks()
 		starvation = starvation || (lt_stress_local_counters[processor->cpu_id] < 10);
 		total_local_count += lt_stress_local_counters[processor->cpu_id];
 	}
-	if (total_local_count != lt_counter) {
+	if (mach_absolute_time() > lt_setup_timeout) {
+		T_FAIL("Stress test setup timed out after %d seconds", LOCK_TEST_SETUP_TIMEOUT_SEC);
+	} else if (total_local_count != lt_counter) {
 		T_FAIL("Lock failure\n");
 	} else if (starvation) {
 		T_FAIL("Lock starvation found\n");
 	} else {
-		T_PASS("Ticket locks stress test with lck_ticket_lock()");
+		T_PASS("Ticket locks stress test with lck_ticket_lock() (%u total acquires)", total_local_count);
 	}
 
 	/* AMP ticket locks stress test */
 	T_LOG("Running AMP Ticket locks stress test bound to clusters with lck_ticket_lock()");
 	lt_reset();
 	lt_target_done_threads = real_ncpus;
+	thread_count = 0;
 	for (processor_t processor = processor_list; processor != NULL; processor = processor->processor_list) {
 		processor_set_t pset = processor->processor_set;
-		if (pset->pset_cluster_type == PSET_AMP_P) {
-			lt_start_lock_thread_p(lt_stress_ticket_lock);
-		} else if (pset->pset_cluster_type == PSET_AMP_E) {
-			lt_start_lock_thread_e(lt_stress_ticket_lock);
-		} else {
+		switch (pset->pset_cluster_type) {
+		case PSET_AMP_P:
+			lt_start_lock_thread_with_bind(lt_p_thread, lt_stress_ticket_lock);
+			break;
+		case PSET_AMP_E:
+			lt_start_lock_thread_with_bind(lt_e_thread, lt_stress_ticket_lock);
+			break;
+		default:
 			lt_start_lock_thread(lt_stress_ticket_lock);
+			break;
 		}
+		thread_count++;
 	}
+	T_EXPECT_GE_UINT(thread_count, lt_target_done_threads, "Spawned enough threads for valid test");
 	lt_wait_for_lock_test_threads();
-#endif
+#endif /* __AMP__ */
 
 	/* HW locks: trylocks */
 	T_LOG("Running test with hw_lock_try()");
@@ -1060,6 +1086,7 @@ struct munger_test {
 	{MT_FUNC(munge_llll), 8, 4, {MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_l), 2, 1, {MT_L_VAL}},
 	{MT_FUNC(munge_lw), 3, 2, {MT_L_VAL, MT_W_VAL}},
+	{MT_FUNC(munge_lww), 4, 3, {MT_L_VAL, MT_W_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_lwww), 5, 4, {MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_lwwwwwww), 9, 8, {MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wlwwwl), 8, 6, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL}},
@@ -1224,7 +1251,7 @@ static NOKASAN bool
 arm64_pan_test_pan_enabled_fault_handler(arm_saved_state_t * state)
 {
 	bool retval                 = false;
-	uint32_t esr                = get_saved_state_esr(state);
+	uint64_t esr                = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 	fault_status_t fsc          = ISS_IA_FSC(ESR_ISS(esr));
 	uint32_t cpsr               = get_saved_state_cpsr(state);
@@ -1257,7 +1284,7 @@ static NOKASAN bool
 arm64_pan_test_pan_disabled_fault_handler(arm_saved_state_t * state)
 {
 	bool retval             = false;
-	uint32_t esr            = get_saved_state_esr(state);
+	uint64_t esr            = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 	fault_status_t fsc      = ISS_IA_FSC(ESR_ISS(esr));
 	uint32_t cpsr           = get_saved_state_cpsr(state);
@@ -1434,7 +1461,7 @@ static bool
 ctrr_test_ro_fault_handler(arm_saved_state_t * state)
 {
 	bool retval                 = false;
-	uint32_t esr                = get_saved_state_esr(state);
+	uint64_t esr                = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 	fault_status_t fsc          = ISS_DA_FSC(ESR_ISS(esr));
 
@@ -1451,7 +1478,7 @@ static bool
 ctrr_test_nx_fault_handler(arm_saved_state_t * state)
 {
 	bool retval                 = false;
-	uint32_t esr                = get_saved_state_esr(state);
+	uint64_t esr                = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 	fault_status_t fsc          = ISS_IA_FSC(ESR_ISS(esr));
 
@@ -1459,6 +1486,12 @@ ctrr_test_nx_fault_handler(arm_saved_state_t * state)
 		ctrr_exception_esr = esr;
 		/* return to the instruction immediately after the call to NX page */
 		set_saved_state_pc(state, get_saved_state_lr(state));
+#if BTI_ENFORCED
+		/* Clear BTYPE to prevent taking another exception on ERET */
+		uint32_t spsr = get_saved_state_cpsr(state);
+		spsr &= ~PSR_BTYPE_MASK;
+		set_saved_state_cpsr(state, spsr);
+#endif /* BTI_ENFORCED */
 		retval = true;
 	}
 
@@ -1581,10 +1614,33 @@ ctrr_test_cpu(void)
 #endif /* defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST) */
 
 
+/**
+ * Explicitly assert that xnu is still uniprocessor before running a POST test.
+ *
+ * In practice, tests in this module can safely manipulate CPU state without
+ * fear of getting preempted.  There's no way for cpu_boot_thread() to bring up
+ * the secondary CPUs until StartIOKitMatching() completes, and arm64 orders
+ * kern_post_test() before StartIOKitMatching().
+ *
+ * But this is also an implementation detail.  Tests that rely on this ordering
+ * should call assert_uniprocessor(), so that we can figure out a workaround
+ * on the off-chance this ordering ever changes.
+ */
+__unused static void
+assert_uniprocessor(void)
+{
+	extern unsigned int real_ncpus;
+	unsigned int ncpus = os_atomic_load(&real_ncpus, relaxed);
+	T_QUIET; T_ASSERT_EQ_UINT(1, ncpus, "arm64 kernel POST tests should run before any secondary CPUs are brought up");
+}
+
 
 #if CONFIG_SPTM
 volatile uint8_t xnu_post_panic_lockdown_did_fire = false;
 typedef uint64_t (panic_lockdown_helper_fcn_t)(uint64_t raw);
+typedef bool (panic_lockdown_recovery_fcn_t)(arm_saved_state_t *);
+
+/* SP0 vector tests */
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_load;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_gdbtrap;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_pac_brk_c470;
@@ -1596,6 +1652,16 @@ extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_br_auth_fail;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_ldr_auth_fail;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_fpac;
 extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_copyio;
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_bti_telemetry;
+
+extern int gARM_FEAT_FPACCOMBINE;
+
+/* SP1 vector tests */
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_sp1_invalid_stack;
+extern bool arm64_panic_lockdown_test_sp1_invalid_stack_handler(arm_saved_state_t *);
+extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_sp1_exception_in_vector;
+extern panic_lockdown_helper_fcn_t el1_sp1_synchronous_raise_exception_in_vector;
+extern bool arm64_panic_lockdown_test_sp1_exception_in_vector_handler(arm_saved_state_t *);
 
 typedef struct arm64_panic_lockdown_test_case {
 	const char *func_str;
@@ -1614,7 +1680,7 @@ static volatile bool arm64_panic_lockdown_caught_exception;
 static bool
 arm64_panic_lockdown_test_exception_handler(arm_saved_state_t * state)
 {
-	uint32_t esr = get_saved_state_esr(state);
+	uint64_t esr = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 
 	if (!arm64_panic_lockdown_active_test ||
@@ -1622,9 +1688,17 @@ arm64_panic_lockdown_test_exception_handler(arm_saved_state_t * state)
 		return false;
 	}
 
+#if BTI_ENFORCED
+	/* Clear BTYPE to prevent taking another exception on ERET */
+	uint32_t spsr = get_saved_state_cpsr(state);
+	spsr &= ~PSR_BTYPE_MASK;
+	set_saved_state_cpsr(state, spsr);
+#endif /* BTI_ENFORCED */
+
 	/* We got the expected exception, recover by forging an early return */
 	set_saved_state_pc(state, get_saved_state_lr(state));
 	arm64_panic_lockdown_caught_exception = true;
+
 	return true;
 }
 
@@ -1645,7 +1719,13 @@ panic_lockdown_expect_test(const char *treatment,
 		fault_pc = (uintptr_t)test->override_expected_fault_pc;
 	} else {
 		fault_pc = (uintptr_t)test->func;
+#ifdef BTI_ENFORCED
+		/* When BTI is enabled, we expect the fault to occur after the landing pad */
+		fault_pc += 4;
+#endif /* BTI_ENFORCED */
 	}
+
+
 	ml_expect_fault_pc_begin(
 		arm64_panic_lockdown_test_exception_handler,
 		fault_pc);
@@ -1671,6 +1751,35 @@ panic_lockdown_expect_test(const char *treatment,
 			test->func_str, treatment,
 			expect_lockdown, xnu_post_panic_lockdown_did_fire,
 			arm64_panic_lockdown_caught_exception);
+	}
+}
+
+static void
+panic_lockdown_expect_fault_raw(const char *label,
+    panic_lockdown_helper_fcn_t entrypoint,
+    panic_lockdown_helper_fcn_t faulting_function,
+    expected_fault_handler_t fault_handler)
+{
+	uint64_t test_success = 0;
+	xnu_post_panic_lockdown_did_fire = false;
+
+	uintptr_t fault_pc = (uintptr_t)faulting_function;
+#ifdef BTI_ENFORCED
+	/* When BTI is enabled, we expect the fault to occur after the landing pad */
+	fault_pc += 4;
+#endif /* BTI_ENFORCED */
+
+	ml_expect_fault_pc_begin(fault_handler, fault_pc);
+
+	test_success = entrypoint(0);
+
+	ml_expect_fault_end();
+
+	if (test_success && xnu_post_panic_lockdown_did_fire) {
+		T_PASS("%s OK\n", label);
+	} else {
+		T_FAIL("%s FAIL (test returned: %d, did lockdown: %d)\n",
+		    label, test_success, xnu_post_panic_lockdown_did_fire);
 	}
 }
 
@@ -1794,7 +1903,7 @@ arm64_panic_lockdown_test(void)
 			.func_str = "arm64_panic_lockdown_test_br_auth_fail",
 			.func = &arm64_panic_lockdown_test_br_auth_fail,
 			.arg = ia_invalid,
-			.expected_ec = ESR_EC_IABORT_EL1,
+			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_IABORT_EL1,
 			.expect_lockdown_exceptions_masked = true,
 			.expect_lockdown_exceptions_unmasked = true,
 			/*
@@ -1803,15 +1912,16 @@ arm64_panic_lockdown_test(void)
 			 * itself. The exact ELR will likely be different from ia_invalid,
 			 * but since the expect logic in sleh only matches on low bits (i.e.
 			 * not bits which will be poisoned), this is fine.
+			 * On FEAT_FPACCOMBINED devices, we will fault on the branch itself.
 			 */
-			.override_expected_fault_pc_valid = true,
+			.override_expected_fault_pc_valid = !gARM_FEAT_FPACCOMBINE,
 			.override_expected_fault_pc = ia_invalid
 		},
 		{
 			.func_str = "arm64_panic_lockdown_test_ldr_auth_fail",
 			.func = &arm64_panic_lockdown_test_ldr_auth_fail,
 			.arg = panic_lockdown_pacda_get_invalid_ptr(),
-			.expected_ec = ESR_EC_DABORT_EL1,
+			.expected_ec = gARM_FEAT_FPACCOMBINE ? ESR_EC_PAC_FAIL : ESR_EC_DABORT_EL1,
 			.expect_lockdown_exceptions_masked = true,
 			.expect_lockdown_exceptions_unmasked = true,
 		},
@@ -1859,6 +1969,447 @@ arm64_panic_lockdown_test(void)
 			tests[i].expect_lockdown_exceptions_masked,
 			/* mask_interrupts */ true);
 	}
+
+	panic_lockdown_expect_fault_raw("arm64_panic_lockdown_test_sp1_invalid_stack",
+	    arm64_panic_lockdown_test_sp1_invalid_stack,
+	    arm64_panic_lockdown_test_pac_brk_c470,
+	    arm64_panic_lockdown_test_sp1_invalid_stack_handler);
+
+	panic_lockdown_expect_fault_raw("arm64_panic_lockdown_test_sp1_exception_in_vector",
+	    arm64_panic_lockdown_test_sp1_exception_in_vector,
+	    el1_sp1_synchronous_raise_exception_in_vector,
+	    arm64_panic_lockdown_test_sp1_exception_in_vector_handler);
 	return KERN_SUCCESS;
 }
 #endif /* CONFIG_SPTM */
+
+
+
+#if HAS_SPECRES
+
+/*** CPS RCTX ***/
+
+#if HAS_CPSRCTX
+
+static inline void
+_cpsrctx_exec(uint64_t ctx)
+{
+	asm volatile ( "ISB SY");
+	asm volatile ( "CPS RCTX, %0" :: "r"(ctx));
+	asm volatile ( "DSB SY");
+	asm volatile ( "ISB SY");
+}
+
+static void
+_cpsrctx_do_test(void)
+{
+	typedef struct {
+		union {
+			struct {
+				uint64_t ASID:16;
+				uint64_t GASID:1;
+				uint64_t :7;
+				uint64_t EL:2;
+				uint64_t NS:1;
+				uint64_t NSE:1;
+				uint64_t :4;
+				uint64_t VMID:16;
+				uint64_t GVMID:1;
+				uint64_t :7;
+				uint64_t GM:1;
+				uint64_t :3;
+				uint64_t IS:3;
+				uint64_t :1;
+			};
+			uint64_t raw;
+		};
+	} cpsrctx_ctx;
+
+	assert(sizeof(cpsrctx_ctx) == 8);
+
+	/*
+	 * Test various possible meaningful CPS_RCTX context ID.
+	 */
+
+	/* el : EL0 / EL1 / EL2. */
+	for (uint8_t el = 0; el < 3; el++) {
+		/* Always non-secure. */
+		const uint8_t ns = 1;
+		const uint8_t nse = 0;
+
+		/* Iterat eover some couples of ASIDs / VMIDs. */
+		for (uint16_t xxid = 0; xxid < 256; xxid++) {
+			const uint16_t asid = (uint16_t) (xxid << 4);
+			const uint16_t vmid = (uint16_t) (256 - (xxid << 4));
+
+			/* Test 4 G[AS|VM]ID combinations. */
+			for (uint8_t bid = 0; bid < 4; bid++) {
+				const uint8_t gasid = bid & 1;
+				const uint8_t gvmid = bid & 2;
+
+				/* Test all GM / IS combinations. */
+				for (uint8_t gid = 0; gid < 0x8; gid++) {
+					const uint8_t gm = gid & 1;
+					const uint8_t is = gid >> 1;
+
+					/* Generate the context descriptor. */
+					cpsrctx_ctx ctx = {0};
+					ctx.ASID = asid;
+					ctx.GASID = gasid;
+					ctx.EL = el;
+					ctx.NS = ns;
+					ctx.NSE = nse;
+					ctx.VMID = vmid;
+					ctx.GVMID = gvmid;
+					ctx.GM = gm;
+					ctx.IS = is;
+
+					/* Execute the CPS instruction. */
+					_cpsrctx_exec(ctx.raw);
+
+					/* Insert some operation. */
+					volatile uint8_t sum = 0;
+					for (volatile uint8_t i = 0; i < 64; i++) {
+						sum += i * sum + 3;
+					}
+				}
+
+				/* If el0 is not targetted, just need to do it once. */
+				if (el != 0) {
+					goto not_el0_skip;
+				}
+			}
+		}
+
+		/* El0 skip. */
+not_el0_skip:   ;
+	}
+}
+
+#endif /* HAS_CPSRCTX */
+
+/*** SPECRES ***/
+
+#if HAS_SPECRES2
+/*
+ * Execute a COSP RCTX instruction.
+ */
+static void
+_cosprctx_exec(uint64_t raw)
+{
+	asm volatile ( "ISB SY");
+	__asm__ volatile ("COSP RCTX, %0" :: "r" (raw));
+	asm volatile ( "DSB SY");
+	asm volatile ( "ISB SY");
+}
+#endif
+
+/*
+ * Execute a CFP RCTX instruction.
+ */
+static void
+_cfprctx_exec(uint64_t raw)
+{
+	asm volatile ( "ISB SY");
+	__asm__ volatile ("CFP RCTX, %0" :: "r" (raw));
+	asm volatile ( "DSB SY");
+	asm volatile ( "ISB SY");
+}
+
+/*
+ * Execute a CPP RCTX instruction.
+ */
+static void
+_cpprctx_exec(uint64_t raw)
+{
+	asm volatile ( "ISB SY");
+	__asm__ volatile ("CPP RCTX, %0" :: "r" (raw));
+	asm volatile ( "DSB SY");
+	asm volatile ( "ISB SY");
+}
+
+/*
+ * Execute a DVP RCTX instruction.
+ */
+static void
+_dvprctx_exec(uint64_t raw)
+{
+	asm volatile ( "ISB SY");
+	__asm__ volatile ("DVP RCTX, %0" :: "r" (raw));
+	asm volatile ( "DSB SY");
+	asm volatile ( "ISB SY");
+}
+
+static void
+_specres_do_test_std(void (*impl)(uint64_t raw))
+{
+	typedef struct {
+		union {
+			struct {
+				uint64_t ASID:16;
+				uint64_t GASID:1;
+				uint64_t :7;
+				uint64_t EL:2;
+				uint64_t NS:1;
+				uint64_t NSE:1;
+				uint64_t :4;
+				uint64_t VMID:16;
+				uint64_t GVMID:1;
+			};
+			uint64_t raw;
+		};
+	} specres_ctx;
+
+	assert(sizeof(specres_ctx) == 8);
+
+	/*
+	 * Test various possible meaningful COSP_RCTX context ID.
+	 */
+
+	/* el : EL0 / EL1 / EL2. */
+	for (uint8_t el = 0; el < 3; el++) {
+		/* Always non-secure. */
+		const uint8_t ns = 1;
+		const uint8_t nse = 0;
+
+		/* Iterate over some couples of ASIDs / VMIDs. */
+		for (uint16_t xxid = 0; xxid < 256; xxid++) {
+			const uint16_t asid = (uint16_t) (xxid << 4);
+			const uint16_t vmid = (uint16_t) (256 - (xxid << 4));
+
+			/* Test 4 G[AS|VM]ID combinations. */
+			for (uint8_t bid = 0; bid < 4; bid++) {
+				const uint8_t gasid = bid & 1;
+				const uint8_t gvmid = bid & 2;
+
+				/* Generate the context descriptor. */
+				specres_ctx ctx = {0};
+				ctx.ASID = asid;
+				ctx.GASID = gasid;
+				ctx.EL = el;
+				ctx.NS = ns;
+				ctx.NSE = nse;
+				ctx.VMID = vmid;
+				ctx.GVMID = gvmid;
+
+				/* Execute the COSP instruction. */
+				(*impl)(ctx.raw);
+
+				/* Insert some operation. */
+				volatile uint8_t sum = 0;
+				for (volatile uint8_t i = 0; i < 64; i++) {
+					sum += i * sum + 3;
+				}
+
+				/* If el0 is not targetted, just need to do it once. */
+				if (el != 0) {
+					goto not_el0_skip;
+				}
+			}
+		}
+
+		/* El0 skip. */
+not_el0_skip:   ;
+	}
+}
+
+/*** RCTX ***/
+
+static void
+_rctx_do_test(void)
+{
+	_specres_do_test_std(&_cfprctx_exec);
+	_specres_do_test_std(&_cpprctx_exec);
+	_specres_do_test_std(&_dvprctx_exec);
+#if HAS_SPECRES2
+	_specres_do_test_std(&_cosprctx_exec);
+#endif
+#if HAS_CPSRCTX
+	_cpsrctx_do_test();
+#endif
+}
+
+kern_return_t
+specres_test(void)
+{
+	/* Basic instructions test. */
+	_cfprctx_exec(0);
+	_cpprctx_exec(0);
+	_dvprctx_exec(0);
+#if HAS_SPECRES2
+	_cosprctx_exec(0);
+#endif
+#if HAS_CPSRCTX
+	_cpsrctx_exec(0);
+#endif
+
+	/* More advanced instructions test. */
+	_rctx_do_test();
+
+	return KERN_SUCCESS;
+}
+
+#endif /* HAS_SPECRES */
+#if BTI_ENFORCED
+typedef uint64_t (bti_landing_pad_func_t)(void);
+typedef uint64_t (bti_shim_func_t)(bti_landing_pad_func_t *);
+
+extern bti_shim_func_t arm64_bti_test_jump_shim;
+extern bti_shim_func_t arm64_bti_test_call_shim;
+
+extern bti_landing_pad_func_t arm64_bti_test_func_with_no_landing_pad;
+extern bti_landing_pad_func_t arm64_bti_test_func_with_call_landing_pad;
+extern bti_landing_pad_func_t arm64_bti_test_func_with_jump_landing_pad;
+extern bti_landing_pad_func_t arm64_bti_test_func_with_jump_call_landing_pad;
+#if __has_feature(ptrauth_returns)
+extern bti_landing_pad_func_t arm64_bti_test_func_with_pac_landing_pad;
+#endif /* __has_feature(ptrauth_returns) */
+
+typedef struct arm64_bti_test_func_case {
+	const char *func_str;
+	bti_landing_pad_func_t *func;
+	uint64_t expect_return_value;
+	uint8_t  expect_call_ok;
+	uint8_t  expect_jump_ok;
+} arm64_bti_test_func_case_s;
+
+static volatile uintptr_t bti_exception_handler_pc = 0;
+
+static bool
+arm64_bti_test_exception_handler(arm_saved_state_t * state)
+{
+	uint64_t esr = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+
+	if (class != ESR_EC_BTI_FAIL) {
+		return false;
+	}
+
+	/* Capture any desired exception metrics */
+	bti_exception_handler_pc = get_saved_state_pc(state);
+
+	/* "Cancel" the function call by forging an early return */
+	set_saved_state_pc(state, get_saved_state_lr(state));
+
+	/* Clear BTYPE to prevent taking another exception after ERET */
+	uint32_t spsr = get_saved_state_cpsr(state);
+	spsr &= ~PSR_BTYPE_MASK;
+	set_saved_state_cpsr(state, spsr);
+
+	return true;
+}
+
+static void
+arm64_bti_test_func_with_shim(
+	uint8_t expect_ok,
+	const char *shim_str,
+	bti_shim_func_t *shim,
+	arm64_bti_test_func_case_s *test_case)
+{
+	uint64_t result = -1;
+
+	/* Capture BTI exceptions triggered by our target function */
+	uintptr_t raw_func = (uintptr_t)ptrauth_strip(
+		(void *)test_case->func,
+		ptrauth_key_function_pointer);
+	ml_expect_fault_pc_begin(arm64_bti_test_exception_handler, raw_func);
+	bti_exception_handler_pc = 0;
+
+	/*
+	 * The assembly routines do not support C function type discriminators, so
+	 * strip and resign with zero if needed
+	 */
+	bti_landing_pad_func_t *resigned = ptrauth_auth_and_resign(
+		test_case->func,
+		ptrauth_key_function_pointer,
+		ptrauth_type_discriminator(bti_landing_pad_func_t),
+		ptrauth_key_function_pointer, 0);
+
+	result = shim(resigned);
+
+	ml_expect_fault_end();
+
+	if (!expect_ok && raw_func != bti_exception_handler_pc) {
+		T_FAIL("Expected BTI exception at 0x%llx but got one at %llx instead\n",
+		    raw_func, bti_exception_handler_pc);
+	} else if (expect_ok && bti_exception_handler_pc) {
+		T_FAIL("Did not expect BTI exception but got on at 0x%llx\n",
+		    bti_exception_handler_pc);
+	} else if (!expect_ok && !bti_exception_handler_pc) {
+		T_FAIL("Failed to hit expected exception!\n");
+	} else if (expect_ok && result != test_case->expect_return_value) {
+		T_FAIL("Incorrect test function result (expected=%llu, result=%llu\n)",
+		    test_case->expect_return_value, result);
+	} else {
+		T_PASS("%s (shim=%s)\n", test_case->func_str, shim_str);
+	}
+}
+
+/**
+ * This test works to ensure that BTI exceptions are raised where expected
+ * and only where they are expected by exhaustively testing all indirect branch
+ * combinations with all landing pad options.
+ */
+kern_return_t
+arm64_bti_test(void)
+{
+	static arm64_bti_test_func_case_s tests[] = {
+		{
+			.func_str = "arm64_bti_test_func_with_no_landing_pad",
+			.func = &arm64_bti_test_func_with_no_landing_pad,
+			.expect_return_value     = 1,
+			.expect_call_ok          = 0,
+			.expect_jump_ok          = 0,
+		},
+		{
+			.func_str = "arm64_bti_test_func_with_call_landing_pad",
+			.func = &arm64_bti_test_func_with_call_landing_pad,
+			.expect_return_value     = 2,
+			.expect_call_ok          = 1,
+			.expect_jump_ok          = 0,
+		},
+		{
+			.func_str = "arm64_bti_test_func_with_jump_landing_pad",
+			.func = &arm64_bti_test_func_with_jump_landing_pad,
+			.expect_return_value     = 3,
+			.expect_call_ok          = 0,
+			.expect_jump_ok          = 1,
+		},
+		{
+			.func_str = "arm64_bti_test_func_with_jump_call_landing_pad",
+			.func = &arm64_bti_test_func_with_jump_call_landing_pad,
+			.expect_return_value     = 4,
+			.expect_call_ok          = 1,
+			.expect_jump_ok          = 1,
+		},
+#if __has_feature(ptrauth_returns)
+		{
+			.func_str = "arm64_bti_test_func_with_pac_landing_pad",
+			.func = &arm64_bti_test_func_with_pac_landing_pad,
+			.expect_return_value     = 5,
+			.expect_call_ok          = 1,
+			.expect_jump_ok          = 0,
+		},
+#endif /* __has_feature(ptrauth_returns) */
+	};
+
+	size_t test_count = sizeof(tests) / sizeof(*tests);
+	for (size_t i = 0; i < test_count; i++) {
+		arm64_bti_test_func_case_s *test_case = tests + i;
+
+		arm64_bti_test_func_with_shim(test_case->expect_call_ok,
+		    "arm64_bti_test_call_shim",
+		    arm64_bti_test_call_shim,
+		    test_case);
+
+
+		arm64_bti_test_func_with_shim(test_case->expect_jump_ok,
+		    "arm64_bti_test_jump_shim",
+		    arm64_bti_test_jump_shim,
+		    test_case);
+	}
+
+	return KERN_SUCCESS;
+}
+#endif /* BTI_ENFORCED */
+

@@ -118,12 +118,12 @@ sotoxsocket_n(struct socket *so, struct xsocket_n *xso)
 		return;
 	}
 
-	xso->xso_so = (uint64_t)VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (uint64_t)VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = so->so_options;
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (uint64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (uint64_t)VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);
@@ -207,10 +207,10 @@ inpcb_to_xinpcb_n(struct inpcb *inp, struct xinpcb_n *xinp)
 {
 	xinp->xi_len = sizeof(struct xinpcb_n);
 	xinp->xi_kind = XSO_INPCB;
-	xinp->xi_inpp = (uint64_t)VM_KERNEL_ADDRPERM(inp);
+	xinp->xi_inpp = (uint64_t)VM_KERNEL_ADDRHASH(inp);
 	xinp->inp_fport = inp->inp_fport;
 	xinp->inp_lport = inp->inp_lport;
-	xinp->inp_ppcb = (uint64_t)VM_KERNEL_ADDRPERM(inp->inp_ppcb);
+	xinp->inp_ppcb = (uint64_t)VM_KERNEL_ADDRHASH(inp->inp_ppcb);
 	xinp->inp_gencnt = inp->inp_gencnt;
 	xinp->inp_flags = inp->inp_flags;
 	xinp->inp_flow = inp->inp_flow;
@@ -234,7 +234,7 @@ tcpcb_to_xtcpcb_n(struct tcpcb *tp, struct xtcpcb_n *xt)
 	xt->xt_len = sizeof(struct xtcpcb_n);
 	xt->xt_kind = XSO_TCPCB;
 
-	xt->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	xt->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	xt->t_dupacks = tp->t_dupacks;
 	xt->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	xt->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
@@ -292,7 +292,8 @@ __private_extern__ int
 get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 {
 	int error = 0;
-	int i, n, sz;
+	int i, n;
+	size_t sz;
 	struct inpcb *inp, **inp_list = NULL;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -303,7 +304,8 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	    ROUNDUP64(sizeof(struct xsockstat_n));
 #if SKYWALK
 	int nuserland;
-	void *userlandsnapshot = NULL;
+	size_t userlandsnapshot_size = 0;
+	void *__sized_by(userlandsnapshot_size) userlandsnapshot = NULL;
 #endif /* SKYWALK */
 
 	if (proto == IPPROTO_TCP) {
@@ -330,7 +332,8 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	 * This could take a while and use other locks, so do this prior
 	 * to taking any locks of our own.
 	 */
-	error = nstat_userland_get_snapshot(proto, &userlandsnapshot, &nuserland);
+	error = nstat_userland_get_snapshot(proto, &userlandsnapshot,
+	    &userlandsnapshot_size, &nuserland);
 
 	if (error) {
 		return error;
@@ -373,7 +376,7 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		goto done;
 	}
 
-	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
+	inp_list = kalloc_type(struct inpcb *, sz, Z_WAITOK);
 	if (inp_list == NULL) {
 		error = ENOMEM;
 		goto done;
@@ -383,9 +386,9 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	 * Special case TCP to include the connections in time wait
 	 */
 	if (proto == IPPROTO_TCP) {
-		n = get_tcp_inp_list(inp_list, n, gencnt);
+		n = get_tcp_inp_list(inp_list, sz, gencnt);
 	} else {
-		for (inp = pcbinfo->ipi_listhead->lh_first, i = 0; inp && i < n;
+		for (inp = pcbinfo->ipi_listhead->lh_first, i = 0; inp && i < sz;
 		    inp = inp->inp_list.le_next) {
 			if (inp->inp_gencnt <= gencnt &&
 			    inp->inp_state != INPCB_STATE_DEAD) {
@@ -482,7 +485,7 @@ done:
 
 static void
 inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
-    bitstr_t *bitfield, struct inpcbinfo *pcbinfo)
+    bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)) bitfield, struct inpcbinfo *pcbinfo)
 {
 	struct inpcb *inp;
 	struct socket *so;
@@ -735,14 +738,15 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 
 __private_extern__ void
 inpcb_get_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
-    bitstr_t *bitfield, struct inpcbinfo *pcbinfo)
+    bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)) bitfield, struct inpcbinfo *pcbinfo)
 {
 	if (ifp != NULL) {
 		inpcb_get_if_ports_used(ifp, protocol, flags, bitfield, pcbinfo);
 	} else {
 		errno_t error;
-		ifnet_t *ifp_list;
-		uint32_t count, i;
+		uint32_t count = 0;
+		ifnet_t *__counted_by(count) ifp_list = NULL;
+		uint32_t i;
 
 		error = ifnet_list_get_all(IFNET_FAMILY_ANY, &ifp_list, &count);
 		if (error != 0) {
@@ -758,7 +762,7 @@ inpcb_get_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			inpcb_get_if_ports_used(ifp_list[i], protocol, flags,
 			    bitfield, pcbinfo);
 		}
-		ifnet_list_free(ifp_list);
+		ifnet_list_free_counted_by(ifp_list, count);
 	}
 }
 
@@ -798,7 +802,7 @@ inpcb_count_opportunistic(unsigned int ifindex, struct inpcbinfo *pcbinfo,
 				}
 				SOTHROTTLELOG("throttle[%d]: so 0x%llx "
 				    "[%d,%d] %s\n", so->last_pid,
-				    (uint64_t)VM_KERNEL_ADDRPERM(so),
+				    (uint64_t)VM_KERNEL_ADDRHASH(so),
 				    SOCK_DOM(so), SOCK_TYPE(so),
 				    (so->so_flags & SOF_SUSPENDED) ?
 				    "SUSPENDED" : "RESUMED");

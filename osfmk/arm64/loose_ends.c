@@ -156,6 +156,7 @@ bcopy_phys_internal(addr64_t src, addr64_t dst, vm_size_t bytes, int flags)
 			count = bytes;
 		}
 
+
 		if (BCOPY_PHYS_SRC_IS_USER(flags)) {
 			res = copyin((user_addr_t)src, tmp_dst, count);
 		} else if (BCOPY_PHYS_DST_IS_USER(flags)) {
@@ -163,6 +164,7 @@ bcopy_phys_internal(addr64_t src, addr64_t dst, vm_size_t bytes, int flags)
 		} else {
 			bcopy(tmp_src, tmp_dst, count);
 		}
+
 
 		if (use_copy_window_src) {
 			pmap_unmap_cpu_windows_copy(src_index);
@@ -246,7 +248,33 @@ bzero_phys(addr64_t src, vm_size_t bytes)
 #if HAS_UCNORMAL_MEM
 		case VM_WIMG_RT:
 #endif
-			bzero(buf, count);
+			/**
+			 * When we are zerofilling a normal page, there are a couple of assumptions that can
+			 * be made.
+			 *
+			 * 1. The destination to be zeroed is page-sized and page-aligned, making the unconditional
+			 *    4 stp instructions in bzero redundant.
+			 * 2. The dczva loop for zerofilling can be fully unrolled at compile-time thanks to
+			 *    known size of the destination, reducing instruction fetch overhead caused by
+			 *    the branch backward in a tight loop.
+			 */
+			if (count == PAGE_SIZE) {
+				/**
+				 * Thanks to how count is computed above, buf should always be page-size aligned
+				 * when count == PAGE_SIZE.
+				 */
+				assert((((addr64_t) buf) & PAGE_MASK) == 0);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpass-failed"
+				#pragma unroll
+				for (addr64_t dczva_offset = 0; dczva_offset < PAGE_SIZE; dczva_offset += (1ULL << MMU_CLINE)) {
+					asm volatile ("dc zva, %0" : : "r"(buf + dczva_offset) : "memory");
+				}
+#pragma clang diagnostic pop
+			} else {
+				bzero(buf, count);
+			}
 			break;
 		default:
 			/* 'dc zva' performed by bzero is not safe for device memory */
@@ -404,9 +432,11 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
 				const uint64_t hi = (uint64_t)(result >> 64);
 				const uint64_t lo = (uint64_t)(result);
+				uint64_t nsec = 0;
+				absolutetime_to_nanoseconds(eabs - sabs, &nsec);
 				panic("Read from physical addr 0x%llx took %llu ns, "
 				    "result: 0x%016llx%016llx (start: %llu, end: %llu), ceiling: %llu",
-				    (unsigned long long)addr, (eabs - sabs), hi, lo, sabs, eabs,
+				    (unsigned long long)addr, nsec, hi, lo, sabs, eabs,
 				    (uint64_t)report_phy_read_delay);
 			}
 		}
@@ -625,9 +655,11 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
 				const uint64_t hi = (uint64_t)(data >> 64);
 				const uint64_t lo = (uint64_t)(data);
+				uint64_t nsec = 0;
+				absolutetime_to_nanoseconds(eabs - sabs, &nsec);
 				panic("Write from physical addr 0x%llx took %llu ns, "
 				    "data: 0x%016llx%016llx (start: %llu, end: %llu), ceiling: %llu",
-				    (unsigned long long)paddr, (eabs - sabs), hi, lo, sabs, eabs,
+				    (unsigned long long)paddr, nsec, hi, lo, sabs, eabs,
 				    (uint64_t)report_phy_write_delay);
 			}
 		}

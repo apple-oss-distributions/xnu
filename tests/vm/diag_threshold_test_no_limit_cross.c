@@ -41,7 +41,7 @@ no_limit_cross_test_execution(__unused struct test_case *test_case, void *param)
 
 
 T_DECL(diag_mem_threshold_no_limit_cross,
-    "In this test is not expected to pass the threshold limit")
+    "In this test is not expected to pass the threshold limit", T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_mem_threshold_no_limit_cross_test);
 }

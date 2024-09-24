@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -42,6 +42,7 @@
  *           SPTM_CPU_BOOT_COLD: Cold boot path.
  *           SPTM_CPU_BOOT_WARM: Warm boot path.
  *           SPTM_CPU_BOOT_SECONDARY: Secondary CPU boot path.
+ *           SPTM_CPU_BOOT_HIB: Hibernation exit path.
  *           SPTM_CPU_PANIC: A panic condition was triggered in SPTM/TXM/cL4.
  *
  * The possible values of the rest of the argument registers are dependent on
@@ -108,6 +109,10 @@ start_boot_path:
 	mov		x20, #SPTM_CPU_BOOT_COLD
 	cmp		x0, x20
 	b.eq	start_cold
+	/*
+	 * Note that on hibernation resume, we take the warm boot path, as SPTM already
+	 * initialized VBAR_EL1 in sptm_init_cpu_registers, called from sptm_resume_cpu.
+	 */
 	b		start_warm
 
 /**
@@ -159,6 +164,9 @@ start_cold:
  * Secondary CPU boot path.
  */
 start_warm:
+	/* Save the hibernation arguments pointer in x20 */
+	mov		x20, x3
+
 #if HAS_BP_RET
 	bl		EXT(set_bp_ret)
 #endif
@@ -223,22 +231,23 @@ found_cpu_data_entry:
 	ldr		x10, [x21, CPU_INTSTACK_TOP]
 	mov		sp, x10
 
-	/* Set up input parameter to reset handler */
+	/* Set up input parameters to reset handler */
 	mov		x0, x21
+	mov		x1, x20
 
 	/* Obtain reset handler */
-	ldr		x1, [x21, CPU_RESET_HANDLER]
-	cbz		x1, Lskip_cpu_reset_handler
+	ldr		x2, [x21, CPU_RESET_HANDLER]
+	cbz		x2, Lskip_cpu_reset_handler
 
 	/* Validate that our handler is one of the two expected ones */
-	adrp	x2, EXT(arm_init_cpu)@page
-	add		x2, x2, EXT(arm_init_cpu)@pageoff
-	cmp		x1, x2
+	adrp	x3, EXT(arm_init_cpu)@page
+	add		x3, x3, EXT(arm_init_cpu)@pageoff
+	cmp		x2, x3
 	beq		1f
 
-	adrp	x2, EXT(arm_init_idle_cpu)@page
-	add		x2, x2, EXT(arm_init_idle_cpu)@pageoff
-	cmp		x1, x2
+	adrp	x3, EXT(arm_init_idle_cpu)@page
+	add		x3, x3, EXT(arm_init_idle_cpu)@pageoff
+	cmp		x2, x3
 	beq		2f
 
 	/* No valid handler was found */
@@ -280,7 +289,7 @@ cpu_data_entry_not_found:
 	.align 14
 	.globl EXT(panic_from_sptm)
 LEXT(panic_from_sptm)
-UNWIND_PROLOGUE
+TRAP_UNWIND_PROLOGUE
 SPTM_UNWIND_DIRECTIVES
 	PUSH_FRAME
 	bl 		EXT(panic)

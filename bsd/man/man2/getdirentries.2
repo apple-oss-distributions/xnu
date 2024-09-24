@@ -33,7 +33,7 @@
 .\"
 .\"	@(#)getdirentries.2	8.1 (Berkeley) 6/9/93
 .\"
-.Dd June 9, 1993
+.Dd October 5, 2023
 .Dt GETDIRENTRIES 2
 .Os
 .Sh NAME
@@ -97,11 +97,16 @@ entry contains a null terminated file name.
 The
 .Fa d_namlen
 entry specifies the length of the file name excluding the null byte.
-Thus the actual size of
+NOTE: As of MacOS X 10.6, 64 bit inodes became the default for the definition of the
+.Fa dirent
+structure.  For legacy / compatibility reasons, the older 32-bit inode definitions will support a
 .Fa d_name
-may vary from 1 to
+length of  1 to
 .Dv MAXNAMELEN
-\&+ 1.
+\&+ 1
+bytes.  If 64-bit inodes are defined, the
+.Fa dirent
+structure will support names of up to MAXPATHLEN-1 bytes.
 .Fa d_type
 is a integer representing the type of the directory entry.  The following types are defined in 
 .Aq sys/dirent.h :

@@ -72,8 +72,8 @@
 
 #include <kern/host.h>
 #include <kern/misc_protos.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 #include <ipc/port.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_space.h>

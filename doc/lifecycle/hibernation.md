@@ -60,7 +60,7 @@ few hibernation-specific differences:
     memory, with a bit to represent each page in that range; these page bitmaps
     are in turn stored in a `hibernate_page_list_t`. The page bitmaps are used
     to represent, for each page, whether preservation of that page is necessary.
-  - On ARM64, `ppl_hmac_get_io_ranges()` is called to get a list of the I/O
+  - On ARM64, `secure_hmac_get_io_ranges()` is called to get a list of the I/O
     regions that need to be included in the hibernation image (for example, the
     GPU UAT handoff region). These I/O regions are typically DRAM regions carved
     out by iBoot that exist outside of kernel-managed memory. A page bitmap is
@@ -108,7 +108,7 @@ few hibernation-specific differences:
     other pieces of memory must also be written unmodified to the hibernation
     image for use by iBoot. Those pieces are described in the device tree so
     that XNU doesn't need to know the details.
-    `ppl_hmac_fetch_hibseg_and_info()` is used to determine the set of memory
+    `secure_hmac_fetch_hibseg_and_info()` is used to determine the set of memory
     regions to be stored in this phase. This routine also calculates an HMAC
     that can be used by the booter to validate this content.
 * The portions of XNU (code and data) that are stored directly to the
@@ -125,7 +125,7 @@ few hibernation-specific differences:
 * Each wired page is compressed and written and then each non-wired page.
   Compression and disk writes can occur in parallel if the polled mode I/O
   driver supports this.
-  - On ARM64, `ppl_hmac_update_and_compress_page()` is called for each page
+  - On ARM64, `secure_hmac_update_and_compress_page()` is called for each page
     included in the image so that the PPL can compute an HMAC of the hibernation
     payload.
 * The image header records the values of `mach_absolute_time()` and
@@ -133,16 +133,16 @@ few hibernation-specific differences:
   values can be used to fix up the offets applied to the hardware clock after
   hibernation exit.
 * The image header is finalized.
-  - On ARM64, `ppl_hmac_final()` is called to compute the HMAC of the
+  - On ARM64, `secure_hmac_final()` is called to compute the HMAC of the
     hibernation payload. There are actually two separate HMACs computed, one for
     the wired pages and one for the non-wired pages. These HMACs are stored in
     the image header.
-  - On ARM64, `ppl_hmac_fetch_rorgn_sha()` and `ppl_hmac_fetch_rorgn_hmac()` are
+  - On ARM64, `secure_hmac_fetch_rorgn_sha()` and `secure_hmac_fetch_rorgn_hmac()` are
     called to obtain the SHA256 and HMAC of the read-only region. They were
     calculated on cold boot. They are stored in the image header.
     This is described in more detail in the "Security details" section of this
     document.
-  - On ARM64, `ppl_hmac_finalize_image()` is called to compute the HMAC of the
+  - On ARM64, `secure_hmac_finalize_image()` is called to compute the HMAC of the
     header of the image. This is described in more detail in the "Security
     details" section of this document.
 * The image header is written to the start of the file and the polling driver
@@ -275,11 +275,11 @@ Security details
     hibernation image
 * The PPL hibernation driver also keeps track of every PPL-owned page being
   hashed (both kernel-managed memory and I/O memory owned by the PPL). This will
-  be double-checked in `ppl_hmac_finalize_image()` to ensure that all PPL-owned
+  be double-checked in `secure_hmac_finalize_image()` to ensure that all PPL-owned
   memory is included in the hibernation image. Any missing pages will panic the
   system as the absence of PPL pages in the image could be a security risk (and
   surely a bug).
-* During early boot, `ppl_hmac_compute_rorgn_hmac()` is used to measure the
+* During early boot, `secure_hmac_compute_rorgn_hmac()` is used to measure the
   entirety of the rorgn. On hibernation resume, the same function is invoked to
   verify that the rorgn matches its original contents.
   - Only the SHA256 of the rorgn is compared on resume. The SIO HMAC key1, used

@@ -126,6 +126,7 @@ extern vm_map_t bsd_pageable_map;
 
 #if defined(__arm64__)
 #include <arm/cpuid.h>          /* for cpuid_info() & cache_info() */
+#include <arm/cpu_capabilities_public.h>
 #endif
 
 #if defined(CONFIG_XNUPOST)
@@ -236,22 +237,28 @@ cluster_type_t
 cpu_type_for_perflevel(int perflevel)
 {
 	unsigned int cpu_types = ml_get_cpu_types();
-	unsigned int n_perflevels = __builtin_popcount(cpu_types);
+	__assert_only unsigned int n_perflevels = __builtin_popcount(cpu_types);
 
 	assert((perflevel >= 0) && (perflevel < n_perflevels));
 
-	int current_idx = 0, current_perflevel = -1;
+	/* Check CPU types mask for each cluster type in descending order of performance */
+	cluster_type_t cluster_types_in_order[MAX_CPU_TYPES];
+	cluster_types_in_order[0] = CLUSTER_TYPE_SMP;
+#if defined(__arm__) || defined(__arm64__)
+	cluster_types_in_order[1] = CLUSTER_TYPE_P;
+	cluster_types_in_order[2] = CLUSTER_TYPE_E;
+#endif /* defined(__arm__) || defined(__arm64__) */
 
-	while (cpu_types) {
-		current_perflevel += cpu_types & 1;
-		if (current_perflevel == (n_perflevels - (perflevel + 1))) {
-			return current_idx;
+	int perflevel_ind = 0;
+	for (int i = 0; i < MAX_CPU_TYPES; i++) {
+		unsigned int type_mask = 1 << cluster_types_in_order[i];
+		if (type_mask & cpu_types) {
+			if (perflevel_ind == perflevel) {
+				return cluster_types_in_order[i];
+			}
+			perflevel_ind++;
 		}
-
-		cpu_types >>= 1;
-		current_idx++;
 	}
-
 	return 0;
 }
 
@@ -922,6 +929,9 @@ SYSCTL_QUAD(_hw, HW_MEMSIZE, memsize, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED
 SYSCTL_QUAD(_hw, OID_AUTO, memsize_physical, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &max_mem_actual, "");
 #endif /* XNU_TARGET_OS_OSX */
 SYSCTL_INT(_hw, OID_AUTO, packages, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &packages, 0, "");
+#if defined(XNU_TARGET_OS_XR)
+SYSCTL_UINT(_hw, OID_AUTO, chiprole, CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED, &gPlatformChipRole, 1, "");
+#endif /* not XNU_TARGET_OS_XR */
 SYSCTL_PROC(_hw, OID_AUTO, osenvironment, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_osenvironment, "A", "");
 SYSCTL_PROC(_hw, OID_AUTO, ephemeral_storage, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_ephemeral_storage, "I", "");
 SYSCTL_PROC(_hw, OID_AUTO, use_recovery_securityd, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_use_recovery_securityd, "I", "");
@@ -1093,13 +1103,21 @@ SECURITY_READ_ONLY_LATE(int) gARM_FEAT_JSCVT = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_PAuth = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_PAuth2 = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_FPAC = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_FPACCOMBINE = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_DPB = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_DPB2 = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_BF16 = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_I8MM = 0;
 
+/* Features from: ID_AA64ISAR2_EL1 */
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_WFxT = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_RPRES = 0;
+
 /* Features from: ID_AA64MMFR0_EL1 */
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_ECV = 0;
+
+/* Features from: ID_AA64MMFR1_EL1 */
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_AFP = 0;
 
 /* Features from: ID_AA64MMFR2_EL1 */
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_LSE2 = 0;
@@ -1115,6 +1133,18 @@ SECURITY_READ_ONLY_LATE(int) gARM_FEAT_FP16 = 0;
 /* Features from: ID_AA64PFR1_EL1 */
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_SSBS = 0;
 SECURITY_READ_ONLY_LATE(int) gARM_FEAT_BTI = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_SME = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_SME2 = 0;
+
+/* Features from: ID_AA64SMFR0_EL1 */
+SECURITY_READ_ONLY_LATE(int) gARM_SME_F32F32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_SME_BI32I32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_SME_B16F32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_SME_F16F32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_SME_I8I32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_SME_I16I32 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_SME_F64F64 = 0;
+SECURITY_READ_ONLY_LATE(int) gARM_FEAT_SME_I16I64 = 0;
 
 SECURITY_READ_ONLY_LATE(int) gUCNormalMem = 0;
 
@@ -1176,8 +1206,15 @@ SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_DPB2, CTLFLAG_RD | CTLFLAG_KERN | CT
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_BF16, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_BF16, 0, "");
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_I8MM, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_I8MM, 0, "");
 
+/* Features from: ID_AA64ISAR2_EL1 */
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_WFxT, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_WFxT, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_RPRES, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_RPRES, 0, "");
+
 /* Features from: ID_AA64MMFR0_EL1 */
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_ECV, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_ECV, 0, "");
+
+/* Features from: ID_AA64MMFR1_EL1 */
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_AFP, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_AFP, 0, "");
 
 /* Features from: ID_AA64MMFR2_EL1 */
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_LSE2, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_LSE2, 0, "");
@@ -1196,6 +1233,18 @@ SECURITY_READ_ONLY_LATE(int) gARM_FP_SyncExceptions = 0;
 /* Features from: ID_AA64PFR1_EL1 */
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_SSBS, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_SSBS, 0, "");
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_BTI, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_BTI, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_SME, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_SME, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_SME2, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_SME2, 0, "");
+
+/* Features from: ID_AA64SMFR0_EL1 */
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_F32F32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_F32F32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_BI32I32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_BI32I32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_B16F32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_B16F32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_F16F32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_F16F32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_I8I32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_I8I32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, SME_I16I32, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_SME_I16I32, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_SME_F64F64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_SME_F64F64, 0, "");
+SYSCTL_INT(_hw_optional_arm, OID_AUTO, FEAT_SME_I16I64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FEAT_SME_I16I64, 0, "");
 
 /* Features from FPCR. */
 SYSCTL_INT(_hw_optional_arm, OID_AUTO, FP_SyncExceptions, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &gARM_FP_SyncExceptions, 0, "");
@@ -1241,6 +1290,105 @@ SYSCTL_INT(_hw_optional, OID_AUTO, arm64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LO
 #else
 SYSCTL_INT(_hw_optional, OID_AUTO, arm64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &arm64_flag, 0, "");
 #endif
+#endif /* ! __arm64__ */
+
+#if defined (__arm64__)
+
+/*
+ * Generate an uint64_t containing one bit per FEAT extension, reporting
+ * the presence of each extension.
+ */
+static int
+sysctl_hw_caps(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+	/* Local buffer, one bit per FEAT, reset to 0, set if FEAT present. */
+	#define CAP_BYTE_NB ((CAP_BIT_NB + 7) / 8)
+	uint8_t feats[CAP_BYTE_NB] = {0};
+
+	/* Write a bit in the local buffer. */
+	#define CAP_DO_SET_BIT(n) { \
+	        assert((n) < CAP_BIT_NB); \
+	        const uint32_t word_id = ((uint32_t) (n)) >> 3; \
+	        assert(word_id < CAP_BYTE_NB); \
+	        const uint8_t bit_id = ((uint32_t) (n)) & 0x7; \
+	        feats[word_id] |= ((uint8_t) 1) << bit_id; \
+	}
+
+	/* Write a capability bit in the local buffer. */
+	#define CAP_SET_BIT_(var, name) \
+	if (var) { \
+	        CAP_DO_SET_BIT(CAP_BIT_##name); \
+	}
+	#define CAP_SET_BIT(name) CAP_SET_BIT_(gARM_##name, name)
+
+	/* Write a capability field in the local buffer. */
+	#define CAP_SET_FIELD(name, val) { \
+	        const uint32_t start = CAP_BIT_##name; \
+	        const uint32_t end = start + CAP_BIT_##name##_LEN; \
+	        uint32_t src = CAP_BIT_##name##_##val; \
+	        for (uint32_t id = start; id < end; id++) { \
+	                if (src & 1) { \
+	                        CAP_DO_SET_BIT(id); \
+	                } \
+	                src >>= 1; \
+	        } \
+	}
+
+	/* Report presence of all FEATs. */
+	CAP_SET_BIT_(gARMv8Crc32, CRC32);
+	CAP_SET_BIT(FEAT_FlagM);
+	CAP_SET_BIT(FEAT_FlagM2);
+	CAP_SET_BIT(FEAT_FHM);
+	CAP_SET_BIT(FEAT_DotProd);
+	CAP_SET_BIT(FEAT_SHA3);
+	CAP_SET_BIT(FEAT_RDM);
+	CAP_SET_BIT(FEAT_LSE);
+	CAP_SET_BIT(FEAT_SHA256);
+	CAP_SET_BIT(FEAT_SHA512);
+	CAP_SET_BIT(FEAT_SHA1);
+	CAP_SET_BIT(FEAT_AES);
+	CAP_SET_BIT(FEAT_PMULL);
+	CAP_SET_BIT(FEAT_SPECRES);
+	CAP_SET_BIT(FEAT_SB);
+	CAP_SET_BIT(FEAT_FRINTTS);
+	CAP_SET_BIT(FEAT_LRCPC);
+	CAP_SET_BIT(FEAT_LRCPC2);
+	CAP_SET_BIT(FEAT_FCMA);
+	CAP_SET_BIT(FEAT_JSCVT);
+	CAP_SET_BIT(FEAT_PAuth);
+	CAP_SET_BIT(FEAT_PAuth2);
+	CAP_SET_BIT(FEAT_FPAC);
+	CAP_SET_BIT(FEAT_DPB);
+	CAP_SET_BIT(FEAT_DPB2);
+	CAP_SET_BIT(FEAT_BF16);
+	CAP_SET_BIT(FEAT_I8MM);
+	CAP_SET_BIT(FEAT_ECV);
+	CAP_SET_BIT(FEAT_LSE2);
+	CAP_SET_BIT(FEAT_CSV2);
+	CAP_SET_BIT(FEAT_CSV3);
+	CAP_SET_BIT(FEAT_DIT);
+	CAP_SET_BIT(AdvSIMD);
+	CAP_SET_BIT(AdvSIMD_HPFPCvt);
+	CAP_SET_BIT(FEAT_FP16);
+	CAP_SET_BIT(FEAT_SSBS);
+	CAP_SET_BIT(FEAT_BTI);
+	CAP_SET_BIT(FEAT_SME);
+	CAP_SET_BIT(FEAT_SME2);
+	CAP_SET_BIT(SME_F32F32);
+	CAP_SET_BIT(SME_BI32I32);
+	CAP_SET_BIT(SME_B16F32);
+	CAP_SET_BIT(SME_F16F32);
+	CAP_SET_BIT(SME_I8I32);
+	CAP_SET_BIT(SME_I16I32);
+	CAP_SET_BIT(FEAT_SME_F64F64);
+	CAP_SET_BIT(FEAT_SME_I16I64);
+
+
+	/* Write the local buffer to userspace and complete. */
+	return SYSCTL_OUT(req, feats, CAP_BYTE_NB);
+}
+SYSCTL_PROC(_hw_optional_arm, OID_AUTO, caps, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, 0, 0, sysctl_hw_caps, "Q", "");
 #endif /* ! __arm64__ */
 
 
@@ -1340,5 +1488,10 @@ sysctl_mib_startup(void)
 		sysctl_register_oid_early(&sysctl__hw_cputhreadtype);
 	}
 
+#if defined(XNU_TARGET_OS_XR)
+	if (gPlatformChipRole != UINT32_MAX) {
+		sysctl_register_oid_early(&sysctl__hw_chiprole);
+	}
+#endif /* not XNU_TARGET_OS_XR */
 }
 STARTUP(SYSCTL, STARTUP_RANK_MIDDLE, sysctl_mib_startup);

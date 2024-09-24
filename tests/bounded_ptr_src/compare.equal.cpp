@@ -140,7 +140,7 @@ tests_convert()
 	check_eq(a, b);
 }
 
-T_DECL(compare_equal, "bounded_ptr.compare.equal") {
+T_DECL(compare_equal, "bounded_ptr.compare.equal", T_META_TAG_VM_PREFERRED) {
 	tests<Derived, Derived>();
 	tests<Derived, Derived const>();
 	tests<Derived, Derived volatile>();

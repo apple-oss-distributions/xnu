@@ -1095,6 +1095,19 @@ lck_rw_lock_exclusive_gen(
 	return TRUE;
 }
 
+static inline void
+lck_rw_lock_check_preemption(lck_rw_t *lock __unused)
+{
+	assertf((get_preemption_level() == 0 && ml_get_interrupts_enabled()) ||
+	    startup_phase < STARTUP_SUB_EARLY_BOOT ||
+	    current_cpu_datap()->cpu_hibernate ||
+	    ml_is_quiescing() ||
+	    !not_in_kdp,
+	    "%s: attempt to take rwlock %p in non-preemptible or interrupt context: "
+	    "preemption level = %d, interruptible = %d", __func__, lock,
+	    get_preemption_level(), (int)ml_get_interrupts_enabled());
+}
+
 #define LCK_RW_LOCK_EXCLUSIVE_TAS(lck) (atomic_test_and_set32(&(lck)->lck_rw_data, \
 	    (LCK_RW_SHARED_MASK | LCK_RW_WANT_EXCL | LCK_RW_WANT_UPGRADE | LCK_RW_INTERLOCK), \
 	    LCK_RW_WANT_EXCL, memory_order_acquire_smp, FALSE))
@@ -1122,6 +1135,7 @@ lck_rw_lock_exclusive_check_contended(
 	bool            contended  = false;
 
 	if (lock->lck_rw_can_sleep) {
+		lck_rw_lock_check_preemption(lock);
 		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
@@ -1156,6 +1170,7 @@ lck_rw_lock_exclusive_internal_inline(
 	thread_t        thread = current_thread();
 
 	if (lock->lck_rw_can_sleep) {
+		lck_rw_lock_check_preemption(lock);
 		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
@@ -1395,6 +1410,7 @@ lck_rw_lock_shared_internal_inline(
 #endif
 
 	if (lock->lck_rw_can_sleep) {
+		lck_rw_lock_check_preemption(lock);
 		lck_rw_lock_count_inc(thread, lock);
 	} else if (get_preemption_level() == 0) {
 		panic("Taking non-sleepable RW lock with preemption enabled");
@@ -2466,6 +2482,38 @@ kdp_rwlck_find_owner(
 }
 
 /*!
+ * @function lck_rw_lock_would_yield_shared
+ *
+ * @abstract
+ * Check whether a rw_lock currently held in shared mode would be yielded
+ *
+ * @discussion
+ * This function can be used when lck_rw_lock_yield_shared() would be
+ * inappropriate due to the need to perform additional housekeeping
+ * prior to any yield or when the caller may wish to prematurely terminate
+ * an operation rather than resume it after regaining the lock.
+ *
+ * @param lck           rw_lock already held in shared mode to yield.
+ *
+ * @returns TRUE if the lock would yield, FALSE otherwise
+ */
+bool
+lck_rw_lock_would_yield_shared(
+	lck_rw_t        *lck)
+{
+	lck_rw_word_t   word;
+
+	lck_rw_assert(lck, LCK_RW_ASSERT_SHARED);
+
+	word.data = ordered_load_rw(lck);
+	if (word.want_excl || word.want_upgrade) {
+		return true;
+	}
+
+	return false;
+}
+
+/*!
  * @function lck_rw_lock_yield_shared
  *
  * @abstract
@@ -2486,12 +2534,7 @@ lck_rw_lock_yield_shared(
 	lck_rw_t        *lck,
 	boolean_t       force_yield)
 {
-	lck_rw_word_t   word;
-
-	lck_rw_assert(lck, LCK_RW_ASSERT_SHARED);
-
-	word.data = ordered_load_rw(lck);
-	if (word.want_excl || word.want_upgrade || force_yield) {
+	if (lck_rw_lock_would_yield_shared(lck) || force_yield) {
 		lck_rw_unlock_shared(lck);
 		mutex_pause(2);
 		lck_rw_lock_shared(lck);
@@ -2499,6 +2542,47 @@ lck_rw_lock_yield_shared(
 	}
 
 	return false;
+}
+
+/*!
+ * @function lck_rw_lock_would_yield_exclusive
+ *
+ * @abstract
+ * Check whether a rw_lock currently held in exclusive mode would be yielded
+ *
+ * @discussion
+ * This function can be used when lck_rw_lock_yield_exclusive would be
+ * inappropriate due to the need to perform additional housekeeping
+ * prior to any yield or when the caller may wish to prematurely terminate
+ * an operation rather than resume it after regaining the lock.
+ *
+ * @param lck           rw_lock already held in exclusive mode to yield.
+ * @param mode          when to yield.
+ *
+ * @returns TRUE if the lock would yield, FALSE otherwise
+ */
+bool
+lck_rw_lock_would_yield_exclusive(
+	lck_rw_t        *lck,
+	lck_rw_yield_t  mode)
+{
+	lck_rw_word_t word;
+	bool yield = false;
+
+	lck_rw_assert(lck, LCK_RW_ASSERT_EXCLUSIVE);
+
+	if (mode == LCK_RW_YIELD_ALWAYS) {
+		yield = true;
+	} else {
+		word.data = ordered_load_rw(lck);
+		if (word.w_waiting) {
+			yield = true;
+		} else if (mode == LCK_RW_YIELD_ANY_WAITER) {
+			yield = (word.r_waiting != 0);
+		}
+	}
+
+	return yield;
 }
 
 /*!
@@ -2522,21 +2606,7 @@ lck_rw_lock_yield_exclusive(
 	lck_rw_t        *lck,
 	lck_rw_yield_t  mode)
 {
-	lck_rw_word_t word;
-	bool yield = false;
-
-	lck_rw_assert(lck, LCK_RW_ASSERT_EXCLUSIVE);
-
-	if (mode == LCK_RW_YIELD_ALWAYS) {
-		yield = true;
-	} else {
-		word.data = ordered_load_rw(lck);
-		if (word.w_waiting) {
-			yield = true;
-		} else if (mode == LCK_RW_YIELD_ANY_WAITER) {
-			yield = (word.r_waiting != 0);
-		}
-	}
+	bool yield = lck_rw_lock_would_yield_exclusive(lck, mode);
 
 	if (yield) {
 		lck_rw_unlock_exclusive(lck);

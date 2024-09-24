@@ -70,6 +70,12 @@
 
 #define kDisableWorkloadClassThreadPolicyValue "DisableWorkloadClassThreadPolicy"
 #define kWIComplexityAllowedValue              "ComplexityAllowed"
+#if defined(XNU_TARGET_OS_XR)
+#if defined(CONFIG_THREAD_GROUPS)
+#define kUXMValue                              "UXM"
+#define kStrictTimersValue                     "StrictTimers"
+#endif /* CONFIG_THREAD_GROUPS */
+#endif /* XNU_TARGET_OS_XR */
 
 #define ARRAY_LEN(x) (sizeof (x) / sizeof (x[0]))
 
@@ -345,6 +351,16 @@ parseFlags(const OSSymbol &id, const OSObject *flagsObj, UInt32 &threadGroupFlag
 		}
 
 		/* Ignore unknown flags. */
+#if defined(XNU_TARGET_OS_XR)
+#if CONFIG_THREAD_GROUPS
+		if (flag->isEqualTo(kUXMValue)) {
+			threadGroupFlags |= THREAD_GROUP_FLAGS_MANAGED;
+		}
+		if (flag->isEqualTo(kStrictTimersValue)) {
+			threadGroupFlags |= THREAD_GROUP_FLAGS_STRICT_TIMERS;
+		}
+#endif /* CONFIG_THREAD_GROUPS */
+#endif /* XNU_TARGET_OS_XR */
 		if (flag->isEqualTo(kWIComplexityAllowedValue)) {
 			workIntervalFlags |= WORK_INTERVAL_WORKLOAD_ID_COMPLEXITY_ALLOWED;
 		}
@@ -714,6 +730,24 @@ IOUnparseWorkloadConfig(char *buffer, size_t *size)
 				ret = kIOReturnError;
 				return true;
 			}
+#if defined(XNU_TARGET_OS_XR)
+#if CONFIG_THREAD_GROUPS
+			if ((wc->wc_thread_group_flags & THREAD_GROUP_FLAGS_MANAGED) != 0) {
+				OSSharedPtr<OSString> UXMStr = OSString::withCString(kUXMValue);
+				if (UXMStr == nullptr || !flags->setObject(UXMStr)) {
+					ret = kIOReturnError;
+					return true;
+				}
+			}
+			if ((wc->wc_thread_group_flags & THREAD_GROUP_FLAGS_STRICT_TIMERS) != 0) {
+				OSSharedPtr<OSString> StrictTimersStr = OSString::withCString(kStrictTimersValue);
+				if (StrictTimersStr == nullptr || !flags->setObject(StrictTimersStr)) {
+					ret = kIOReturnError;
+					return true;
+				}
+			}
+#endif /* CONFIG_THREAD_GROUPS */
+#endif /* XNU_TARGET_OS_XR */
 			if ((wc->wc_flags & WORK_INTERVAL_WORKLOAD_ID_COMPLEXITY_ALLOWED) != 0) {
 				OSSharedPtr<OSString> WIComplexityAllowedStr =
 				    OSString::withCString(kWIComplexityAllowedValue);

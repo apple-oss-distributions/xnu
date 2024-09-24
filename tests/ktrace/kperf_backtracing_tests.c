@@ -16,6 +16,8 @@
 #define CALLSTACK_VALID 0x1
 #define CALLSTACK_TRUNCATED 0x10
 
+T_GLOBAL_META(T_META_TAG_VM_PREFERRED);
+
 static void
 expect_frame(const char **bt, unsigned int bt_len, CSSymbolRef symbol,
     uint64_t addr, unsigned int bt_idx, unsigned int max_frames)

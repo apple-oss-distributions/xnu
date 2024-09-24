@@ -104,8 +104,9 @@ struct ns_flow_info {
  *      reservations, UNLESS there is also a Listener reservation, in which
  *      case the presence of prexisting Skywalk reservations are ignored
  */
-extern int netns_reserve(netns_token *token, uint32_t *addr, uint8_t addr_len,
-    uint8_t proto, in_port_t port, uint32_t flags, struct ns_flow_info *nfi);
+extern int netns_reserve(netns_token * token, uint32_t *__sized_by(addr_len) addr,
+    uint8_t addr_len, uint8_t proto, in_port_t port, uint32_t flags,
+    struct ns_flow_info *nfi);
 
 /*
  * Reserve a port in the namespace of the provided <addr, proto> tuple, letting
@@ -113,9 +114,9 @@ extern int netns_reserve(netns_token *token, uint32_t *addr, uint8_t addr_len,
  * argument. Aside from this behavior, this function behaves identically to
  * netns_reserve().
  */
-extern int netns_reserve_ephemeral(netns_token *token, uint32_t *addr,
-    uint8_t addr_len, uint8_t proto, in_port_t *port, uint32_t flags,
-    struct ns_flow_info *nfi);
+extern int netns_reserve_ephemeral(netns_token * token,
+    uint32_t *__sized_by(addr_len) addr, uint8_t addr_len, uint8_t proto,
+    in_port_t *port, uint32_t flags, struct ns_flow_info *nfi);
 
 /*
  * Release a port reservation recorded by the provided token.
@@ -156,8 +157,8 @@ extern int netns_get_flow_info(netns_token *token, struct ns_flow_info *nfi);
  *
  * The passed in token will be updated to reflect this new reservation.
  */
-extern int netns_change_addr(netns_token *token, uint32_t *new_addr,
-    uint8_t new_addr_len);
+extern int netns_change_addr(netns_token * token,
+    uint32_t *__sized_by(new_addr_len) new_addr, uint8_t new_addr_len);
 
 /*
  * Update which network interface a given port reservation corresponds to.
@@ -197,7 +198,7 @@ extern void netns_change_flags(netns_token *token, uint32_t set_flags,
  */
 extern errno_t
 netns_get_local_ports(ifnet_t ifp, protocol_family_t protocol,
-    u_int32_t flags, u_int8_t *bitfield);
+    u_int32_t flags, u_int8_t bitfield[IP_PORTRANGE_BITFIELD_LEN]);
 
 /*
  * Return 1 if the parent ifnet of the specified ifaddr has any reservations

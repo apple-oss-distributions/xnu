@@ -55,7 +55,8 @@ static int flow_track_udp(struct flow_entry *, struct flow_track *,
 static void
 flow_track_tcp_get_wscale(struct flow_track *s, struct __kern_packet *pkt)
 {
-	const uint8_t *hdr = (uint8_t *)(void *)pkt->pkt_flow_tcp_hdr;
+	const uint8_t *hdr = __unsafe_forge_bidi_indexable(uint8_t *,
+	    pkt->pkt_flow_tcp_hdr, pkt->pkt_flow_tcp_hlen);
 	int hlen = pkt->pkt_flow_tcp_hlen;
 	uint8_t optlen, wscale = 0;
 	const uint8_t *opt;
@@ -907,7 +908,8 @@ flow_track_abort_tcp(struct flow_entry *fe, struct __kern_packet *in_pkt,
 }
 
 void
-flow_track_abort_quic(struct flow_entry *fe, uint8_t *token)
+flow_track_abort_quic(struct flow_entry *fe,
+    uint8_t *__counted_by(QUIC_STATELESS_RESET_TOKEN_SIZE)token)
 {
 	struct quic_stateless_reset {
 		uint8_t ssr_header[30];
@@ -919,7 +921,7 @@ flow_track_abort_quic(struct flow_entry *fe, uint8_t *token)
 	struct udphdr *uh;
 	struct quic_stateless_reset *qssr;
 	uint16_t len, l3hlen, ulen;
-	struct mbuf *m;
+	struct mbuf *__single m;
 	unsigned int one = 1;
 	int error;
 

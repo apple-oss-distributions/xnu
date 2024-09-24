@@ -85,7 +85,7 @@
 
 #include <libkern/OSAtomic.h>
 
-#define KERNEL_DESC_SIZE             sizeof(mach_msg_descriptor_t)
+#define KERNEL_DESC_SIZE             sizeof(mach_msg_kdescriptor_t)
 
 void
 mach_msg_receive_results_complete(ipc_object_t object);
@@ -108,20 +108,20 @@ mach_msg_receive_results_complete(ipc_object_t object);
  */
 
 mach_msg_return_t
-mach_msg_send_from_kernel_proper(
-	mach_msg_header_t       *msg,
+mach_msg_send_from_kernel(
+	mach_msg_header_t      *msg,
 	mach_msg_size_t         send_size)
 {
-	mach_msg_option_t   option = MACH_SEND_KERNEL_DEFAULT;
+	mach_msg_option64_t option = MACH_SEND_KERNEL_DEFAULT;
 	mach_msg_timeout_t  timeout_val = MACH_MSG_TIMEOUT_NONE;
 	return kernel_mach_msg_send(msg, send_size, option, timeout_val, NULL);
 }
 
 mach_msg_return_t
 mach_msg_send_from_kernel_with_options(
-	mach_msg_header_t       *msg,
+	mach_msg_header_t      *msg,
 	mach_msg_size_t         send_size,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option,
 	mach_msg_timeout_t      timeout_val)
 {
 	return kernel_mach_msg_send(msg, send_size, option, timeout_val, NULL);
@@ -130,9 +130,9 @@ mach_msg_send_from_kernel_with_options(
 static mach_msg_return_t
 kernel_mach_msg_send_common(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option,
 	mach_msg_timeout_t      timeout_val,
-	boolean_t               *message_moved)
+	boolean_t              *message_moved)
 {
 	mach_msg_return_t mr;
 
@@ -173,11 +173,11 @@ kernel_mach_msg_send_common(
 
 mach_msg_return_t
 kernel_mach_msg_send(
-	mach_msg_header_t       *msg,
+	mach_msg_header_t      *msg,
 	mach_msg_size_t         send_size,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option,
 	mach_msg_timeout_t      timeout_val,
-	boolean_t               *message_moved)
+	boolean_t              *message_moved)
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
@@ -188,7 +188,8 @@ kernel_mach_msg_send(
 		*message_moved = FALSE;
 	}
 
-	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+	option &= ~MACH64_POLICY_KERNEL_EXTENSION;
+	mr = ipc_kmsg_get_from_kernel(msg, send_size, option, &kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
@@ -197,15 +198,49 @@ kernel_mach_msg_send(
 	return kernel_mach_msg_send_common(kmsg, option, timeout_val, message_moved);
 }
 
+extern typeof(mach_msg_send_from_kernel) mach_msg_send_from_kernel_proper;
+mach_msg_return_t
+mach_msg_send_from_kernel_proper(
+	mach_msg_header_t      *msg,
+	mach_msg_size_t         send_size)
+{
+	mach_msg_option64_t option = MACH_SEND_KERNEL_DEFAULT;
+	mach_msg_timeout_t  timeout_val = MACH_MSG_TIMEOUT_NONE;
+	ipc_kmsg_t          kmsg;
+	mach_msg_return_t   mr;
+
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
+	option |= MACH64_POLICY_KERNEL_EXTENSION;
+	mr = ipc_kmsg_get_from_kernel(msg, send_size, option, &kmsg);
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
+		return mr;
+	}
+
+	return kernel_mach_msg_send_common(kmsg, option, timeout_val, NULL);
+}
+
+mach_msg_return_t
+kernel_mach_msg_send_kmsg(
+	ipc_kmsg_t              kmsg)
+{
+	mach_msg_option_t   option = MACH_SEND_KERNEL_DEFAULT;
+	mach_msg_timeout_t  timeout_val = MACH_MSG_TIMEOUT_NONE;
+
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
+	return kernel_mach_msg_send_common(kmsg, option, timeout_val, NULL);
+}
+
 mach_msg_return_t
 kernel_mach_msg_send_with_builder_internal(
 	mach_msg_size_t         desc_count,
 	mach_msg_size_t         payload_size, /* Not total send size */
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option,
 	mach_msg_timeout_t      timeout_val,
-	boolean_t               *message_moved,
-	void                    (^builder)(mach_msg_header_t *,
-	mach_msg_descriptor_t *, void *))
+	boolean_t              *message_moved,
+	void                  (^builder)(mach_msg_header_t *, mach_msg_descriptor_t *, void *))
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
@@ -213,7 +248,6 @@ kernel_mach_msg_send_with_builder_internal(
 	void *udata;
 	bool complex;
 	mach_msg_size_t send_size;
-	mach_msg_descriptor_t *desc;
 
 	KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
 
@@ -242,22 +276,27 @@ kernel_mach_msg_send_with_builder_internal(
 		return mr;
 	}
 
-	hdr = ikm_header(kmsg);
+	hdr   = ikm_header(kmsg);
 	udata = (payload_size > 0) ? ikm_udata(kmsg, desc_count, complex) : NULL;
-	desc = (desc_count > 0) ? (mach_msg_descriptor_t *)((vm_address_t)hdr + sizeof(mach_msg_base_t)) : NULL;
 
 	/* Allow the caller to build the message, and sanity check it */
-	builder(hdr, desc, udata);
-	assert(hdr->msgh_size == send_size);
 	if (complex) {
+		mach_msg_kbase_t *kbase = mach_msg_header_to_kbase(hdr);
+
+		builder(hdr, (mach_msg_descriptor_t *)kbase->msgb_dsc_array, udata);
+
 		assert(hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX);
 		hdr->msgh_bits |= MACH_MSGH_BITS_COMPLEX;
+
 		/* Set the correct descriptor count */
-		((mach_msg_base_t *)hdr)->body.msgh_descriptor_count = desc_count;
+		kbase->msgb_dsc_count = desc_count;
 	} else {
+		builder(hdr, NULL, udata);
+
 		assert(!(hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX));
 		hdr->msgh_bits &= ~MACH_MSGH_BITS_COMPLEX;
 	}
+	assert(hdr->msgh_size == send_size);
 
 	return kernel_mach_msg_send_common(kmsg, option, timeout_val, NULL);
 }
@@ -269,8 +308,11 @@ kernel_mach_msg_send_with_builder(
 	void                    (^builder)(mach_msg_header_t *,
 	mach_msg_descriptor_t *, void *))
 {
+	mach_msg_option64_t options;
+
+	options = MACH_SEND_KERNEL_DEFAULT | MACH64_POLICY_KERNEL_EXTENSION;
 	return kernel_mach_msg_send_with_builder_internal(desc_count, udata_size,
-	           MACH_SEND_KERNEL_DEFAULT, MACH_MSG_TIMEOUT_NONE, NULL, builder);
+	           options, MACH_MSG_TIMEOUT_NONE, NULL, builder);
 }
 
 /*
@@ -288,27 +330,19 @@ kernel_mach_msg_send_with_builder(
  *		MACH_RCV_PORT_DIED	The reply port was deallocated.
  */
 
-mach_msg_return_t
-mach_msg_rpc_from_kernel_proper(
-	mach_msg_header_t       *msg,
-	mach_msg_size_t         send_size,
-	mach_msg_size_t         rcv_size)
-{
-	return kernel_mach_msg_rpc(msg, send_size, rcv_size, TRUE, NULL);
-}
-
-mach_msg_return_t
-kernel_mach_msg_rpc(
+static mach_msg_return_t
+kernel_mach_msg_rpc_common(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         send_size,
 	mach_msg_size_t         rcv_size,
 	boolean_t               interruptible,
-	boolean_t               *message_moved)
+	mach_msg_option64_t     options,
+	boolean_t              *message_moved)
 {
 	thread_t self = current_thread();
 	ipc_port_t dest = IPC_PORT_NULL;
 	/* Sync IPC from kernel should pass adopted voucher and importance */
-	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT & ~MACH_SEND_NOIMPORTANCE;
+	mach_msg_option64_t option = MACH_SEND_KERNEL_DEFAULT & ~MACH_SEND_NOIMPORTANCE;
 	ipc_port_t reply;
 	ipc_kmsg_t kmsg;
 	mach_msg_header_t *hdr;
@@ -327,7 +361,7 @@ kernel_mach_msg_rpc(
 		return MACH_SEND_INVALID_DEST;
 	}
 
-	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+	mr = ipc_kmsg_get_from_kernel(msg, send_size, options, &kmsg);
 	/* kmsg can be non-linear */
 
 	if (mr != MACH_MSG_SUCCESS) {
@@ -418,13 +452,17 @@ kernel_mach_msg_rpc(
 		ipc_port_link_special_reply_port(reply,
 		    dest, FALSE);
 
-		ipc_mqueue_receive(&reply->ip_waitq,
-		    MACH64_MSG_OPTION_NONE,
-		    MACH_MSG_SIZE_MAX,
-		    0,
-		    MACH_MSG_TIMEOUT_NONE,
+		bzero(&self->ith_receive, sizeof(self->ith_receive));
+		self->ith_recv_bufs = (mach_msg_recv_bufs_t){
+			.recv_msg_size = MACH_MSG_SIZE_MAX,
+		};
+		self->ith_object = IO_NULL;
+		self->ith_option = MACH64_MSG_OPTION_NONE;
+		self->ith_knote  = ITH_KNOTE_NULL; /* not part of ith_receive */
+
+		ipc_mqueue_receive(&reply->ip_waitq, MACH_MSG_TIMEOUT_NONE,
 		    interruptible ? THREAD_INTERRUPTIBLE : THREAD_UNINT,
-		    /* continuation ? */ false);
+		    self, /* continuation ? */ false);
 
 		mr = self->ith_state;
 		kmsg = self->ith_kmsg;
@@ -480,7 +518,7 @@ kernel_mach_msg_rpc(
 	ipc_kmsg_copyout_dest_to_kernel(kmsg, ipc_space_reply);
 
 	mach_msg_format_0_trailer_t *trailer =  (mach_msg_format_0_trailer_t *)
-	    ipc_kmsg_get_trailer(kmsg, false);
+	    ipc_kmsg_get_trailer(kmsg);
 
 	/* Determine what trailer bits we can receive (as no option specified) */
 	if (rcv_size < kmsg_size + MACH_MSG_TRAILER_MINIMUM_SIZE) {
@@ -503,27 +541,68 @@ kernel_mach_msg_rpc(
 	assert(trailer->msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0);
 	mr = MACH_MSG_SUCCESS;
 
-	ipc_kmsg_put_to_kernel(msg, kmsg, rcv_size);
+	ipc_kmsg_put_to_kernel(msg, options, kmsg, rcv_size);
 	return mr;
 }
 
+mach_msg_return_t
+kernel_mach_msg_rpc(
+	mach_msg_header_t       *msg,
+	mach_msg_size_t         send_size,
+	mach_msg_size_t         rcv_size,
+	boolean_t               interruptible,
+	boolean_t              *message_moved)
+{
+	mach_msg_option64_t options = MACH64_MSG_OPTION_NONE;
+
+	return kernel_mach_msg_rpc_common(msg, send_size, rcv_size,
+	           interruptible, options, message_moved);
+}
+
+mach_msg_return_t
+mach_msg_rpc_from_kernel(
+	mach_msg_header_t       *msg,
+	mach_msg_size_t         send_size,
+	mach_msg_size_t         rcv_size)
+{
+	mach_msg_option64_t options = MACH64_MSG_OPTION_NONE;
+
+	return kernel_mach_msg_rpc_common(msg, send_size, rcv_size, TRUE,
+	           options, NULL);
+}
+
+/* same as mach_msg_rpc_from_kernel but for kexts */
+extern typeof(mach_msg_rpc_from_kernel) mach_msg_rpc_from_kernel_proper;
+mach_msg_return_t
+mach_msg_rpc_from_kernel_proper(
+	mach_msg_header_t       *msg,
+	mach_msg_size_t         send_size,
+	mach_msg_size_t         rcv_size)
+{
+	mach_msg_option64_t options = MACH64_POLICY_KERNEL_EXTENSION;
+
+	return kernel_mach_msg_rpc_common(msg, send_size, rcv_size, TRUE,
+	           options, NULL);
+}
+
 /*
- *	Routine:	mach_msg_destroy_from_kernel_proper
+ *	Routine:	mach_msg_destroy_from_kernel
  *	Purpose:
- *		mach_msg_destroy_from_kernel_proper is used to destroy
+ *		mach_msg_destroy_from_kernel is used to destroy
  *		an unwanted/unexpected reply message from a MIG
  *		kernel-specific user-side stub.	It is like ipc_kmsg_destroy(),
  *		except we no longer have the kmsg - just the contents.
  */
 void
-mach_msg_destroy_from_kernel_proper(mach_msg_header_t *msg)
+mach_msg_destroy_from_kernel(mach_msg_header_t *msg)
 {
 	mach_msg_bits_t mbits = msg->msgh_bits;
-	ipc_object_t object;
+	ipc_port_t      port = msg->msgh_remote_port;
 
-	object = (ipc_object_t) msg->msgh_remote_port;
-	if (IO_VALID(object)) {
-		ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
+	if (IP_VALID(port)) {
+		ipc_object_destroy(ip_to_object(port),
+		    MACH_MSGH_BITS_REMOTE(mbits));
+		msg->msgh_remote_port = IP_NULL;
 	}
 
 	/*
@@ -536,69 +615,28 @@ mach_msg_destroy_from_kernel_proper(mach_msg_header_t *msg)
 	assert(!MACH_MSGH_BITS_VOUCHER(mbits));
 
 	/* For simple messages, we're done */
-	if ((mbits & MACH_MSGH_BITS_COMPLEX) == 0) {
-		return;
-	}
+	if (mbits & MACH_MSGH_BITS_COMPLEX) {
+		mach_msg_kbase_t *kbase = mach_msg_header_to_kbase(msg);
 
-	/* Discard descriptor contents */
-	mach_msg_body_t *body = (mach_msg_body_t *)(msg + 1);
-	mach_msg_descriptor_t *daddr = (mach_msg_descriptor_t *)(body + 1);
-	mach_msg_size_t i;
-
-	for (i = 0; i < body->msgh_descriptor_count; i++, daddr++) {
-		switch (daddr->type.type) {
-		case MACH_MSG_PORT_DESCRIPTOR: {
-			mach_msg_port_descriptor_t *dsc = &daddr->port;
-			if (IO_VALID((ipc_object_t) dsc->name)) {
-				ipc_object_destroy((ipc_object_t) dsc->name, dsc->disposition);
-			}
-			break;
-		}
-		case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
-		case MACH_MSG_OOL_DESCRIPTOR: {
-			mach_msg_ool_descriptor_t *dsc =
-			    (mach_msg_ool_descriptor_t *)&daddr->out_of_line;
-
-			if (dsc->size > 0) {
-				vm_map_copy_discard((vm_map_copy_t) dsc->address);
-			} else {
-				assert(dsc->address == (void *) 0);
-			}
-			break;
-		}
-		case MACH_MSG_OOL_PORTS_DESCRIPTOR: {
-			ipc_object_t                    *objects;
-			mach_msg_type_number_t          j;
-			mach_msg_ool_ports_descriptor_t *dsc;
-
-			dsc = (mach_msg_ool_ports_descriptor_t  *)&daddr->ool_ports;
-			objects = (ipc_object_t *) dsc->address;
-
-			if (dsc->count == 0) {
-				break;
-			}
-			assert(objects != 0);
-			for (j = 0; j < dsc->count; j++) {
-				object = objects[j];
-				if (IO_VALID(object)) {
-					ipc_object_destroy(object, dsc->disposition);
-				}
-			}
-			kfree_type(mach_port_t, dsc->count, dsc->address);
-			break;
-		}
-		case MACH_MSG_GUARDED_PORT_DESCRIPTOR: {
-			mach_msg_guarded_port_descriptor_t *dsc = (mach_msg_guarded_port_descriptor_t *)&daddr->guarded_port;
-			if (IO_VALID((ipc_object_t) dsc->name)) {
-				ipc_object_destroy((ipc_object_t) dsc->name, dsc->disposition);
-			}
-			break;
-		}
-		default:
-			break;
-		}
+		ipc_kmsg_clean_descriptors(kbase->msgb_dsc_array,
+		    kbase->msgb_dsc_count);
 	}
 }
+
+/* same as mach_msg_destroy_from_kernel but for kexts */
+extern typeof(mach_msg_destroy_from_kernel) mach_msg_destroy_from_kernel_proper;
+void
+mach_msg_destroy_from_kernel_proper(mach_msg_header_t *msg)
+{
+	if (msg->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+		mach_msg_kbase_t *kbase = mach_msg_header_to_kbase(msg);
+
+		ipc_kmsg_sign_descriptors(kbase->msgb_dsc_array,
+		    kbase->msgb_dsc_count);
+	}
+	mach_msg_destroy_from_kernel(msg);
+}
+
 
 /************** These Calls are set up for kernel-loaded tasks/threads **************/
 

@@ -20,7 +20,8 @@
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
-    T_META_RADAR_COMPONENT_VERSION("scheduler"));
+    T_META_RADAR_COMPONENT_VERSION("scheduler"),
+    T_META_TAG_VM_NOT_ELIGIBLE);
 
 
 static mach_timebase_info_data_t timebase_info;
@@ -197,6 +198,8 @@ start_helper_threads(unsigned int num_threads, pthread_t *threads, struct thread
 	}
 }
 
+static bool logged_wi_instance_id_zero = false;
+
 static void
 start_work_interval_instance(uint64_t interval_length_abs, work_interval_instance_t wi_instance,
     work_interval_data_t wi_data)
@@ -216,8 +219,9 @@ start_work_interval_instance(uint64_t interval_length_abs, work_interval_instanc
 	ret = work_interval_instance_start(wi_instance);
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "work_interval_instance_start");
 
-	if (wi_instance->wi_instance_id == 0ULL) {
-		T_LOG("wi_instance_id is 0, which is an acceptable condition for devices running legacy CLPC");
+	if (wi_instance->wi_instance_id == 0ULL && !logged_wi_instance_id_zero) {
+		T_LOG("Note, wi_instance_id is 0, which is an acceptable condition for devices running legacy CLPC");
+		logged_wi_instance_id_zero = true;
 	}
 
 	work_interval_instance_get_telemetry_data(wi_instance, wi_data, sizeof(struct work_interval_data));
@@ -284,7 +288,9 @@ run_work_interval_data_test(unsigned int num_iterations, uint64_t interval_nanos
 	int supports_cpi = 0;
 	size_t supports_cpi_size = sizeof(supports_cpi);
 	ret = sysctlbyname("kern.monotonic.supported", &supports_cpi, &supports_cpi_size, NULL, 0);
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "sysctl kern.monotonic.supported");
+	if (ret < 0 || supports_cpi == 0) {
+		T_LOG("Monotonic stats are unsupported on this platform. Skipping cycles/instructions stats validation");
+	}
 
 	work_interval_t wi_handle = NULL;
 	work_interval_instance_t wi_instance = NULL;

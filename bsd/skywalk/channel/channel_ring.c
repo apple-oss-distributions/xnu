@@ -1031,6 +1031,11 @@ kr_rxsync_prologue(struct kern_channel *ch, struct __kern_channel_ring *kring,
 	/* update the user's view of slots & bytes transferred */
 	kr_update_user_stats(kring, slot_count, byte_count);
 
+	/* Update Rx dequeue timestamp */
+	if (slot_count > 0) {
+		kring->ckr_rx_dequeue_ts = _net_uptime;
+	}
+
 	/* update the kernel view of ring */
 	kring->ckr_rhead = head;
 	return head;
@@ -1741,8 +1746,12 @@ kr_internalize_metadata(struct kern_channel *ch,
 		PKT_GET_NEXT_BUFLET(kpkt, bcnt, pkbuf, kbuf);
 		ASSERT(kbuf != NULL);
 		if (kbuf->buf_flag & BUFLET_FLAG_EXTERNAL) {
+			struct __kern_buflet_ext *kbuf_ext;
+
+			kbuf_ext = __container_of(kbuf,
+			    struct __kern_buflet_ext, kbe_overlay);
 			ubuf = __DECONST(struct __user_buflet *,
-			    ((struct __kern_buflet_ext *)kbuf)->kbe_buf_user);
+			    kbuf_ext->kbe_buf_user);
 		} else {
 			ASSERT(i == 0);
 			ubuf = __DECONST(struct __user_buflet *,
@@ -1981,8 +1990,12 @@ kr_externalize_metadata_internal(struct __kern_channel_ring *kring,
 		ASSERT(kbuf != NULL);
 
 		if (kbuf->buf_flag & BUFLET_FLAG_EXTERNAL) {
+			struct __kern_buflet_ext *kbuf_ext;
+
+			kbuf_ext = __container_of(kbuf,
+			    struct __kern_buflet_ext, kbe_overlay);
 			ubuf = __DECONST(struct __user_buflet *,
-			    ((struct __kern_buflet_ext *)kbuf)->kbe_buf_user);
+			    kbuf_ext->kbe_buf_user);
 		} else {
 			ASSERT(i == 0);
 			ubuf = __DECONST(struct __user_buflet *,

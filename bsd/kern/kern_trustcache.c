@@ -25,7 +25,7 @@
 #include <pexpert/device_tree.h>
 #include <mach/boolean.h>
 #include <mach/vm_param.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/pmap_cs.h>
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
@@ -39,6 +39,7 @@
 #include <sys/proc.h>
 #include <sys/codesign.h>
 #include <sys/trust_caches.h>
+#include <sys/code_signing.h>
 #include <IOKit/IOBSD.h>
 #include <img4/firmware.h>
 #include <TrustCache/API.h>
@@ -843,6 +844,11 @@ load_trust_cache_with_type(
 		return KERN_DENIED;
 	} else if ((type == kTCTypeCryptex1BootApp) && boot_app_tc_loaded) {
 		printf("disallowed to load multiple kTCTypeCryptex1BootApp trust caches\n");
+		return KERN_DENIED;
+	}
+
+	if (restricted_execution_mode_state() == KERN_SUCCESS) {
+		printf("disallowed to load trust caches once REM is enabled\n");
 		return KERN_DENIED;
 	}
 

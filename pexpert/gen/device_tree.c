@@ -328,6 +328,126 @@ find_entry(const char *propName, const char *propValue, DTEntry *entryH)
 	return kError;
 }
 
+/**
+ * @brief Recursive helper function for SecureDTFindNodeWithPropertyEqualToValue().
+ *
+ * @param[in] currentNode The root node of the subtree currently being searched.
+ * @param[out] currentNodeSize The size (in bytes) of the current node. This is
+ * only set if the current subtree doesn't contain the target node so that our
+ * parent can know where to continue the search.
+ */
+static int
+SecureDTFindNodeWithPropertyEqualToValueHelper(
+	const char *const propertyName,
+	const void *const propertyValue,
+	const size_t propertyValueSize,
+	const DeviceTreeNode **const devicetreeNode,
+	const DeviceTreeNode *const currentNode,
+	size_t *const currentNodeSize)
+{
+	// This variable tracks our current position in the devicetree blob. This is
+	// necessary because the sizes of both properties and nodes are variable.
+	uintptr_t current_position = (uintptr_t)(currentNode + 1);
+
+	// Check to see if the target node is this one. That is, check if the
+	// current node has the specified property equal to the specified value.
+	for (int i = 0; i < currentNode->nProperties; i++) {
+		const DeviceTreeNodeProperty *const property = (const DeviceTreeNodeProperty *const)current_position;
+
+		// Move on if the property name doesn't match.
+		if (strncmp(propertyName, property->name, kPropNameLength) != 0) {
+			goto next_property;
+		}
+
+		// Move on if the property value doesn't match.
+		if (propertyValueSize != property->length) {
+			goto next_property;
+		}
+		const void *const value = property + 1;
+		if (memcmp(propertyValue, value, propertyValueSize) != 0) {
+			goto next_property;
+		}
+
+		// Both name and value match!
+		*devicetreeNode = currentNode;
+		return kSuccess;
+
+next_property:
+		// The next property can be found at the closest 4-byte boundary after
+		// the current property's value.
+		current_position += sizeof(DeviceTreeNodeProperty) + ((property->length + 3) & ~3);
+	}
+
+	// If we're here, then the current node isn't the target node. Check to see
+	// if the target node can be found in any of the child subtrees.
+	for (int i = 0; i < currentNode->nChildren; i++) {
+		const DeviceTreeNode *const child = (const DeviceTreeNode *const)current_position;
+		size_t child_size;
+		const int retval = SecureDTFindNodeWithPropertyEqualToValueHelper(
+			propertyName,
+			propertyValue,
+			propertyValueSize,
+			devicetreeNode,
+			child,
+			&child_size);
+		if (retval == kSuccess) {
+			return kSuccess;
+		}
+		current_position += child_size;
+	}
+
+	// The target node cannot be found in the current subtree.
+	*currentNodeSize = current_position - (uintptr_t)currentNode;
+	return kError;
+}
+
+int
+SecureDTFindNodeWithPropertyEqualToValue(
+	const char *const propertyName,
+	const void *const propertyValue,
+	const size_t propertyValueSize,
+	const DeviceTreeNode **const devicetreeNode)
+{
+	if (!DTInitialized) {
+		return kError;
+	}
+	size_t unused;
+	return SecureDTFindNodeWithPropertyEqualToValueHelper(
+		propertyName,
+		propertyValue,
+		propertyValueSize,
+		devicetreeNode,
+		DTRootNode,
+		&unused);
+};
+
+int
+SecureDTFindNodeWithPhandle(
+	const uint32_t phandle,
+	const DeviceTreeNode **const devicetreeNode)
+{
+	return SecureDTFindNodeWithPropertyEqualToValue(
+		"AAPL,phandle",
+		&phandle,
+		sizeof(phandle),
+		devicetreeNode);
+}
+
+int
+SecureDTFindNodeWithStringProperty(
+	const char *const propertyName,
+	const char *const propertyValue,
+	const DeviceTreeNode **const devicetreeNode)
+{
+	// The property length for strings that gets encoded in the devicetree blob
+	// includes the null-terminator.
+	return SecureDTFindNodeWithPropertyEqualToValue(
+		propertyName,
+		propertyValue,
+		strlen(propertyValue) + 1,
+		devicetreeNode);
+}
+
 int
 SecureDTLookupEntry(const DTEntry searchPoint, const char *pathName, DTEntry *foundEntry)
 {

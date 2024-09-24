@@ -25,8 +25,48 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+#if defined(KERNEL)
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Xcode doesn't currently set up search paths correctly for Kernel extensions,
+ * so the clang headers are not seen in the correct order to use their types.
+ */
+#endif
+#define USE_CLANG_STDDEF 0
+#else
+#if defined(__has_feature) && __has_feature(modules)
+#define USE_CLANG_STDDEF 1
+#else
+#define USE_CLANG_STDDEF 0
+#endif
+#endif
+
+#if USE_CLANG_STDDEF
+
+#ifndef __SIZE_T
+#define __SIZE_T
+
+#define __need_size_t
+#include <stddef.h>
+#undef __need_size_t
+
+#endif  /* __SIZE_T */
+
+#else
+
 #ifndef _SIZE_T
 #define _SIZE_T
 #include <machine/_types.h> /* __darwin_size_t */
 typedef __darwin_size_t        size_t;
 #endif  /* _SIZE_T */
+
+#endif
+
+#if KERNEL
+#if !defined(_SIZE_UT) && !defined(VM_UNSAFE_TYPES)
+#define _SIZE_UT
+typedef __typeof__(sizeof(int)) size_ut;
+#endif /*  !defined(_SIZE_UT) && !defined(VM_UNSAFE_TYPES) */
+#endif /* KERNEL */
+
+#undef USE_CLANG_STDDEF

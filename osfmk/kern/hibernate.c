@@ -38,9 +38,9 @@
 
 #include <IOKit/IOHibernatePrivate.h>
 #include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 #include <vm/vm_purgeable_internal.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_compressor_xnu.h>
 #include <kern/ecc.h>
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

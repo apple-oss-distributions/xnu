@@ -29,3 +29,10 @@
 #define _CADDR_T
 typedef char *          caddr_t;
 #endif /* _CADDR_T */
+
+#if KERNEL
+#if !defined(_CADDR_UT) && !defined(VM_UNSAFE_TYPES)
+#define _CADDR_UT
+typedef caddr_t caddr_ut;
+#endif /* !defined(_CADDR_UT) && !defined(VM_UNSAFE_TYPES) */
+#endif /* KERNEL */

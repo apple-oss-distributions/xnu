@@ -47,9 +47,10 @@ _skoid_oid_init(struct skoid *skoid, struct sysctl_oid *oid,
     struct sysctl_oid_list *parent, int kind, void *arg1, int arg2,
     const char *name, int (*handler)SYSCTL_HANDLER_ARGS, const char *fmt)
 {
+	const char *__null_terminated sko_name = NULL;
 	ASSERT(oid != NULL);
 	/*
-	 * Note here we use OID2 for current varsion, which does oid alloc/free
+	 * Note here we use OID2 for current version, which does oid alloc/free
 	 * ourselves with mcache
 	 */
 	oid->oid_link.sle_next = NULL;
@@ -60,9 +61,9 @@ _skoid_oid_init(struct skoid *skoid, struct sysctl_oid *oid,
 	oid->oid_arg2 = arg2;
 	if (&skoid->sko_oid == oid) {
 		/* for DNODE, store its name inside skoid */
-		(void) snprintf(skoid->sko_name, sizeof(skoid->sko_name), "%s",
-		    name);
-		oid->oid_name = skoid->sko_name;
+		sko_name = tsnprintf(skoid->sko_name, sizeof(skoid->sko_name),
+		    "%s", name);
+		oid->oid_name = sko_name;
 	} else {
 		/* for leaf property, use static name string */
 		oid->oid_name = name;
@@ -91,8 +92,8 @@ skoid_create(struct skoid *skoid, struct sysctl_oid_list *parent,
 
 __attribute__((always_inline))
 static inline void
-_skoid_add_property(struct skoid *skoid, const char *name, int kind, char *fmt,
-    void *arg1, int arg2, int (*handler)SYSCTL_HANDLER_ARGS)
+_skoid_add_property(struct skoid *skoid, const char *name, int kind,
+    const char *fmt, void *arg1, int arg2, int (*handler)SYSCTL_HANDLER_ARGS)
 {
 	struct sysctl_oid *oid;
 

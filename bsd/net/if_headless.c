@@ -1337,9 +1337,9 @@ headless_ioctl(ifnet_t ifp, u_long cmd, void * data)
 	uint64_t                drv_len;
 	boolean_t               drv_set_command = FALSE;
 	int                     error = 0;
-	struct ifmediareq *     ifmr;
+	struct ifmediareq32 *   ifmr;
 	struct ifreq *          ifr;
-	if_headless_ref             headlessif;
+	if_headless_ref         headlessif;
 	int                     status;
 	user_addr_t             user_addr;
 
@@ -1359,10 +1359,10 @@ headless_ioctl(ifnet_t ifp, u_long cmd, void * data)
 		}
 		status = (headlessif->iff_peer != NULL)
 		    ? (IFM_AVALID | IFM_ACTIVE) : IFM_AVALID;
-		ifmr = (struct ifmediareq *)data;
+		ifmr = (struct ifmediareq32 *)data;
 		user_addr = (cmd == SIOCGIFMEDIA64) ?
-		    CAST_USER_ADDR_T(((struct ifmediareq64 *)ifmr)->ifmu_ulist) :
-		    CAST_USER_ADDR_T(((struct ifmediareq32 *)ifmr)->ifmu_ulist);
+		    CAST_USER_ADDR_T(((struct ifmediareq64 *)data)->ifmu_ulist) :
+		    CAST_USER_ADDR_T(((struct ifmediareq32 *)data)->ifmu_ulist);
 		count = ifmr->ifm_count;
 		ifmr->ifm_active = IFM_ETHER;
 		ifmr->ifm_current = IFM_ETHER;

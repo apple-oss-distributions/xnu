@@ -18,7 +18,7 @@ T_GLOBAL_META(
 
 char g_target_path[PATH_MAX];
 
-T_DECL(syscall, "xnu_quick_test for syscall")
+T_DECL(syscall, "xnu_quick_test for syscall", T_META_TAG_VM_NOT_PREFERRED)
 {
 	int                             my_fd = -1;
 	char *                  my_pathp;
@@ -60,7 +60,7 @@ T_DECL(syscall, "xnu_quick_test for syscall")
 }
 
 T_DECL(fork_wait4_exit,
-    "Tests forking off a process and waiting for the child to exit")
+    "Tests forking off a process and waiting for the child to exit", T_META_TAG_VM_NOT_PREFERRED)
 {
 	int                             my_err, my_status;
 	pid_t                       my_pid, my_wait_pid;
@@ -100,7 +100,7 @@ T_DECL(fork_wait4_exit,
 	    "check if wait4 returns right exit status");
 }
 
-T_DECL(getrusage, "check getrusage works")
+T_DECL(getrusage, "check getrusage works", T_META_TAG_VM_NOT_PREFERRED)
 {
 	struct rusage rubuf;
 

@@ -4,7 +4,8 @@
 
 T_DECL(vm_analytics, "Report VM analytics",
     T_META_ASROOT(true),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1))
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED)
 {
 	int val = 1;
 	int ret = sysctlbyname("vm.analytics_report", NULL, NULL, &val, sizeof(val));

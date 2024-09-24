@@ -242,7 +242,7 @@ cpu_topology_start_cpu( int cpunum )
 	TOPO_DBG("cpu_topology_start() processor_start():\n");
 	if (i < ncpus) {
 		TOPO_DBG("\tlcpu %d\n", cpu_datap(i)->cpu_number);
-		processor_start(cpu_datap(i)->cpu_processor);
+		processor_boot(cpu_datap(i)->cpu_processor);
 		return KERN_SUCCESS;
 	} else {
 		return KERN_FAILURE;

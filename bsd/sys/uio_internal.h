@@ -124,14 +124,14 @@ __private_extern__ void uio_reset_fast( uio_t a_uio,
     int a_spacetype,                                            /* type of address space */
     int a_iodirection );                                /* read or write flag */
 
-__private_extern__ int uio_copyout_user(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyin_user(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyout_sys(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyin_sys(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyout_phys_user(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyin_phys_user(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyout_phys_sys(const char *c_cp, int n, uio_t uio);
-__private_extern__ int uio_copyin_phys_sys(const char *c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyout_user(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyin_user(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyout_sys(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyin_sys(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyout_phys_user(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyin_phys_user(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyout_phys_sys(const char *__sized_by(n) c_cp, int n, uio_t uio);
+__private_extern__ int uio_copyin_phys_sys(const char *__sized_by(n) c_cp, int n, uio_t uio);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

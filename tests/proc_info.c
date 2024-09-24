@@ -741,7 +741,7 @@ free_proc_info(void ** proc_info, int num)
 
 T_DECL(proc_info_listpids_all_pids,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	/*
 	 * Get the value of nprocs with no buffer sent in
@@ -808,7 +808,7 @@ T_DECL(proc_info_listpids_all_pids,
 
 T_DECL(proc_info_listpids_pgrp_only,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(CONF_PROC_COUNT, proc_info_listpids_handler);
 	T_LOG("Test to verify PROC_PGRP_ONLY returns correct value");
@@ -830,7 +830,7 @@ T_DECL(proc_info_listpids_pgrp_only,
 
 T_DECL(proc_info_listpids_ppid_only,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(CONF_PROC_COUNT, proc_info_listpids_handler);
 	T_LOG("Test to verify PROC_PPID_ONLY returns correct value");
@@ -850,7 +850,7 @@ T_DECL(proc_info_listpids_ppid_only,
 
 T_DECL(proc_info_listpids_uid_only,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(CONF_PROC_COUNT, proc_info_listpids_handler);
 	T_LOG("Test to verify PROC_UID_ONLY returns correct value");
@@ -869,7 +869,7 @@ T_DECL(proc_info_listpids_uid_only,
 
 T_DECL(proc_info_listpids_ruid_only,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(CONF_PROC_COUNT, proc_info_listpids_handler);
 	T_LOG("Test to verify PROC_RUID_ONLY returns correct value");
@@ -888,7 +888,7 @@ T_DECL(proc_info_listpids_ruid_only,
 
 T_DECL(proc_info_listpids_tty_only,
     "proc_info API test to verify PROC_INFO_CALL_LISTPIDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int ret = isatty(STDOUT_FILENO);
 	if (ret != 1) {
@@ -918,7 +918,7 @@ T_DECL(proc_info_listpids_tty_only,
 
 T_DECL(proc_info_pidinfo_proc_piduniqidentifierinfo,
     "Test to identify PROC_PIDUNIQIDENTIFIERINFO returns correct unique identifiers for process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	proc_info_caller(P_UNIQIDINFO | C_UNIQIDINFO, proc_info, NULL);
@@ -938,7 +938,7 @@ T_DECL(proc_info_pidinfo_proc_piduniqidentifierinfo,
 
 T_DECL(proc_info_pidinfo_proc_pidtbsdinfo,
     "Test to verify PROC_PIDTBSDINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	int child_pid = 0;
@@ -970,7 +970,7 @@ T_DECL(proc_info_pidinfo_proc_pidtbsdinfo,
 
 T_DECL(proc_info_pidt_shortbsdinfo,
     "Test to verify PROC_PIDT_SHORTBSDINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	int child_pid = 0;
@@ -999,7 +999,7 @@ T_DECL(proc_info_pidt_shortbsdinfo,
 
 T_DECL(proc_info_pidt_bsdinfowithuniqid,
     "Test to verify PROC_PIDT_BSDINFOWITHUNIQID returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[4];
 	int child_pid = 0;
@@ -1060,7 +1060,7 @@ _expect_increasing_taskinfo_times(const char *name, struct proc_taskinfo *early,
 
 T_DECL(proc_info_proc_pidtask_info,
     "Test to verify PROC_PIDTASKINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	proc_info_caller(P_TASK_INFO | P_TASK_INFO_NEW, proc_info, NULL);
@@ -1106,7 +1106,7 @@ T_DECL(proc_info_proc_pidtask_info,
 
 T_DECL(proc_info_proc_pidtaskallinfo,
     "Test to verify PROC_PIDTASKALLINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[4];
 	int child_pid = 0;
@@ -1171,7 +1171,7 @@ T_DECL(proc_info_proc_pidtaskallinfo,
 
 T_DECL(proc_info_proc_pidlistthreads,
     "Test to verify PROC_PIDLISTTHREADS returns valid information about process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[1];
 	proc_info_caller(THREAD_ADDR, proc_info, NULL);
@@ -1179,7 +1179,7 @@ T_DECL(proc_info_proc_pidlistthreads,
 
 T_DECL(proc_info_proc_pidthreadinfo,
     "Test to verify PROC_PIDTHREADINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	int child_pid = 0;
@@ -1217,7 +1217,7 @@ T_DECL(proc_info_proc_pidthreadinfo,
 
 T_DECL(proc_info_proc_threadid64info,
     "Test to verify PROC_PIDTHREADID64INFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	proc_info_caller(PTHINFO | PTHINFO_64, proc_info, NULL);
@@ -1245,7 +1245,7 @@ T_DECL(proc_info_proc_threadid64info,
 
 T_DECL(proc_info_proc_pidthreadpathinfo,
     "Test to verify PROC_PIDTHREADPATHINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[2];
 	proc_info_caller(PTHINFO | PINFO_PATH, proc_info, NULL);
@@ -1276,7 +1276,7 @@ T_DECL(proc_info_proc_pidthreadpathinfo,
 
 T_DECL(proc_info_proc_pidarchinfo,
     "Test to verify PROC_PIDARCHINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[1];
 	proc_info_caller(PAI, proc_info, NULL);
@@ -1298,7 +1298,7 @@ T_DECL(proc_info_proc_pidarchinfo,
 
 T_DECL(proc_info_proc_pidregioninfo,
     "Test to verify PROC_PIDREGIONINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[3];
 	proc_info_caller(PREGINFO, proc_info, NULL);
@@ -1348,7 +1348,7 @@ T_DECL(proc_info_proc_pidregioninfo,
 
 T_DECL(proc_info_proc_pidregionpathinfo,
     "Test to verify PROC_PIDREGIONPATHINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[3];
 	proc_info_caller(PREGINFO_PATH, proc_info, NULL);
@@ -1435,7 +1435,7 @@ T_DECL(proc_info_proc_pidregionpathinfo,
 
 T_DECL(proc_info_proc_pidregionpathinfo2,
     "Test to verify PROC_PIDREGIONPATHINFO2 returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[3];
 	proc_info_caller(PREGINFO_PATH_2, proc_info, NULL);
@@ -1527,7 +1527,7 @@ T_DECL(proc_info_proc_pidregionpathinfo2,
 
 T_DECL(proc_info_proc_pidregionpathinfo3,
     "Test to verify PROC_PIDREGIONPATHINFO3 returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[5];
 	proc_info_caller(PREGINFO_PATH_3, proc_info, NULL);
@@ -1551,7 +1551,7 @@ T_DECL(proc_info_proc_pidregionpathinfo3,
 
 T_DECL(proc_info_proc_pidvnodepathinfo,
     "Test to verify PROC_PIDVNODEPATHINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	void * proc_info[1];
 	proc_info_caller(PVNINFO, proc_info, NULL);
@@ -1586,7 +1586,7 @@ T_DECL(proc_info_proc_pidvnodepathinfo,
 
 T_DECL(proc_info_pidinfo_proc_pidlistfds,
     "proc_info API tests to verify PROC_INFO_CALL_PIDINFO/PROC_PIDLISTFDS",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int retval;
 	int orig_nfiles              = 0;
@@ -1634,7 +1634,7 @@ T_DECL(proc_info_pidinfo_proc_pidlistfds,
 
 T_DECL(proc_info_proc_pidpathinfo,
     "Test to verify PROC_PIDPATHINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	char * pid_path = NULL;
 	pid_path        = malloc(sizeof(char) * PROC_PIDPATHINFO_MAXSIZE);
@@ -1650,7 +1650,7 @@ T_DECL(proc_info_proc_pidpathinfo,
 
 T_DECL(proc_info_proc_pidlistfileports,
     "Test to verify PROC_PIDLISTFILEPORTS returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct proc_fileportinfo * fileport_info = NULL;
 	mach_port_t tmp_file_port                = MACH_PORT_NULL;
@@ -1701,7 +1701,7 @@ T_DECL(proc_info_proc_pidlistfileports,
 
 T_DECL(proc_info_proc_pidcoalitioninfo,
     "Test to verify PROC_PIDCOALITIONINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(1, proc_info_call_pidinfo_handler);
 	int child_pid             = proc_config->child_pids[0];
@@ -1728,7 +1728,7 @@ T_DECL(proc_info_proc_pidcoalitioninfo,
 
 T_DECL(proc_info_proc_pidworkqueueinfo,
     "Test to verify PROC_PIDWORKQUEUEINFO returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(1, proc_info_call_pidinfo_handler);
 	int child_pid             = proc_config->child_pids[0];
@@ -1754,7 +1754,7 @@ T_DECL(proc_info_proc_pidworkqueueinfo,
 }
 T_DECL(proc_info_proc_pidnoteexit,
     "Test to verify PROC_PIDNOTEEXIT returns valid information about the process",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	/*
 	 * Ask the child to close pipe and quit, cleanup pipes for parent
@@ -1775,7 +1775,7 @@ T_DECL(proc_info_proc_pidnoteexit,
 
 T_DECL(proc_info_negative_tests,
     "Test to validate PROC_INFO_CALL_PIDINFO for invalid arguments",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	proc_config_t proc_config = spawn_child_processes(1, proc_info_call_pidinfo_handler);
 	int child_pid             = proc_config->child_pids[0];
@@ -1847,7 +1847,7 @@ print_uptrs(int argc, char * const * argv)
 	}
 }
 
-T_DECL(proc_list_uptrs, "the kernel should return any up-pointers it knows about")
+T_DECL(proc_list_uptrs, "the kernel should return any up-pointers it knows about", T_META_TAG_VM_PREFERRED)
 {
 	if (argc > 0) {
 		print_uptrs(argc, argv);
@@ -1990,7 +1990,7 @@ retry:
 	return kqids;
 }
 
-T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_META_ALL_VALID_ARCHS(true))
+T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	int nkqids;
 	bool found = false;
@@ -2014,7 +2014,7 @@ T_DECL(list_dynamic_kqueues, "the kernel should list IDs of dynamic kqueues", T_
 	free(kqids);
 }
 
-T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic kqueue info", T_META_ALL_VALID_ARCHS(true))
+T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic kqueue info", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	struct kqueue_info kqinfo;
 	int ret;
@@ -2029,7 +2029,7 @@ T_DECL(dynamic_kqueue_basic_info, "the kernel should report valid basic dynamic 
 	T_EXPECT_EQ(kqinfo.kq_stat.vst_ino, EXPECTED_ID, "inode field should be the kqueue's ID");
 }
 
-T_DECL(dynamic_kqueue_extended_info, "the kernel should report valid extended dynamic kqueue info", T_META_ALL_VALID_ARCHS(true))
+T_DECL(dynamic_kqueue_extended_info, "the kernel should report valid extended dynamic kqueue info", T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	struct kevent_extinfo kqextinfo[1];
 	int ret;
@@ -2048,7 +2048,7 @@ T_DECL(dynamic_kqueue_extended_info, "the kernel should report valid extended dy
 #pragma mark proc_listpids
 
 T_DECL(list_kdebug_pids, "the kernel should report processes that are filtered by kdebug",
-    T_META_ASROOT(YES), T_META_RUN_CONCURRENTLY(false))
+    T_META_ASROOT(YES), T_META_RUN_CONCURRENTLY(false), T_META_TAG_VM_PREFERRED)
 {
 	int mib[4] = {CTL_KERN, KERN_KDEBUG};
 	int npids;
@@ -2105,7 +2105,7 @@ prf_end(void)
 	unlink(prf_path);
 }
 
-T_DECL(proc_regionfilename, "proc_regionfilename() should work")
+T_DECL(proc_regionfilename, "proc_regionfilename() should work", T_META_TAG_VM_PREFERRED)
 {
 	static char expected[] = "'very rigorous maritime engineering standards' && the front fell off";
 	static char real[sizeof(expected)];
@@ -2127,7 +2127,7 @@ T_DECL(proc_regionfilename, "proc_regionfilename() should work")
 	T_EXPECT_EQ_STR(basename(prf_path), basename(real), "filename");
 }
 
-T_DECL(proc_regionpath, "PROC_PIDREGIONPATH should return addr, length and path")
+T_DECL(proc_regionpath, "PROC_PIDREGIONPATH should return addr, length and path", T_META_TAG_VM_PREFERRED)
 {
 	int rc;
 	struct proc_regionpath path;
@@ -2162,7 +2162,7 @@ T_DECL(proc_regionpath, "PROC_PIDREGIONPATH should return addr, length and path"
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 #endif
 T_DECL(proc_pidinfo_kernel_task_fail, "calling proc_pidinfo for certain flavors on the kernel task should fail",
-    T_META_ASROOT(YES))
+    T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	int flavors[] = {PROC_PIDREGIONPATH, PROC_PIDREGIONINFO, PROC_PIDREGIONPATHINFO, PROC_PIDREGIONPATHINFO2, PROC_PIDREGIONPATHINFO3};
 	for (int f = 0; f < ARRAY_SIZE(flavors); f++) {

@@ -37,10 +37,11 @@
 #include <sys/queue.h>
 
 struct net_str_id_entry {
-	SLIST_ENTRY(net_str_id_entry)   nsi_next;
-	u_int32_t                                               nsi_flags;
-	u_int32_t                                               nsi_id;
-	char                                                    nsi_string[1]; /* variable lenght string */
+	SLIST_ENTRY(net_str_id_entry) nsi_next;
+	uint32_t nsi_flags;
+	uint32_t nsi_id;
+	uint32_t nsi_length;
+	char nsi_string[__counted_by(nsi_length)];
 };
 
 enum {

@@ -100,11 +100,10 @@ multicast_list_program(struct multicast_list * mc_list,
 {
 	u_char                      alen;
 	int                         error = 0;
-	int                         i;
 	struct multicast_entry *    mc = NULL;
 	struct multicast_list       new_mc_list;
 	struct sockaddr_dl          source_sdl = {};
-	ifmultiaddr_t *             source_multicast_list;
+	ifmultiaddr_t *__null_terminated source_multicast_list;
 	struct sockaddr_dl          target_sdl;
 
 	alen = target_ifp->if_addrlen;
@@ -124,10 +123,9 @@ multicast_list_program(struct multicast_list * mc_list,
 		    source_ifp->if_name, source_ifp->if_unit, error);
 		return error;
 	}
-	for (i = 0; source_multicast_list[i] != NULL; i++) {
-		if (ifmaddr_address(source_multicast_list[i],
-		    SA(&source_sdl),
-		    sizeof(source_sdl)) != 0
+	for (ifmultiaddr_t *__null_terminated ptr = source_multicast_list;
+	    *ptr != NULL; ptr++) {
+		if (ifmaddr_address(*ptr, SA(&source_sdl), sizeof(source_sdl)) != 0
 		    || source_sdl.sdl_family != AF_LINK) {
 			continue;
 		}

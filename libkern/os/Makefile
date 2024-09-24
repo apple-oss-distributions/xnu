@@ -26,6 +26,7 @@ PRIVATE_KERNELFILES = \
 	reason_private.h \
 	refcnt.h \
 	refcnt_internal.h \
+	cxx_safe_buffers.h \
 	system_event_log.h
 
 DATAFILES = \
@@ -40,11 +41,13 @@ DRIVERKIT_DATAFILES = \
 
 EXCLAVEKIT_DATAFILES = \
 	base.h \
-	base_private.h
+	base_private.h \
+	cxx_safe_buffers.h
 
 EXCLAVECORE_DATAFILES = \
 	base.h \
-	base_private.h
+	base_private.h  \
+	cxx_safe_buffers.h
 
 PRIVATE_DATAFILES = \
 	atomic_private.h	\
@@ -52,6 +55,7 @@ PRIVATE_DATAFILES = \
 	atomic_private_impl.h	\
 	base_private.h \
 	reason_private.h \
+	cxx_safe_buffers.h \
 	system_event_log.h
 
 INSTALL_MI_LIST = ${DATAFILES}

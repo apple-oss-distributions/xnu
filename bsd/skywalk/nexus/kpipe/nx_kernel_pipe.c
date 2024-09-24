@@ -287,7 +287,7 @@ nx_kpipe_dom_bind_port(struct kern_nexus *nx, nexus_port_t *nx_port,
 static int
 nx_kpipe_dom_unbind_port(struct kern_nexus *nx, nexus_port_t nx_port)
 {
-	struct nxbind *nxb = NULL;
+	struct nxbind *__single nxb = NULL;
 	int error = 0;
 
 	ASSERT(nx_port != NEXUS_PORT_ANY);
@@ -551,7 +551,7 @@ nx_kpipe_prov_nx_ctor(struct kern_nexus *nx)
 static void
 nx_kpipe_prov_nx_dtor(struct kern_nexus *nx)
 {
-	struct nxbind *nxb;
+	struct nxbind *__single nxb;
 
 	SK_LOCK_ASSERT_HELD();
 

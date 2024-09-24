@@ -139,7 +139,9 @@
 #include <net/necp.h>
 #endif
 
-extern struct ip6protosw *ip6_protox[];
+#include <net/sockaddr_utils.h>
+
+extern struct ip6protosw *ip6_protox[IPPROTO_MAX];
 
 extern uint32_t rip_sendspace;
 extern uint32_t rip_recvspace;
@@ -163,12 +165,12 @@ static int icmp6_ratelimit(const struct in6_addr *, const int, const int);
 static const char *icmp6_redirect_diag(struct in6_addr *,
     struct in6_addr *, struct in6_addr *);
 static struct mbuf *ni6_input(struct mbuf *, int);
-static struct mbuf *ni6_nametodns(const char *, uint32_t, int);
-static int ni6_dnsmatch(const char *, int, const char *, int);
+static struct mbuf *ni6_nametodns(const char *__counted_by(len), uint32_t len, int);
+static int ni6_dnsmatch(const char *__counted_by(alen), int alen, const char *__counted_by(blen), int blen);
 static int ni6_addrs(struct icmp6_nodeinfo *,
-    struct ifnet **, char *);
-static int ni6_store_addrs(struct icmp6_nodeinfo *, struct icmp6_nodeinfo *,
-    struct ifnet *, int);
+    struct ifnet **, char *__indexable);
+static int ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *__indexable nni6,
+    struct ifnet *ifp0, int resid);
 static int icmp6_notify_error(struct mbuf *, int, int, int);
 
 
@@ -280,8 +282,9 @@ icmp6_error(struct mbuf *m, int type, int code, int param)
 void
 icmp6_error_flag(struct mbuf *m, int type, int code, int param, int flags)
 {
-	struct ip6_hdr *oip6, *nip6;
-	struct icmp6_hdr *icmp6;
+	struct ip6_hdr *__single oip6;
+	struct ip6_hdr *nip6;
+	struct icmp6_hdr *__single icmp6;
 	u_int preplen;
 	int off;
 
@@ -358,7 +361,7 @@ icmp6_error_flag(struct mbuf *m, int type, int code, int param, int flags)
 		int nxt = -1;
 		off = ip6_lasthdr(m, 0, IPPROTO_IPV6, &nxt);
 		if (off >= 0 && nxt == IPPROTO_ICMPV6) {
-			struct icmp6_hdr *icp;
+			struct icmp6_hdr *__single icp;
 
 #ifndef PULLDOWN_TEST
 			IP6_EXTHDR_CHECK(m, 0, off + sizeof(struct icmp6_hdr), return );
@@ -463,10 +466,10 @@ int
 icmp6_input(struct mbuf **mp, int *offp, int proto)
 {
 #pragma unused(proto)
-	struct mbuf *m = *mp, *n;
-	struct ifnet *ifp;
+	mbuf_ref_t m = *mp, n;
+	ifnet_ref_t ifp;
 	struct ip6_hdr *ip6, *nip6;
-	struct icmp6_hdr *icmp6, *nicmp6;
+	struct icmp6_hdr *__single icmp6, *__single nicmp6;
 	int off = *offp;
 	int icmp6len = m->m_pkthdr.len - *offp;
 	int code, sum, noff, proxy = 0;
@@ -532,7 +535,7 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 	 * Note: SSM filters are not applied for ICMPv6 traffic.
 	 */
 	if (IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst)) {
-		struct in6_multi        *inm;
+		struct in6_multi *__single inm;
 
 		in6_multihead_lock_shared();
 		IN6_LOOKUP_MULTI(&ip6->ip6_dst, ifp, inm);
@@ -668,7 +671,7 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		}
 		if ((n->m_flags & M_EXT) != 0
 		    || n->m_len < off + sizeof(struct icmp6_hdr)) {
-			struct mbuf *n0 = n;
+			mbuf_ref_t n0 = n;
 			const int maxlen = sizeof(*nip6) + sizeof(*nicmp6);
 
 			/*
@@ -962,7 +965,7 @@ static int
 icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 {
 	struct icmp6_hdr *icmp6;
-	struct ip6_hdr *eip6;
+	struct ip6_hdr *__single eip6;
 	u_int32_t notifymtu;
 	struct sockaddr_in6 icmp6src, icmp6dst;
 
@@ -984,7 +987,7 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 	}
 #endif
 	eip6 = (struct ip6_hdr *)(icmp6 + 1);
-	bzero(&icmp6dst, sizeof(icmp6dst));
+	SOCKADDR_ZERO(&icmp6dst, sizeof(icmp6dst));
 
 	/* Detect the upper level protocol */
 	{
@@ -994,8 +997,8 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 		    sizeof(struct ip6_hdr);
 		struct ip6ctlparam ip6cp;
 		int icmp6type = icmp6->icmp6_type;
-		struct ip6_frag *fh;
-		struct ip6_rthdr *rth;
+		struct ip6_frag *__single fh;
+		struct ip6_rthdr *__single rth;
 		struct ip6_rthdr0 *rth0;
 		int rthlen;
 
@@ -1154,7 +1157,7 @@ notify:
 		if (in6_setscope(&icmp6dst.sin6_addr, m->m_pkthdr.rcvif, IN6_NULL_IF_EMBEDDED_SCOPE(&icmp6dst.sin6_scope_id))) {
 			goto freeit;
 		}
-		bzero(&icmp6src, sizeof(icmp6src));
+		SOCKADDR_ZERO(&icmp6src, sizeof(icmp6src));
 		icmp6src.sin6_len = sizeof(struct sockaddr_in6);
 		icmp6src.sin6_family = AF_INET6;
 		icmp6src.sin6_addr = eip6->ip6_src;
@@ -1184,7 +1187,7 @@ notify:
 
 			lck_mtx_unlock(inet6_domain_mutex);
 
-			(void) (*ctlfunc)(code, (struct sockaddr *)&icmp6dst,
+			(void) (*ctlfunc)(code, SA(&icmp6dst),
 			    &ip6cp, m->m_pkthdr.rcvif);
 
 			lck_mtx_lock(inet6_domain_mutex);
@@ -1200,11 +1203,11 @@ freeit:
 void
 icmp6_mtudisc_update(struct ip6ctlparam *ip6cp, int validated)
 {
-	struct in6_addr *dst = ip6cp->ip6c_finaldst;
-	struct icmp6_hdr *icmp6 = ip6cp->ip6c_icmp6;
-	struct mbuf *m = ip6cp->ip6c_m; /* will be necessary for scope issue */
+	struct in6_addr *__single dst = ip6cp->ip6c_finaldst;
+	struct icmp6_hdr *__single icmp6 = ip6cp->ip6c_icmp6;
+	mbuf_ref_t m = ip6cp->ip6c_m; /* will be necessary for scope issue */
 	u_int mtu = ntohl(icmp6->icmp6_mtu);
-	struct rtentry *rt = NULL;
+	rtentry_ref_t rt = NULL;
 	struct sockaddr_in6 sin6;
 	/*
 	 * we reject ICMPv6 too big with abnormally small value.
@@ -1223,7 +1226,7 @@ icmp6_mtudisc_update(struct ip6ctlparam *ip6cp, int validated)
 		mtu = IPV6_MMTU;
 	}
 
-	bzero(&sin6, sizeof(sin6));
+	SOCKADDR_ZERO(&sin6, sizeof(sin6));
 	sin6.sin6_family = PF_INET6;
 	sin6.sin6_len = sizeof(struct sockaddr_in6);
 	sin6.sin6_addr = *dst;
@@ -1240,7 +1243,7 @@ icmp6_mtudisc_update(struct ip6ctlparam *ip6cp, int validated)
 	 * That requires looking at the cached route for the
 	 * protocol control block.
 	 */
-	rt = rtalloc1_scoped((struct sockaddr *)&sin6, 0,
+	rt = rtalloc1_scoped(SA(&sin6), 0,
 	    RTF_CLONING | RTF_PRCLONING, m->m_pkthdr.rcvif->if_index);
 	if (rt != NULL) {
 		RT_LOCK(rt);
@@ -1267,21 +1270,21 @@ icmp6_mtudisc_update(struct ip6ctlparam *ip6cp, int validated)
  * - joins NI group address at in6_ifattach() time only, does not cope
  *   with hostname changes by sethostname(3)
  */
-#define hostnamelen     (uint32_t)strlen(hostname)
+#define hostnamelen     (uint32_t)strbuflen(hostname, sizeof(hostname))
 static struct mbuf *
 ni6_input(struct mbuf *m, int off)
 {
 	struct icmp6_nodeinfo *ni6, *nni6;
-	struct mbuf *n = NULL;
+	mbuf_ref_t n = NULL;
 	u_int16_t qtype;
 	int subjlen;
 	int replylen = sizeof(struct ip6_hdr) + sizeof(struct icmp6_nodeinfo);
-	struct ni_reply_fqdn *fqdn;
+	struct ni_reply_fqdn *__single fqdn;
 	int addrs;              /* for NI_QTYPE_NODEADDR */
-	struct ifnet *ifp = NULL; /* for NI_QTYPE_NODEADDR */
+	ifnet_ref_t ifp = NULL; /* for NI_QTYPE_NODEADDR */
 	struct sockaddr_in6 sin6; /* double meaning; ip6_dst and subjectaddr */
 	struct sockaddr_in6 sin6_d; /* XXX: we should retrieve this from m_aux */
-	struct ip6_hdr *ip6;
+	struct ip6_hdr *__single ip6;
 	int oldfqdn = 0;        /* if 1, return pascal string (03 draft) */
 	char *subj = NULL;
 
@@ -1402,7 +1405,7 @@ ni6_input(struct mbuf *m, int off)
 			    &sin6.sin6_addr);
 			in6_embedscope(&sin6.sin6_addr, &sin6, NULL, NULL,
 			    NULL, IN6_NULL_IF_EMBEDDED_SCOPE(&sin6.sin6_scope_id));
-			bzero(&sin6_d, sizeof(sin6_d));
+			SOCKADDR_ZERO(&sin6_d, sizeof(sin6_d));
 			sin6_d.sin6_family = AF_INET6; /* not used, actually */
 			sin6_d.sin6_len = sizeof(sin6_d); /* ditto */
 			sin6_d.sin6_addr = ip6->ip6_dst;
@@ -1410,7 +1413,7 @@ ni6_input(struct mbuf *m, int off)
 			    &ip6->ip6_dst);
 			in6_embedscope(&sin6_d.sin6_addr, &sin6_d, NULL, NULL,
 			    NULL, IN6_NULL_IF_EMBEDDED_SCOPE(&sin6_d.sin6_scope_id));
-			subj = (char *)&sin6;
+			subj = (char*)__SA_UTILS_CONV_TO_BYTES(&sin6);
 			if (SA6_ARE_ADDR_EQUAL(&sin6, &sin6_d)) {
 				break;
 			}
@@ -1630,11 +1633,11 @@ bad:
  */
 static struct mbuf *
 ni6_nametodns(
-	const char *name,
+	const char *__counted_by(namelen)name,
 	uint32_t namelen,
 	int old)        /* return pascal string if non-zero */
 {
-	struct mbuf *m;
+	mbuf_ref_t m;
 	char *cp, *ep;
 	const char *p, *q;
 	int i, nterm;
@@ -1743,28 +1746,26 @@ fail:
  * XXX upper/lowercase match (see RFC2065)
  */
 static int
-ni6_dnsmatch(const char *a, int alen, const char *b, int blen)
+ni6_dnsmatch(const char *__counted_by(alen0)a0, int alen0, const char *__counted_by(blen0)b0, int blen0)
 {
-	const char *a0, *b0;
+	const char *a = a0, *b = b0;
 	int l;
 
 	/* simplest case - need validation? */
-	if (alen == blen && bcmp(a, b, alen) == 0) {
+	if (alen0 == blen0 && bcmp(a, b, alen0) == 0) {
 		return 1;
 	}
 
-	a0 = a;
-	b0 = b;
-
 	/* termination is mandatory */
-	if (alen < 2 || blen < 2) {
+	if (alen0 < 2 || blen0 < 2) {
 		return 0;
 	}
-	if (a0[alen - 1] != '\0' || b0[blen - 1] != '\0') {
+	if (a0[alen0 - 1] != '\0' || b0[blen0 - 1] != '\0') {
 		return 0;
 	}
-	alen--;
-	blen--;
+
+	const int alen = alen0 - 1;
+	const int blen = blen0 - 1;
 
 	while (a - a0 < alen && b - b0 < blen) {
 		if (a - a0 + 1 > alen || b - b0 + 1 > blen) {
@@ -1816,12 +1817,12 @@ ni6_dnsmatch(const char *a, int alen, const char *b, int blen)
  * calculate the number of addresses to be returned in the node info reply.
  */
 static int
-ni6_addrs(struct icmp6_nodeinfo *ni6, struct ifnet **ifpp, char *subj)
+ni6_addrs(struct icmp6_nodeinfo *ni6, struct ifnet **ifpp, char *__indexable subj)
 {
-	struct ifnet *ifp;
-	struct in6_ifaddr *ifa6;
-	struct ifaddr *ifa;
-	struct sockaddr_in6 *subj_ip6 = NULL; /* XXX pedant */
+	ifnet_ref_t ifp;
+	struct in6_ifaddr *__single ifa6;
+	struct ifaddr *__single ifa;
+	struct sockaddr_in6 *__single subj_ip6 = NULL; /* XXX pedant */
 	int addrs = 0, addrsofif, iffound = 0;
 	int niflags = ni6->ni_flags;
 
@@ -1835,7 +1836,7 @@ ni6_addrs(struct icmp6_nodeinfo *ni6, struct ifnet **ifpp, char *subj)
 			if (subj == NULL) { /* must be impossible... */
 				return 0;
 			}
-			subj_ip6 = (struct sockaddr_in6 *)(void *)subj;
+			subj_ip6 = SIN6(subj);
 			break;
 		default:
 			/*
@@ -1857,7 +1858,7 @@ ni6_addrs(struct icmp6_nodeinfo *ni6, struct ifnet **ifpp, char *subj)
 				IFA_UNLOCK(ifa);
 				continue;
 			}
-			ifa6 = (struct in6_ifaddr *)ifa;
+			ifa6 = ifatoia6(ifa);
 
 			if ((niflags & NI_NODEADDR_FLAG_ALL) == 0 &&
 			    IN6_ARE_ADDR_EQUAL(&subj_ip6->sin6_addr,
@@ -1935,13 +1936,13 @@ ni6_addrs(struct icmp6_nodeinfo *ni6, struct ifnet **ifpp, char *subj)
 }
 
 static int
-ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
+ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *__indexable nni6,
     struct ifnet *ifp0, int resid)
 {
-	struct ifnet *ifp = ifp0;
-	struct in6_ifaddr *ifa6;
-	struct ifaddr *ifa;
-	struct ifnet *ifp_dep = NULL;
+	ifnet_ref_t ifp = ifp0;
+	struct in6_ifaddr *__single ifa6;
+	struct ifaddr *__single ifa;
+	ifnet_ref_t ifp_dep = NULL;
 	int copied = 0, allow_deprecated = 0;
 	u_char *cp = (u_char *)(nni6 + 1);
 	int niflags = ni6->ni_flags;
@@ -1962,14 +1963,14 @@ again:
 		ifnet_lock_shared(ifp);
 		for (ifa = ifp->if_addrlist.tqh_first; ifa;
 		    ifa = ifa->ifa_list.tqe_next) {
-			struct in6_addrlifetime_i *lt;
+			struct in6_addrlifetime_i *__single lt;
 
 			IFA_LOCK(ifa);
 			if (ifa->ifa_addr->sa_family != AF_INET6) {
 				IFA_UNLOCK(ifa);
 				continue;
 			}
-			ifa6 = (struct in6_ifaddr *)ifa;
+			ifa6 = ifatoia6(ifa);
 
 			if ((ifa6->ia6_flags & IN6_IFF_DEPRECATED) != 0 &&
 			    allow_deprecated == 0) {
@@ -2111,15 +2112,15 @@ again:
 static int
 icmp6_rip6_input(struct mbuf **mp, int off)
 {
-	struct mbuf *m = *mp;
+	mbuf_ref_t m = *mp;
 	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
-	struct in6pcb *in6p;
-	struct in6pcb *last = NULL;
+	struct in6pcb *__single in6p;
+	struct in6pcb *__single last = NULL;
 	struct sockaddr_in6 rip6src;
 	struct icmp6_hdr *icmp6;
-	struct mbuf *opts = NULL;
+	mbuf_ref_t opts = NULL;
 	int ret = 0;
-	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	ifnet_ref_t ifp = m->m_pkthdr.rcvif;
 
 #ifndef PULLDOWN_TEST
 	/* this is assumed to be safe. */
@@ -2136,7 +2137,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 	 * XXX: the address may have embedded scope zone ID, which should be
 	 * hidden from applications.
 	 */
-	bzero(&rip6src, sizeof(rip6src));
+	SOCKADDR_ZERO(&rip6src, sizeof(rip6src));
 	rip6src.sin6_family = AF_INET6;
 	rip6src.sin6_len = sizeof(struct sockaddr_in6);
 	rip6src.sin6_addr = ip6->ip6_src;
@@ -2175,7 +2176,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 		}
 
 		if (last) {
-			struct  mbuf *n;
+			mbuf_ref_t n;
 			if ((n = m_copy(m, 0, (int)M_COPYALL)) != NULL) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
 				    SOFLOW_ENABLED(last->in6p_socket) ||
@@ -2192,7 +2193,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 				m_adj(n, off);
 				so_recv_data_stat(last->in6p_socket, m, 0);
 				if (sbappendaddr(&last->in6p_socket->so_rcv,
-				    (struct sockaddr *)&rip6src,
+				    SA(&rip6src),
 				    n, opts, NULL) != 0) {
 					sorwakeup(last->in6p_socket);
 				}
@@ -2214,7 +2215,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 		m_adj(m, off);
 		so_recv_data_stat(last->in6p_socket, m, 0);
 		if (sbappendaddr(&last->in6p_socket->so_rcv,
-		    (struct sockaddr *)&rip6src, m, opts, NULL) != 0) {
+		    SA(&rip6src), m, opts, NULL) != 0) {
 			sorwakeup(last->in6p_socket);
 		}
 	} else {
@@ -2238,16 +2239,17 @@ error:
 void
 icmp6_reflect(struct mbuf *m, size_t off)
 {
-	struct mbuf *m_ip6hdr = m;
+	mbuf_ref_t m_ip6hdr = m;
 	struct ip6_hdr *ip6;
 	struct icmp6_hdr *icmp6;
-	struct in6_ifaddr *ia;
-	struct in6_addr t, src_storage, *src = 0;
+	struct in6_ifaddr *__single ia;
+	struct in6_addr t, src_storage;
+	struct in6_addr *__single src = 0;
 	int plen;
 	int type, code;
-	struct ifnet *outif = NULL;
+	ifnet_ref_t outif = NULL;
 	struct sockaddr_in6 sa6_src, sa6_dst;
-	struct nd_ifinfo *ndi = NULL;
+	struct nd_ifinfo *__single ndi = NULL;
 	u_int32_t oflow;
 	uint32_t sifscope = IFSCOPE_NONE;
 	uint32_t fifscope = IFSCOPE_NONE;
@@ -2336,7 +2338,7 @@ icmp6_reflect(struct mbuf *m, size_t off)
 	 * already embedded IDs or the received interface (if any).
 	 * Note that rcvif may be NULL.
 	 */
-	bzero(&sa6_src, sizeof(sa6_src));
+	SOCKADDR_ZERO(&sa6_src, sizeof(sa6_src));
 	sa6_src.sin6_family = AF_INET6;
 	sa6_src.sin6_len = sizeof(sa6_src);
 	sa6_src.sin6_addr = ip6->ip6_dst;
@@ -2355,7 +2357,7 @@ icmp6_reflect(struct mbuf *m, size_t off)
 		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
 	}
 
-	bzero(&sa6_dst, sizeof(sa6_dst));
+	SOCKADDR_ZERO(&sa6_dst, sizeof(sa6_dst));
 	sa6_dst.sin6_family = AF_INET6;
 	sa6_dst.sin6_len = sizeof(sa6_dst);
 	sa6_dst.sin6_addr = t;
@@ -2411,7 +2413,7 @@ icmp6_reflect(struct mbuf *m, size_t off)
 		 * that we do not own.  Select a source address based on the
 		 * source address of the erroneous packet.
 		 */
-		bzero(&sin6, sizeof(sin6));
+		SOCKADDR_ZERO(&sin6, sizeof(sin6));
 		sin6.sin6_family = AF_INET6;
 		sin6.sin6_len = sizeof(sin6);
 		sin6.sin6_addr = ip6->ip6_dst; /* zone ID should be embedded */
@@ -2505,22 +2507,21 @@ icmp6_redirect_diag(struct in6_addr *src6,
     struct in6_addr *tgt6)
 {
 	static char buf[1024];
-	snprintf(buf, sizeof(buf), "(src=%s dst=%s tgt=%s)",
-	    ip6_sprintf(src6), ip6_sprintf(dst6), ip6_sprintf(tgt6));
-	return buf;
+	return tsnprintf(buf, sizeof(buf), "(src=%s dst=%s tgt=%s)",
+	           ip6_sprintf(src6), ip6_sprintf(dst6), ip6_sprintf(tgt6));
 }
 
 void
 icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 {
-	struct ifnet *ifp = NULL;
-	struct ip6_hdr *ip6 = NULL;
+	ifnet_ref_t ifp = NULL;
+	struct ip6_hdr *__single ip6 = NULL;
 	struct nd_redirect *nd_rd = NULL;
 	char *lladdr = NULL;
 	int lladdrlen = 0;
-	u_char *redirhdr = NULL;
+	char *redirhdr = NULL;
 	int redirhdrlen = 0;
-	struct rtentry *rt = NULL;
+	rtentry_ref_t rt = NULL;
 	int is_router = 0;
 	int is_onlink = 0;
 	struct in6_addr src6 = {};
@@ -2589,16 +2590,16 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 	{
 		/* ip6->ip6_src must be equal to gw for icmp6->icmp6_reddst */
 		struct sockaddr_in6 sin6;
-		struct in6_addr *gw6;
+		struct in6_addr *__single gw6;
 
-		bzero(&sin6, sizeof(sin6));
+		SOCKADDR_ZERO(&sin6, sizeof(sin6));
 		sin6.sin6_family = AF_INET6;
 		sin6.sin6_len = sizeof(struct sockaddr_in6);
 		if (!in6_embedded_scope) {
 			sin6.sin6_scope_id = reddst_ifscope;
 		}
 		bcopy(&reddst6, &sin6.sin6_addr, sizeof(reddst6));
-		rt = rtalloc1_scoped((struct sockaddr *)&sin6, 0, 0, ifp->if_index);
+		rt = rtalloc1_scoped(SA(&sin6), 0, 0, ifp->if_index);
 		if (rt) {
 			RT_LOCK(rt);
 			if (rt->rt_gateway == NULL ||
@@ -2612,10 +2613,8 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 				goto bad;
 			}
 
-			gw6 = &(((struct sockaddr_in6 *)(void *)
-			    rt->rt_gateway)->sin6_addr);
-			if (!in6_are_addr_equal_scoped(&src6, gw6, src_ifscope, ((struct sockaddr_in6 *)(void *)
-			    rt->rt_gateway)->sin6_scope_id)) {
+			gw6 = &((SIN6(rt->rt_gateway))->sin6_addr);
+			if (!in6_are_addr_equal_scoped(&src6, gw6, src_ifscope, (SIN6(rt->rt_gateway))->sin6_scope_id)) {
 				nd6log(error,
 				    "ICMP6 redirect rejected; "
 				    "not equal to gw-for-src=%s (must be same): "
@@ -2662,6 +2661,7 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 	/* validation passed */
 
 	icmp6len -= sizeof(*nd_rd);
+
 	nd6_option_init(nd_rd + 1, icmp6len, &ndopts);
 	if (nd6_options(&ndopts) < 0) {
 		nd6log(info, "icmp6_redirect_input: "
@@ -2672,13 +2672,11 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 	}
 
 	if (ndopts.nd_opts_tgt_lladdr) {
-		lladdr = (char *)(ndopts.nd_opts_tgt_lladdr + 1);
-		lladdrlen = ndopts.nd_opts_tgt_lladdr->nd_opt_len << 3;
+		ND_OPT_LLADDR(ndopts.nd_opts_tgt_lladdr, nd_opt_len, lladdr, lladdrlen);
 	}
 
 	if (ndopts.nd_opts_rh) {
-		redirhdrlen = ndopts.nd_opts_rh->nd_opt_rh_len;
-		redirhdr = (u_char *)(ndopts.nd_opts_rh + 1); /* xxx */
+		ND_OPT_LLADDR(ndopts.nd_opts_rh, nd_opt_rh_len, redirhdr, redirhdrlen);
 	}
 
 	if (lladdr && ((ifp->if_addrlen + 2 + 7) & ~7) != lladdrlen) {
@@ -2700,9 +2698,9 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 		struct sockaddr_in6 sgw;
 		struct sockaddr_in6 ssrc;
 
-		bzero(&sdst, sizeof(sdst));
-		bzero(&sgw, sizeof(sgw));
-		bzero(&ssrc, sizeof(ssrc));
+		SOCKADDR_ZERO(&sdst, sizeof(sdst));
+		SOCKADDR_ZERO(&sgw, sizeof(sgw));
+		SOCKADDR_ZERO(&ssrc, sizeof(ssrc));
 		sdst.sin6_family = sgw.sin6_family = ssrc.sin6_family = AF_INET6;
 		sdst.sin6_len = sgw.sin6_len = ssrc.sin6_len =
 		    sizeof(struct sockaddr_in6);
@@ -2715,15 +2713,15 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 		bcopy(&reddst6, &sdst.sin6_addr, sizeof(struct in6_addr));
 		bcopy(&src6, &ssrc.sin6_addr, sizeof(struct in6_addr));
 
-		rtredirect(ifp, (struct sockaddr *)&sdst,
-		    (struct sockaddr *)&sgw, NULL, RTF_GATEWAY | RTF_HOST,
-		    (struct sockaddr *)&ssrc, NULL);
+		rtredirect(ifp, SA(&sdst),
+		    SA(&sgw), NULL, RTF_GATEWAY | RTF_HOST,
+		    SA(&ssrc), NULL);
 	}
 	/* finally update cached route in each socket via pfctlinput */
 	{
 		struct sockaddr_in6 sdst;
 
-		bzero(&sdst, sizeof(sdst));
+		SOCKADDR_ZERO(&sdst, sizeof(sdst));
 		sdst.sin6_family = AF_INET6;
 		sdst.sin6_len = sizeof(struct sockaddr_in6);
 		if (!in6_embedded_scope) {
@@ -2731,9 +2729,9 @@ icmp6_redirect_input(struct mbuf *m, int off, int icmp6len)
 		}
 		bcopy(&reddst6, &sdst.sin6_addr, sizeof(struct in6_addr));
 
-		pfctlinput(PRC_REDIRECT_HOST, (struct sockaddr *)&sdst);
+		pfctlinput(PRC_REDIRECT_HOST, SA(&sdst));
 #if IPSEC
-		key_sa_routechange((struct sockaddr *)&sdst);
+		key_sa_routechange(SA(&sdst));
 #endif
 	}
 
@@ -2749,16 +2747,16 @@ bad:
 void
 icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 {
-	struct ifnet *ifp;      /* my outgoing interface */
+	ifnet_ref_t ifp;      /* my outgoing interface */
 	struct in6_addr ifp_ll6;
-	struct in6_addr *router_ll6;
-	struct ip6_hdr *sip6;   /* m0 as struct ip6_hdr */
-	struct mbuf *m = NULL;  /* newly allocated one */
-	struct ip6_hdr *ip6;    /* m as struct ip6_hdr */
+	struct in6_addr *__single router_ll6;
+	struct ip6_hdr *__single sip6;   /* m0 as struct ip6_hdr */
+	mbuf_ref_t m = NULL;  /* newly allocated one */
+	struct ip6_hdr *ip6;             /* m as struct ip6_hdr */
 	struct nd_redirect *nd_rd;
 	size_t maxlen;
 	u_char *p;
-	struct ifnet *outif = NULL;
+	ifnet_ref_t outif = NULL;
 	struct sockaddr_in6 src_sa;
 	struct ip6_out_args ip6oa;
 
@@ -2794,7 +2792,7 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 	 *  [RFC 2461, sec 8.2]
 	 */
 	sip6 = mtod(m0, struct ip6_hdr *);
-	bzero(&src_sa, sizeof(src_sa));
+	SOCKADDR_ZERO(&src_sa, sizeof(src_sa));
 	src_sa.sin6_family = AF_INET6;
 	src_sa.sin6_len = sizeof(src_sa);
 	src_sa.sin6_addr = sip6->ip6_src;
@@ -2857,8 +2855,8 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 
 	/* get ip6 linklocal address for the router. */
 	if (rt->rt_gateway && (rt->rt_flags & RTF_GATEWAY)) {
-		struct sockaddr_in6 *sin6;
-		sin6 = (struct sockaddr_in6 *)(void *)rt->rt_gateway;
+		struct sockaddr_in6 *__single sin6;
+		sin6 = SIN6(rt->rt_gateway);
 		router_ll6 = &sin6->sin6_addr;
 		if (!IN6_IS_ADDR_LINKLOCAL(router_ll6)) {
 			router_ll6 = (struct in6_addr *)NULL;
@@ -2914,9 +2912,9 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 
 	{
 		/* target lladdr option */
-		struct rtentry *rt_router = NULL;
+		rtentry_ref_t rt_router = NULL;
 		int len;
-		struct sockaddr_dl *sdl;
+		struct sockaddr_dl *__single sdl;
 		struct nd_opt_hdr *nd_opt;
 		char *lladdr;
 
@@ -2938,8 +2936,7 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 		if (!(rt_router->rt_flags & RTF_GATEWAY) &&
 		    (rt_router->rt_flags & RTF_LLINFO) &&
 		    (rt_router->rt_gateway->sa_family == AF_LINK) &&
-		    (sdl = (struct sockaddr_dl *)(void *)
-		    rt_router->rt_gateway) && sdl->sdl_alen) {
+		    (sdl = SDL(rt_router->rt_gateway)) && sdl->sdl_alen) {
 			nd_opt = (struct nd_opt_hdr *)p;
 			nd_opt->nd_opt_type = ND_OPT_TARGET_LINKADDR;
 			nd_opt->nd_opt_len = (uint8_t)(len >> 3);
@@ -3087,7 +3084,7 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 {
 	int error = 0;
 	size_t optlen;
-	struct inpcb *inp = sotoinpcb(so);
+	struct inpcb *__single inp = sotoinpcb(so);
 	int level, op, optname;
 
 	if (sopt) {
@@ -3108,7 +3105,7 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 		switch (optname) {
 		case ICMP6_FILTER:
 		{
-			struct icmp6_filter *p;
+			struct icmp6_filter *__single p;
 
 			if (optlen != 0 && optlen != sizeof(*p)) {
 				error = EMSGSIZE;
@@ -3126,7 +3123,7 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 				 */
 				ICMP6_FILTER_SETPASSALL(inp->in6p_icmp6filt);
 			} else {
-				error = sooptcopyin(sopt, inp->in6p_icmp6filt, optlen,
+				error = sooptcopyin(sopt, __unsafe_forge_bidi_indexable(void*, inp->in6p_icmp6filt, optlen), optlen,
 				    optlen);
 			}
 			break;
@@ -3146,8 +3143,8 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = EINVAL;
 				break;
 			}
-			error = sooptcopyout(sopt, inp->in6p_icmp6filt,
-			    MIN(sizeof(struct icmp6_filter), optlen));
+			size_t copylen = MIN(sizeof(struct icmp6_filter), optlen);
+			error = sooptcopyout(sopt, __unsafe_forge_bidi_indexable(void*, inp->in6p_icmp6filt, optlen), copylen);
 			break;
 		}
 
@@ -3175,16 +3172,20 @@ icmp6_dgram_ctloutput(struct socket *so, struct sockopt *sopt)
 		return rip6_ctloutput(so, sopt);
 	}
 
-	if (sopt->sopt_level == IPPROTO_ICMPV6) {
+	/* Allow <SOL_SOCKET,SO_BINDTODEVICE> at this level */
+	if (sopt->sopt_level == SOL_SOCKET) {
+		if (sopt->sopt_name == SO_BINDTODEVICE) {
+			return ip6_ctloutput(so, sopt);
+		}
+		return EINVAL;
+	} else if (sopt->sopt_level == IPPROTO_ICMPV6) {
 		switch (sopt->sopt_name) {
 		case ICMP6_FILTER:
 			return icmp6_ctloutput(so, sopt);
 		default:
 			return EPERM;
 		}
-	}
-
-	if (sopt->sopt_level != IPPROTO_IPV6) {
+	} else if (sopt->sopt_level != IPPROTO_IPV6) {
 		return EINVAL;
 	}
 
@@ -3231,8 +3232,8 @@ icmp6_dgram_send(struct socket *so, int flags, struct mbuf *m,
 {
 #pragma unused(flags, p)
 	int error = 0;
-	struct inpcb *inp = sotoinpcb(so);
-	struct icmp6_hdr *icmp6;
+	struct inpcb *__single inp = sotoinpcb(so);
+	struct icmp6_hdr *__single icmp6;
 
 	if (inp == NULL
 #if NECP
@@ -3275,6 +3276,8 @@ icmp6_dgram_send(struct socket *so, int flags, struct mbuf *m,
 		}
 	}
 
+	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
+
 	return rip6_output(m, so, SIN6(nam), control, 0);
 bad:
 	VERIFY(error != 0);
@@ -3293,7 +3296,7 @@ bad:
 __private_extern__ int
 icmp6_dgram_attach(struct socket *so, int proto, struct proc *p)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	int error;
 
 	inp = sotoinpcb(so);

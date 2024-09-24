@@ -83,7 +83,7 @@ tests()
 struct Base { };
 struct Derived : Base { };
 
-T_DECL(ctor_begin_end, "bounded_ptr.ctor.begin_end") {
+T_DECL(ctor_begin_end, "bounded_ptr.ctor.begin_end", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

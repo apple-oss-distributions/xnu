@@ -49,15 +49,19 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 
-#include <vm/memory_object.h>
+#include <vm/memory_object_internal.h>
 #include <vm/vm_kern.h>
-#include <vm/vm_fault.h>
+#include <vm/vm_fault_internal.h>
 #include <vm/vm_map.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
-#include <vm/vm_shared_region.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_protos_internal.h>
+#include <vm/vm_shared_region_internal.h>
+#include <vm/vm_ubc.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_object_internal.h>
 
 #include <sys/kdebug_triage.h>
+#include <sys/random.h>
 
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
@@ -154,6 +158,22 @@ int shared_region_key_count = 0;              /* number of active shared_region_
 queue_head_t shared_region_jop_key_queue = QUEUE_HEAD_INITIALIZER(shared_region_jop_key_queue);
 LCK_GRP_DECLARE(shared_region_jop_key_lck_grp, "shared_region_jop_key");
 LCK_MTX_DECLARE(shared_region_jop_key_lock, &shared_region_jop_key_lck_grp);
+
+#if __has_feature(ptrauth_calls)
+/*
+ * Generate a random pointer signing key that isn't 0.
+ */
+uint64_t
+generate_jop_key(void)
+{
+	uint64_t key;
+
+	do {
+		read_random(&key, sizeof key);
+	} while (key == 0);
+	return key;
+}
+#endif /* __has_feature(ptrauth_calls) */
 
 /*
  * Find the pointer signing key for the give shared_region_id.
@@ -768,7 +788,7 @@ retry_src_fault:
 		/*
 		 * Cleanup the result of vm_fault_page() of the source page.
 		 */
-		PAGE_WAKEUP_DONE(src_page);
+		vm_page_wakeup_done(src_page_object, src_page);
 		src_page = VM_PAGE_NULL;
 		vm_object_paging_end(src_page_object);
 		vm_object_unlock(src_page_object);
@@ -888,7 +908,7 @@ shared_region_pager_terminate_internal(
 		pager->srp_backing_object = VM_OBJECT_NULL;
 	}
 	/* trigger the destruction of the memory object */
-	memory_object_destroy(pager->srp_header.mo_control, VM_OBJECT_DESTROY_UNKNOWN_REASON);
+	memory_object_destroy(pager->srp_header.mo_control, VM_OBJECT_DESTROY_PAGER);
 }
 
 /*

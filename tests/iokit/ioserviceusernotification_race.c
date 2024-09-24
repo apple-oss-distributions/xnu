@@ -190,7 +190,7 @@ T_HELPER_DECL(ioserviceusernotification_race_helper, "ioserviceusernotification_
 // How much ioclasscount variation to tolerate before we think we have a leak
 #define IOCLASSCOUNT_LEAK_TOLERANCE 20
 
-T_DECL(ioserviceusernotification_race, "Test IOServiceUserNotification race")
+T_DECL(ioserviceusernotification_race, "Test IOServiceUserNotification race", T_META_TAG_VM_PREFERRED)
 {
 	io_service_t service = IO_OBJECT_NULL;
 	io_connect_t connect = IO_OBJECT_NULL;

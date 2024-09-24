@@ -67,12 +67,16 @@ subsystem
 #endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  vm_map 3800;
 
+#if KERNEL_SERVER
+#define VM_KERNEL_SERVER 1
+#endif
+
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
 #include <mach_debug/mach_debug_types.defs>
 
 #define CONCAT(a,b) a ## b
-#if !KERNEL && !LIBSYSCALL_INTERFACE
+#if !KERNEL && !LIBSYSCALL_INTERFACE && !KERNEL_VM_TEST
 #define PREFIX(NAME) CONCAT(_kernelrpc_, NAME)
 #else
 #define PREFIX(NAME) NAME
@@ -120,13 +124,13 @@ routine vm_region(
  *	allocation actually took place is returned.
  */
 
-#if !KERNEL && !LIBSYSCALL_INTERFACE
+#if !KERNEL && !LIBSYSCALL_INTERFACE && !KERNEL_VM_TEST
 skip;
 #else
 routine PREFIX(KERNEL_SERVER_SUFFIX(vm_allocate))(
 		target_task	: vm_task_entry_t;
-	inout	address		: vm_address_t;
-		size		: vm_size_t;
+	inout	address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
 		flags		: int);
 
 #endif
@@ -136,13 +140,13 @@ routine PREFIX(KERNEL_SERVER_SUFFIX(vm_allocate))(
  *	address space of the target task.
  */
 
-#if !KERNEL && !LIBSYSCALL_INTERFACE
+#if !KERNEL && !LIBSYSCALL_INTERFACE && !KERNEL_VM_TEST
 skip;
 #else
 routine PREFIX(vm_deallocate)(
 		target_task	: vm_task_entry_t;
-		address		: vm_address_t;
-		size		: vm_size_t);
+		address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t));
 
 #endif
 
@@ -157,7 +161,7 @@ routine PREFIX(vm_deallocate)(
  *	*permissions*.
  */
 
-#if !KERNEL && !LIBSYSCALL_INTERFACE
+#if !KERNEL && !LIBSYSCALL_INTERFACE && !KERNEL_VM_TEST
 skip;
 #else
 routine PREFIX(vm_protect)(
@@ -190,8 +194,8 @@ routine vm_inherit(
  */
 routine PREFIX(vm_read) (
 		target_task	: vm_map_read_t;
-		address		: vm_address_t;
-		size		: vm_size_t;
+		address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
 	out	data		: pointer_t);
 
 /* 
@@ -212,7 +216,7 @@ routine vm_read_list(
  */
 routine vm_write(
 		target_task	: vm_map_t;
-		address		: vm_address_t;
+		address		: VM_USE_TMPTYPE(vm_address_t);
 		data		: pointer_t);
 
 /*
@@ -227,9 +231,9 @@ routine vm_write(
  */
 routine vm_copy(
 		target_task	: vm_map_t;
-		source_address	: vm_address_t;
-		size		: vm_size_t;
-		dest_address	: vm_address_t);
+		source_address	: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		dest_address	: VM_USE_TMPTYPE(vm_address_t));
 
 /*
  *	Returns the contents of the specified range of the
@@ -241,10 +245,10 @@ routine vm_copy(
  */
 routine vm_read_overwrite(
 		target_task	: vm_map_read_t;
-		address		: vm_address_t;
-		size		: vm_size_t;
-		data		: vm_address_t;
-	out	outsize		: vm_size_t);
+		address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		data		: VM_USE_TMPTYPE(vm_address_t);
+	out	outsize		: VM_USE_TMPTYPE(vm_size_t));
 
 
 routine vm_msync(
@@ -299,16 +303,16 @@ routine vm_behavior_set(
  */
 routine PREFIX(KERNEL_SERVER_SUFFIX(vm_map)) (
 		target_task	: vm_task_entry_t;
-	inout	address		: vm_address_t;
-		size		: vm_size_t;
-		mask		: vm_address_t;
+	inout	address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		mask		: VM_USE_TMPTYPE(vm_address_t);
 		flags		: int;
 		object		: mem_entry_name_port_t;
-		offset		: vm_offset_t;
+		offset		: VM_USE_TMPTYPE(vm_offset_t);
 		copy		: boolean_t;
-		cur_protection	: vm_prot_t;
-		max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+		cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 /*
  *	Set/Get special properties of memory associated
@@ -327,16 +331,16 @@ routine vm_machine_attribute(
  */
 routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap)) (
 		target_task	: vm_map_t;
-	inout	target_address	: vm_address_t;
-		size		: vm_size_t;
-		mask		: vm_address_t;
+	inout	target_address	: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		mask		: VM_USE_TMPTYPE(vm_address_t);
 		flags		: int;
 		src_task	: vm_map_t;
-		src_address	: vm_address_t;
+		src_address	: VM_USE_TMPTYPE(vm_address_t);
 		copy		: boolean_t;
-	out	cur_protection	: vm_prot_t;
-	out	max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+	out	cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+	out	max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 /*
  *	Require that all future virtual memory allocation
@@ -357,9 +361,9 @@ routine task_wire(
 
 routine mach_make_memory_entry(
 		target_task	:vm_map_t;
-	inout	size		:vm_size_t;
-		offset		:vm_offset_t;
-		permission	:vm_prot_t;
+	inout	size		:VM_USE_TMPTYPE(vm_size_t);
+		offset		:VM_USE_TMPTYPE(vm_offset_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 	out	object_handle	:mem_entry_name_port_move_send_t;
 		parent_entry	:mem_entry_name_port_t);
 
@@ -434,9 +438,9 @@ routine vm_region_64(
 
 routine mach_make_memory_entry_64(
 		target_task	:vm_map_t;
-	inout	size		:memory_object_size_t;
-		offset		:memory_object_offset_t;
-		permission	:vm_prot_t;
+	inout	size		:VM_USE_TMPTYPE(memory_object_size_t);
+		offset		:VM_USE_TMPTYPE(memory_object_offset_t);
+		permission	:VM_USE_TMPTYPE(vm_prot_t);
 	out	object_handle	:mach_port_move_send_t;
 		parent_entry	:mem_entry_name_port_t);
 
@@ -444,16 +448,16 @@ routine mach_make_memory_entry_64(
 
 routine KERNEL_SERVER_SUFFIX(vm_map_64)(
 		target_task	: vm_task_entry_t;
-	inout	address		: vm_address_t;
-		size		: vm_size_t;
-		mask		: vm_address_t;
+	inout	address		: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		mask		: VM_USE_TMPTYPE(vm_address_t);
 		flags		: int;
 		object		: mem_entry_name_port_t;
-		offset		: memory_object_offset_t;
+		offset		: VM_USE_TMPTYPE(memory_object_offset_t);
 		copy		: boolean_t;
-		cur_protection	: vm_prot_t;
-		max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+		cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 skip; /* was vm_map_get_upl */
 skip; /* was vm_upl_map */
@@ -482,19 +486,19 @@ routine vm_map_exec_lockdown(
 
 routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
 		target_task	: vm_map_t;
-inout	target_address	: vm_address_t;
-		size		: vm_size_t;
-		mask		: vm_address_t;
+	inout	target_address	: VM_USE_TMPTYPE(vm_address_t);
+		size		: VM_USE_TMPTYPE(vm_size_t);
+		mask		: VM_USE_TMPTYPE(vm_address_t);
 		flags		: int;
 #ifdef KERNEL_SERVER
-		src_tport   : mach_port_t;
+		src_tport	: mach_port_t;
 #else
 		src_task	: vm_map_read_t;
 #endif
-		src_address	: vm_address_t;
+		src_address	: VM_USE_TMPTYPE(vm_address_t);
 		copy		: boolean_t;
-inout	cur_protection	: vm_prot_t;
-inout	max_protection	: vm_prot_t;
-		inheritance	: vm_inherit_t);
+	inout	cur_protection	: VM_USE_TMPTYPE(vm_prot_t);
+	inout	max_protection	: VM_USE_TMPTYPE(vm_prot_t);
+		inheritance	: VM_USE_TMPTYPE(vm_inherit_t));
 
 /* vim: set ft=c : */

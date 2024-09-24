@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -29,6 +29,10 @@
 #include <atm/atm_internal.h>
 #include <machine/commpage.h>
 #include <pexpert/pexpert.h>
+
+#if CONFIG_EXCLAVES
+extern kern_return_t exclaves_oslog_set_trace_mode(uint32_t);
+#endif // CONFIG_EXCLAVES
 
 /*
  * Global that is set by diagnosticd and readable by userspace
@@ -72,6 +76,9 @@ atm_reset(void)
 {
 	atm_init();
 	commpage_update_atm_diagnostic_config(atm_diagnostic_config);
+#if CONFIG_EXCLAVES
+	exclaves_oslog_set_trace_mode(atm_diagnostic_config);
+#endif // CONFIG_EXCLAVES
 }
 
 /*
@@ -89,8 +96,11 @@ atm_set_diagnostic_config(uint32_t diagnostic_config)
 
 	atm_diagnostic_config = diagnostic_config;
 	commpage_update_atm_diagnostic_config(atm_diagnostic_config);
-
+#if CONFIG_EXCLAVES
+	return exclaves_oslog_set_trace_mode(diagnostic_config);
+#else
 	return KERN_SUCCESS;
+#endif // CONFIG_EXCLAVES
 }
 
 /*

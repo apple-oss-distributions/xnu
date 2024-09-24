@@ -596,7 +596,7 @@ in_pcbinfo_detach(struct inpcbinfo *ipi)
 
 __attribute__((noinline))
 char *
-inp_snprintf_tuple(struct inpcb *inp, char *buf, size_t buflen)
+inp_snprintf_tuple(struct inpcb *inp, char *__sized_by(buflen) buf, size_t buflen)
 {
 	char laddrstr[MAX_IPv6_STR_LEN];
 	char faddrstr[MAX_IPv6_STR_LEN];
@@ -662,6 +662,22 @@ in_pcb_check_management_entitled(struct inpcb *inp)
 	}
 }
 
+__attribute__((noinline))
+void
+in_pcb_check_ultra_constrained_entitled(struct inpcb *inp)
+{
+	if (inp->inp_flags2 & INP2_ULTRA_CONSTRAINED_CHECKED) {
+		return;
+	}
+
+	if (if_ultra_constrained_check_needed) {
+		inp->inp_flags2 |= INP2_ULTRA_CONSTRAINED_CHECKED;
+		if (IOCurrentTaskHasEntitlement(ULTRA_CONSTRAINED_ENTITLEMENT)) {
+			inp->inp_flags2 |= INP2_ULTRA_CONSTRAINED_ALLOWED;
+		}
+	}
+}
+
 /*
  * Allocate a PCB and associate it with the socket.
  *
@@ -677,8 +693,16 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	caddr_t temp;
 
 	if ((so->so_flags1 & SOF1_CACHED_IN_SOCK_LAYER) == 0) {
-		inp = zalloc_flags(pcbinfo->ipi_zone,
+		void *__unsafe_indexable addr = __zalloc_flags(pcbinfo->ipi_zone,
 		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		__builtin_assume(addr != NULL);
+		/*
+		 * N.B: the allocation above may actually be inp_tp
+		 * which is a structure that includes inpcb, but for
+		 * the purposes of this function we just touch
+		 * struct inpcb.
+		 */
+		inp = __unsafe_forge_single(struct inpcb *, addr);
 	} else {
 		inp = (struct inpcb *)(void *)so->so_saved_pcb;
 		temp = inp->inp_saved_ppcb;
@@ -689,9 +713,15 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	inp->inp_gencnt = ++pcbinfo->ipi_gencnt;
 	inp->inp_pcbinfo = pcbinfo;
 	inp->inp_socket = so;
+#define INP_ALIGN_AND_CAST(_type, _ptr) ({                                \
+	typeof((_type)(void *__header_bidi_indexable)NULL) __roundup_type;\
+	const volatile char *__roundup_align_ptr = (const volatile char *)(_ptr); \
+	__roundup_align_ptr += P2ROUNDUP((uintptr_t)__roundup_align_ptr,  \
+	                                 _Alignof(typeof(*__roundup_type))) - (uintptr_t)__roundup_align_ptr; \
+	__DEQUALIFY(_type, __roundup_align_ptr);                          \
+})
 	/* make sure inp_stat is always 64-bit aligned */
-	inp->inp_stat = (struct inp_stat *)P2ROUNDUP(inp->inp_stat_store,
-	    sizeof(u_int64_t));
+	inp->inp_stat = INP_ALIGN_AND_CAST(struct inp_stat *, inp->inp_stat_store);
 	if (((uintptr_t)inp->inp_stat - (uintptr_t)inp->inp_stat_store) +
 	    sizeof(*inp->inp_stat) > sizeof(inp->inp_stat_store)) {
 		panic("%s: insufficient space to align inp_stat", __func__);
@@ -699,8 +729,7 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	}
 
 	/* make sure inp_cstat is always 64-bit aligned */
-	inp->inp_cstat = (struct inp_stat *)P2ROUNDUP(inp->inp_cstat_store,
-	    sizeof(u_int64_t));
+	inp->inp_cstat = INP_ALIGN_AND_CAST(struct inp_stat *, inp->inp_cstat_store);
 	if (((uintptr_t)inp->inp_cstat - (uintptr_t)inp->inp_cstat_store) +
 	    sizeof(*inp->inp_cstat) > sizeof(inp->inp_cstat_store)) {
 		panic("%s: insufficient space to align inp_cstat", __func__);
@@ -708,8 +737,7 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	}
 
 	/* make sure inp_wstat is always 64-bit aligned */
-	inp->inp_wstat = (struct inp_stat *)P2ROUNDUP(inp->inp_wstat_store,
-	    sizeof(u_int64_t));
+	inp->inp_wstat = INP_ALIGN_AND_CAST(struct inp_stat *, inp->inp_wstat_store);
 	if (((uintptr_t)inp->inp_wstat - (uintptr_t)inp->inp_wstat_store) +
 	    sizeof(*inp->inp_wstat) > sizeof(inp->inp_wstat_store)) {
 		panic("%s: insufficient space to align inp_wstat", __func__);
@@ -717,14 +745,21 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	}
 
 	/* make sure inp_Wstat is always 64-bit aligned */
-	inp->inp_Wstat = (struct inp_stat *)P2ROUNDUP(inp->inp_Wstat_store,
-	    sizeof(u_int64_t));
+	inp->inp_Wstat = INP_ALIGN_AND_CAST(struct inp_stat *, inp->inp_Wstat_store);
 	if (((uintptr_t)inp->inp_Wstat - (uintptr_t)inp->inp_Wstat_store) +
 	    sizeof(*inp->inp_Wstat) > sizeof(inp->inp_Wstat_store)) {
 		panic("%s: insufficient space to align inp_Wstat", __func__);
 		/* NOTREACHED */
 	}
 
+	/* make sure inp_btstat is always 64-bit aligned */
+	inp->inp_btstat = INP_ALIGN_AND_CAST(struct inp_stat *, inp->inp_btstat_store);
+	if (((uintptr_t)inp->inp_btstat - (uintptr_t)inp->inp_btstat_store) +
+	    sizeof(*inp->inp_btstat) > sizeof(inp->inp_btstat_store)) {
+		panic("%s: insufficient space to align inp_btstat", __func__);
+		/* NOTREACHED */
+	}
+#undef INP_ALIGN_AND_CAST
 	so->so_pcb = (caddr_t)inp;
 
 	if (so->so_proto->pr_flags & PR_PCBLOCK) {
@@ -818,7 +853,7 @@ in_pcb_conflict_post_msg(u_int16_t port)
 
 /*
  * Bind an INPCB to an address and/or port.  This routine should not alter
- * the caller-supplied local address "nam".
+ * the caller-supplied local address "nam" or remote address "remote".
  *
  * Returns:	0			Success
  *		EADDRNOTAVAIL		Address not available.
@@ -830,7 +865,7 @@ in_pcb_conflict_post_msg(u_int16_t port)
  *		priv_check_cred:EPERM	Operation not permitted
  */
 int
-in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
+in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, struct proc *p)
 {
 	struct socket *so = inp->inp_socket;
 	unsigned short *lastport;
@@ -1327,7 +1362,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		inp->inp_flags |= INP_ANONPORT;
 	}
 
-	if (in_pcbinshash(inp, 1) != 0) {
+	if (in_pcbinshash(inp, remote, 1) != 0) {
 		inp->inp_laddr.s_addr = INADDR_ANY;
 		inp->inp_last_outifp = NULL;
 
@@ -1346,6 +1381,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	sflt_notify(so, sock_evt_bound, NULL);
 
 	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
 done:
 	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
 	return error;
@@ -1439,11 +1475,11 @@ apn_fallback_required(proc_t proc, struct socket *so, struct sockaddr_in *p_dstv
 		 * Note that platform daemons use their process name as a
 		 * bundle ID so we filter out bundle IDs without dots.
 		 */
-		const char *bundle_id = cs_identity_get(proc);
+		const char *__null_terminated bundle_id = cs_identity_get(proc);
 		if (bundle_id == NULL ||
 		    bundle_id[0] == '\0' ||
 		    strchr(bundle_id, '.') == NULL ||
-		    strncmp(bundle_id, "com.apple.", sizeof("com.apple.") - 1) == 0) {
+		    strlcmp("com.apple.", bundle_id, sizeof("com.apple.") - 1) == 0) {
 			apn_fallbk_log((LOG_INFO, "Abort: APN fallback notification found first-"
 			    "party bundle ID \"%s\"!\n", (bundle_id ? bundle_id : "NULL")));
 			return FALSE;
@@ -1458,7 +1494,7 @@ apn_fallback_required(proc_t proc, struct socket *so, struct sockaddr_in *p_dstv
 		 * We check both atime and birthtime since birthtime is not always supported.
 		 */
 		static const long ipv6_start_date = 1464764400L;
-		vfs_context_t context;
+		vfs_context_t __single context;
 		struct stat64 sb;
 		int vn_stat_error;
 
@@ -1560,6 +1596,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 	}
 
 	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
 
 	/*
 	 * If the destination address is INADDR_ANY,
@@ -1874,7 +1911,7 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
 	}
 	if (inp->inp_laddr.s_addr == INADDR_ANY) {
 		if (inp->inp_lport == 0) {
-			error = in_pcbbind(inp, NULL, p);
+			error = in_pcbbind(inp, NULL, nam, p);
 			if (error) {
 				return error;
 			}
@@ -2002,8 +2039,7 @@ in_pcbdetach(struct inpcb *inp)
 
 	/* Free memory buffer held for generating keep alives */
 	if (inp->inp_keepalive_data != NULL) {
-		kfree_data(inp->inp_keepalive_data, inp->inp_keepalive_datalen);
-		inp->inp_keepalive_data = NULL;
+		kfree_data_counted_by(inp->inp_keepalive_data, inp->inp_keepalive_datalen);
 	}
 
 	/* mark socket state as dead */
@@ -2694,13 +2730,14 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
  * @brief	Insert PCB onto various hash lists.
  *
  * @param	inp Pointer to internet protocol control block
+ * @param	remote Pointer to remote address sockaddr for policy evaluation
  * @param	locked	Implies if ipi_lock (protecting pcb list)
  *              is already locked or not.
  *
  * @return	int error on failure and 0 on success
  */
 int
-in_pcbinshash(struct inpcb *inp, int locked)
+in_pcbinshash(struct inpcb *inp, struct sockaddr *remote, int locked)
 {
 	struct inpcbhead *pcbhash;
 	struct inpcbporthead *pcbporthash;
@@ -2805,7 +2842,7 @@ in_pcbinshash(struct inpcb *inp, int locked)
 
 #if NECP
 	// This call catches the original setting of the local address
-	inp_update_necp_policy(inp, NULL, NULL, 0);
+	inp_update_necp_policy(inp, NULL, remote, 0);
 #endif /* NECP */
 
 	return 0;
@@ -3175,21 +3212,9 @@ inp_route_copyin(struct inpcb *inp, struct route *src)
 /*
  * Handler for setting IP_BOUND_IF/IPV6_BOUND_IF socket option.
  */
-int
-inp_bindif(struct inpcb *inp, unsigned int ifscope, struct ifnet **pifp)
+static void
+inp_bindif_common(struct inpcb *inp, struct ifnet *ifp)
 {
-	struct ifnet *ifp = NULL;
-
-	ifnet_head_lock_shared();
-	if ((ifscope > (unsigned)if_index) || (ifscope != IFSCOPE_NONE &&
-	    (ifp = ifindex2ifnet[ifscope]) == NULL)) {
-		ifnet_head_done();
-		return ENXIO;
-	}
-	ifnet_head_done();
-
-	VERIFY(ifp != NULL || ifscope == IFSCOPE_NONE);
-
 	/*
 	 * A zero interface scope value indicates an "unbind".
 	 * Otherwise, take in whatever value the app desires;
@@ -3208,11 +3233,50 @@ inp_bindif(struct inpcb *inp, unsigned int ifscope, struct ifnet **pifp)
 
 	/* Blow away any cached route in the PCB */
 	ROUTE_RELEASE(&inp->inp_route);
+}
+
+
+int
+inp_bindif(struct inpcb *inp, unsigned int ifscope, struct ifnet **pifp)
+{
+	struct ifnet *ifp = NULL;
+
+	ifnet_head_lock_shared();
+	if ((ifscope > (unsigned)if_index) || (ifscope != IFSCOPE_NONE &&
+	    (ifp = ifindex2ifnet[ifscope]) == NULL)) {
+		ifnet_head_done();
+		return ENXIO;
+	}
+	ifnet_head_done();
+
+	VERIFY(ifp != NULL || ifscope == IFSCOPE_NONE);
+
+	inp_bindif_common(inp, ifp);
 
 	if (pifp != NULL) {
 		*pifp = ifp;
 	}
 
+	return 0;
+}
+
+int
+inp_bindtodevice(struct inpcb *inp, const char *ifname)
+{
+	ifnet_ref_t ifp = NULL;
+
+	if (*ifname != 0) {
+		int error = ifnet_find_by_name(ifname, &ifp);
+		if (error != 0) {
+			return error;
+		}
+	}
+
+	inp_bindif_common(inp, ifp);
+
+	if (ifp != NULL) {
+		ifnet_release(ifp);
+	}
 	return 0;
 }
 
@@ -3337,6 +3401,16 @@ void
 inp_clear_management_allowed(struct inpcb *inp)
 {
 	inp->inp_flags2 &= ~INP2_MANAGEMENT_ALLOWED;
+
+	/* Blow away any cached route in the PCB */
+	ROUTE_RELEASE(&inp->inp_route);
+}
+
+void
+inp_set_ultra_constrained_allowed(struct inpcb *inp)
+{
+	inp->inp_flags2 |= INP2_ULTRA_CONSTRAINED_ALLOWED;
+	inp->inp_flags2 |= INP2_ULTRA_CONSTRAINED_CHECKED;
 
 	/* Blow away any cached route in the PCB */
 	ROUTE_RELEASE(&inp->inp_route);
@@ -3722,8 +3796,7 @@ inp_get_soprocinfo(struct inpcb *inp, struct so_procinfo *soprocinfo)
 	struct socket *so = inp->inp_socket;
 
 	soprocinfo->spi_pid = so->last_pid;
-	strlcpy(&soprocinfo->spi_proc_name[0], &inp->inp_last_proc_name[0],
-	    sizeof(soprocinfo->spi_proc_name));
+	strbufcpy(soprocinfo->spi_proc_name, inp->inp_last_proc_name);
 	if (so->last_pid != 0) {
 		uuid_copy(soprocinfo->spi_uuid, so->last_uuid);
 	}
@@ -3738,8 +3811,7 @@ inp_get_soprocinfo(struct inpcb *inp, struct so_procinfo *soprocinfo)
 		soprocinfo->spi_delegated = 0;
 		soprocinfo->spi_epid = so->last_pid;
 	}
-	strlcpy(&soprocinfo->spi_e_proc_name[0], &inp->inp_e_proc_name[0],
-	    sizeof(soprocinfo->spi_e_proc_name));
+	strbufcpy(soprocinfo->spi_e_proc_name, inp->inp_e_proc_name);
 }
 
 int
@@ -3804,9 +3876,9 @@ inp_update_cellular_policy(struct inpcb *inp, boolean_t set)
 		/* allow this socket to generate another notification event */
 		so->so_ifdenied_notifies = 0;
 
-		log(LOG_DEBUG, "%s: so 0x%llx [%d,%d] epid %d "
+		log(LOG_DEBUG, "%s: so %llu [%d,%d] epid %d "
 		    "euuid %s%s %s->%s\n", __func__,
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), epid, euuid_buf,
 		    (so->so_flags & SOF_DELEGATED) ?
 		    " [delegated]" : "",
@@ -3846,9 +3918,9 @@ inp_update_necp_want_app_policy(struct inpcb *inp, boolean_t set)
 			epid = so->last_pid;
 		}
 
-		log(LOG_DEBUG, "%s: so 0x%llx [%d,%d] epid %d "
+		log(LOG_DEBUG, "%s: so %llu [%d,%d] epid %d "
 		    "euuid %s%s %s->%s\n", __func__,
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    so->so_gencnt, SOCK_DOM(so),
 		    SOCK_TYPE(so), epid, euuid_buf,
 		    (so->so_flags & SOF_DELEGATED) ?
 		    " [delegated]" : "",
@@ -4076,6 +4148,13 @@ _inp_restricted_send(struct inpcb *inp, struct ifnet *ifp)
 		return TRUE;
 	}
 
+	if (IFNET_IS_ULTRA_CONSTRAINED(ifp) && uuid_is_null(inp->necp_client_uuid) &&
+	    !INP_ULTRA_CONSTRAINED_ALLOWED(inp)) {
+		// Non-NECP-aware sockets are not allowed to use ultra constrained interfaces
+		// without an entitlement
+		return TRUE;
+	}
+
 	if (IFNET_IS_AWDL_RESTRICTED(ifp) && !INP_AWDL_UNRESTRICTED(inp)) {
 		return TRUE;
 	}
@@ -4265,12 +4344,6 @@ inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *ab)
 	bcopy(&inp->inp_nw_activity, ab, sizeof(*ab));
 }
 
-inline void
-inp_clear_activity_bitmap(struct inpcb *inp)
-{
-	in_stat_clear_activity_bitmap(&inp->inp_nw_activity);
-}
-
 void
 inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep)
 {
@@ -4304,15 +4377,15 @@ inp_copy_last_owner(struct socket *so, struct socket *head)
 		return;
 	}
 
-	strlcpy(&inp->inp_last_proc_name[0], &head_inp->inp_last_proc_name[0], sizeof(inp->inp_last_proc_name));
-	strlcpy(&inp->inp_e_proc_name[0], &head_inp->inp_e_proc_name[0], sizeof(inp->inp_e_proc_name));
+	strbufcpy(inp->inp_last_proc_name, head_inp->inp_last_proc_name);
+	strbufcpy(inp->inp_e_proc_name, head_inp->inp_e_proc_name);
 }
 
 static int
 in_check_management_interface_proc_callout(proc_t proc, void *arg __unused)
 {
 	struct fileproc *fp = NULL;
-	task_t task = proc_task(proc);
+	task_t __single task = proc_task(proc);
 	bool allowed = false;
 
 	if (IOTaskHasEntitlement(task, INTCOPROC_RESTRICTED_ENTITLEMENT) == true

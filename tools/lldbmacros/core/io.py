@@ -14,7 +14,7 @@ class SBProcessRawIO(io.RawIOBase):
             address: Starting memory address in process' VA.
             size: Size of the memory range.
         """
-        super(SBProcessRawIO, self).__init__()
+        super().__init__()
 
         self._sbprocess = sbprocess
         self._start = address

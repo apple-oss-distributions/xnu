@@ -14,7 +14,7 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.net"),
     T_META_ASROOT(true));
 
 T_DECL(PR_35136664_utun,
-    "This bind a utun and close it without connecting")
+    "This bind a utun and close it without connecting", T_META_TAG_VM_PREFERRED)
 {
 	int tunsock;
 	struct ctl_info kernctl_info;
@@ -39,7 +39,7 @@ T_DECL(PR_35136664_utun,
 }
 
 T_DECL(PR_35136664_ipsec,
-    "This bind a ipsec and close it without connecting")
+    "This bind a ipsec and close it without connecting", T_META_TAG_VM_PREFERRED)
 {
 	int tunsock;
 	struct ctl_info kernctl_info;

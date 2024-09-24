@@ -45,7 +45,7 @@ struct mpsc_test_pingpong_queue {
 };
 
 static void
-mpsc_test_pingpong_invoke(mpsc_queue_chain_t elm, mpsc_daemon_queue_t dq)
+mpsc_test_pingpong_invoke(mpsc_queue_chain_t elm, __assert_only mpsc_daemon_queue_t dq)
 {
 	struct mpsc_test_pingpong_queue *q;
 	q = mpsc_queue_element(elm, struct mpsc_test_pingpong_queue, link);

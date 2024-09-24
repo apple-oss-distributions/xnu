@@ -41,7 +41,8 @@ extern vm_pressure_level_t memorystatus_vm_pressure_level;
 extern boolean_t memorystatus_hwm_candidates;
 extern unsigned int memorystatus_sustained_pressure_maximum_band;
 
-boolean_t memorystatus_warn_process(const proc_t p, __unused boolean_t is_active, __unused boolean_t is_fatal, boolean_t exceeded);
+boolean_t memorystatus_warn_process(const proc_t p, boolean_t is_active,
+    boolean_t is_fatal, boolean_t exceeded);
 int memorystatus_send_note(int event_code, void *data, uint32_t data_length);
 void memorystatus_send_low_swap_note(void);
 void consider_vm_pressure_events(void);
@@ -53,8 +54,10 @@ int memorystatus_low_mem_privileged_listener(uint32_t op_flags);
 int memorystatus_send_pressure_note(int pid);
 boolean_t memorystatus_is_foreground_locked(proc_t p);
 boolean_t memorystatus_bg_pressure_eligible(proc_t p);
-void memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty, boolean_t *is_dirty_tracked, boolean_t *allow_idle_exit);
-extern void memorystatus_issue_fg_band_notify(void);
+void memorystatus_proc_flags_unsafe(void * v, boolean_t *is_dirty,
+    boolean_t *is_dirty_tracked, boolean_t *allow_idle_exit);
+void memorystatus_broadcast_jetsam_pressure(
+	vm_pressure_level_t pressure_level);
 
 #endif /* CONFIG_MEMORYSTATUS */
 

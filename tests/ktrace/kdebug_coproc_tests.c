@@ -44,7 +44,8 @@ future_events_session(void)
 }
 
 T_DECL(future_iop_events,
-    "make sure IOPs cannot trace events in the future while live tracing")
+    "make sure IOPs cannot trace events in the future while live tracing",
+	T_META_TAG_VM_NOT_PREFERRED)
 {
 	start_controlling_ktrace();
 	ktrace_session_t ktsess = future_events_session();
@@ -69,7 +70,8 @@ T_DECL(future_iop_events,
 }
 
 T_DECL(future_iop_events_disabled,
-    "make sure IOPs cannot trace events in the future after disabling tracing")
+    "make sure IOPs cannot trace events in the future after disabling tracing",
+	T_META_TAG_VM_NOT_PREFERRED)
 {
 	start_controlling_ktrace();
 	ktrace_session_t ktsess = future_events_session();
@@ -98,7 +100,8 @@ T_DECL(future_iop_events_disabled,
 }
 
 T_DECL(iop_events_disable,
-    "make sure IOP events are flushed before disabling trace")
+    "make sure IOP events are flushed before disabling trace",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 	ktrace_session_t ktsess = future_events_session();
@@ -136,7 +139,8 @@ T_DECL(iop_events_disable,
 }
 
 T_DECL(past_coproc_events,
-    "make sure past events from coprocessors log a TRACE_PAST_EVENTS event")
+    "make sure past events from coprocessors log a TRACE_PAST_EVENTS event",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 	ktrace_session_t ktsess = future_events_session();
@@ -259,14 +263,16 @@ expect_convert_between_abs_cont(bool abs_to_cont)
 }
 
 T_DECL(absolute_to_continuous_iop,
-    "expect IOPs issuing absolute times show up as continuous in the stream")
+    "expect IOPs issuing absolute times show up as continuous in the stream",
+	T_META_TAG_VM_PREFERRED)
 {
 	expect_convert_between_abs_cont(true);
 	dispatch_main();
 }
 
 T_DECL(continuous_to_absolute_coproc,
-    "expect IOPs issuing absolute times show up as continuous in the stream")
+    "expect IOPs issuing absolute times show up as continuous in the stream",
+	T_META_TAG_VM_PREFERRED)
 {
 	expect_convert_between_abs_cont(false);
 	dispatch_main();

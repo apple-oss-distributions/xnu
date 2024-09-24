@@ -36,7 +36,7 @@ def ReadPhys(cmd_args = None):
         addressed is displayed.
         usage: readphys <nbits> <address>
         nbits: 8,16,32,64
-        address: 1234 or 0x1234
+        address: 1234 or 0x1234 or `foo_ptr`
     """
     if cmd_args is None or len(cmd_args) < 2:
         print("Insufficient arguments.", ReadPhys.__doc__)
@@ -240,7 +240,7 @@ def WritePhys(cmd_args=None):
         addressed is displayed.
         usage: writephys <nbits> <address> <value>
         nbits: 8,16,32,64
-        address: 1234 or 0x1234
+        address: 1234 or 0x1234 or `foo_ptr`
         value: int value to be written
         ex. (lldb)writephys 16 0x12345abcd 0x25
     """
@@ -566,8 +566,12 @@ def PmapDecodeTTEARM64(tte, level, stage2 = False, is_iommu_tte = False):
         else:
             attr_index = (tte >> 2) & 0x7
             attr_string = { 0: 'WRITEBACK', 1: 'WRITECOMB', 2: 'WRITETHRU',
-                3: 'CACHE DISABLE', 4: 'INNERWRITEBACK', 5: 'POSTED',
-                6: 'POSTED_REORDERED', 7: 'POSTED_COMBINED_REORDERED' }
+                3: 'CACHE DISABLE',
+                4: 'RESERVED'
+                ,
+                5: 'POSTED (DISABLE_XS if FEAT_XS supported)',
+                6: 'POSTED_REORDERED (POSTED_COMBINED_REORDERED if FEAT_XS supported)',
+                7: 'POSTED_COMBINED_REORDERED (POSTED_COMBINED_REORDERED_XS if FEAT_XS supported)' }
 
             # Only show the string version of the AttrIdx for CPU mappings since
             # these values don't apply to IOMMU mappings.
@@ -1076,11 +1080,11 @@ def PhysToFTE(cmd_args=None):
     fte = PhysToFrameTableEntry(int(unsigned(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))))
     print(repr(fte))
 
-XNU_IOMMU = 22
-XNU_PAGE_TABLE = 18
-XNU_PAGE_TABLE_SHARED = 19
-XNU_PAGE_TABLE_ROZONE = 20
-XNU_PAGE_TABLE_COMMPAGE = 21
+XNU_IOMMU = 23
+XNU_PAGE_TABLE = 19
+XNU_PAGE_TABLE_SHARED = 20
+XNU_PAGE_TABLE_ROZONE = 21
+XNU_PAGE_TABLE_COMMPAGE = 22
 SPTM_PAGE_TABLE = 9
 
 def ShowPTEARM(pte, page_size, level):
@@ -1144,7 +1148,10 @@ def ShowPTEARM(pte, page_size, level):
     ptd = GetPtDesc(pte_paddr)
     refcnt, level, info_str = GetPageTableInfo(ptd, pte_paddr)
     wiredcnt = ptd.ptd_info[pt_index].wiredcnt
-    va = ptd.va[pt_index]
+    if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
+        va = ptd.va[pt_index]
+    else:
+        va = ptd.va
     print("descriptor: {:#x} (refcnt: {:#x}, wiredcnt: {:#x}, va: {:#x})".format(ptd, refcnt, wiredcnt, va))
 
     # The pmap/iommu field is a union, so only print the correct one.
@@ -1159,9 +1166,12 @@ def ShowPTEARM(pte, page_size, level):
         print("pmap: {:#x} {:s}".format(ptd.pmap, pmap_str))
         nttes = page_size // 8
         granule = page_size * (nttes ** (3 - level))
-        pte_pgoff = pte % page_size
+        if kern.globals.page_protection_type <= kern.PAGE_PROTECTION_TYPE_PPL:
+            pte_pgoff = pte % page_size
+        else:
+            pte_pgoff = pte % kern.globals.native_pt_attr.pta_page_size
         pte_pgoff = pte_pgoff // 8
-        print("maps {}: {:#x}".format("IPA" if stage2 else "VA", int(unsigned(ptd.va[pt_index])) + (pte_pgoff * granule)))
+        print("maps {}: {:#x}".format("IPA" if stage2 else "VA", int(unsigned(va)) + (pte_pgoff * granule)))
         pteval = int(unsigned(dereference(kern.GetValueFromAddress(unsigned(pte), 'pt_entry_t *'))))
         print("value: {:#x}".format(pteval))
         print("level: {:d}".format(level))

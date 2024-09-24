@@ -1785,7 +1785,7 @@ run_all_tests()
 }
 
 T_DECL(kqueue_file_tests,
-    "Tests assorted kqueue operations for file-related events")
+    "Tests assorted kqueue operations for file-related events", T_META_TAG_VM_PREFERRED)
 {
 	char *which = NULL;
 	if (argc > 1) {

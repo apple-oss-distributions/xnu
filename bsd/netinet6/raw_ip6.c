@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -106,6 +106,7 @@
 #include <net/route.h>
 #include <net/if_types.h>
 #include <net/content_filter.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -152,14 +153,14 @@ rip6_input(
 	int     *offp,
 	int     proto)
 {
-	struct mbuf *m = *mp;
-	struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
-	struct inpcb *in6p;
-	struct inpcb *last = 0;
-	struct mbuf *opts = NULL;
+	struct mbuf *__single m = *mp;
+	struct ip6_hdr *__single ip6 = mtod(m, struct ip6_hdr *);
+	struct inpcb *__single in6p;
+	struct inpcb *__single last = 0;
+	struct mbuf *__single opts = NULL;
 	struct sockaddr_in6 rip6src;
 	int ret;
-	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	struct ifnet *__single ifp = m->m_pkthdr.rcvif;
 	boolean_t is_wake_pkt = false;
 
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
@@ -209,7 +210,7 @@ rip6_input(
 #if NECP
 			if (n && !necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
 			    &ip6->ip6_dst, &ip6->ip6_src, ifp, 0, NULL, NULL, NULL, NULL)) {
-				m_freem(n);
+				m_drop(n, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_NECP_POLICY_DROP, NULL, 0);
 				/* do not inject data into pcb */
 			} else
 #endif /* NECP */
@@ -219,7 +220,7 @@ rip6_input(
 				    SO_RECV_CONTROL_OPTS(last->in6p_socket)) {
 					ret = ip6_savecontrol(last, n, &opts);
 					if (ret != 0) {
-						m_freem(n);
+						m_drop(n, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_ENOBUFS, NULL, 0);
 						m_freem(opts);
 						opts = NULL;
 						last = in6p;
@@ -249,7 +250,7 @@ rip6_input(
 #if NECP
 	if (last && !necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
 	    &ip6->ip6_dst, &ip6->ip6_src, ifp, 0, NULL, NULL, NULL, NULL)) {
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_NECP_POLICY_DROP, NULL, 0);
 		ip6stat.ip6s_delivered--;
 		/* do not inject data into pcb */
 	} else
@@ -285,7 +286,7 @@ rip6_input(
 			rip6stat.rip6s_nosockmcast++;
 		}
 		if (proto == IPPROTO_NONE) {
-			m_freem(m);
+			m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_IP_NO_SOCK, NULL, 0);
 		} else {
 			char *prvnxtp = ip6_get_prevhdr(m, *offp); /* XXX */
 			icmp6_error(m, ICMP6_PARAM_PROB,
@@ -308,12 +309,12 @@ rip6_ctlinput(
 	void *d,
 	__unused struct ifnet *ifp)
 {
-	struct ip6_hdr *ip6 = NULL;
-	struct mbuf *m = NULL;
-	void *cmdarg = NULL;
+	struct ip6_hdr *__single ip6 = NULL;
+	struct mbuf *__single m = NULL;
+	void *__single cmdarg = NULL;
 	int off = 0;
-	struct ip6ctlparam *ip6cp = NULL;
-	const struct sockaddr_in6 *sa6_src = NULL;
+	struct ip6ctlparam *__single ip6cp = NULL;
+	const struct sockaddr_in6 *__single sa6_src = NULL;
 	void (*notify)(struct inpcb *, int) = in6_rtchange;
 
 	if (sa->sa_family != AF_INET6 ||
@@ -364,14 +365,14 @@ rip6_output(
 	struct mbuf *control,
 	int israw)
 {
-	struct in6_addr *dst;
-	struct ip6_hdr *ip6;
-	struct inpcb *in6p;
+	struct in6_addr *__single dst;
+	struct ip6_hdr *__single ip6;
+	struct inpcb *__single in6p;
 	u_int   plen = m->m_pkthdr.len;
 	int error = 0;
-	struct ip6_pktopts opt, *optp = NULL;
-	struct ip6_moptions *im6o = NULL;
-	struct ifnet *oifp = NULL;
+	struct ip6_pktopts opt, *__single optp = NULL;
+	struct ip6_moptions *__single im6o = NULL;
+	struct ifnet *__single oifp = NULL;
 	int type = 0, code = 0;         /* for ICMPv6 output statistics only */
 	int sotc = SO_TC_UNSPEC;
 	int netsvctype = _NET_SERVICE_TYPE_UNSPEC;
@@ -384,9 +385,10 @@ rip6_output(
 	uint32_t cfil_so_state_change_cnt = 0;
 	uint32_t cfil_so_options = 0;
 	uint32_t sifscope = IFSCOPE_NONE, difscope = IFSCOPE_NONE;
-	struct sockaddr *cfil_faddr = NULL;
-	struct sockaddr_in6 *cfil_sin6 = NULL;
+	struct sockaddr *__single cfil_faddr = NULL;
+	struct sockaddr_in6 *__single cfil_sin6 = NULL;
 #endif
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 
 	in6p = sotoin6pcb(so);
 	if (in6p == NULL) {
@@ -426,6 +428,7 @@ rip6_output(
 	if (so->so_state & SS_ISCONNECTED) {
 		if (dstsock != NULL) {
 			error = EISCONN;
+			drop_reason = DROP_REASON_IP_EISCONN;
 			goto bad;
 		}
 		/* XXX */
@@ -504,8 +507,8 @@ rip6_output(
 	if (control) {
 		sotc = so_tc_from_control(control, &netsvctype);
 
-		if ((error = ip6_setpktopts(control, &opt, NULL,
-		    SOCK_PROTO(so))) != 0) {
+		if ((error = ip6_setpktopts(control, &opt,
+		    in6p->in6p_outputopts, SOCK_PROTO(so))) != 0) {
 			goto bad;
 		}
 		optp = &opt;
@@ -601,11 +604,12 @@ rip6_output(
 			/*
 			 * boundary check
 			 *
-			 * Sinced stsock->sin6_scope_id is unsigned, we don't
+			 * Sinced dstsock->sin6_scope_id is unsigned, we don't
 			 * need to check if it's < 0
 			 */
 			if (!IF_INDEX_IN_RANGE(dstsock->sin6_scope_id)) {
 				error = ENXIO;  /* XXX EINVAL? */
+				drop_reason = DROP_REASON_IP6_BAD_SCOPE;
 				ifnet_head_done();
 				goto bad;
 			}
@@ -624,7 +628,7 @@ rip6_output(
 	 * Source address selection.
 	 */
 	{
-		struct in6_addr *in6a;
+		struct in6_addr *__single in6a;
 		struct in6_addr storage;
 		u_short index = 0;
 
@@ -633,7 +637,7 @@ rip6_output(
 			flags |= IPV6_FLAG_NOSRCIFSEL;
 			sifscope = optp->ip6po_pktinfo->ipi6_ifindex;
 		} else {
-			struct ifnet *src_ifp = NULL;
+			struct ifnet *__single src_ifp = NULL;
 			in6a = in6_selectsrc(dstsock, optp, in6p,
 			    &in6p->in6p_route, &src_ifp, &storage, ip6oa.ip6oa_boundif,
 			    &error);
@@ -763,6 +767,7 @@ rip6_output(
 		if (!necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
 		    &ip6->ip6_src, &ip6->ip6_dst, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			error = EHOSTUNREACH;
+			drop_reason = DROP_REASON_IP_NECP_POLICY_DROP;
 			goto bad;
 		}
 
@@ -780,6 +785,7 @@ rip6_output(
 #if IPSEC
 	if (in6p->in6p_sp != NULL && ipsec_setsocket(m, so) != 0) {
 		error = ENOBUFS;
+		drop_reason = DROP_REASON_IP_ENOBUFS;
 		goto bad;
 	}
 #endif /*IPSEC*/
@@ -891,7 +897,7 @@ rip6_output(
 
 bad:
 	if (m != NULL) {
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	}
 
 freectl:
@@ -927,15 +933,20 @@ rip6_ctloutput(
 {
 	int error, optval;
 
-	/* Allow <SOL_SOCKET,SO_FLUSH> at this level */
-	if (sopt->sopt_level == IPPROTO_ICMPV6) {
+	/* Allow <SOL_SOCKET,SO_FLUSH/SO_BINDTODEVICE> at this level */
+	if (sopt->sopt_level == SOL_SOCKET) {
+		if (sopt->sopt_name == SO_BINDTODEVICE) {
+			return ip6_ctloutput(so, sopt);
+		} else if (sopt->sopt_name != SO_FLUSH) {
+			return EINVAL;
+		}
+	} else if (sopt->sopt_level == IPPROTO_ICMPV6) {
 		/*
 		 * XXX: is it better to call icmp6_ctloutput() directly
 		 * from protosw?
 		 */
 		return icmp6_ctloutput(so, sopt);
-	} else if (sopt->sopt_level != IPPROTO_IPV6 &&
-	    !(sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_FLUSH)) {
+	} else if (sopt->sopt_level != IPPROTO_IPV6) {
 		return EINVAL;
 	}
 
@@ -981,7 +992,7 @@ rip6_ctloutput(
 static int
 rip6_attach(struct socket *so, int proto, struct proc *p)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	int error;
 
 	inp = sotoinpcb(so);
@@ -1014,7 +1025,7 @@ rip6_attach(struct socket *so, int proto, struct proc *p)
 static int
 rip6_detach(struct socket *so)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 
 	inp = sotoinpcb(so);
 	if (inp == 0) {
@@ -1039,7 +1050,7 @@ rip6_abort(struct socket *so)
 static int
 rip6_disconnect(struct socket *so)
 {
-	struct inpcb *inp = sotoinpcb(so);
+	struct inpcb *__single inp = sotoinpcb(so);
 
 	if ((so->so_state & SS_ISCONNECTED) == 0) {
 		return ENOTCONN;
@@ -1053,10 +1064,10 @@ static int
 rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 {
 #pragma unused(p)
-	struct inpcb *inp = sotoinpcb(so);
+	struct inpcb *__single inp = sotoinpcb(so);
 	struct sockaddr_in6 sin6;
-	struct ifaddr *ifa = NULL;
-	struct ifnet *outif = NULL;
+	struct ifaddr *__single ifa = NULL;
+	struct ifnet *__single outif = NULL;
 	uint32_t ifscope = IFSCOPE_NONE;
 	int error;
 
@@ -1096,7 +1107,7 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	}
 	if (ifa != NULL) {
 		IFA_LOCK(ifa);
-		if (((struct in6_ifaddr *)ifa)->ia6_flags &
+		if ((ifatoia6(ifa))->ia6_flags &
 		    (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY | IN6_IFF_CLAT46 |
 		    IN6_IFF_DETACHED | IN6_IFF_DEPRECATED)) {
 			IFA_UNLOCK(ifa);
@@ -1117,16 +1128,16 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 static int
 rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 {
-	struct inpcb *inp = sotoinpcb(so);
-	struct sockaddr_in6 *addr = (struct sockaddr_in6 *)(void *)nam;
-	struct in6_addr *in6a = NULL;
+	struct inpcb *__single inp = sotoinpcb(so);
+	struct sockaddr_in6 *__single addr = (struct sockaddr_in6 *)(void *)nam;
+	struct in6_addr *__single in6a = NULL;
 	struct in6_addr storage;
 	int error = 0;
 #if ENABLE_DEFAULT_SCOPE
 	struct sockaddr_in6 tmp;
 #endif
 	unsigned int ifscope;
-	struct ifnet *outif = NULL;
+	struct ifnet *__single outif = NULL;
 
 	if (inp == NULL
 #if NECP
@@ -1168,7 +1179,7 @@ rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 	    inp->inp_boundifp->if_index : IFSCOPE_NONE;
 
 	/* Source address selection. XXX: need pcblookup? */
-	struct ifnet *src_ifp = NULL;
+	struct ifnet *__single src_ifp = NULL;
 	in6a = in6_selectsrc(addr, inp->in6p_outputopts, inp, &inp->in6p_route,
 	    &src_ifp, &storage, ifscope, &error);
 	if (src_ifp != NULL) {
@@ -1211,7 +1222,7 @@ rip6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
     struct mbuf *control, struct proc *p)
 {
 #pragma unused(flags, p)
-	struct inpcb *inp = sotoinpcb(so);
+	struct inpcb *__single inp = sotoinpcb(so);
 	int error = 0;
 
 	if (inp == NULL
@@ -1226,6 +1237,8 @@ rip6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		}
 		goto bad;
 	}
+
+	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
 
 	return rip6_output(m, so, SIN6(nam), control, 1);
 

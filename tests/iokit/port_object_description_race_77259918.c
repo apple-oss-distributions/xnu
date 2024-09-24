@@ -70,7 +70,7 @@ iokit_port_object_description_thread(void * data)
 }
 
 
-T_DECL(port_object_description_race, "Test iokit_port_object_description() race condition")
+T_DECL(port_object_description_race, "Test iokit_port_object_description() race condition", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t notification_create_pth;
 	pthread_t iokit_port_object_description_pth;

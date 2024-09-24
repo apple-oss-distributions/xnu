@@ -6,15 +6,16 @@
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #include <signal.h>
-#include "excserver_protect.h"
+#include "excserver_protect_state.h"
 #include "../osfmk/ipc/ipc_init.h"
 #include "../osfmk/mach/port.h"
 #include "../osfmk/kern/exc_guard.h"
 #include "exc_helpers.h"
 #include <sys/code_signing.h>
 #include "cs_helpers.h"
+#include <TargetConditionals.h>
 
-#define MAX_TEST_NUM 7
+#define MAX_TEST_NUM 9
 #define MAX_ARGV 3
 
 extern char **environ;
@@ -84,6 +85,26 @@ catch_mach_exception_raise_state_identity(mach_port_t exception_port,
 }
 
 kern_return_t
+catch_mach_exception_raise_state_identity_protected(
+	__unused mach_port_t      exception_port,
+	uint64_t                  thread_id,
+	mach_port_t               task_id_token,
+	exception_type_t          exception,
+	mach_exception_data_t     codes,
+	mach_msg_type_number_t    codeCnt,
+	__unused int * flavor,
+	__unused thread_state_t old_state,
+	__unused mach_msg_type_number_t old_state_count,
+	__unused thread_state_t new_state,
+	__unused mach_msg_type_number_t * new_state_count)
+{
+#pragma unused(exception_port, thread_id, task_id_token, exception, codes, codeCnt)
+
+	T_FAIL("Unsupported catch_mach_exception_raise_state_identity_protected");
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
 catch_mach_exception_raise_identity_protected(
 	__unused mach_port_t      exception_port,
 	uint64_t                  thread_id,
@@ -100,8 +121,6 @@ catch_mach_exception_raise_identity_protected(
 	exception_taken = exception;
 	if (exception == EXC_GUARD) {
 		received_exception_code = EXC_GUARD_DECODE_GUARD_FLAVOR((uint64_t)codes[0]);
-	} else if (exception == EXC_CORPSE_NOTIFY) {
-		received_exception_code = codes[0];
 	} else {
 		T_FAIL("Unexpected exception");
 	}
@@ -134,7 +153,6 @@ exception_server_thread(void *arg)
 	return NULL;
 }
 
-#define kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE 6
 static void
 reply_port_defense(const bool thirdparty_hardened, int test_index, mach_exception_data_type_t expected_exception_code, bool triggers_exception)
 {
@@ -176,7 +194,7 @@ reply_port_defense(const bool thirdparty_hardened, int test_index, mach_exceptio
 	 * If you are using this code as an example for platform binaries,
 	 * use `EXCEPTION_IDENTITY_PROTECTED` instead of `EXCEPTION_DEFAULT`
 	 */
-	int err = posix_spawnattr_setexceptionports_np(&attrs, EXC_MASK_GUARD | EXC_MASK_CORPSE_NOTIFY, exc_port,
+	int err = posix_spawnattr_setexceptionports_np(&attrs, EXC_MASK_GUARD, exc_port,
 	    (exception_behavior_t) (EXCEPTION_IDENTITY_PROTECTED | MACH_EXCEPTION_CODES), 0);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(err, "posix_spawnattr_setflags");
 
@@ -214,7 +232,8 @@ reply_port_defense(const bool thirdparty_hardened, int test_index, mach_exceptio
 T_DECL(reply_port_defense,
     "Test reply port semantics violations",
     T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
-    T_META_CHECK_LEAKS(false)) {
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_NOT_PREFERRED) {
 	bool triggers_exception = true;
 	/* The first test is setup as moving immovable receive right of a reply port. */
 	reply_port_defense(true, 0, kGUARD_EXC_IMMOVABLE, triggers_exception);
@@ -241,7 +260,6 @@ T_DECL(test_move_provisional_reply_port,
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }
 
-
 T_DECL(test_unentitled_thread_set_exception_ports,
     "thread_set_exception_ports should fail without an entitlement",
     T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
@@ -251,6 +269,7 @@ T_DECL(test_unentitled_thread_set_exception_ports,
 	bool triggers_exception = true;
 
 #if TARGET_OS_OSX
+	T_SKIP("Test disabled on macOS due to SIP disabled and AMFI boot args usage on BATS");
 	/*
 	 * CS_CONFIG_GET_OUT_OF_MY_WAY (enabled via AMFI boot-args)
 	 * disables this security feature. This boot-arg previously
@@ -284,6 +303,17 @@ T_DECL(test_unentitled_thread_set_state,
 	int test_num = 6;
 	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_THREAD_SET_STATE;
 	bool triggers_exception = true;
+	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
+	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
+}
+
+T_DECL(unentitled_set_exception_ports_pass,
+    "set_exception_ports should succeed",
+    T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
+    T_META_CHECK_LEAKS(false)) {
+	int test_num = 7;
+	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)0;
+	bool triggers_exception = false;
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }

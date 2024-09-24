@@ -250,13 +250,23 @@ public:
 #define PERFCONTROL_INTERFACE_VERSION_1 (1) /* up-to workEnd */
 #define PERFCONTROL_INTERFACE_VERSION_2 (2) /* up-to workUpdate */
 #define PERFCONTROL_INTERFACE_VERSION_3 (3) /* up-to (un)registerDriverDevice */
-#define PERFCONTROL_INTERFACE_VERSION_CURRENT PERFCONTROL_INTERFACE_VERSION_3
+#define PERFCONTROL_INTERFACE_VERSION_4 (4) /* up-to workEndWithResources */
+#define PERFCONTROL_INTERFACE_VERSION_CURRENT PERFCONTROL_INTERFACE_VERSION_4
 
 /*!
  * @struct PerfControllerInterface
  * @discussion Function pointers necessary to register a performance controller. Not for general driver use.
  */
 	struct PerfControllerInterface {
+		enum struct PerfDeviceID : uint32_t{
+			kInvalid = 0,
+			kCPU = 0,
+			kANE = 0x4,
+			kGPU,
+			kMSR,
+			kStorage,
+		};
+
 		struct DriverState {
 			uint32_t has_target_thread_group : 1;
 			uint32_t has_device_info : 1;
@@ -265,8 +275,9 @@ public:
 			uint64_t target_thread_group_id;
 			void *target_thread_group_data;
 
-			uint32_t device_type;
+			PerfDeviceID device_type;
 			uint32_t instance_id;
+			bool resource_accounting;
 		};
 
 		struct WorkState {
@@ -279,12 +290,18 @@ public:
 			const DriverState* driver_state;
 		};
 
+		struct ResourceAccounting {
+			uint64_t mach_time_delta;
+			uint64_t energy_nj_delta;
+		};
+
 		using RegisterDeviceFunction = IOReturn (*)(IOService *);
 		using RegisterDriverDeviceFunction = IOReturn (*)(IOService *, IOService *, DriverState *);
 		using WorkCanSubmitFunction = bool (*)(IOService *, WorkState *, WorkSubmitArgs *);
 		using WorkSubmitFunction = void (*)(IOService *, uint64_t, WorkState *, WorkSubmitArgs *);
 		using WorkBeginFunction = void (*)(IOService *, uint64_t, WorkState *, WorkBeginArgs *);
 		using WorkEndFunction = void (*)(IOService *, uint64_t, WorkState *, WorkEndArgs *, bool);
+		using WorkEndWithResourcesFunction = void (*)(IOService *, uint64_t, WorkState *, WorkEndArgs *, ResourceAccounting *, bool);
 		using WorkUpdateFunction = void (*)(IOService *, uint64_t, WorkState *, WorkUpdateArgs *);
 
 		uint64_t version;
@@ -297,6 +314,7 @@ public:
 		WorkUpdateFunction workUpdate;
 		RegisterDriverDeviceFunction registerDriverDevice;
 		RegisterDriverDeviceFunction unregisterDriverDevice;
+		WorkEndWithResourcesFunction workEndWithResources;
 	};
 
 	struct IOPerfControlClientShared {
@@ -333,6 +351,7 @@ public:
 private:
 	struct WorkTableEntry {
 		struct thread_group *thread_group;
+		coalition_t coal;
 		bool started;
 		uint8_t perfcontrol_data[32];
 	};
@@ -348,6 +367,7 @@ private:
 	WorkTableEntry *getEntryForToken(uint64_t token);
 	void markEntryStarted(uint64_t token, bool started);
 	inline uint64_t tokenToGlobalUniqueToken(uint64_t token);
+	void accountResources(coalition_t coal, PerfControllerInterface::PerfDeviceID device_type, PerfControllerInterface::ResourceAccounting *resources);
 
 	uint8_t driverIndex;
 	IOPerfControlClientShared *shared;

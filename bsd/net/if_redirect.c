@@ -39,6 +39,7 @@
 #include <net/if_media.h>
 #include <net/if_ether.h>
 #include <net/if_redirect.h>
+#include <netinet/icmp6.h>
 #include <os/log.h>
 
 #include <skywalk/os_skywalk_private.h>
@@ -294,7 +295,7 @@ redirect_enqueue_pkt(struct nx_netif *nif, struct __kern_packet *pkt,
 	    ifp->if_traffic_rule_count > 0 &&
 	    nxctl_inet_traffic_rule_find_qset_id_with_pkt(ifp->if_xname,
 	    pkt, &qset_id) == 0) {
-		struct netif_qset *qset;
+		struct netif_qset * __single qset;
 
 		/*
 		 * This always returns a qset because if the qset id is invalid the
@@ -320,7 +321,7 @@ redirect_enqueue_mbuf(struct nx_netif *nif, struct mbuf *m,
 }
 
 static int
-redirect_tx_submit(ifnet_t delegate_ifp, struct pktq *spktq, uint32_t if_flowhash)
+redirect_tx_submit(ifnet_t delegate_ifp, struct pktq *spktq)
 {
 	struct __kern_packet *spkt, *pkt;
 	struct nx_netif *nif;
@@ -359,9 +360,9 @@ redirect_tx_submit(ifnet_t delegate_ifp, struct pktq *spktq, uint32_t if_flowhas
 			if (pkt == NULL) {
 				continue;
 			}
-			pkt->pkt_flowsrc_type = FLOWSRC_IFNET;
-			pkt->pkt_flow_token = if_flowhash;
-			pkt->pkt_pflags |= (PKT_F_FLOW_ADV | PKTF_FLOW_ID);
+
+			pkt->pkt_pflags |= PKT_F_FLOW_ID;
+			pkt->pkt_pflags &= ~PKT_F_FLOW_ADV;
 
 			netif_ifp_inc_traffic_class_out_pkt(delegate_ifp,
 			    pkt->pkt_svc_class, 1, pkt->pkt_length);
@@ -373,10 +374,9 @@ redirect_tx_submit(ifnet_t delegate_ifp, struct pktq *spktq, uint32_t if_flowhas
 			if (m == NULL) {
 				continue;
 			}
-			m->m_pkthdr.pkt_flowsrc = FLOWSRC_IFNET;
-			m->m_pkthdr.pkt_mpriv_srcid = if_flowhash;
-			m->m_pkthdr.pkt_flags =
-			    (PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC);
+
+			m->m_pkthdr.pkt_flags = PKTF_FLOW_ID;
+			m->m_pkthdr.pkt_flags &= ~PKTF_FLOW_ADV;
 
 			ifp_inc_traffic_class_out(delegate_ifp, m);
 
@@ -430,13 +430,12 @@ redirect_register_nexus_domain_provider(void)
 		.nxdpi_init = redirect_nxdp_init,
 		.nxdpi_fini = redirect_nxdp_fini
 	};
-
+	nexus_domain_provider_name_t domain_provider_name = "com.apple.redirect";
 	errno_t err = 0;
 
 	/* redirect_nxdp_init() is called before this function returns */
 	err = kern_nexus_register_domain_provider(NEXUS_TYPE_NET_IF,
-	    (const uint8_t *)
-	    "com.apple.redirect",
+	    domain_provider_name,
 	    &dp_init, sizeof(dp_init),
 	    &redirect_nx_dom_prov);
 	if (err != 0) {
@@ -497,7 +496,7 @@ redirect_nx_ring_fini(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 {
 #pragma unused(nxprov, ring)
 	if_redirect_t rd;
-	thread_call_t tcall = NULL;
+	thread_call_t __single tcall = NULL;
 
 	rd = redirect_nexus_context(nexus);
 	RD_LOCK(rd);
@@ -682,7 +681,7 @@ redirect_nx_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		goto done;
 	}
 	if (n_pkts > 0) {
-		redirect_tx_submit(delegate_ifp, &tx_pktq, ifp->if_flowhash);
+		redirect_tx_submit(delegate_ifp, &tx_pktq);
 	}
 done:
 	/*
@@ -696,11 +695,58 @@ done:
 	return error;
 }
 
+static boolean_t
+pkt_is_for_delegate(if_redirect_t rd, struct __kern_packet *pkt)
+{
+#if !(DEVELOPMENT || DEBUG)
+#pragma unused(rd)
+#endif
+	uint8_t proto;
+	uint8_t *hdr;
+	uint32_t l4len;
+
+	if ((pkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) == 0) {
+		DTRACE_SKYWALK2(not__classified, if_redirect_t, rd,
+		    struct __kern_packet *, pkt);
+		return FALSE;
+	}
+	if (pkt->pkt_flow_ip_hdr == 0 || pkt->pkt_flow_ip_hlen == 0) {
+		RDLOG_ERR("%s: classifier info missing", rd->rd_name);
+		DTRACE_SKYWALK2(classifier__info__missing, if_redirect_t, rd,
+		    struct __kern_packet *, pkt);
+		return FALSE;
+	}
+	proto = pkt->pkt_flow_ip_proto;
+	l4len = pkt->pkt_length - pkt->pkt_l2_len - pkt->pkt_flow_ip_hlen;
+	hdr = __unsafe_forge_bidi_indexable(uint8_t *, pkt->pkt_flow_ip_hdr + pkt->pkt_flow_ip_hlen,
+	    l4len);
+	if (proto == IPPROTO_ICMPV6) {
+		struct icmp6_hdr *icmp6;
+
+		if (l4len < sizeof(*icmp6)) {
+			RDLOG_ERR("%s: l4len(%u) < icmp6len(%lu)", rd->rd_name,
+			    l4len, sizeof(*icmp6));
+			DTRACE_SKYWALK3(too__small__v6, if_redirect_t, rd,
+			    struct __kern_packet *, pkt, uint32_t, l4len);
+			return FALSE;
+		}
+
+		icmp6 = (struct icmp6_hdr *)(void *)hdr;
+		if (icmp6->icmp6_type == ND_ROUTER_ADVERT) {
+			DTRACE_SKYWALK3(icmp6__ra, if_redirect_t, rd,
+			    struct __kern_packet *, pkt, struct icmp6 *, icmp6);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 static void
 redirect_rx_cb(void *arg, struct pktq *spktq)
 {
-	if_redirect_t rd = arg;
+	if_redirect_t __single rd = arg;
 	struct __kern_packet *spkt, *pkt;
+	struct pktq rpktq;
 	kern_packet_t ph;
 	kern_channel_ring_t rx_ring = NULL;
 	kern_channel_slot_t rx_slot = NULL, last_rx_slot = NULL;
@@ -716,13 +762,17 @@ redirect_rx_cb(void *arg, struct pktq *spktq)
 		pp_free_pktq(spktq);
 		return;
 	}
+	KPKTQ_INIT(&rpktq);
 	bzero(&stats, sizeof(stats));
 	kr_enter(rx_ring, TRUE);
 	kern_channel_reclaim(rx_ring);
 
 	while (KPKTQ_LEN(spktq) > 0) {
 		KPKTQ_DEQUEUE(spktq, spkt);
-
+		if (pkt_is_for_delegate(rd, spkt)) {
+			KPKTQ_ENQUEUE(&rpktq, spkt);
+			continue;
+		}
 		rx_slot = kern_channel_get_next_slot(rx_ring, last_rx_slot, NULL);
 		if (rx_slot == NULL) {
 			DTRACE_SKYWALK2(no__slot__drop, if_redirect_t, rd,
@@ -746,6 +796,7 @@ redirect_rx_cb(void *arg, struct pktq *spktq)
 		last_rx_slot = rx_slot;
 	}
 	ASSERT(KPKTQ_EMPTY(spktq));
+	KPKTQ_CONCAT(spktq, &rpktq);
 	if (last_rx_slot != NULL) {
 		kern_channel_advance_slot(rx_ring, last_rx_slot);
 		kern_channel_increment_ring_net_stats(rx_ring, rd->rd_ifp, &stats);
@@ -803,7 +854,7 @@ done:
 static void
 redirect_schedule_async_doorbell(if_redirect_t rd)
 {
-	thread_call_t tcall;
+	thread_call_t __single tcall;
 
 	RD_LOCK(rd);
 	if (__improbable(!redirect_is_usable(rd))) {
@@ -932,7 +983,7 @@ static errno_t
 fill_capab_interface_advisory(if_redirect_t rd, void *contents,
     uint32_t *len)
 {
-	struct kern_nexus_capab_interface_advisory *capab = contents;
+	struct kern_nexus_capab_interface_advisory * __single capab = contents;
 
 	if (*len != sizeof(*capab)) {
 		DTRACE_SKYWALK2(invalid__len, uint32_t, *len, size_t, sizeof(*capab));
@@ -982,7 +1033,7 @@ create_netif_provider_and_instance(if_redirect_t rd,
 	nexus_controller_t controller = kern_nexus_shared_controller();
 	struct kern_nexus_net_init net_init = {};
 	nexus_name_t provider_name = {};
-	nexus_attr_t nexus_attr = NULL;
+	nexus_attr_t __single nexus_attr = NULL;
 
 	struct kern_nexus_provider_init prov_init = {
 		.nxpi_version = KERN_NEXUS_DOMAIN_PROVIDER_CURRENT_VERSION,
@@ -1107,7 +1158,7 @@ interface_link_event(ifnet_t ifp, uint32_t event_code)
 	};
 	_Alignas(struct kern_event_msg) char message[sizeof(struct kern_event_msg) + sizeof(struct event)] = { 0 };
 	struct kern_event_msg *header = (struct kern_event_msg *)message;
-	struct event *data = (struct event *)(header + 1);
+	struct event *data = (struct event *)(message + KEV_MSG_HEADER_SIZE);
 
 	header->total_size = sizeof(message);
 	header->vendor_code = KEV_VENDOR_APPLE;
@@ -1134,7 +1185,7 @@ redirect_clone_create(struct if_clone *ifc, uint32_t unit, void *param)
 	struct ifnet_init_eparams rd_init;
 	struct if_redirect_create_params params;
 	user_addr_t param_addr = (user_addr_t)param;
-	ifnet_t ifp;
+	ifnet_t __single ifp;
 
 	if (param_addr == USER_ADDR_NULL) {
 		RDLOG_ERR("create params not specified");
@@ -1187,9 +1238,9 @@ redirect_clone_create(struct if_clone *ifc, uint32_t unit, void *param)
 	if (params.ircp_type == RD_CREATE_PARAMS_TYPE_NOATTACH) {
 		rd_init.flags |= IFNET_INIT_NX_NOAUTO;
 	}
+	rd_init.uniqueid_len = (uint32_t)strbuflen(rd->rd_name);
 	rd_init.uniqueid = rd->rd_name;
-	rd_init.uniqueid_len = (uint32_t)strlen(rd->rd_name);
-	rd_init.name = ifc->ifc_name;
+	rd_init.name = __unsafe_null_terminated_from_indexable(ifc->ifc_name);
 	rd_init.unit = unit;
 	rd_init.softc = rd;
 	rd_init.ioctl = redirect_ioctl;
@@ -1311,7 +1362,7 @@ done:
 static void
 redirect_detach_notify(void *arg)
 {
-	if_redirect_t rd = arg;
+	if_redirect_t __single rd = arg;
 
 	redirect_clear_delegate(rd);
 }
@@ -1535,7 +1586,7 @@ redirect_ioctl_set_delegate(ifnet_t ifp, user_addr_t user_addr, uint64_t len)
 	}
 	/* ensure null termination */
 	ifrr.ifrr_delegate_name[IFNAMSIZ - 1] = '\0';
-	delegate_ifp = ifunit_ref(ifrr.ifrr_delegate_name);
+	delegate_ifp = ifunit_ref(__unsafe_null_terminated_from_indexable(ifrr.ifrr_delegate_name));
 	if (delegate_ifp == NULL) {
 		RDLOG_ERR("delegate %s not found", ifrr.ifrr_delegate_name);
 		DTRACE_SKYWALK2(invalid__name, ifnet_t, ifp, char *,
@@ -1664,7 +1715,7 @@ redirect_ioctl(ifnet_t ifp, u_long cmd, void *data)
 		break;
 	case SIOCGIFMEDIA32:
 	case SIOCGIFMEDIA64: {
-		struct ifmediareq *ifmr;
+		struct ifmediareq32 *ifmr;
 
 		RD_LOCK(rd);
 		if (rd->rd_ftype != IFRTYPE_FAMILY_ETHERNET) {
@@ -1672,7 +1723,7 @@ redirect_ioctl(ifnet_t ifp, u_long cmd, void *data)
 			RD_UNLOCK(rd);
 			return EOPNOTSUPP;
 		}
-		ifmr = (struct ifmediareq *)data;
+		ifmr = (struct ifmediareq32 *)data;
 		ifmr->ifm_current = IFM_ETHER;
 		ifmr->ifm_mask = 0;
 		ifmr->ifm_status = (IFM_AVALID | IFM_ACTIVE);
@@ -1680,8 +1731,8 @@ redirect_ioctl(ifnet_t ifp, u_long cmd, void *data)
 		ifmr->ifm_count = 1;
 
 		user_addr = (cmd == SIOCGIFMEDIA64) ?
-		    ((struct ifmediareq64 *)ifmr)->ifmu_ulist :
-		    CAST_USER_ADDR_T(((struct ifmediareq32 *)ifmr)->ifmu_ulist);
+		    ((struct ifmediareq64 *)data)->ifmu_ulist :
+		    CAST_USER_ADDR_T(((struct ifmediareq32 *)data)->ifmu_ulist);
 		if (user_addr != USER_ADDR_NULL) {
 			error = copyout(&ifmr->ifm_current, user_addr, sizeof(int));
 		}

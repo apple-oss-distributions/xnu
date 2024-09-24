@@ -224,7 +224,7 @@ receive_packets(int recvSocket)
 	return success;
 }
 
-T_DECL(recvmsg_x_ipv4_udp, "revcmsg_x() ipv4")
+T_DECL(recvmsg_x_ipv4_udp, "revcmsg_x() ipv4", T_META_TAG_VM_PREFERRED)
 {
 	struct sockaddr_in addr = {
 		.sin_len = sizeof(addr),
@@ -260,7 +260,7 @@ T_DECL(recvmsg_x_ipv4_udp, "revcmsg_x() ipv4")
 	close(recvSocket);
 }
 
-T_DECL(recvmsg_x_ipv6_udp, "exercise revcmsg_x() ")
+T_DECL(recvmsg_x_ipv6_udp, "exercise revcmsg_x() ", T_META_TAG_VM_PREFERRED)
 {
 	struct sockaddr_in6 addr = {
 		.sin6_len = sizeof(addr),

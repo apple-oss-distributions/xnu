@@ -121,7 +121,7 @@ static void ipc_mqueue_peek_on_thread_locked(
 static void ipc_mqueue_post(
 	ipc_mqueue_t            mqueue,
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option);
+	mach_msg_option64_t     option);
 
 /*
  *	Routine:	ipc_mqueue_init
@@ -135,6 +135,64 @@ ipc_mqueue_init(
 	ipc_kmsg_queue_init(&mqueue->imq_messages);
 	mqueue->imq_qlimit = MACH_PORT_QLIMIT_DEFAULT;
 	klist_init(&mqueue->imq_klist);
+}
+
+/*
+ *	Routine:	ipc_mqueue_msg_too_large
+ *	Purpose:
+ *		Return true if kmsg is too large to be received:
+ *
+ *      If MACH64_RCV_LINEAR_VECTOR:
+ *          - combined message buffer is not large enough
+ *            to fit both the message (plus trailer) and
+ *            auxiliary data.
+ *      Otherwise:
+ *          - message buffer is not large enough
+ *          - auxiliary buffer is not large enough:
+ *	      (1) kmsg is a vector with aux, but user expects
+ *                a scalar kmsg (ith_max_asize is 0)
+ *            (2) kmsg is a vector with aux, but user aux
+ *                buffer is not large enough.
+ */
+static bool
+ipc_mqueue_msg_too_large(
+	mach_msg_size_t         msg_size,
+	mach_msg_size_t         trailer_size,
+	mach_msg_size_t         aux_size,
+	mach_msg_option64_t     options,
+	mach_msg_recv_bufs_t   *recv_bufs)
+{
+	mach_msg_size_t max_msg_size = recv_bufs->recv_msg_size;
+	mach_msg_size_t max_aux_size = recv_bufs->recv_aux_size;
+
+	if (max_aux_size != 0) {
+		assert(options & MACH64_MSG_VECTOR);
+	}
+
+	if (options & MACH64_RCV_LINEAR_VECTOR) {
+		assert(max_aux_size == 0);
+		assert(options & MACH64_MSG_VECTOR);
+
+		if (max_msg_size < msg_size + trailer_size + aux_size) {
+			return true;
+		}
+	} else {
+		if (max_msg_size < msg_size + trailer_size) {
+			return true;
+		}
+
+		/*
+		 * only return too large if MACH64_MSG_VECTOR.
+		 *
+		 * silently drop aux data when receiver is not expecting it for compat
+		 * reasons.
+		 */
+		if ((options & MACH64_MSG_VECTOR) && max_aux_size < aux_size) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /*
@@ -174,8 +232,8 @@ ipc_mqueue_add_locked(
 	 * posted to already.
 	 */
 	while ((kmsg = ipc_kmsg_queue_first(kmsgq)) != IKM_NULL) {
+		mach_msg_size_t msize, tsize, asize;
 		thread_t th;
-		mach_msg_size_t msize, asize;
 
 		th = waitq_wakeup64_identify_locked(wqset, IPC_MQUEUE_RECEIVE,
 		    THREAD_AWAKENED, WAITQ_KEEP_LOCKED);
@@ -233,10 +291,11 @@ ipc_mqueue_add_locked(
 		 * just move onto the next.
 		 */
 		msize = ipc_kmsg_copyout_size(kmsg, th->map);
-		asize = ipc_kmsg_aux_data_size(kmsg);
+		tsize = ipc_kmsg_trailer_size(th->ith_option, th->map);
+		asize = kmsg->ikm_aux_size;
 
-		if (ipc_kmsg_too_large(msize, asize, th->ith_option,
-		    th->ith_max_msize, th->ith_max_asize, th)) {
+		if (ipc_mqueue_msg_too_large(msize, tsize, asize, th->ith_option,
+		    &th->ith_recv_bufs)) {
 			th->ith_state = MACH_RCV_TOO_LARGE;
 			th->ith_msize = msize;
 			th->ith_asize = asize;
@@ -398,8 +457,8 @@ mach_msg_return_t
 ipc_mqueue_send_locked(
 	ipc_mqueue_t            mqueue,
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
-	mach_msg_timeout_t  send_timeout)
+	mach_msg_option64_t     option,
+	mach_msg_timeout_t      send_timeout)
 {
 	ipc_port_t port = ip_from_mq(mqueue);
 	int wresult;
@@ -606,7 +665,7 @@ static void
 ipc_mqueue_post(
 	ipc_mqueue_t               mqueue,
 	ipc_kmsg_t                 kmsg,
-	mach_msg_option_t __unused option)
+	mach_msg_option64_t        option __unused)
 {
 	ipc_port_t port = ip_from_mq(mqueue);
 	struct waitq *waitq = &port->ip_waitq;
@@ -629,8 +688,8 @@ ipc_mqueue_post(
 	}
 
 	for (;;) {
+		mach_msg_size_t msize, tsize, asize;
 		thread_t receiver;
-		mach_msg_size_t msize, asize;
 
 		receiver = waitq_wakeup64_identify_locked(waitq,
 		    IPC_MQUEUE_RECEIVE, THREAD_AWAKENED, WAITQ_KEEP_LOCKED);
@@ -717,10 +776,11 @@ ipc_mqueue_post(
 		 * the thread we wake up will get that as its status.
 		 */
 		msize = ipc_kmsg_copyout_size(kmsg, receiver->map);
-		asize = ipc_kmsg_aux_data_size(kmsg);
+		tsize = ipc_kmsg_trailer_size(receiver->ith_option, receiver->map);
+		asize = kmsg->ikm_aux_size;
 
-		if (ipc_kmsg_too_large(msize, asize, receiver->ith_option,
-		    receiver->ith_max_msize, receiver->ith_max_asize, receiver)) {
+		if (ipc_mqueue_msg_too_large(msize, tsize, asize, receiver->ith_option,
+		    &receiver->ith_recv_bufs)) {
 			receiver->ith_msize = msize;
 			receiver->ith_asize = asize;
 			receiver->ith_state = MACH_RCV_TOO_LARGE;
@@ -874,21 +934,19 @@ ipc_mqueue_receive_continue(
 
 void
 ipc_mqueue_receive(
-	struct waitq            *waitq,
-	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_size,
-	mach_msg_size_t         max_aux_size,   /* 0 if no aux buffer */
+	struct waitq           *waitq,
 	mach_msg_timeout_t      rcv_timeout,
 	int                     interruptible,
+	thread_t                thread,
 	bool                    has_continuation)
 {
 	wait_result_t           wresult;
-	thread_t                self = current_thread();
 
+	assert(thread == current_thread());
 	waitq_lock(waitq);
 
-	wresult = ipc_mqueue_receive_on_thread_and_unlock(waitq, option64, max_size,
-	    max_aux_size, rcv_timeout, interruptible, self);
+	wresult = ipc_mqueue_receive_on_thread_and_unlock(waitq, rcv_timeout,
+	    interruptible, thread);
 	/* object unlocked */
 	if (wresult == THREAD_NOT_WAITING) {
 		return;
@@ -917,19 +975,19 @@ ipc_mqueue_receive(
  */
 wait_result_t
 ipc_mqueue_receive_on_thread_and_unlock(
-	struct waitq            *waitq,
-	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_msg_size,
-	mach_msg_size_t         max_aux_size,
+	struct waitq           *waitq,
 	mach_msg_timeout_t      rcv_timeout,
 	int                     interruptible,
 	thread_t                thread)
 {
+	mach_msg_option64_t     option64 = thread->ith_option;
 	ipc_object_t            object = io_from_waitq(waitq);
 	ipc_port_t              port = IP_NULL;
 	wait_result_t           wresult;
 	uint64_t                deadline;
 	struct turnstile        *rcv_turnstile = TURNSTILE_NULL;
+
+	assert(thread == current_thread());
 
 	if (waitq_type(waitq) == WQT_PORT_SET) {
 		ipc_pset_t pset = ips_object_to_pset(object);
@@ -982,7 +1040,7 @@ ipc_mqueue_receive_on_thread_and_unlock(
 #endif /* MACH_FLIPC */
 		{
 			ipc_mqueue_select_on_thread_locked(&port->ip_messages,
-			    option64, max_msg_size, max_aux_size, thread);
+			    option64, thread);
 		}
 		ip_mq_unlock(port);
 		return THREAD_NOT_WAITING;
@@ -1009,13 +1067,6 @@ ipc_mqueue_receive_on_thread_and_unlock(
 		thread->ith_state = MACH_RCV_TIMED_OUT;
 		return THREAD_NOT_WAITING;
 	}
-
-	thread->ith_option = option64;
-	thread->ith_max_msize = max_msg_size;
-	thread->ith_msize = 0;
-
-	thread->ith_max_asize = max_aux_size;
-	thread->ith_asize = 0;
 
 	thread->ith_state = MACH_RCV_IN_PROGRESS;
 #if MACH_FLIPC
@@ -1151,13 +1202,11 @@ ipc_mqueue_peek_on_thread_locked(
 void
 ipc_mqueue_select_on_thread_locked(
 	ipc_mqueue_t            port_mq,
-	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_msg_size,
-	mach_msg_size_t         max_aux_size,
+	mach_msg_option64_t     options,
 	thread_t                thread)
 {
+	mach_msg_size_t msize, tsize, asize;
 	ipc_kmsg_t kmsg;
-	mach_msg_size_t msize, asize;
 
 	mach_msg_return_t mr = MACH_MSG_SUCCESS;
 
@@ -1175,13 +1224,14 @@ ipc_mqueue_select_on_thread_locked(
 	 * (and size needed).
 	 */
 	msize = ipc_kmsg_copyout_size(kmsg, thread->map);
-	asize = ipc_kmsg_aux_data_size(kmsg);
+	tsize = ipc_kmsg_trailer_size(options, thread->map);
+	asize = kmsg->ikm_aux_size;
 
-	if (ipc_kmsg_too_large(msize, asize, option64,
-	    max_msg_size, max_aux_size, thread)) {
+	if (ipc_mqueue_msg_too_large(msize, tsize, asize, options,
+	    &thread->ith_recv_bufs)) {
 		mr = MACH_RCV_TOO_LARGE;
-		if (option64 & MACH_RCV_LARGE) {
-			ipc_kmsg_validate_partial_sig(kmsg);
+		if (options & MACH_RCV_LARGE) {
+			(void)ipc_kmsg_validate_signature(kmsg);
 			thread->ith_receiver_name = port_mq->imq_receiver_name;
 			thread->ith_kmsg = IKM_NULL;
 			thread->ith_msize = msize;
@@ -1221,12 +1271,13 @@ ipc_mqueue_select_on_thread_locked(
  *		Caller holds reference on the message queue.
  */
 unsigned
-ipc_mqueue_peek_locked(ipc_mqueue_t mq,
-    mach_port_seqno_t * seqnop,
-    mach_msg_size_t * msg_sizep,
-    mach_msg_id_t * msg_idp,
-    mach_msg_max_trailer_t * msg_trailerp,
-    ipc_kmsg_t *kmsgp)
+ipc_mqueue_peek_locked(
+	ipc_mqueue_t            mq,
+	mach_port_seqno_t      *seqnop,
+	mach_msg_size_t        *msg_sizep,
+	mach_msg_id_t          *msg_idp,
+	mach_msg_max_trailer_t *msg_trailerp,
+	ipc_kmsg_t             *kmsgp)
 {
 	ipc_kmsg_queue_t kmsgq;
 	ipc_kmsg_t kmsg;
@@ -1266,7 +1317,7 @@ ipc_mqueue_peek_locked(ipc_mqueue_t mq,
 	 *
 	 * Partial kmsg signature is only supported on PAC devices.
 	 */
-	ipc_kmsg_validate_partial_sig(kmsg);
+	(void)ipc_kmsg_validate_signature(kmsg);
 
 	hdr = ikm_header(kmsg);
 	/* found one - return the requested info */
@@ -1280,7 +1331,7 @@ ipc_mqueue_peek_locked(ipc_mqueue_t mq,
 		*msg_idp = hdr->msgh_id;
 	}
 	if (msg_trailerp != NULL) {
-		memcpy(msg_trailerp, ipc_kmsg_get_trailer(kmsg, false), sizeof(mach_msg_max_trailer_t));
+		*msg_trailerp = *ipc_kmsg_get_trailer(kmsg);
 	}
 	if (kmsgp != NULL) {
 		*kmsgp = kmsg;

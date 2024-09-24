@@ -230,17 +230,17 @@ nd6_prproxy_prelist_setroute(boolean_t enable,
     struct nd6_prproxy_prelist_head *up_head,
     struct nd6_prproxy_prelist_head *down_head)
 {
-	struct nd6_prproxy_prelist *up, *down, *ndprl_tmp;
-	struct nd_prefix *pr;
+	struct nd6_prproxy_prelist *__single up, *__single down, *__single ndprl_tmp;
+	struct nd_prefix *__single pr;
 
 	LCK_MTX_ASSERT(&proxy6_lock, LCK_MTX_ASSERT_OWNED);
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	SLIST_FOREACH_SAFE(up, up_head, ndprl_le, ndprl_tmp) {
-		struct rtentry *rt;
+		rtentry_ref_t rt;
 		boolean_t prproxy, set_allmulti = FALSE;
 		int allmulti_sw = FALSE;
-		struct ifnet *ifp = NULL;
+		ifnet_ref_t ifp = NULL;
 
 		SLIST_REMOVE(up_head, up, nd6_prproxy_prelist, ndprl_le);
 		pr = up->ndprl_pr;
@@ -294,11 +294,11 @@ nd6_prproxy_prelist_setroute(boolean_t enable,
 	}
 
 	SLIST_FOREACH_SAFE(down, down_head, ndprl_le, ndprl_tmp) {
-		struct nd_prefix *pr_up;
-		struct rtentry *rt;
+		struct nd_prefix *__single pr_up;
+		rtentry_ref_t rt;
 		boolean_t prproxy, set_allmulti = FALSE;
 		int allmulti_sw = FALSE;
-		struct ifnet *ifp = NULL;
+		ifnet_ref_t ifp = NULL;
 
 		SLIST_REMOVE(down_head, down, nd6_prproxy_prelist, ndprl_le);
 		pr = down->ndprl_pr;
@@ -356,8 +356,8 @@ nd6_if_prproxy(struct ifnet *ifp, boolean_t enable)
 {
 	SLIST_HEAD(, nd6_prproxy_prelist) up_head;
 	SLIST_HEAD(, nd6_prproxy_prelist) down_head;
-	struct nd6_prproxy_prelist *up, *down;
-	struct nd_prefix *pr;
+	struct nd6_prproxy_prelist *__single up, *__single down;
+	struct nd_prefix *__single pr;
 
 	/* Can't be enabled if we are an advertising router on the interface */
 	ifnet_lock_shared(ifp);
@@ -432,7 +432,7 @@ nd6_if_prproxy(struct ifnet *ifp, boolean_t enable)
 	 * the NDPRF_PRPROXY is never set/cleared on the downstream prefixes.
 	 */
 	SLIST_FOREACH(up, &up_head, ndprl_le) {
-		struct nd_prefix *fwd;
+		struct nd_prefix *__single fwd;
 		struct in6_addr pr_addr;
 		uint32_t pr_ifscope;
 		u_char pr_len;
@@ -495,7 +495,7 @@ boolean_t
 nd6_prproxy_isours(struct mbuf *m, struct ip6_hdr *ip6, struct route_in6 *ro6,
     unsigned int ifscope)
 {
-	struct rtentry *rt;
+	rtentry_ref_t rt;
 	boolean_t ours = FALSE;
 
 	if (ip6->ip6_hlim != IPV6_MAXHLIM || ip6->ip6_nxt != IPPROTO_ICMPV6) {
@@ -557,11 +557,11 @@ done:
 void
 nd6_proxy_find_fwdroute(struct ifnet *ifp, struct route_in6 *ro6)
 {
-	struct in6_addr *dst6 = &ro6->ro_dst.sin6_addr;
+	struct in6_addr *__single dst6 = &ro6->ro_dst.sin6_addr;
 	uint32_t dst_ifscope = ro6->ro_dst.sin6_scope_id;
-	struct ifnet *fwd_ifp = NULL;
-	struct nd_prefix *pr;
-	struct rtentry *rt;
+	ifnet_ref_t fwd_ifp = NULL;
+	struct nd_prefix *__single pr;
+	rtentry_ref_t rt;
 
 	if ((rt = ro6->ro_rt) != NULL) {
 		RT_LOCK(rt);
@@ -593,7 +593,7 @@ nd6_proxy_find_fwdroute(struct ifnet *ifp, struct route_in6 *ro6)
 	lck_mtx_lock(nd6_mutex);
 	for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
 		struct in6_addr pr_addr;
-		struct nd_prefix *fwd;
+		struct nd_prefix *__single fwd;
 		uint32_t pr_ifscope = pr->ndpr_prefix.sin6_scope_id;
 
 		u_char pr_len;
@@ -699,8 +699,8 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 {
 	SLIST_HEAD(, nd6_prproxy_prelist) up_head;
 	SLIST_HEAD(, nd6_prproxy_prelist) down_head;
-	struct nd6_prproxy_prelist *up, *down;
-	struct nd_prefix *pr;
+	struct nd6_prproxy_prelist *__single up, *__single down;
+	struct nd_prefix *__single pr;
 	struct in6_addr pr_addr;
 	boolean_t enable;
 	u_char pr_len;
@@ -821,7 +821,7 @@ done:
 boolean_t
 nd6_prproxy_ifaddr(struct in6_ifaddr *ia)
 {
-	struct nd_prefix *pr;
+	struct nd_prefix *__single pr;
 	struct in6_addr addr;
 	u_int32_t pr_len;
 	uint32_t pr_scope_id;
@@ -867,9 +867,9 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
     struct in6_addr *daddr, struct in6_addr *taddr, struct llinfo_nd6 *ln)
 {
 	SLIST_HEAD(, nd6_prproxy_prelist) ndprl_head;
-	struct nd6_prproxy_prelist *ndprl, *ndprl_tmp;
-	struct nd_prefix *pr, *fwd;
-	struct ifnet *fwd_ifp;
+	struct nd6_prproxy_prelist *__single ndprl, *__single ndprl_tmp;
+	struct nd_prefix *__single pr, *__single fwd;
+	ifnet_ref_t fwd_ifp;
 	struct in6_addr pr_addr;
 	u_char pr_len;
 	uint32_t pr_scope_id;
@@ -963,7 +963,7 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
 			    "on %s\n", if_name(fwd_ifp),
 			    ip6_sprintf(taddr), if_name(ifp));
 
-			nd6_ns_output(fwd_ifp, daddr, taddr, NULL, NULL);
+			nd6_ns_output(fwd_ifp, daddr, taddr, NULL, NULL, 0);
 		} else {
 			NDPR_UNLOCK(pr);
 		}
@@ -973,7 +973,7 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
 	}
 	VERIFY(SLIST_EMPTY(&ndprl_head));
 
-	nd6_ns_output(ifp, daddr, taddr, ln, NULL);
+	nd6_ns_output(ifp, daddr, taddr, ln, NULL, 0);
 }
 
 /*
@@ -986,13 +986,13 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
  */
 void
 nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
-    char *lladdr, int lladdrlen, struct in6_addr *daddr,
-    struct in6_addr *taddr, uint8_t *nonce)
+    char *__sized_by(lladdrlen)lladdr, int lladdrlen, struct in6_addr *daddr,
+    struct in6_addr *taddr, uint8_t *__counted_by(noncelen) nonce, size_t noncelen)
 {
 	SLIST_HEAD(, nd6_prproxy_prelist) ndprl_head;
-	struct nd6_prproxy_prelist *ndprl, *ndprl_tmp;
-	struct nd_prefix *pr, *fwd;
-	struct ifnet *fwd_ifp;
+	struct nd6_prproxy_prelist *__single ndprl, *__single ndprl_tmp;
+	struct nd_prefix *__single pr, *__single fwd;
+	ifnet_ref_t fwd_ifp;
 	struct in6_addr pr_addr;
 	u_char pr_len;
 	boolean_t solrec = FALSE;
@@ -1102,7 +1102,7 @@ nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
 			    ip6_sprintf(taddr), if_name(ifp));
 
 			nd6_ns_output(fwd_ifp, ndprl->ndprl_sol ? taddr : NULL,
-			    taddr, NULL, nonce);
+			    taddr, NULL, nonce, noncelen);
 		} else {
 			NDPR_UNLOCK(pr);
 		}
@@ -1126,9 +1126,9 @@ nd6_prproxy_na_input(struct ifnet *ifp, struct in6_addr *saddr,
     struct in6_addr *daddr0, struct in6_addr *taddr, int flags)
 {
 	SLIST_HEAD(, nd6_prproxy_prelist) ndprl_head;
-	struct nd6_prproxy_prelist *ndprl, *ndprl_tmp;
-	struct nd_prefix *pr;
-	struct ifnet *fwd_ifp;
+	struct nd6_prproxy_prelist *__single ndprl, *__single ndprl_tmp;
+	struct nd_prefix *__single pr;
+	ifnet_ref_t fwd_ifp;
 	struct in6_addr daddr;
 	uint32_t pr_scope_id;
 	uint32_t taddr_ifscope = ifp->if_index;
@@ -1176,7 +1176,7 @@ nd6_prproxy_na_input(struct ifnet *ifp, struct in6_addr *saddr,
 
 			SLIST_INSERT_HEAD(&ndprl_head, ndprl, ndprl_le);
 		} else {
-			struct nd_prefix *fwd;
+			struct nd_prefix *__single fwd;
 			struct in6_addr pr_addr;
 			u_char pr_len;
 
@@ -1285,7 +1285,7 @@ nd6_solsrc_free(struct nd6_prproxy_solsrc *ssrc)
 static void
 nd6_prproxy_sols_purge(struct nd_prefix *pr, u_int64_t max_stgt)
 {
-	struct nd6_prproxy_soltgt *soltgt, *tmp;
+	struct nd6_prproxy_soltgt *__single soltgt, *__single tmp;
 	u_int64_t expire = (max_stgt > 0) ? net_uptime() : 0;
 
 	NDPR_LOCK_ASSERT_HELD(pr);
@@ -1349,8 +1349,9 @@ static boolean_t
 nd6_solsrc_enq(struct nd_prefix *pr, struct ifnet *ifp,
     struct in6_addr *saddr, struct in6_addr *taddr)
 {
-	struct nd6_prproxy_soltgt find, *soltgt;
-	struct nd6_prproxy_solsrc *ssrc;
+	struct nd6_prproxy_soltgt find;
+	struct nd6_prproxy_soltgt *__single soltgt;
+	struct nd6_prproxy_solsrc *__single ssrc;
 	u_int32_t max_stgt = nd6_max_tgt_sols;
 	u_int32_t max_ssrc = nd6_max_src_sols;
 
@@ -1416,8 +1417,9 @@ static boolean_t
 nd6_solsrc_deq(struct nd_prefix *pr, struct in6_addr *taddr,
     struct in6_addr *daddr, struct ifnet **ifp)
 {
-	struct nd6_prproxy_soltgt find, *soltgt;
-	struct nd6_prproxy_solsrc *ssrc;
+	struct nd6_prproxy_soltgt find;
+	struct nd6_prproxy_soltgt *__single soltgt;
+	struct nd6_prproxy_solsrc *__single ssrc;
 
 	NDPR_LOCK_ASSERT_HELD(pr);
 	VERIFY(!(pr->ndpr_stateflags & NDPRF_IFSCOPE));
@@ -1450,7 +1452,7 @@ nd6_solsrc_deq(struct nd_prefix *pr, struct in6_addr *taddr,
 static struct nd6_prproxy_soltgt *
 nd6_soltgt_alloc(int how)
 {
-	struct nd6_prproxy_soltgt *soltgt;
+	struct nd6_prproxy_soltgt *__single soltgt;
 
 	soltgt = zalloc_flags(soltgt_zone, how | Z_ZERO);
 	if (soltgt != NULL) {
@@ -1462,7 +1464,7 @@ nd6_soltgt_alloc(int how)
 static void
 nd6_soltgt_free(struct nd6_prproxy_soltgt *soltgt)
 {
-	struct nd6_prproxy_solsrc *ssrc, *tssrc;
+	struct nd6_prproxy_solsrc *__single ssrc, *__single tssrc;
 
 	TAILQ_FOREACH_SAFE(ssrc, &soltgt->soltgt_q, solsrc_tqe, tssrc) {
 		VERIFY(soltgt->soltgt_cnt > 0);
@@ -1481,7 +1483,7 @@ static void
 nd6_soltgt_prune(struct nd6_prproxy_soltgt *soltgt, u_int32_t max_ssrc)
 {
 	while (soltgt->soltgt_cnt >= max_ssrc) {
-		struct nd6_prproxy_solsrc *ssrc;
+		struct nd6_prproxy_solsrc *__single ssrc;
 
 		VERIFY(soltgt->soltgt_cnt != 0);
 		--soltgt->soltgt_cnt;

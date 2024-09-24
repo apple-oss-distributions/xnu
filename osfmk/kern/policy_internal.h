@@ -71,6 +71,7 @@ extern kern_return_t task_importance(task_t task, integer_t importance);
 /* for tracing */
 #define TASK_POLICY_TASK                0x4
 #define TASK_POLICY_THREAD              0x8
+#define TASK_POLICY_COALITION           0x10
 
 /* flavors (also DBG_IMPORTANCE subclasses  0x20 - 0x40) */
 
@@ -290,20 +291,9 @@ extern const struct thread_requested_policy default_thread_requested_policy;
  * for IPC importance hooks into task policy
  */
 
-typedef struct task_pend_token {
-	uint32_t        tpt_update_sockets      :1,
-	    tpt_update_timers       :1,
-	    tpt_update_watchers     :1,
-	    tpt_update_live_donor   :1,
-	    tpt_update_coal_sfi     :1,
-	    tpt_update_throttle     :1,
-	    tpt_update_thread_sfi   :1,
-	    tpt_force_recompute_pri :1,
-	    tpt_update_tg_ui_flag   :1,
-	    tpt_update_turnstile    :1,
-	    tpt_update_tg_app_flag  :1,
-	    tpt_update_game_mode    :1;
-} *task_pend_token_t;
+extern void coalition_policy_update_task(task_t task, coalition_pend_token_t coal_pend_token);
+
+extern bool task_get_effective_jetsam_coalition_policy(task_t task, int flavor);
 
 extern void task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token);
 extern void task_update_boost_locked(task_t task, boolean_t boost_active, task_pend_token_t pend_token);

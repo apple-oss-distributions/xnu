@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -63,7 +63,7 @@
 #ifndef ARM64_SOC_NAME
 #ifndef CURRENT_MACHINE_CONFIG_LC
 #error CURRENT_MACHINE_CONFIG_LC must be defined in makedefs/MakeInc.def
-#endif
+#endif /* CURRENT_MACHINE_CONFIG_LC */
 #define ARM64_SOC_NAME CURRENT_MACHINE_CONFIG_LC
 #endif /* ARM64_SOC_NAME */
 

@@ -37,7 +37,7 @@
 #include <mach/vm_statistics.h>
 
 #include <vm/vm_kern.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_xnu.h>
 #include <vm/vm_protos.h>
 #include <kdp/kdp_core.h>
 #include <kdp/kdp_udp.h>

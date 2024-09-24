@@ -81,6 +81,19 @@ ccmode_gcm_gf_mult.o_INCFLAGS += -I${SRCROOT}/EXTERNAL_HEADERS/corecrypto
 ccmode_gcm_mult_h.o_INCFLAGS += -I${SRCROOT}/EXTERNAL_HEADERS/corecrypto
 
 #
+# Enforce semantic types
+#
+
+SEMANTIC_TYPES_SRC = $(notdir $(wildcard ${SRCROOT}/osfmk/vm/*.c))
+SEMANTIC_TYPES_OBJ = $(SEMANTIC_TYPES_SRC:.c=.o)
+
+define FORCE_UNSAFE_TYPES
+$1_CFLAGS_ADD += -DVM_UNSAFE_TYPES
+endef
+
+$(foreach file,$(SEMANTIC_TYPES_OBJ),$(eval $(call FORCE_UNSAFE_TYPES, $(file))))
+
+#
 # Diagnostic opt-outs.  We need to make this list empty.
 #
 # DO NOT ADD MORE HERE.
@@ -317,9 +330,7 @@ sched_amp_common.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 sched_average.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 sched_clutch.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 sched_dualq.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-sched_multiq.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 sched_prim.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-sched_traditional.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 serial_console.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 serial_general.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 sfi.o_CWARNFLAGS_ADD += -Wno-sign-conversion
@@ -357,7 +368,6 @@ vm_compressor_algorithms.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_compressor_backing_store.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_compressor_pager.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_fault.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-vm_fourk_pager.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_kern.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_map.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 vm_map_store_ll.o_CWARNFLAGS_ADD += -Wno-sign-conversion
@@ -379,6 +389,15 @@ xcpm_ioctl.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 # -Wno-xnu-typed-allocators
 kalloc.o_CWARNFLAGS_ADD += -Wno-xnu-typed-allocators
 exclaves_conclave_launcher.tightbeam.o_CWARNFLAGS_ADD += -Wno-unused-parameter
+# -Wno-vla
+exclaves_boot.o_CWARNFLAGS_ADD += -Wno-vla
+exclaves_xnuproxy.o_CWARNFLAGS_ADD += -Wno-vla
+machine.o_CWARNFLAGS_ADD += -Wno-vla
+pmap.o_CWARNFLAGS_ADD += -Wno-vla
+ppl_hib.o_CWARNFLAGS_ADD += -Wno-vla
+processor_core.o_CWARNFLAGS_ADD += -Wno-vla
+sleh.o_CWARNFLAGS_ADD += -Wno-vla
+vm_reclaim.o_CWARNFLAGS_ADD += -Wno-vla
 
 # Rebuild if per-file overrides change
 ${OBJS}: $(firstword $(MAKEFILE_LIST))

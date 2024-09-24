@@ -138,31 +138,11 @@ struct machine_info     machine_info;
 
 /* Forwards */
 static void
-processor_doshutdown(processor_t processor);
-
-static void
 processor_offline(void * parameter, __unused wait_result_t result);
 
 static void
 processor_offline_intstack(processor_t processor) __dead2;
 
-static void
-processor_up_update_counts(processor_t processor)
-{
-	ml_cpu_up_update_counts(processor->cpu_id);
-
-	os_atomic_inc(&processor_avail_count, relaxed);
-	if (processor->is_recommended) {
-		os_atomic_inc(&processor_avail_count_user, relaxed);
-	}
-	if (processor->processor_primary == processor) {
-		os_atomic_inc(&primary_processor_avail_count, relaxed);
-		if (processor->is_recommended) {
-			os_atomic_inc(&primary_processor_avail_count_user, relaxed);
-		}
-	}
-	commpage_update_active_cpus();
-}
 
 /*
  *	processor_up:
@@ -174,10 +154,7 @@ void
 processor_up(
 	processor_t                     processor)
 {
-	processor_set_t         pset;
-	spl_t                           s;
-
-	s = splsched();
+	spl_t s = splsched();
 	init_ast_check(processor);
 
 #if defined(__arm64__)
@@ -189,37 +166,27 @@ processor_up(
 	 * However, since cpu_signal() is not yet enabled for this processor,
 	 * there is a race if we have just passed this when a cpu_signal()
 	 * is attempted.  The sender will assume the cpu is offline, so it will
-	 * not end up spinning anywhere.  See processor_offline() for the fix
+	 * not end up spinning anywhere.  See processor_cpu_reinit() for the fix
 	 * for this race.
 	 */
 	wait_while_mp_kdp_trap(false);
 #endif
 
-	pset = processor->processor_set;
-	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
-	pset_lock(pset);
+	/* Boot CPU coming online for the first time, either at boot or after sleep */
+	__assert_only bool is_first_online_processor;
 
-	++pset->online_processor_count;
-	simple_lock(&processor->start_state_lock, LCK_GRP_NULL);
-	pset_update_processor_state(pset, processor, PROCESSOR_RUNNING);
-	simple_unlock(&processor->start_state_lock);
-	bool temporary = processor->shutdown_temporary;
-	if (temporary) {
-		processor->shutdown_temporary = false;
-	} else {
-		processor_up_update_counts(processor);
-	}
-	if (processor->is_recommended) {
-		SCHED(pset_made_schedulable)(processor, pset, false);
-	}
-	pset_unlock(pset);
-	ml_cpu_up();
-	smr_cpu_up(processor, SMR_CPU_REASON_OFFLINE);
-	sched_mark_processor_online_locked(processor, processor->last_startup_reason);
-	simple_unlock(&sched_available_cores_lock);
+	is_first_online_processor = sched_mark_processor_online(processor,
+	    processor->last_startup_reason);
+
+	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
+	assert(processor->processor_instartup == true || is_first_online_processor);
+	simple_unlock(&processor_start_state_lock);
+
 	splx(s);
 
-	thread_wakeup((event_t)&processor->state);
+#if defined(__x86_64__)
+	ml_cpu_up();
+#endif /* defined(__x86_64__) */
 
 #if CONFIG_DTRACE
 	if (dtrace_cpu_state_changed_hook) {
@@ -227,6 +194,7 @@ processor_up(
 	}
 #endif
 }
+
 #include <atm/atm_internal.h>
 
 kern_return_t
@@ -264,223 +232,97 @@ processor_assign(
 	return KERN_FAILURE;
 }
 
-static void
-processor_down_update_counts(processor_t processor)
+void
+processor_doshutdown(
+	processor_t     processor,
+	bool            is_final_system_sleep)
 {
-	ml_cpu_down_update_counts(processor->cpu_id);
+	lck_mtx_assert(&cluster_powerdown_lock, LCK_MTX_ASSERT_OWNED);
+	lck_mtx_assert(&processor_updown_lock, LCK_MTX_ASSERT_OWNED);
 
-	os_atomic_dec(&processor_avail_count, relaxed);
-	if (processor->is_recommended) {
-		os_atomic_dec(&processor_avail_count_user, relaxed);
-	}
-	if (processor->processor_primary == processor) {
-		os_atomic_dec(&primary_processor_avail_count, relaxed);
-		if (processor->is_recommended) {
-			os_atomic_dec(&primary_processor_avail_count_user, relaxed);
-		}
-	}
-	commpage_update_active_cpus();
-}
-
-extern lck_mtx_t processor_updown_lock;
-
-kern_return_t
-processor_shutdown(
-	processor_t                     processor,
-	processor_reason_t              reason,
-	uint32_t                        flags)
-{
-	if (!ml_cpu_can_exit(processor->cpu_id, reason)) {
-		/*
-		 * Failure if disallowed by arch code.
-		 */
-		return KERN_NOT_SUPPORTED;
+	if (!processor->processor_booted) {
+		panic("processor %d not booted", processor->cpu_id);
 	}
 
-	lck_mtx_lock(&processor_updown_lock);
+	if (is_final_system_sleep) {
+		assert(processor == current_processor());
+		assert(processor == master_processor);
+		assert(processor_avail_count == 1);
+	}
 
-	spl_t s = splsched();
 	processor_set_t pset = processor->processor_set;
-
-	pset_lock(pset);
-
-	if (processor->state == PROCESSOR_START) {
-		pset_unlock(pset);
-		splx(s);
-
-		processor_wait_for_start(processor);
-
-		s = splsched();
-		pset_lock(pset);
-	}
-
-	/*
-	 * If the processor is dispatching, let it finish.
-	 */
-	while (processor->state == PROCESSOR_DISPATCHING) {
-		pset_unlock(pset);
-		splx(s);
-		delay(1);
-		s = splsched();
-		pset_lock(pset);
-	}
-	pset_unlock(pset);
-	splx(s);
-
-	kern_return_t mark_ret = sched_mark_processor_offline(processor, reason);
-	if (mark_ret != KERN_SUCCESS) {
-		/* Must fail or we deadlock */
-		lck_mtx_unlock(&processor_updown_lock);
-		return KERN_FAILURE;
-	}
 
 	ml_cpu_begin_state_transition(processor->cpu_id);
-	s = splsched();
-
-	pset_lock(pset);
-	if (processor->state == PROCESSOR_OFF_LINE) {
-		/*
-		 * Success if already shutdown.
-		 */
-		if (processor->shutdown_temporary && !(flags & SHUTDOWN_TEMPORARY)) {
-			/* Convert a temporary shutdown into a permanent shutdown */
-			processor->shutdown_temporary = false;
-			processor_down_update_counts(processor);
-		}
-		pset_unlock(pset);
-		splx(s);
-		ml_cpu_end_state_transition(processor->cpu_id);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return KERN_SUCCESS;
-	}
-
-	if (processor->shutdown_locked && (reason != REASON_SYSTEM)) {
-		/*
-		 * Failure if processor is locked against shutdown.
-		 */
-		pset_unlock(pset);
-		splx(s);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return KERN_FAILURE;
-	}
-
-	/*
-	 * If the processor is dispatching, let it finish.
-	 */
-	while (processor->state == PROCESSOR_DISPATCHING) {
-		pset_unlock(pset);
-		splx(s);
-		delay(1);
-		s = splsched();
-		pset_lock(pset);
-	}
-
-	/*
-	 * Success if already being shutdown with matching SHUTDOWN_TEMPORARY flag.
-	 */
-	if ((processor->state == PROCESSOR_SHUTDOWN) || (processor->state == PROCESSOR_PENDING_OFFLINE)) {
-		bool success = (flags & SHUTDOWN_TEMPORARY) ? processor->shutdown_temporary : !processor->shutdown_temporary;
-
-		pset_unlock(pset);
-		splx(s);
-		ml_cpu_end_state_transition(processor->cpu_id);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return success ? KERN_SUCCESS : KERN_FAILURE;
-	}
 
 	ml_broadcast_cpu_event(CPU_EXIT_REQUESTED, processor->cpu_id);
-	pset_update_processor_state(pset, processor, PROCESSOR_SHUTDOWN);
-	processor->last_shutdown_reason = reason;
-	if (flags & SHUTDOWN_TEMPORARY) {
-		processor->shutdown_temporary = true;
-	}
-	pset_unlock(pset);
-
-	processor_doshutdown(processor);
-	splx(s);
-
-	cpu_exit_wait(processor->cpu_id);
-
-	if (processor != master_processor) {
-		s = splsched();
-		pset_lock(pset);
-		pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
-		pset_unlock(pset);
-		splx(s);
-	}
-
-	ml_cpu_end_state_transition(processor->cpu_id);
-	ml_broadcast_cpu_event(CPU_EXITED, processor->cpu_id);
-	ml_cpu_power_disable(processor->cpu_id);
-
-	lck_mtx_unlock(&processor_updown_lock);
-	return KERN_SUCCESS;
-}
-
-/*
- * Called with interrupts disabled.
- */
-static void
-processor_doshutdown(
-	processor_t processor)
-{
-	thread_t self = current_thread();
-
-	/*
-	 *	Get onto the processor to shutdown
-	 */
-	processor_t prev = thread_bind(processor);
-	thread_block(THREAD_CONTINUE_NULL);
-
-	/* interrupts still disabled */
-	assert(ml_get_interrupts_enabled() == FALSE);
-
-	assert(processor == current_processor());
-	assert(processor->state == PROCESSOR_SHUTDOWN);
-
-#if CONFIG_DTRACE
-	if (dtrace_cpu_state_changed_hook) {
-		(*dtrace_cpu_state_changed_hook)(processor->cpu_id, FALSE);
-	}
-#endif
-
-#if defined(__arm64__)
-	/*
-	 * Catch a processor going offline
-	 * while a panic or stackshot is in progress, as it won't
-	 * receive a SIGPdebug now that interrupts are disabled.
-	 */
-	wait_while_mp_kdp_trap(false);
-#endif
-
-	smr_cpu_down(processor, SMR_CPU_REASON_OFFLINE);
-	ml_cpu_down();
 
 #if HIBERNATION
-	if (processor_avail_count < 2) {
+	if (is_final_system_sleep) {
+		/*
+		 * Ensure the page queues are in a state where the hibernation
+		 * code can manipulate them without requiring other threads
+		 * to be scheduled.
+		 *
+		 * This operation can block,
+		 * and unlock must be done from the same thread.
+		 */
+		assert(processor_avail_count < 2);
 		hibernate_vm_lock();
-		hibernate_vm_unlock();
 	}
 #endif
 
-	processor_set_t pset = processor->processor_set;
-
+	spl_t s = splsched();
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
 	pset_lock(pset);
-	pset_update_processor_state(pset, processor, PROCESSOR_PENDING_OFFLINE);
-	--pset->online_processor_count;
-	if (!processor->shutdown_temporary) {
-		processor_down_update_counts(processor);
+
+	assert(processor->state != PROCESSOR_START);
+	assert(processor->state != PROCESSOR_PENDING_OFFLINE);
+	assert(processor->state != PROCESSOR_OFF_LINE);
+
+	assert(!processor->processor_inshutdown);
+	processor->processor_inshutdown = true;
+
+	assert(processor->processor_offline_state == PROCESSOR_OFFLINE_RUNNING);
+	processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_BEGIN_SHUTDOWN);
+
+	if (!is_final_system_sleep) {
+		sched_assert_not_last_online_cpu(processor->cpu_id);
 	}
-	SCHED(processor_queue_shutdown)(processor);
-	/* pset lock dropped */
-	SCHED(rt_queue_shutdown)(processor);
 
-	thread_bind(prev);
+	pset_unlock(pset);
+	simple_unlock(&sched_available_cores_lock);
 
-	/* interrupts still disabled */
+	if (is_final_system_sleep) {
+		assert(processor == current_processor());
+
+#if HIBERNATION
+		/*
+		 * After this point, the system is now
+		 * committed to hibernation and must
+		 * not run any other thread that could take this lock.
+		 */
+		hibernate_vm_unlock();
+#endif
+	} else {
+		/*
+		 * Get onto the processor to shut down.
+		 * The scheduler picks this thread naturally according to its
+		 * priority.
+		 * The processor can run any other thread if this one blocks.
+		 * So, don't block.
+		 */
+		processor_t prev = thread_bind(processor);
+		thread_block(THREAD_CONTINUE_NULL);
+
+		/* interrupts still disabled */
+		assert(ml_get_interrupts_enabled() == FALSE);
+
+		assert(processor == current_processor());
+		assert(processor->processor_inshutdown);
+
+		thread_bind(prev);
+		/* interrupts still disabled */
+	}
 
 	/*
 	 * Continue processor shutdown on the processor's idle thread.
@@ -490,9 +332,58 @@ processor_doshutdown(
 	 */
 	thread_t shutdown_thread = processor->idle_thread;
 	shutdown_thread->continuation = processor_offline;
-	shutdown_thread->parameter = processor;
+	shutdown_thread->parameter = (void*)is_final_system_sleep;
 
-	thread_run(self, NULL, NULL, shutdown_thread);
+	thread_run(current_thread(), THREAD_CONTINUE_NULL, NULL, shutdown_thread);
+
+	/*
+	 * After this point, we are in regular scheduled context on a remaining
+	 * available CPU. Interrupts are still disabled.
+	 */
+
+	if (is_final_system_sleep) {
+		/*
+		 * We are coming out of system sleep here, so there won't be a
+		 * corresponding processor_startup for this processor, so we
+		 * need to put it back in the correct running state.
+		 *
+		 * There's nowhere to execute a call to CPU_EXITED during system
+		 * sleep for the boot processor, and it's already been CPU_BOOTED
+		 * by this point anyways, so skip the call.
+		 */
+		assert(current_processor() == master_processor);
+		assert(processor->state == PROCESSOR_RUNNING);
+		assert(processor->processor_inshutdown);
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_STARTED_NOT_WAITED);
+		processor->processor_inshutdown = false;
+		processor_update_offline_state(processor, PROCESSOR_OFFLINE_RUNNING);
+
+		splx(s);
+	} else {
+		splx(s);
+
+		cpu_exit_wait(processor->cpu_id);
+
+		s = splsched();
+		simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+		pset_lock(pset);
+		assert(processor->processor_inshutdown);
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_PENDING_OFFLINE);
+		assert(processor->state == PROCESSOR_PENDING_OFFLINE);
+		pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
+		processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_CPU_OFFLINE);
+		pset_unlock(pset);
+		simple_unlock(&sched_available_cores_lock);
+		splx(s);
+
+		ml_broadcast_cpu_event(CPU_EXITED, processor->cpu_id);
+		ml_cpu_power_disable(processor->cpu_id);
+
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_CPU_OFFLINE);
+		processor_update_offline_state(processor, PROCESSOR_OFFLINE_FULLY_OFFLINE);
+	}
+
+	ml_cpu_end_state_transition(processor->cpu_id);
 }
 
 /*
@@ -506,17 +397,25 @@ processor_offline(
 	void * parameter,
 	__unused wait_result_t result)
 {
-	processor_t processor = (processor_t) parameter;
+	bool is_final_system_sleep = (bool) parameter;
+	processor_t processor = current_processor();
 	thread_t self = current_thread();
 	__assert_only thread_t old_thread = THREAD_NULL;
 
-	assert(processor == current_processor());
 	assert(self->state & TH_IDLE);
 	assert(processor->idle_thread == self);
 	assert(ml_get_interrupts_enabled() == FALSE);
 	assert(self->continuation == NULL);
-	assert(processor->processor_offlined == false);
+	assert(processor->processor_online == true);
 	assert(processor->running_timers_active == false);
+
+	if (is_final_system_sleep) {
+		assert(processor == current_processor());
+		assert(processor == master_processor);
+		assert(processor_avail_count == 1);
+	}
+
+	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PROCESSOR_SHUTDOWN) | DBG_FUNC_START, processor->cpu_id);
 
 	bool enforce_quiesce_safety = gEnforcePlatformActionSafety;
 
@@ -528,8 +427,18 @@ processor_offline(
 		disable_preemption_without_measurements();
 	}
 
-	/* convince slave_main to come back here */
-	processor->processor_offlined = true;
+#if CONFIG_DTRACE
+	if (dtrace_cpu_state_changed_hook) {
+		(*dtrace_cpu_state_changed_hook)(processor->cpu_id, FALSE);
+	}
+#endif
+
+	smr_cpu_down(processor, SMR_CPU_REASON_OFFLINE);
+
+	/* Drain pending IPIs for the last time here. */
+	ml_cpu_down();
+
+	sched_mark_processor_offline(processor, is_final_system_sleep);
 
 	/*
 	 * Switch to the interrupt stack and shut down the processor.
@@ -539,53 +448,32 @@ processor_offline(
 	 */
 	old_thread = machine_processor_shutdown(self, processor_offline_intstack, processor);
 
+	/*
+	 * The processor is back. sched_mark_processor_online and
+	 * friends have already run via processor_up.
+	 */
+
 	/* old_thread should be NULL because we got here through Load_context */
 	assert(old_thread == THREAD_NULL);
 
 	assert(processor == current_processor());
 	assert(processor->idle_thread == current_thread());
+	assert(processor->processor_online == true);
 
 	assert(ml_get_interrupts_enabled() == FALSE);
 	assert(self->continuation == NULL);
 
-	/* Extract the machine_param value stashed by slave_main */
+	/* Extract the machine_param value stashed by secondary_cpu_main */
 	void * machine_param = self->parameter;
 	self->parameter = NULL;
 
-	/* Re-initialize the processor */
-	slave_machine_init(machine_param);
-
-	assert(processor->processor_offlined == true);
-	processor->processor_offlined = false;
+	processor_cpu_reinit(machine_param, true, is_final_system_sleep);
 
 	if (enforce_quiesce_safety) {
 		enable_preemption();
 	}
 
-#if defined(__arm64__)
-	/*
-	 * See the comments for DebuggerLock in processor_up().
-	 *
-	 * SIGPdisabled is cleared (to enable cpu_signal() to succeed with this processor)
-	 * the first time we take an IPI.  This is triggered by slave_machine_init(), above,
-	 * which calls cpu_machine_init()->PE_cpu_machine_init()->PE_cpu_signal() which sends
-	 * a self-IPI to ensure that happens when we enable interrupts.  So enable interrupts
-	 * here so that cpu_signal() can succeed before we spin on mp_kdp_trap.
-	 */
-	ml_set_interrupts_enabled(TRUE);
-
-	ml_set_interrupts_enabled(FALSE);
-
-	wait_while_mp_kdp_trap(true);
-
-	/*
-	 * At this point,
-	 * if a stackshot or panic is in progress, we either spin on mp_kdp_trap
-	 * or we sucessfully received a SIGPdebug signal which will cause us to
-	 * break out of the spin on mp_kdp_trap and instead
-	 * spin next time interrupts are enabled in idle_thread().
-	 */
-#endif
+	KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_PROCESSOR_SHUTDOWN) | DBG_FUNC_END, processor->cpu_id);
 
 	/*
 	 * Now that the processor is back, invoke the idle thread to find out what to do next.
@@ -621,6 +509,73 @@ processor_offline_intstack(
 	cpu_sleep();
 	panic("zombie processor");
 	/*NOTREACHED*/
+}
+
+/*
+ * Called on the idle thread with interrupts disabled to initialize a
+ * secondary processor on boot or to reinitialize any processor on resume
+ * from processor offline.
+ */
+void
+processor_cpu_reinit(void* machine_param,
+    __unused bool wait_for_cpu_signal,
+    __assert_only bool is_final_system_sleep)
+{
+	/* Re-initialize the processor */
+	machine_cpu_reinit(machine_param);
+
+#if defined(__arm64__)
+	/*
+	 * See the comments for wait_while_mp_kdp_trap in processor_up().
+	 *
+	 * SIGPdisabled is cleared (to enable cpu_signal() to succeed with this processor)
+	 * the first time we take an IPI.  This is triggered by machine_cpu_reinit(), above,
+	 * which calls cpu_machine_init()->PE_cpu_machine_init()->PE_cpu_signal() which sends
+	 * a self-IPI to ensure that happens when we enable interrupts.  So enable interrupts
+	 * here so that cpu_signal() can succeed before we spin on mp_kdp_trap.
+	 */
+	assert_ml_cpu_signal_is_enabled(false);
+
+	ml_set_interrupts_enabled(TRUE);
+
+	if (wait_for_cpu_signal) {
+		ml_wait_for_cpu_signal_to_enable();
+	}
+
+	ml_set_interrupts_enabled(FALSE);
+
+	wait_while_mp_kdp_trap(true);
+
+	/*
+	 * At this point,
+	 * if a stackshot or panic is in progress, we either spin on mp_kdp_trap
+	 * or we sucessfully received a SIGPdebug signal which will cause us to
+	 * break out of the spin on mp_kdp_trap and instead
+	 * spin next time interrupts are enabled in idle_thread().
+	 */
+	if (wait_for_cpu_signal) {
+		assert_ml_cpu_signal_is_enabled(true);
+	}
+
+	/*
+	 * Now that we know SIGPdisabled is cleared, we can publish that
+	 * this CPU has fully come out of offline state.
+	 *
+	 * Without wait_for_cpu_signal, we'll publish this earlier than
+	 * cpu_signal is actually ready, but as long as it's ready by next S2R,
+	 * it will be good enough.
+	 */
+	ml_cpu_up();
+#endif
+
+	processor_t processor = current_processor();
+
+	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
+	assert(processor->processor_instartup == true || is_final_system_sleep);
+	processor->processor_instartup = false;
+	simple_unlock(&processor_start_state_lock);
+
+	thread_wakeup((event_t)&processor->processor_instartup);
 }
 
 kern_return_t
@@ -727,7 +682,7 @@ STARTUP(TIMEOUTS, STARTUP_RANK_SECOND, ml_io_init_timeouts);
 #endif /* SCHED_HYGIENE_DEBUG */
 
 extern pmap_paddr_t kvtophys(vm_offset_t va);
-#endif
+#endif /* !defined(__x86_64__) */
 
 #if ML_IO_TIMEOUTS_ENABLED
 
@@ -737,7 +692,7 @@ static LCK_SPIN_DECLARE(io_timeout_override_lock, &io_timeout_override_lock_grp)
 struct io_timeout_override_entry {
 	RB_ENTRY(io_timeout_override_entry) tree;
 
-	uintptr_t iovaddr_base;
+	uintptr_t ioaddr_base;
 	unsigned int size;
 	uint32_t read_timeout;
 	uint32_t write_timeout;
@@ -746,26 +701,25 @@ struct io_timeout_override_entry {
 static inline int
 io_timeout_override_cmp(const struct io_timeout_override_entry *a, const struct io_timeout_override_entry *b)
 {
-	if (a->iovaddr_base < b->iovaddr_base) {
+	if (a->ioaddr_base < b->ioaddr_base) {
 		return -1;
-	} else if (a->iovaddr_base > b->iovaddr_base) {
+	} else if (a->ioaddr_base > b->ioaddr_base) {
 		return 1;
 	} else {
 		return 0;
 	}
 }
 
-static RB_HEAD(io_timeout_override, io_timeout_override_entry) io_timeout_override_root;
+static RB_HEAD(io_timeout_override, io_timeout_override_entry)
+io_timeout_override_root_pa, io_timeout_override_root_va;
+
 RB_PROTOTYPE_PREV(io_timeout_override, io_timeout_override_entry, tree, io_timeout_override_cmp);
 RB_GENERATE_PREV(io_timeout_override, io_timeout_override_entry, tree, io_timeout_override_cmp);
 
-#endif /* ML_IO_TIMEOUTS_ENABLED */
-
-int
-ml_io_increase_timeouts(uintptr_t iovaddr_base, unsigned int size, uint32_t read_timeout_us, uint32_t write_timeout_us)
+static int
+io_increase_timeouts(struct io_timeout_override *root, uintptr_t ioaddr_base,
+    unsigned int size, uint32_t read_timeout_us, uint32_t write_timeout_us)
 {
-#if ML_IO_TIMEOUTS_ENABLED
-	const size_t MAX_SIZE = 4096;
 	const uint64_t MAX_TIMEOUT_ABS = UINT32_MAX;
 
 	assert(preemption_enabled());
@@ -776,8 +730,8 @@ ml_io_increase_timeouts(uintptr_t iovaddr_base, unsigned int size, uint32_t read
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	uintptr_t iovaddr_end;
-	if (size > MAX_SIZE || os_add_overflow(iovaddr_base, size - 1, &iovaddr_end)) {
+	uintptr_t ioaddr_end;
+	if (os_add_overflow(ioaddr_base, size - 1, &ioaddr_end)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -789,7 +743,7 @@ ml_io_increase_timeouts(uintptr_t iovaddr_base, unsigned int size, uint32_t read
 	}
 
 	struct io_timeout_override_entry *node = kalloc_type(struct io_timeout_override_entry, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	node->iovaddr_base = iovaddr_base;
+	node->ioaddr_base = ioaddr_base;
 	node->size = size;
 	node->read_timeout = (uint32_t)read_timeout_abs;
 	node->write_timeout = (uint32_t)write_timeout_abs;
@@ -803,21 +757,21 @@ ml_io_increase_timeouts(uintptr_t iovaddr_base, unsigned int size, uint32_t read
 	 */
 	boolean_t istate = ml_set_interrupts_enabled(FALSE);
 	lck_spin_lock(&io_timeout_override_lock);
-	if (RB_INSERT(io_timeout_override, &io_timeout_override_root, node)) {
+	if (RB_INSERT(io_timeout_override, root, node)) {
 		ret = KERN_INVALID_ARGUMENT;
 		goto out;
 	}
 
 	/* Check that this didn't create any new overlaps */
-	struct io_timeout_override_entry *prev = RB_PREV(io_timeout_override, &io_timeout_override_root, node);
-	if (prev && (prev->iovaddr_base + prev->size) > node->iovaddr_base) {
-		RB_REMOVE(io_timeout_override, &io_timeout_override_root, node);
+	struct io_timeout_override_entry *prev = RB_PREV(io_timeout_override, root, node);
+	if (prev && (prev->ioaddr_base + prev->size) > node->ioaddr_base) {
+		RB_REMOVE(io_timeout_override, root, node);
 		ret = KERN_INVALID_ARGUMENT;
 		goto out;
 	}
-	struct io_timeout_override_entry *next = RB_NEXT(io_timeout_override, &io_timeout_override_root, node);
-	if (next && (node->iovaddr_base + node->size) > next->iovaddr_base) {
-		RB_REMOVE(io_timeout_override, &io_timeout_override_root, node);
+	struct io_timeout_override_entry *next = RB_NEXT(io_timeout_override, root, node);
+	if (next && (node->ioaddr_base + node->size) > next->ioaddr_base) {
+		RB_REMOVE(io_timeout_override, root, node);
 		ret = KERN_INVALID_ARGUMENT;
 		goto out;
 	}
@@ -829,26 +783,21 @@ out:
 		kfree_type(struct io_timeout_override_entry, node);
 	}
 	return ret;
-#else /* !ML_IO_TIMEOUTS_ENABLED */
-#pragma unused(iovaddr_base, size, read_timeout_us, write_timeout_us)
-	return KERN_SUCCESS;
-#endif
 }
 
-int
-ml_io_reset_timeouts(uintptr_t iovaddr_base, unsigned int size)
+static int
+io_reset_timeouts(struct io_timeout_override *root, uintptr_t ioaddr_base, unsigned int size)
 {
-#if ML_IO_TIMEOUTS_ENABLED
 	assert(preemption_enabled());
 
-	struct io_timeout_override_entry key = { .iovaddr_base = iovaddr_base };
+	struct io_timeout_override_entry key = { .ioaddr_base = ioaddr_base };
 
 	boolean_t istate = ml_set_interrupts_enabled(FALSE);
 	lck_spin_lock(&io_timeout_override_lock);
-	struct io_timeout_override_entry *node = RB_FIND(io_timeout_override, &io_timeout_override_root, &key);
+	struct io_timeout_override_entry *node = RB_FIND(io_timeout_override, root, &key);
 	if (node) {
 		if (node->size == size) {
-			RB_REMOVE(io_timeout_override, &io_timeout_override_root, node);
+			RB_REMOVE(io_timeout_override, root, node);
 		} else {
 			node = NULL;
 		}
@@ -861,34 +810,28 @@ ml_io_reset_timeouts(uintptr_t iovaddr_base, unsigned int size)
 	}
 
 	kfree_type(struct io_timeout_override_entry, node);
-#else /* !ML_IO_TIMEOUTS_ENABLED */
-#pragma unused(iovaddr_base, size)
-#endif
 	return KERN_SUCCESS;
 }
 
-#if ML_IO_TIMEOUTS_ENABLED
-
 static bool
-override_io_timeouts_va(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write_timeout)
+io_override_timeout(struct io_timeout_override *root, uintptr_t addr,
+    uint64_t *read_timeout, uint64_t *write_timeout)
 {
 	assert(!ml_get_interrupts_enabled());
+	assert3p(read_timeout, !=, NULL);
+	assert3p(write_timeout, !=, NULL);
 
-	struct io_timeout_override_entry *node = RB_ROOT(&io_timeout_override_root);
+	struct io_timeout_override_entry *node = RB_ROOT(root);
 
 	lck_spin_lock(&io_timeout_override_lock);
 	/* RB_FIND() doesn't support custom cmp functions, so we have to open-code our own */
 	while (node) {
-		if (node->iovaddr_base <= vaddr && vaddr < node->iovaddr_base + node->size) {
-			if (read_timeout) {
-				*read_timeout = node->read_timeout;
-			}
-			if (write_timeout) {
-				*write_timeout = node->write_timeout;
-			}
+		if (node->ioaddr_base <= addr && addr < node->ioaddr_base + node->size) {
+			*read_timeout = node->read_timeout;
+			*write_timeout = node->write_timeout;
 			lck_spin_unlock(&io_timeout_override_lock);
 			return true;
-		} else if (vaddr < node->iovaddr_base) {
+		} else if (addr < node->ioaddr_base) {
 			node = RB_LEFT(node, tree);
 		} else {
 			node = RB_RIGHT(node, tree);
@@ -900,26 +843,21 @@ override_io_timeouts_va(uintptr_t vaddr, uint64_t *read_timeout, uint64_t *write
 }
 
 static bool
-override_io_timeouts_pa(uint64_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
+io_override_timeout_ss(uint64_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
 {
 #if defined(__arm64__)
+
 	/*
 	 * PCIe regions are marked with PMAP_IO_RANGE_STRONG_SYNC. Apply a
-	 * timeout greater than the PCIe completion timeout (50ms). In some
-	 * cases those timeouts can stack so make the timeout significantly
-	 * higher.
+	 * timeout greater than two PCIe completion timeouts (90ms) as they can
+	 * stack.
 	 */
-	#define STRONG_SYNC_TIMEOUT 1800000 /* 75ms */
+	#define STRONG_SYNC_TIMEOUT 2160000 /* 90ms */
 
 	pmap_io_range_t *range = pmap_find_io_attr(paddr);
 	if (range != NULL && (range->wimg & PMAP_IO_RANGE_STRONG_SYNC) != 0) {
-		if (read_timeout) {
-			*read_timeout = STRONG_SYNC_TIMEOUT;
-		}
-		if (write_timeout) {
-			*write_timeout = STRONG_SYNC_TIMEOUT;
-		}
-
+		*read_timeout = STRONG_SYNC_TIMEOUT;
+		*write_timeout = STRONG_SYNC_TIMEOUT;
 		return true;
 	}
 #else
@@ -930,20 +868,99 @@ override_io_timeouts_pa(uint64_t paddr, uint64_t *read_timeout, uint64_t *write_
 	return false;
 }
 
+/*
+ * Return timeout override values for the read/write timeout for a given
+ * address.
+ * A virtual address (vaddr), physical address (paddr) or both may be passed.
+ * Up to three separate timeout overrides can be found
+ *  - A virtual address override
+ *  - A physical address override
+ *  - A strong sync override
+ *  The largest override found is returned.
+ */
 void
-override_io_timeouts(uintptr_t vaddr, uint64_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
+override_io_timeouts(uintptr_t vaddr, uint64_t paddr, uint64_t *read_timeout,
+    uint64_t *write_timeout)
 {
-	if (vaddr != 0 &&
-	    override_io_timeouts_va(vaddr, read_timeout, write_timeout)) {
-		return;
+	uint64_t rt_va = 0, wt_va = 0, rt_pa = 0, wt_pa = 0, rt_ss = 0, wt_ss = 0;
+
+	if (vaddr != 0) {
+		/* Override from virtual address. */
+		io_override_timeout(&io_timeout_override_root_va, vaddr, &rt_va, &wt_va);
 	}
 
-	if (paddr != 0 &&
-	    override_io_timeouts_pa(paddr, read_timeout, write_timeout)) {
-		return;
+	if (paddr != 0) {
+		/* Override from physical address. */
+		io_override_timeout(&io_timeout_override_root_pa, paddr, &rt_pa, &wt_pa);
+
+		/* Override from strong sync range. */
+		io_override_timeout_ss(paddr, &rt_ss, &wt_ss);
+	}
+
+	if (read_timeout != NULL) {
+		*read_timeout =  MAX(MAX(rt_va, rt_pa), rt_ss);
+	}
+
+	if (write_timeout != NULL) {
+		*write_timeout = MAX(MAX(wt_va, wt_pa), wt_ss);
 	}
 }
+
 #endif /* ML_IO_TIMEOUTS_ENABLED */
+
+int
+ml_io_increase_timeouts(uintptr_t ioaddr_base, unsigned int size,
+    uint32_t read_timeout_us, uint32_t write_timeout_us)
+{
+#if ML_IO_TIMEOUTS_ENABLED
+	const size_t MAX_SIZE = 4096;
+
+	if (size > MAX_SIZE) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	return io_increase_timeouts(&io_timeout_override_root_va, ioaddr_base,
+	           size, read_timeout_us, write_timeout_us);
+#else
+	#pragma unused(ioaddr_base, size, read_timeout_us, write_timeout_us)
+	return KERN_SUCCESS;
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+}
+
+int
+ml_io_increase_timeouts_phys(vm_offset_t ioaddr_base, unsigned int size,
+    uint32_t read_timeout_us, uint32_t write_timeout_us)
+{
+#if ML_IO_TIMEOUTS_ENABLED
+	return io_increase_timeouts(&io_timeout_override_root_pa, ioaddr_base,
+	           size, read_timeout_us, write_timeout_us);
+#else
+	#pragma unused(ioaddr_base, size, read_timeout_us, write_timeout_us)
+	return KERN_SUCCESS;
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+}
+
+int
+ml_io_reset_timeouts(uintptr_t ioaddr_base, unsigned int size)
+{
+#if ML_IO_TIMEOUTS_ENABLED
+	return io_reset_timeouts(&io_timeout_override_root_va, ioaddr_base, size);
+#else
+	#pragma unused(ioaddr_base, size)
+	return KERN_SUCCESS;
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+}
+
+int
+ml_io_reset_timeouts_phys(vm_offset_t ioaddr_base, unsigned int size)
+{
+#if ML_IO_TIMEOUTS_ENABLED
+	return io_reset_timeouts(&io_timeout_override_root_pa, ioaddr_base, size);
+#else
+	#pragma unused(ioaddr_base, size)
+	return KERN_SUCCESS;
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+}
 
 unsigned long long
 ml_io_read(uintptr_t vaddr, int size)
@@ -953,9 +970,9 @@ ml_io_read(uintptr_t vaddr, int size)
 	unsigned short s2;
 
 #ifdef ML_IO_VERIFY_UNCACHEABLE
-	uintptr_t const paddr = pmap_verify_noncacheable(vaddr);
+	uintptr_t paddr = pmap_verify_noncacheable(vaddr);
 #elif defined(ML_IO_TIMEOUTS_ENABLED)
-	uintptr_t const paddr = kvtophys(vaddr);
+	uintptr_t paddr = 0;
 #endif
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
@@ -1019,6 +1036,7 @@ ml_io_read(uintptr_t vaddr, int size)
 	if (__improbable(timeread == TRUE)) {
 		eabs = ml_io_timestamp();
 
+
 		/* Prevent the processor from calling iotrace during its
 		 * initialization procedure. */
 		if (current_processor()->state == PROCESSOR_RUNNING) {
@@ -1026,6 +1044,10 @@ ml_io_read(uintptr_t vaddr, int size)
 		}
 
 		if (__improbable((eabs - sabs) > report_read_delay)) {
+			if (paddr == 0) {
+				paddr = kvtophys(vaddr);
+			}
+
 			DTRACE_PHYSLAT5(physioread, uint64_t, (eabs - sabs),
 			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, result);
 
@@ -1106,9 +1128,9 @@ void
 ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 {
 #ifdef ML_IO_VERIFY_UNCACHEABLE
-	uintptr_t const paddr = pmap_verify_noncacheable(vaddr);
+	uintptr_t paddr = pmap_verify_noncacheable(vaddr);
 #elif defined(ML_IO_TIMEOUTS_ENABLED)
-	uintptr_t const paddr = kvtophys(vaddr);
+	uintptr_t paddr = 0;
 #endif
 
 #ifdef ML_IO_TIMEOUTS_ENABLED
@@ -1169,7 +1191,6 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 	if (__improbable(timewrite == TRUE)) {
 		eabs = ml_io_timestamp();
 
-
 		/* Prevent the processor from calling iotrace during its
 		 * initialization procedure. */
 		if (current_processor()->state == PROCESSOR_RUNNING) {
@@ -1178,6 +1199,10 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 
 
 		if (__improbable((eabs - sabs) > report_write_delay)) {
+			if (paddr == 0) {
+				paddr = kvtophys(vaddr);
+			}
+
 			DTRACE_PHYSLAT5(physiowrite, uint64_t, (eabs - sabs),
 			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, val);
 
@@ -1533,8 +1558,21 @@ ml_io_timeout_test_get_timeouts(uintptr_t vaddr, uint64_t *read_timeout, uint64_
 	*read_timeout = 0;
 	*write_timeout = 0;
 
+	vm_offset_t paddr = kvtophys(vaddr);
+
 	boolean_t istate = ml_set_interrupts_enabled(FALSE);
-	override_io_timeouts(vaddr, 0, read_timeout, write_timeout);
+	override_io_timeouts(vaddr, paddr, read_timeout, write_timeout);
+	ml_set_interrupts_enabled(istate);
+}
+
+static inline void
+ml_io_timeout_test_get_timeouts_phys(vm_offset_t paddr, uint64_t *read_timeout, uint64_t *write_timeout)
+{
+	*read_timeout = 0;
+	*write_timeout = 0;
+
+	boolean_t istate = ml_set_interrupts_enabled(FALSE);
+	override_io_timeouts(0, paddr, read_timeout, write_timeout);
 	ml_set_interrupts_enabled(istate);
 }
 
@@ -1542,10 +1580,20 @@ kern_return_t
 ml_io_timeout_test(void)
 {
 	const size_t SIZE = 16;
-	uintptr_t iovaddr_base1 = (uintptr_t)&ml_io_timeout_test;
-	uintptr_t iovaddr_base2 = iovaddr_base1 + SIZE;
-	uintptr_t vaddr1 = iovaddr_base1 + SIZE / 2;
-	uintptr_t vaddr2 = iovaddr_base2 + SIZE / 2;
+	/*
+	 * Page align the base address to ensure that the regions are physically
+	 * contiguous.
+	 */
+	const uintptr_t iovaddr_base1 = (uintptr_t)kernel_pmap & ~PAGE_MASK;
+
+	const uintptr_t iovaddr_base2 = iovaddr_base1 + SIZE;
+	const uintptr_t vaddr1 = iovaddr_base1 + SIZE / 2;
+	const uintptr_t vaddr2 = iovaddr_base2 + SIZE / 2;
+
+	const vm_offset_t iopaddr_base1 = kvtophys(iovaddr_base1);
+	const vm_offset_t iopaddr_base2 = kvtophys(iovaddr_base2);
+	const vm_offset_t paddr1 = iopaddr_base1 + SIZE / 2;
+	const vm_offset_t paddr2 = iopaddr_base2 + SIZE / 2;
 
 	const uint64_t READ_TIMEOUT1_US = 50000, WRITE_TIMEOUT1_US = 50001;
 	const uint64_t READ_TIMEOUT2_US = 50002, WRITE_TIMEOUT2_US = 50003;
@@ -1608,6 +1656,38 @@ ml_io_timeout_test(void)
 
 	err = ml_io_reset_timeouts(iovaddr_base2, SIZE);
 	T_EXPECT_EQ_INT(err, KERN_SUCCESS, "Resetting timeout for second VA region should succeed");
+
+	err = ml_io_increase_timeouts_phys(iopaddr_base1, SIZE, READ_TIMEOUT1_US, WRITE_TIMEOUT1_US);
+	T_EXPECT_EQ_INT(err, KERN_SUCCESS, "Setting timeout for first PA region should succeed");
+
+	err = ml_io_increase_timeouts_phys(iopaddr_base2, SIZE, READ_TIMEOUT2_US, WRITE_TIMEOUT2_US);
+	T_EXPECT_EQ_INT(err, KERN_SUCCESS, "Setting timeout for second PA region should succeed");
+
+	ml_io_timeout_test_get_timeouts(vaddr1, &read_timeout, &write_timeout);
+	T_EXPECT_EQ_ULLONG(read_timeout, read_timeout1_abs, "Read timeout for first region");
+	T_EXPECT_EQ_ULLONG(write_timeout, write_timeout1_abs, "Write timeout for first region");
+
+	ml_io_timeout_test_get_timeouts(vaddr2, &read_timeout, &write_timeout);
+	T_EXPECT_EQ_ULLONG(read_timeout, read_timeout2_abs, "Read timeout for first region");
+	T_EXPECT_EQ_ULLONG(write_timeout, write_timeout2_abs, "Write timeout for first region");
+
+	ml_io_timeout_test_get_timeouts_phys(paddr1, &read_timeout, &write_timeout);
+	T_EXPECT_EQ_ULLONG(read_timeout, read_timeout1_abs, "Read timeout for first region");
+	T_EXPECT_EQ_ULLONG(write_timeout, write_timeout1_abs, "Write timeout for first region");
+
+	ml_io_timeout_test_get_timeouts_phys(paddr2, &read_timeout, &write_timeout);
+	T_EXPECT_EQ_ULLONG(read_timeout, read_timeout2_abs, "Read timeout for first physical region");
+	T_EXPECT_EQ_ULLONG(write_timeout, write_timeout2_abs, "Write timeout for first physical region");
+
+	err = ml_io_reset_timeouts_phys(iopaddr_base1, SIZE);
+	T_EXPECT_EQ_INT(err, KERN_SUCCESS, "Resetting timeout for first PA region should succeed");
+
+	err = ml_io_reset_timeouts_phys(iopaddr_base2, SIZE);
+	T_EXPECT_EQ_INT(err, KERN_SUCCESS, "Resetting timeout for second PA region should succeed");
+
+	ml_io_timeout_test_get_timeouts_phys(paddr1, &read_timeout, &write_timeout);
+	T_EXPECT_EQ_ULLONG(read_timeout, 0, "Read timeout for reset region");
+	T_EXPECT_EQ_ULLONG(write_timeout, 0, "Write timeout for reset region");
 
 	return KERN_SUCCESS;
 }

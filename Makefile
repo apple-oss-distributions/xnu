@@ -203,10 +203,13 @@ TOP_TARGETS = \
 	exporthdrs \
 	all all_desktop all_embedded \
 	all_release_embedded all_development_embedded \
+	all_release_desktop all_development_desktop \
 	installhdrs installhdrs_desktop installhdrs_embedded \
 	installhdrs_release_embedded installhdrs_development_embedded \
+	installhdrs_release_desktop installhdrs_development_desktop \
 	install install_desktop install_embedded \
 	install_release_embedded install_development_embedded \
+	install_release_desktop install_development_desktop \
 	install_kernels \
 	cscope tags TAGS \
 	help
@@ -257,27 +260,23 @@ config_all_recurse_into_san: config_all_recurse_into_config
 INSTINC_SUBDIRS = $(ALL_SUBDIRS) EXTERNAL_HEADERS
 INSTINC_SUBDIRS_X86_64 = $(INSTINC_SUBDIRS)
 INSTINC_SUBDIRS_X86_64H = $(INSTINC_SUBDIRS)
-INSTINC_SUBDIRS_ARM = $(INSTINC_SUBDIRS)
 INSTINC_SUBDIRS_ARM64 = $(INSTINC_SUBDIRS)
 
 EXPINC_SUBDIRS = $(ALL_SUBDIRS)
 EXPINC_SUBDIRS_X86_64 = $(EXPINC_SUBDIRS)
 EXPINC_SUBDIRS_X86_64H = $(EXPINC_SUBDIRS)
-EXPINC_SUBDIRS_ARM = $(EXPINC_SUBDIRS)
 EXPINC_SUBDIRS_ARM64 = $(EXPINC_SUBDIRS)
 
 SETUP_SUBDIRS = SETUP san bsd
 
 COMP_SUBDIRS_X86_64 = $(ALL_SUBDIRS)
 COMP_SUBDIRS_X86_64H = $(ALL_SUBDIRS)
-COMP_SUBDIRS_ARM = $(ALL_SUBDIRS)
 COMP_SUBDIRS_ARM64 = $(ALL_SUBDIRS)
 
 INSTTEXTFILES_SUBDIRS =	\
 	bsd
 INSTTEXTFILES_SUBDIRS_X86_64 = $(INSTTEXTFILES_SUBDIRS)
 INSTTEXTFILES_SUBDIRS_X86_64H = $(INSTTEXTFILES_SUBDIRS)
-INSTTEXTFILES_SUBDIRS_ARM = $(INSTTEXTFILES_SUBDIRS)
 INSTTEXTFILES_SUBDIRS_ARM64 = $(INSTTEXTFILES_SUBDIRS)
 
 include $(MakeInc_kernel)
@@ -330,6 +329,8 @@ xnu_tests:
 		SRCROOT=$(SRCROOT)/tools/tests
 	$(MAKE) -C $(SRCROOT)/tests	$(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
 		SRCROOT=$(SRCROOT)/tests
+	$(MAKE) -C $(SRCROOT)/tools/lldbmacros/tests $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
+		SRCROOT=$(SRCROOT)/tools/lldbmacros
 
 xnu_tests_driverkit:
 	$(MAKE) -C $(SRCROOT)/tests/driverkit $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
@@ -375,3 +376,11 @@ analyze:
 		$(MAKE) $(STATIC_ANALYZER_TARGET) QUIET=1 2>&1 | $(GREP) "^scan-build:"
 
 .PHONY: analyze
+
+.PHONY: empty
+
+# Add an empty target which is useful for bringing up new build aliases
+# Aliases can be created with this as their target, then later move to their
+# required target in coordination with other aliases
+empty:
+	$(_v)$(MKDIR) $(DSTROOT)/AppleInternal

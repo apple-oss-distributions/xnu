@@ -366,8 +366,8 @@ struct __metadata_preamble {
 #define METADATA_PREAMBLE_SZ    (sizeof (struct __metadata_preamble))
 
 #define METADATA_PREAMBLE(_md)                  \
-	((struct __metadata_preamble *)         \
-	((mach_vm_address_t)(_md) - METADATA_PREAMBLE_SZ))
+	(__unsafe_forge_single(struct __metadata_preamble *,         \
+	((mach_vm_address_t)(_md) - METADATA_PREAMBLE_SZ)))
 
 #define METADATA_IDX(_md)                       \
 	(METADATA_PREAMBLE(_md)->mdp_idx)

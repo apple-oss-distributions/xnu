@@ -43,7 +43,7 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.net"));
 
 #define DATAGRAM_SIZE 64
 
-T_DECL(sendmsg_x_test, "exercise sendmsg_x() return value")
+T_DECL(sendmsg_x_test, "exercise sendmsg_x() return value", T_META_TAG_VM_PREFERRED)
 {
 	int socket_fds[2];
 

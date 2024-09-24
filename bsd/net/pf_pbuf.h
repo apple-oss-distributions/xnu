@@ -40,7 +40,7 @@ enum pbuf_action {
 #define PBUF_ACTION_RV_FAILURE  (-1)
 
 struct pbuf_memory {
-	uint8_t *pm_buffer;     // Pointer to start of buffer
+	uint8_t *__sized_by(pm_buffer_len) pm_buffer;     // Pointer to start of buffer
 	u_int pm_buffer_len;    // Total length of buffer
 	u_int pm_offset;        // Offset to start of payload
 	u_int pm_len;           // Length of payload
@@ -66,7 +66,7 @@ typedef struct pbuf {
 #define pb_mbuf         pb_u.pbu_mbuf
 #define pb_memory       pb_u.pbu_memory
 
-	void            *pb_data;
+	void            *__sized_by(pb_contig_len) pb_data;
 	uint32_t        pb_packet_len;
 	uint32_t        pb_contig_len;
 	uint32_t        *pb_csum_flags;
@@ -99,8 +99,8 @@ void *          pbuf_ensure_writable(pbuf_t *, size_t);
 void *          pbuf_resize_segment(pbuf_t *, int off, int olen, int nlen);
 void *          pbuf_contig_segment(pbuf_t *, int off, int len);
 
-void            pbuf_copy_data(pbuf_t *, int, int, void *);
-void            pbuf_copy_back(pbuf_t *, int, int, void *);
+void            pbuf_copy_data(pbuf_t *, int, int, void *__sized_by(buflen), size_t buflen);
+void            pbuf_copy_back(pbuf_t *, int, int, void *__sized_by(buflen), size_t buflen);
 
 uint16_t        pbuf_inet_cksum(const pbuf_t *, uint32_t, uint32_t, uint32_t);
 uint16_t        pbuf_inet6_cksum(const pbuf_t *, uint32_t, uint32_t, uint32_t);

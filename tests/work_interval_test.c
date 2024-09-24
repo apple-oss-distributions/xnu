@@ -14,7 +14,8 @@
 #include <darwintest.h>
 
 T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
-    T_META_RUN_CONCURRENTLY(true));
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_TAG_VM_PREFERRED);
 
 static mach_port_t port = MACH_PORT_NULL;
 

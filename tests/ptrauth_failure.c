@@ -43,9 +43,48 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(true)
 	);
 
+#if __arm64e__
+#ifndef EXC_ARM_PAC_FAIL
+#define EXC_ARM_PAC_FAIL        0x105   /* PAC authentication failure */
+#endif
+
+static volatile bool mach_exc_caught = false;
+
+static size_t
+pac_exception_handler(
+	__unused mach_port_t task,
+	__unused mach_port_t thread,
+	exception_type_t type,
+	mach_exception_data_t codes)
+{
+	T_ASSERT_EQ(type, EXC_BAD_ACCESS, "Caught an EXC_BAD_ACCESS exception");
+	T_ASSERT_EQ(codes[0], (uint64_t)EXC_ARM_PAC_FAIL, "The subcode is EXC_ARM_PAC_FAIL");
+	mach_exc_caught = true;
+	return 4;
+}
+
+#define ID_AA64ISAR1_EL1_APA(x)         ((x >> 4) & 0xf)
+#define ID_AA64ISAR1_EL1_API(x)         ((x >> 8) & 0xf)
+
+static bool
+have_fpac(void)
+{
+	uint64_t id_aa64isar1_el1;
+	size_t id_aa64isar1_el1_size = sizeof(id_aa64isar1_el1);
+
+	int err = sysctlbyname("machdep.cpu.sysreg_ID_AA64ISAR1_EL1", &id_aa64isar1_el1, &id_aa64isar1_el1_size, NULL, 0);
+	if (err) {
+		return false;
+	}
+
+	const uint8_t APA_API_HAVE_FPAC = 0x4;
+	return ID_AA64ISAR1_EL1_APA(id_aa64isar1_el1) >= APA_API_HAVE_FPAC ||
+	       ID_AA64ISAR1_EL1_API(id_aa64isar1_el1) >= APA_API_HAVE_FPAC;
+}
+#endif // __arm64e__
 
 T_DECL(thread_set_state_corrupted_pc,
-    "Test that ptrauth failures in thread_set_state() poison the respective register.")
+    "Test that ptrauth failures in thread_set_state() poison the respective register.", T_META_TAG_VM_NOT_PREFERRED)
 {
 #if !__arm64e__
 	T_SKIP("Running on non-arm64e target, skipping...");
@@ -73,3 +112,44 @@ T_DECL(thread_set_state_corrupted_pc,
 #endif // __arm64e__
 }
 
+T_DECL(ptrauth_exception,
+    "Test naked ptrauth failures.",
+    T_META_IGNORECRASHES("ptrauth_failure.*"), T_META_TAG_VM_NOT_PREFERRED)
+{
+#if !__arm64e__
+	T_SKIP("Running on non-arm64e target, skipping...");
+#else
+	if (!have_fpac()) {
+		T_SKIP("Running on non-FPAC target, skipping...");
+		return;
+	}
+
+	int pid, stat;
+	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
+
+	extern int main(int, char *[]);
+	void *func_ptr = (void *)main;
+	void *func_ptr_stripped = ptrauth_strip(func_ptr, ptrauth_key_function_pointer);
+	void *func_ptr_corrupted = (void *)((uintptr_t)func_ptr ^ 1);
+
+	void *func_ptr_authed = func_ptr;
+	mach_exc_caught = false;
+	run_exception_handler(exc_port, pac_exception_handler);
+	asm volatile ("autiza %0" : "+r"(func_ptr_authed));
+
+	T_EXPECT_FALSE(mach_exc_caught, "Authing valid pointer should not cause an exception");
+	T_EXPECT_EQ(func_ptr_authed, func_ptr_stripped, "Valid pointer should auth to stripped value");
+
+	pid = fork();
+	if (pid == 0) {
+		func_ptr_authed = func_ptr_corrupted;
+		asm volatile ("autiza %0" : "+r"(func_ptr_authed));
+		T_FAIL("Expected PAC EXCEPTION");
+		__builtin_unreachable();
+	}
+	T_ASSERT_TRUE(pid != -1, "Checking fork success in parent");
+
+	T_ASSERT_POSIX_SUCCESS(waitpid(pid, &stat, 0), "waitpid");
+	T_ASSERT_TRUE(stat == SIGKILL, "Expect a PAC EXCEPTION to SIGKILL the process");
+#endif // __arm64e__
+}

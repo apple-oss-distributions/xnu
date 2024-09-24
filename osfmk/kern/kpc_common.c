@@ -79,7 +79,7 @@ kpc_percpu_free(uint64_t *buf)
 	kfree_data(buf, COUNTERBUF_SIZE_PER_CPU);
 }
 
-boolean_t
+void
 kpc_register_cpu(struct cpu_data *cpu_data)
 {
 	assert(cpu_data);
@@ -113,11 +113,10 @@ kpc_register_cpu(struct cpu_data *cpu_data)
 	}
 
 	/* success */
-	return TRUE;
+	return;
 
 error:
-	kpc_unregister_cpu(cpu_data);
-	return FALSE;
+	panic("kpc_percpu_alloc failed");
 }
 
 void

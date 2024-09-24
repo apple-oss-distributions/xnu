@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -87,8 +87,9 @@
 #include <kern/ux_handler.h>
 #include <kern/task_ident.h>
 
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_map.h>
-
+#include <sys/reason.h>
 #include <security/mac_mach_internal.h>
 #include <string.h>
 
@@ -106,6 +107,7 @@ bool panic_on_exception_triage = false;
 /* Not used in coded, only for inspection during debugging */
 unsigned long c_thr_exc_raise = 0;
 unsigned long c_thr_exc_raise_identity_token = 0;
+unsigned long c_thr_exc_raise_state_identity_token = 0;
 unsigned long c_thr_exc_raise_state = 0;
 unsigned long c_thr_exc_raise_state_id = 0;
 unsigned long c_thr_exc_raise_backtrace = 0;
@@ -125,14 +127,6 @@ kern_return_t bsd_exception(
 	mach_exception_data_t   code,
 	mach_msg_type_number_t  codeCnt);
 #endif /* MACH_BSD */
-
-#if __has_feature(ptrauth_calls)
-extern int exit_with_pac_exception(
-	void *proc,
-	exception_type_t         exception,
-	mach_exception_code_t    code,
-	mach_exception_subcode_t subcode);
-#endif /* __has_feature(ptrauth_calls) */
 
 #ifdef MACH_BSD
 extern bool proc_is_traced(void *p);
@@ -210,12 +204,14 @@ exception_deliver(
 	int                     code64;
 	int                     behavior;
 	int                     flavor;
-	kern_return_t           kr;
+	kern_return_t           kr = KERN_FAILURE;
 	task_t task;
 	task_id_token_t task_token;
 	ipc_port_t thread_port = IPC_PORT_NULL,
 	    task_port = IPC_PORT_NULL,
 	    task_token_port = IPC_PORT_NULL;
+	thread_set_status_flags_t get_flags = TSSF_TRANSLATE_TO_USER;
+	thread_set_status_flags_t set_flags = TSSF_CHECK_USER_FLAGS;
 
 	/*
 	 *  Save work if we are terminating.
@@ -253,9 +249,19 @@ exception_deliver(
 		lck_mtx_unlock(mutex);
 		return KERN_FAILURE;
 	}
+	task = get_threadtask(thread);
 
 	flavor = excp->flavor;
 	behavior = excp->behavior;
+	if (excp->hardened) {
+		/*
+		 * On arm64e devices we have protected the pc returned via exception
+		 * handlers with PAC. We also want to protect all other thread state
+		 * for hardened exceptions to prevent modification of any registers
+		 * that could affect control flow integrity sometime in the future.
+		 */
+		set_flags |= TSSF_ONLY_PC;
+	}
 	lck_mtx_unlock(mutex);
 
 	code64 = (behavior & MACH_EXCEPTION_CODES);
@@ -266,7 +272,6 @@ exception_deliver(
 		small_code[1] = CAST_DOWN_EXPLICIT(exception_data_type_t, code[1]);
 	}
 
-	task = get_threadtask(thread);
 
 #if CONFIG_MACF
 	/* Now is a reasonably good time to check if the exception action is
@@ -290,8 +295,6 @@ exception_deliver(
 	case EXCEPTION_STATE: {
 		mach_msg_type_number_t old_state_cnt, new_state_cnt;
 		thread_state_data_t old_state;
-		thread_set_status_flags_t get_flags = TSSF_TRANSLATE_TO_USER;
-		thread_set_status_flags_t set_flags = TSSF_CHECK_USER_FLAGS;
 		bool task_allow_user_state = task_needs_user_signed_thread_state(task);
 
 		if (pac_replace_ptrs_user || task_allow_user_state) {
@@ -300,7 +303,8 @@ exception_deliver(
 		}
 
 		c_thr_exc_raise_state++;
-		old_state_cnt = _MachineStateCount[flavor];
+		assert(flavor < THREAD_STATE_FLAVORS);
+		old_state_cnt = (flavor < THREAD_STATE_FLAVORS) ? _MachineStateCount[flavor] : 0;
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
 		    &old_state_cnt, get_flags);
@@ -408,11 +412,82 @@ exception_deliver(
 		goto out_release_right;
 	}
 
+
+	case EXCEPTION_STATE_IDENTITY_PROTECTED: {
+		mach_msg_type_number_t old_state_cnt, new_state_cnt;
+		thread_state_data_t old_state;
+		bool task_allow_user_state = task_needs_user_signed_thread_state(task);
+
+		if (pac_replace_ptrs_user || task_allow_user_state) {
+			set_flags |= TSSF_ALLOW_ONLY_USER_PTRS;
+			if (excp->hardened) {
+				/* Use the signed_pc_key diversifier on the task for authentication. */
+				set_flags |= TSSF_TASK_USER_DIV;
+				get_flags |= TSSF_TASK_USER_DIV;
+			} else {
+				/* Otherwise we should use the random diversifier */
+				set_flags |= TSSF_RANDOM_USER_DIV;
+				get_flags |= TSSF_RANDOM_USER_DIV;
+			}
+		}
+
+		c_thr_exc_raise_state_identity_token++;
+		kr = task_create_identity_token(task, &task_token);
+
+		if (!task->active && kr == KERN_INVALID_ARGUMENT) {
+			/* The task is terminating, don't need to send more exceptions */
+			kr = KERN_SUCCESS;
+			goto out_release_right;
+		}
+
+		/* task_token now represents a task, or corpse */
+		assert(kr == KERN_SUCCESS);
+		task_token_port = convert_task_id_token_to_port(task_token);
+		/* task token ref consumed */
+
+		old_state_cnt = _MachineStateCount[flavor];
+		kr = thread_getstatus_to_user(thread, flavor,
+		    (thread_state_t)old_state,
+		    &old_state_cnt, get_flags);
+		new_state_cnt = old_state_cnt;
+
+		if (kr == KERN_SUCCESS) {
+			new_state = (thread_state_t)kalloc_data(sizeof(thread_state_data_t), Z_WAITOK | Z_ZERO);
+			if (new_state == NULL) {
+				kr = KERN_RESOURCE_SHORTAGE;
+				goto out_release_right;
+			}
+
+			if (code64) {
+				kr = mach_exception_raise_state_identity_protected(exc_port,
+				    thread->thread_id,
+				    task_token_port,
+				    exception,
+				    code,
+				    codeCnt,
+				    &flavor,
+				    old_state, old_state_cnt,
+				    new_state, &new_state_cnt);
+			} else {
+				panic("mach_exception_raise_state_identity_protected() must be code64");
+			}
+
+			if (kr == KERN_SUCCESS) {
+				if (exception != EXC_CORPSE_NOTIFY) {
+					kr = thread_setstatus_from_user(thread, flavor,
+					    (thread_state_t)new_state, new_state_cnt,
+					    (thread_state_t)old_state, old_state_cnt, set_flags);
+				}
+				goto out_release_right;
+			}
+		}
+
+		goto out_release_right;
+	}
+
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t old_state_cnt, new_state_cnt;
 		thread_state_data_t old_state;
-		thread_set_status_flags_t get_flags = TSSF_TRANSLATE_TO_USER;
-		thread_set_status_flags_t set_flags = TSSF_CHECK_USER_FLAGS;
 		bool task_allow_user_state = task_needs_user_signed_thread_state(task);
 
 		if (pac_replace_ptrs_user || task_allow_user_state) {
@@ -439,7 +514,8 @@ exception_deliver(
 		}
 		/* task and thread ref consumed */
 
-		old_state_cnt = _MachineStateCount[flavor];
+		assert(flavor < THREAD_STATE_FLAVORS);
+		old_state_cnt = (flavor < THREAD_STATE_FLAVORS) ? _MachineStateCount[flavor] : 0;
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
 		    &old_state_cnt, get_flags);
@@ -760,7 +836,14 @@ pac_exception_triage(
 			}
 			if (task_is_pac_exception_fatal(task)) {
 				os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n", __func__, proc_name, pid);
-				exit_with_pac_exception(proc, exception, code[0], code[1]);
+
+				exception_info_t info = {
+					.os_reason = OS_REASON_PAC_EXCEPTION,
+					.exception_type = exception,
+					.mx_code = code[0],
+					.mx_subcode = code[1]
+				};
+				exit_with_mach_exception(proc, info, PX_FLAGS_NONE);
 				thread_exception_return();
 				/* NOT_REACHABLE */
 			}
@@ -804,7 +887,7 @@ exception_triage(
 		}
 	}
 
-#if (DEVELOPMENT || DEBUG)
+#if DEVELOPMENT || DEBUG
 #ifdef MACH_BSD
 	if (proc_pid(get_bsdtask_info(task)) <= exception_log_max_pid) {
 		record_system_event(SYSTEM_EVENT_TYPE_INFO, SYSTEM_EVENT_SUBSYSTEM_PROCESS, "process exit",
@@ -891,13 +974,21 @@ sys_perf_notify(thread_t thread, int pid)
 {
 	host_priv_t             hostp;
 	ipc_port_t              xport;
+	struct exception_action saved_exc_actions[EXC_TYPES_COUNT] = {};
 	wait_interrupt_t        wsave;
 	kern_return_t           ret;
+	struct label            *temp_label;
 
 	hostp = host_priv_self();       /* Get the host privileged ports */
 	mach_exception_data_type_t      code[EXCEPTION_CODE_MAX];
 	code[0] = 0xFF000001;           /* Set terminate code */
 	code[1] = pid;          /* Pass out the pid */
+
+#if CONFIG_MACF
+	/* Create new label for saved_exc_actions[EXC_RPC_ALERT] */
+	mac_exc_associate_action_label(&saved_exc_actions[EXC_RPC_ALERT],
+	    mac_exc_create_label(&saved_exc_actions[EXC_RPC_ALERT]));
+#endif /* CONFIG_MACF */
 
 	lck_mtx_lock(&hostp->lock);
 	xport = hostp->exc_actions[EXC_RPC_ALERT].port;
@@ -907,8 +998,21 @@ sys_perf_notify(thread_t thread, int pid)
 	    !ip_active(xport) ||
 	    ip_in_space_noauth(xport, get_threadtask(thread)->itk_space)) {
 		lck_mtx_unlock(&hostp->lock);
+#if CONFIG_MACF
+		mac_exc_free_action_label(&saved_exc_actions[EXC_RPC_ALERT]);
+#endif /* CONFIG_MACF */
 		return KERN_FAILURE;
 	}
+
+	/* Save hostp->exc_actions and hold a sright to xport so it can't be dropped after unlock */
+	temp_label = saved_exc_actions[EXC_RPC_ALERT].label;
+	saved_exc_actions[EXC_RPC_ALERT] = hostp->exc_actions[EXC_RPC_ALERT];
+	saved_exc_actions[EXC_RPC_ALERT].port = exception_port_copy_send(xport);
+	saved_exc_actions[EXC_RPC_ALERT].label = temp_label;
+
+#if CONFIG_MACF
+	mac_exc_inherit_action_label(&hostp->exc_actions[EXC_RPC_ALERT], &saved_exc_actions[EXC_RPC_ALERT]);
+#endif /* CONFIG_MACF */
 
 	lck_mtx_unlock(&hostp->lock);
 
@@ -918,9 +1022,14 @@ sys_perf_notify(thread_t thread, int pid)
 		EXC_RPC_ALERT,
 		code,
 		2,
-		hostp->exc_actions,
+		saved_exc_actions,
 		&hostp->lock);
 	(void)thread_interrupt_level(wsave);
+
+#if CONFIG_MACF
+	mac_exc_free_action_label(&saved_exc_actions[EXC_RPC_ALERT]);
+#endif /* CONFIG_MACF */
+	ipc_port_release_send(saved_exc_actions[EXC_RPC_ALERT].port);
 
 	return ret;
 }

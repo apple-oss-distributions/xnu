@@ -40,7 +40,7 @@ tests()
 	}
 }
 
-T_DECL(data, "bounded_array_ref.data") {
+T_DECL(data, "bounded_array_ref.data", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

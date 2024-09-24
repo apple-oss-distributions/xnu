@@ -1006,9 +1006,9 @@ IOService::addPowerChild2( IOPMRequest * request )
 	connection->setReadyFlag(true);
 
 	if (fControllingDriver && fParentsKnowState) {
-		fMaxPowerState = fControllingDriver->maxCapabilityForDomainState(fParentsCurrentPowerFlags);
+		fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(fParentsCurrentPowerFlags);
 		// initially change into the state we are already in
-		tempDesire = fControllingDriver->initialPowerStateForDomainState(fParentsCurrentPowerFlags);
+		tempDesire = fControllingDriver->driverInitialPowerStateForDomainState(fParentsCurrentPowerFlags);
 		fPreviousRequestPowerFlags = (IOPMPowerFlags)(-1);
 		adjustPowerState(tempDesire);
 	}
@@ -1354,9 +1354,9 @@ IOService::handleRegisterPowerDriver( IOPMRequest * request )
 
 		if (inPlane(gIOPowerPlane) && fParentsKnowState) {
 			IOPMPowerStateIndex tempDesire;
-			fMaxPowerState = fControllingDriver->maxCapabilityForDomainState(fParentsCurrentPowerFlags);
+			fMaxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(fParentsCurrentPowerFlags);
 			// initially change into the state we are already in
-			tempDesire = fControllingDriver->initialPowerStateForDomainState(fParentsCurrentPowerFlags);
+			tempDesire = fControllingDriver->driverInitialPowerStateForDomainState(fParentsCurrentPowerFlags);
 			adjustPowerState(tempDesire);
 		}
 	} else {
@@ -1921,7 +1921,7 @@ IOService::handlePowerDomainWillChangeTo( IOPMRequest * request )
 	// until after the power domain has completed its power transition.
 
 	if (fControllingDriver && !fInitialPowerChange) {
-		maxPowerState = fControllingDriver->maxCapabilityForDomainState(
+		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
 			combinedPowerFlags);
 
 		if (parentChangeFlags & kIOPMDomainPowerDrop) {
@@ -2027,7 +2027,7 @@ IOService::handlePowerDomainDidChangeTo( IOPMRequest * request )
 	setParentInfo(parentPowerFlags, whichParent, true);
 
 	if (fControllingDriver) {
-		maxPowerState = fControllingDriver->maxCapabilityForDomainState(
+		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
 			fParentsCurrentPowerFlags);
 
 		if ((parentChangeFlags & kIOPMDomainPowerDrop) == 0) {
@@ -2038,7 +2038,7 @@ IOService::handlePowerDomainDidChangeTo( IOPMRequest * request )
 
 		if (fInitialPowerChange) {
 			computeDesire = true;
-			initialDesire = fControllingDriver->initialPowerStateForDomainState(
+			initialDesire = fControllingDriver->driverInitialPowerStateForDomainState(
 				fParentsCurrentPowerFlags);
 		} else if (parentChangeFlags & kIOPMRootChangeUp) {
 			if (fAdvisoryTickleUsed) {
@@ -2056,7 +2056,7 @@ IOService::handlePowerDomainDidChangeTo( IOPMRequest * request )
 				// Default implementation returns the lowest power state.
 
 				IOPMPowerStateIndex wakePowerState =
-				    fControllingDriver->initialPowerStateForDomainState(
+				    fControllingDriver->driverInitialPowerStateForDomainState(
 					kIOPMRootDomainState | kIOPMPowerOn );
 
 				// fDesiredPowerState was adjusted before going to sleep
@@ -2195,12 +2195,7 @@ IOService::trackSystemSleepPreventers(
 			this, enablePrevention);
 #if SUPPORT_IDLE_CANCEL
 		if (idleCancelAllowed && enablePrevention) {
-			IOPMRequest *   cancelRequest;
-
-			cancelRequest = acquirePMRequest( getPMRootDomain(), kIOPMRequestTypeIdleCancel );
-			if (cancelRequest) {
-				submitPMRequest( cancelRequest );
-			}
+			cancelIdlePowerDown(getPMRootDomain());
 		}
 #endif
 	}
@@ -4887,7 +4882,7 @@ IOService::requestDomainPower(
 	applyToParents(requestDomainPowerApplier, &context, gIOPowerPlane);
 
 	if (options & kReserveDomainPower) {
-		maxPowerState = fControllingDriver->maxCapabilityForDomainState(
+		maxPowerState = fControllingDriver->driverMaxCapabilityForDomainState(
 			fHeadNoteDomainTargetFlags );
 
 		if (StateOrder(maxPowerState) < StateOrder(ourPowerState)) {
@@ -6469,6 +6464,7 @@ IOService::pmTellClientWithResponse( OSObject * object, void * arg )
 				ackState->completionTimestamp = AbsoluteTime_to_scalar(&end);
 				ackState->maxTimeRequested = ackTimeRequested;
 				context->responseArray->setObject(msgIndex, ackState);
+				OSSafeReleaseNULL(ackState);
 			} else {
 				context->responseArray->setObject(msgIndex, replied);
 			}
@@ -6698,6 +6694,7 @@ IOService::pmTellCapabilityClientWithResponse(
 				ackState->completionTimestamp = AbsoluteTime_to_scalar(&end);
 				ackState->maxTimeRequested = ackTimeRequested;
 				context->responseArray->setObject(msgIndex, ackState);
+				OSSafeReleaseNULL(ackState);
 			} else {
 				context->responseArray->setObject(msgIndex, replied);
 			}
@@ -7193,6 +7190,48 @@ IOService::cancelIdlePowerDown( IOService * service )
 	}
 }
 
+//*********************************************************************************
+// cancelIdlePowerDownSync
+//
+// Internal method to cancel sleep synchronously to avoid races on power down path
+//*********************************************************************************
+
+void
+IOService::cancelIdlePowerDownSync( void )
+{
+	handleCancelIdlePowerDown();
+}
+
+
+//*********************************************************************************
+// [private] handleCancelIdlePowerDown
+//*********************************************************************************
+
+bool
+IOService::handleCancelIdlePowerDown( void )
+{
+	bool    more = false;
+	if ((fMachineState == kIOPM_OurChangeTellClientsPowerDown)
+	    || (fMachineState == kIOPM_OurChangeTellUserPMPolicyPowerDown)
+	    || (fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown)
+	    || (fMachineState == kIOPM_SyncTellClientsPowerDown)
+	    || (fMachineState == kIOPM_SyncTellPriorityClientsPowerDown)) {
+		OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
+		PM_LOG2("%s: cancel from machine state %d\n",
+		    getName(), fMachineState);
+		fDoNotPowerDown = true;
+		// Stop waiting for app replys.
+		if ((fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown) ||
+		    (fMachineState == kIOPM_OurChangeTellUserPMPolicyPowerDown) ||
+		    (fMachineState == kIOPM_SyncTellPriorityClientsPowerDown) ||
+		    (fMachineState == kIOPM_SyncTellClientsPowerDown)) {
+			cleanClientResponses(false);
+		}
+		more = true;
+	}
+	return more;
+}
+
 #ifndef __LP64__
 IOReturn
 IOService::serializedCancelPowerChange2( unsigned long refcon )
@@ -7514,6 +7553,19 @@ IOService::maxCapabilityForDomainState( IOPMPowerFlags domainState )
 	return getPowerStateForDomainFlags(domainState);
 }
 
+unsigned long
+IOService::driverMaxCapabilityForDomainState( IOPMPowerFlags domainState )
+{
+	IOPMDriverCallEntry callEntry;
+	IOPMPowerStateIndex powerState = kPowerStateZero;
+
+	if (assertPMDriverCall(&callEntry, kIOPMDriverCallMethodMaxCapabilityForDomainState)) {
+		powerState = maxCapabilityForDomainState(domainState);
+		deassertPMDriverCall(&callEntry);
+	}
+	return powerState;
+}
+
 //*********************************************************************************
 // [public] initialPowerStateForDomainState
 //
@@ -7529,6 +7581,19 @@ IOService::initialPowerStateForDomainState( IOPMPowerFlags domainState )
 	}
 
 	return getPowerStateForDomainFlags(domainState);
+}
+
+unsigned long
+IOService::driverInitialPowerStateForDomainState( IOPMPowerFlags domainState )
+{
+	IOPMDriverCallEntry callEntry;
+	IOPMPowerStateIndex powerState = kPowerStateZero;
+
+	if (assertPMDriverCall(&callEntry, kIOPMDriverCallMethodInitialPowerStateForDomainState)) {
+		powerState = initialPowerStateForDomainState(domainState);
+		deassertPMDriverCall(&callEntry);
+	}
+	return powerState;
 }
 
 //*********************************************************************************
@@ -7979,6 +8044,10 @@ IOService::actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue
 				OurChangeFinish();
 			} else {
 				// yes, we can continue
+				if (IS_ROOT_DOMAIN) {
+					// Can no longer revert idle sleep
+					getPMRootDomain()->setIdleSleepRevertible(false);
+				}
 				OurChangeTellPriorityClientsPowerDown();
 			}
 			break;
@@ -8346,24 +8415,7 @@ IOService::actionPMReplyQueue( IOPMRequest * request, IOPMRequestQueue * queue )
 		break;
 
 	case kIOPMRequestTypeIdleCancel:
-		if ((fMachineState == kIOPM_OurChangeTellClientsPowerDown)
-		    || (fMachineState == kIOPM_OurChangeTellUserPMPolicyPowerDown)
-		    || (fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown)
-		    || (fMachineState == kIOPM_SyncTellClientsPowerDown)
-		    || (fMachineState == kIOPM_SyncTellPriorityClientsPowerDown)) {
-			OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
-			PM_LOG2("%s: cancel from machine state %d\n",
-			    getName(), fMachineState);
-			fDoNotPowerDown = true;
-			// Stop waiting for app replys.
-			if ((fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown) ||
-			    (fMachineState == kIOPM_OurChangeTellUserPMPolicyPowerDown) ||
-			    (fMachineState == kIOPM_SyncTellPriorityClientsPowerDown) ||
-			    (fMachineState == kIOPM_SyncTellClientsPowerDown)) {
-				cleanClientResponses(false);
-			}
-			more = true;
-		}
+		more = handleCancelIdlePowerDown();
 		break;
 
 	case kIOPMRequestTypeChildNotifyDelayCancel:
@@ -8436,6 +8488,8 @@ IOService::assertPMDriverCall(
 		break;
 	case kIOPMDriverCallMethodUnknown:
 	case kIOPMDriverCallMethodSetAggressive:
+	case kIOPMDriverCallMethodMaxCapabilityForDomainState:
+	case kIOPMDriverCallMethodInitialPowerStateForDomainState:
 	default:
 		entry->callMethod = NULL;
 		break;

@@ -24,6 +24,6 @@ tests()
 	}
 }
 
-T_DECL(usage_for_loop, "safe_allocation.usage.for_loop") {
+T_DECL(usage_for_loop, "safe_allocation.usage.for_loop", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

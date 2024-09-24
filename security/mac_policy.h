@@ -1396,6 +1396,7 @@ typedef int mpo_mount_check_snapshot_revert_t(
  *  @param cred Subject credential
  *  @param mp The mount point
  *  @param mlabel Label currently associated with the mount point
+ *  @param flags Requested updated flags
  *
  *  Determine whether the subject identified by the credential can perform
  *  the remount operation on the target vnode.
@@ -1403,10 +1404,12 @@ typedef int mpo_mount_check_snapshot_revert_t(
  *  @return Return 0 if access is granted, otherwise an appropriate value for
  *  errno should be returned.
  */
+#define NEEDS_RDAR_103115865 1 // Required until both EndpointSecurity & Sandbox are updated
 typedef int mpo_mount_check_remount_t(
 	kauth_cred_t cred,
 	struct mount *mp,
-	struct label *mlabel
+	struct label *mlabel,
+	uint64_t flags
 	);
 /**
  *  @brief Access control check for the settting of file system attributes
@@ -2284,6 +2287,38 @@ typedef int mpo_proc_check_set_task_special_port_t(
 	struct ipc_port *port
 	);
 /**
+ *  @brief Access control check for setting task exception ports for current task.
+ *  @param cred Subject credential
+ *  @param pident Object unique process identifier
+ *  @param exception Exception port to set
+ *  @param new_behavior exception_behavior_t value
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned.
+ */
+typedef int mpo_proc_check_set_task_exception_port_t(
+	kauth_cred_t cred,
+	struct proc_ident *pident,
+	unsigned int exception,
+	int new_behavior
+	);
+/**
+ *  @brief Access control check for setting thread exception ports.
+ *  @param cred Subject credential
+ *  @param pident Object unique process identifier
+ *  @param exception Exception port to set
+ *  @param new_behavior exception_behavior_t value
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned.
+ */
+typedef int mpo_proc_check_set_thread_exception_port_t(
+	kauth_cred_t cred,
+	struct proc_ident *pident,
+	unsigned int exception,
+	int new_behavior
+	);
+/**
  *  @brief Access control check for getting movable task/thread control port for current task.
  *  @param cred Subject credential
  *
@@ -2562,6 +2597,36 @@ typedef int mpo_proc_check_setauid_t(
 typedef int mpo_proc_check_signal_t(
 	kauth_cred_t cred,
 	struct proc *proc,
+	int signum
+	);
+/**
+ *  @brief Access control check for delivering a delegated signal
+ *  @param caller Caller credential
+ *  @param instigator Instigator process audit token
+ *  @param target Target process audit token
+ *  @param signum Signal number; see kill(2)
+ *
+ *  Determine whether the caller and instigator combination identified by
+ *  the provided credentials can deliver the specified signal to the target process.
+ *
+ *  @note Caller will always be current_proc(). But the instigator may not be
+ *  the current proc, and may no longer be running.
+ *
+ *  @warning Policy implementations must avoid obtaining proc refs of
+ *  two different processes simultaneously.
+ *
+ *  @warning Programs typically expect to be able to send and receive
+ *  signals as part or their normal process lifecycle; caution should be
+ *  exercised when implementing access controls over signal events.
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned. Suggested failure: EACCES for label mismatch,
+ *  EPERM for lack of privilege, or ESRCH to limit visibility.
+ */
+typedef int mpo_proc_check_delegated_signal_t(
+	kauth_cred_t caller,
+	audit_token_t instigator,
+	audit_token_t target,
 	int signum
 	);
 /**
@@ -4452,11 +4517,11 @@ typedef int mpo_vnode_check_readlink_t(
 /**
  *  @brief Access control check for rename
  *  @param cred Subject credential
- *  @param dvp Directory vnode
- *  @param dlabel Policy label associated with dvp
- *  @param vp vnode to be renamed
- *  @param label Policy label associated with vp
- *  @param cnp Component name for vp
+ *  @param fdvp Directory vnode
+ *  @param fdlabel Policy label associated with dvp
+ *  @param fvp vnode to be renamed
+ *  @param flabel Policy label associated with vp
+ *  @param fcnp Component name for vp
  *  @param tdvp Destination directory vnode
  *  @param tdlabel Policy label associated with tdvp
  *  @param tvp Overwritten vnode
@@ -4471,11 +4536,11 @@ typedef int mpo_vnode_check_readlink_t(
  */
 typedef int mpo_vnode_check_rename_t(
 	kauth_cred_t cred,
-	struct vnode *dvp,
-	struct label *dlabel,
-	struct vnode *vp,
-	struct label *label,
-	struct componentname *cnp,
+	struct vnode *fdvp,
+	struct label *fdlabel,
+	struct vnode *fvp,
+	struct label *flabel,
+	struct componentname *fcnp,
 	struct vnode *tdvp,
 	struct label *tdlabel,
 	struct vnode *tvp,
@@ -4789,28 +4854,6 @@ typedef int mpo_vnode_check_signature_t(
 	unsigned int platform,
 	char **fatal_failure_desc, size_t *fatal_failure_desc_len
 	);
-
-/**
- *  @brief Access control check for supplemental signature attachement
- *  @param vp the vnode to which the signature will be attached
- *  @param label label associated with the vnode
- *  @param cs_blob the code signature to check
- *  @param linked_vp vnode to which this new vp is related
- *  @param linked_cs_blob the code signature of the linked vnode
- *  @param signer_type output parameter for the signer type of the code signature being checked.
- *
- *  @return Return 0 if access is granted, otherwise an appropriate value for
- *  errno should be returned.
- */
-typedef int mpo_vnode_check_supplemental_signature_t(
-	struct vnode *vp,
-	struct label *label,
-	struct cs_blob *cs_blob,
-	struct vnode *linked_vp,
-	struct cs_blob *linked_cs_blob,
-	unsigned int *signer_type
-	);
-
 /**
  *  @brief Access control check for stat
  *  @param active_cred Subject credential
@@ -4833,6 +4876,45 @@ typedef int mpo_vnode_check_stat_t(
 	struct ucred *file_cred,        /* NULLOK */
 	struct vnode *vp,
 	struct label *label
+	);
+/**
+ *  @brief Access control check for supplemental signature attachement
+ *  @param vp the vnode to which the signature will be attached
+ *  @param label label associated with the vnode
+ *  @param cs_blob the code signature to check
+ *  @param linked_vp vnode to which this new vp is related
+ *  @param linked_cs_blob the code signature of the linked vnode
+ *  @param signer_type output parameter for the signer type of the code signature being checked.
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned.
+ */
+typedef int mpo_vnode_check_supplemental_signature_t(
+	struct vnode *vp,
+	struct label *label,
+	struct cs_blob *cs_blob,
+	struct vnode *linked_vp,
+	struct cs_blob *linked_cs_blob,
+	unsigned int *signer_type
+	);
+/**
+ *  @brief Access control check for atomically swapping two vnodes.
+ *  @param cred User credential for the swapping process
+ *  @param v1 vnode 1 to swap
+ *  @param vl1 Policy label for v1
+ *  @param v2 vnode 2 to swap
+ *  @param vl2 Policy label for v2
+ *
+ *  @return Return 0 if access is granted, otherwise an appropriate value for
+ *  errno should be returned. Suggested failure: EACCES for label mismatch or
+ *  EPERM for lack of privilege.
+ */
+typedef int mpo_vnode_check_swap_t(
+	kauth_cred_t cred,
+	struct vnode *v1,
+	struct label *vl1,
+	struct vnode *v2,
+	struct label *vl2
 	);
 /**
  *  @brief Access control check for vnode trigger resolution
@@ -5760,7 +5842,7 @@ typedef void mpo_reserved_hook_t(void);
  * Please note that this should be kept in sync with the check assumptions
  * policy in bsd/kern/policy_check.c (policy_ops struct).
  */
-#define MAC_POLICY_OPS_VERSION 84 /* inc when new reserved slots are taken */
+#define MAC_POLICY_OPS_VERSION 86 /* inc when new reserved slots are taken */
 struct mac_policy_ops {
 	mpo_audit_check_postselect_t            *mpo_audit_check_postselect;
 	mpo_audit_check_preselect_t             *mpo_audit_check_preselect;
@@ -5809,8 +5891,12 @@ struct mac_policy_ops {
 	mpo_file_label_destroy_t                *mpo_file_label_destroy;    /* deprecated not called anymore */
 	mpo_file_label_associate_t              *mpo_file_label_associate;  /* deprecated not called anymore */
 	mpo_file_notify_close_t                 *mpo_file_notify_close;
+
 	mpo_proc_check_launch_constraints_t     *mpo_proc_check_launch_constraints;
 	mpo_proc_notify_service_port_derive_t   *mpo_proc_notify_service_port_derive;
+	mpo_proc_check_set_task_exception_port_t *mpo_proc_check_set_task_exception_port;
+	mpo_proc_check_set_thread_exception_port_t *mpo_proc_check_set_thread_exception_port;
+	mpo_proc_check_delegated_signal_t       *mpo_proc_check_delegated_signal;
 
 	mpo_reserved_hook_t                     *mpo_reserved08;
 	mpo_reserved_hook_t                     *mpo_reserved09;
@@ -5826,9 +5912,6 @@ struct mac_policy_ops {
 	mpo_reserved_hook_t                     *mpo_reserved19;
 	mpo_reserved_hook_t                     *mpo_reserved20;
 	mpo_reserved_hook_t                     *mpo_reserved21;
-	mpo_reserved_hook_t                     *mpo_reserved22;
-	mpo_reserved_hook_t                     *mpo_reserved23;
-	mpo_reserved_hook_t                     *mpo_reserved24;
 
 	mpo_necp_check_open_t                   *mpo_necp_check_open;
 	mpo_necp_check_client_action_t          *mpo_necp_check_client_action;
@@ -5850,7 +5933,7 @@ struct mac_policy_ops {
 
 	mpo_vnode_notify_swap_t                 *mpo_vnode_notify_swap;
 	mpo_vnode_notify_unlink_t               *mpo_vnode_notify_unlink;
-	mpo_reserved_hook_t                     *mpo_reserved32;
+	mpo_vnode_check_swap_t                  *mpo_vnode_check_swap;
 	mpo_reserved_hook_t                     *mpo_reserved33;
 	mpo_reserved_hook_t                     *mpo_reserved34;
 	mpo_reserved_hook_t                     *mpo_reserved35;

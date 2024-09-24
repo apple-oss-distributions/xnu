@@ -83,7 +83,7 @@ int
 __nexus_open(struct proc *p, struct __nexus_open_args *uap, int *retval)
 {
 	struct nxctl *nxctl = NULL;
-	struct fileproc *fp = NULL;
+	struct fileproc *__single fp = NULL;
 	struct nxctl_init init;
 	uuid_t nxctl_uuid;
 	int fd = -1, err = 0;
@@ -171,7 +171,7 @@ int
 __nexus_register(struct proc *p, struct __nexus_register_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct kern_nexus_provider *nxprov = NULL;
 	struct nxctl *nxctl;
 	struct nxprov_reg reg;
@@ -249,7 +249,7 @@ __nexus_deregister(struct proc *p, struct __nexus_deregister_args *uap,
     int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct nxctl *nxctl = NULL;
 	uuid_t nxprov_uuid;
 	int err = 0;
@@ -294,7 +294,7 @@ int
 __nexus_create(struct proc *p, struct __nexus_create_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct kern_nexus *nx = NULL;
 	struct nxctl *nxctl = NULL;
 	uuid_t nxprov_uuid;
@@ -361,7 +361,7 @@ int
 __nexus_destroy(struct proc *p, struct __nexus_destroy_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct nxctl *nxctl = NULL;
 	int err = 0;
 	uuid_t nx_uuid;
@@ -407,7 +407,7 @@ int
 __nexus_get_opt(struct proc *p, struct __nexus_get_opt_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct nxctl *nxctl = NULL;
 	struct sockopt sopt;
 	uint32_t optlen;
@@ -470,7 +470,7 @@ int
 __nexus_set_opt(struct proc *p, struct __nexus_set_opt_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct nxctl *nxctl = NULL;
 	struct sockopt sopt;
 	int err = 0;

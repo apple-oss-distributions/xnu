@@ -69,7 +69,7 @@ tests()
 	}
 }
 
-T_DECL(cast_static, "intrusive_shared_ptr.cast.static") {
+T_DECL(cast_static, "intrusive_shared_ptr.cast.static", T_META_TAG_VM_PREFERRED) {
 	tests</*stored*/ Derived, /*from*/ Derived, /*to*/ Base>();
 	tests</*stored*/ Derived, /*from*/ Derived const, /*to*/ Base const>();
 

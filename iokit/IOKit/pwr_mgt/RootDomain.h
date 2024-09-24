@@ -536,6 +536,7 @@ public:
 	IOReturn    shutdownSystem( void );
 	IOReturn    restartSystem( void );
 	void        handleSleepTimerExpiration( void );
+	void        setIdleSleepRevertible( bool revertible );
 
 	bool        activitySinceSleep(void);
 	bool        abortHibernation(void);
@@ -673,6 +674,7 @@ private:
 	bool                    idleSleepEnabled;
 	uint32_t                sleepSlider;
 	uint32_t                idleMilliSeconds;
+	bool                    idleSleepRevertible;
 
 // Difference between sleepSlider and longestNonSleepSlider
 	uint32_t                extraSleepDelay;
@@ -684,6 +686,10 @@ private:
 	thread_call_t           diskSyncCalloutEntry;
 	thread_call_t           fullWakeThreadCall;
 	thread_call_t           updateConsoleUsersEntry;
+
+// Core Analytics
+	IOPMAOTAnalytics        * _aotAnalytics;
+	thread_call_t           analyticsThreadCall;
 
 // Track system capabilities.
 	uint32_t                _desiredCapability;
@@ -862,11 +868,17 @@ private:
 	size_t               _driverKitMatchingAssertionCount;
 	IOPMDriverAssertionID _driverKitMatchingAssertion;
 
-	bool        aotShouldExit(bool checkTimeSet, bool software);
+	bool        aotShouldExit(bool software);
 	void        aotExit(bool cps);
 	void        aotEvaluate(IOTimerEventSource * timer);
 public:
 	bool        isAOTMode(void);
+
+// Core Analytics
+	void        initAOTMetrics();
+	void        scheduleAnalyticsThreadCall();
+	void        reportAnalytics();
+
 private:
 	// -- AOT
 	enum {
@@ -888,8 +900,9 @@ private:
 	bool        checkSystemSleepEnabled( void );
 	bool        checkSystemCanSleep( uint32_t sleepReason );
 	bool        checkSystemCanSustainFullWake( void );
-
+	bool        checkSystemCanAbortIdleSleep( void );
 	void        adjustPowerState( bool sleepASAP = false );
+	bool        attemptIdleSleepAbort( void );
 	void        setQuickSpinDownTimeout( void );
 	void        restoreUserSpinDownTimeout( void );
 
@@ -967,6 +980,7 @@ private:
 	void        copySleepPreventersList(OSArray  **idleSleepList, OSArray  **systemSleepList);
 	void        copySleepPreventersListWithID(OSArray  **idleSleepList, OSArray  **systemSleepList);
 	void        recordRTCAlarm(const OSSymbol *type, OSObject *object);
+	void        scheduleImmediateDebugWake( void );
 
 	// Used to inform interested clients about low latency audio activity in the system
 	OSPtr<OSDictionary>   lowLatencyAudioNotifierDict;
@@ -993,6 +1007,19 @@ public:
 	void sleepToDoze( void );
 	void wakeSystem( void );
 };
+
+void     IOHibernateSystemInit(IOPMrootDomain * rootDomain);
+
+IOReturn IOHibernateSystemSleep(void);
+IOReturn IOHibernateIOKitSleep(void);
+IOReturn IOHibernateSystemHasSlept(void);
+IOReturn IOHibernateSystemWake(void);
+IOReturn IOHibernateSystemPostWake(bool now);
+uint32_t IOHibernateWasScreenLocked(void);
+void     IOHibernateSetScreenLocked(uint32_t lockState);
+void     IOHibernateSetWakeCapabilities(uint32_t capability);
+void     IOHibernateSystemRestart(void);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* _IOKIT_ROOTDOMAIN_H */

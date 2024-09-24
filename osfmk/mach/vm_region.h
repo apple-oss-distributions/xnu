@@ -71,6 +71,15 @@ typedef int     *vm_region_recurse_info_64_t;
 typedef int      vm_region_flavor_t;
 typedef int      vm_region_info_data_t[VM_REGION_INFO_MAX];
 
+#ifdef PRIVATE
+/* task region info flags configured via sysctl */
+#ifdef MACH_KERNEL_PRIVATE
+/* update the bit field size in task.h if flags are added */
+#endif /* MACH_KERNEL_PRIVATE */
+/* return SM_SHARED for SM_PRIVATE_ALIASED/SM_SHARED_ALIASED (perf) */
+#define VM_REGION_INFO_FLAGS_NO_ALIASED 0x1
+#endif /* PRIVATE */
+
 #define VM_REGION_BASIC_INFO_64         9
 struct vm_region_basic_info_64 {
 	vm_prot_t               protection;

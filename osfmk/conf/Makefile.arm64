@@ -34,6 +34,8 @@ $(1)_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
 $(1)_CFLAGS_ADD += -fno-sanitize=address -UKASAN
 # Stack protector and stack check must be disabled because the stack protector runtime isn't available
 $(1)_CFLAGS_ADD += -fno-stack-protector -fno-stack-check
+# Profiling information and code coverage must be disabled for __HIB files (see rdar://104951137)
+$(1)_CFLAGS_ADD += -fno-profile-instr-generate -fno-coverage-mapping
 endef
 
 $(foreach FILE,$(UNCONFIGURED_HIB_FILES),$(eval $(call ADD_HIB_CFLAGS,$(FILE))))

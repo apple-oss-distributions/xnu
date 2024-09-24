@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2014-2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,6 +78,54 @@ SYSCTL_INT(_net_netagent, OID_AUTO, active_count, CTLFLAG_RD | CTLFLAG_LOCKED,
     }                                                                                    \
 } while (0)
 
+#if __has_ptrcheck
+static inline
+__attribute__((always_inline)) __pure
+uint8_t * __bidi_indexable
+netagent_get_data(const struct netagent *agent)
+{
+	if (agent == NULL) {
+		return NULL;
+	}
+
+	return __unsafe_forge_bidi_indexable(uint8_t *, agent->netagent_data, agent->netagent_data_size);
+}
+#else
+#define netagent_get_data(agent) ((agent)->netagent_data)
+#endif
+
+#if __has_ptrcheck
+static inline
+__attribute__((always_inline)) __pure
+uint8_t * __bidi_indexable
+netagent_group_message_get_members(const struct netagent_client_group_message *msg, size_t members_length)
+{
+	if (msg == NULL) {
+		return NULL;
+	}
+
+	return __unsafe_forge_bidi_indexable(uint8_t *, msg->group_members, members_length);
+}
+#else
+#define netagent_group_message_get_members(msg, members_length) ((msg)->group_members)
+#endif
+
+#if __has_ptrcheck
+static inline
+__attribute__((always_inline)) __pure
+uint8_t * __bidi_indexable
+netagent_assign_message_get_necp_result(const struct netagent_assign_nexus_message *msg, size_t result_length)
+{
+	if (msg == NULL) {
+		return NULL;
+	}
+
+	return __unsafe_forge_bidi_indexable(uint8_t *, msg->assign_necp_results, result_length);
+}
+#else
+#define netagent_assign_message_get_necp_result(msg, result_length) ((msg)->assign_necp_results)
+#endif
+
 struct netagent_client {
 	LIST_ENTRY(netagent_client) client_chain;
 	uuid_t client_id;
@@ -90,7 +138,7 @@ LIST_HEAD(netagent_client_list_s, netagent_client);
 struct netagent_token {
 	TAILQ_ENTRY(netagent_token) token_chain;
 	u_int32_t token_length;
-	u_int8_t *token_bytes;
+	u_int8_t *  __indexable token_bytes;
 };
 
 TAILQ_HEAD(netagent_token_list_s, netagent_token);
@@ -169,11 +217,12 @@ static errno_t netagent_ctl_send(kern_ctl_ref kctlref, u_int32_t unit, void *uni
     mbuf_t m, int flags);
 static void netagent_ctl_rcvd(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo, int flags);
 static errno_t netagent_ctl_getopt(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo,
-    int opt, void *data, size_t *len);
+    int opt, void * __sized_by(*len)data, size_t *len);
 static errno_t netagent_ctl_setopt(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo,
-    int opt, void *data, size_t len);
+    int opt, void * __sized_by(len)data, size_t len);
 
-static int netagent_send_ctl_data(u_int32_t control_unit, u_int8_t *buffer, size_t buffer_size);
+static int netagent_send_ctl_data(u_int32_t control_unit,
+    u_int8_t *__sized_by(buffer_size)buffer, size_t buffer_size);
 
 static struct netagent_session *netagent_create_session(u_int32_t control_unit);
 static void netagent_delete_session(struct netagent_session *session);
@@ -207,21 +256,18 @@ static errno_t netagent_handle_assign_group_setopt(struct netagent_session *sess
     size_t payload_length);
 
 // Set/get assert count
-static errno_t netagent_handle_use_count_setopt(struct netagent_session *session, u_int8_t *payload, size_t payload_length);
-static errno_t netagent_handle_use_count_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length);
+static errno_t netagent_handle_use_count_setopt(struct netagent_session *session, u_int8_t * __sized_by(payload_length)payload, size_t payload_length);
+static errno_t netagent_handle_use_count_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length);
 
 // Manage tokens
-static errno_t netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t *payload, size_t payload_length);
+static errno_t netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t * __sized_by(token_length)token, size_t token_length);
 static errno_t netagent_handle_flush_tokens_setopt(struct netagent_session *session, u_int8_t *payload, size_t payload_length);
-static errno_t netagent_handle_token_count_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length);
-static errno_t netagent_handle_token_low_water_setopt(struct netagent_session *session, u_int8_t *buffer, size_t buffer_length);
-static errno_t netagent_handle_token_low_water_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length);
+static errno_t netagent_handle_token_count_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length);
+static errno_t netagent_handle_token_low_water_setopt(struct netagent_session *session, u_int8_t * __sized_by(buffer_length)buffer, size_t buffer_length);
+static errno_t netagent_handle_token_low_water_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length);
 
 // Client error
 static errno_t netagent_handle_reset_client_error_setopt(struct netagent_session *session, u_int8_t *payload, size_t payload_length);
-
-static void netagent_handle_get(struct netagent_session *session, u_int32_t message_id,
-    size_t payload_length, mbuf_t packet, size_t offset);
 
 // Requires list lock being held
 static struct netagent_wrapper *netagent_find_agent_with_uuid_and_lock(uuid_t uuid, bool exclusively, bool ignore_lock);
@@ -318,9 +364,8 @@ netagent_post_event(uuid_t agent_uuid, u_int32_t event_code, bool update_necp, b
 }
 
 // Message handling
-static u_int8_t *
-netagent_buffer_write_message_header(u_int8_t *buffer, u_int8_t message_type, u_int8_t flags,
-    u_int32_t message_id, u_int32_t error, size_t payload_length)
+static u_int8_t * __indexable
+netagent_buffer_write_message_header(u_int8_t * __sized_by(sizeof(struct netagent_message_header) + payload_length)buffer, u_int8_t message_type, u_int8_t flags, u_int32_t message_id, u_int32_t error, size_t payload_length)
 {
 	memset(buffer, 0, sizeof(struct netagent_message_header));
 	((struct netagent_message_header *)(void *)buffer)->message_type = message_type;
@@ -328,11 +373,11 @@ netagent_buffer_write_message_header(u_int8_t *buffer, u_int8_t message_type, u_
 	((struct netagent_message_header *)(void *)buffer)->message_id = message_id;
 	((struct netagent_message_header *)(void *)buffer)->message_error = error;
 	((struct netagent_message_header *)(void *)buffer)->message_payload_length = (u_int32_t)payload_length;
-	return buffer + sizeof(struct netagent_message_header);
+	return payload_length ? buffer + sizeof(struct netagent_message_header) : NULL;
 }
 
 static int
-netagent_send_ctl_data(u_int32_t control_unit, u_int8_t *buffer, size_t buffer_size)
+netagent_send_ctl_data(u_int32_t control_unit, u_int8_t *__sized_by(buffer_size) buffer, size_t buffer_size)
 {
 	if (netagent_kctlref == NULL || control_unit == 0 || buffer == NULL || buffer_size == 0) {
 		return EINVAL;
@@ -348,7 +393,6 @@ netagent_send_trigger(struct netagent_wrapper *wrapper, struct proc *p, u_int32_
 	struct netagent_trigger_message *trigger_message = NULL;
 	u_int8_t *trigger = NULL;
 	size_t trigger_size = sizeof(struct netagent_message_header) + sizeof(struct netagent_trigger_message);
-
 	trigger = (u_int8_t *)kalloc_data(trigger_size, Z_WAITOK);
 	if (trigger == NULL) {
 		return ENOMEM;
@@ -431,7 +475,7 @@ static int
 netagent_send_group_message(struct netagent_wrapper *wrapper, uuid_t client_id, u_int8_t message_type, struct necp_client_group_members *group_members)
 {
 	int error = 0;
-	struct netagent_client_group_message *client_message = NULL;
+	struct netagent_client_group_message * __single client_message = NULL;
 	u_int8_t *message = NULL;
 	size_t message_size = sizeof(struct netagent_message_header) + sizeof(struct netagent_client_group_message) + group_members->group_members_length;
 
@@ -444,7 +488,7 @@ netagent_send_group_message(struct netagent_wrapper *wrapper, uuid_t client_id, 
 
 	client_message = (struct netagent_client_group_message *)(void *)(message + sizeof(struct netagent_message_header));
 	uuid_copy(client_message->client_id, client_id);
-	memcpy(client_message->group_members, group_members->group_members, group_members->group_members_length);
+	memcpy(netagent_group_message_get_members(client_message, group_members->group_members_length), group_members->group_members, group_members->group_members_length);
 
 	if ((error = netagent_send_ctl_data(wrapper->control_unit, message, message_size))) {
 		NETAGENTLOG(LOG_ERR, "Failed to send client group message %d on control unit %d", message_type, wrapper->control_unit);
@@ -483,6 +527,7 @@ netagent_send_success_response(struct netagent_session *session, u_int8_t messag
 	int error = 0;
 	u_int8_t *response = NULL;
 	size_t response_size = sizeof(struct netagent_message_header);
+
 	response = (u_int8_t *)kalloc_data(response_size, Z_WAITOK);
 	if (response == NULL) {
 		return ENOMEM;
@@ -570,8 +615,7 @@ netagent_ctl_send(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo, mbuf_t p
 		break;
 	}
 	case NETAGENT_MESSAGE_TYPE_GET: {
-		netagent_handle_get(session, header.message_id, header.message_payload_length,
-		    packet, sizeof(header));
+		NETAGENTLOG0(LOG_ERR, "NETAGENT_MESSAGE_TYPE_GET no longer supported");
 		break;
 	}
 	case NETAGENT_MESSAGE_TYPE_ASSERT: {
@@ -609,7 +653,7 @@ netagent_ctl_rcvd(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo, int flag
 
 static errno_t
 netagent_ctl_getopt(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo, int opt,
-    void *data, size_t *len)
+    void * __sized_by(*len)data, size_t *len)
 {
 #pragma unused(kctlref, unit)
 	struct netagent_session *session = (struct netagent_session *)unitinfo;
@@ -649,7 +693,7 @@ done:
 
 static errno_t
 netagent_ctl_setopt(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo, int opt,
-    void *data, size_t len)
+    void * __sized_by(len)data, size_t len)
 {
 #pragma unused(kctlref, unit)
 	struct netagent_session *session = (struct netagent_session *)unitinfo;
@@ -806,7 +850,7 @@ netagent_free_wrapper(struct netagent_wrapper *wrapper)
 	}
 
 	// Free any pending client triggers
-	struct netagent_client *search_client = NULL;
+	struct netagent_client * __single search_client = NULL;
 	struct netagent_client *temp_client = NULL;
 	LIST_FOREACH_SAFE(search_client, &wrapper->pending_triggers_list, client_chain, temp_client) {
 		LIST_REMOVE(search_client, client_chain);
@@ -949,7 +993,8 @@ netagent_register(netagent_session_t _session, struct netagent *agent)
 
 	new_wrapper = netagent_alloc_wrapper_memory(data_size);
 
-	__nochk_memcpy(new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(new_wrapper->netagent, agent, sizeof(struct netagent));
+	__nochk_memcpy(netagent_get_data(new_wrapper->netagent), netagent_get_data(agent), data_size);
 
 	uuid_copy(registered_uuid, new_wrapper->netagent->netagent_uuid);
 
@@ -1008,7 +1053,8 @@ netagent_handle_register_setopt(struct netagent_session *session, u_int8_t *payl
 
 	new_wrapper = netagent_alloc_wrapper_memory(data_size);
 
-	__nochk_memcpy(new_wrapper->netagent, register_netagent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(new_wrapper->netagent, register_netagent, sizeof(struct netagent));
+	__nochk_memcpy(netagent_get_data(new_wrapper->netagent), netagent_get_data(register_netagent), data_size);
 
 	uuid_copy(registered_uuid, new_wrapper->netagent->netagent_uuid);
 
@@ -1141,7 +1187,7 @@ static void
 netagent_send_cellular_failed_event(struct netagent_wrapper *wrapper,
     pid_t pid, uuid_t proc_uuid)
 {
-	if (strncmp(wrapper->netagent->netagent_domain, "Cellular", NETAGENT_DOMAINSIZE) != 0) {
+	if (strlcmp(wrapper->netagent->netagent_domain, "Cellular", NETAGENT_DOMAINSIZE) != 0) {
 		return;
 	}
 
@@ -1198,13 +1244,14 @@ netagent_handle_update_inner(struct netagent_session *session, struct netagent_w
 
 	new_wrapper->netagent->netagent_flags |= NETAGENT_FLAG_REGISTERED;
 	if (session->wrapper->netagent->netagent_data_size == new_wrapper->netagent->netagent_data_size &&
-	    memcmp(session->wrapper->netagent, new_wrapper->netagent, sizeof(struct netagent) + data_size) == 0) {
+	    memcmp(session->wrapper->netagent, new_wrapper->netagent, sizeof(struct netagent)) == 0 &&
+	    memcmp(netagent_get_data(session->wrapper->netagent), netagent_get_data(new_wrapper->netagent), data_size) == 0) {
 		// Agent is exactly identical, don't increment the generation count
 
 		// Make a copy of the list of pending clients, and clear the current list
 		struct netagent_client_list_s pending_triggers_list_copy;
 		LIST_INIT(&pending_triggers_list_copy);
-		struct netagent_client *search_client = NULL;
+		struct netagent_client * __single search_client = NULL;
 		struct netagent_client *temp_client = NULL;
 		LIST_FOREACH_SAFE(search_client, &session->wrapper->pending_triggers_list, client_chain, temp_client) {
 			LIST_REMOVE(search_client, client_chain);
@@ -1293,7 +1340,8 @@ netagent_update(netagent_session_t _session, struct netagent *agent)
 
 	new_wrapper = netagent_alloc_wrapper_memory(data_size);
 
-	__nochk_memcpy(new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(new_wrapper->netagent, agent, sizeof(struct netagent));
+	__nochk_memcpy(netagent_get_data(new_wrapper->netagent), netagent_get_data(agent), data_size);
 
 	uuid_copy(updated_uuid, new_wrapper->netagent->netagent_uuid);
 	should_update_immediately = (NETAGENT_FLAG_UPDATE_IMMEDIATELY == (new_wrapper->netagent->netagent_flags & NETAGENT_FLAG_UPDATE_IMMEDIATELY));
@@ -1357,7 +1405,8 @@ netagent_handle_update_setopt(struct netagent_session *session, u_int8_t *payloa
 
 	new_wrapper = netagent_alloc_wrapper_memory(data_size);
 
-	__nochk_memcpy(new_wrapper->netagent, update_netagent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(new_wrapper->netagent, update_netagent, sizeof(struct netagent));
+	__nochk_memcpy(netagent_get_data(new_wrapper->netagent), netagent_get_data(update_netagent), data_size);
 
 	uuid_copy(updated_uuid, new_wrapper->netagent->netagent_uuid);
 	should_update_immediately = (NETAGENT_FLAG_UPDATE_IMMEDIATELY == (new_wrapper->netagent->netagent_flags & NETAGENT_FLAG_UPDATE_IMMEDIATELY));
@@ -1445,63 +1494,9 @@ fail:
 	netagent_send_error_response(session, NETAGENT_MESSAGE_TYPE_UPDATE, message_id, response_error);
 }
 
-static void
-netagent_handle_get(struct netagent_session *session, u_int32_t message_id,
-    size_t payload_length, mbuf_t packet, size_t offset)
-{
-#pragma unused(payload_length, packet, offset)
-	u_int8_t *response = NULL;
-	u_int8_t *cursor = NULL;
-	u_int32_t response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
-
-	if (session == NULL) {
-		NETAGENTLOG0(LOG_ERR, "Failed to find session");
-		response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
-		goto fail;
-	}
-
-	NETAGENT_SESSION_LOCK(session);
-	if (session->wrapper == NULL) {
-		NETAGENT_SESSION_UNLOCK(session);
-		NETAGENTLOG0(LOG_ERR, "Session has no agent to get");
-		response_error = NETAGENT_MESSAGE_ERROR_NOT_REGISTERED;
-		goto fail;
-	}
-
-	NETAGENT_LOCK_SHARED(session->wrapper);
-
-	size_t response_size = sizeof(struct netagent_message_header)
-	    + sizeof(struct netagent)
-	    + session->wrapper->netagent->netagent_data_size;
-	response = (u_int8_t *)kalloc_data(response_size, Z_WAITOK);
-	if (response == NULL) {
-		NETAGENT_UNLOCK(session->wrapper);
-		NETAGENT_SESSION_UNLOCK(session);
-		goto fail;
-	}
-
-	cursor = response;
-	cursor = netagent_buffer_write_message_header(cursor, NETAGENT_MESSAGE_TYPE_GET,
-	    NETAGENT_MESSAGE_FLAGS_RESPONSE, message_id, 0,
-	    response_size - sizeof(struct netagent_message_header));
-	memcpy(cursor, session->wrapper->netagent, sizeof(struct netagent) +
-	    session->wrapper->netagent->netagent_data_size);
-
-	NETAGENT_UNLOCK(session->wrapper);
-	NETAGENT_SESSION_UNLOCK(session);
-
-	if (!netagent_send_ctl_data(session->control_unit, response, response_size)) {
-		NETAGENTLOG0(LOG_ERR, "Failed to send response");
-	}
-	kfree_data(response, response_size);
-	return;
-fail:
-	netagent_send_error_response(session, NETAGENT_MESSAGE_TYPE_GET, message_id, response_error);
-}
-
 errno_t
 netagent_assign_nexus(netagent_session_t _session, uuid_t necp_client_uuid,
-    void *assign_message, size_t assigned_results_length)
+    void * __sized_by(assigned_results_length)assign_message, size_t assigned_results_length)
 {
 	struct netagent_session *session = (struct netagent_session *)_session;
 	uuid_t netagent_uuid;
@@ -1569,7 +1564,7 @@ netagent_handle_assign_nexus_setopt(struct netagent_session *session, u_int8_t *
     size_t payload_length)
 {
 	errno_t response_error = 0;
-	struct netagent_assign_nexus_message *assign_nexus_netagent = (struct netagent_assign_nexus_message *)(void *)payload;
+	struct netagent_assign_nexus_message * __single assign_nexus_netagent = (struct netagent_assign_nexus_message *)(void *)payload;
 	uuid_t client_id;
 	uuid_t netagent_uuid;
 	u_int8_t *assigned_results = NULL;
@@ -1615,7 +1610,9 @@ netagent_handle_assign_nexus_setopt(struct netagent_session *session, u_int8_t *
 			response_error = ENOMEM;
 			goto done;
 		}
-		memcpy(assigned_results, assign_nexus_netagent->assign_necp_results, assigned_results_length);
+		memcpy(assigned_results,
+		    netagent_assign_message_get_necp_result(assign_nexus_netagent, assigned_results_length),
+		    assigned_results_length);
 	}
 
 	// Note that if the error is 0, NECP has taken over our malloc'ed buffer
@@ -1641,7 +1638,7 @@ netagent_handle_assign_nexus_message(struct netagent_session *session, u_int32_t
 	u_int32_t response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
 	uuid_t client_id;
 	uuid_t netagent_uuid;
-	u_int8_t *assigned_results = NULL;
+	u_int8_t * assigned_results = NULL;
 
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
@@ -1759,7 +1756,7 @@ netagent_handle_assign_group_setopt(struct netagent_session *session, u_int8_t *
 			response_error = ENOMEM;
 			goto done;
 		}
-		memcpy(assigned_group_members, assign_message->assign_necp_results, assigned_group_members_length);
+		memcpy(assigned_group_members, netagent_assign_message_get_necp_result(assign_message, assigned_group_members_length), assigned_group_members_length);
 	}
 
 	// Note that if the error is 0, NECP has taken over our malloc'ed buffer
@@ -1780,7 +1777,7 @@ done:
 
 
 errno_t
-netagent_handle_use_count_setopt(struct netagent_session *session, u_int8_t *payload, size_t payload_length)
+netagent_handle_use_count_setopt(struct netagent_session *session, u_int8_t * __sized_by(payload_length)payload, size_t payload_length)
 {
 	errno_t response_error = 0;
 	uint64_t use_count = 0;
@@ -1824,7 +1821,7 @@ done:
 }
 
 errno_t
-netagent_handle_use_count_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length)
+netagent_handle_use_count_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length)
 {
 	errno_t response_error = 0;
 	uint64_t use_count = 0;
@@ -1869,7 +1866,7 @@ done:
 }
 
 static errno_t
-netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t *token, size_t token_length)
+netagent_handle_add_token_setopt(struct netagent_session *session, u_int8_t * __sized_by(token_length)token, size_t token_length)
 {
 	errno_t response_error = 0;
 
@@ -1962,7 +1959,7 @@ done:
 }
 
 static errno_t
-netagent_handle_token_count_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length)
+netagent_handle_token_count_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length)
 {
 	errno_t response_error = 0;
 	uint32_t token_count = 0;
@@ -2006,7 +2003,7 @@ done:
 }
 
 static errno_t
-netagent_handle_token_low_water_setopt(struct netagent_session *session, u_int8_t *buffer, size_t buffer_length)
+netagent_handle_token_low_water_setopt(struct netagent_session *session, u_int8_t * __sized_by(buffer_length)buffer, size_t buffer_length)
 {
 	errno_t response_error = 0;
 	uint32_t token_low_water = 0;
@@ -2049,7 +2046,7 @@ done:
 }
 
 static errno_t
-netagent_handle_token_low_water_getopt(struct netagent_session *session, u_int8_t *buffer, size_t *buffer_length)
+netagent_handle_token_low_water_getopt(struct netagent_session *session, u_int8_t * __sized_by(*buffer_length)buffer, size_t *buffer_length)
 {
 	errno_t response_error = 0;
 	uint32_t token_low_water = 0;
@@ -2175,13 +2172,13 @@ netagent_dump_get_data_size_locked()
 }
 
 static void
-netagent_dump_copy_data_locked(u_int8_t *buffer, u_int32_t buffer_length)
+netagent_dump_copy_data_locked(u_int8_t * __sized_by(buffer_length)buffer, u_int32_t buffer_length)
 {
 	NETAGENT_LIST_ASSERT_LOCKED();
 
 	size_t response_size = 0;
-	u_int8_t *cursor = NULL;
-	struct netagent_wrapper *search_netagent = NULL;
+	u_int8_t * __indexable cursor = NULL;
+	struct netagent_wrapper * __single search_netagent = NULL;
 
 	response_size = buffer_length; // We already know that buffer_length is the same as total_netagent_data_size.
 	cursor = buffer;
@@ -2192,7 +2189,7 @@ netagent_dump_copy_data_locked(u_int8_t *buffer, u_int32_t buffer_length)
 }
 
 int
-netagent_ioctl(u_long cmd, caddr_t data)
+netagent_ioctl(u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data)
 {
 	int error = 0;
 
@@ -2231,7 +2228,7 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		} else if (ifsir32->netagent_data != USER_ADDR_NULL &&
 		    ifsir32->netagent_data_size == wrapper->netagent->netagent_data_size) {
 			// Second pass, client wants data buffer filled out
-			error = copyout(wrapper->netagent->netagent_data, ifsir32->netagent_data, wrapper->netagent->netagent_data_size);
+			error = copyout(netagent_get_data(wrapper->netagent), ifsir32->netagent_data, wrapper->netagent->netagent_data_size);
 		} else {
 			error = EINVAL;
 		}
@@ -2256,7 +2253,7 @@ netagent_ioctl(u_long cmd, caddr_t data)
 		} else if (ifsir64->netagent_data != USER_ADDR_NULL &&
 		    ifsir64->netagent_data_size == wrapper->netagent->netagent_data_size) {
 			// Second pass, client wants data buffer filled out
-			error = copyout(wrapper->netagent->netagent_data, ifsir64->netagent_data, wrapper->netagent->netagent_data_size);
+			error = copyout(netagent_get_data(wrapper->netagent), ifsir64->netagent_data, wrapper->netagent->netagent_data_size);
 		} else {
 			error = EINVAL;
 		}
@@ -2388,7 +2385,7 @@ netagent_get_generation(uuid_t uuid)
 }
 
 bool
-netagent_get_agent_domain_and_type(uuid_t uuid, char *domain, char *type)
+netagent_get_agent_domain_and_type(uuid_t uuid, char * __sized_by(NETAGENT_DOMAINSIZE)domain, char * __sized_by(NETAGENT_TYPESIZE)type)
 {
 	bool found = FALSE;
 	if (domain == NULL || type == NULL) {
@@ -2455,7 +2452,7 @@ netagent_client_message_with_params(uuid_t agent_uuid,
     void *handle,
     u_int8_t message_type,
     struct necp_client_agent_parameters *parameters,
-    void **assigned_results,
+    void * __sized_by(*assigned_results_length) *assigned_results,
     size_t *assigned_results_length)
 {
 	int error = 0;
@@ -2642,7 +2639,10 @@ done:
 int
 netagent_client_message(uuid_t agent_uuid, uuid_t necp_client_uuid, pid_t pid, void *handle, u_int8_t message_type)
 {
-	return netagent_client_message_with_params(agent_uuid, necp_client_uuid, pid, handle, message_type, NULL, NULL, NULL);
+	size_t dummy_length = 0;
+	void *dummy_results __sized_by(dummy_length) = NULL;
+
+	return netagent_client_message_with_params(agent_uuid, necp_client_uuid, pid, handle, message_type, NULL, &dummy_results, &dummy_length);
 }
 
 int
@@ -2693,7 +2693,8 @@ netagent_copyout(uuid_t agent_uuid, user_addr_t user_addr, u_int32_t user_size)
 		goto done;
 	}
 
-	error = copyout(wrapper->netagent, user_addr, total_size);
+	u_int8_t *ptr = __unsafe_forge_bidi_indexable(u_int8_t *, wrapper->netagent, total_size);
+	error = copyout(ptr, user_addr, total_size);
 
 	NETAGENTLOG((error ? LOG_ERR : LOG_DEBUG), "Copied agent content (error %d)", error);
 done:

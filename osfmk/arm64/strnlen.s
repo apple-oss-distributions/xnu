@@ -72,6 +72,7 @@ _strnlen:
 //	that it exceeds the size of any buffer that can be allocted, jump into a
 //	simpler implementation that omits all length checks.  This is both faster
 //	and lets us avoid some messy edgecases in the mainline.
+	ARM64_PROLOG
 	tst       x1,      x1
 	b.mi      _strlen
 	b.eq      L_maxlenIsZero

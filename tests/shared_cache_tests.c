@@ -8,7 +8,7 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.shared_cache"));
 
 // Give the test up to two minutes because in the failure case we want to invoke update_dyld_shared_cache, which
 // might take a bit to do.
-T_DECL(present, "tests that the device is running with a shared cache", T_META_ASROOT(true), T_META_TIMEOUT(120))
+T_DECL(present, "tests that the device is running with a shared cache", T_META_ASROOT(true), T_META_TIMEOUT(120), T_META_TAG_VM_NOT_PREFERRED)
 {
 	size_t shared_cache_len = 0;
 	const void *cache_header = _dyld_get_shared_cache_range(&shared_cache_len);

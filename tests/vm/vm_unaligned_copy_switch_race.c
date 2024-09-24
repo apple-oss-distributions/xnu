@@ -71,7 +71,7 @@ switcheroo_thread(__unused void *arg)
 }
 
 T_DECL(unaligned_copy_switch_race,
-    "Test that unaligned copy respects read-only mapping")
+    "Test that unaligned copy respects read-only mapping", T_META_TAG_VM_PREFERRED)
 {
 	pthread_t th = NULL;
 	int ret;

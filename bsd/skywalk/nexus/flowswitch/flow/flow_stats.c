@@ -76,19 +76,23 @@ flow_stats_alloc(boolean_t cansleep)
 	_CASSERT((offsetof(struct flow_stats, fs_stats) % 16) == 0);
 	_CASSERT((offsetof(struct sk_stats_flow, sf_key) % 16) == 0);
 
-	if ((fs = skmem_cache_alloc(flow_stats_cache,
-	    (cansleep ? SKMEM_SLEEP : SKMEM_NOSLEEP))) != NULL) {
-		/*
-		 * sf_key is 16-bytes aligned which requires fe to begin on
-		 * a 16-bytes boundary as well.  This alignment is specified
-		 * at flow_stats_cache creation time and we assert here.
-		 */
-		ASSERT(IS_P2ALIGNED(fs, 16));
-		bzero(fs, flow_stats_size);
-		os_ref_init(&fs->fs_refcnt, &flow_stats_refgrp);
-		SK_DF(SK_VERB_MEM, "allocated fs 0x%llx", SK_KVA(fs));
-	}
+	/* XXX -fbounds-safety: fix after skmem merge */
+	fs = __unsafe_forge_bidi_indexable(struct flow_stats *,
+	    skmem_cache_alloc(flow_stats_cache,
+	    (cansleep ? SKMEM_SLEEP : SKMEM_NOSLEEP)), flow_stats_size);
 
+	if (fs == NULL) {
+		return NULL;
+	}
+	/*
+	 * sf_key is 16-bytes aligned which requires fe to begin on
+	 * a 16-bytes boundary as well.  This alignment is specified
+	 * at flow_stats_cache creation time and we assert here.
+	 */
+	ASSERT(IS_P2ALIGNED(fs, 16));
+	bzero(fs, flow_stats_size);
+	os_ref_init(&fs->fs_refcnt, &flow_stats_refgrp);
+	SK_DF(SK_VERB_MEM, "allocated fs 0x%llx", SK_KVA(fs));
 	return fs;
 }
 

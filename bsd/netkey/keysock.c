@@ -83,6 +83,7 @@
 #include <netkey/key.h>
 #include <netkey/keysock.h>
 #include <netkey/key_debug.h>
+#include <net/sockaddr_utils.h>
 
 extern lck_mtx_t raw_mtx;
 extern void key_init(struct protosw *, struct domain *);
@@ -225,7 +226,7 @@ key_sendup0(struct rawcb *rp, struct mbuf *m, int promisc)
 		PFKEY_STAT_INCREMENT(pfkeystat.in_msgtype[pmsg->sadb_msg_type]);
 	}
 
-	if (!sbappendaddr(&rp->rcb_socket->so_rcv, (struct sockaddr *)&key_src,
+	if (!sbappendaddr(&rp->rcb_socket->so_rcv, SA(&key_src),
 	    m, NULL, &error)) {
 #if IPSEC_DEBUG
 		printf("key_sendup0: sbappendaddr failed\n");
@@ -287,7 +288,7 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 			continue;
 		}
 
-		kp = (struct keycb *)rp;
+		kp = __container_of(rp, struct keycb, kp_raw);
 
 		socket_lock(rp->rcb_socket, 1);
 		/*
@@ -295,7 +296,7 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 		 * reply, you'll get two PF_KEY messages.
 		 * (based on pf_key@inner.net message on 14 Oct 1998)
 		 */
-		if (((struct keycb *)rp)->kp_promisc) {
+		if (kp->kp_promisc) {
 			if ((n = m_copy(m, 0, (int)M_COPYALL)) != NULL) {
 				(void)key_sendup0(rp, n, 1);
 				n = NULL;

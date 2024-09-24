@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -283,6 +283,7 @@ cp_pipe_from_user_32( struct sockopt *sopt, struct dn_pipe *p )
 		p->numbytes = user_pipe_32.numbytes;
 		p->sched_time = user_pipe_32.sched_time;
 		bcopy( user_pipe_32.if_name, p->if_name, IFNAMSIZ);
+		p->if_name[IFNAMSIZ - 1] = '\0';
 		p->ready = user_pipe_32.ready;
 
 		p->fs.fs_nr = user_pipe_32.fs.fs_nr;
@@ -330,6 +331,7 @@ cp_pipe_from_user_64( struct sockopt *sopt, struct dn_pipe *p )
 		p->numbytes = user_pipe_64.numbytes;
 		p->sched_time = user_pipe_64.sched_time;
 		bcopy( user_pipe_64.if_name, p->if_name, IFNAMSIZ);
+		p->if_name[IFNAMSIZ - 1] = '\0';
 		p->ready = user_pipe_64.ready;
 
 		p->fs.fs_nr = user_pipe_64.fs.fs_nr;
@@ -382,7 +384,7 @@ cp_flow_set_to_32_user(struct dn_flow_set *set, struct dn_flow_set_32 *fs_bp)
 	fs_bp->c_2 = set->c_2;
 	fs_bp->c_3 = set->c_3;
 	fs_bp->c_4 = set->c_4;
-	fs_bp->w_q_lookup = CAST_DOWN_EXPLICIT(user32_addr_t, set->w_q_lookup);
+	fs_bp->w_q_lookup = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(set->w_q_lookup));
 	fs_bp->lookup_depth = set->lookup_depth;
 	fs_bp->lookup_step = set->lookup_step;
 	fs_bp->lookup_weight = set->lookup_weight;
@@ -412,7 +414,7 @@ cp_flow_set_to_64_user(struct dn_flow_set *set, struct dn_flow_set_64 *fs_bp)
 	fs_bp->c_2 = set->c_2;
 	fs_bp->c_3 = set->c_3;
 	fs_bp->c_4 = set->c_4;
-	fs_bp->w_q_lookup = CAST_DOWN(user64_addr_t, set->w_q_lookup);
+	fs_bp->w_q_lookup = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(set->w_q_lookup));
 	fs_bp->lookup_depth = set->lookup_depth;
 	fs_bp->lookup_step = set->lookup_step;
 	fs_bp->lookup_weight = set->lookup_weight;
@@ -474,17 +476,17 @@ cp_pipe_to_32_user(struct dn_pipe *p, struct dn_pipe_32 *pipe_bp)
 	pipe_bp->bandwidth = p->bandwidth;
 	pipe_bp->delay = p->delay;
 	bcopy( &(p->scheduler_heap), &(pipe_bp->scheduler_heap), sizeof(struct dn_heap_32));
-	pipe_bp->scheduler_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->scheduler_heap.p);
+	pipe_bp->scheduler_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->scheduler_heap.p));
 	bcopy( &(p->not_eligible_heap), &(pipe_bp->not_eligible_heap), sizeof(struct dn_heap_32));
-	pipe_bp->not_eligible_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->not_eligible_heap.p);
+	pipe_bp->not_eligible_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->not_eligible_heap.p));
 	bcopy( &(p->idle_heap), &(pipe_bp->idle_heap), sizeof(struct dn_heap_32));
-	pipe_bp->idle_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, pipe_bp->idle_heap.p);
+	pipe_bp->idle_heap.p = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->idle_heap.p));
 	pipe_bp->V = p->V;
 	pipe_bp->sum = p->sum;
 	pipe_bp->numbytes = p->numbytes;
 	pipe_bp->sched_time = p->sched_time;
 	bcopy( p->if_name, pipe_bp->if_name, IFNAMSIZ);
-	pipe_bp->ifp = CAST_DOWN_EXPLICIT(user32_addr_t, p->ifp);
+	pipe_bp->ifp = CAST_DOWN_EXPLICIT(user32_addr_t, VM_KERNEL_ADDRHIDE(p->ifp));
 	pipe_bp->ready = p->ready;
 
 	cp_flow_set_to_32_user( &(p->fs), &(pipe_bp->fs));
@@ -516,17 +518,17 @@ cp_pipe_to_64_user(struct dn_pipe *p, struct dn_pipe_64 *pipe_bp)
 	pipe_bp->bandwidth = p->bandwidth;
 	pipe_bp->delay = p->delay;
 	bcopy( &(p->scheduler_heap), &(pipe_bp->scheduler_heap), sizeof(struct dn_heap_64));
-	pipe_bp->scheduler_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->scheduler_heap.p);
+	pipe_bp->scheduler_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->scheduler_heap.p));
 	bcopy( &(p->not_eligible_heap), &(pipe_bp->not_eligible_heap), sizeof(struct dn_heap_64));
-	pipe_bp->not_eligible_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->not_eligible_heap.p);
+	pipe_bp->not_eligible_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->not_eligible_heap.p));
 	bcopy( &(p->idle_heap), &(pipe_bp->idle_heap), sizeof(struct dn_heap_64));
-	pipe_bp->idle_heap.p = CAST_DOWN(user64_addr_t, pipe_bp->idle_heap.p);
+	pipe_bp->idle_heap.p = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(pipe_bp->idle_heap.p));
 	pipe_bp->V = p->V;
 	pipe_bp->sum = p->sum;
 	pipe_bp->numbytes = p->numbytes;
 	pipe_bp->sched_time = p->sched_time;
 	bcopy( p->if_name, pipe_bp->if_name, IFNAMSIZ);
-	pipe_bp->ifp = CAST_DOWN(user64_addr_t, p->ifp);
+	pipe_bp->ifp = CAST_DOWN(user64_addr_t, VM_KERNEL_ADDRHIDE(p->ifp));
 	pipe_bp->ready = p->ready;
 
 	cp_flow_set_to_64_user( &(p->fs), &(pipe_bp->fs));
@@ -1927,10 +1929,10 @@ config_red(struct dn_flow_set *p, struct dn_flow_set * x)
 	}
 	x->lookup_depth = red_lookup_depth;
 	x->w_q_lookup = (u_int *) kalloc_data(x->lookup_depth * sizeof(int),
-	    Z_NOWAIT);
+	    Z_WAITOK | Z_ZERO);
 	if (x->w_q_lookup == NULL) {
 		printf("dummynet: sorry, cannot allocate red lookup table\n");
-		return ENOSPC;
+		return ENOMEM;
 	}
 
 	/* fill the lookup table with (1 - w_q)^x */
@@ -1973,7 +1975,7 @@ alloc_hash(struct dn_flow_set *x, struct dn_flow_set *pfs)
 	    Z_NOWAIT | Z_ZERO);
 	if (x->rq == NULL) {
 		printf("dummynet: sorry, cannot allocate queue\n");
-		return ENOSPC;
+		return ENOMEM;
 	}
 	x->rq_elements = 0;
 	return 0;
@@ -2040,11 +2042,11 @@ config_pipe(struct dn_pipe *p)
 
 		if (b == NULL || b->pipe_nr != p->pipe_nr) { /* new pipe */
 			is_new = true;
-			x = kalloc_type(struct dn_pipe, Z_NOWAIT | Z_ZERO);
+			x = kalloc_type(struct dn_pipe, Z_WAITOK | Z_ZERO);
 			if (x == NULL) {
 				lck_mtx_unlock(&dn_mutex);
 				printf("dummynet: no memory for new pipe\n");
-				return ENOSPC;
+				return ENOMEM;
 			}
 			x->pipe_nr = p->pipe_nr;
 			x->fs.pipe = x;
@@ -2110,11 +2112,11 @@ config_pipe(struct dn_pipe *p)
 				lck_mtx_unlock(&dn_mutex);
 				return EINVAL;
 			}
-			x = kalloc_type(struct dn_flow_set, Z_NOWAIT | Z_ZERO);
+			x = kalloc_type(struct dn_flow_set, Z_WAITOK | Z_ZERO);
 			if (x == NULL) {
 				lck_mtx_unlock(&dn_mutex);
 				printf("dummynet: no memory for new flow_set\n");
-				return ENOSPC;
+				return ENOMEM;
 			}
 			x->fs_nr = pfs->fs_nr;
 			x->parent_nr = pfs->parent_nr;
@@ -2453,7 +2455,7 @@ dummynet_get(struct sockopt *sopt)
 		lck_mtx_unlock(&dn_mutex);
 		buf = kalloc_data(size, Z_WAITOK | Z_ZERO);
 		if (buf == NULL) {
-			return ENOBUFS;
+			return ENOMEM;
 		}
 		lck_mtx_lock(&dn_mutex);
 		if (size == dn_calc_size(is64user)) {
@@ -2464,7 +2466,7 @@ dummynet_get(struct sockopt *sopt)
 	}
 	if (buf == NULL) {
 		lck_mtx_unlock(&dn_mutex);
-		return ENOBUFS;
+		return ENOMEM;
 	}
 
 	bp = buf;
@@ -2607,11 +2609,29 @@ dummynet_event_enqueue_nwk_wq_entry(struct dummynet_event *p_dn_event)
 {
 	struct dn_event_nwk_wq_entry *p_ev = NULL;
 
+	evhlog(debug, "%s: eventhandler enqueuing event of type=dummynet_event event_code=%s",
+	    __func__, dummynet_event2str(p_dn_event->dn_event_code));
+
 	p_ev = kalloc_type(struct dn_event_nwk_wq_entry,
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	p_ev->nwk_wqe.func = dummynet_event_callback;
 	p_ev->dn_ev_arg = *p_dn_event;
 	nwk_wq_enqueue(&p_ev->nwk_wqe);
+}
+
+const char *
+dummynet_event2str(int event)
+{
+	switch (event) {
+#define DUMMYNET_EVENT_TO_STRING(type) case type: return #type;
+		DUMMYNET_EVENT_TO_STRING(DUMMYNET_RULE_CONFIG)
+		DUMMYNET_EVENT_TO_STRING(DUMMYNET_RULE_DELETE)
+		DUMMYNET_EVENT_TO_STRING(DUMMYNET_PIPE_CONFIG)
+		DUMMYNET_EVENT_TO_STRING(DUMMYNET_PIPE_DELETE)
+		DUMMYNET_EVENT_TO_STRING(DUMMYNET_NLC_DISABLED)
+#undef DUMMYNET_EVENT_TO_STRING
+	}
+	return "UNKNOWN_DUMMYNET_EVENT";
 }
 
 struct dummynet_tag_container {

@@ -32,8 +32,8 @@
 static errno_t kern_pbufpool_alloc_common(const kern_pbufpool_t,
     const uint32_t, kern_packet_t *, uint32_t);
 static errno_t kern_pbufpool_alloc_batch_common(const kern_pbufpool_t,
-    const uint32_t, kern_packet_t *, uint32_t *, alloc_cb_func_t,
-    const void *, uint32_t);
+    const uint32_t, kern_packet_t *__counted_by(*size), uint32_t *size,
+    alloc_cb_func_t, const void *, uint32_t);
 
 #define KBI_INVALID_CB_PAIRS(cb1, cb2)                                  \
 	(!(init->kbi_##cb1 == NULL && init->kbi_##cb2 == NULL) &&       \
@@ -211,10 +211,11 @@ kern_pbufpool_create(const struct kern_pbufpool_init *init,
 	if (!(init->kbi_flags & KBIF_VIRTUAL_DEVICE)) {
 		ppcreatef |= PPCREATEF_DYNAMIC;
 	}
-	if ((pp = pp_create((const char *)init->kbi_name, srp,
-	    init->kbi_buf_seg_ctor, init->kbi_buf_seg_dtor,
-	    init->kbi_ctx, init->kbi_ctx_retain, init->kbi_ctx_release,
-	    ppcreatef)) == NULL) {
+	if ((pp = pp_create(
+		    __unsafe_null_terminated_from_indexable(init->kbi_name), srp,
+		    init->kbi_buf_seg_ctor, init->kbi_buf_seg_dtor,
+		    init->kbi_ctx, init->kbi_ctx_retain, init->kbi_ctx_release,
+		    ppcreatef)) == NULL) {
 		err = ENOMEM;
 		goto done;
 	}
@@ -236,10 +237,14 @@ done:
 	return err;
 }
 
-void *
+/*
+ * -fbounds-safety: This function is mainly used by kexts in C++, which we're
+ * not doing bound checks yet. So just leave it as __single
+ */
+void *__single
 kern_pbufpool_get_context(const kern_pbufpool_t pp)
 {
-	void *ctx = (pp->pp_flags & PPF_EXTERNAL) ? pp->pp_ctx : NULL;
+	void *__single ctx = (pp->pp_flags & PPF_EXTERNAL) ? pp->pp_ctx : NULL;
 	if (ctx != NULL) {
 		pp->pp_ctx_retain(ctx);
 	}
@@ -317,8 +322,8 @@ kern_pbufpool_alloc_nosleep(const kern_pbufpool_t pp, const uint32_t bufcnt,
 
 static errno_t
 kern_pbufpool_alloc_batch_common(const kern_pbufpool_t pp,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size,
-    alloc_cb_func_t cb, const void *ctx, uint32_t skmflag)
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size)array,
+    uint32_t *size, alloc_cb_func_t cb, const void *ctx, uint32_t skmflag)
 {
 	if (__improbable(array == NULL || size == NULL || *size == 0 ||
 	    bufcnt > pp->pp_max_frags || (cb == NULL && ctx != NULL))) {
@@ -336,7 +341,7 @@ kern_pbufpool_alloc_batch_common(const kern_pbufpool_t pp,
 
 errno_t
 kern_pbufpool_alloc_batch(const kern_pbufpool_t pp, const uint32_t bufcnt,
-    kern_packet_t *array, uint32_t *size)
+    kern_packet_t *__counted_by(*size)array, uint32_t *size)
 {
 	return kern_pbufpool_alloc_batch_common(pp, bufcnt, array,
 	           size, NULL, NULL, SKMEM_SLEEP);
@@ -344,8 +349,8 @@ kern_pbufpool_alloc_batch(const kern_pbufpool_t pp, const uint32_t bufcnt,
 
 errno_t
 kern_pbufpool_alloc_batch_callback(const kern_pbufpool_t pp,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size,
-    alloc_cb_func_t cb, const void *ctx)
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size)array,
+    uint32_t *size, alloc_cb_func_t cb, const void *ctx)
 {
 	return kern_pbufpool_alloc_batch_common(pp, bufcnt, array,
 	           size, cb, ctx, SKMEM_SLEEP);
@@ -353,7 +358,8 @@ kern_pbufpool_alloc_batch_callback(const kern_pbufpool_t pp,
 
 errno_t
 kern_pbufpool_alloc_batch_nosleep(const kern_pbufpool_t pp,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size)
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size)array,
+    uint32_t *size)
 {
 	return kern_pbufpool_alloc_batch_common(pp, bufcnt, array,
 	           size, NULL, NULL, SKMEM_NOSLEEP);
@@ -361,8 +367,8 @@ kern_pbufpool_alloc_batch_nosleep(const kern_pbufpool_t pp,
 
 errno_t
 kern_pbufpool_alloc_batch_nosleep_callback(const kern_pbufpool_t pp,
-    const uint32_t bufcnt, kern_packet_t *array, uint32_t *size,
-    alloc_cb_func_t cb, const void *ctx)
+    const uint32_t bufcnt, kern_packet_t *__counted_by(*size)array,
+    uint32_t *size, alloc_cb_func_t cb, const void *ctx)
 {
 	return kern_pbufpool_alloc_batch_common(pp, bufcnt, array,
 	           size, cb, ctx, SKMEM_NOSLEEP);
@@ -375,8 +381,8 @@ kern_pbufpool_free(const kern_pbufpool_t pp, kern_packet_t ph)
 }
 
 void
-kern_pbufpool_free_batch(const kern_pbufpool_t pp, kern_packet_t *array,
-    uint32_t size)
+kern_pbufpool_free_batch(const kern_pbufpool_t pp,
+    kern_packet_t *__counted_by(size)array, uint32_t size)
 {
 	if (__improbable(array == NULL || size == 0)) {
 		return;

@@ -47,6 +47,7 @@
 #define HAS_E0PD                1 /* Supports E0PD0 and E0PD1 in TCR for Meltdown mitigation (ARMv8.5)*/
 #define HAS_CPU_DPE_COUNTER     1 /* Has a hardware counter for digital power estimation */
 #define HAS_GUARDED_IO_FILTER   1 /* Has a guarded runtime dedicated to the fine-grained IO access filter */
+#define HAS_SPECRES             1 /* Supports SPECRES. */
 
 #define CPU_HAS_APPLE_PAC                    1
 #define HAS_UNCORE_CTRS                      1

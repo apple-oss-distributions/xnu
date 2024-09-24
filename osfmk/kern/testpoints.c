@@ -35,6 +35,7 @@
 
 // this is set by sysctl
 uint64_t tp_scenario;
+int32_t  tp_pid = -1;
 
 #define TESTPOINT_COUNT 64
 // array of blocked test points
@@ -81,6 +82,9 @@ tp_relay(tp_id_t testpoint, tp_id_t other_testpoint)
 void
 tp_call(tp_id_t testpoint, tp_val_t val)
 {
+	if (tp_pid != pid_from_task(current_task())) {
+		return;
+	}
 	switch (tp_scenario) {
 	case TPS_NONE:
 		break;
@@ -126,5 +130,25 @@ tp_scenario_handler(int64_t scenario, int64_t *out)
 }
 
 SYSCTL_TEST_REGISTER(tp_scenario, tp_scenario_handler);
+
+static int
+tp_pid_handler(int64_t pid, int64_t *out)
+{
+	int32_t new_pid = (int32_t)pid;
+	lck_mtx_lock(&tp_mtx);
+	if (tp_pid != new_pid) {
+		tp_pid = new_pid;
+		tp_scenario = TPS_NONE;
+		bzero(&tp_blocked_info, sizeof(tp_blocked_info));
+		thread_wakeup(&tp_blocked_info);
+	}
+	lck_mtx_unlock(&tp_mtx);
+
+	printf("tp_pid=%u\n", tp_pid);
+	*out = 0;
+	return 0;
+}
+
+SYSCTL_TEST_REGISTER(tp_pid, tp_pid_handler);
 
 #endif /* DEBUG || DEVELOPMENT */

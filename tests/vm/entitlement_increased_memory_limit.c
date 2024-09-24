@@ -16,25 +16,43 @@
 #include "memorystatus_assertion_helpers.h"
 #include "jumbo_va_spaces_common.h"
 
-#define MAX_TASK_MEM_ENTITLED "kern.entitled_max_task_pmem"
 #define MAX_TASK_MEM "kern.max_task_pmem"
-#define MAX_TASK_MEM_ENTITLED_VALUE (3 * (1 << 10))
 
-#if ENTITLED
-#define TESTNAME entitlement_increased_memory_limit_entitled
-#else /* ENTITLED */
+#if ENTITLED_DEBUGGING
+// Keep aligned with kern_memorystatus.c:
+#define MAX_TASK_MEM_ENTITLED "kern.entitled_dev_max_task_pmem"
+// 6.5 GiB (from EmbeddedDeviceTree):
+#define MAX_TASK_MEM_ENTITLED_VALUE 0x00001A00
+#else
+#define MAX_TASK_MEM_ENTITLED "kern.entitled_max_task_pmem"
+#define MAX_TASK_MEM_ENTITLED_VALUE (3 * (1 << 10))
+#endif
+
+
+#if ENTITLED_DEBUGGING
+#define TESTNAME                  entitlement_debugging_increased_memory_limit_entitled
+#define SET_MEMLIMIT_TESTNAME     entitlement_debugging_increased_memory_limit_set_memlimit
+#define CONVERT_MEMLIMIT_TESTNAME entitlement_debugging_increased_memory_limit_convert_memlimit_mb
+#define LIMIT_WITH_SWAP_TESTNAME  entitlement_debugging_increased_memory_limit_with_swap
+#elif ENTITLED
+#define TESTNAME                  entitlement_increased_memory_limit_entitled
+#define SET_MEMLIMIT_TESTNAME     entitlement_increased_memory_limit_set_memlimit
+#define CONVERT_MEMLIMIT_TESTNAME entitlement_increased_memory_limit_convert_memlimit_mb
+#define LIMIT_WITH_SWAP_TESTNAME  entitlement_increased_memory_limit_with_swap
+#else /* ENTITLED, ENTITLED_DEBUGGING */
 #define TESTNAME entitlement_increased_memory_limit_unentitled
 #endif /* ENTITLED */
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("VM"));
+	T_META_RADAR_COMPONENT_VERSION("VM"),
+	T_META_TAG_VM_PREFERRED);
 
 static int32_t old_entitled_max_task_pmem = 0;
 
 static void
-reset_old_entitled_max_task_mem()
+reset_old_entitled_max_task_mem(void)
 {
 	int ret;
 	size_t size_old_entitled_max_task_pmem = sizeof(old_entitled_max_task_pmem);
@@ -49,11 +67,11 @@ T_HELPER_DECL(child, "Child") {
 	T_PASS("Child exiting");
 
 	if (dt_64_bit_kernel()) {
-#if ENTITLED
+#if ENTITLED || ENTITLED_DEBUGGING
 		verify_jumbo_va(true);
 #else
 		verify_jumbo_va(false);
-#endif /* ENTITLED */
+#endif /* ENTITLED || ENTITLED_DEBUGGING */
 	}
 }
 
@@ -156,18 +174,18 @@ T_DECL(TESTNAME,
 	// Check its memlimt
 	ret = memorystatus_control(MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES, pid, 0, &mmprops, sizeof(mmprops));
 	T_ASSERT_POSIX_SUCCESS(ret, "memorystatus_control");
-#if ENTITLED
+#if ENTITLED || ENTITLED_DEBUGGING
 	expected_limit = MAX_TASK_MEM_ENTITLED_VALUE;
-#else /* ENTITLED */
+#else /* ENTITLED || ENTITLED_DEBUGGING */
 	expected_limit = max_task_pmem;
-#endif /* ENTITLED */
+#endif /* ENTITLED || ENTITLED_DEBUGGING */
 	T_ASSERT_EQ(mmprops.v1.memlimit_active, expected_limit, "active limit");
 	T_ASSERT_EQ(mmprops.v1.memlimit_inactive, expected_limit, "inactive limit");
 	resume_child_and_verify_exit(pid);
 }
 
-#if ENTITLED
-T_DECL(entitlement_increased_memory_limit_set_memlimit,
+#if ENTITLED || ENTITLED_DEBUGGING
+T_DECL(SET_MEMLIMIT_TESTNAME,
     "set memlimit to -1 for entitled process should keep entitled limit.",
     T_META_CHECK_LEAKS(false))
 {
@@ -217,7 +235,7 @@ T_DECL(entitlement_increased_memory_limit_set_memlimit,
 	resume_child_and_verify_exit(pid);
 }
 
-T_DECL(entitlement_increased_memory_limit_convert_memlimit_mb,
+T_DECL(CONVERT_MEMLIMIT_TESTNAME,
     "convert_memlimit_mb returns entitled limit.")
 {
 	int ret;
@@ -250,7 +268,7 @@ T_DECL(entitlement_increased_memory_limit_convert_memlimit_mb,
 	resume_child_and_verify_exit(pid);
 }
 
-T_DECL(entitlement_increased_memory_limit_with_swap, "entitled memory limit equals dram size when swap is enabled.",
+T_DECL(LIMIT_WITH_SWAP_TESTNAME, "entitled memory limit equals dram size when swap is enabled.",
     T_META_BOOTARGS_SET("kern.swap_all_apps=1"))
 {
 	int32_t entitled_max_task_pmem = 0;
@@ -266,6 +284,6 @@ T_DECL(entitlement_increased_memory_limit_with_swap, "entitled memory limit equa
 	ret = sysctlbyname("hw.memsize_physical", &memsize_physical, &size_memsize_physical, NULL, 0);
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "call sysctlbyname to get max task physical memory.");
 	uint64_t memsize_physical_mb = (uint64_t) memsize_physical / (1ULL << 20);
-	T_QUIET; T_ASSERT_EQ(entitled_max_task_pmem, memsize_physical_mb, "entitled limit == dram size");
+	T_QUIET; T_ASSERT_EQ((uint64_t)entitled_max_task_pmem, memsize_physical_mb, "entitled limit == dram size");
 }
-#endif /* ENTITLED */
+#endif /* ENTITLED || ENTITLED_DEBUGGING */

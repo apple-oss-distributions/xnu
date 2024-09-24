@@ -149,8 +149,7 @@ struct name {                                                   \
  */
 #define KPKTQ_LAST(head)                                        \
 	(((head)->kq_last == &KPKTQ_FIRST(head)) ? NULL :       \
-	((struct __kern_packet *)(void *)((char *)(head)->kq_last -     \
-	    (size_t)(&KPKTQ_NEXT((struct __kern_packet *)0)))))
+	__container_of((head)->kq_last, struct __kern_packet, pkt_nextpkt))
 
 /*
  * struct pktq serves as basic common batching data structure using KPKTQ.

@@ -34,7 +34,7 @@ pthread_async(void (^block)(void))
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(rc, "pthread_create");
 }
 
-T_DECL(kqueue_in_select, "make sure kqueue in select works")
+T_DECL(kqueue_in_select, "make sure kqueue in select works", T_META_TAG_VM_PREFERRED)
 {
 	fd_set rd_set;
 	int kq_fd, ret, nfd;

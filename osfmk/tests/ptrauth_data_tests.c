@@ -33,7 +33,7 @@
 #include <mach/port.h>
 #include <mach/task.h>
 #include <kern/task.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/pmap.h>
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_port.h>
@@ -101,7 +101,9 @@ ptrauth_data_tests(void)
 	/* task_t */
 	ALLOC_VALIDATE_DATA_PTR(struct task, vm_map_t, map, "task.map");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_task_ports[0], "task.itk_task_ports");
+#if CONFIG_CSR
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_settable_self, "task.itk_settable_self");
+#endif /* CONFIG_CSR */
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_host, "task.itk_host");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_bootstrap, "task.itk_bootstrap");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_debug_control, "task.itk_debug_control");
@@ -122,7 +124,6 @@ ptrauth_data_tests(void)
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_entry, struct ipc_object *, ie_object, "ipc_entry.ie_object");
 
 	/* ipc_kmsg */
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_prealloc, "kmsg.ikm_prealloc");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_udata, "kmsg.ikm_udata");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher_port, "kmsg.ikm_voucher_port");
 

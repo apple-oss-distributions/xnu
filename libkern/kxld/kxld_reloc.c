@@ -34,7 +34,6 @@
     #include <libkern/libkern.h>
     #include <mach/machine.h>
 #else
-    #define __SPI_AVAILABLE(...)
     #include <stdlib.h>
     #include <libkern/OSByteOrder.h>
 

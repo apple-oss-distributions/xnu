@@ -43,6 +43,30 @@ type unsigned = uint32_t;
 type float = MACH_MSG_TYPE_REAL_32;
 type double = MACH_MSG_TYPE_REAL_64;
 
+#if VM_KERNEL_SERVER
+#define VM_ADD_CTYPE(type) ctype: type
+#else /* VM_KERNEL_SERVER */
+#define VM_ADD_CTYPE(type)
+#endif /* VM_KERNEL_SERVER */
+
+#define VM_GENERATE_MIG_TMPTYPE_U64(_original_type, _unsafe_type)     \
+	type _unsafe_type = uint64_t;                                       \
+	type _original_type ## _tmp = uint64_t VM_ADD_CTYPE(_unsafe_type);
+
+#define VM_GENERATE_MIG_TMPTYPE_U32(_original_type, _unsafe_type)     \
+	type _unsafe_type = uint32_t;                                       \
+	type _original_type ## _tmp = uint32_t VM_ADD_CTYPE(_unsafe_type);
+
+#define VM_GENERATE_MIG_TMPTYPE_I32(_original_type, _unsafe_type)     \
+	type _unsafe_type = int32_t;                                        \
+	type _original_type ## _tmp = int32_t VM_ADD_CTYPE(_unsafe_type);
+
+
+#if VM_KERNEL_SERVER
+#define VM_USE_TMPTYPE(_original_type) _original_type ## _tmp
+#else /* VM_KERNEL_SERVER */
+#define VM_USE_TMPTYPE(_original_type) _original_type
+#endif /* VM_KERNEL_SERVER */
 
 /* from ISO/IEC 988:1999 spec */
 /* 7.18.1.4 Integer types capable of hgolding object pointers */
@@ -106,6 +130,27 @@ type mach_port_context_t = uint64_t;
 type mach_vm_address_t = uint64_t;
 type mach_vm_offset_t = uint64_t;
 type mach_vm_size_t = uint64_t;
+
+/*
+ * Temporary VM types to allow parallelizing semantic type adoption
+ */
+VM_GENERATE_MIG_TMPTYPE_U64(mach_vm_address_t, mach_vm_address_ut);
+VM_GENERATE_MIG_TMPTYPE_U64(mach_vm_offset_t, mach_vm_offset_ut);
+VM_GENERATE_MIG_TMPTYPE_U64(mach_vm_size_t, mach_vm_size_ut);
+
+VM_GENERATE_MIG_TMPTYPE_U64(vm_address_t, vm_address_ut);
+VM_GENERATE_MIG_TMPTYPE_U64(vm_offset_t, vm_offset_ut);
+VM_GENERATE_MIG_TMPTYPE_U64(vm_size_t, vm_size_ut);
+
+VM_GENERATE_MIG_TMPTYPE_U64(memory_object_offset_t, memory_object_offset_ut);
+VM_GENERATE_MIG_TMPTYPE_U64(memory_object_size_t, memory_object_size_ut);
+
+VM_GENERATE_MIG_TMPTYPE_U32(vm32_address_t, vm32_address_ut);
+VM_GENERATE_MIG_TMPTYPE_U32(vm32_offset_t, vm32_offset_ut);
+VM_GENERATE_MIG_TMPTYPE_U32(vm32_size_t, vm32_size_ut);
+
+VM_GENERATE_MIG_TMPTYPE_I32(vm_prot_t, vm_prot_ut);
+VM_GENERATE_MIG_TMPTYPE_I32(vm_inherit_t, vm_inherit_ut);
 
 /*
  * These are types used internal to Mach to implement the

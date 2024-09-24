@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -288,7 +288,7 @@ in_dinit(struct domain *dp)
 {
 	struct protosw *pr;
 	int i;
-	domain_unguard_t unguard;
+	domain_unguard_t __single unguard;
 
 	VERIFY(!(dp->dom_flags & DOM_INITIALIZED));
 	VERIFY(inetdomain == NULL);

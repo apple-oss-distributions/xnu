@@ -56,6 +56,7 @@
 #include "../mach/arm/vm_param.h"
 #define kVectorSize 16
 
+
 /*****************************************************************************
  *  Constants                                                                *
  *****************************************************************************/
@@ -94,6 +95,8 @@ L_s1aligned:
 //	If s2 is similarly aligned to s1, then we can use a naive vector comparison
 //	from this point on without worrying about spurious page faults; none of our
 //	loads will ever cross a page boundary, because they are all aligned.
+
+
 	tst       x1,      #(kVectorSize-1)
 	b.eq      L_naiveVector
 
@@ -149,6 +152,8 @@ L_s1aligned:
 //	back into the vector comparison part of the loop.
 	mov       x7,      #(PAGE_MIN_SIZE-kVectorSize)
 	b         0b
+
+
 
 /*****************************************************************************
  *  Naive vector comparison                                                  *

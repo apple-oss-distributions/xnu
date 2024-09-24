@@ -38,11 +38,13 @@
 #include <sys/sysctl.h>
 
 #include <dev/random/randomdev.h>
+#include <net/droptap.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_dl.h>
 #include <net/if_types.h>
 #include <net/net_osdep.h>
+#include <net/droptap.h>
 #include <net/pktsched/pktsched.h>
 #include <net/pktsched/pktsched_fq_codel.h>
 #include <net/pktsched/pktsched_netem.h>
@@ -323,9 +325,9 @@ pktsched_corrupt_packet(pktsched_pkt_t *pkt)
 	}
 
 	read_frandom(&rand32, sizeof(rand32));
-	rand_bit = rand32 & 0x8;
+	rand_bit = rand32 & 0x7;
 	rand_off = (rand32 >> 3) % data_len;
-	data[rand_off] ^= 1 << rand_bit;
+	data[rand_off] ^= (uint8_t)(1 << rand_bit);
 }
 
 void
@@ -373,6 +375,56 @@ pktsched_free_pkt(pktsched_pkt_t *pkt)
 	pkt->pktsched_tail = CLASSQ_PKT_INITIALIZER(pkt->pktsched_tail);
 	pkt->pktsched_plen = 0;
 	pkt->pktsched_pcnt = 0;
+}
+
+void
+pktsched_drop_pkt(pktsched_pkt_t *pkt, drop_reason_t reason, const char *funcname,
+    uint16_t linenum, uint16_t flags)
+{
+	if (__probable(droptap_total_tap_count == 0)) {
+		pktsched_free_pkt(pkt);
+		return;
+	}
+
+	uint32_t cnt = pkt->pktsched_pcnt;
+	ASSERT(cnt != 0);
+
+	switch (pkt->pktsched_ptype) {
+	case QP_MBUF: {
+		struct mbuf *m;
+
+		m = pkt->pktsched_pkt_mbuf;
+		if (cnt == 1) {
+			VERIFY(m->m_nextpkt == NULL);
+		} else {
+			VERIFY(m->m_nextpkt != NULL);
+		}
+		m_drop_list(m, flags | DROPTAP_FLAG_DIR_OUT, reason, funcname, linenum);
+		break;
+	}
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kpkt;
+
+		kpkt = pkt->pktsched_pkt_kpkt;
+		if (cnt == 1) {
+			VERIFY(kpkt->pkt_nextpkt == NULL);
+		} else {
+			VERIFY(kpkt->pkt_nextpkt != NULL);
+		}
+		droptap_output_packet(SK_PKT2PH(kpkt), reason, funcname, linenum,
+		    flags, NULL, kpkt->pkt_qum.qum_pid, NULL, -1, NULL, 0, 0);
+		break;
+	}
+#endif /* SKYWALK */
+
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
+
+	pktsched_free_pkt(pkt);
 }
 
 mbuf_svc_class_t
@@ -600,7 +652,7 @@ static int
 pktsched_mbuf_mark_ecn(struct mbuf* m)
 {
 	struct mbuf     *m0;
-	void            *hdr;
+	void            *__single hdr;
 	int             af;
 	uint8_t         ipv;
 
@@ -626,7 +678,7 @@ pktsched_mbuf_mark_ecn(struct mbuf* m)
 
 	switch (af) {
 	case AF_INET: {
-		struct ip *ip = hdr;
+		struct ip *__single ip = (struct ip *)(void *)hdr;
 		uint8_t otos;
 		int sum;
 
@@ -661,7 +713,7 @@ pktsched_mbuf_mark_ecn(struct mbuf* m)
 		return 0;
 	}
 	case AF_INET6: {
-		struct ip6_hdr *ip6 = hdr;
+		struct ip6_hdr *__single ip6 = (struct ip6_hdr *)(void *)hdr;
 		u_int32_t flowlabel;
 
 		if (((uintptr_t)ip6 + sizeof(*ip6)) >
@@ -695,8 +747,10 @@ pktsched_kpkt_mark_ecn(struct __kern_packet *kpkt)
 	uint8_t ipv = 0, *l3_hdr;
 
 	if ((kpkt->pkt_qum_qflags & QUM_F_FLOW_CLASSIFIED) != 0) {
+		uint32_t l3_len = 0;
 		ipv = kpkt->pkt_flow_ip_ver;
-		l3_hdr = (uint8_t *)kpkt->pkt_flow_ip_hdr;
+		l3_len = kpkt->pkt_length - kpkt->pkt_l2_len;
+		l3_hdr = __unsafe_forge_bidi_indexable(uint8_t *, kpkt->pkt_flow_ip_hdr, l3_len);
 	} else {
 		uint8_t *pkt_buf;
 		uint32_t bdlen, bdlim, bdoff;
@@ -742,7 +796,7 @@ pktsched_kpkt_mark_ecn(struct __kern_packet *kpkt)
 		return 0;
 	}
 	case IPV6_VERSION: {
-		struct ip6_hdr *ip6 = (struct ip6_hdr *)l3_hdr;
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)(void *)l3_hdr;
 		u_int32_t flowlabel;
 		flowlabel = ntohl(ip6->ip6_flow);
 		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
@@ -836,7 +890,7 @@ m_tag_kalloc_aqm(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 static void
 m_tag_kfree_aqm(struct m_tag *tag)
 {
-	struct aqm_tag_container *tag_container = (struct aqm_tag_container *)tag;
+	struct aqm_tag_container *__single tag_container = (struct aqm_tag_container *)tag;
 
 	assert3u(tag->m_tag_len, ==, sizeof(uint64_t));
 

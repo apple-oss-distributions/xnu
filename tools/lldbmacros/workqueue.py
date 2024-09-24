@@ -63,6 +63,9 @@ def GetWQThreadSummary(th, uth):
     if uth.uu_workq_flags & 0x04: uu_workq_flags.append("DYING")
     if uth.uu_workq_flags & 0x08: uu_workq_flags.append("OVERCOMMIT")
     if uth.uu_workq_flags & 0x100: uu_workq_flags.append("COOPERATIVE")
+    if uth.uu_workq_flags & 0x200: uu_workq_flags.append("PERMANENT_BIND")
+    if uth.uu_workq_flags & 0x400: uu_workq_flags.append("WORK_INTERVAL_JOINED")
+    if uth.uu_workq_flags & 0x800: uu_workq_flags.append("WORK_INTERVAL_FAILED")
     if uth.uu_workq_flags & 0x10: uu_workq_flags.append("OUTSIDE_QOS")
     if uth.uu_workq_flags & 0x20: uu_workq_flags.append("IDLE_CLEANUP")
     if uth.uu_workq_flags & 0x40: uu_workq_flags.append("EARLY_BOUND")
@@ -100,6 +103,7 @@ def GetWorkqueueThreadRequestSummary(proc, req): # req is the actual structure, 
     if req.tr_flags & 0x08: tr_flags.append("PARAMS")
     if req.tr_flags & 0x10: tr_flags.append("OUTSIDE_QOS")
     if req.tr_flags & 0x20: tr_flags.append("COOPERATIVE")
+    if req.tr_flags & 0x40: tr_flags.append("PERMANENT_BIND")
 
     state = {0: "IDLE", 1: "NEW", 2: "QUEUED", 3: "CANCELED", 4: "BINDING", 5: "BOUND" }[int(req.tr_state)]
 

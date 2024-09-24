@@ -68,7 +68,7 @@
 #include <kern/task.h>
 #include <kern/sched_prim.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 #include <os/refcnt.h>
 
@@ -1552,17 +1552,7 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 		if ((entryp->flags & AIO_READ) != 0) {
 			error = do_aio_read(entryp);
 		} else if ((entryp->flags & AIO_WRITE) != 0) {
-			uthreadp = (struct uthread *)current_uthread();
-			uthread_t context_uthreadp = get_bsdthread_info(vfs_context_thread(&entryp->context));
-
-			if ((context_uthreadp && (context_uthreadp->uu_flag & UT_FS_BLKSIZE_NOCACHE_WRITES)) ||
-			    os_atomic_load(&p->p_vfs_iopolicy, relaxed) & P_VFS_IOPOLICY_NOCACHE_WRITE_FS_BLKSIZE) {
-				uthreadp->uu_flag |= UT_FS_BLKSIZE_NOCACHE_WRITES;
-			}
-
 			error = do_aio_write(entryp);
-
-			uthreadp->uu_flag &= ~UT_FS_BLKSIZE_NOCACHE_WRITES;
 		} else if ((entryp->flags & (AIO_FSYNC | AIO_DSYNC)) != 0) {
 			error = do_aio_fsync(entryp);
 		} else {

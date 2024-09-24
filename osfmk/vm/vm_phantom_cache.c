@@ -26,12 +26,13 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <vm/vm_page.h>
-#include <vm/vm_object.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_phantom_cache.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_phantom_cache_internal.h>
+#include <vm/vm_compressor_internal.h>
+#include <vm/vm_protos_internal.h>
 
 
 uint32_t phantom_cache_eval_period_in_msecs = 250;
@@ -486,7 +487,7 @@ vm_phantom_cache_check_pressure()
 		pressure_detected = TRUE;
 	}
 
-	if (vm_page_external_count > ((AVAILABLE_MEMORY) * 50) / 100) {
+	if (vm_page_pageable_external_count > ((AVAILABLE_MEMORY) * 50) / 100) {
 		pressure_detected = FALSE;
 	}
 

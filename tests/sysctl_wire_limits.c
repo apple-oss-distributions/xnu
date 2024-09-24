@@ -31,7 +31,7 @@ ptoa(size_t num_pages)
 }
 
 
-T_DECL(global_no_user_wire_amount, "no_user_wire_amount <= 32G") {
+T_DECL(global_no_user_wire_amount, "no_user_wire_amount <= 32G", T_META_TAG_VM_PREFERRED) {
 	int ret;
 	vm_map_size_t no_wire;
 	size_t no_wire_size = sizeof(no_wire);
@@ -40,7 +40,7 @@ T_DECL(global_no_user_wire_amount, "no_user_wire_amount <= 32G") {
 	T_QUIET; T_EXPECT_LE(no_wire, 32 * 2ULL << 30, "no_user_wire_amount is too big.");
 }
 
-T_DECL(user_wire_amount, "max_mem > user_wire_amount >= 0.7 * max_mem") {
+T_DECL(user_wire_amount, "max_mem > user_wire_amount >= 0.7 * max_mem", T_META_TAG_VM_NOT_PREFERRED) {
 	int ret;
 	vm_map_size_t wire;
 	uint64_t max_mem;
@@ -88,7 +88,7 @@ set_wire_limit(vm_map_size_t value, uint64_t max_mem)
 	T_QUIET; T_ASSERT_EQ(max_mem - value, no_wire, "no wire size is incorrect");
 }
 
-T_DECL(set_global_no_user_wire_amount, "Setting no_user_wire_amount changes global_user_wire_amount", T_META_ASROOT(true)) {
+T_DECL(set_global_no_user_wire_amount, "Setting no_user_wire_amount changes global_user_wire_amount", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED) {
 	int ret;
 	vm_map_size_t no_wire, wire;
 	vm_map_size_t no_wire_delta = 16 * (1 << 10);
@@ -112,7 +112,7 @@ T_DECL(set_global_no_user_wire_amount, "Setting no_user_wire_amount changes glob
 	set_wire_limit(wire, max_mem);
 }
 
-T_DECL(set_user_wire_limit, "Set user_wire_limit", T_META_ASROOT(true)) {
+T_DECL(set_user_wire_limit, "Set user_wire_limit", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED) {
 	vm_map_size_t wire, original_wire;
 	size_t wire_size = sizeof(wire);
 	int ret;
@@ -171,7 +171,7 @@ wire_to_limit(size_t limit, size_t *size)
 }
 
 T_DECL(wire_stress_test, "wire up to global_user_wire_limit and spin for 120 seconds.",
-    T_META_REQUIRES_SYSCTL_NE("kern.hv_vmm_present", 1))
+    T_META_REQUIRES_SYSCTL_NE("kern.hv_vmm_present", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	static const int kNumSecondsToSpin = 120;
 	int ret;

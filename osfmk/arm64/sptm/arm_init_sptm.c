@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -27,6 +27,7 @@
  */
 
 #include <arm64/lowglobals.h>
+#include <kern/ecc.h>
 #include <kern/timer_queue.h>
 #include <kern/monotonic.h>
 #include <machine/commpage.h>
@@ -36,12 +37,14 @@
 #include <arm/machine_cpu.h>
 #include <arm/rtclock.h>
 #include <vm/vm_map.h>
+#include <mach/exclaves.h>
 #include <mach/vm_param.h>
 #include <libkern/stack_protector.h>
 #include <console/serial_protos.h>
 #include <arm64/sptm/pmap/pmap_pt_geometry.h>
 #include <arm64/sptm/sptm.h>
 #include <sptm/sptm_common.h>
+#include <vm/vm_page_internal.h>
 
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
@@ -53,6 +56,7 @@
 
 #if HIBERNATION
 #include <IOKit/IOPlatformExpert.h>
+#include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
 
 /**
@@ -73,6 +77,9 @@ extern vm_offset_t excepstack_top;
 extern pmap_paddr_t vm_first_phys;
 extern pmap_paddr_t vm_last_phys;
 
+/* UART hibernation flag - import so we can set it ASAP on resume. */
+extern MARK_AS_HIBERNATE_DATA bool uart_hibernation;
+
 int debug_task;
 
 /**
@@ -80,11 +87,21 @@ int debug_task;
  */
 extern int disableConsoleOutput;
 
+#if XNU_TARGET_OS_OSX
+/**
+ * Extern the PMAP boot-arg to enable/disable XNU_KERNEL_RESTRICTED.
+ * We need it here because if we detect an auxKC, we disable the mitigation.
+ */
+extern bool use_xnu_restricted;
+#endif /* XNU_TARGET_OS_OSX */
+
 /**
  * SPTM devices do not support static kernelcaches, but the rest of XNU
  * expects this variable to be defined. Set it to false at build time.
  */
 SECURITY_READ_ONLY_LATE(bool) static_kernelcache = false;
+
+TUNABLE(bool, restore_boot, "-restore", false);
 
 /**
  * First physical address freely available to xnu.
@@ -105,6 +122,8 @@ boolean_t sched_hygiene_debug_pmc = 1;
 
 #if XNU_PLATFORM_iPhoneOS
 #define DEFAULT_INTERRUPT_MASKED_TIMEOUT 48000   /* 2ms */
+#elif XNU_PLATFORM_XROS
+#define DEFAULT_INTERRUPT_MASKED_TIMEOUT 12000   /* 500us */
 #else
 #define DEFAULT_INTERRUPT_MASKED_TIMEOUT 0xd0000 /* 35.499ms */
 #endif /* XNU_PLATFORM_iPhoneOS */
@@ -163,11 +182,11 @@ extern boolean_t force_immediate_debug_halt;
 SECURITY_READ_ONLY_LATE(boolean_t) diversify_user_jop = TRUE;
 #endif
 
+
 SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
 
 SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
-SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
 
 /**
  * SPTM TODO: The following flag is set up based on the presence and
@@ -177,6 +196,10 @@ SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
  *            able to boot to user space.
  */
 SECURITY_READ_ONLY_LATE(bool) sptm_stability_hacks = false;
+
+#if APPLEVIRTUALPLATFORM
+SECURITY_READ_ONLY_LATE(vm_offset_t) reset_vector_vaddr = 0;
+#endif /* APPLEVIRTUALPLATFORM */
 
 /*
  * Forward definition
@@ -548,7 +571,7 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) etext;
 SECURITY_READ_ONLY_LATE(vm_offset_t) sdata;
 SECURITY_READ_ONLY_LATE(vm_offset_t) edata;
 
-SECURITY_READ_ONLY_LATE(static vm_offset_t) auxkc_mh, auxkc_base, auxkc_right_above;
+SECURITY_READ_ONLY_LATE(static vm_offset_t) auxkc_mh, auxkc_base;
 
 pmap_paddr_t alloc_ptpage(sptm_pt_level_t level, bool map_static);
 SECURITY_READ_ONLY_LATE(vm_offset_t) ropage_next;
@@ -582,6 +605,9 @@ typedef struct {
 
 SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
 
+#if HAS_ARM_FEAT_SME
+static SECURITY_READ_ONLY_LATE(bool) enable_sme = true;
+#endif
 
 /**
  * sptm_supports_local_coredump is set in start_sptm.s when SPTM dispatch logic
@@ -629,6 +655,10 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 	 */
 	first_avail_phys = sptm_boot_args->first_avail_phys;
 
+#if APPLEVIRTUALPLATFORM
+	reset_vector_vaddr = (vm_offset_t) sptm_boot_args->sptm_reset_vector_vaddr;
+#endif /* APPLEVIRTUALPLATFORM */
+
 	cpu_data_init(&BootCpuData);
 #if defined(HAS_APPLE_PAC)
 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
@@ -648,6 +678,12 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	configure_misc_apple_boot_args();
 	configure_misc_apple_regs(true);
+#if HAS_ARM_FEAT_SME
+	(void)PE_parse_boot_argn("enable_sme", &enable_sme, sizeof(enable_sme));
+	if (enable_sme) {
+		arm_sme_init(true);
+	}
+#endif
 
 
 	{
@@ -694,6 +730,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 	BootCpuData.intstack_top = (vm_offset_t) &intstack_top;
 	BootCpuData.istackptr = &intstack_top;
 	BootCpuData.excepstack_top = (vm_offset_t) &excepstack_top;
+	BootCpuData.excepstackptr = &excepstack_top;
 	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
 	    + ((uintptr_t)&BootCpuData
@@ -701,7 +738,8 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	thread = thread_bootstrap();
 	thread->machine.CpuDatap = &BootCpuData;
-	thread->machine.pcpu_data_base = (vm_offset_t)0;
+	thread->machine.pcpu_data_base_and_cpu_number =
+	    ml_make_pcpu_base_and_cpu_number(0, BootCpuData.cpu_number);
 	machine_set_current_thread(thread);
 
 	/*
@@ -772,6 +810,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 	__builtin_arm_wsr("pan", 1);
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
+
 	arm_vm_init(xmaxmem, args);
 
 	if (debug_boot_arg) {
@@ -794,7 +833,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 		/* Do we want a serial keyboard and/or console? */
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
-		enable_dklog_serial_output = (serialmode & SERIALMODE_DKLOG) != 0;
+		enable_dklog_serial_output = restore_boot || (serialmode & SERIALMODE_DKLOG) != 0;
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
@@ -831,17 +870,12 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	PE_init_platform(TRUE, &BootCpuData);
 
+#if RELEASE
 	/* Validate SPTM variant. */
-	__typeof__(const_sptm_args.sptm_variant) expected_sptm_variant;
-#if DEVELOPMENT || DEBUG
-	expected_sptm_variant = SPTM_VARIANT_DEVELOPMENT;
-#else /* RELEASE */
-	expected_sptm_variant = SPTM_VARIANT_RELEASE;
-#endif /* RELEASE */
-	if (const_sptm_args.sptm_variant != expected_sptm_variant) {
-		panic("arm_init: Mismatch between xnu variant (%s) and SPTM variant (0x%x)",
-		    osbuild_config, const_sptm_args.sptm_variant);
+	if (const_sptm_args.sptm_variant != SPTM_VARIANT_RELEASE) {
+		panic("arm_init: Development SPTM / Release XNU is not a supported configuration.");
 	}
+#endif /* RELEASE */
 
 #if __arm64__
 	extern bool cpu_config_correct;
@@ -914,8 +948,21 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 void
 arm_init_cpu(
-	cpu_data_t      *cpu_data_ptr)
+	cpu_data_t       *cpu_data_ptr,
+	__unused uint64_t hibernation_args)
 {
+#if HIBERNATION
+	sptm_hibernation_args_xnu_t *hibargs = (sptm_hibernation_args_xnu_t *)hibernation_args;
+
+	if ((hibargs != 0) && (hibargs->hib_header_phys != 0) && (hibargs->handoff_page_count > 0)) {
+		/*
+		 * We must copy the handoff region before anything else because the physical pages
+		 * holding the handoff region are not tracked by xnu as in-use.
+		 */
+		HibernationCopyHandoffRegionFromPageArray(&hibargs->handoff_pages[0], hibargs->handoff_page_count);
+	}
+#endif /* HIBERNATION */
+
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif
@@ -924,14 +971,25 @@ arm_init_cpu(
 	configure_timer_apple_regs();
 	configure_misc_apple_regs(false);
 #endif
+#if HAS_ARM_FEAT_SME
+	if (enable_sme) {
+		arm_sme_init(false);
+	}
+#endif
 
-	cpu_data_ptr->cpu_flags &= ~SleepState;
+	os_atomic_andnot(&cpu_data_ptr->cpu_flags, SleepState, relaxed);
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
+
 #if HIBERNATION
-	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate)) {
+	if (hibargs != 0 && hibargs->hib_header_phys != 0) {
+		gIOHibernateState = kIOHibernateStateWakingFromHibernate;
+		uart_hibernation = true;
+		__nosan_memcpy(gIOHibernateCurrentHeader, (void*)phystokv(hibargs->hib_header_phys), sizeof(IOHibernateImageHeader));
+	}
+	if ((cpu_data_ptr == &BootCpuData) && (gIOHibernateState == kIOHibernateStateWakingFromHibernate) && ml_is_quiescing()) {
 		// the "normal" S2R code captures wake_abstime too early, so on a hibernation resume we fix it up here
 		extern uint64_t wake_abstime;
 		wake_abstime = gIOHibernateCurrentHeader->lastHibAbsTime;
@@ -943,7 +1001,7 @@ arm_init_cpu(
 
 		// during hibernation, we captured the idle thread's state from inside the PPL context, so we have to
 		// fix up its preemption count
-		unsigned int expected_preemption_count = (gEnforceQuiesceSafety ? 2 : 1);
+		unsigned int expected_preemption_count = (gEnforcePlatformActionSafety ? 2 : 1);
 		if (get_preemption_level_for_thread(cpu_data_ptr->cpu_active_thread) !=
 		    expected_preemption_count) {
 			panic("unexpected preemption count %u on boot cpu thread (should be %u)",
@@ -978,7 +1036,7 @@ arm_init_cpu(
 	kptimer_curcpu_up();
 #endif /* KPERF */
 
-	if (cpu_data_ptr == &BootCpuData) {
+	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
 #if __arm64__ && __ARM_GLOBAL_SLEEP_BIT__
 		/*
 		 * Prevent CPUs from going into deep sleep until all
@@ -989,6 +1047,15 @@ arm_init_cpu(
 		serial_init();
 		PE_init_platform(TRUE, NULL);
 		commpage_update_timebase();
+
+		exclaves_update_timebase(EXCLAVES_CLOCK_ABSOLUTE,
+		    rtclock_base_abstime);
+#if HIBERNATION
+		if (gIOHibernateState == kIOHibernateStateWakingFromHibernate) {
+			exclaves_update_timebase(EXCLAVES_CLOCK_CONTINUOUS,
+			    hwclock_conttime_offset);
+		}
+#endif /* HIBERNATION */
 	}
 	PE_init_cpu();
 
@@ -1002,7 +1069,7 @@ arm_init_cpu(
 
 	kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
 
-	if (cpu_data_ptr == &BootCpuData) {
+	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
 		if (kdebug_enable == 0) {
 			__kdebug_only uint64_t elapsed = kdebug_wake();
 			KDBG(IOKDBG_CODE(DBG_HIBERNATE, 15), mach_absolute_time() - elapsed);
@@ -1025,7 +1092,8 @@ arm_init_cpu(
 	}
 #endif
 
-	slave_main(NULL);
+
+	secondary_cpu_main(NULL);
 }
 
 /*
@@ -1044,8 +1112,6 @@ arm_init_idle_cpu(
 
 #if __arm64__
 	wfe_timeout_init();
-	/* Enable asynchronous exceptions */
-	__builtin_arm_wsr("DAIFClr", DAIFSC_ASYNCF);
 #endif
 
 #ifdef  APPLETYPHOON
@@ -1112,12 +1178,6 @@ arm_vm_auxkc_init(void)
 	/* Fixup AuxKC and populate seg*AuxKC globals used below */
 	arm_auxkc_init((void*)auxkc_mh, (void*)auxkc_base);
 
-	if (segLOWESTAuxKC != segLOWEST) {
-		panic("segLOWESTAuxKC (%p) not equal to segLOWEST (%p). auxkc_mh: %p, auxkc_base: %p",
-		    (void*)segLOWESTAuxKC, (void*)segLOWEST,
-		    (void*)auxkc_mh, (void*)auxkc_base);
-	}
-
 	/*
 	 * The AuxKC LINKEDIT segment needs to be covered by the RO region but is excluded
 	 * from the RO address range returned by kernel_collection_adjust_mh_addrs().
@@ -1134,7 +1194,6 @@ arm_vm_auxkc_init(void)
 	 * The AuxKC RO region must be right below the device tree/trustcache so that it can be covered
 	 * by CTRR, and the AuxKC RX region must be within the RO region.
 	 */
-	assert(segHIGHESTROAuxKC == auxkc_right_above);
 	assert(segHIGHESTRXAuxKC <= segHIGHESTROAuxKC);
 	assert(segLOWESTRXAuxKC <= segHIGHESTRXAuxKC);
 	assert(segLOWESTROAuxKC <= segLOWESTRXAuxKC);
@@ -1286,39 +1345,13 @@ arm_vm_prot_init(__unused boot_args * args)
 		}
 	}
 
-	const DTMemoryMapRange *auxKC_range, *auxKC_header_range;
-	unsigned int auxKC_range_size, auxKC_header_range_size;
-
-	err = SecureDTGetProperty(memory_map, "AuxKC", (const void**)&auxKC_range,
-	    &auxKC_range_size);
-	if (err != kSuccess) {
-		goto noAuxKC;
-	}
-	assert(auxKC_range_size == sizeof(DTMemoryMapRange));
-	err = SecureDTGetProperty(memory_map, "AuxKC-mach_header",
-	    (const void**)&auxKC_header_range, &auxKC_header_range_size);
-	if (err != kSuccess) {
-		goto noAuxKC;
-	}
-	assert(auxKC_header_range_size == sizeof(DTMemoryMapRange));
-
-	if (auxKC_header_range->paddr == 0 || auxKC_range->paddr == 0) {
-		goto noAuxKC;
-	}
-
-	auxkc_mh = phystokv(auxKC_header_range->paddr);
-	auxkc_base = phystokv(auxKC_range->paddr);
-
-	if (auxkc_base < segLOWEST) {
-		auxkc_right_above = segLOWEST;
-		segLOWEST = auxkc_base;
-	} else {
-		panic("auxkc_base (%p) not below segLOWEST (%p)", (void*)auxkc_base, (void*)segLOWEST);
-	}
-
-noAuxKC:
 	/* Record the bounds of the kernelcache. */
 	vm_kernelcache_base = segLOWEST;
+
+	auxkc_mh = SPTMArgs->auxkc_mh;
+	auxkc_base = SPTMArgs->auxkc_base;
+	end_kern = SPTMArgs->auxkc_end;
+
 	vm_kernelcache_top = end_kern;
 }
 
@@ -1540,6 +1573,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 */
 	gPhysSize = mem_size = ((gPhysBase + args->memSize) & ~PAGE_MASK) - gPhysBase;
 
+
 	/* Obtain total memory size, including non-managed memory */
 	mem_actual = args->memSizeActual ? args->memSizeActual : mem_size;
 
@@ -1554,6 +1588,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	if (mem_size >= ((VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS) / 2)) {
 		panic("Unsupported memory configuration %lx", mem_size);
 	}
+
 
 	physmap_base = SPTMArgs->physmap_base;
 	physmap_end = static_memory_end = SPTMArgs->physmap_end;
@@ -1728,7 +1763,14 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 		if (segLOWESTRXAuxKC < segLOWESTTEXT) {
 			segLOWESTTEXT = segLOWESTRXAuxKC;
 		}
-		assert(segLOWEST == segLOWESTAuxKC);
+
+#if XNU_TARGET_OS_OSX
+		/**
+		 * If we are on macOS with 3P kexts, we disable
+		 * XNU_KERNEL_RESTRICTED for now.
+		 */
+		use_xnu_restricted = false;
+#endif /* XNU_TARGET_OS_OSX */
 	}
 
 	sane_size = mem_size - (avail_start - gPhysBase);

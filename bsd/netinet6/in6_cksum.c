@@ -147,7 +147,7 @@ in6_pseudo(const struct in6_addr *src, const struct in6_addr *dst, uint32_t x)
 	/*
 	 * IPv6 source address
 	 */
-	w = (const uint16_t *)src;
+	w = (const uint16_t *)(const struct in6_addr *__bidi_indexable)src;
 	sum += w[0];
 	if (!IN6_IS_SCOPE_EMBED(src)) {
 		sum += w[1];
@@ -158,7 +158,7 @@ in6_pseudo(const struct in6_addr *src, const struct in6_addr *dst, uint32_t x)
 	/*
 	 * IPv6 destination address
 	 */
-	w = (const uint16_t *)dst;
+	w = (const uint16_t *)(const struct in6_addr *__bidi_indexable)dst;
 	sum += w[0];
 	if (!IN6_IS_SCOPE_EMBED(dst)) {
 		sum += w[1];
@@ -194,7 +194,7 @@ inet6_cksum(struct mbuf *m, uint32_t nxt, uint32_t off, uint32_t len)
 	sum = m_sum16(m, off, len);
 
 	if (nxt != 0) {
-		struct ip6_hdr *ip6;
+		struct ip6_hdr *__single ip6;
 		unsigned char buf[sizeof(*ip6)] __attribute__((aligned(8)));
 		uint32_t mlen;
 
@@ -221,7 +221,7 @@ inet6_cksum(struct mbuf *m, uint32_t nxt, uint32_t off, uint32_t len)
 			m_copydata(m, 0, sizeof(*ip6), (caddr_t)buf);
 			ip6 = (struct ip6_hdr *)(void *)buf;
 		} else {
-			ip6 = (struct ip6_hdr *)(void *)(m->m_data);
+			ip6 = (struct ip6_hdr *)m_mtod_current(m);
 		}
 
 		/* add pseudo header checksum */
@@ -242,13 +242,34 @@ inet6_cksum(struct mbuf *m, uint32_t nxt, uint32_t off, uint32_t len)
  * len is a total length of a transport segment (e.g. TCP header + TCP payload)
  */
 u_int16_t
-inet6_cksum_buffer(const uint8_t *buffer, uint32_t nxt, uint32_t off,
-    uint32_t len)
+inet6_cksum_buffer(const uint8_t *__sized_by(buffer_len)buffer, uint32_t nxt, uint32_t off,
+    uint32_t len, uint32_t buffer_len)
 {
 	uint32_t sum;
+	uint32_t tmp;
 
-	if (off >= len) {
-		panic("%s: off (%d) >= len (%d)", __func__, off, len);
+	if (__improbable(off >= buffer_len)) {
+		panic("%s: off (%u) >=  buffer_len (%u)",
+		    __func__, off, buffer_len);
+		/* NOTREACHED */
+	}
+
+	if (__improbable(len == 0 || len > buffer_len)) {
+		panic("%s: len == 0 OR len (%u) >=  buffer_len (%u)",
+		    __func__, len, buffer_len);
+		/* NOTREACHED */
+	}
+
+	if (__improbable(os_add_overflow(off, len, &tmp))) {
+		panic("%s: off(%u), len(%u) add overflow",
+		    __func__, off, len);
+		/* NOTREACHED */
+	}
+
+	if (__improbable(tmp > buffer_len)) {
+		panic("%s: off(%u) + len(%u) >=  buffer_len (%u)",
+		    __func__, off, len, buffer_len);
+		/* NOTREACHED */
 	}
 
 	sum = b_sum16(&((const uint8_t *)buffer)[off], len);

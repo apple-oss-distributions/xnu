@@ -74,7 +74,7 @@ run_test(void)
 }
 
 T_DECL(kqueue_close_race, "Races kqueue close with kqueue process",
-    T_META_LTEPHASE(LTE_POSTINIT), T_META_TIMEOUT(5))
+    T_META_LTEPHASE(LTE_POSTINIT), T_META_TIMEOUT(5), T_META_TAG_VM_PREFERRED)
 {
 	for (uint32_t i = 1; i < 100; i++) {
 		run_test();
@@ -102,7 +102,7 @@ pthread_async(void (^block)(void))
 }
 
 T_DECL(kqueue_filter_close,
-    "Check closing a kqfile with various filters works, rdar://72542450")
+    "Check closing a kqfile with various filters works, rdar://72542450", T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t mp, pset;
 	kern_return_t kr;

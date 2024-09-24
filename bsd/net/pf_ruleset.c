@@ -136,7 +136,7 @@ RB_GENERATE(pf_anchor_node, pf_anchor, entry_node, pf_anchor_compare);
 static __inline int
 pf_anchor_compare(struct pf_anchor *a, struct pf_anchor *b)
 {
-	int c = strcmp(a->path, b->path);
+	int c = strbufcmp(a->path, b->path);
 
 	return c ? (c < 0 ? -1 : 1) : 0;
 }
@@ -225,7 +225,7 @@ pf_release_anchor(struct pf_anchor *a)
 struct pf_ruleset *
 pf_find_ruleset(const char *path)
 {
-	struct pf_anchor        *anchor;
+	struct pf_anchor        *__single anchor;
 
 	while (*path == '/') {
 		path++;
@@ -258,8 +258,8 @@ pf_find_ruleset_with_owner(const char *path, const char *owner, int is_anchor,
 		*error = EINVAL;
 		return NULL;
 	} else {
-		if ((owner && (!strcmp(owner, anchor->owner)))
-		    || (is_anchor && !strcmp(anchor->owner, ""))) {
+		if ((owner && (!strlcmp(anchor->owner, owner, sizeof(anchor->owner))))
+		    || (is_anchor && !strlcmp(anchor->owner, "", sizeof(anchor->owner)))) {
 			return &anchor->ruleset;
 		}
 		pf_release_anchor(anchor);
@@ -278,28 +278,60 @@ pf_release_ruleset(struct pf_ruleset *r)
 	return pf_release_anchor(r->anchor);
 }
 
+#define PF_ANCHOR_DELIMITER '/'
+
+static char *__bidi_indexable
+pf_find_next_anchor_delimiter(char *__bidi_indexable str, bool reverse)
+{
+	const char *__null_terminated str_nt = __unsafe_null_terminated_from_indexable(str);
+	const char *__null_terminated result_nt = NULL;
+	char *__bidi_indexable result = NULL;
+
+	if (reverse) {
+		result_nt = strrchr(str_nt, PF_ANCHOR_DELIMITER);
+	} else {
+		result_nt = strchr(str_nt, PF_ANCHOR_DELIMITER);
+	}
+	if (result_nt == NULL) {
+		goto done;
+	}
+	if (str_nt > result_nt) {
+		goto done;
+	}
+	size_t off = (size_t) (result_nt - str_nt);
+	result = str + off;
+done:
+	return result;
+}
+
 struct pf_ruleset *
 pf_find_or_create_ruleset(const char *path)
 {
-	char                    *p, *q = NULL, *r;
-	struct pf_ruleset       *ruleset;
-	struct pf_anchor        *anchor = 0, *dup, *parent = NULL;
+	char                    *__bidi_indexable p = NULL;
+	char                    *__bidi_indexable q = NULL;
+	char                    *__bidi_indexable r = NULL;
+	struct pf_ruleset       *__single ruleset;
+	struct pf_anchor        *__single anchor = NULL, *__single dup, *__single parent = NULL;
 
 	if (path[0] == 0) {
 		return &pf_main_ruleset;
 	}
-	while (*path == '/') {
+	while (*path == PF_ANCHOR_DELIMITER) {
 		path++;
 	}
 	ruleset = pf_find_ruleset(path);
 	if (ruleset != NULL) {
 		return ruleset;
 	}
-	p = (char *)rs_malloc_data(MAXPATHLEN);
+	p = (char *__bidi_indexable) rs_malloc_data(MAXPATHLEN);
 	strlcpy(p, path, MAXPATHLEN);
-	while (parent == NULL && (q = strrchr(p, '/')) != NULL) {
+	while (parent == NULL) {
+		q = pf_find_next_anchor_delimiter(p, true);
+		if (q == NULL) {
+			break;
+		}
 		*q = 0;
-		if ((ruleset = pf_find_ruleset(p)) != NULL) {
+		if ((ruleset = pf_find_ruleset(__unsafe_null_terminated_from_indexable(p))) != NULL) {
 			parent = ruleset->anchor;
 			break;
 		}
@@ -314,12 +346,12 @@ pf_find_or_create_ruleset(const char *path)
 		rs_free_data(p, MAXPATHLEN);
 		return NULL;
 	}
-	while ((r = strchr(q, '/')) != NULL || *q) {
+	while ((r = pf_find_next_anchor_delimiter(q, false)) != NULL || *q) {
 		if (r != NULL) {
 			*r = 0;
 		}
-		if (!*q || strlen(q) >= PF_ANCHOR_NAME_SIZE ||
-		    (parent != NULL && strlen(parent->path) >=
+		if (!*q || strlen(__unsafe_null_terminated_from_indexable(q)) >= PF_ANCHOR_NAME_SIZE ||
+		    (parent != NULL && strbuflen(parent->path, sizeof(parent->path)) >=
 		    MAXPATHLEN - PF_ANCHOR_NAME_SIZE - 1)) {
 			rs_free_data(p, MAXPATHLEN);
 			return NULL;
@@ -330,13 +362,12 @@ pf_find_or_create_ruleset(const char *path)
 			return NULL;
 		}
 		RB_INIT(&anchor->children);
-		strlcpy(anchor->name, q, sizeof(anchor->name));
+		strbufcpy(anchor->name, sizeof(anchor->name), q, strlen(__unsafe_null_terminated_from_indexable(q)));
 		if (parent != NULL) {
-			strlcpy(anchor->path, parent->path,
-			    sizeof(anchor->path));
+			strbufcpy(anchor->path, parent->path);
 			strlcat(anchor->path, "/", sizeof(anchor->path));
 		}
-		strlcat(anchor->path, anchor->name, sizeof(anchor->path));
+		strbufcat(anchor->path, anchor->name);
 		if ((dup = RB_INSERT(pf_anchor_global, &pf_anchors, anchor)) !=
 		    NULL) {
 			printf("pf_find_or_create_ruleset: RB_INSERT1 "
@@ -372,8 +403,8 @@ pf_find_or_create_ruleset(const char *path)
 			*q = 0;
 		}
 #if DUMMYNET
-		if (strncmp("com.apple.nlc", anchor->name,
-		    sizeof("com.apple.nlc")) == 0) {
+		if (strlcmp(anchor->name, "com.apple.nlc",
+		    sizeof(anchor->name)) == 0) {
 			is_nlc_enabled_glb = TRUE;
 		}
 #endif
@@ -422,8 +453,8 @@ pf_remove_if_empty_ruleset(struct pf_ruleset *ruleset)
 	}
 	RB_REMOVE(pf_anchor_global, &pf_anchors, ruleset->anchor);
 #if DUMMYNET
-	if (strncmp("com.apple.nlc", ruleset->anchor->name,
-	    sizeof("com.apple.nlc")) == 0) {
+	if (strlcmp(ruleset->anchor->name, "com.apple.nlc",
+	    sizeof(ruleset->anchor->name)) == 0) {
 		struct dummynet_event dn_event;
 		bzero(&dn_event, sizeof(dn_event));
 		dn_event.dn_event_code = DUMMYNET_NLC_DISABLED;
@@ -444,52 +475,54 @@ pf_remove_if_empty_ruleset(struct pf_ruleset *ruleset)
 
 int
 pf_anchor_setup(struct pf_rule *r, const struct pf_ruleset *s,
-    const char *name)
+    const char *__counted_by(name_len)name, size_t name_len)
 {
-	char                    *p, *path;
-	struct pf_ruleset       *ruleset;
+	char                    *__null_terminated p = NULL, *path;
+	struct pf_ruleset       *__single ruleset;
+	char const *namebuf = (char const *__bidi_indexable) name;
 
 	r->anchor = NULL;
 	r->anchor_relative = 0;
 	r->anchor_wildcard = 0;
-	if (!name[0]) {
+	if (!namebuf[0]) {
 		return 0;
 	}
-	path = (char *)rs_malloc_data(MAXPATHLEN);
-	if (name[0] == '/') {
-		strlcpy(path, name + 1, MAXPATHLEN);
+	path = (char *__bidi_indexable)rs_malloc_data(MAXPATHLEN);
+	if (namebuf[0] == '/') {
+		strbufcpy(path, MAXPATHLEN, namebuf + 1, name_len - 1);
 	} else {
 		/* relative path */
 		r->anchor_relative = 1;
 		if (s->anchor == NULL || !s->anchor->path[0]) {
 			path[0] = 0;
 		} else {
-			strlcpy(path, s->anchor->path, MAXPATHLEN);
+			strbufcpy(path, MAXPATHLEN, s->anchor->path, sizeof(s->anchor->path));
 		}
-		while (name[0] == '.' && name[1] == '.' && name[2] == '/') {
+		while (namebuf[0] == '.' && namebuf[1] == '.' && namebuf[2] == '/') {
 			if (!path[0]) {
 				printf("pf_anchor_setup: .. beyond root\n");
 				rs_free_data(path, MAXPATHLEN);
 				return 1;
 			}
-			if ((p = strrchr(path, '/')) != NULL) {
+			if ((p = strrchr(__unsafe_null_terminated_from_indexable(path), '/')) != NULL) {
 				*p = 0;
 			} else {
 				path[0] = 0;
 			}
 			r->anchor_relative++;
-			name += 3;
+			namebuf += 3;
 		}
 		if (path[0]) {
 			strlcat(path, "/", MAXPATHLEN);
 		}
-		strlcat(path, name, MAXPATHLEN);
+		strbufcat(path, MAXPATHLEN, namebuf, name_len);
 	}
-	if ((p = strrchr(path, '/')) != NULL && strcmp(p, "/*") == 0) {
+	if ((p = strrchr(__unsafe_null_terminated_from_indexable(path), '/')) != NULL &&
+	    strcmp(p, "/*") == 0) {
 		r->anchor_wildcard = 1;
 		*p = 0;
 	}
-	ruleset = pf_find_or_create_ruleset(path);
+	ruleset = pf_find_or_create_ruleset(__unsafe_null_terminated_from_indexable(path));
 	rs_free_data(path, MAXPATHLEN);
 	if (ruleset == NULL || ruleset->anchor == NULL) {
 		printf("pf_anchor_setup: ruleset\n");
@@ -509,40 +542,40 @@ pf_anchor_copyout(const struct pf_ruleset *rs, const struct pf_rule *r,
 	}
 	if (!r->anchor_relative) {
 		strlcpy(pr->anchor_call, "/", sizeof(pr->anchor_call));
-		strlcat(pr->anchor_call, r->anchor->path,
-		    sizeof(pr->anchor_call));
+		strbufcat(pr->anchor_call, r->anchor->path);
 	} else {
-		char    *a, *p;
+		char    *a, *__null_terminated p = NULL;
 		int      i;
 
-		a = (char *)rs_malloc_data(MAXPATHLEN);
+		a = (char *__bidi_indexable)rs_malloc_data(MAXPATHLEN);
 		if (rs->anchor == NULL) {
 			a[0] = 0;
 		} else {
-			strlcpy(a, rs->anchor->path, MAXPATHLEN);
+			strbufcpy(a, MAXPATHLEN, rs->anchor->path, sizeof(rs->anchor->path));
 		}
 		for (i = 1; i < r->anchor_relative; ++i) {
-			if ((p = strrchr(a, '/')) == NULL) {
-				p = a;
+			if ((p = strrchr(__unsafe_null_terminated_from_indexable(a), '/')) == NULL) {
+				p = __unsafe_null_terminated_from_indexable(a);
 			}
 			*p = 0;
 			strlcat(pr->anchor_call, "../",
 			    sizeof(pr->anchor_call));
 		}
-		if (strncmp(a, r->anchor->path, strlen(a))) {
+		if (strbufcmp(a, strbuflen(a, MAXPATHLEN), r->anchor->path, strbuflen(a, MAXPATHLEN))) {
 			printf("pf_anchor_copyout: '%s' '%s'\n", a,
 			    r->anchor->path);
 			rs_free_data(a, MAXPATHLEN);
 			return 1;
 		}
-		if (strlen(r->anchor->path) > strlen(a)) {
-			strlcat(pr->anchor_call, r->anchor->path + (a[0] ?
-			    strlen(a) + 1 : 0), sizeof(pr->anchor_call));
+		if (strbuflen(r->anchor->path, sizeof(r->anchor->path)) > strbuflen(a, MAXPATHLEN)) {
+			strlcat(pr->anchor_call,
+			    __unsafe_null_terminated_from_indexable(r->anchor->path + (a[0] ?
+			    strbuflen(a, MAXPATHLEN) + 1 : 0)), sizeof(pr->anchor_call));
 		}
 		rs_free_data(a, MAXPATHLEN);
 	}
 	if (r->anchor_wildcard) {
-		strlcat(pr->anchor_call, pr->anchor_call[0] ? "/*" : "*",
+		strlcat(pr->anchor_call, __unsafe_null_terminated_from_indexable(pr->anchor_call[0] ? "/*" : "*"),
 		    sizeof(pr->anchor_call));
 	}
 	return 0;

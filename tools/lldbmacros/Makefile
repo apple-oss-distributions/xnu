@@ -31,7 +31,7 @@ LLDBMACROS_USERDEBUG_FILES:= \
 LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	core/__init__.py \
 	core/caching.py \
-	core/collections.py \
+	core/iterators.py \
 	core/configuration.py \
 	core/cvalue.py \
 	core/io.py \
@@ -71,6 +71,7 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	structanalyze.py \
 	pmap.py \
 	memory.py \
+	memorystatus.py \
 	mbufs.py \
 	net.py \
 	skywalk.py \
@@ -98,7 +99,8 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	kext.py \
 	nvram.py \
 	taskinfo.py \
-	exclaves.py
+	exclaves.py \
+	vm_pageout.py
 
 ifneq ($(PLATFORM),MacOSX)
 	LLDBMACROS_PYTHON_FILES+= \

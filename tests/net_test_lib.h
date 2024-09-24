@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -67,12 +68,53 @@
 #include "bpflib.h"
 #include "in_cksum.h"
 
-extern bool S_debug;
+extern bool G_debug;
+
+/*
+ * network_interface routines
+ */
+typedef char if_name_t[IFNAMSIZ];
+
+typedef struct {
+	if_name_t               if_name;
+	u_short                 if_index;
+	struct in_addr          ip;
+	struct in6_addr         ip6;
+} network_interface, *network_interface_t;
+
+typedef struct {
+	network_interface       one;
+	network_interface       two;
+} network_interface_pair, *network_interface_pair_t;
+
+typedef struct {
+	u_int                   count;
+	network_interface_pair  list[1];
+} network_interface_pair_list, * network_interface_pair_list_t;
+
+extern void
+network_interface_create(network_interface_t if_p, const if_name_t name);
+
+extern void
+network_interface_destroy(network_interface_t if_p);
+
+extern network_interface_pair_list_t
+network_interface_pair_list_alloc(u_int n);
+
+extern void
+network_interface_pair_list_destroy(network_interface_pair_list_t list);
 
 #define DHCP_PAYLOAD_MIN        sizeof(struct bootp)
 #define DHCP_FLAGS_BROADCAST    ((u_short)0x8000)
 
 #define FETH_NAME       "feth"
+#define VLAN_NAME       "vlan"
+#define BOND_NAME       "bond"
+#define BRIDGE_NAME     "bridge"
+#define BRIDGE200       BRIDGE_NAME "200"
+#define FETH0           FETH_NAME "0"
+
+extern struct in_addr inet_class_c_subnet_mask;
 
 typedef union {
 	char            bytes[DHCP_PAYLOAD_MIN];
@@ -131,29 +173,45 @@ typedef struct {
 	unsigned short  length;
 } udp6_pseudo_hdr_t;
 
-extern int inet_dgram_socket(void);
+extern ether_addr_t ether_broadcast;
 
-extern int inet6_dgram_socket(void);
+extern int inet_dgram_socket_get(void);
+void inet_dgram_socket_close(void);
 
-extern int routing_socket(void);
+extern int inet6_dgram_socket_get(void);
+void inet6_dgram_socket_close(void);
 
-extern int ifnet_create(int s, const char * ifname);
+extern int ifnet_create(const char * ifname);
 
-extern int ifnet_create_2(int s, char * ifname, size_t len);
+extern int ifnet_create_2(char * ifname, size_t len);
 
-extern int ifnet_destroy(int s, const char * ifname, bool fail_on_error);
+extern int ifnet_destroy(const char * ifname, bool fail_on_error);
 
-extern void ifnet_get_lladdr(int s, const char * ifname, ether_addr_t * eaddr);
+extern void ifnet_get_lladdr(const char * ifname, ether_addr_t * eaddr);
 
-extern int ifnet_attach_ip(int s, char * name);
+extern void ifnet_attach_ip(char * name);
 
-extern int ifnet_set_flags(int s, const char * ifname,
+extern void ifnet_start_ipv6(const char * ifname);
+
+extern int ifnet_set_lladdr(const char * ifname, ether_addr_t * eaddr);
+
+extern int ifnet_set_flags(const char * ifname,
     uint16_t flags_set, uint16_t flags_clear);
 
-extern int siocdrvspec(int s, const char * ifname,
+extern void ifnet_add_ip_address(char *ifname, struct in_addr addr,
+    struct in_addr mask);
+
+extern int ifnet_set_mtu(const char * ifname, int mtu);
+
+extern int siocdrvspec(const char * ifname,
     u_long op, void *arg, size_t argsize, bool set);
 
-extern int fake_set_peer(int s, const char * feth, const char * feth_peer);
+extern void fake_set_peer(const char * feth, const char * feth_peer);
+
+extern void siocsifvlan(const char * vlan, const char * phys, uint16_t tag);
+
+extern void route_add_inet_scoped_subnet(char * ifname, u_short if_index,
+    struct in_addr ifa, struct in_addr mask);
 
 extern u_int ethernet_udp4_frame_populate(void * buf, size_t buf_len,
     const ether_addr_t * src,
@@ -177,6 +235,10 @@ ethernet_udp6_frame_populate(void * buf, size_t buf_len,
 
 extern u_int make_dhcp_payload(dhcp_min_payload_t payload, ether_addr_t *eaddr);
 
+extern bool has_ipv4_default_route(void);
 
+extern bool has_ipv6_default_route(void);
+
+extern int bridge_add_member(const char * bridge, const char * member);
 
 #endif /* __net_test_lib_h__ */

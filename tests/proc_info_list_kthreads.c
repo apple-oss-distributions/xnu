@@ -23,12 +23,14 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 T_DECL(proc_info_list_kthreads,
     "Test to verify PROC_PIDLISTTHREADIDS returns kernel thread IDs for pid 0",
     T_META_ASROOT(true),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_PREFERRED)
 #else
 T_DECL(proc_info_list_kthreads,
     "Test to verify PROC_PIDLISTTHREADIDS returns kernel thread IDs for pid 0",
     T_META_ASROOT(false),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_PREFERRED)
 #endif /* TARGET_OS_OSX */
 {
 	int buf_used = 0;

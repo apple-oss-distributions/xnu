@@ -152,7 +152,7 @@ typedef ipc_voucher_attr_control_t iv_attr_control_t;
 
 #define IVAC_NULL                  IPC_VOUCHER_ATTR_CONTROL_NULL
 
-extern void ipc_voucher_receive_postprocessing(ipc_kmsg_t kmsg, mach_msg_option_t option);
+extern void ipc_voucher_receive_postprocessing(ipc_kmsg_t kmsg, mach_msg_option64_t option);
 extern void ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg);
 extern ipc_voucher_t ipc_voucher_get_default_voucher(void);
 extern void mach_init_activity_id(void);

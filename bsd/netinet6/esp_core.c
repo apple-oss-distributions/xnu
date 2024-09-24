@@ -119,17 +119,21 @@ static int esp_des_schedule(const struct esp_algorithm *,
     struct secasvar *);
 static size_t esp_des_schedlen(const struct esp_algorithm *);
 static int esp_des_blockdecrypt(const struct esp_algorithm *,
-    struct secasvar *, u_int8_t *, u_int8_t *);
+    struct secasvar *, u_int8_t *__sized_by(sizeof(DES_LONG) * 2),
+    u_int8_t *__sized_by(sizeof(DES_LONG) * 2));
 static int esp_des_blockencrypt(const struct esp_algorithm *,
-    struct secasvar *, u_int8_t *, u_int8_t *);
+    struct secasvar *, u_int8_t *__sized_by(sizeof(DES_LONG) * 2),
+    u_int8_t *__sized_by(sizeof(DES_LONG) * 2));
 static int esp_cbc_mature(struct secasvar *);
 static int esp_3des_schedule(const struct esp_algorithm *,
     struct secasvar *);
 static size_t esp_3des_schedlen(const struct esp_algorithm *);
 static int esp_3des_blockdecrypt(const struct esp_algorithm *,
-    struct secasvar *, u_int8_t *, u_int8_t *);
+    struct secasvar *, u_int8_t *__sized_by(sizeof(DES_LONG) * 2),
+    u_int8_t *__sized_by(sizeof(DES_LONG) * 2));
 static int esp_3des_blockencrypt(const struct esp_algorithm *,
-    struct secasvar *, u_int8_t *, u_int8_t *);
+    struct secasvar *, u_int8_t *__sized_by(sizeof(DES_LONG) * 2),
+    u_int8_t *__sized_by(sizeof(DES_LONG) * 2));
 static int esp_common_ivlen(const struct esp_algorithm *,
     struct secasvar *);
 static int esp_cbc_decrypt(struct mbuf *, size_t,
@@ -137,18 +141,36 @@ static int esp_cbc_decrypt(struct mbuf *, size_t,
 static int esp_cbc_encrypt(struct mbuf *, size_t, size_t,
     struct secasvar *, const struct esp_algorithm *, int);
 static int esp_gcm_mature(struct secasvar *);
-static int esp_cbc_des_encrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-static int esp_cbc_des_decrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-static int esp_cbc_3des_encrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-static int esp_cbc_3des_decrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-static int esp_null_encrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-static int esp_null_decrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
+static int esp_cbc_des_encrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+static int esp_cbc_des_decrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+static int esp_cbc_3des_encrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+static int esp_cbc_3des_decrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+static int esp_null_encrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(out_ivlen), size_t out_ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+static int esp_null_decrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
 
 #define MAXIVLEN        16
 
@@ -337,6 +359,8 @@ esp_max_ivlen(void)
 int
 esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 {
+	void *sched = NULL;
+	size_t schedlen = 0;
 	int error;
 
 	/* check for key length */
@@ -373,28 +397,28 @@ esp_schedule(const struct esp_algorithm *algo, struct secasvar *sav)
 		return 0;
 	}
 
-	sav->schedlen_enc = (*algo->schedlen)(algo);
-	if ((signed) sav->schedlen_enc < 0) {
+	schedlen = (*algo->schedlen)(algo);
+	if ((signed)schedlen < 0) {
 		lck_mtx_unlock(sadb_mutex);
 		return EINVAL;
 	}
 
 //#### that malloc should be replaced by a saved buffer...
-	sav->sched_enc = kalloc_data(sav->schedlen_enc, Z_NOWAIT);
-	if (!sav->sched_enc) {
-		sav->schedlen_enc = 0;
+	sched = kalloc_data(schedlen, Z_NOWAIT);
+	if (sched == NULL) {
 		lck_mtx_unlock(sadb_mutex);
 		return ENOBUFS;
 	}
+
+	sav->sched_enc = sched;
+	sav->schedlen_enc = schedlen;
 
 	error = (*algo->schedule)(algo, sav);
 	if (error) {
 		ipseclog((LOG_ERR, "esp_schedule %s: error %d\n",
 		    algo->name, error));
 		bzero(sav->sched_enc, sav->schedlen_enc);
-		kfree_data(sav->sched_enc, sav->schedlen_enc);
-		sav->sched_enc = NULL;
-		sav->schedlen_enc = 0;
+		kfree_data_sized_by(sav->sched_enc, sav->schedlen_enc);
 	}
 	lck_mtx_unlock(sadb_mutex);
 	return error;
@@ -433,9 +457,12 @@ esp_null_encrypt(
 
 static int
 esp_null_encrypt_data(__unused struct secasvar *sav,
-    __unused uint8_t *input_data, __unused size_t input_data_len,
-    __unused struct newesp *esp_hdr, __unused uint8_t *out_iv,
-    __unused size_t out_ivlen, __unused uint8_t *output_data,
+    __unused uint8_t *__sized_by(input_data_len)input_data,
+    __unused size_t input_data_len,
+    __unused struct newesp *esp_hdr,
+    __unused uint8_t *__sized_by(out_ivlen)out_iv,
+    __unused size_t out_ivlen,
+    __unused uint8_t *__sized_by(output_data_len)output_data,
     __unused size_t output_data_len)
 {
 	return 0; /* do nothing */
@@ -443,9 +470,12 @@ esp_null_encrypt_data(__unused struct secasvar *sav,
 
 static int
 esp_null_decrypt_data(__unused struct secasvar *sav,
-    __unused uint8_t *input_data, __unused size_t input_data_len,
-    __unused struct newesp *esp_hdr, __unused uint8_t *iv,
-    __unused size_t ivlen, __unused uint8_t *output_data,
+    __unused uint8_t *__sized_by(input_data_len)input_data,
+    __unused size_t input_data_len,
+    __unused struct newesp *esp_hdr,
+    __unused uint8_t *__sized_by(ivlen)iv,
+    __unused size_t ivlen,
+    __unused uint8_t *__sized_by(output_data_len)output_data,
     __unused size_t output_data_len)
 {
 	return 0; /* do nothing */
@@ -534,8 +564,8 @@ static int
 esp_des_blockdecrypt(
 	__unused const struct esp_algorithm *algo,
 	struct secasvar *sav,
-	u_int8_t *s,
-	u_int8_t *d)
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)s,
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)d)
 {
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
@@ -547,8 +577,8 @@ static int
 esp_des_blockencrypt(
 	__unused const struct esp_algorithm *algo,
 	struct secasvar *sav,
-	u_int8_t *s,
-	u_int8_t *d)
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)s,
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)d)
 {
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
@@ -700,8 +730,8 @@ static int
 esp_3des_blockdecrypt(
 	__unused const struct esp_algorithm *algo,
 	struct secasvar *sav,
-	u_int8_t *s,
-	u_int8_t *d)
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)s,
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)d)
 {
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
@@ -713,8 +743,8 @@ static int
 esp_3des_blockencrypt(
 	__unused const struct esp_algorithm *algo,
 	struct secasvar *sav,
-	u_int8_t *s,
-	u_int8_t *d)
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)s,
+	u_int8_t *__sized_by(sizeof(DES_LONG) * 2)d)
 {
 	/* assumption: d has a good alignment */
 	bcopy(s, d, sizeof(DES_LONG) * 2);
@@ -743,7 +773,7 @@ esp_cbc_decrypt(struct mbuf *m, size_t off, struct secasvar *sav,
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
 	size_t ivoff, bodyoff;
 	u_int8_t iv[MAXIVLEN] __attribute__((aligned(4))), *ivp;
-	u_int8_t *sbuf = NULL, *sp, *sp_unaligned;
+	u_int8_t *__bidi_indexable sbuf = NULL, *sp, *sp_unaligned;
 	u_int8_t *p, *q;
 	struct mbuf *scut;
 	int scutoff;
@@ -981,7 +1011,7 @@ esp_cbc_encrypt(
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
 	size_t ivoff, bodyoff;
 	u_int8_t iv[MAXIVLEN] __attribute__((aligned(4))), *ivp;
-	u_int8_t *sbuf = NULL, *sp, *sp_unaligned;
+	u_int8_t *__bidi_indexable sbuf = NULL, *sp, *sp_unaligned;
 	u_int8_t *p, *q;
 	struct mbuf *scut;
 	int scutoff;
@@ -1210,9 +1240,14 @@ end:
 
 #define ESP_CBC_DES_BLOCKLEN 8
 static int
-esp_cbc_des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_cbc_des_encrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data,
+    size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)out_iv,
+    size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data,
+    size_t output_data_len)
 {
 	uint8_t *ivp = NULL;
 	size_t soff = 0;
@@ -1259,9 +1294,14 @@ esp_cbc_des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 }
 
 static int
-esp_cbc_des_decrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_cbc_des_decrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data,
+    size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)iv,
+    size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data,
+    size_t output_data_len)
 {
 	uint8_t *ivp = NULL;
 	size_t soff = 0;
@@ -1307,9 +1347,14 @@ esp_cbc_des_decrypt_data(struct secasvar *sav, uint8_t *input_data,
 
 #define ESP_CBC_3DES_BLOCKLEN 8
 static int
-esp_cbc_3des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_cbc_3des_encrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data,
+    size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)out_iv,
+    size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data,
+    size_t output_data_len)
 {
 	uint8_t *ivp = NULL;
 	size_t soff = 0;
@@ -1356,9 +1401,14 @@ esp_cbc_3des_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 }
 
 static int
-esp_cbc_3des_decrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv,
-    size_t ivlen, uint8_t *output_data, size_t output_data_len)
+esp_cbc_3des_decrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data,
+    size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)iv,
+    size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data,
+    size_t output_data_len)
 {
 	uint8_t *ivp = NULL;
 	size_t soff = 0;
@@ -1411,15 +1461,17 @@ esp_auth(
 	size_t skip,    /* offset to ESP header */
 	size_t length,  /* payload length */
 	struct secasvar *sav,
-	u_char *sum)
+	u_char *__sized_by(ESP_AUTH_MAXSUMSIZE)sum)
 {
 	struct mbuf *m;
 	size_t off;
 	struct ah_algorithm_state s;
-	u_char sumbuf[AH_MAXSUMSIZE] __attribute__((aligned(4)));
+	u_char sumbuf[ESP_AUTH_MAXSUMSIZE] __attribute__((aligned(4)));
 	const struct ah_algorithm *algo;
 	size_t siz;
 	int error;
+
+	_CASSERT(ESP_AUTH_MAXSUMSIZE == AH_MAXSUMSIZE);
 
 	/* sanity checks */
 	if (m0->m_pkthdr.len < skip) {

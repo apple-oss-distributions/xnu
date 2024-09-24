@@ -34,7 +34,7 @@ tests()
 	}
 }
 
-T_DECL(data, "safe_allocation.data") {
+T_DECL(data, "safe_allocation.data", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

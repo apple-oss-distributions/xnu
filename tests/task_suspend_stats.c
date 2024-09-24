@@ -51,7 +51,8 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(true),
 	T_META_ASROOT(true),
 	// rdar://112041307
-	T_META_REQUIRES_SYSCTL_EQ("kern.hv_vmm_present", 0));
+	T_META_REQUIRES_SYSCTL_EQ("kern.hv_vmm_present", 0),
+	T_META_TAG_VM_NOT_ELIGIBLE);
 
 // sleep for 1 sec between suspend/resume
 static unsigned int sleep_duration = 1;

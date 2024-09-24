@@ -54,9 +54,9 @@ def KDPDumpInfo(subcmd, file_name="", dest_ip="", router_ip="", port=0):
     # 0x1f is same as KDP_DUMPINFO
     if ( WriteInt64ToMemoryAddress((header_value), int(addressof(pkt.hdr))) and
          WriteInt32ToMemoryAddress(subcmd, int(addressof(pkt.type))) and
-         WriteStringToMemoryAddress(file_name.encode(), int(addressof(pkt.name))) and
-         WriteStringToMemoryAddress(dest_ip.encode(), int(addressof(pkt.destip))) and
-         WriteStringToMemoryAddress(router_ip.encode(), int(addressof(pkt.routerip)))
+         WriteStringToMemoryAddress(file_name, int(addressof(pkt.name))) and
+         WriteStringToMemoryAddress(dest_ip, int(addressof(pkt.destip))) and
+         WriteStringToMemoryAddress(router_ip, int(addressof(pkt.routerip)))
          ):
          #We have saved important data successfully
         if port > 0:

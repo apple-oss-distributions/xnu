@@ -77,19 +77,6 @@ struct fcl_stat {
 	uint64_t fcl_fcl_pacemaker_needed;
 };
 
-/*
- * Use 8 bits from the flow id as the tag for set associative
- * hashing
- * NOTE: The first 2 bits of the flow id is being used to encode the flow
- * domain information, so don't use the top 8 bits as it won't have a uniform
- * distribution.
- */
-
-#define FQ_IF_HASH_TAG_SIZE     8
-#define FQ_IF_HASH_TAG_SHIFT    16
-#define FQ_IF_HASH_TAG_MASK     0xFF
-#define FQ_IF_HASH_TABLE_SIZE   (1 << FQ_IF_HASH_TAG_SIZE)
-
 /* Set the quantum to be one MTU */
 #define FQ_IF_DEFAULT_QUANTUM   1500
 
@@ -137,7 +124,7 @@ typedef enum : uint8_t {
 #define FQ_IF_VO_INDEX  1
 #define FQ_IF_CTL_INDEX 0
 
-typedef SLIST_HEAD(, flowq) flowq_list_t;
+typedef LIST_HEAD(, flowq) flowq_list_t;
 typedef STAILQ_HEAD(, flowq) flowq_stailq_t;
 typedef struct fq_if_classq {
 	uint32_t fcl_pri;      /* class priority, lower the better */
@@ -205,7 +192,8 @@ typedef struct fq_if_bitmap_ops {
 
 typedef struct fq_codel_sched_data {
 	struct ifclassq         *fqs_ifq;       /* back pointer to ifclassq */
-	flowq_list_t            fqs_flows[FQ_IF_HASH_TABLE_SIZE]; /* flows table */
+	flowq_list_t            *fqs_flows __counted_by(fqs_flows_count); /* flows table */
+	uint32_t                fqs_flows_count;
 	uint32_t                fqs_pkt_droplimit;  /* drop limit */
 	uint8_t                 fqs_throttle;   /* throttle on or off */
 	uint8_t                 fqs_flags;      /* flags */

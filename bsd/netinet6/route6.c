@@ -78,11 +78,11 @@ route6_input(struct mbuf **mp, int *offp, int proto)
 {
 #pragma unused(proto)
 	struct ip6_hdr *ip6 = NULL;
-	struct mbuf *m = *mp;
-	struct ip6_rthdr *rh = NULL;
+	mbuf_ref_t m = *mp;
+	struct ip6_rthdr *__single rh = NULL;
 	int off = *offp, rhlen = 0;
 #ifdef notyet
-	struct ip6aux *ip6a = NULL;
+	struct ip6aux *__single ip6a = NULL;
 
 	ip6a = ip6_findaux(m);
 	if (ip6a) {

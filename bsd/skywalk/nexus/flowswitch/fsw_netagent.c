@@ -91,7 +91,7 @@ fsw_netagent_tc2sc(uint32_t tc, uint32_t *scp)
 static int
 fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
     void *context, struct necp_client_nexus_parameters *cparams,
-    void **results, size_t *results_length)
+    void * __sized_by(*results_length) *results, size_t *results_length)
 {
 	struct nx_flow_req req;
 	struct flow_owner *fo = NULL;
@@ -217,8 +217,7 @@ done:
 		ASSERT(*results == NULL);
 		ASSERT(*results_length == 0);
 		if (assign_message != NULL) {
-			kfree_data(assign_message, assign_message_length);
-			assign_message = NULL;
+			kfree_data_sized_by(assign_message, assign_message_length);
 		}
 		if (fo != NULL) {
 			req.nfr_pid = pid;
@@ -261,7 +260,7 @@ fsw_netagent_flow_del(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 
 static int
 fsw_netagent_event(u_int8_t event, uuid_t flow_uuid, pid_t pid, void *context,
-    void *ctx, struct necp_client_agent_parameters *cparams, void **results,
+    void *ctx, struct necp_client_agent_parameters *cparams, void * __sized_by(*results_length) *results,
     size_t *results_length)
 {
 	struct nx_flowswitch *fsw;

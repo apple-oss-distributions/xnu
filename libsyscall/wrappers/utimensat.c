@@ -52,7 +52,10 @@ prepare_times_array_and_attrs(struct timespec times_in[2],
 
 	if (times_in[0].tv_nsec == UTIME_NOW ||
 	    times_in[1].tv_nsec == UTIME_NOW) {
-		*flags |= FSOPT_UTIMES_NULL;
+		if (times_in[0].tv_nsec == UTIME_NOW &&
+		    times_in[1].tv_nsec == UTIME_NOW) {
+			*flags |= FSOPT_UTIMES_NULL;
+		}
 		struct timespec now = {};
 		{
 			/*

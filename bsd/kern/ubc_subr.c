@@ -68,8 +68,12 @@
 #include <kern/zalloc.h>
 #include <kern/thread.h>
 #include <vm/pmap.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_pageout.h>
+#include <vm/vm_map.h>
+#include <vm/vm_upl.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_protos.h> /* last */
+#include <vm/vm_ubc.h>
 
 #include <libkern/crypto/sha1.h>
 #include <libkern/crypto/sha2.h>
@@ -79,15 +83,6 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <libkern/amfi/amfi.h>
-
-/* XXX These should be in a BSD accessible Mach header, but aren't. */
-extern kern_return_t memory_object_pages_resident(memory_object_control_t,
-    boolean_t *);
-extern kern_return_t    memory_object_signed(memory_object_control_t control,
-    boolean_t is_signed);
-extern boolean_t        memory_object_is_signed(memory_object_control_t);
-extern void             memory_object_mark_trusted(
-	memory_object_control_t         control);
 
 extern void Debugger(const char *message);
 
@@ -992,32 +987,42 @@ ubc_cs_blob_pagewise_allocate(
 }
 
 int
-csblob_register_profile_uuid(
-	struct cs_blob __unused *csblob,
-	const uuid_t __unused profile_uuid,
-	void __unused *profile_addr,
-	vm_size_t __unused profile_size)
+csblob_register_profile(
+	__unused struct cs_blob *csblob,
+	__unused cs_profile_register_t *profile)
 {
 #if CODE_SIGNING_MONITOR
 	/* Profiles only need to be registered for monitor environments */
-	assert(profile_addr != NULL);
-	assert(profile_size != 0);
+	assert(profile->data != NULL);
+	assert(profile->size != 0);
 	assert(csblob != NULL);
 
 	kern_return_t kr = csm_register_provisioning_profile(
-		profile_uuid,
-		profile_addr, profile_size);
+		profile->uuid,
+		profile->data, profile->size);
 
 	if ((kr != KERN_SUCCESS) && (kr != KERN_ALREADY_IN_SET)) {
+		if (kr == KERN_NOT_SUPPORTED) {
+			return 0;
+		}
+		return EPERM;
+	}
+
+	/* Attempt to trust the profile */
+	kr = csm_trust_provisioning_profile(
+		profile->uuid,
+		profile->sig_data, profile->sig_size);
+
+	if (kr != KERN_SUCCESS) {
 		return EPERM;
 	}
 
 	/* Associate the profile with the monitor's signature object */
 	kr = csm_associate_provisioning_profile(
 		csblob->csb_csm_obj,
-		profile_uuid);
+		profile->uuid);
 
-	if ((kr != KERN_SUCCESS) && (kr != KERN_NOT_SUPPORTED)) {
+	if (kr != KERN_SUCCESS) {
 		return EPERM;
 	}
 
@@ -1025,6 +1030,26 @@ csblob_register_profile_uuid(
 #else
 	return 0;
 #endif /* CODE_SIGNING_MONITOR */
+}
+
+int
+csblob_register_profile_uuid(
+	struct cs_blob *csblob,
+	const uuid_t profile_uuid,
+	void *profile_addr,
+	vm_size_t profile_size)
+{
+	cs_profile_register_t profile = {
+		.sig_data = NULL,
+		.sig_size = 0,
+		.data = profile_addr,
+		.size = profile_size
+	};
+
+	/* Copy the provided UUID */
+	memcpy(profile.uuid, profile_uuid, sizeof(profile.uuid));
+
+	return csblob_register_profile(csblob, &profile);
 }
 
 /*
@@ -3157,9 +3182,7 @@ ubc_cs_blob_deallocate(
  * a multi-level scheme where groups of 4 hashes are combined to form
  * a new hash, which represents 16KiB in the on-disk file.  This can
  * reduce the wired memory requirement for the Code Directory by
- * 75%. Care must be taken for binaries that use the "fourk" VM pager
- * for unaligned access, which may still attempt to validate on
- * non-16KiB multiples for compatibility with 3rd party binaries.
+ * 75%.
  */
 static boolean_t
 ubc_cs_supports_multilevel_hash(struct cs_blob *blob __unused)
@@ -4338,6 +4361,47 @@ register_code_signature_monitor(
 
 #endif /* CODE_SIGNING_MONITOR */
 
+static errno_t
+validate_main_binary_check(
+	struct cs_blob *csblob,
+	cs_blob_add_flags_t csblob_add_flags)
+{
+#if XNU_TARGET_OS_OSX
+	(void)csblob;
+	(void)csblob_add_flags;
+	return 0;
+#else
+	const CS_CodeDirectory *first_cd = NULL;
+	const CS_CodeDirectory *alt_cd = NULL;
+	uint64_t exec_seg_flags = 0;
+	uint32_t slot = CSSLOT_CODEDIRECTORY;
+
+	/* Nothing to enforce if we're allowing main binaries */
+	if ((csblob_add_flags & CS_BLOB_ADD_ALLOW_MAIN_BINARY) != 0) {
+		return 0;
+	}
+
+	first_cd = (const CS_CodeDirectory*)csblob_find_blob(csblob, slot, CSMAGIC_CODEDIRECTORY);
+	if ((first_cd != NULL) && (ntohl(first_cd->version) >= CS_SUPPORTSEXECSEG)) {
+		exec_seg_flags |= ntohll(first_cd->execSegFlags);
+	}
+
+	for (uint32_t i = 0; i < CSSLOT_ALTERNATE_CODEDIRECTORY_MAX; i++) {
+		slot = CSSLOT_ALTERNATE_CODEDIRECTORIES + i;
+		alt_cd = (const CS_CodeDirectory*)csblob_find_blob(csblob, slot, CSMAGIC_CODEDIRECTORY);
+		if ((alt_cd == NULL) || (ntohl(alt_cd->version) < CS_SUPPORTSEXECSEG)) {
+			continue;
+		}
+		exec_seg_flags |= ntohll(alt_cd->execSegFlags);
+	}
+
+	if ((exec_seg_flags & CS_EXECSEG_MAIN_BINARY) != 0) {
+		return EBADEXEC;
+	}
+	return 0;
+#endif /* XNU_TARGET_OS_OSX */
+}
+
 /**
  * Accelerate entitlements for a code signature object. When we have a code
  * signing monitor, this acceleration is done within the monitor which then
@@ -4649,7 +4713,8 @@ ubc_cs_blob_add(
 	vm_size_t       size,
 	struct image_params *imgp,
 	__unused int    flags,
-	struct cs_blob  **ret_blob)
+	struct cs_blob  **ret_blob,
+	cs_blob_add_flags_t csblob_add_flags)
 {
 	ptrauth_generic_signature_t cs_blob_sig = {0};
 	struct ubc_info *uip = NULL;
@@ -4748,6 +4813,18 @@ ubc_cs_blob_add(
 #endif /* HAS_APPLE_PAC */
 
 #endif /* CODE_SIGNING_MONITOR */
+
+	/*
+	 * Ensure that we're honoring the main binary policy check on platforms which
+	 * require it. We perform this check at this stage to ensure the blob we're
+	 * looking at has been locked down by a code signing monitor if the system
+	 * has one.
+	 */
+	error = validate_main_binary_check(&tmp_blob, csblob_add_flags);
+	if (error != 0) {
+		printf("failed to verify main binary policy: %d\n", error);
+		goto out;
+	}
 
 #if CONFIG_MACF
 	unsigned int cs_flags = tmp_blob.csb_flags;

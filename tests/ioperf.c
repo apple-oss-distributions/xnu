@@ -198,7 +198,7 @@ perform_io(dt_stat_time_t stat)
 T_GLOBAL_META(T_META_NAMESPACE("xnu.io"), T_META_TAG_PERF);
 
 /* Disable the test on MacOS for now */
-T_DECL(read_perf, "Sequential Uncached Read Performance", T_META_TYPE_PERF, T_META_CHECK_LEAKS(NO), T_META_ASROOT(YES), T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(read_perf, "Sequential Uncached Read Performance", T_META_TYPE_PERF, T_META_CHECK_LEAKS(NO), T_META_ASROOT(YES), T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if !CONFIG_EMBEDDED
 	T_SKIP("Not supported on MacOS");

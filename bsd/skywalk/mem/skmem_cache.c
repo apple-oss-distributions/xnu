@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -104,15 +104,6 @@ static LCK_GRP_DECLARE(skmem_cpu_lock_grp, "skmem_cpu_cache");
 #define SKMEM_CACHE_LOCK_ASSERT_NOTHELD()       \
 	LCK_MTX_ASSERT(&skmem_cache_lock, LCK_MTX_ASSERT_NOTOWNED)
 
-#define SKM_SLAB_LOCK(_skm)                     \
-	lck_mtx_lock(&(_skm)->skm_sl_lock)
-#define SKM_SLAB_LOCK_ASSERT_HELD(_skm)         \
-	LCK_MTX_ASSERT(&(_skm)->skm_sl_lock, LCK_MTX_ASSERT_OWNED)
-#define SKM_SLAB_LOCK_ASSERT_NOTHELD(_skm)      \
-	LCK_MTX_ASSERT(&(_skm)->skm_sl_lock, LCK_MTX_ASSERT_NOTOWNED)
-#define SKM_SLAB_UNLOCK(_skm)                   \
-	lck_mtx_unlock(&(_skm)->skm_sl_lock)
-
 #define SKM_DEPOT_LOCK(_skm)                    \
 	lck_mtx_lock(&(_skm)->skm_dp_lock)
 #define SKM_DEPOT_LOCK_SPIN(_skm)               \
@@ -153,10 +144,27 @@ static LCK_GRP_DECLARE(skmem_cpu_lock_grp, "skmem_cpu_cache");
 #define SKM_ZONE_MAX    256
 
 static struct zone *skm_zone;                   /* zone for skmem_cache */
+/*
+ * XXX -fbounds-safety: Took out ZC_DESTRUCTIBLE flag because of static assert
+ * in ZONE_DEFINE_TYPE
+ */
+ZONE_DECLARE(skm_zone, struct zone *);
 
-static struct skmem_cache *skmem_slab_cache;    /* cache for skmem_slab */
-static struct skmem_cache *skmem_bufctl_cache;  /* cache for skmem_bufctl */
-static unsigned int bc_size;                    /* size of bufctl */
+struct skmem_cache *skmem_slab_cache;    /* cache for skmem_slab */
+struct skmem_cache *skmem_bufctl_cache;  /* cache for skmem_bufctl */
+
+unsigned int bc_size;                    /* size of bufctl */
+
+/*
+ * XXX: -fbounds-safety: we added objsize to skmem_cache_batch_alloc(), but this
+ * is only used by -fbounds-safety, so we use __unused if -fbounds-safety is
+ * disabled. The utility macro for that is SK_BF_ARG()
+ */
+#if !__has_ptrcheck
+#define SK_FB_ARG __unused
+#else
+#define SK_FB_ARG
+#endif
 
 /*
  * Magazine types (one per row.)
@@ -213,11 +221,6 @@ static struct skmem_magtype skmem_magtype[] = {
 #define SKMEM_CACHE_HASH_INITIAL        64      /* initial hash table size */
 #define SKMEM_CACHE_HASH_LIMIT          8192    /* hash table size limit */
 
-#define SKMEM_CACHE_HASH_INDEX(_a, _s, _m)      (((_a) >> (_s)) & (_m))
-#define SKMEM_CACHE_HASH(_skm, _buf)                                     \
-	(&(_skm)->skm_hash_table[SKMEM_CACHE_HASH_INDEX((uintptr_t)_buf, \
-	(_skm)->skm_hash_shift, (_skm)->skm_hash_mask)])
-
 /*
  * The last magazine type.
  */
@@ -225,26 +228,19 @@ static struct skmem_magtype *skmem_cache_magsize_last;
 
 static TAILQ_HEAD(, skmem_cache) skmem_cache_head;
 static boolean_t skmem_cache_ready;
-
-static int skmem_slab_alloc_locked(struct skmem_cache *,
-    struct skmem_obj_info *, struct skmem_obj_info *, uint32_t);
-static void skmem_slab_free_locked(struct skmem_cache *, void *);
-static int skmem_slab_alloc_pseudo_locked(struct skmem_cache *,
-    struct skmem_obj_info *, struct skmem_obj_info *, uint32_t);
-static void skmem_slab_free_pseudo_locked(struct skmem_cache *, void *);
-static struct skmem_slab *skmem_slab_create(struct skmem_cache *, uint32_t);
-static void skmem_slab_destroy(struct skmem_cache *, struct skmem_slab *);
 static int skmem_magazine_ctor(struct skmem_obj_info *,
     struct skmem_obj_info *, void *, uint32_t);
 static void skmem_magazine_destroy(struct skmem_cache *, struct skmem_mag *,
     int);
 static uint32_t skmem_depot_batch_alloc(struct skmem_cache *,
-    struct skmem_maglist *, uint32_t *, struct skmem_mag **, uint32_t);
+    struct skmem_maglist *, uint32_t *, struct skmem_mag *__bidi_indexable *, uint32_t);
 static void skmem_depot_batch_free(struct skmem_cache *, struct skmem_maglist *,
     uint32_t *, struct skmem_mag *);
 static void skmem_depot_ws_update(struct skmem_cache *);
 static void skmem_depot_ws_zero(struct skmem_cache *);
 static void skmem_depot_ws_reap(struct skmem_cache *);
+#define SKMEM_CACHE_FREE_NOCACHE    0x1
+static void skmem_cache_batch_free_common(struct skmem_cache *, struct skmem_obj *, uint32_t);
 static void skmem_cache_magazine_purge(struct skmem_cache *);
 static void skmem_cache_magazine_enable(struct skmem_cache *, uint32_t);
 static void skmem_cache_magazine_resize(struct skmem_cache *);
@@ -261,7 +257,6 @@ static void skmem_cache_reap_func(thread_call_param_t, thread_call_param_t);
 static void skmem_cache_update_func(thread_call_param_t, thread_call_param_t);
 static int skmem_cache_resize_enter(struct skmem_cache *, boolean_t);
 static void skmem_cache_resize_exit(struct skmem_cache *);
-static void skmem_audit_bufctl(struct skmem_bufctl *);
 static void skmem_audit_buf(struct skmem_cache *, struct skmem_obj *);
 static int skmem_cache_mib_get_sysctl SYSCTL_HANDLER_ARGS;
 
@@ -294,26 +289,6 @@ static uint32_t skmem_cache_update_interval = SKMEM_CACHE_UPDATE_INTERVAL;
 
 #define SKMEM_DEPOT_CONTENTION  3       /* max failed trylock per interval */
 static int skmem_cache_depot_contention = SKMEM_DEPOT_CONTENTION;
-
-/*
- * Too big a value will cause overflow and thus trip the assertion; the
- * idea here is to set an upper limit for the time that a particular
- * thread is allowed to perform retries before we give up and panic.
- */
-#define SKMEM_SLAB_MAX_BACKOFF          (20 * USEC_PER_SEC) /* seconds */
-
-/*
- * Threshold (in msec) after which we reset the exponential backoff value
- * back to its (random) initial value.  Note that we allow the actual delay
- * to be at most twice this value.
- */
-#define SKMEM_SLAB_BACKOFF_THRES        1024    /* up to ~2 sec (2048 msec) */
-
-/*
- * To reduce the likelihood of global synchronization between threads,
- * we use some random value to start the exponential backoff.
- */
-#define SKMEM_SLAB_BACKOFF_RANDOM       4       /* range is [1,4] msec */
 
 #if (DEVELOPMENT || DEBUG)
 SYSCTL_UINT(_kern_skywalk_mem, OID_AUTO, cache_update_interval,
@@ -414,6 +389,15 @@ skmem_cache_init(void)
 	ASSERT(__skmem_cache_pre_inited);
 	ASSERT(!__skmem_cache_inited);
 
+	_CASSERT(offsetof(struct skmem_bufctl, bc_addr) == offsetof(struct skmem_bufctl_audit, bc_addr));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_addrm) == offsetof(struct skmem_bufctl_audit, bc_addrm));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_slab) == offsetof(struct skmem_bufctl_audit, bc_slab));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_lim) == offsetof(struct skmem_bufctl_audit, bc_lim));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_flags) == offsetof(struct skmem_bufctl_audit, bc_flags));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_idx) == offsetof(struct skmem_bufctl_audit, bc_idx));
+	_CASSERT(offsetof(struct skmem_bufctl, bc_usecnt) == offsetof(struct skmem_bufctl_audit, bc_usecnt));
+	_CASSERT(sizeof(struct skmem_bufctl) == offsetof(struct skmem_bufctl_audit, bc_thread));
+
 	PE_parse_boot_argn("skmem_debug", &skmem_debug, sizeof(skmem_debug));
 	skmem_debug &= SKMEM_DEBUG_MASK;
 
@@ -449,9 +433,10 @@ skmem_cache_init(void)
 	    NULL, NULL, 0);
 
 	/*
-	 * Go thru the magazine type table and create an cache for each.
+	 * Go thru the magazine type table and create a cache for each.
 	 */
 	for (i = 0; i < sizeof(skmem_magtype) / sizeof(*mtp); i++) {
+		const char *__null_terminated mt_cname = NULL;
 		mtp = &skmem_magtype[i];
 
 		if (mtp->mt_align != 0 &&
@@ -461,11 +446,11 @@ skmem_cache_init(void)
 			/* NOTREACHED */
 			__builtin_unreachable();
 		}
-		(void) snprintf(mtp->mt_cname, sizeof(mtp->mt_cname),
+		mt_cname = tsnprintf(mtp->mt_cname, sizeof(mtp->mt_cname),
 		    "mg.%d", mtp->mt_magsize);
 
-		/* create an cache for this magazine type */
-		mtp->mt_cache = skmem_cache_create(mtp->mt_cname,
+		/* create a cache for this magazine type */
+		mtp->mt_cache = skmem_cache_create(mt_cname,
 		    SKMEM_MAG_SIZE(mtp->mt_magsize), mtp->mt_align,
 		    skmem_magazine_ctor, NULL, NULL, mtp, NULL, 0);
 
@@ -559,8 +544,11 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 {
 	boolean_t pseudo = (region == NULL);
 	struct skmem_magtype *mtp;
-	struct skmem_cache *skm;
+	struct skmem_cache *__single skm;
+#if KASAN
 	void *buf;
+	size_t skm_align_off;
+#endif
 	size_t segsize;
 	size_t chunksize;
 	size_t objsize;
@@ -577,7 +565,7 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 	VERIFY(powerof2(bufalign));
 
 	if (region == NULL) {
-		struct skmem_region_params srp;
+		struct skmem_region_params srp = {};
 
 		/* batching is currently not supported on pseudo regions */
 		VERIFY(!(cflags & SKMEM_CR_BATCH));
@@ -626,19 +614,21 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 	segsize = region->skr_seg_size;
 	ASSERT(bufalign <= segsize);
 
-	buf = zalloc_flags(skm_zone, Z_WAITOK | Z_ZERO);
 #if KASAN
+	buf = zalloc_flags_buf(skm_zone, Z_WAITOK | Z_ZERO);
 	/*
-	 * In case we didn't get a cache-aligned memory, round it up
-	 * accordingly.  This is needed in order to get the rest of
-	 * structure members aligned properly.  It also means that
-	 * the memory span gets shifted due to the round up, but it
-	 * is okay since we've allocated extra space for this.
+	 * We need to align `buf` such that offsetof(struct skmem_cache, skm_align)
+	 * is aligned to a cache line boundary. In KASAN builds, allocations are
+	 * preceded by metadata that changes the alignment of the object. The
+	 * extra required size is accounted for at the time skm_zone is created.
+	 * We then save the actual start of the allocation to skm_start, as it's
+	 * the address we need to actually free.
 	 */
-	skm = (struct skmem_cache *)
-	    P2ROUNDUP((intptr_t)buf + sizeof(void *), CHANNEL_CACHE_ALIGN_MAX);
-	void **pbuf = (void **)((intptr_t)skm - sizeof(void *));
-	*pbuf = buf;
+	skm_align_off = offsetof(struct skmem_cache, skm_align);
+	uintptr_t diff = P2ROUNDUP((intptr_t)buf + skm_align_off,
+	    CHANNEL_CACHE_ALIGN_MAX) - (intptr_t)buf;
+	skm = (void *)((char *)buf + diff);
+	skm->skm_start = buf;
 #else /* !KASAN */
 	/*
 	 * We expect that the zone allocator would allocate elements
@@ -646,8 +636,10 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 	 * size computed in skmem_cache_pre_init() earlier, and
 	 * 'skm' is therefore the element address itself.
 	 */
-	skm = buf;
+	skm = zalloc_flags_buf(skm_zone, Z_WAITOK | Z_ZERO);
 #endif /* !KASAN */
+	skm->skm_cpu_cache_count = ncpu;
+
 	VERIFY(IS_P2ALIGNED(skm, CHANNEL_CACHE_ALIGN_MAX));
 
 	if ((skmem_debug & SKMEM_DEBUG_NOMAGAZINES) ||
@@ -775,6 +767,7 @@ skmem_cache_create(const char *name, size_t bufsize, size_t bufalign,
 	skm->skm_hash_limit = SKMEM_CACHE_HASH_LIMIT;
 	skm->skm_hash_table = sk_alloc_type_array(struct skmem_bufctl_bkt,
 	    skm->skm_hash_initial, Z_WAITOK | Z_NOFAIL, skmem_tag_bufctl_hash);
+	skm->skm_hash_size = skm->skm_hash_initial;
 
 	skm->skm_hash_mask = (skm->skm_hash_initial - 1);
 	skm->skm_hash_shift = flsll(chunksize) - 1;
@@ -879,9 +872,14 @@ skmem_cache_destroy(struct skmem_cache *skm)
 		}
 #endif /* DEBUG || DEVELOPMENT */
 
+		/* XXX -fbounds-safety: __counted_by pointer (skm_hash_table)
+		 * cannot be pointed to by any other variable */
+		struct skmem_bufctl_bkt *__indexable htable = skm->skm_hash_table;
 		sk_free_type_array(struct skmem_bufctl_bkt,
-		    skm->skm_hash_mask + 1, skm->skm_hash_table);
+		    skm->skm_hash_size, htable);
 		skm->skm_hash_table = NULL;
+		htable = NULL;
+		skm->skm_hash_size = 0;
 	}
 
 	for (cpuid = 0; cpuid < ncpu; cpuid++) {
@@ -901,747 +899,10 @@ skmem_cache_destroy(struct skmem_cache *skm)
 
 #if KASAN
 	/* get the original address since we're about to free it */
-	void **pbuf = (void **)((intptr_t)skm - sizeof(void *));
-	skm = *pbuf;
-#endif /* KASAN */
-
+	zfree(skm_zone, skm->skm_start);
+#else
 	zfree(skm_zone, skm);
-}
-
-/*
- * Create a slab.
- */
-static struct skmem_slab *
-skmem_slab_create(struct skmem_cache *skm, uint32_t skmflag)
-{
-	struct skmem_region *skr = skm->skm_region;
-	uint32_t objsize, chunks;
-	size_t slabsize = skm->skm_slabsize;
-	struct skmem_slab *sl;
-	struct sksegment *sg, *sgm;
-	char *buf, *bufm, *slab, *slabm;
-
-	/*
-	 * Allocate a segment (a slab at our layer) from the region.
-	 */
-	slab = skmem_region_alloc(skr, (void **)&slabm, &sg, &sgm, skmflag);
-	if (slab == NULL) {
-		goto rg_alloc_failure;
-	}
-
-	if ((sl = skmem_cache_alloc(skmem_slab_cache, SKMEM_SLEEP)) == NULL) {
-		goto slab_alloc_failure;
-	}
-
-	ASSERT(sg != NULL);
-	ASSERT(sgm == NULL || sgm->sg_index == sg->sg_index);
-
-	bzero(sl, sizeof(*sl));
-	sl->sl_cache = skm;
-	sl->sl_base = buf = slab;
-	sl->sl_basem = bufm = slabm;
-	ASSERT(skr->skr_c_obj_size <= UINT32_MAX);
-	objsize = (uint32_t)skr->skr_c_obj_size;
-	ASSERT(skm->skm_objsize == objsize);
-	ASSERT((slabsize / objsize) <= UINT32_MAX);
-	sl->sl_chunks = chunks = (uint32_t)(slabsize / objsize);
-	sl->sl_seg = sg;
-	sl->sl_segm = sgm;
-
-	/*
-	 * Create one or more buffer control structures for the slab,
-	 * each one tracking a chunk of raw object from the segment,
-	 * and insert these into the slab's list of buffer controls.
-	 */
-	ASSERT(chunks > 0);
-	while (chunks != 0) {
-		struct skmem_bufctl *bc;
-
-		bc = skmem_cache_alloc(skmem_bufctl_cache, SKMEM_SLEEP);
-		if (bc == NULL) {
-			goto bufctl_alloc_failure;
-		}
-
-		bzero(bc, bc_size);
-		bc->bc_addr = buf;
-		bc->bc_addrm = bufm;
-		bc->bc_slab = sl;
-		bc->bc_idx = (sl->sl_chunks - chunks);
-		if (skr->skr_mode & SKR_MODE_SHAREOK) {
-			bc->bc_flags |= SKMEM_BUFCTL_SHAREOK;
-		}
-		SLIST_INSERT_HEAD(&sl->sl_head, bc, bc_link);
-		bc->bc_lim = objsize;
-		buf += objsize;
-		if (bufm != NULL) {
-			bufm += objsize;
-		}
-		--chunks;
-	}
-
-	SK_DF(SK_VERB_MEM_CACHE, "skm 0x%llx sl 0x%llx",
-	    SK_KVA(skm), SK_KVA(sl));
-	SK_DF(SK_VERB_MEM_CACHE, "  [%u] [0x%llx-0x%llx)", sl->sl_seg->sg_index,
-	    SK_KVA(slab), SK_KVA(slab + objsize));
-
-	return sl;
-
-bufctl_alloc_failure:
-	skmem_slab_destroy(skm, sl);
-
-slab_alloc_failure:
-	skmem_region_free(skr, slab, slabm);
-
-rg_alloc_failure:
-	os_atomic_inc(&skm->skm_sl_alloc_fail, relaxed);
-
-	return NULL;
-}
-
-/*
- * Destroy a slab.
- */
-static void
-skmem_slab_destroy(struct skmem_cache *skm, struct skmem_slab *sl)
-{
-	struct skmem_bufctl *bc, *tbc;
-	void *slab = sl->sl_base;
-	void *slabm = sl->sl_basem;
-
-	ASSERT(sl->sl_refcnt == 0);
-
-	SK_DF(SK_VERB_MEM_CACHE, "skm 0x%llx sl 0x%llx",
-	    SK_KVA(skm), SK_KVA(sl));
-	SK_DF(SK_VERB_MEM_CACHE, "  [%u] [0x%llx-0x%llx)", sl->sl_seg->sg_index,
-	    SK_KVA(slab), SK_KVA((uintptr_t)slab + skm->skm_objsize));
-
-	/*
-	 * Go through the slab's list of buffer controls and free
-	 * them, and then free the slab itself back to its cache.
-	 */
-	SLIST_FOREACH_SAFE(bc, &sl->sl_head, bc_link, tbc) {
-		SLIST_REMOVE(&sl->sl_head, bc, skmem_bufctl, bc_link);
-		skmem_cache_free(skmem_bufctl_cache, bc);
-	}
-	skmem_cache_free(skmem_slab_cache, sl);
-
-	/* and finally free the segment back to the backing region */
-	skmem_region_free(skm->skm_region, slab, slabm);
-}
-
-/*
- * Allocate a raw object from the (locked) slab layer.  Normal region variant.
- */
-static int
-skmem_slab_alloc_locked(struct skmem_cache *skm, struct skmem_obj_info *oi,
-    struct skmem_obj_info *oim, uint32_t skmflag)
-{
-	struct skmem_bufctl_bkt *bcb;
-	struct skmem_bufctl *bc;
-	struct skmem_slab *sl;
-	uint32_t retries = 0;
-	uint64_t boff_total = 0;                /* in usec */
-	uint64_t boff = 0;                      /* in msec */
-	boolean_t new_slab;
-	void *buf;
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	vm_offset_t tagged_address;             /* address tagging */
-	struct skmem_region *region;            /* region source for this slab */
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-
-	/* this flag is not for the caller to set */
-	VERIFY(!(skmflag & SKMEM_FAILOK));
-
-	/*
-	 * A slab is either in a partially-allocated list (at least it has
-	 * a free object available), or is in the empty list (everything
-	 * has been allocated.)  If we can't find a partially-allocated
-	 * slab, then we need to allocate a slab (segment) from the region.
-	 */
-again:
-	SKM_SLAB_LOCK_ASSERT_HELD(skm);
-	sl = TAILQ_FIRST(&skm->skm_sl_partial_list);
-	if (sl == NULL) {
-		uint32_t flags = skmflag;
-		boolean_t retry;
-
-		ASSERT(skm->skm_sl_partial == 0);
-		SKM_SLAB_UNLOCK(skm);
-		if (!(flags & SKMEM_NOSLEEP)) {
-			/*
-			 * Pick up a random value to start the exponential
-			 * backoff, if this is the first round, or if the
-			 * current value is over the threshold.  Otherwise,
-			 * double the backoff value.
-			 */
-			if (boff == 0 || boff > SKMEM_SLAB_BACKOFF_THRES) {
-				read_frandom(&boff, sizeof(boff));
-				boff = (boff % SKMEM_SLAB_BACKOFF_RANDOM) + 1;
-				ASSERT(boff > 0);
-			} else if (os_mul_overflow(boff, 2, &boff)) {
-				panic_plain("\"%s\": boff counter "
-				    "overflows\n", skm->skm_name);
-				/* NOTREACHED */
-				__builtin_unreachable();
-			}
-			/* add this value (in msec) to the total (in usec) */
-			if (os_add_overflow(boff_total,
-			    (boff * NSEC_PER_USEC), &boff_total)) {
-				panic_plain("\"%s\": boff_total counter "
-				    "overflows\n", skm->skm_name);
-				/* NOTREACHED */
-				__builtin_unreachable();
-			}
-		}
-		/*
-		 * In the event of a race between multiple threads trying
-		 * to create the last remaining (or the only) slab, let the
-		 * loser(s) attempt to retry after waiting a bit.  The winner
-		 * would have inserted the newly-created slab into the list.
-		 */
-		if (!(flags & SKMEM_NOSLEEP) &&
-		    boff_total <= SKMEM_SLAB_MAX_BACKOFF) {
-			retry = TRUE;
-			++retries;
-			flags |= SKMEM_FAILOK;
-		} else {
-			if (!(flags & SKMEM_NOSLEEP)) {
-				panic_plain("\"%s\": failed to allocate "
-				    "slab (sleeping mode) after %llu "
-				    "msec, %u retries\n\n%s", skm->skm_name,
-				    (boff_total / NSEC_PER_USEC), retries,
-				    skmem_dump(skm->skm_region));
-				/* NOTREACHED */
-				__builtin_unreachable();
-			}
-			retry = FALSE;
-		}
-
-		/*
-		 * Create a new slab.
-		 */
-		if ((sl = skmem_slab_create(skm, flags)) == NULL) {
-			if (retry) {
-				SK_ERR("\"%s\": failed to allocate "
-				    "slab (%ssleeping mode): waiting for %llu "
-				    "msec, total %llu msec, %u retries",
-				    skm->skm_name,
-				    (flags & SKMEM_NOSLEEP) ? "non-" : "",
-				    boff, (boff_total / NSEC_PER_USEC), retries);
-				VERIFY(boff > 0 && ((uint32_t)boff <=
-				    (SKMEM_SLAB_BACKOFF_THRES * 2)));
-				delay((uint32_t)boff * NSEC_PER_USEC);
-				SKM_SLAB_LOCK(skm);
-				goto again;
-			} else {
-				SK_RDERR(4, "\"%s\": failed to allocate slab "
-				    "(%ssleeping mode)", skm->skm_name,
-				    (flags & SKMEM_NOSLEEP) ? "non-" : "");
-				SKM_SLAB_LOCK(skm);
-			}
-			return ENOMEM;
-		}
-
-		SKM_SLAB_LOCK(skm);
-		skm->skm_sl_create++;
-		if ((skm->skm_sl_bufinuse += sl->sl_chunks) >
-		    skm->skm_sl_bufmax) {
-			skm->skm_sl_bufmax = skm->skm_sl_bufinuse;
-		}
-	}
-	skm->skm_sl_alloc++;
-
-	new_slab = (sl->sl_refcnt == 0);
-	ASSERT(new_slab || SKMEM_SLAB_IS_PARTIAL(sl));
-
-	sl->sl_refcnt++;
-	ASSERT(sl->sl_refcnt <= sl->sl_chunks);
-
-	/*
-	 * We either have a new slab, or a partially-allocated one.
-	 * Remove a buffer control from the slab, and insert it to
-	 * the allocated-address hash chain.
-	 */
-	bc = SLIST_FIRST(&sl->sl_head);
-	ASSERT(bc != NULL);
-	SLIST_REMOVE(&sl->sl_head, bc, skmem_bufctl, bc_link);
-
-	/* sanity check */
-	VERIFY(bc->bc_usecnt == 0);
-
-	/*
-	 * Also store the master object's region info for the caller.
-	 */
-	bzero(oi, sizeof(*oi));
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	region = sl->sl_cache->skm_region;
-	if (region->skr_mode & SKR_MODE_MEMTAG) {
-		/*
-		 * If this region is configured to be tagged, we generate a
-		 * unique tag for the object address, and return this tagged
-		 * address to the caller. vm_memtag_assign_tag generates a
-		 * unique tag for the given address and size, and
-		 * vm_memtag_set_tag commits the tag to the backing memory
-		 * metadata. This tagged address is returned back to the client,
-		 * and when the client frees the address, we "re-tag" the
-		 * address to prevent against use-after-free attacks (more on
-		 * this in skmem_cache_batch_free).
-		 */
-		tagged_address = vm_memtag_assign_tag((vm_offset_t)bc->bc_addr,
-		    skm->skm_objsize);
-		vm_memtag_set_tag(tagged_address, skm->skm_objsize);
-		buf = (void *)tagged_address;
-	} else {
-		buf = bc->bc_addr;
-	}
-#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-	buf = bc->bc_addr;
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-	SKMEM_OBJ_ADDR(oi) = buf;
-	SKMEM_OBJ_BUFCTL(oi) = bc;      /* master only; NULL for slave */
-	ASSERT(skm->skm_objsize <= UINT32_MAX);
-	SKMEM_OBJ_SIZE(oi) = (uint32_t)skm->skm_objsize;
-	SKMEM_OBJ_IDX_REG(oi) =
-	    ((sl->sl_seg->sg_index * sl->sl_chunks) + bc->bc_idx);
-	SKMEM_OBJ_IDX_SEG(oi) = bc->bc_idx;
-	/*
-	 * And for slave object.
-	 */
-	if (oim != NULL) {
-		bzero(oim, sizeof(*oim));
-		if (bc->bc_addrm != NULL) {
-			SKMEM_OBJ_ADDR(oim) = bc->bc_addrm;
-			SKMEM_OBJ_SIZE(oim) = SKMEM_OBJ_SIZE(oi);
-			SKMEM_OBJ_IDX_REG(oim) = SKMEM_OBJ_IDX_REG(oi);
-			SKMEM_OBJ_IDX_SEG(oim) = SKMEM_OBJ_IDX_SEG(oi);
-		}
-	}
-
-	if (skm->skm_mode & SKM_MODE_BATCH) {
-		((struct skmem_obj *)buf)->mo_next = NULL;
-	}
-
-	/* insert to allocated-address hash chain */
-	bcb = SKMEM_CACHE_HASH(skm, buf);
-	SLIST_INSERT_HEAD(&bcb->bcb_head, bc, bc_link);
-
-	if (SLIST_EMPTY(&sl->sl_head)) {
-		/*
-		 * If that was the last buffer control from this slab,
-		 * insert the slab into the empty list.  If it was in
-		 * the partially-allocated list, then remove the slab
-		 * from there as well.
-		 */
-		ASSERT(sl->sl_refcnt == sl->sl_chunks);
-		if (new_slab) {
-			ASSERT(sl->sl_chunks == 1);
-		} else {
-			ASSERT(sl->sl_chunks > 1);
-			ASSERT(skm->skm_sl_partial > 0);
-			skm->skm_sl_partial--;
-			TAILQ_REMOVE(&skm->skm_sl_partial_list, sl, sl_link);
-		}
-		skm->skm_sl_empty++;
-		ASSERT(skm->skm_sl_empty != 0);
-		TAILQ_INSERT_HEAD(&skm->skm_sl_empty_list, sl, sl_link);
-	} else {
-		/*
-		 * The slab is not empty; if it was newly allocated
-		 * above, then it's not in the partially-allocated
-		 * list and so we insert it there.
-		 */
-		ASSERT(SKMEM_SLAB_IS_PARTIAL(sl));
-		if (new_slab) {
-			skm->skm_sl_partial++;
-			ASSERT(skm->skm_sl_partial != 0);
-			TAILQ_INSERT_HEAD(&skm->skm_sl_partial_list,
-			    sl, sl_link);
-		}
-	}
-
-	/* if auditing is enabled, record this transaction */
-	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
-		skmem_audit_bufctl(bc);
-	}
-
-	return 0;
-}
-
-/*
- * Allocate a raw object from the (locked) slab layer.  Pseudo region variant.
- */
-static int
-skmem_slab_alloc_pseudo_locked(struct skmem_cache *skm,
-    struct skmem_obj_info *oi, struct skmem_obj_info *oim, uint32_t skmflag)
-{
-	zalloc_flags_t zflags = (skmflag & SKMEM_NOSLEEP) ? Z_NOWAIT : Z_WAITOK;
-	struct skmem_region *skr = skm->skm_region;
-	void *obj, *buf;
-
-	/* this flag is not for the caller to set */
-	VERIFY(!(skmflag & SKMEM_FAILOK));
-
-	SKM_SLAB_LOCK_ASSERT_HELD(skm);
-
-	ASSERT(skr->skr_reg == NULL && skr->skr_zreg != NULL);
-	/* mirrored region is not applicable */
-	ASSERT(!(skr->skr_mode & SKR_MODE_MIRRORED));
-	/* batching is not yet supported */
-	ASSERT(!(skm->skm_mode & SKM_MODE_BATCH));
-
-	if ((obj = zalloc_flags(skr->skr_zreg, zflags | Z_ZERO)) == NULL) {
-		os_atomic_inc(&skm->skm_sl_alloc_fail, relaxed);
-		return ENOMEM;
-	}
-
-#if KASAN
-	/*
-	 * Perform some fix-ups since the zone element isn't guaranteed
-	 * to be on the aligned boundary.  The effective object size
-	 * has been adjusted accordingly by skmem_region_create() earlier
-	 * at cache creation time.
-	 *
-	 * 'buf' is get the aligned address for this object.
-	 */
-	buf = (void *)P2ROUNDUP((intptr_t)obj + sizeof(u_int64_t),
-	    skm->skm_bufalign);
-
-	/*
-	 * Wind back a pointer size from the aligned address and
-	 * save the original address so we can free it later.
-	 */
-	void **pbuf = (void **)((intptr_t)buf - sizeof(void *));
-	*pbuf = obj;
-
-	VERIFY(((intptr_t)buf + skm->skm_bufsize) <=
-	    ((intptr_t)obj + skm->skm_objsize));
-#else /* !KASAN */
-	/*
-	 * We expect that the zone allocator would allocate elements
-	 * rounded up to the requested alignment based on the effective
-	 * object size computed in skmem_region_create() earlier, and
-	 * 'buf' is therefore the element address itself.
-	 */
-	buf = obj;
-#endif /* !KASAN */
-
-	/* make sure the object is aligned */
-	VERIFY(IS_P2ALIGNED(buf, skm->skm_bufalign));
-
-	/*
-	 * Return the object's info to the caller.
-	 */
-	bzero(oi, sizeof(*oi));
-	SKMEM_OBJ_ADDR(oi) = buf;
-	ASSERT(skm->skm_objsize <= UINT32_MAX);
-	SKMEM_OBJ_SIZE(oi) = (uint32_t)skm->skm_objsize;
-	if (oim != NULL) {
-		bzero(oim, sizeof(*oim));
-	}
-
-	skm->skm_sl_alloc++;
-	skm->skm_sl_bufinuse++;
-	if (skm->skm_sl_bufinuse > skm->skm_sl_bufmax) {
-		skm->skm_sl_bufmax = skm->skm_sl_bufinuse;
-	}
-
-	return 0;
-}
-
-/*
- * Allocate a raw object from the slab layer.
- */
-static int
-skmem_slab_alloc(struct skmem_cache *skm, struct skmem_obj_info *oi,
-    struct skmem_obj_info *oim, uint32_t skmflag)
-{
-	int err;
-
-	SKM_SLAB_LOCK(skm);
-	err = skm->skm_slab_alloc(skm, oi, oim, skmflag);
-	SKM_SLAB_UNLOCK(skm);
-
-	return err;
-}
-
-/*
- * Allocate raw object(s) from the slab layer.
- */
-static uint32_t
-skmem_slab_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
-    uint32_t num, uint32_t skmflag)
-{
-	uint32_t need = num;
-
-	ASSERT(list != NULL && (skm->skm_mode & SKM_MODE_BATCH));
-	*list = NULL;
-
-	SKM_SLAB_LOCK(skm);
-	for (;;) {
-		struct skmem_obj_info oi, oim;
-
-		/*
-		 * Get a single raw object from the slab layer.
-		 */
-		if (skm->skm_slab_alloc(skm, &oi, &oim, skmflag) != 0) {
-			break;
-		}
-
-		*list = SKMEM_OBJ_ADDR(&oi);
-		ASSERT((*list)->mo_next == NULL);
-		/* store these inside the object itself */
-		(*list)->mo_info = oi;
-		(*list)->mo_minfo = oim;
-		list = &(*list)->mo_next;
-
-		ASSERT(need != 0);
-		if (--need == 0) {
-			break;
-		}
-	}
-	SKM_SLAB_UNLOCK(skm);
-
-	return num - need;
-}
-
-/*
- * Free a raw object to the (locked) slab layer.  Normal region variant.
- */
-static void
-skmem_slab_free_locked(struct skmem_cache *skm, void *buf)
-{
-	struct skmem_bufctl *bc, *tbc;
-	struct skmem_bufctl_bkt *bcb;
-	struct skmem_slab *sl = NULL;
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	struct skmem_region *region;
-	vm_offset_t tagged_addr;
-	/*
-	 * If buf is tagged, then addr would have the canonicalized address.
-	 * If buf is untagged, then addr is same as buf.
-	 */
-	void *addr = (void *)vm_memtag_canonicalize_address((vm_offset_t)buf);
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-
-	SKM_SLAB_LOCK_ASSERT_HELD(skm);
-	ASSERT(buf != NULL);
-	/* caller is expected to clear mo_next */
-	ASSERT(!(skm->skm_mode & SKM_MODE_BATCH) ||
-	    ((struct skmem_obj *)buf)->mo_next == NULL);
-
-	/*
-	 * Search the hash chain to find a matching buffer control for the
-	 * given object address.  If found, remove the buffer control from
-	 * the hash chain and insert it into the freelist.  Otherwise, we
-	 * panic since the caller has given us a bogus address.
-	 */
-	skm->skm_sl_free++;
-	bcb = SKMEM_CACHE_HASH(skm, buf);
-
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	/*
-	 * If this region is configured to tag memory addresses, then buf is a
-	 * tagged address. When we search for the buffer control from the hash
-	 * table, we need to use the untagged address, because buffer control
-	 * maintains untagged address (bc_addr). vm_memtag_canonicalize_address
-	 * returns the untagged address.
-	 */
-	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
-		if (bc->bc_addr == addr) {
-			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
-			sl = bc->bc_slab;
-			break;
-		}
-	}
-#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-	SLIST_FOREACH_SAFE(bc, &bcb->bcb_head, bc_link, tbc) {
-		if (bc->bc_addr == buf) {
-			SLIST_REMOVE(&bcb->bcb_head, bc, skmem_bufctl, bc_link);
-			sl = bc->bc_slab;
-			break;
-		}
-	}
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-
-	if (bc == NULL) {
-		panic("%s: attempt to free invalid or already-freed obj %p "
-		    "on skm %p", __func__, buf, skm);
-		/* NOTREACHED */
-		__builtin_unreachable();
-	}
-	ASSERT(sl != NULL && sl->sl_cache == skm);
-
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	/*
-	 * We use untagged address here, because SKMEM_SLAB_MEMBER compares the
-	 * address against sl_base, which is untagged.
-	 */
-	VERIFY(SKMEM_SLAB_MEMBER(sl, addr));
-#else /* !CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-	VERIFY(SKMEM_SLAB_MEMBER(sl, buf));
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-
-	/* make sure this object is not currently in use by another object */
-	VERIFY(bc->bc_usecnt == 0);
-
-	/* if auditing is enabled, record this transaction */
-	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
-		skmem_audit_bufctl(bc);
-	}
-
-	/* if clear on free is requested, zero out the object */
-	if (skm->skm_mode & SKM_MODE_CLEARONFREE) {
-		bzero(buf, skm->skm_objsize);
-	}
-
-#if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
-	/*
-	 * If this region is configured to tag memory addresses, we re-tag this
-	 * address as the object is freed. We do the re-tagging in the magazine
-	 * layer too, but in case we need to free raw objects to the slab layer
-	 * (either becasue SKM_MODE_NOMAGAZINES is set, or the magazine layer
-	 * was not able to allocate empty magazines), we re-tag the addresses
-	 * here in the slab layer. Freeing to the slab layer is symmetrical to
-	 * allocating from the slab layer - when we allocate from slab layer, we
-	 * tag the address, and then construct the object; when we free to the
-	 * slab layer, we destruct the object, and retag the address.
-	 * We do the re-tagging here, because this is right after the last usage
-	 * of the buf variable (which is tagged).
-	 */
-	region = skm->skm_region;
-	if (region->skr_mode & SKR_MODE_MEMTAG) {
-		tagged_addr = vm_memtag_assign_tag((vm_offset_t)buf,
-		    skm->skm_objsize);
-		vm_memtag_set_tag(tagged_addr, skm->skm_objsize);
-	}
-#endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
-
-	/* insert the buffer control to the slab's freelist */
-	SLIST_INSERT_HEAD(&sl->sl_head, bc, bc_link);
-
-	ASSERT(sl->sl_refcnt >= 1);
-	if (--sl->sl_refcnt == 0) {
-		/*
-		 * If this was the last outstanding object for the slab,
-		 * remove the slab from the partially-allocated or empty
-		 * list, and destroy the slab (segment) back to the region.
-		 */
-		if (sl->sl_chunks == 1) {
-			ASSERT(skm->skm_sl_empty > 0);
-			skm->skm_sl_empty--;
-			TAILQ_REMOVE(&skm->skm_sl_empty_list, sl, sl_link);
-		} else {
-			ASSERT(skm->skm_sl_partial > 0);
-			skm->skm_sl_partial--;
-			TAILQ_REMOVE(&skm->skm_sl_partial_list, sl, sl_link);
-		}
-		ASSERT((int64_t)(skm->skm_sl_bufinuse - sl->sl_chunks) >= 0);
-		skm->skm_sl_bufinuse -= sl->sl_chunks;
-		skm->skm_sl_destroy++;
-		SKM_SLAB_UNLOCK(skm);
-		skmem_slab_destroy(skm, sl);
-		SKM_SLAB_LOCK(skm);
-		return;
-	}
-
-	ASSERT(bc == SLIST_FIRST(&sl->sl_head));
-	if (SLIST_NEXT(bc, bc_link) == NULL) {
-		/*
-		 * If this is the first (potentially amongst many) object
-		 * that's returned to the slab, remove the slab from the
-		 * empty list and insert to end of the partially-allocated
-		 * list. This should help avoid thrashing the partial slab
-		 * since we avoid disturbing what's already at the front.
-		 */
-		ASSERT(sl->sl_refcnt == (sl->sl_chunks - 1));
-		ASSERT(sl->sl_chunks > 1);
-		ASSERT(skm->skm_sl_empty > 0);
-		skm->skm_sl_empty--;
-		TAILQ_REMOVE(&skm->skm_sl_empty_list, sl, sl_link);
-		skm->skm_sl_partial++;
-		ASSERT(skm->skm_sl_partial != 0);
-		TAILQ_INSERT_TAIL(&skm->skm_sl_partial_list, sl, sl_link);
-	}
-}
-
-/*
- * Free a raw object to the (locked) slab layer.  Pseudo region variant.
- */
-static void
-skmem_slab_free_pseudo_locked(struct skmem_cache *skm, void *buf)
-{
-	struct skmem_region *skr = skm->skm_region;
-	void *obj = buf;
-
-	ASSERT(skr->skr_reg == NULL && skr->skr_zreg != NULL);
-
-	SKM_SLAB_LOCK_ASSERT_HELD(skm);
-
-	VERIFY(IS_P2ALIGNED(obj, skm->skm_bufalign));
-
-#if KASAN
-	/*
-	 * Since we stuffed the original zone element address before
-	 * the buffer address in KASAN mode, get it back since we're
-	 * about to free it.
-	 */
-	void **pbuf = (void **)((intptr_t)obj - sizeof(void *));
-
-	VERIFY(((intptr_t)obj + skm->skm_bufsize) <=
-	    ((intptr_t)*pbuf + skm->skm_objsize));
-
-	obj = *pbuf;
 #endif /* KASAN */
-
-	/* free it to zone */
-	zfree(skr->skr_zreg, obj);
-
-	skm->skm_sl_free++;
-	ASSERT(skm->skm_sl_bufinuse > 0);
-	skm->skm_sl_bufinuse--;
-}
-
-/*
- * Free a raw object to the slab layer.
- */
-static void
-skmem_slab_free(struct skmem_cache *skm, void *buf)
-{
-	if (skm->skm_mode & SKM_MODE_BATCH) {
-		((struct skmem_obj *)buf)->mo_next = NULL;
-	}
-
-	SKM_SLAB_LOCK(skm);
-	skm->skm_slab_free(skm, buf);
-	SKM_SLAB_UNLOCK(skm);
-}
-
-/*
- * Free raw object(s) to the slab layer.
- */
-static void
-skmem_slab_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
-{
-	struct skmem_obj *listn;
-
-	ASSERT(list != NULL && (skm->skm_mode & SKM_MODE_BATCH));
-
-	SKM_SLAB_LOCK(skm);
-	for (;;) {
-		listn = list->mo_next;
-		list->mo_next = NULL;
-
-		/*
-		 * Free a single object to the slab layer.
-		 */
-		skm->skm_slab_free(skm, (void *)list);
-
-		/* if no more objects to free, we're done */
-		if ((list = listn) == NULL) {
-			break;
-		}
-	}
-	SKM_SLAB_UNLOCK(skm);
 }
 
 /*
@@ -1679,10 +940,11 @@ skmem_cache_get_obj_info(struct skmem_cache *skm, void *buf,
 	 * Return the master object's info to the caller.
 	 */
 	sl = bc->bc_slab;
-	SKMEM_OBJ_ADDR(oi) = bc->bc_addr;
-	SKMEM_OBJ_BUFCTL(oi) = bc;      /* master only; NULL for slave */
-	ASSERT(skm->skm_objsize <= UINT32_MAX);
+	SKMEM_OBJ_ADDR(oi) = __unsafe_forge_bidi_indexable(void *, bc->bc_addr,
+	    (uint32_t)skm->skm_objsize);
 	SKMEM_OBJ_SIZE(oi) = (uint32_t)skm->skm_objsize;
+	ASSERT(skm->skm_objsize <= UINT32_MAX);
+	SKMEM_OBJ_BUFCTL(oi) = bc;      /* master only; NULL for slave */
 	SKMEM_OBJ_IDX_REG(oi) =
 	    (sl->sl_seg->sg_index * sl->sl_chunks) + bc->bc_idx;
 	SKMEM_OBJ_IDX_SEG(oi) = bc->bc_idx;
@@ -1692,7 +954,8 @@ skmem_cache_get_obj_info(struct skmem_cache *skm, void *buf,
 	if (oim != NULL) {
 		bzero(oim, sizeof(*oim));
 		if (bc->bc_addrm != NULL) {
-			SKMEM_OBJ_ADDR(oim) = bc->bc_addrm;
+			SKMEM_OBJ_ADDR(oim) = __unsafe_forge_bidi_indexable(
+				void *, bc->bc_addrm, oi->oi_size);
 			SKMEM_OBJ_SIZE(oim) = oi->oi_size;
 			SKMEM_OBJ_IDX_REG(oim) = oi->oi_idx_reg;
 			SKMEM_OBJ_IDX_SEG(oim) = oi->oi_idx_seg;
@@ -1709,7 +972,7 @@ skmem_magazine_ctor(struct skmem_obj_info *oi, struct skmem_obj_info *oim,
     void *arg, uint32_t skmflag)
 {
 #pragma unused(oim, skmflag)
-	struct skmem_mag *mg = SKMEM_OBJ_ADDR(oi);
+	struct skmem_mag *__single mg = SKMEM_OBJ_ADDR(oi);
 
 	ASSERT(oim == NULL);
 	ASSERT(arg != NULL);
@@ -1735,7 +998,7 @@ skmem_magazine_destroy(struct skmem_cache *skm, struct skmem_mag *mg,
 	int round;
 
 	for (round = 0; round < nrounds; round++) {
-		void *buf = mg->mg_round[round];
+		void *__single buf = mg->mg_round[round];
 		struct skmem_obj *next;
 
 		if (skm->skm_mode & SKM_MODE_BATCH) {
@@ -1779,7 +1042,7 @@ skmem_magazine_destroy(struct skmem_cache *skm, struct skmem_mag *mg,
  */
 static uint32_t
 skmem_depot_batch_alloc(struct skmem_cache *skm, struct skmem_maglist *ml,
-    uint32_t *count, struct skmem_mag **list, uint32_t num)
+    uint32_t *count, struct skmem_mag *__bidi_indexable *list, uint32_t num)
 {
 	SLIST_HEAD(, skmem_mag) mg_list = SLIST_HEAD_INITIALIZER(mg_list);
 	struct skmem_mag *mg;
@@ -2018,26 +1281,14 @@ skmem_cpu_reload(struct skmem_cpu_cache *cp, struct skmem_mag *mg, int rounds)
 }
 
 /*
- * Allocate a constructed object from the cache.
- */
-void *
-skmem_cache_alloc(struct skmem_cache *skm, uint32_t skmflag)
-{
-	struct skmem_obj *buf;
-
-	(void) skmem_cache_batch_alloc(skm, &buf, 1, skmflag);
-	return buf;
-}
-
-/*
  * Allocate constructed object(s) from the cache.
  */
 uint32_t
 skmem_cache_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
-    uint32_t num, uint32_t skmflag)
+    size_t SK_FB_ARG objsize, uint32_t num, uint32_t skmflag)
 {
 	struct skmem_cpu_cache *cp = SKMEM_CPU_CACHE(skm);
-	struct skmem_obj **top = &(*list);
+	struct skmem_obj **top = list;
 	struct skmem_mag *mg;
 	uint32_t need = num;
 
@@ -2068,7 +1319,7 @@ skmem_cache_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
 			cp->cp_alloc += objs;
 
 			if (skm->skm_mode & SKM_MODE_BATCH) {
-				struct skmem_obj *tail =
+				struct skmem_obj *__single tail =
 				    cp->cp_loaded->mg_round[cp->cp_rounds];
 				list = &tail->mo_next;
 				*list = NULL;
@@ -2148,7 +1399,7 @@ skmem_cache_batch_alloc(struct skmem_cache *skm, struct skmem_obj **list,
 	SKM_CPU_UNLOCK(cp);
 
 	if (__probable(num > 1 && (skm->skm_mode & SKM_MODE_BATCH) != 0)) {
-		struct skmem_obj *rtop, *rlist, *rlistp = NULL;
+		struct skmem_obj *rtop, *__single rlist, *rlistp = NULL;
 		uint32_t rlistc, c = 0;
 
 		/*
@@ -2256,7 +1507,8 @@ done:
 	/* if auditing is enabled, record this transaction */
 	if (__improbable(*top != NULL &&
 	    (skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
-		skmem_audit_buf(skm, *top);
+		skmem_audit_buf(skm,
+		    __unsafe_forge_bidi_indexable(struct skmem_obj *, *top, objsize));
 	}
 
 	return num - need;
@@ -2271,14 +1523,48 @@ skmem_cache_free(struct skmem_cache *skm, void *buf)
 	if (skm->skm_mode & SKM_MODE_BATCH) {
 		((struct skmem_obj *)buf)->mo_next = NULL;
 	}
-	skmem_cache_batch_free(skm, (struct skmem_obj *)buf);
+	skmem_cache_batch_free_common(skm, (struct skmem_obj *)buf, 0);
+}
+
+/*
+ * Free a constructed object.
+ */
+void
+skmem_cache_free_nocache(struct skmem_cache *skm, void *buf)
+{
+	if (skm->skm_mode & SKM_MODE_BATCH) {
+		((struct skmem_obj *)buf)->mo_next = NULL;
+	}
+	skmem_cache_batch_free_common(skm, (struct skmem_obj *)buf, SKMEM_CACHE_FREE_NOCACHE);
 }
 
 void
 skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 {
+	skmem_cache_batch_free_common(skm, list, 0);
+}
+
+void
+skmem_cache_batch_free_nocache(struct skmem_cache *skm, struct skmem_obj *list)
+{
+	skmem_cache_batch_free_common(skm, list, SKMEM_CACHE_FREE_NOCACHE);
+}
+
+static void
+skmem_cache_batch_free_common(struct skmem_cache *skm, struct skmem_obj *list, uint32_t flags)
+{
 	struct skmem_cpu_cache *cp = SKMEM_CPU_CACHE(skm);
 	struct skmem_magtype *mtp;
+	/*
+	 * XXX -fbounds-safety: Don't mark mg as __single, because it's a struct
+	 * with a flexible array, and when we allocate it, the alloc function
+	 * returns an __indexable to tell us the bounds. But if we mark this as
+	 * __single, we lose that information. It might compile fine, but at
+	 * runtime, before we actually assign the count value, there will be a
+	 * comparison between current count value and the new count value we
+	 * assign, where current count is supposed to be greater than the new
+	 * count. Unfortunately, this will most likely fail.
+	 */
 	struct skmem_mag *mg;
 	struct skmem_obj *listn;
 #if CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT)
@@ -2289,6 +1575,10 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 	/* if auditing is enabled, record this transaction */
 	if (__improbable((skm->skm_mode & SKM_MODE_AUDIT) != 0)) {
 		skmem_audit_buf(skm, list);
+	}
+
+	if (flags & SKMEM_CACHE_FREE_NOCACHE) {
+		goto nocache;
 	}
 
 	SKM_CPU_LOCK(cp);
@@ -2331,7 +1621,9 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 				vm_memtag_set_tag(tagged_address,
 				    skm->skm_objsize);
 				cp->cp_loaded->mg_round[cp->cp_rounds++] =
-				    (void *)tagged_address;
+				    __unsafe_forge_bidi_indexable(
+					struct skmem_obj *, tagged_address,
+					skm->skm_objsize);
 			} else {
 				cp->cp_loaded->mg_round[cp->cp_rounds++] = list;
 			}
@@ -2425,6 +1717,15 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 
 		if (mg != NULL) {
 			/*
+			 * XXX -fbounds-safety requires mg to be set before
+			 * setting mg->mg_count. But self-assignment mg = mg was
+			 * not allowed. As such, we used the following
+			 * workaround
+			 */
+			void *vmg = mg;
+			mg = vmg;
+			mg->mg_count = mg->mg_magtype->mt_magsize;
+			/*
 			 * We allocated an empty magazine, but since we
 			 * dropped the CPU lock above the magazine size
 			 * may have changed.  If that's the case free
@@ -2454,6 +1755,7 @@ skmem_cache_batch_free(struct skmem_cache *skm, struct skmem_obj *list)
 	}
 	SKM_CPU_UNLOCK(cp);
 
+nocache:
 	/*
 	 * We weren't able to free the constructed object(s) to the
 	 * magazine layer, so deconstruct them and free to the slab.
@@ -2687,7 +1989,8 @@ skmem_cache_resize_exit(struct skmem_cache *skm)
 static void
 skmem_cache_magazine_resize(struct skmem_cache *skm)
 {
-	struct skmem_magtype *mtp = skm->skm_magtype;
+	struct skmem_magtype *mtp = __unsafe_forge_bidi_indexable(
+		struct skmem_magtype *, skm->skm_magtype, sizeof(skmem_magtype));
 
 	/* insist that we are executing in the update thread call context */
 	ASSERT(sk_is_cache_update_protected());
@@ -2727,7 +2030,7 @@ skmem_cache_magazine_resize(struct skmem_cache *skm)
 static void
 skmem_cache_hash_rescale(struct skmem_cache *skm)
 {
-	struct skmem_bufctl_bkt *old_table, *new_table;
+	struct skmem_bufctl_bkt *__indexable old_table, *new_table;
 	size_t old_size, new_size;
 	uint32_t i, moved = 0;
 
@@ -2765,6 +2068,7 @@ skmem_cache_hash_rescale(struct skmem_cache *skm)
 
 	skm->skm_hash_mask = (new_size - 1);
 	skm->skm_hash_table = new_table;
+	skm->skm_hash_size = new_size;
 	skm->skm_sl_rescale++;
 
 	for (i = 0; i < old_size; i++) {
@@ -2978,22 +2282,6 @@ skmem_cache_update_func(thread_call_param_t dummy, thread_call_param_t arg)
 }
 
 /*
- * Given a buffer control, record the current transaction.
- */
-__attribute__((noinline, cold, not_tail_called))
-static inline void
-skmem_audit_bufctl(struct skmem_bufctl *bc)
-{
-	struct skmem_bufctl_audit *bca = (struct skmem_bufctl_audit *)bc;
-	struct timeval tv;
-
-	microuptime(&tv);
-	bca->bc_thread = current_thread();
-	bca->bc_timestamp = (uint32_t)((tv.tv_sec * 1000) + (tv.tv_usec / 1000));
-	bca->bc_depth = OSBacktrace(bca->bc_stack, SKMEM_STACK_DEPTH);
-}
-
-/*
  * Given an object, find its buffer control and record the transaction.
  */
 __attribute__((noinline, cold, not_tail_called))
@@ -3007,7 +2295,7 @@ skmem_audit_buf(struct skmem_cache *skm, struct skmem_obj *list)
 
 	SKM_SLAB_LOCK(skm);
 	while (list != NULL) {
-		void *buf = list;
+		void *__single buf = list;
 
 		bcb = SKMEM_CACHE_HASH(skm, buf);
 		SLIST_FOREACH(bc, &bcb->bcb_head, bc_link) {
@@ -3035,15 +2323,17 @@ skmem_audit_buf(struct skmem_cache *skm, struct skmem_obj *list)
 }
 
 static size_t
-skmem_cache_mib_get_stats(struct skmem_cache *skm, void *out, size_t len)
+skmem_cache_mib_get_stats(struct skmem_cache *skm, void *__sized_by(len) out,
+    size_t len)
 {
 	size_t actual_space = sizeof(struct sk_stats_cache);
-	struct sk_stats_cache *sca = out;
+	struct sk_stats_cache *__single sca;
 	int contention;
 
 	if (out == NULL || len < actual_space) {
 		goto done;
 	}
+	sca = out;
 
 	bzero(sca, sizeof(*sca));
 	(void) snprintf(sca->sca_name, sizeof(sca->sca_name), "%s",
@@ -3109,8 +2399,8 @@ skmem_cache_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	struct skmem_cache *skm;
 	size_t actual_space;
 	size_t buffer_space;
-	size_t allocated_space;
-	caddr_t buffer = NULL;
+	size_t allocated_space = 0;
+	caddr_t __sized_by(allocated_space) buffer = NULL;
 	caddr_t scan;
 	int error = 0;
 
@@ -3124,11 +2414,13 @@ skmem_cache_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (buffer_space > SK_SYSCTL_ALLOC_MAX) {
 			buffer_space = SK_SYSCTL_ALLOC_MAX;
 		}
-		allocated_space = buffer_space;
-		buffer = sk_alloc_data(allocated_space, Z_WAITOK, skmem_tag_cache_mib);
-		if (__improbable(buffer == NULL)) {
+		caddr_t temp;
+		temp = sk_alloc_data(buffer_space, Z_WAITOK, skmem_tag_cache_mib);
+		if (__improbable(temp == NULL)) {
 			return ENOBUFS;
 		}
+		buffer = temp;
+		allocated_space = buffer_space;
 	} else if (req->oldptr == USER_ADDR_NULL) {
 		buffer_space = 0;
 	}
@@ -3158,7 +2450,7 @@ skmem_cache_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		}
 	}
 	if (buffer != NULL) {
-		sk_free_data(buffer, allocated_space);
+		sk_free_data_sized_by(buffer, allocated_space);
 	}
 
 	return error;

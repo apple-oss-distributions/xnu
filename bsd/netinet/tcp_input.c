@@ -93,6 +93,7 @@
 #include <net/content_filter.h>
 #include <net/dlil.h>
 #include <net/multi_layer_pkt_log.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -119,11 +120,6 @@
 #include <kern/zalloc.h>
 #include <netinet6/tcp6_var.h>
 #include <netinet/tcpip.h>
-#if TCPDEBUG
-#include <netinet/tcp_debug.h>
-u_char tcp_saveipgen[40]; /* the size must be of max ip header, now IPv6 */
-struct tcphdr tcp_savetcp;
-#endif /* TCPDEBUG */
 #include <netinet/tcp_log.h>
 
 #if IPSEC
@@ -268,7 +264,7 @@ extern int tcp_fin_timeout;
 
 uint8_t tcprexmtthresh = 3;
 
-u_int32_t tcp_now;
+uint32_t tcp_now;
 struct timeval tcp_uptime;      /* uptime when tcp_now was last updated */
 
 /* Used to sychronize updates to tcp_now */
@@ -572,9 +568,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	struct socket *so = inp->inp_socket;
 	int flags = 0;
 	uint32_t qlimit;
-	boolean_t cell = IFNET_IS_CELLULAR(ifp);
-	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
-	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
+	stats_functional_type ifnet_count_type = IFNET_COUNT_TYPE(ifp);
 	boolean_t dsack_set = FALSE;
 
 	/*
@@ -671,9 +665,9 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 					nstat_route_rx(inp->inp_route.ro_rt,
 					    1, *tlenp,
 					    NSTAT_RX_FLAG_DUPLICATE);
-					INP_ADD_STAT(inp, cell, wifi, wired,
+					INP_ADD_STAT(inp, ifnet_count_type,
 					    rxpackets, 1);
-					INP_ADD_STAT(inp, cell, wifi, wired,
+					INP_ADD_STAT(inp, ifnet_count_type,
 					    rxbytes, *tlenp);
 					tp->t_stat.rxduplicatebytes += *tlenp;
 					inp_set_activity_bitmap(inp);
@@ -709,8 +703,8 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	if (nstat_collect) {
 		nstat_route_rx(inp->inp_route.ro_rt, 1, *tlenp,
 		    NSTAT_RX_FLAG_OUT_OF_ORDER);
-		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, *tlenp);
+		INP_ADD_STAT(inp, ifnet_count_type, rxpackets, 1);
+		INP_ADD_STAT(inp, ifnet_count_type, rxbytes, *tlenp);
 		inp_set_activity_bitmap(inp);
 	}
 
@@ -847,11 +841,12 @@ present:
 }
 
 /*
- * Reduce congestion window -- used when ECN is seen or when a tail loss
- * probe recovers the last packet.
+ * Enter fast recovery and reduce congestion window,
+ * used when CE is seen or when a tail loss
+ * probe recovers the last packet. Also used by RACK.
  */
-static void
-tcp_reduce_congestion_window(struct tcpcb *tp)
+void
+tcp_enter_fast_recovery(struct tcpcb *tp)
 {
 	/*
 	 * If the current tcp cc module has
@@ -867,14 +862,17 @@ tcp_reduce_congestion_window(struct tcpcb *tp)
 	} else {
 		tp->snd_recover = tp->snd_max;
 	}
+
+	tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
+
 	tp->t_timer[TCPT_REXMT] = 0;
 	tp->t_timer[TCPT_PTO] = 0;
 	tp->t_rtttime = 0;
 	if (tp->t_flagsext & TF_CWND_NONVALIDATED) {
 		tcp_cc_adjust_nonvalidated_cwnd(tp);
 	} else {
-		tp->snd_cwnd = tp->snd_ssthresh +
-		    tp->t_maxseg * tcprexmtthresh;
+		/* No need to inflate the congestion window */
+		tp->snd_cwnd = tp->snd_ssthresh;
 	}
 }
 
@@ -1331,7 +1329,7 @@ tcp_detect_bad_rexmt(struct tcpcb *tp, struct tcphdr *th,
 	bad_rexmt_win = (tp->t_srtt >> (TCP_RTT_SHIFT + 1));
 
 	/* If the ack has ECN CE bit, then cwnd has to be adjusted */
-	if ((TCP_ACC_ECN_ON(tp) && tp->t_delta_ce_packets > 0) ||
+	if ((TCP_ACC_ECN_ON(tp) && tp->t_aecn.t_delta_ce_packets > 0) ||
 	    (TCP_ECN_ENABLED(tp) && (th->th_flags & TH_ECE))) {
 		return 0;
 	}
@@ -1394,6 +1392,11 @@ tcp_bad_rexmt_restore_state(struct tcpcb *tp, struct tcphdr *th)
 	/* Fix send socket buffer to reflect the change in cwnd */
 	tcp_bad_rexmt_fix_sndbuf(tp);
 
+	/* Restore rack related state */
+	if (TCP_RACK_ENABLED(tp)) {
+		tcp_rack_bad_rexmt_restore(tp);
+	}
+
 	/*
 	 * This RTT might reflect the extra delay induced
 	 * by the network. Skip using this sample for RTO
@@ -1430,10 +1433,11 @@ tcp_bad_rexmt_check(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to)
 		 * The tail loss probe recovered the last packet and
 		 * we need to adjust the congestion window to take
 		 * this loss into account.
+		 * No need to update rack.reo_wnd_persist for a TLP recovery
 		 */
 		++tcpstat.tcps_tlp_recoverlastpkt;
 		if (!IN_FASTRECOVERY(tp)) {
-			tcp_reduce_congestion_window(tp);
+			tcp_enter_fast_recovery(tp);
 			EXIT_FASTRECOVERY(tp);
 		}
 		tcp_ccdbg_trace(tp, th, TCP_CC_TLP_RECOVER_LASTPACKET);
@@ -1500,10 +1504,11 @@ tcp_early_rexmt_check(struct tcpcb *tp, struct tcphdr *th)
 		 * will allow us to do Early Retransmit as
 		 * described in RFC 5827.
 		 */
-		if (SACK_ENABLED(tp) &&
+		if (TCP_RACK_ENABLED(tp)) {
+			obytes = tcp_flight_size(tp);
+		} else if (SACK_ENABLED(tp) &&
 		    !TAILQ_EMPTY(&tp->snd_holes)) {
-			obytes = (tp->snd_max - tp->snd_fack) +
-			    tp->sackhint.sack_bytes_rexmit;
+			obytes = tcp_flight_size(tp);
 		} else {
 			obytes = (tp->snd_max - tp->snd_una);
 		}
@@ -1529,18 +1534,12 @@ tcp_early_rexmt_check(struct tcpcb *tp, struct tcphdr *th)
 			}
 
 			/*
-			 * Since the connection might have already
-			 * received some dupacks, we add them to
-			 * to the outstanding segments count to get
-			 * the correct retransmit threshold.
-			 *
 			 * By checking for early retransmit after
 			 * receiving some duplicate acks when SACK
 			 * is supported, the connection will
 			 * enter fast recovery even if multiple
 			 * segments are lost in the same window.
 			 */
-			osegs += tp->t_dupacks;
 			if (osegs < 4) {
 				tp->t_rexmtthresh =
 				    ((osegs - 1) > 1) ? ((uint8_t)osegs - 1) : 1;
@@ -1762,12 +1761,6 @@ static void
 tcp_update_snd_una(struct tcpcb *tp, uint32_t ack)
 {
 	tp->snd_una = ack;
-	if (SACK_ENABLED(tp) && SEQ_LT(tp->send_highest_sack, tp->snd_una)) {
-		tp->send_highest_sack = tp->snd_una;
-
-		/* If we move our marker, we need to start fresh */
-		tp->t_new_dupacks = 0;
-	}
 }
 
 static bool
@@ -1793,20 +1786,21 @@ tcp_syn_data_valid(struct tcpcb *tp, struct tcphdr *tcp_hdr, int tlen)
 
 /* Process IP-ECN codepoints on received packets and update receive side counters */
 static void
-tcp_input_ip_ecn(struct tcpcb *tp, struct inpcb *inp, uint32_t tlen, uint32_t segment_count, uint8_t ip_ecn)
+tcp_input_ip_ecn(struct tcpcb *tp, struct inpcb *inp, uint32_t tlen,
+    uint32_t segment_count, uint8_t ip_ecn)
 {
 	switch (ip_ecn) {
 	case IPTOS_ECN_ECT1:
 		tp->ecn_flags |= TE_ACO_ECT1;
-		tp->t_rcv_ect1_bytes += tlen;
+		tp->t_aecn.t_rcv_ect1_bytes += tlen;
 		break;
 	case IPTOS_ECN_ECT0:
 		tp->ecn_flags |= TE_ACO_ECT0;
-		tp->t_rcv_ect0_bytes += tlen;
+		tp->t_aecn.t_rcv_ect0_bytes += tlen;
 		break;
 	case IPTOS_ECN_CE:
-		tp->t_rcv_ce_packets += segment_count;
-		tp->t_rcv_ce_bytes += tlen;
+		tp->t_aecn.t_rcv_ce_packets += segment_count;
+		tp->t_aecn.t_rcv_ce_bytes += tlen;
 		tp->t_ecn_recv_ce++;
 		tcpstat.tcps_ecn_recv_ce++;
 		INP_INC_IFNET_STAT(inp, ecn_recv_ce);
@@ -1849,14 +1843,14 @@ tcp_input_process_accecn_syn(struct tcpcb *tp, int ace_flags, uint8_t ip_ecn)
 				break;
 			}
 			/*
-			 * We are not yet committing to send IP ECT packets when
-			 * Accurate ECN is enabled
+			 * We set TE_SENDIPECT when handshake is complete
+			 * for Accurate ECN
 			 */
 			tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
 
 			/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
-			tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
-			tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
+			tp->t_aecn.t_rcv_ect1_bytes = tp->t_aecn.t_rcv_ect0_bytes = 1;
+			tp->t_aecn.t_snd_ect1_bytes = tp->t_aecn.t_snd_ect0_bytes = 1;
 			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_requested;
 		} else {
 			/*
@@ -1890,12 +1884,130 @@ tcp_input_process_accecn_syn(struct tcpcb *tp, int ace_flags, uint8_t ip_ecn)
 			tp->ecn_flags |= (TE_ACE_SETUPRECEIVED);
 
 			/* Initialize ECT byte counter to 1 to distinguish zeroing of options */
-			tp->t_rcv_ect1_bytes = tp->t_rcv_ect0_bytes = 1;
-			tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
+			tp->t_aecn.t_rcv_ect1_bytes = tp->t_aecn.t_rcv_ect0_bytes = 1;
+			tp->t_aecn.t_snd_ect1_bytes = tp->t_aecn.t_snd_ect0_bytes = 1;
 			tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_requested;
 		}
 		break;
 	}
+}
+
+static uint32_t
+tcp_process_ace_field(struct tcpcb *tp, uint32_t pkts_acked, uint64_t old_sceb, uint8_t ace)
+{
+	/* Congestion was experienced if delta_cep > 0 */
+	uint32_t delta = 0, safe_delta = 0;
+	delta = (ace + TCP_ACE_DIV -
+	    (tp->t_aecn.t_snd_ce_packets & TCP_ACE_MASK)) & TCP_ACE_MASK;
+	if (pkts_acked <= TCP_ACE_MASK) {
+		return delta;
+	}
+
+	uint64_t d_ceb = tp->t_aecn.t_snd_ce_bytes - old_sceb;
+	safe_delta = pkts_acked - ((pkts_acked - delta) & TCP_ACE_MASK);
+
+	if (d_ceb == 0 || d_ceb < safe_delta * tp->t_maxseg >> 1) {
+		return delta;
+	}
+
+	return safe_delta;
+}
+
+/* Returns the number of CE marked bytes */
+static uint32_t
+tcp_process_accecn_options(struct tcpcb *tp, struct tcpopt *to)
+{
+	int delta = 0;
+	uint32_t ce_bytes = 0;
+
+	if (to->to_num_accecn >= 1) {
+		delta = ntoh24(to->to_accecn + 0);
+		if (to->to_accecn_order == 0) {
+			delta = (delta + TCP_ACO_DIV -
+			    (tp->t_aecn.t_snd_ect0_bytes & TCP_ACO_MASK)) & TCP_ACO_MASK;
+			if (delta < 0) {
+				os_log_error(OS_LOG_DEFAULT, "delta for AccECN0 options (ECT0 bytes) can't be zero");
+			}
+			tp->t_aecn.t_snd_ect0_bytes += delta;
+		} else {
+			delta = (delta + TCP_ACO_DIV -
+			    (tp->t_aecn.t_snd_ect1_bytes & TCP_ACO_MASK)) & TCP_ACO_MASK;
+			if (delta < 0) {
+				os_log_error(OS_LOG_DEFAULT, "delta for AccECN1 options (ECT1 bytes) can't be zero");
+			}
+			tp->t_aecn.t_snd_ect1_bytes += delta;
+		}
+	}
+	if (to->to_num_accecn >= 2) {
+		delta = ntoh24(to->to_accecn + 1 * TCPOLEN_ACCECN_COUNTER);
+		delta = (delta + TCP_ACO_DIV -
+		    (tp->t_aecn.t_snd_ce_bytes & TCP_ACO_MASK)) & TCP_ACO_MASK;
+		if (delta < 0) {
+			os_log_error(OS_LOG_DEFAULT, "delta for AccECN options (CE bytes) can't be zero");
+		}
+		tp->t_aecn.t_snd_ce_bytes += delta;
+		ce_bytes = delta;
+	}
+	if (to->to_num_accecn >= 3) {
+		delta = ntoh24(to->to_accecn + 2 * TCPOLEN_ACCECN_COUNTER);
+		if (to->to_accecn_order == 0) {
+			delta = (delta + TCP_ACO_DIV -
+			    (tp->t_aecn.t_snd_ect1_bytes & TCP_ACO_MASK)) & TCP_ACO_MASK;
+			if (delta < 0) {
+				os_log_error(OS_LOG_DEFAULT, "delta for AccECN0 options (ECT1 bytes) can't be zero");
+			}
+			tp->t_aecn.t_snd_ect1_bytes += delta;
+		} else {
+			delta = (delta + TCP_ACO_DIV -
+			    (tp->t_aecn.t_snd_ect0_bytes & TCP_ACO_MASK)) & TCP_ACO_MASK;
+			if (delta < 0) {
+				os_log_error(OS_LOG_DEFAULT, "delta for AccECN1 options (ECT0 bytes) can't be zero");
+			}
+			tp->t_aecn.t_snd_ect0_bytes += delta;
+		}
+	}
+
+	return ce_bytes;
+}
+
+static void
+tcp_process_accecn(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
+    uint32_t pkts_acked, uint8_t ace)
+{
+	if (tp->t_aecn.accecn_processed) {
+		os_log(OS_LOG_DEFAULT, "already processed AccECN field/options for this ACK");
+		return;
+	}
+
+	uint64_t old_sceb = tp->t_aecn.t_snd_ce_bytes;
+	uint32_t new_ce_bytes = tcp_process_accecn_options(tp, to);
+	uint32_t delta = tcp_process_ace_field(tp, pkts_acked, old_sceb, ace);
+	tp->t_aecn.t_snd_ce_packets += delta;
+	tp->t_aecn.t_delta_ce_packets = delta;
+
+	/* Update the time for this newly acked data or control packet */
+	if ((to->to_flags & TOF_TS) != 0 && (to->to_tsecr != 0) &&
+	    TSTMP_GEQ(to->to_tsecr, tp->t_last_ack_tsecr)) {
+		tp->t_last_ack_tsecr = to->to_tsecr;
+	}
+
+	if (delta > 0) {
+		tp->ecn_flags |= (TE_INRECOVERY);
+		tp->total_ect_packets_marked += delta;
+
+		/* update the stats */
+		tcpstat.tcps_ecn_ace_recv_ce += tp->t_aecn.t_delta_ce_packets;
+		/* CE packets counter start at 5 */
+		tp->t_ecn_capable_packets_marked = tp->t_aecn.t_snd_ce_packets - 5;
+		tcp_ccdbg_trace(tp, th, TCP_CC_ECN_RCVD);
+	}
+
+	if (CC_ALGO(tp)->process_ecn != NULL) {
+		CC_ALGO(tp)->process_ecn(tp, th, new_ce_bytes, tp->total_ect_packets_marked,
+		    tp->total_ect_packets_acked);
+	}
+
+	tp->t_aecn.accecn_processed = 1;
 }
 
 void
@@ -1912,18 +2024,16 @@ tcp_input(struct mbuf *m, int off0)
 	struct tcpcb *tp = 0;
 	int thflags;
 	struct socket *so = 0;
-	int todrop, acked, ourfinisacked, needoutput = 0;
+	int todrop, acked = 0, ourfinisacked, needoutput = 0;
 	int read_wakeup = 0;
 	int write_wakeup = 0;
 	struct in_addr laddr;
 	struct in6_addr laddr6;
 	int dropsocket = 0;
 	int iss = 0, nosock = 0;
-	u_int32_t tiwin, sack_bytes_acked = 0, sack_bytes_newly_acked = 0;
+	uint32_t tiwin, sack_bytes_acked = 0;
+	uint32_t highest_sacked_seq = 0;
 	struct tcpopt to;               /* options in this segment */
-#if TCPDEBUG
-	short ostate = 0;
-#endif
 	u_char ip_ecn = IPTOS_ECN_NOTECT;
 	unsigned int ifscope;
 	uint8_t isconnected, isdisconnected;
@@ -1934,14 +2044,15 @@ tcp_input(struct mbuf *m, int off0)
 #if MPTCP
 	struct mptcb *mp_tp = NULL;
 #endif /* MPTCP */
-	boolean_t cell = IFNET_IS_CELLULAR(ifp);
-	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
-	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
+	stats_functional_type ifnet_count_type = IFNET_COUNT_TYPE(ifp);
 	boolean_t recvd_dsack = FALSE;
+	boolean_t dsack_tlp = false;
 	struct tcp_respond_args tra;
 	int prev_t_state;
 	boolean_t check_cfil = cfil_filter_present();
 	bool findpcb_iterated = false;
+	bool rack_loss_detected = false;
+	bool is_th_swapped = false;
 	/*
 	 * The mbuf may be freed after it has been added to the receive socket
 	 * buffer or the reassembly queue, so we reinitialize th to point to a
@@ -1959,6 +2070,7 @@ tcp_input(struct mbuf *m, int off0)
 #define TCP_INC_VAR(stat, npkts) do {                   \
 	        stat += npkts;                          \
 } while (0)
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 
 	if (tcp_ack_strategy == TCP_ACK_STRATEGY_LEGACY) {
 		segment_count = 1;
@@ -2159,6 +2271,7 @@ tcp_input(struct mbuf *m, int off0)
 	NTOHL(th->th_ack);
 	NTOHS(th->th_win);
 	NTOHS(th->th_urp);
+	is_th_swapped = true;
 #endif
 
 	/*
@@ -2387,6 +2500,9 @@ findpcb:
 		goto drop;
 	}
 
+	/* Initialize highest sacked seq to avoid using 0 as initial value */
+	highest_sacked_seq = th->th_ack;
+
 	/* Unscale the window into a 32-bit value. */
 	if ((thflags & TH_SYN) == 0) {
 		tiwin = th->th_win << tp->snd_scale;
@@ -2406,18 +2522,6 @@ findpcb:
 	}
 
 	if (so->so_options & (SO_DEBUG | SO_ACCEPTCONN)) {
-#if TCPDEBUG
-		if (so->so_options & SO_DEBUG) {
-			ostate = tp->t_state;
-			if (isipv6) {
-				bcopy((char *)ip6, (char *)tcp_saveipgen,
-				    sizeof(*ip6));
-			} else {
-				bcopy((char *)ip, (char *)tcp_saveipgen, sizeof(*ip));
-			}
-			tcp_savetcp = *th;
-		}
-#endif
 		if (so->so_options & SO_ACCEPTCONN) {
 			struct tcpcb *tp0 = tp;
 			struct socket *so2;
@@ -2429,7 +2533,8 @@ findpcb:
 			bool head_nocell, head_recvanyif,
 			    head_noexpensive, head_awdl_unrestricted,
 			    head_intcoproc_allowed, head_external_port,
-			    head_noconstrained, head_management_allowed;
+			    head_noconstrained, head_management_allowed,
+			    head_ultra_constrained_allowed;
 
 			/* Get listener's bound-to-interface, if any */
 			head_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
@@ -2445,6 +2550,7 @@ findpcb:
 			head_intcoproc_allowed = INP_INTCOPROC_ALLOWED(inp);
 			head_external_port = (inp->inp_flags2 & INP2_EXTERNAL_PORT);
 			head_management_allowed = INP_MANAGEMENT_ALLOWED(inp);
+			head_ultra_constrained_allowed = INP_ULTRA_CONSTRAINED_ALLOWED(inp);
 
 			/*
 			 * If the state is LISTEN then ignore segment if it contains an RST.
@@ -2650,6 +2756,9 @@ findpcb:
 			if (head_management_allowed) {
 				inp_set_management_allowed(inp);
 			}
+			if (head_ultra_constrained_allowed) {
+				inp_set_ultra_constrained_allowed(inp);
+			}
 			/*
 			 * Inherit {IN,IN6}_RECV_ANYIF from listener.
 			 */
@@ -2672,7 +2781,7 @@ findpcb:
 				inp->inp_laddr = ip->ip_dst;
 			}
 			inp->inp_lport = th->th_dport;
-			if (in_pcbinshash(inp, 0) != 0) {
+			if (in_pcbinshash(inp, SA(&from), 0) != 0) {
 				/*
 				 * Undo the assignments above if we failed to
 				 * put the PCB on the hash lists.
@@ -2818,7 +2927,15 @@ findpcb:
 		}
 	}
 
+	if (TCP_L4S_ENABLED(tp) && TCP_ACC_ECN_ON(tp)) {
+		/* Reset the state used for AccECN processing */
+		tp->t_aecn.accecn_processed = 0;
+	}
+
 	if (tp->t_state == TCPS_ESTABLISHED && BYTES_ACKED(th, tp) > 0) {
+		if (CC_ALGO(tp)->set_bytes_acked != NULL) {
+			CC_ALGO(tp)->set_bytes_acked(tp, BYTES_ACKED(th, tp));
+		}
 		if (tp->ecn_flags & TE_SENDIPECT) {
 			/*
 			 * Data sent with ECT has been acknowledged, calculate
@@ -2844,23 +2961,12 @@ findpcb:
 	}
 
 	/*
-	 * Accurate ECN feedback
-	 * 1. Process peer's feedback in received TCP thflags and update s.cep
-	 * 2. Process IP ECN bits and update r.cep for CE marked pure ACKs
-	 *    or valid data packets
-	 *
+	 * Accurate ECN feedback for Data Receiver,
+	 * Process IP ECN bits and update r.cep for CE marked pure ACKs
+	 * or valid data packets
 	 */
+	uint8_t ace = tcp_get_ace(th);
 	if (TCP_ACC_ECN_ON(tp) && tp->t_state == TCPS_ESTABLISHED) {
-		/*
-		 * Update s.cep if bytes have been acknowledged
-		 * otherwise, this ACK has already been superseded.
-		 */
-		uint8_t ace = tcp_get_ace(th);
-		if (BYTES_ACKED(th, tp) > 0) {
-			/* Congestion was experienced if delta_cep > 0 */
-			tp->t_delta_ce_packets = (ace + TCP_ACE_DIV - (tp->t_snd_ce_packets % TCP_ACE_DIV)) % TCP_ACE_DIV;
-			tp->t_snd_ce_packets += tp->t_delta_ce_packets;
-		}
 		/* Update receive side counters */
 		if (tlen == 0 || (tlen > 0 &&
 		    SEQ_GEQ(th->th_seq, tp->last_ack_sent) &&
@@ -3104,6 +3210,43 @@ findpcb:
 				tcpstat.tcps_rcvackpack++;
 				tcpstat.tcps_rcvackbyte += acked;
 
+				/* TE_SENDIPECT is only set when L4S sysctl is enabled */
+				if (TCP_ACC_ECN_ON(tp) && (tp->ecn_flags & TE_SENDIPECT)) {
+					if (!TCP_L4S_ENABLED(tp)) {
+						os_log_error(OS_LOG_DEFAULT, "TE_SENDIPECT flag is set but TCP_L4S_ENABLED is not");
+					}
+					uint32_t pkts_acked = tcp_packets_this_ack(tp, acked);
+					tp->total_ect_packets_acked += pkts_acked;
+
+					bool newly_acked_time = false;
+					if (acked == 0 && (to.to_flags & TOF_TS) != 0 && to.to_tsecr != 0 &&
+					    TSTMP_GT(to.to_tsecr, tp->t_last_ack_tsecr)) {
+						newly_acked_time = true;
+					}
+					if (acked > 0 || newly_acked_time) {
+						tcp_process_accecn(tp, &to, th, pkts_acked, ace);
+					}
+				}
+
+				/*
+				 * Process sent segments used for RACK, called after RTT is computed
+				 * RACK reordering window doesn't need to be updated until we process
+				 * DSACK.
+				 */
+				if (TCP_RACK_ENABLED(tp)) {
+					tcp_segs_doack(tp, th->th_ack, &to);
+					if (SEQ_LT(tp->snd_fack, th->th_ack)) {
+						/*
+						 * We update snd_fack here for RACK only as it is updated
+						 * and used differently for SACK. This should be done after
+						 * ACK processing of segments which checks for reordering.
+						 * Also, we don't compare with highest_sacked_seq here as this
+						 * is the fast path with no SACK blocks.
+						 */
+						tp->snd_fack = th->th_ack;
+					}
+				}
+
 				/*
 				 * Handle an ack that is in sequence during
 				 * congestion avoidance phase. The
@@ -3135,7 +3278,6 @@ findpcb:
 				if (tp->t_dupacks > 0) {
 					tp->t_dupacks = 0;
 					tp->t_rexmtthresh = tcprexmtthresh;
-					tp->t_new_dupacks = 0;
 				}
 
 				tp->sackhint.sack_bytes_acked = 0;
@@ -3152,6 +3294,8 @@ findpcb:
 				if (tp->snd_una == tp->snd_max) {
 					tp->t_timer[TCPT_REXMT] = 0;
 					tp->t_timer[TCPT_PTO] = 0;
+					tp->t_timer[TCPT_REORDER] = 0;
+					tcp_rack_reset_segs_retransmitted(tp);
 				} else if (tp->t_timer[TCPT_PERSIST] == 0) {
 					tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 				}
@@ -3222,9 +3366,9 @@ findpcb:
 			TCP_INC_VAR(tcpstat.tcps_rcvpack, segment_count);
 			tcpstat.tcps_rcvbyte += tlen;
 			if (nstat_collect) {
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    rxpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired, rxbytes,
+				INP_ADD_STAT(inp, ifnet_count_type, rxbytes,
 				    tlen);
 				inp_set_activity_bitmap(inp);
 			}
@@ -3410,7 +3554,7 @@ findpcb:
 		tcp_dooptions(tp, optp, optlen, th, &to);
 		tcp_finalize_options(tp, &to, ifscope);
 
-		if (tfo_enabled(tp) && tcp_tfo_syn(tp, &to)) {
+		if (TFO_ENABLED(tp) && tcp_tfo_syn(tp, &to)) {
 			isconnected = TRUE;
 		}
 
@@ -3519,7 +3663,7 @@ findpcb:
 		}
 		if (thflags & TH_RST) {
 			if ((thflags & TH_ACK) != 0) {
-				if (tfo_enabled(tp) &&
+				if (TFO_ENABLED(tp) &&
 				    !(tp->t_flagsext & TF_FASTOPEN_FORCE_ENABLE)) {
 					tcp_heuristic_tfo_rst(tp);
 				}
@@ -3532,6 +3676,7 @@ findpcb:
 					 */
 					if (tp->t_flags & TF_LOCAL) {
 						tp->ecn_flags |= TE_RCVD_SYN_RST;
+						drop_reason = DROP_REASON_TCP_RST;
 						goto drop;
 					} else {
 						tcp_heuristic_ecn_synrst(tp);
@@ -3543,6 +3688,7 @@ findpcb:
 				tp = tcp_drop(tp, ECONNREFUSED);
 			}
 			TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, "SYN_SENT got RST");
+			drop_reason = DROP_REASON_TCP_RST;
 			goto drop;
 		}
 		if ((thflags & TH_SYN) == 0) {
@@ -3582,9 +3728,9 @@ findpcb:
 			} else if (TCP_ACC_ECN_ENABLED(tp) && ace_flags != 0 &&
 			    ace_flags != TH_ACE) {
 				/* Initialize sender side packet & byte counters */
-				tp->t_snd_ce_packets = 5;
-				tp->t_snd_ect1_bytes = tp->t_snd_ect0_bytes = 1;
-				tp->t_snd_ce_bytes = 0;
+				tp->t_aecn.t_snd_ce_packets = 5;
+				tp->t_aecn.t_snd_ect1_bytes = tp->t_aecn.t_snd_ect0_bytes = 1;
+				tp->t_aecn.t_snd_ce_bytes = 0;
 				tp->ecn_flags |= TE_ACE_FINAL_ACK_3WHS;
 				/*
 				 * Client received AccECN SYN-ACK that reflects the state (ECN)
@@ -3595,16 +3741,20 @@ findpcb:
 				 * If 0|0|0 and 1|1|1 were received, fail Accurate ECN negotiation
 				 * by not setting TE_ACE_SETUPRECEIVED.
 				 */
+				uint32_t ecn_flags = TE_ACE_SETUPRECEIVED;
+				if (TCP_L4S_ENABLED(tp)) {
+					ecn_flags |= TE_SENDIPECT;
+				}
 				switch (ace_flags) {
 				case (0 | TH_CWR | 0):
 					/* Non-ECT SYN was delivered */
-					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
+					tp->ecn_flags |= ecn_flags;
 					tcpstat.tcps_ecn_ace_syn_not_ect++;
 					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success;
 					break;
 				case (0 | TH_CWR | TH_ECE):
 					/* ECT1 SYN was delivered */
-					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
+					tp->ecn_flags |= ecn_flags;
 					/* Mangling detected, set Non-ECT on outgoing packets */
 					tp->ecn_flags &= ~TE_SENDIPECT;
 					tcpstat.tcps_ecn_ace_syn_ect1++;
@@ -3612,7 +3762,7 @@ findpcb:
 					break;
 				case (TH_AE | 0 | 0):
 					/* ECT0 SYN was delivered */
-					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
+					tp->ecn_flags |= ecn_flags;
 					/* Mangling detected, set Non-ECT on outgoing packets */
 					tp->ecn_flags &= ~TE_SENDIPECT;
 					tcpstat.tcps_ecn_ace_syn_ect0++;
@@ -3620,7 +3770,7 @@ findpcb:
 					break;
 				case (TH_AE | TH_CWR | 0):
 					/* CE SYN was delivered */
-					tp->ecn_flags |= TE_ACE_SETUPRECEIVED;
+					tp->ecn_flags |= ecn_flags;
 					/* Mangling detected, set Non-ECT on outgoing packets */
 					tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_negotiation_success_ect_mangling_detected;
 					tp->ecn_flags &= ~TE_SENDIPECT;
@@ -3633,6 +3783,7 @@ findpcb:
 					 * If a TCP client in AccECN mode receives CE feedback in the TCP
 					 * flags of a SYN/ACK, it MUST NOT increment s.cep.
 					 */
+					tp->snd_cwnd = 2 * tp->t_maxseg;
 					tcpstat.tcps_ecn_ace_syn_ce++;
 					break;
 				default:
@@ -3649,9 +3800,9 @@ findpcb:
 				 * We will initialize r.cep, r.e1b, r.e0b first and then increment
 				 * if CE was set on the IP-ECN field of the SYN-ACK.
 				 */
-				tp->t_rcv_ce_packets = 5;
-				tp->t_rcv_ect0_bytes = tp->t_rcv_ect1_bytes = 1;
-				tp->t_rcv_ce_bytes = 0;
+				tp->t_aecn.t_rcv_ce_packets = 5;
+				tp->t_aecn.t_rcv_ect0_bytes = tp->t_aecn.t_rcv_ect1_bytes = 1;
+				tp->t_aecn.t_rcv_ce_bytes = 0;
 
 				/* Increment packet & byte counters based on IP-ECN */
 				tcp_input_ip_ecn(tp, inp, (uint32_t)tlen, (uint32_t)segment_count, ip_ecn);
@@ -3672,6 +3823,11 @@ findpcb:
 				case IPTOS_ECN_CE:
 					tp->ecn_flags |= TE_ACE_SETUP_CE;
 					break;
+				}
+				/* Update the time for this newly SYN-ACK packet */
+				if ((to.to_flags & TOF_TS) != 0 && (to.to_tsecr != 0) &&
+				    (tp->t_last_ack_tsecr == 0 || TSTMP_GEQ(to.to_tsecr, tp->t_last_ack_tsecr))) {
+					tp->t_last_ack_tsecr = to.to_tsecr;
 				}
 			} else {
 				if ((tp->ecn_flags & (TE_SETUPSENT | TE_ACE_SETUPSENT)) &&
@@ -4105,9 +4261,9 @@ close:
 			if (nstat_collect) {
 				nstat_route_rx(tp->t_inpcb->inp_route.ro_rt,
 				    1, tlen, NSTAT_RX_FLAG_DUPLICATE);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    rxpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    rxbytes, tlen);
 				tp->t_stat.rxduplicatebytes += tlen;
 				inp_set_activity_bitmap(inp);
@@ -4206,8 +4362,8 @@ close:
 		if (nstat_collect) {
 			nstat_route_rx(tp->t_inpcb->inp_route.ro_rt, 1,
 			    todrop, NSTAT_RX_FLAG_DUPLICATE);
-			INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
-			INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, todrop);
+			INP_ADD_STAT(inp, ifnet_count_type, rxpackets, 1);
+			INP_ADD_STAT(inp, ifnet_count_type, rxbytes, todrop);
 			tp->t_stat.rxduplicatebytes += todrop;
 			inp_set_activity_bitmap(inp);
 		}
@@ -4372,7 +4528,7 @@ close:
 	 */
 	if ((thflags & TH_ACK) == 0) {
 		if (tp->t_state == TCPS_SYN_RECEIVED) {
-			if ((tfo_enabled(tp))) {
+			if ((TFO_ENABLED(tp))) {
 				/*
 				 * So, we received a valid segment while in
 				 * SYN-RECEIVED.
@@ -4490,7 +4646,7 @@ close:
 				switch (ace_flags) {
 				case (0 | TH_CWR | 0):
 					/* Non-ECT SYN-ACK was delivered */
-					tp->t_snd_ce_packets = 5;
+					tp->t_aecn.t_snd_ce_packets = 5;
 					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
 						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success;
 					}
@@ -4500,7 +4656,7 @@ close:
 					OS_FALLTHROUGH;
 				case (TH_AE | 0 | 0):
 					/* ECT0 SYN-ACK was delivered, mangling detected */
-					tp->t_snd_ce_packets = 5;
+					tp->t_aecn.t_snd_ce_packets = 5;
 					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
 						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success_ect_mangling_detected;
 					}
@@ -4511,7 +4667,7 @@ close:
 					 * CE could indicate congestion at a node after mangling occured.
 					 * Set cwnd to 2 segments
 					 */
-					tp->t_snd_ce_packets = 6;
+					tp->t_aecn.t_snd_ce_packets = 6;
 					tp->snd_cwnd = 2 * tp->t_maxseg;
 					if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
 						tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success_ect_mangling_detected;
@@ -4541,8 +4697,23 @@ close:
 					break;
 				default:
 					/* Unused values for forward compatibility */
-					tp->t_snd_ce_packets = 5;
+					tp->t_aecn.t_snd_ce_packets = 5;
 					break;
+				}
+				/* Update the time for this newly received last ACK */
+				if ((to.to_flags & TOF_TS) != 0 && (to.to_tsecr != 0) &&
+				    (tp->t_last_ack_tsecr == 0 || TSTMP_GEQ(to.to_tsecr, tp->t_last_ack_tsecr))) {
+					tp->t_last_ack_tsecr = to.to_tsecr;
+				}
+			} else if (to.to_nsacks == 0) {
+				/*
+				 * If 3rd ACK is lost, we won't receive the last ACK
+				 * encoding. We will move the server to AccECN mode
+				 * regardless.
+				 */
+				tp->t_aecn.t_snd_ce_packets = 5;
+				if (tp->t_server_accecn_state == tcp_connection_server_accurate_ecn_requested) {
+					tp->t_server_accecn_state = tcp_connection_server_accurate_ecn_negotiation_success;
 				}
 			}
 			/* Increment receive side counters based on IP-ECN */
@@ -4602,7 +4773,7 @@ close:
 			 */
 			if (SACK_ENABLED(tp) &&
 			    (to.to_nsacks > 0 || !TAILQ_EMPTY(&tp->snd_holes))) {
-				tcp_sack_doack(tp, &to, th, &sack_bytes_acked, &sack_bytes_newly_acked);
+				tcp_sack_doack(tp, &to, th, &sack_bytes_acked, &highest_sacked_seq);
 			}
 
 			goto process_ACK;
@@ -4643,7 +4814,7 @@ close:
 			}
 		}
 		if (SACK_ENABLED(tp) && to.to_nsacks > 0) {
-			recvd_dsack = tcp_sack_process_dsack(tp, &to, th);
+			recvd_dsack = tcp_sack_process_dsack(tp, &to, th, &dsack_tlp);
 			/*
 			 * If DSACK is received and this packet has no
 			 * other SACK information, it can be dropped.
@@ -4659,7 +4830,15 @@ close:
 
 		if (SACK_ENABLED(tp) &&
 		    (to.to_nsacks > 0 || !TAILQ_EMPTY(&tp->snd_holes))) {
-			tcp_sack_doack(tp, &to, th, &sack_bytes_acked, &sack_bytes_newly_acked);
+			tcp_sack_doack(tp, &to, th, &sack_bytes_acked, &highest_sacked_seq);
+		}
+
+		if (TCP_RACK_ENABLED(tp)) {
+			/* If DSACK was received (not due to TLP), then update the reordering window */
+			if (recvd_dsack && !dsack_tlp) {
+				tp->rack.dsack_round_seen = 1;
+			}
+			tcp_rack_update_reordering_window(tp, th->th_ack);
 		}
 
 #if MPTCP
@@ -4699,6 +4878,33 @@ close:
 		 * recovery with SACK
 		 */
 		if (SEQ_LEQ(th->th_ack, tp->snd_una)) {
+			/*
+			 * Update snd_fack when new SACK blocks are received
+			 * without advancing the ACK
+			 */
+			if (TCP_RACK_ENABLED(tp) && sack_bytes_acked > 0 &&
+			    SEQ_LT(tp->snd_fack, highest_sacked_seq)) {
+				tp->snd_fack = highest_sacked_seq;
+			}
+
+			/*
+			 * Process AccECN feedback here for control packets
+			 * that don't have s/acked bytes
+			 */
+			if (TCP_ACC_ECN_ON(tp) && (tp->ecn_flags & TE_SENDIPECT) &&
+			    (sack_bytes_acked == 0)) {
+				tp->total_ect_packets_acked += 1;
+
+				bool newly_acked_time = false;
+				if (acked == 0 && (to.to_flags & TOF_TS) != 0 && to.to_tsecr != 0 &&
+				    TSTMP_GT(to.to_tsecr, tp->t_last_ack_tsecr)) {
+					newly_acked_time = true;
+				}
+				if (newly_acked_time) {
+					tcp_process_accecn(tp, &to, th, 1, ace);
+				}
+			}
+
 			if (tlen == 0 && (tiwin == tp->snd_wnd ||
 			    (to.to_nsacks > 0 && sack_bytes_acked > 0))) {
 				uint32_t old_dupacks;
@@ -4740,7 +4946,7 @@ process_dupack:
 				}
 
 				tcpstat.tcps_rcvdupack++;
-				if (SACK_ENABLED(tp) && tcp_do_better_lr) {
+				if (SACK_ENABLED(tp)) {
 					tp->t_dupacks += max(1, sack_bytes_acked / tp->t_maxseg);
 				} else {
 					++tp->t_dupacks;
@@ -4748,48 +4954,12 @@ process_dupack:
 
 				tp->sackhint.sack_bytes_acked += sack_bytes_acked;
 
-				if (SACK_ENABLED(tp) && tcp_do_better_lr) {
-					tp->t_new_dupacks += (sack_bytes_newly_acked / tp->t_maxseg);
-
-					if (tp->t_new_dupacks >= tp->t_rexmtthresh && IN_FASTRECOVERY(tp)) {
-						/* Let's restart the retransmission */
-						tcp_sack_lost_rexmit(tp);
-
-						/*
-						 * If the current tcp cc module has
-						 * defined a hook for tasks to run
-						 * before entering FR, call it
-						 */
-						if (CC_ALGO(tp)->pre_fr != NULL) {
-							CC_ALGO(tp)->pre_fr(tp);
-						}
-
-						ENTER_FASTRECOVERY(tp);
-
-						if (tp->t_flags & TF_SENTFIN) {
-							tp->snd_recover = tp->snd_max - 1;
-						} else {
-							tp->snd_recover = tp->snd_max;
-						}
-						tp->t_rtttime = 0;
-						/*
-						 * Accurate ECN Sender MUST NOT set CWR to indicate
-						 * it has received and responded to indications
-						 * of congestion. ACE field is used to reflect counters
-						 * that are continously updated overloading the CWR bit.
-						 */
-						if (!TCP_ACC_ECN_ON(tp) && TCP_ECN_ENABLED(tp)) {
-							tp->ecn_flags |= TE_SENDCWR;
-						}
-
-						if (tp->t_flagsext & TF_CWND_NONVALIDATED) {
-							tcp_cc_adjust_nonvalidated_cwnd(tp);
-						} else {
-							tp->snd_cwnd = tp->snd_ssthresh;
-						}
-					}
+				if (sack_bytes_acked > 0 && TCP_ACC_ECN_ON(tp) &&
+				    (tp->ecn_flags & TE_SENDIPECT) && tp->t_state == TCPS_ESTABLISHED) {
+					uint32_t pkts_sacked = tcp_packets_this_ack(tp, sack_bytes_acked);
+					tp->total_ect_packets_acked += pkts_sacked;
+					tcp_process_accecn(tp, &to, th, pkts_sacked, ace);
 				}
-
 				/*
 				 * Check if we need to reset the limit on
 				 * early retransmit
@@ -4811,32 +4981,34 @@ process_dupack:
 				}
 
 				/*
-				 * If we've seen exactly rexmt threshold
-				 * of duplicate acks, assume a packet
-				 * has been dropped and retransmit it.
-				 * Kludge snd_nxt & the congestion
-				 * window so we send only this one
-				 * packet.
-				 *
-				 * We know we're losing at the current
-				 * window size so do congestion avoidance
-				 * (set ssthresh to half the current window
-				 * and pull our congestion window back to
-				 * the new ssthresh).
-				 *
-				 * Dup acks mean that packets have left the
-				 * network (they're now cached at the receiver)
-				 * so bump cwnd by the amount in the receiver
-				 * to keep a constant cwnd packets in the
-				 * network.
+				 * Detect loss based on RACK during dupACK processing to mark lost
+				 * segments before tcp_output is called for retransmission
+				 */
+				if (TCP_RACK_ENABLED(tp) && tcp_rack_detect_loss_and_arm_timer(tp, tp->t_dupacks)) {
+					rack_loss_detected = true;
+				}
+				/*
+				 * Below are four different processing of (dup) ACKs,
+				 * 1. Not a valid dup ACK
+				 * 2. More than 3 dup ACKs but already in Fast Recovery
+				 * 3. Entered Fast Recovery for the first time
+				 * 4. Received less than 3 dup ACKs, evaluate if we can do Limited Transmit
 				 */
 				if (tp->t_timer[TCPT_REXMT] == 0 ||
 				    (th->th_ack != tp->snd_una && sack_bytes_acked == 0)) {
+					/*
+					 * No outstanding data and ACK is not a duplicate as it is
+					 * less than snd_una but not equal to it.
+					 */
 					tp->t_dupacks = 0;
 					tp->t_rexmtthresh = tcprexmtthresh;
-					tp->t_new_dupacks = 0;
-				} else if ((tp->t_dupacks > tp->t_rexmtthresh && (!tcp_do_better_lr || old_dupacks >= tp->t_rexmtthresh)) ||
+				} else if ((!TCP_RACK_ENABLED(tp) && tp->t_dupacks > tp->t_rexmtthresh && old_dupacks >= tp->t_rexmtthresh) ||
 				    IN_FASTRECOVERY(tp)) {
+					/*
+					 * We are already in Fast Recovery and t_dupacks is greater than retransmit threshold.
+					 * Increase the cwnd by 1MSS if allowed
+					 */
+
 					/*
 					 * If this connection was seeing packet
 					 * reordering, then recovery might be
@@ -4892,8 +5064,12 @@ process_dupack:
 					(void) tcp_output(tp);
 
 					goto drop;
-				} else if ((!tcp_do_better_lr && tp->t_dupacks == tp->t_rexmtthresh) ||
-				    (tcp_do_better_lr && tp->t_dupacks >= tp->t_rexmtthresh)) {
+				} else if (rack_loss_detected || (!TCP_RACK_ENABLED(tp) && tp->t_dupacks >= tp->t_rexmtthresh)) {
+					/*
+					 * Currently not in Fast Recovery and received 3 or more dupacks.
+					 * Enter Fast Recovery, retransmit segment and set
+					 * cwnd to sshthresh if SACK is enabled.
+					 */
 					tcp_seq onxt = tp->snd_nxt;
 
 					/*
@@ -4964,14 +5140,15 @@ process_dupack:
 					}
 
 					if (SACK_ENABLED(tp)) {
-						tcpstat.tcps_sack_recovery_episode++;
-						tp->t_sack_recovery_episode++;
-						tp->sack_newdata = tp->snd_nxt;
-						if (tcp_do_better_lr) {
-							tp->snd_cwnd = tp->snd_ssthresh;
+						if (TCP_RACK_ENABLED(tp)) {
+							tcpstat.tcps_rack_recovery_episode++;
+							tp->t_rack_recovery_episode++;
 						} else {
-							tp->snd_cwnd = tp->t_maxseg;
+							tcpstat.tcps_sack_recovery_episode++;
+							tp->t_sack_recovery_episode++;
 						}
+
+						tp->snd_cwnd = tp->snd_ssthresh;
 						tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
 
 						/* Process any window updates */
@@ -4985,6 +5162,9 @@ process_dupack:
 					}
 					tp->snd_nxt = th->th_ack;
 					tp->snd_cwnd = tp->t_maxseg;
+
+					/* cwnd is validated after pre_fr() */
+					tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
 
 					/* Process any window updates */
 					if (tiwin > tp->snd_wnd) {
@@ -5037,13 +5217,15 @@ process_dupack:
 				if (tp->ecn_flags & TE_INRECOVERY) {
 					goto process_ACK;
 				}
-
-				if (SACK_ENABLED(tp)) {
-					tcp_sack_partialack(tp, th);
-				} else {
-					tcp_newreno_partial_ack(tp, th);
+				/* RACK doesn't require inflating cwnd */
+				if (!TCP_RACK_ENABLED(tp)) {
+					if (SACK_ENABLED(tp)) {
+						tcp_sack_partialack(tp, th);
+					} else {
+						tcp_newreno_partial_ack(tp, th);
+					}
+					tcp_ccdbg_trace(tp, th, TCP_CC_PARTIAL_ACK);
 				}
-				tcp_ccdbg_trace(tp, th, TCP_CC_PARTIAL_ACK);
 			} else {
 				if (tcp_cubic_minor_fixes) {
 					exiting_fr = 1;
@@ -5052,6 +5234,11 @@ process_dupack:
 				if (CC_ALGO(tp)->post_fr != NULL) {
 					CC_ALGO(tp)->post_fr(tp, th);
 				}
+
+				if (TCP_RACK_ENABLED(tp)) {
+					tcp_rack_update_reordering_win_persist(tp);
+				}
+
 				tp->t_pipeack = 0;
 				tcp_clear_pipeack_state(tp);
 				tcp_ccdbg_trace(tp, th,
@@ -5083,7 +5270,6 @@ process_dupack:
 			 */
 			tp->t_dupacks = 0;
 			tp->t_rexmtthresh = tcprexmtthresh;
-			tp->t_new_dupacks = 0;
 		}
 
 process_ACK:
@@ -5118,6 +5304,8 @@ process_ACK:
 		if (th->th_ack == tp->snd_max) {
 			tp->t_timer[TCPT_REXMT] = 0;
 			tp->t_timer[TCPT_PTO] = 0;
+			tp->t_timer[TCPT_REORDER] = 0;
+			tcp_rack_reset_segs_retransmitted(tp);
 			needoutput = 1;
 		} else if (tp->t_timer[TCPT_PERSIST] == 0) {
 			tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp,
@@ -5139,6 +5327,20 @@ process_ACK:
 		}
 
 		/*
+		 * Process sent segments used for RACK as we need to update
+		 * RACK state before loss detection. Update snd_fack only
+		 * after ACK processing which performs reordering detection.
+		 */
+		if (TCP_RACK_ENABLED(tp)) {
+			tcp_segs_doack(tp, th->th_ack, &to);
+			if (SEQ_LT(tp->snd_fack, highest_sacked_seq)) {
+				tp->snd_fack = highest_sacked_seq;
+			}
+			if (SEQ_LT(tp->snd_fack, th->th_ack)) {
+				tp->snd_fack = th->th_ack;
+			}
+		}
+		/*
 		 * When outgoing data has been acked (except the SYN+data), we
 		 * mark this connection as "sending good" for TFO.
 		 */
@@ -5148,28 +5350,58 @@ process_ACK:
 			tp->t_tfo_flags |= TFO_F_NO_SNDPROBING;
 		}
 
-		/*
-		 * Accurate ECN uses delta_cep to determine a congestion
-		 * event if new CE counts were received.
-		 * For classic ECN, congestion event is receiving TH_ECE.
-		 */
 		if ((tp->ecn_flags & TE_SENDIPECT)) {
-			if (TCP_ACC_ECN_ON(tp)) {
-				if (!IN_FASTRECOVERY(tp) && tp->t_delta_ce_packets > 0) {
-					tcp_reduce_congestion_window(tp);
-					tp->ecn_flags |= (TE_INRECOVERY);
-					/* update the stats */
-					tcpstat.tcps_ecn_ace_recv_ce += tp->t_delta_ce_packets;
-					tp->t_ecn_capable_packets_marked += tp->t_delta_ce_packets;
-					tcp_ccdbg_trace(tp, th, TCP_CC_ECN_RCVD);
+			/*
+			 * draft-ietf-tcpm-accurate-ecn-28
+			 * Accurate ECN feedback processing for data sender,
+			 * Process peer's feedback in received TCP thflags and update s.cep
+			 * Since SYN-ACK has a special encoding, exclude it from below.
+			 * Only perform it before CC is called and snd_una is updated.
+			 */
+			if (TCP_ACC_ECN_ON(tp) && !(thflags & TH_SYN)) {
+				/*
+				 * For a server in SYN_RECEIVED state (that switched to
+				 * ESTABLISHED in this ACK, exclude processing the last ACK
+				 */
+				if (th->th_ack == tp->iss + 1) {
+					acked = 0;
+				}
+				uint32_t pkts_acked = tcp_packets_this_ack(tp, acked);
+				tp->total_ect_packets_acked += pkts_acked;
+				/*
+				 * Calculate newly_acked_time used for AccECN feedback parsing
+				 * for data sender if ACK acknowledges packets without data
+				 * if reordering happens and certain packets have same TS.
+				 * Right now, we consider that new time was ACKed if the TS
+				 * was GT previous value, but we need to think about how to
+				 * differentiate between reordering and wrapping when TS is same
+				 * as previous value.
+				 */
+				bool newly_acked_time = false;
+				if (acked == 0 && sack_bytes_acked == 0 &&
+				    (to.to_flags & TOF_TS) != 0 && to.to_tsecr != 0 &&
+				    (tp->t_last_ack_tsecr == 0 || TSTMP_GT(to.to_tsecr, tp->t_last_ack_tsecr))) {
+					newly_acked_time = true;
+				}
+				/*
+				 * Update s.cep if bytes have been newly S/ACKed
+				 * otherwise, this ACK has already been superseded.
+				 */
+				if (acked > 0 || sack_bytes_acked > 0 || newly_acked_time) {
+					tcp_process_accecn(tp, &to, th, pkts_acked, ace);
 				}
 			} else if (TCP_ECN_ENABLED(tp) && (thflags & TH_ECE)) {
 				/*
+				 * For classic ECN, congestion event is receiving TH_ECE.
 				 * Reduce the congestion window if we haven't
 				 * done so.
 				 */
 				if (!IN_FASTRECOVERY(tp)) {
-					tcp_reduce_congestion_window(tp);
+					/*
+					 * Although we enter Fast Recovery in the below function
+					 * we exit it immediately below as th_ack >= snd_recover
+					 */
+					tcp_enter_fast_recovery(tp);
 					tp->ecn_flags |= (TE_INRECOVERY | TE_SENDCWR);
 					/*
 					 * Also note that the connection received
@@ -5220,6 +5452,9 @@ process_ACK:
 		if (IN_FASTRECOVERY(tp) &&
 		    SEQ_GEQ(th->th_ack, tp->snd_recover)) {
 			EXIT_FASTRECOVERY(tp);
+			if (TCP_RACK_ENABLED(tp)) {
+				tcp_rack_update_reordering_win_persist(tp);
+			}
 		}
 
 		tcp_update_snd_una(tp, th->th_ack);
@@ -5232,6 +5467,21 @@ process_ACK:
 		if (SEQ_LT(tp->snd_nxt, tp->snd_una)) {
 			tp->snd_nxt = tp->snd_una;
 		}
+
+		/*
+		 * Detect loss based on RACK during ACK processing to mark lost
+		 * segments and call tcp_output. Rest of the ACK processing can
+		 * continue after that.
+		 */
+		if (TCP_RACK_ENABLED(tp) && tcp_rack_detect_loss_and_arm_timer(tp, 0)) {
+			if (!IN_FASTRECOVERY(tp)) {
+				tcp_enter_fast_recovery(tp);
+				tcpstat.tcps_rack_recovery_episode++;
+				tp->t_rack_recovery_episode++;
+			}
+			tcp_output(tp);
+		}
+
 		if (!SLIST_EMPTY(&tp->t_rxt_segments) &&
 		    !TCP_DSACK_SEQ_IN_WINDOW(tp, tp->t_dsack_lastuna,
 		    tp->snd_una)) {
@@ -5502,9 +5752,9 @@ dodata:
 			TCP_INC_VAR(tcpstat.tcps_rcvpack, segment_count);
 			tcpstat.tcps_rcvbyte += tlen;
 			if (nstat_collect) {
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    rxpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    rxbytes, tlen);
 				inp_set_activity_bitmap(inp);
 			}
@@ -5709,13 +5959,6 @@ dodata:
 			break;
 		}
 	}
-#if TCPDEBUG
-	if (so->so_options & SO_DEBUG) {
-		tcp_trace(TA_INPUT, ostate, tp, (void *)tcp_saveipgen,
-		    &tcp_savetcp, 0);
-	}
-#endif
-
 	if (read_wakeup) {
 		mptcp_handle_input(so);
 	}
@@ -5757,12 +6000,6 @@ dropafterack:
 		IF_TCP_STATINC(ifp, dospacket);
 		goto dropwithreset;
 	}
-#if TCPDEBUG
-	if (so->so_options & SO_DEBUG) {
-		tcp_trace(TA_DROP, ostate, tp, (void *)tcp_saveipgen,
-		    &tcp_savetcp, 0);
-	}
-#endif
 	m_freem(m);
 	tp->t_flags |= TF_ACKNOW;
 
@@ -5798,12 +6035,6 @@ dropwithreset:
 	}
 	/* IPv6 anycast check is done at tcp6_input() */
 
-#if TCPDEBUG
-	if (tp == 0 || (tp->t_inpcb->inp_socket->so_options & SO_DEBUG)) {
-		tcp_trace(TA_DROP, ostate, tp, (void *)tcp_saveipgen,
-		    &tcp_savetcp, 0);
-	}
-#endif
 	bzero(&tra, sizeof(tra));
 	tra.ifscope = ifscope;
 	tra.awdl_unrestricted = 1;
@@ -5838,13 +6069,28 @@ drop:
 	/*
 	 * Drop space held by incoming segment and return.
 	 */
-#if TCPDEBUG
-	if (tp == 0 || (tp->t_inpcb->inp_socket->so_options & SO_DEBUG)) {
-		tcp_trace(TA_DROP, ostate, tp, (void *)tcp_saveipgen,
-		    &tcp_savetcp, 0);
+	if (isipv6 == 0) {
+		if (ip == NULL) {
+			ip = mtod(m, struct ip *);
+		}
+		/* add back the header length */
+		ip->ip_len += (ip->ip_hl << 2);
+		HTONS(ip->ip_len);
+		HTONS(ip->ip_off);
+
+		th = (struct tcphdr *)(void *)((caddr_t)ip + off0);
+	} else if (ip6 == NULL) {
+		ip6 = mtod(m, struct ip6_hdr *);
+
+		th = (struct tcphdr *)(void *)((caddr_t)ip6 + off0);
 	}
-#endif
-	m_freem(m);
+	if (is_th_swapped) {
+		HTONL(th->th_seq);
+		HTONL(th->th_ack);
+		HTONS(th->th_win);
+		HTONS(th->th_urp);
+	}
+	m_drop(m, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	/* destroy temporarily created socket */
 	if (dropsocket) {
 		(void) soabort(so);
@@ -5969,6 +6215,21 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcphdr *th,
 			}
 
 			break;
+		case TCPOPT_ACCECN0:
+		case TCPOPT_ACCECN1:
+			if (optlen < (TCPOLEN_ACCECN_EMPTY + 1 * TCPOLEN_ACCECN_COUNTER) ||
+			    (optlen - 2) % TCPOLEN_ACCECN_COUNTER != 0) {
+				continue;
+			}
+			to->to_num_accecn = (optlen - 2) / TCPOLEN_ACCECN_COUNTER;
+			to->to_accecn = cp + 2;
+			if (opt == TCPOPT_ACCECN0) {
+				to->to_accecn_order = 0;
+			} else if (opt == TCPOPT_ACCECN1) {
+				to->to_accecn_order = 1;
+			}
+			break;
+
 #if MPTCP
 		case TCPOPT_MULTIPATH:
 			tcp_do_mptcp_options(tp, cp, th, to, optlen);
@@ -7072,7 +7333,13 @@ tcp_set_foreground_cc(struct socket *so)
 		tcp_set_new_cc(so, TCP_CC_ALGO_BACKGROUND_INDEX);
 #endif
 	} else {
-		tcp_set_new_cc(so, TCP_CC_ALGO_CUBIC_INDEX);
+		struct inpcb *inp = sotoinpcb(so);
+		struct tcpcb *tp = intotcpcb(inp);
+		if (TCP_L4S_ENABLED(tp)) {
+			tcp_set_new_cc(so, TCP_CC_ALGO_PRAGUE_INDEX);
+		} else {
+			tcp_set_new_cc(so, TCP_CC_ALGO_CUBIC_INDEX);
+		}
 	}
 }
 
@@ -7209,6 +7476,7 @@ tcp_getstat SYSCTL_HANDLER_ARGS
 	int error;
 	struct tcpstat *stat;
 	stat = &tcpstat;
+
 #if XNU_TARGET_OS_OSX
 	struct tcpstat zero_stat;
 

@@ -10,7 +10,7 @@
 #include "abi_helper.h"
 
 // Receive a raw pointer from a function that actually returns a smart pointer
-T_DECL(abi_caller_raw, "intrusive_shared_ptr.abi.caller.raw") {
+T_DECL(abi_caller_raw, "intrusive_shared_ptr.abi.caller.raw", T_META_TAG_VM_PREFERRED) {
 	T obj{10};
 	T* expected = &obj;
 	T* result = return_shared_as_raw(expected);

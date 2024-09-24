@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2021, 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2021, 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -53,13 +53,13 @@
 
 #include <vm/pmap.h>
 #include <vm/pmap_cs.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_page_internal.h>
 #include <vm/vm_pageout.h>
-#include <vm/cpm.h>
+#include <vm/cpm_internal.h>
 
 #include <libkern/img4/interface.h>
 #include <libkern/amfi/amfi.h>
@@ -218,6 +218,50 @@ const struct page_table_level_info pmap_table_level_info_4k[] =
 	}
 };
 
+const struct page_table_level_info pmap_table_level_info_4k_stage2[] =
+{
+	[0] = { /* Unused */
+		.size       = ARM_4K_TT_L0_SIZE,
+		.offmask    = ARM_4K_TT_L0_OFFMASK,
+		.shift      = ARM_4K_TT_L0_SHIFT,
+		.index_mask = ARM_4K_TT_L0_INDEX_MASK,
+		.valid_mask = ARM_TTE_VALID,
+		.type_mask  = ARM_TTE_TYPE_MASK,
+		.type_block = ARM_TTE_TYPE_BLOCK
+	},
+	[1] = { /* Concatenated, so index mask is larger than normal */
+		.size       = ARM_4K_TT_L1_SIZE,
+		.offmask    = ARM_4K_TT_L1_OFFMASK,
+		.shift      = ARM_4K_TT_L1_SHIFT,
+#ifdef ARM_4K_TT_L1_40_BIT_CONCATENATED_INDEX_MASK
+		.index_mask = ARM_4K_TT_L1_40_BIT_CONCATENATED_INDEX_MASK,
+#else
+		.index_mask = ARM_4K_TT_L1_INDEX_MASK,
+#endif
+		.valid_mask = ARM_TTE_VALID,
+		.type_mask  = ARM_TTE_TYPE_MASK,
+		.type_block = ARM_TTE_TYPE_BLOCK
+	},
+	[2] = {
+		.size       = ARM_4K_TT_L2_SIZE,
+		.offmask    = ARM_4K_TT_L2_OFFMASK,
+		.shift      = ARM_4K_TT_L2_SHIFT,
+		.index_mask = ARM_4K_TT_L2_INDEX_MASK,
+		.valid_mask = ARM_TTE_VALID,
+		.type_mask  = ARM_TTE_TYPE_MASK,
+		.type_block = ARM_TTE_TYPE_BLOCK
+	},
+	[3] = {
+		.size       = ARM_4K_TT_L3_SIZE,
+		.offmask    = ARM_4K_TT_L3_OFFMASK,
+		.shift      = ARM_4K_TT_L3_SHIFT,
+		.index_mask = ARM_4K_TT_L3_INDEX_MASK,
+		.valid_mask = ARM_PTE_TYPE_VALID,
+		.type_mask  = ARM_PTE_TYPE_MASK,
+		.type_block = ARM_TTE_TYPE_L3BLOCK
+	}
+};
+
 const struct page_table_attr pmap_pt_attr_4k = {
 	.pta_level_info = pmap_table_level_info_4k,
 	.pta_root_level = (T0SZ_BOOT - 16) / 9,
@@ -273,13 +317,13 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
 #endif /* !__ARM_16K_PG__ */
 
 
-#if MACH_ASSERT
+#if DEVELOPMENT || DEBUG
 int vm_footprint_suspend_allowed = 1;
 
 extern int pmap_ledgers_panic;
 extern int pmap_ledgers_panic_leeway;
 
-#endif /* MACH_ASSERT */
+#endif /* DEVELOPMENT || DEBUG */
 
 #if DEVELOPMENT || DEBUG
 #define PMAP_FOOTPRINT_SUSPENDED(pmap) \
@@ -392,10 +436,6 @@ tt_free_entry_t *free_page_size_tt_list MARK_AS_PMAP_DATA;
 unsigned int    free_page_size_tt_count MARK_AS_PMAP_DATA;
 unsigned int    free_page_size_tt_max MARK_AS_PMAP_DATA;
 #define FREE_PAGE_SIZE_TT_MAX   4
-tt_free_entry_t *free_two_page_size_tt_list MARK_AS_PMAP_DATA;
-unsigned int    free_two_page_size_tt_count MARK_AS_PMAP_DATA;
-unsigned int    free_two_page_size_tt_max MARK_AS_PMAP_DATA;
-#define FREE_TWO_PAGE_SIZE_TT_MAX       4
 tt_free_entry_t *free_tt_list MARK_AS_PMAP_DATA;
 unsigned int    free_tt_count MARK_AS_PMAP_DATA;
 unsigned int    free_tt_max MARK_AS_PMAP_DATA;
@@ -425,6 +465,7 @@ int allow_stack_exec = 0;                               /* No apps may execute f
 unsigned long pmap_asid_flushes MARK_AS_PMAP_DATA = 0;
 unsigned long pmap_asid_hits MARK_AS_PMAP_DATA = 0;
 unsigned long pmap_asid_misses MARK_AS_PMAP_DATA = 0;
+unsigned long pmap_speculation_restrictions MARK_AS_PMAP_DATA = 0;
 #else /* DEVELOPMENT || DEBUG */
 const int nx_enabled = 1;                                       /* enable no-execute protection */
 const int allow_data_exec  = 0;                         /* No apps may execute data */
@@ -445,17 +486,6 @@ pmap_check_ledgers(__unused pmap_t pmap)
 {
 }
 #endif /* MACH_ASSERT */
-
-/**
- * This helper function ensures that potentially-long-running batched PPL operations are
- * called in preemptible context before entering the PPL, so that the PPL call may
- * periodically exit to allow pending urgent ASTs to be taken.
- */
-static inline void
-pmap_verify_preemptible(void)
-{
-	assert(preemption_enabled() || (startup_phase < STARTUP_SUB_EARLY_BOOT));
-}
 
 SIMPLE_LOCK_DECLARE(phys_backup_lock, 0);
 
@@ -507,6 +537,11 @@ static uint64_t asid_plru_gencount MARK_AS_PMAP_DATA = 0;
 #else
 static uint16_t last_allocated_asid = 0;
 #endif /* !HAS_16BIT_ASID */
+
+#if HAS_SPECRES_DEBUGGING
+/* A debug flag that controls SPECRES instructions behavior facilitating perf evaluation. */
+static SECURITY_READ_ONLY_LATE(uint64_t) specres_debug = 0;
+#endif /* HAS_SPECRES_DEBUGGING */
 
 
 #if __ARM_MIXED_PAGE_SIZE__
@@ -577,7 +612,7 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
 		return false;
 	}
 	switch (ARM_PTE_EXTRACT_ATTRINDX(pte)) {
-	case CACHE_ATTRINDX_POSTED_XS:
+	case CACHE_ATTRINDX_DISABLE_XS:
 	case CACHE_ATTRINDX_POSTED_COMBINED_REORDERED_XS:
 		return true;
 	default:
@@ -1287,6 +1322,7 @@ PMAP_SUPPORT_PROTOTYPES(
 
 
 
+
 #if DEVELOPMENT || DEBUG
 PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t,
@@ -1402,6 +1438,7 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 #if DEVELOPMENT || DEBUG
 	[PMAP_TEST_TEXT_CORRUPTION_INDEX] = pmap_test_text_corruption_internal,
 #endif /* DEVELOPMENT || DEBUG */
+
 
 };
 #endif
@@ -2149,6 +2186,14 @@ pmap_get_arm64_prot(
 }
 #endif /* __arm64__ */
 
+/**
+ * Helper macros for accessing the "unnested" and "in-progress" bits in
+ * pmap->nested_region_unnested_table_bitmap.
+ */
+#define UNNEST_BIT(index) ((index) * 2)
+#define UNNEST_IN_PROGRESS_BIT(index) (((index) * 2) + 1)
+
+
 /*
  *	Bootstrap the system enough to run with virtual memory.
  *
@@ -2257,6 +2302,14 @@ pmap_bootstrap(
 
 	const vm_size_t asid_table_size = sizeof(*asid_bitmap) * BITMAP_LEN(pmap_max_asids);
 
+#if HAS_SPECRES_DEBUGGING
+	PE_parse_boot_argn("specres_debug", &specres_debug, sizeof(specres_debug));
+
+	if ((specres_debug & SPECRES_DEBUG_FORCE_RCTX) && (specres_debug & SPECRES_DEBUG_FORCE_NO_RCTX)) {
+		panic("%s: invalid specres_debug value: %llu", __func__, specres_debug);
+	}
+#endif /* HAS_SPECRES_DEBUGGING */
+
 	/**
 	 * Bootstrap the core pmap data structures (e.g., pv_head_table,
 	 * pp_attr_table, etc). This function will use `avail_start` to allocate
@@ -2296,9 +2349,6 @@ pmap_bootstrap(
 	free_page_size_tt_list = TT_FREE_ENTRY_NULL;
 	free_page_size_tt_count = 0;
 	free_page_size_tt_max = 0;
-	free_two_page_size_tt_list = TT_FREE_ENTRY_NULL;
-	free_two_page_size_tt_count = 0;
-	free_two_page_size_tt_max = 0;
 	free_tt_list = TT_FREE_ENTRY_NULL;
 	free_tt_count = 0;
 	free_tt_max = 0;
@@ -2341,11 +2391,11 @@ pmap_bootstrap(
 	ppl_trust_cache_rt_lock.lck_rw_can_sleep = FALSE;
 #endif
 
-#if MACH_ASSERT
+#if DEVELOPMENT || DEBUG
 	PE_parse_boot_argn("vm_footprint_suspend_allowed",
 	    &vm_footprint_suspend_allowed,
 	    sizeof(vm_footprint_suspend_allowed));
-#endif /* MACH_ASSERT */
+#endif /* DEVELOPMENT || DEBUG */
 
 #if KASAN
 	/* Shadow the CPU copy windows, as they fall outside of the physical aperture */
@@ -2519,6 +2569,7 @@ pmap_static_allocations_done(void)
 	pmap_lockdown_kc();
 }
 
+
 void
 pmap_lockdown_ppl(void)
 {
@@ -2671,6 +2722,7 @@ pmap_is_bad_ram(__unused ppnum_t ppn)
  * Prepare bad ram pages to be skipped.
  */
 
+
 /*
  * Initialize the count of available pages. No lock needed here,
  * as this code is called while kernel boot up is single threaded.
@@ -2687,6 +2739,7 @@ initialize_ram_ranges(void)
 	avail_page_count = atop(end - first);
 
 	need_ram_ranges_init = false;
+
 }
 
 unsigned int
@@ -3263,7 +3316,7 @@ pmap_destroy_internal(
 
 	__unused const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 
-	int32_t ref_count = os_atomic_dec(&pmap->ref_count, relaxed);
+	int32_t ref_count = os_atomic_dec(&pmap->ref_count, release);
 	if (ref_count > 0) {
 		return;
 	} else if (__improbable(ref_count < 0)) {
@@ -3274,7 +3327,6 @@ pmap_destroy_internal(
 		panic("pmap %p: attempt to destroy commpage pmap", pmap);
 	}
 
-#if XNU_MONITOR
 	/*
 	 * Issue a store-load barrier to ensure the checks of nested_count and the per-CPU
 	 * pmaps below will not be speculated ahead of the decrement of ref_count above.
@@ -3283,6 +3335,8 @@ pmap_destroy_internal(
 	 * ref_count of 0 and panic.
 	 */
 	os_atomic_thread_fence(seq_cst);
+
+#if XNU_MONITOR
 	if (__improbable(os_atomic_load(&pmap->nested_count, relaxed) != 0)) {
 		panic("pmap %p: attempt to destroy while nested", pmap);
 	}
@@ -3395,7 +3449,7 @@ pmap_reference_internal(
 {
 	if (pmap != PMAP_NULL) {
 		validate_pmap_mutable(pmap);
-		os_atomic_inc(&pmap->ref_count, relaxed);
+		os_atomic_inc(&pmap->ref_count, acquire);
 	}
 }
 
@@ -3427,21 +3481,25 @@ pmap_tt1_allocate(
 		size = PAGE_SIZE;
 	}
 
+	/**
+	 * We expect top level translation tables to always fit into a single
+	 * physical page. This would also catch a misconfiguration if 4K
+	 * concatenated page tables needed more than one physical tt1 page.
+	 */
+	if (__improbable(size > PAGE_SIZE)) {
+		panic("%s: translation tables do not fit into a single physical page %u", __FUNCTION__, (unsigned)size);
+	}
+
 	pmap_simple_lock(&tt1_lock);
 	if ((size == PAGE_SIZE) && (free_page_size_tt_count != 0)) {
 		free_page_size_tt_count--;
 		tt1 = (tt_entry_t *)free_page_size_tt_list;
 		free_page_size_tt_list = ((tt_free_entry_t *)tt1)->next;
-	} else if ((size == 2 * PAGE_SIZE) && (free_two_page_size_tt_count != 0)) {
-		free_two_page_size_tt_count--;
-		tt1 = (tt_entry_t *)free_two_page_size_tt_list;
-		free_two_page_size_tt_list = ((tt_free_entry_t *)tt1)->next;
 	} else if ((size < PAGE_SIZE) && (free_tt_count != 0)) {
 		free_tt_count--;
 		tt1 = (tt_entry_t *)free_tt_list;
 		free_tt_list = (tt_free_entry_t *)((tt_free_entry_t *)tt1)->next;
 	}
-
 	pmap_simple_unlock(&tt1_lock);
 
 	if (tt1 != NULL) {
@@ -3522,15 +3580,6 @@ pmap_tt1_deallocate(
 		free_page_size_tt_list = tt_entry;
 	}
 
-	if (size == 2 * PAGE_SIZE) {
-		free_two_page_size_tt_count++;
-		if (free_two_page_size_tt_count > free_two_page_size_tt_max) {
-			free_two_page_size_tt_max = free_two_page_size_tt_count;
-		}
-		tt_entry->next = free_two_page_size_tt_list;
-		free_two_page_size_tt_list = tt_entry;
-	}
-
 	if (option & PMAP_TT_DEALLOCATE_NOBLOCK) {
 		pmap_simple_unlock(&tt1_lock);
 		pmap_tt_ledger_debit(pmap, size);
@@ -3551,19 +3600,6 @@ pmap_tt1_deallocate(
 		pmap_simple_lock(&tt1_lock);
 	}
 
-	while (free_two_page_size_tt_count > FREE_TWO_PAGE_SIZE_TT_MAX) {
-		free_two_page_size_tt_count--;
-		tt = (tt_entry_t *)free_two_page_size_tt_list;
-		free_two_page_size_tt_list = ((tt_free_entry_t *)tt)->next;
-
-		pmap_simple_unlock(&tt1_lock);
-
-		pmap_pages_free(ml_static_vtop((vm_offset_t)tt), 2 * PAGE_SIZE);
-
-		OSAddAtomic(-2 * (int32_t)(PAGE_SIZE / PMAP_ROOT_ALLOC_SIZE), (pmap == kernel_pmap ? &inuse_kernel_tteroot_count : &inuse_user_tteroot_count));
-
-		pmap_simple_lock(&tt1_lock);
-	}
 	pmap_simple_unlock(&tt1_lock);
 	pmap_tt_ledger_debit(pmap, size);
 }
@@ -3598,10 +3634,12 @@ pmap_tt_allocate(
 	if (*ttp == NULL) {
 		pt_desc_t       *ptdp;
 
+		const unsigned int alloc_flags =
+		    (options & PMAP_TT_ALLOCATE_NOWAIT) ? PMAP_PAGES_ALLOCATE_NOWAIT : 0;
 		/*
 		 *  Allocate a VM page for the level x page table entries.
 		 */
-		while (pmap_pages_alloc_zeroed(&pa, PAGE_SIZE, ((options & PMAP_TT_ALLOCATE_NOWAIT)? PMAP_PAGES_ALLOCATE_NOWAIT : 0)) != KERN_SUCCESS) {
+		while (pmap_pages_alloc_zeroed(&pa, PAGE_SIZE, alloc_flags) != KERN_SUCCESS) {
 			if (options & PMAP_OPTIONS_NOWAIT) {
 				return KERN_RESOURCE_SHORTAGE;
 			}
@@ -4243,6 +4281,9 @@ pmap_remove_range_options(
 		}
 
 #if XNU_MONITOR
+		if (__improbable(pmap == kernel_pmap && ppattr_pa_test_no_monitor(pa))) {
+			panic("%s: PA 0x%llx is pinned.", __func__, (uint64_t)pa);
+		}
 		if (__improbable(ro_va)) {
 			pmap_ppl_unlockdown_page_locked(pai, PVH_FLAG_LOCKDOWN_RO, true);
 		}
@@ -4433,7 +4474,21 @@ pmap_remove_options(
 	while (va < end) {
 		vm_map_address_t l;
 
+#if XNU_TARGET_OS_XR
+		/* rdar://84856940 */
+		unsigned int const BATCH_SIZE = 128 * pt_attr_leaf_size(pt_attr);
+
+		l = va + BATCH_SIZE;
+
+		vm_map_address_t const l_twig = l & ~pt_attr_twig_offmask(pt_attr);
+
+		if (l_twig > (va & ~pt_attr_twig_offmask(pt_attr))) {
+			// We're not allowed to cross an L2 boundary.
+			l = l_twig;
+		}
+#else /* XNU_TARGET_OS_XR */
 		l = ((va + pt_attr_twig_size(pt_attr)) & ~pt_attr_twig_offmask(pt_attr));
+#endif /* XNU_TARGET_OS_XR */
 		if (l > end) {
 			l = end;
 		}
@@ -4498,6 +4553,24 @@ pmap_flush_core_tlb_asid_async(pmap_t pmap)
 	flush_core_tlb_asid_async(((uint64_t) pmap->hw_asid) << TLBI_ASID_SHIFT);
 }
 
+#if HAS_SPECRES
+static void
+pmap_flush_core_cfp_asid_async(pmap_t pmap)
+{
+	const uint64_t rctx_operand = RCTX_EL(0ULL) | RCTX_ASID((uint64_t) pmap->hw_asid);
+	asm volatile ("cfp rctx, %0" : : "r"(rctx_operand));
+}
+
+#if REQUIRES_DVP_RCTX
+static void
+pmap_flush_core_dvp_asid_async(pmap_t pmap)
+{
+	const uint64_t rctx_operand = RCTX_EL(0ULL) | RCTX_ASID((uint64_t) pmap->hw_asid);
+	asm volatile ("dvp rctx, %0" : : "r"(rctx_operand));
+}
+#endif /* REQUIRES_DVP_RCTX */
+#endif /* HAS_SPECRES */
+
 static inline bool
 pmap_user_ttb_is_clear(void)
 {
@@ -4526,6 +4599,9 @@ pmap_switch_internal(
 	uint16_t asid_index = pmap->hw_asid;
 	bool do_asid_flush = false;
 	bool do_commpage_flush = false;
+#if HAS_SPECRES
+	bool do_speculation_restriction = false;
+#endif /* HAS_SPECRES */
 
 	if (__improbable((asid_index == 0) && (pmap != kernel_pmap))) {
 		panic("%s: attempt to activate pmap with invalid ASID %p", __func__, pmap);
@@ -4554,7 +4630,7 @@ pmap_switch_internal(
 		uint8_t last_sw_asid = cpu_data_ptr->cpu_sw_asids[asid_index];
 
 		if (new_sw_asid != last_sw_asid) {
-			/*
+			/**
 			 * If the virtual ASID of the new pmap does not match the virtual ASID
 			 * last seen on this CPU for the physical ASID (that was a mouthful),
 			 * then this switch runs the risk of aliasing.  We need to flush the
@@ -4562,10 +4638,21 @@ pmap_switch_internal(
 			 */
 			cpu_data_ptr->cpu_sw_asids[asid_index] = new_sw_asid;
 			do_asid_flush = true;
+#if HAS_SPECRES
+			do_speculation_restriction = true;
+#endif /* HAS_SPECRES */
 			break_before_make = true;
 		}
 	}
 #endif /* !HAS_16BIT_ASID */
+
+#if HAS_SPECRES_DEBUGGING
+	if (specres_debug & SPECRES_DEBUG_FORCE_RCTX) {
+		do_speculation_restriction = true;
+	} else if (specres_debug & SPECRES_DEBUG_FORCE_NO_RCTX) {
+		do_speculation_restriction = false;
+	}
+#endif /* HAS_SPECRES_DEBUGGING */
 
 #if __ARM_MIXED_PAGE_SIZE__
 	if (pt_attr->pta_tcr_value != get_tcr()) {
@@ -4591,6 +4678,21 @@ pmap_switch_internal(
 		PMAP_TRACE(1, PMAP_CODE(PMAP__CLEAR_USER_TTB), VM_KERNEL_ADDRHIDE(pmap), PMAP_VASID(pmap), pmap->hw_asid);
 		pmap_clear_user_ttb_internal();
 	}
+
+#if HAS_SPECRES
+	/**
+	 * Perform an CFP/DVP flush if required.
+	 */
+	if (__improbable(do_speculation_restriction)) {
+		pmap_flush_core_cfp_asid_async(pmap);
+#if REQUIRES_DVP_RCTX
+		pmap_flush_core_dvp_asid_async(pmap);
+#endif /* REQUIRES_DVP_RCTX */
+#if DEVELOPMENT || DEBUG
+		os_atomic_inc(&pmap_speculation_restrictions, relaxed);
+#endif /* DEVELOPMENT || DEBUG */
+	}
+#endif /* HAS_SPECRES */
 
 	/* If we're switching to a different nested pmap (i.e. shared region), we'll need
 	 * to flush the userspace mappings for that region.  Those mappings are global
@@ -4639,9 +4741,14 @@ pmap_switch_internal(
 		pmap_flush_core_tlb_asid_async(pmap);
 #if DEVELOPMENT || DEBUG
 		os_atomic_inc(&pmap_asid_flushes, relaxed);
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 	}
-	if (__improbable(do_asid_flush || do_shared_region_flush || do_commpage_flush)) {
+
+	if (__improbable(do_asid_flush || do_shared_region_flush || do_commpage_flush
+#if HAS_SPECRES && !HAS_ERRATA_123855614
+	    || do_speculation_restriction
+#endif /* HAS_SPECRES && !HAS_ERRATA_123855614 */
+	    )) {
 		sync_tlb_flush_local();
 	}
 
@@ -4753,6 +4860,9 @@ pmap_page_protect_options_with_flush_range(
 	}
 	if (__improbable(ppattr_pa_test_monitor(phys))) {
 		panic("%s: PA 0x%llx belongs to PPL.", __func__, (uint64_t)phys);
+	}
+	if (__improbable(remove && ppattr_pa_test_no_monitor(phys))) {
+		panic("%s: PA 0x%llx is pinned.", __func__, (uint64_t)phys);
 	}
 #endif
 
@@ -5804,7 +5914,7 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 }
 
 MARK_AS_PMAP_TEXT static pt_entry_t
-wimg_to_pte(unsigned int wimg, __unused pmap_paddr_t pa)
+wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
 {
 	pt_entry_t pte;
 
@@ -5819,6 +5929,12 @@ wimg_to_pte(unsigned int wimg, __unused pmap_paddr_t pa)
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_POSTED_COMBINED_REORDERED);
 		} else {
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE);
+#if HAS_FEAT_XS
+			pmap_io_range_t *io_rgn = pmap_find_io_attr(pa);
+			if (__improbable((io_rgn != NULL) && (io_rgn->wimg & PMAP_IO_RANGE_STRONG_SYNC))) {
+				pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DISABLE_XS);
+			}
+#endif /* HAS_FEAT_XS */
 		}
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
@@ -5949,7 +6065,7 @@ pmap_construct_pte(
 			unsigned int index = (unsigned int)((va - pmap->nested_region_addr)  >> pt_attr_twig_shift(pt_attr));
 
 			if ((pmap->nested_region_unnested_table_bitmap)
-			    && testbit(index, (int *)pmap->nested_region_unnested_table_bitmap)) {
+			    && testbit(UNNEST_BIT(index), (int *)pmap->nested_region_unnested_table_bitmap)) {
 				pte |= ARM_PTE_NG;
 			}
 		}
@@ -6192,6 +6308,7 @@ pmap_enter_options_internal(
 			pte = pmap_construct_pte(pmap, v, pa, prot, fault_type, wired, pt_attr, &pp_attr_bits);
 		}
 
+
 		if (pa_valid(pa)) {
 			unsigned int pai;
 			boolean_t   is_altacct = FALSE, is_internal = FALSE, is_reusable = FALSE, is_external = FALSE;
@@ -6273,6 +6390,8 @@ pmap_enter_options_internal(
 			pte &= ~(ARM_PTE_ATTRINDXMASK | ARM_PTE_SHMASK);
 			pte |= pmap_get_pt_ops(pmap)->wimg_to_pte(wimg_bits, pa);
 
+
+
 #if XNU_MONITOR
 			/* The regular old kernel is not allowed to remap PPL pages. */
 			if (__improbable(ppattr_pa_test_monitor(pa))) {
@@ -6289,6 +6408,8 @@ pmap_enter_options_internal(
 				    pmap, v, (void *)pa, prot, fault_type, flags, wired, options);
 			}
 #endif
+
+
 
 
 
@@ -9130,6 +9251,7 @@ pmap_trim_internal(
 		    __func__, grand, subord, (void*)vstart, size, state);
 	}
 
+
 	/* Trimming starts with figuring out the bounds for the grand. */
 	if (state == PMAP_TRIM_STATE_START) {
 		pmap_lock(subord, PMAP_LOCK_EXCLUSIVE);
@@ -9534,7 +9656,7 @@ pmap_nest_internal(
 	os_atomic_inc(&subord->nested_count, relaxed);
 	os_atomic_thread_fence(seq_cst);
 #endif
-	if (__improbable(os_atomic_inc_orig(&subord->ref_count, relaxed) <= 0)) {
+	if (__improbable(os_atomic_inc_orig(&subord->ref_count, acquire) <= 0)) {
 		panic("%s: invalid subordinate pmap %p", __func__, subord);
 	}
 
@@ -9563,6 +9685,14 @@ pmap_nest_internal(
 
 	if (subord->nested_region_unnested_table_bitmap == NULL) {
 		nested_region_unnested_table_bitmap_size = (size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY) + 1;
+
+		/**
+		 * Each even-numbered entry in the unnested table bit stores the table's unnesting state to be used
+		 * by pmap_enter() in determining whether to set the NG bit, while the subsequent odd-numbered
+		 * entry stores the "unnest in progress" indicator for the table, which is used by pmap_unnest()
+		 * to determine if an L3 table may not have been fully marked NG due to an interrupted operation.
+		 */
+		nested_region_unnested_table_bitmap_size <<= 1;
 
 		if (__improbable((nested_region_unnested_table_bitmap_size > UINT_MAX))) {
 			panic("%s: subord->nested_region_unnested_table_bitmap_size=%llu will truncate, "
@@ -9641,6 +9771,7 @@ pmap_nest_internal(
 		new_size =  vend - subord->nested_region_addr;
 
 		new_nested_region_unnested_table_bitmap_size = (new_size >> pt_attr_twig_shift(pt_attr)) / (sizeof(unsigned int) * NBBY) + 1;
+		new_nested_region_unnested_table_bitmap_size <<= 1;
 
 		if (__improbable((new_nested_region_unnested_table_bitmap_size > UINT_MAX))) {
 			panic("%s: subord->nested_region_unnested_table_bitmap_size=%llu will truncate, "
@@ -10090,11 +10221,10 @@ pmap_unnest_options_internal(
 			/*
 			 * If we've re-entered this function partway through unnesting a leaf region, the
 			 * 'unnest' bit will be set in the ASID bitmap, but we won't have finished updating
-			 * the run of PTEs.  We therefore also need to check for a non-twig-aligned starting
-			 * address.
+			 * the run of PTEs and the adjacent "in-progress" bit will be set.
 			 */
-			if (!testbit(current_index, (int *)grand->nested_pmap->nested_region_unnested_table_bitmap) ||
-			    (addr & pt_attr_twig_offmask(pt_attr))) {
+			if (!testbit(UNNEST_BIT(current_index), (int *)grand->nested_pmap->nested_region_unnested_table_bitmap) ||
+			    testbit(UNNEST_IN_PROGRESS_BIT(current_index), (int *)grand->nested_pmap->nested_region_unnested_table_bitmap)) {
 				/*
 				 * Mark the 'twig' region as being unnested.  Every mapping entered within
 				 * the nested pmap in this region will now be marked non-global.  Do this
@@ -10104,7 +10234,8 @@ pmap_unnest_options_internal(
 				 * is later inserted for the same VA in a pmap which has fully unnested this
 				 * region.
 				 */
-				setbit(current_index, (int *)grand->nested_pmap->nested_region_unnested_table_bitmap);
+				setbit(UNNEST_BIT(current_index), (int *)grand->nested_pmap->nested_region_unnested_table_bitmap);
+				setbit(UNNEST_IN_PROGRESS_BIT(current_index), (int *)grand->nested_pmap->nested_region_unnested_table_bitmap);
 				for (cpte = bpte; (bpte != NULL) && (addr < vlim); cpte += PAGE_RATIO) {
 					pmap_paddr_t    pa;
 					unsigned int    pai = 0;
@@ -10149,6 +10280,7 @@ pmap_unnest_options_internal(
 						goto unnest_subord_done;
 					}
 				}
+				clrbit(UNNEST_IN_PROGRESS_BIT(current_index), (int *)grand->nested_pmap->nested_region_unnested_table_bitmap);
 			}
 			addr = vlim;
 			vrestart = addr;
@@ -10524,22 +10656,47 @@ pmap_unmap_compressor_page(ppnum_t pn __unused, void *kva __unused)
  * Batch updates the cache attributes of a list of pages. This is a wrapper for
  * the ppl call on PPL-enabled platforms or the _internal helper on other platforms.
  *
- * @param user_page_list List of pages to be updated.
- * @param page_cnt Number of pages in total in user_page_list.
+ * @param page_list List of pages to be updated.
  * @param cacheattr The new cache attribute.
- *
- * @return Success if true is returned.
  */
-bool
+void
 pmap_batch_set_cache_attributes(
-	upl_page_info_array_t user_page_list,
-	unsigned int page_cnt,
+	const unified_page_list_t *page_list,
 	unsigned int cacheattr)
 {
-	PMAP_TRACE(2, PMAP_CODE(PMAP__BATCH_UPDATE_CACHING) | DBG_FUNC_START, page_cnt, cacheattr, 0xCECC0DE0);
+	PMAP_TRACE(2, PMAP_CODE(PMAP__BATCH_UPDATE_CACHING) | DBG_FUNC_START, page_list, cacheattr, 0xCECC0DE0);
 
-	if (page_cnt == 0) {
-		return true;
+	if (page_list->type != UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY) {
+		/**
+		 * For the UNIFIED_PAGE_LIST_TYPE_UPL_ARRAY case, we process the UPL in batch below.
+		 * In an ideal world we would just use these iterator functions within
+		 * pmap_batch_set_cache_attributes_internal() for all cases, but since this is the PPL
+		 * that means we'll need to take special care to handle pending preemption and
+		 * if necessary return the iterator position out to this function and then re-enter
+		 * pmap_batch_set_cache_attributes_internal() at the same iterator position in a
+		 * secure manner.  Not impossible, but also not trivial, so unless someone asks for
+		 * this perf improvement on the PPL I'm going to take the lazy approach here.
+		 */
+		unified_page_list_iterator_t iter;
+
+		for (unified_page_list_iterator_init(page_list, &iter);
+		    !unified_page_list_iterator_end(&iter);
+		    unified_page_list_iterator_next(&iter)) {
+			bool is_fictitious = false;
+			const ppnum_t pn = unified_page_list_iterator_page(&iter, &is_fictitious);
+			if (__probable(!is_fictitious)) {
+#if XNU_MONITOR
+				pmap_set_cache_attributes_ppl(pn, cacheattr);
+#else /* !XNU_MONITOR */
+				pmap_set_cache_attributes_internal(pn, cacheattr);
+#endif /* XNU_MONITOR */
+			}
+		}
+		return;
+	}
+
+	if (page_list->upl.upl_size == 0) {
+		return;
 	}
 
 	batch_set_cache_attr_state_t states;
@@ -10553,14 +10710,15 @@ pmap_batch_set_cache_attributes(
 
 	while (states.state != PMAP_BATCH_SET_CACHE_ATTRIBUTES_DONE) {
 #if XNU_MONITOR
-		states = pmap_batch_set_cache_attributes_ppl((volatile upl_page_info_t *) user_page_list, states, page_cnt, cacheattr);
+		states = pmap_batch_set_cache_attributes_ppl((volatile upl_page_info_t *) page_list->upl.upl_info,
+		    states, page_list->upl.upl_size, cacheattr);
 #else /* !XNU_MONITOR */
-		states = pmap_batch_set_cache_attributes_internal(user_page_list, states, page_cnt, cacheattr);
+		states = pmap_batch_set_cache_attributes_internal(page_list->upl.upl_info,
+		    states, page_list->upl.upl_size, cacheattr);
 #endif /* XNU_MONITOR */
 	}
 
-	PMAP_TRACE(2, PMAP_CODE(PMAP__BATCH_UPDATE_CACHING) | DBG_FUNC_END, page_cnt, cacheattr, 0xCECC0DEF);
-	return true;
+	PMAP_TRACE(2, PMAP_CODE(PMAP__BATCH_UPDATE_CACHING) | DBG_FUNC_END, page_list, cacheattr, 0xCECC0DEF);
 }
 
 /**
@@ -11720,8 +11878,12 @@ pmap_max_64bit_offset(
 			// Allow the boot-arg to override jumbo size
 			max_offset_ret = arm64_pmap_max_offset_default;
 		} else {
-			max_offset_ret = MACH_VM_MAX_ADDRESS;     // Max offset is 64GB for pmaps with special "jumbo" blessing
+			max_offset_ret = MACH_VM_JUMBO_ADDRESS;     // Max offset is 64GB for pmaps with special "jumbo" blessing
 		}
+#if XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT
+	} else if (option == ARM_PMAP_MAX_OFFSET_EXTRA_JUMBO) {
+		max_offset_ret = MACH_VM_MAX_ADDRESS;
+#endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
 	} else {
 		panic("pmap_max_64bit_offset illegal option 0x%x", option);
 	}
@@ -11824,17 +11986,25 @@ pmap_pin_kernel_pages(vm_offset_t kva, size_t nbytes)
 	}
 	for (vm_offset_t ckva = trunc_page(kva); ckva < end; ckva = round_page(ckva + 1)) {
 		pmap_paddr_t pa = kvtophys_nofail(ckva);
-		pp_attr_t attr;
 		unsigned int pai = pa_index(pa);
-		if (ckva == phystokv(pa)) {
+		pp_attr_t attr;
+		if (__improbable(!pa_valid(pa))) {
+			panic("%s(%s): attempt to pin mapping of non-managed page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
+		}
+		pvh_lock(pai);
+		if (__improbable(ckva == phystokv(pa))) {
 			panic("%s(%p): attempt to pin static mapping for page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
 		}
 		do {
 			attr = pp_attr_table[pai] & ~PP_ATTR_NO_MONITOR;
-			if (attr & PP_ATTR_MONITOR) {
+			if (__improbable(attr & PP_ATTR_MONITOR)) {
 				panic("%s(%p): physical page 0x%llx belongs to PPL", __func__, (void*)kva, (uint64_t)pa);
 			}
 		} while (!OSCompareAndSwap16(attr, attr | PP_ATTR_NO_MONITOR, &pp_attr_table[pai]));
+		pvh_unlock(pai);
+		if (__improbable(kvtophys_nofail(ckva) != pa)) {
+			panic("%s(%p): VA no longer mapped to physical page 0x%llx", __func__, (void*)kva, (uint64_t)pa);
+		}
 	}
 }
 
@@ -12108,7 +12278,7 @@ pmap_ro_zone_validate_element(
 }
 
 /**
- * Ensure that physical page is locked down and pinned, before writing to it.
+ * Ensure that physical page is locked down before writing to it.
  *
  * @note Should be called before writing to an allocation from the read
  * only allocator. This function pairs with pmap_ro_zone_unlock_phy_page,
@@ -12127,6 +12297,10 @@ pmap_ro_zone_lock_phy_page(
 	vm_offset_t         va,
 	vm_size_t           size)
 {
+	if (__improbable(trunc_page(va + size - 1) != trunc_page(va))) {
+		panic("%s: va 0x%llx size 0x%llx crosses page boundary",
+		    __func__, (unsigned long long)va, (unsigned long long)size);
+	}
 	const unsigned int pai = pa_index(pa);
 	pvh_lock(pai);
 
@@ -12137,13 +12311,10 @@ pmap_ro_zone_lock_phy_page(
 		panic("%s: Physical page not locked down %llx", __func__, pa);
 	}
 #endif /* XNU_MONITOR */
-
-	/* Ensure page can't become PPL-owned memory before the memcpy occurs */
-	pmap_pin_kernel_pages(va, size);
 }
 
 /**
- * Unlock and unpin physical page after writing to it.
+ * Unlock physical page after writing to it.
  *
  * @note Should be called after writing to an allocation from the read
  * only allocator. This function pairs with pmap_ro_zone_lock_phy_page,
@@ -12158,11 +12329,10 @@ pmap_ro_zone_lock_phy_page(
 MARK_AS_PMAP_TEXT static void
 pmap_ro_zone_unlock_phy_page(
 	const pmap_paddr_t  pa,
-	vm_offset_t         va,
-	vm_size_t           size)
+	vm_offset_t         va __unused,
+	vm_size_t           size __unused)
 {
 	const unsigned int pai = pa_index(pa);
-	pmap_unpin_kernel_pages(va, size);
 	pvh_unlock(pai);
 }
 
@@ -14445,7 +14615,7 @@ static bool
 pmap_test_fault_handler(arm_saved_state_t * state)
 {
 	bool retval                 = false;
-	uint32_t esr                = get_saved_state_esr(state);
+	uint64_t esr                = get_saved_state_esr(state);
 	esr_exception_class_t class = ESR_EC(esr);
 	fault_status_t fsc          = ISS_IA_FSC(ESR_ISS(esr));
 

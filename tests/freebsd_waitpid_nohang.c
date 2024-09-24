@@ -33,7 +33,7 @@
 
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
-T_DECL(waitpid_nohang, "FreeBSDarwin--waitpid_nohang")
+T_DECL(waitpid_nohang, "FreeBSDarwin--waitpid_nohang", T_META_TAG_VM_PREFERRED)
 {
 	pid_t child, pid;
 	int status, r;

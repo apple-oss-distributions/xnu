@@ -39,7 +39,7 @@ tests()
 	}
 }
 
-T_DECL(size, "bounded_array_ref.size") {
+T_DECL(size, "bounded_array_ref.size", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

@@ -158,8 +158,8 @@ struct __user_channel_schema {
 	 */
 	const uint32_t  csm_ver;                /* schema layout version */
 	const volatile uint32_t csm_flags;      /* CSM_* flags */
-	const char      csm_kern_name[CHANNEL_SCHEMA_KERN_NAME];
-	const uuid_t    csm_kern_uuid;
+	char      csm_kern_name[CHANNEL_SCHEMA_KERN_NAME];
+	uuid_t    csm_kern_uuid;
 
 	/*
 	 * The rest of the fields may be rearranged as needed, with
@@ -243,7 +243,9 @@ struct __user_channel_schema {
 	struct {
 		const mach_vm_offset_t  ring_off; /* __user_channel_ring */
 		const mach_vm_offset_t  sd_off;   /* __slot_desc */
-	} csm_ring_ofs[0] __attribute__((aligned(sizeof(uint64_t))));
+	} csm_ring_ofs[__counted_by(csm_tx_rings + csm_rx_rings +
+	csm_allocator_ring_pairs + csm_num_event_rings + csm_large_buf_alloc_rings)]
+	__attribute__((aligned(sizeof(uint64_t))));
 };
 
 /*
@@ -459,6 +461,7 @@ struct __flowadv_entry {
 
 #define FLOWADVF_VALID          0x1     /* flow is valid */
 #define FLOWADVF_SUSPENDED      0x2     /* flow is suspended */
+#define FLOWADV_RESUME_PENDING  0x4     /* flow is resumed before being suspended */
 
 /* channel event threshold */
 struct ch_ev_thresh {

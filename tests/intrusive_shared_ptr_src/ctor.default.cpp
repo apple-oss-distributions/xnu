@@ -32,6 +32,6 @@ tests()
 	}
 }
 
-T_DECL(ctor_default, "intrusive_shared_ptr.ctor.default") {
+T_DECL(ctor_default, "intrusive_shared_ptr.ctor.default", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

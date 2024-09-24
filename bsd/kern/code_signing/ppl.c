@@ -23,7 +23,7 @@
 #include <os/overflow.h>
 #include <machine/atomic.h>
 #include <mach/vm_param.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
@@ -76,6 +76,14 @@ ppl_enter_lockdown_mode(void)
 	printf("entered lockdown mode policy for the PPL");
 }
 
+kern_return_t
+ppl_secure_channel_shared_page(
+	__unused uint64_t *secure_channel_phys,
+	__unused size_t *secure_channel_size)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
 #pragma mark Developer Mode
 
 SECURITY_READ_ONLY_LATE(bool*) developer_mode_enabled = &ppl_developer_mode_storage;
@@ -85,6 +93,35 @@ ppl_toggle_developer_mode(
 	bool state)
 {
 	pmap_toggle_developer_mode(state);
+}
+
+#pragma mark Restricted Execution Mode
+
+kern_return_t
+ppl_rem_enable(void)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+ppl_rem_state(void)
+{
+	return KERN_NOT_SUPPORTED;
+}
+
+#pragma mark Device State
+
+void
+ppl_update_device_state(void)
+{
+	/* Does nothing */
+}
+
+void
+ppl_complete_security_boot_mode(
+	__unused uint32_t security_boot_mode)
+{
+	/* Does nothing */
 }
 
 #pragma mark Code Signing and Provisioning Profiles
@@ -139,6 +176,16 @@ exit:
 	}
 
 	return ret;
+}
+
+kern_return_t
+ppl_trust_provisioning_profile(
+	__unused void *profile_obj,
+	__unused const void *sig_data,
+	__unused size_t sig_size)
+{
+	/* PPL does not support profile trust */
+	return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -362,6 +409,15 @@ ppl_get_trust_level_kdp(
 	uint32_t *trust_level)
 {
 	return pmap_get_trust_level_kdp(pmap, trust_level);
+}
+
+kern_return_t
+ppl_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end)
+{
+	return pmap_get_jit_address_range_kdp(pmap, jit_region_start, jit_region_end);
 }
 
 kern_return_t

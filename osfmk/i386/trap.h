@@ -130,11 +130,32 @@ __attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant",
 	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"((void *)((unsigned long long)code)));
 	__builtin_unreachable();
 }
+
+__attribute__((cold, noreturn, always_inline))
+static inline void
+ml_fatal_trap_with_value(unsigned int code, unsigned long value)
+__attribute__((diagnose_if(!__builtin_constant_p(code), "code must be constant", "error")))
+{
+	register unsigned long long _value __asm__("rax") = value;
+	__asm__ volatile ("ud1l %[_code](%%eax), %%eax"
+                : "=r"(_value)
+                : [_code]"p"((void *)((unsigned long long)code))
+                , "0"(_value));
+	__builtin_unreachable();
+}
 #else
 #define ml_recoverable_trap(code) \
 	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code))
 #define ml_fatal_trap(code)  ({ \
 	__asm__ volatile ("ud1l %0(%%eax), %%eax" : : "p"(code)); \
+	__builtin_unreachable(); \
+})
+#define ml_fatal_trap_with_value(code, value)  ({ \
+	register unsigned long long _value __asm__("rax") = (value); \
+	__asm__ volatile ("ud1l %[_code](%%eax), %%eax" \
+	        : "=r"(_value) \
+	        : [_code]"p"((void *)((unsigned long long)code)) \
+	        , "0"(_value)); \
 	__builtin_unreachable(); \
 })
 #endif

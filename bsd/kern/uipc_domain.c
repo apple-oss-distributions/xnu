@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1175,6 +1175,9 @@ protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
     uint32_t protoctl_event_code, struct protoctl_ev_val *p_protoctl_ev_val)
 {
 	struct protoctl_event_nwk_wq_entry *p_protoctl_ev = NULL;
+
+	evhlog(debug, "%s: eventhandler enqueuing event of type=protoctl_event event_code=%d",
+	    __func__, protocol);
 
 	p_protoctl_ev = kalloc_type(struct protoctl_event_nwk_wq_entry,
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);

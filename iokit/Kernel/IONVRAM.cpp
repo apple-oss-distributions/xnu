@@ -39,6 +39,7 @@
 #include <IOKit/IOBSD.h>
 #include <kern/debug.h>
 #include <os/system_event_log.h>
+#include <pexpert/boot.h>
 #include <sys/csr.h>
 
 #define super IOService
@@ -175,8 +176,10 @@ static bool gInternalBuild = false;
 // IONVRAMSystemVariableListInternal:
 // Used for internal builds only
 // "force-lock-bits" used by fwam over ssh nvram to device so they are unable to use entitlements
+// "stress-rack" used in SEG stress-rack restore prdocs
 #define IONVRAMSystemVariableListInternal IONVRAMSystemVariableList, \
-	                                      "force-lock-bits"
+	                                      "force-lock-bits", \
+	                                      "stress-rack"
 
 // allowlist variables from macboot that need to be set/get from system region if present
 static const char * const gNVRAMSystemList[] = { IONVRAMSystemVariableList, nullptr };
@@ -413,11 +416,7 @@ static bool
 verifyWriteSizeLimit(const uuid_t varGuid, const char *variableName, size_t propDataSize)
 {
 	if (variableInAllowList(variableName)) {
-		if (strnstr(variableName, "breadcrumbs", strlen(variableName)) != NULL) {
-			return propDataSize <= 1024;
-		} else {
-			return propDataSize <= 768;
-		}
+		return propDataSize <= BOOT_LINE_LENGTH;
 	}
 
 	return true;
@@ -713,7 +712,8 @@ skipKey(const OSSymbol *aKey)
 	       aKey->isEqualTo(kIOBSDUnitKey) ||
 	       aKey->isEqualTo(kIOUserServicePropertiesKey) ||
 	       aKey->isEqualTo(kIOExclaveAssignedKey) ||
-	       aKey->isEqualTo(kIOMatchCategoryKey);
+	       aKey->isEqualTo(kIOMatchCategoryKey) ||
+	       aKey->isEqualTo(kIOBusyInterest);
 }
 
 static OSSharedPtr<const OSSymbol>
@@ -1262,12 +1262,12 @@ IODTNVRAM::init(IORegistryEntry *old, const IORegistryPlane *plane)
 
 	require(super::init(old, plane), fail);
 
-#if XNU_TARGET_OS_OSX
-#if CONFIG_CSR
+#if CONFIG_CSR && XNU_TARGET_OS_OSX
 	gInternalBuild = (csr_check(CSR_ALLOW_APPLE_INTERNAL) == 0);
+#elif defined(DEBUG) || defined(DEVELOPMENT)
+	gInternalBuild = true;
+#endif
 	DEBUG_INFO("gInternalBuild = %d\n", gInternalBuild);
-#endif // CONFIG_CSR
-#endif // XNU_TARGET_OS_OSX
 
 	_variableLock = IORWLockAlloc();
 	require(_variableLock != nullptr, fail);
@@ -1557,13 +1557,12 @@ IODTNVRAM::reload(void)
 	_format->reload();
 }
 
-bool
-IODTNVRAM::serializeProperties(OSSerialize *s) const
+OSPtr<OSDictionary>
+IODTNVRAM::dictionaryWithProperties(void) const
 {
 	const OSSymbol                    *canonicalKey;
 	OSSharedPtr<OSDictionary>         localVarDict, returnDict;
 	OSSharedPtr<OSCollectionIterator> iter;
-	bool                              ok = false;
 	unsigned int                      totalCapacity = 0;
 	uuid_t                            varGuid;
 	const char *                      varName;
@@ -1625,12 +1624,22 @@ IODTNVRAM::serializeProperties(OSSerialize *s) const
 			}
 		}
 	}
-
-	ok = returnDict->serialize(s);
-
 exit:
-	DEBUG_INFO("ok=%d\n", ok);
+	return returnDict;
+}
 
+bool
+IODTNVRAM::serializeProperties(OSSerialize *s) const
+{
+	bool ok = false;
+	OSSharedPtr<OSDictionary> dict;
+
+	dict = dictionaryWithProperties();
+	if (dict) {
+		ok = dict->serialize(s);
+	}
+
+	DEBUG_INFO("ok=%d\n", ok);
 	return ok;
 }
 

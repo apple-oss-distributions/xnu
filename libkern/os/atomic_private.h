@@ -165,7 +165,7 @@
 
 /*! @} */
 
-#include "atomic_private_impl.h" // Internal implementation details
+#include <os/atomic_private_impl.h> // Internal implementation details
 
 /*!
  * @function os_compiler_barrier
@@ -869,6 +869,6 @@ typedef struct { unsigned long __opaque_zero; } os_atomic_dependency_t;
 
 #endif // OS_ATOMIC_CONFIG_MEMORY_ORDER_DEPENDENCY
 
-#include "atomic_private_arch.h" // Per architecture overrides
+#include <os/atomic_private_arch.h> // Per architecture overrides
 
 #endif /* __OS_ATOMIC_PRIVATE_H__ */

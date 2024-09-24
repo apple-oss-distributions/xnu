@@ -45,7 +45,7 @@
 #include <vfs/vfs_io_compression_stats.h>
 
 #include <vm/lz4.h>
-#include <vm/vm_compressor_algorithms.h>
+#include <vm/vm_compressor_algorithms_xnu.h>
 #include <vm/vm_protos.h>
 
 

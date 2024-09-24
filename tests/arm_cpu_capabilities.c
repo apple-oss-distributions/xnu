@@ -355,7 +355,164 @@ try_ecv(void)
 	(void)__builtin_arm_rsr64("CNTVCTSS_EL0");
 }
 
+static void
+try_afp(void)
+{
+	/*
+	 * FEAT_AFP can be detected via three new FPCR bits which were
+	 * previously marked read-as-zero.
+	 */
+	const uint64_t FPCR_AFP_FLAGS = (1 << 0) | (1 << 1) | (1 << 2);
 
+	uint64_t old_fpcr = __builtin_arm_rsr64("FPCR");
+	__builtin_arm_wsr64("FPCR", old_fpcr | FPCR_AFP_FLAGS);
+	uint64_t new_fpcr = __builtin_arm_rsr64("FPCR");
+	__builtin_arm_wsr64("FPCR", old_fpcr);
+
+	if ((new_fpcr & FPCR_AFP_FLAGS) != FPCR_AFP_FLAGS) {
+		cap_usable = false;
+	}
+}
+
+static void
+try_rpres(void)
+{
+	/*
+	 * When FEAT_RPRES is enabled via FPCR.AH, floating-point reciprocal
+	 * estimate instructions increase precision from 8 mantissa bits to 12
+	 * mantissa bits.  This can be detected by estimating 1/10.0 (which has
+	 * no exact floating-point representation) and checking bits 11-14.
+	 */
+	const uint64_t FPCR_AH = (1 << 1);
+	const uint32_t EXTRA_MANTISSA_BITS = (0xf << 11);
+
+	uint32_t recip;
+	uint64_t old_fpcr = __builtin_arm_rsr64("FPCR");
+	__builtin_arm_wsr64("FPCR", old_fpcr | FPCR_AH);
+	asm volatile (
+                "fmov	s0, #10.0"      "\n"
+                "frecpe s0, s0"         "\n"
+                "fmov   %w0, s0"        "\n"
+                : "=r"(recip)
+                :
+                : "s0"
+        );
+	__builtin_arm_wsr64("FPCR", old_fpcr);
+
+	if ((recip & EXTRA_MANTISSA_BITS) == 0) {
+		cap_usable = false;
+	}
+}
+
+__attribute__((target("wfxt")))
+static void
+try_wfxt(void)
+{
+	asm volatile ("wfet xzr");
+}
+
+static void
+try_sme(void)
+{
+	asm volatile (
+               "rdsvl	x0, #1"
+               :
+               :
+               : "x0"
+        );
+}
+
+static void
+try_sme2(void)
+{
+	asm volatile (
+               "smstart za"             "\n"
+               "zero    { zt0 }"        "\n"
+               "smstop  za"             "\n"
+        );
+}
+
+static void
+try_sme_f32f32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "fmopa   za0.s, p0/m, p0/m, z0.s, z0.s"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+static void
+try_sme_bi32i32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "bmopa   za0.s, p0/m, p0/m, z0.s, z0.s"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+static void
+try_sme_b16f32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "bfmopa  za0.s, p0/m, p0/m, z0.h, z0.h"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+static void
+try_sme_f16f32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "fmopa   za0.s, p0/m, p0/m, z0.h, z0.h"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+static void
+try_sme_i8i32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "smopa   za0.s, p0/m, p0/m, z0.b, z0.b"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+static void
+try_sme_i16i32(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "smopa   za0.s, p0/m, p0/m, z0.h, z0.h"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+__attribute__((target("sme-f64f64")))
+static void
+try_sme_f64f64(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "fmopa   za0.d, p0/m, p0/m, z0.d, z0.d"  "\n"
+               "smstop"                                 "\n"
+        );
+}
+
+__attribute__((target("sme-i16i64")))
+static void
+try_sme_i16i64(void)
+{
+	asm volatile (
+               "smstart"                                "\n"
+               "smopa   za0.d, p0/m, p0/m, z0.h, z0.h"  "\n"
+               "smstop"                                 "\n"
+        );
+}
 
 static void
 try_fpexcp(void)
@@ -418,7 +575,7 @@ test_cpu_capability(const char *cap_name, uint64_t cap_flag, bool has_commpage_e
 	}
 }
 
-T_DECL(cpu_capabilities, "Verify ARM CPU capabilities") {
+T_DECL(cpu_capabilities, "Verify ARM CPU capabilities", T_META_TAG_VM_NOT_ELIGIBLE) {
 	exc_port = create_exception_port(EXC_MASK_BAD_INSTRUCTION);
 	repeat_exception_handler(exc_port, bad_instruction_handler);
 
@@ -450,13 +607,26 @@ T_DECL(cpu_capabilities, "Verify ARM CPU capabilities") {
 	test_cpu_capability("SPECRES", kHasFeatSPECRES, true, "hw.optional.arm.FEAT_SPECRES", try_specres);
 	test_cpu_capability("LRCPC", kHasFeatLRCPC, true, "hw.optional.arm.FEAT_LRCPC", try_lrcpc);
 	test_cpu_capability("LRCPC2", kHasFeatLRCPC2, true, "hw.optional.arm.FEAT_LRCPC2", try_lrcpc2);
+	test_cpu_capability("AFP", kHasFeatAFP, true, "hw.optional.arm.FEAT_AFP", try_afp);
 	test_cpu_capability("DIT", kHasFeatDIT, true, "hw.optional.arm.FEAT_DIT", try_dit);
 	test_cpu_capability("FP16", kHasFP_SyncExceptions, true, "hw.optional.arm.FP_SyncExceptions", try_fpexcp);
+	test_cpu_capability("SME", kHasFeatSME, true, "hw.optional.arm.FEAT_SME", try_sme);
+	test_cpu_capability("SME2", kHasFeatSME2, true, "hw.optional.arm.FEAT_SME2", try_sme2);
 
 	// The following features do not have a commpage entry
 	test_cpu_capability("BF16", 0, false, "hw.optional.arm.FEAT_BF16", try_bf16);
 	test_cpu_capability("I8MM", 0, false, "hw.optional.arm.FEAT_I8MM", try_i8mm);
 	test_cpu_capability("ECV", 0, false, "hw.optional.arm.FEAT_ECV", try_ecv);
+	test_cpu_capability("RPRES", 0, false, "hw.optional.arm.FEAT_RPRES", try_rpres);
+	test_cpu_capability("WFxT", 0, false, "hw.optional.arm.FEAT_WFxT", try_wfxt);
+	test_cpu_capability("SME_F32F32", 0, false, "hw.optional.arm.SME_F32F32", try_sme_f32f32);
+	test_cpu_capability("SME_BI32I32", 0, false, "hw.optional.arm.SME_BI32I32", try_sme_bi32i32);
+	test_cpu_capability("SME_B16F32", 0, false, "hw.optional.arm.SME_B16F32", try_sme_b16f32);
+	test_cpu_capability("SME_F16F32", 0, false, "hw.optional.arm.SME_F16F32", try_sme_f16f32);
+	test_cpu_capability("SME_I8I32", 0, false, "hw.optional.arm.SME_I8I32", try_sme_i8i32);
+	test_cpu_capability("SME_I16I32", 0, false, "hw.optional.arm.SME_I16I32", try_sme_i16i32);
+	test_cpu_capability("SME_F64F64", 0, false, "hw.optional.arm.FEAT_SME_F64F64", try_sme_f64f64);
+	test_cpu_capability("SME_I16I64", 0, false, "hw.optional.arm.FEAT_SME_I16I64", try_sme_i16i64);
 
 	// The following features do not add instructions or registers to test for the presence of
 	test_cpu_capability("LSE2", kHasFeatLSE2, true, "hw.optional.arm.FEAT_LSE2", NULL);

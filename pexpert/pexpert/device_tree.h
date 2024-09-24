@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000, 2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -164,10 +164,64 @@ extern int SecureDTEntryIsEqual(const DTEntry ref1, const DTEntry ref2);
  *  Find the device tree entry that contains propName=propValue.
  *  It currently  searches the entire
  *  tree.  This function should eventually go in DeviceTree.c.
+ *  This only works for string properties where `propValue` is null-terminated.
  *  Returns:    kSuccess = entry was found.  Entry is in entryH.
  *            kError   = entry was not found
  */
 extern int SecureDTFindEntry(const char *propName, const char *propValue, DTEntry *entryH);
+
+/**
+ * @brief Finds the devicetree node that has the specified property equal to the
+ * specified value.
+ *
+ * This function works with properties of any type; it just checks that the size
+ * and bytes of the value are what the caller wants.
+ *
+ * @note This function also works with properties that don't have a value—just
+ * specify NULL for `propertyValue` and 0 for `propertyValueSize`.
+ *
+ * @param[in] propertyName The name of the property.
+ * @param[in] propertyValue A pointer to some bytes that make up the value.
+ * @param[in] propertyValueSize The number of bytes that make up the value.
+ * @param[out] devicetreeNode A pointer to the target devicetree node, if found.
+ *
+ * @return kSuccess if the node was found and kError otherwise.
+ */
+extern int SecureDTFindNodeWithPropertyEqualToValue(
+	const char *const propertyName,
+	const void *const propertyValue,
+	const size_t propertyValueSize,
+	const DeviceTreeNode **const devicetreeNode);
+
+/**
+ * @brief Finds the devicetree node with the specified phandle.
+ *
+ * This is a convenience wrapper around `SecureDTFindNodeWithPropertyEqualToValue()`.
+ *
+ * @param[in] phandle The phandle of interest.
+ * @param[out] devicetreeNode A pointer to the target devicetree node, if found.
+ *
+ * @return kSuccess if the node was found and kError otherwise.
+ */
+extern int SecureDTFindNodeWithPhandle(
+	const uint32_t phandle,
+	const DeviceTreeNode **const devicetreeNode);
+
+/**
+ * @brief Finds the devicetree node with the specified string property.
+ *
+ * This is a convenience wrapper around `SecureDTFindNodeWithPropertyEqualToValue()`.
+ *
+ * @param[in] propertyName The name of the string property.
+ * @param[in] propertyValue The value of the string property.
+ * @param[out] devicetreeNode A pointer to the target devicetree node, if found.
+ *
+ * @return kSuccess if the node was found and kError otherwise.
+ */
+extern int SecureDTFindNodeWithStringProperty(
+	const char *const propertyName,
+	const char *const propertyValue,
+	const DeviceTreeNode **const devicetreeNode);
 
 /*
  *  Lookup Entry

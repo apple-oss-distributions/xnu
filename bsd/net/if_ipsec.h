@@ -30,6 +30,8 @@
 #ifndef _NET_IF_IPSEC_H_
 #define _NET_IF_IPSEC_H_
 
+#include <sys/types.h>
+
 #ifdef BSD_KERNEL_PRIVATE
 
 #include <sys/kern_control.h>

@@ -137,6 +137,6 @@ static_assert(alignof(FooShared) == alignof(FooRaw));
 static_assert(offsetof(FooShared, ptr) == offsetof(FooRaw, ptr));
 }
 
-T_DECL(abi_size_alignment, "intrusive_shared_ptr.abi.size_alignment") {
+T_DECL(abi_size_alignment, "intrusive_shared_ptr.abi.size_alignment", T_META_TAG_VM_PREFERRED) {
 	T_PASS("intrusive_shared_ptr.abi.size_alignment compile-time tests passed");
 }

@@ -78,7 +78,11 @@ struct nxctl {
 	STAILQ_ENTRY(nxctl)     nxctl_link;
 	struct fileproc         *nxctl_fp;
 	kauth_cred_t            nxctl_cred;
-	void                   *nxctl_traffic_rule_storage;
+	/*
+	 * -fbounds-safety: nxctl_traffic_rule_storage only gets used as of type
+	 * struct nxctl_traffic_rule_storage *
+	 */
+	struct nxctl_traffic_rule_storage *nxctl_traffic_rule_storage;
 };
 
 #define NEXUSCTLF_ATTACHED      0x1
@@ -97,7 +101,7 @@ struct nxbind {
 	uint64_t                nxb_uniqueid;
 	uuid_t                  nxb_exec_uuid;
 	uint32_t                nxb_key_len;
-	void                    *nxb_key;
+	void                    *__sized_by(nxb_key_len) nxb_key;
 };
 
 #define NXBF_MATCH_UNIQUEID     0x1     /* match against process's unique ID */
@@ -173,7 +177,7 @@ typedef enum {
 #define NPI_NA_ENCODE(_p, _s)   (NPI_NA_ADDR_ENC(_p) | NPI_NA_STATE_ENC(_s))
 
 #define NPI_NA(_npi)            \
-	((struct nexus_adapter *)NPI_NA_ADDR((_npi)->npi_nah))
+	(__unsafe_forge_single(struct nexus_adapter *, NPI_NA_ADDR((_npi)->npi_nah)))
 #define NPI_IS_DEFUNCT(_npi)    \
 	(NPI_NA_STATE((_npi)->npi_nah) == NEXUS_PORT_STATE_DEFUNCT)
 
@@ -182,12 +186,13 @@ typedef enum {
  */
 struct kern_nexus_advisory {
 	struct skmem_region     *nxv_reg;
-	void                    *nxv_adv;
+	void                    *__sized_by(nxv_adv_size) nxv_adv;
 	nexus_advisory_type_t   nxv_adv_type;
 	union {
 		struct sk_nexusadv             *flowswitch_nxv_adv;
 		struct netif_nexus_advisory    *netif_nxv_adv;
 	};
+	uint32_t                nxv_adv_size;
 };
 
 /*
@@ -222,10 +227,11 @@ struct kern_nexus {
 	struct kern_nexus_advisory nx_adv;
 
 	/* nexus port */
-	struct nx_port_info     *nx_ports;
-	bitmap_t                *nx_ports_bmap;
+	struct nx_port_info     *__counted_by(nx_num_ports) nx_ports;
+	bitmap_t                *__sized_by(nx_ports_bmap_size) nx_ports_bmap;
 	nexus_port_size_t       nx_active_ports;
 	nexus_port_size_t       nx_num_ports;
+	size_t                  nx_ports_bmap_size;
 };
 
 #define NXF_ATTACHED    0x1
@@ -485,7 +491,7 @@ extern int nx_port_unbind(struct kern_nexus *, nexus_port_t);
 extern struct nexus_adapter *nx_port_get_na(struct kern_nexus *,
     nexus_port_t);
 extern int nx_port_get_info(struct kern_nexus *, nexus_port_t,
-    nx_port_info_type_t, void *, uint32_t);
+    nx_port_info_type_t, void *__sized_by(len), uint32_t len);
 extern void nx_port_defunct(struct kern_nexus *, nexus_port_t);
 extern void nx_port_free(struct kern_nexus *, nexus_port_t);
 extern void nx_port_free_all(struct kern_nexus *);
@@ -509,7 +515,7 @@ extern int nxctl_get_opt(struct nxctl *, struct sockopt *);
 extern int nxctl_set_opt(struct nxctl *, struct sockopt *);
 extern void nxctl_retain(struct nxctl *);
 extern int nxctl_release(struct nxctl *);
-extern void nxctl_dtor(void *);
+extern void nxctl_dtor(struct nxctl *);
 
 extern int nxprov_advise_connect(struct kern_nexus *, struct kern_channel *,
     struct proc *p);

@@ -39,7 +39,8 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.scheduler"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("scheduler"),
     T_META_OWNER("chimene"),
-    T_META_RUN_CONCURRENTLY(true));
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_TAG_VM_PREFERRED);
 
 T_DECL(unentitled_game_mode, "game mode bit shouldn't work unentitled")
 {

@@ -155,7 +155,7 @@ class LogStream(LogBlocks):
     """ Represents an OSLog Stream buffer. """
 
     def __init__(self, log_stream):
-        super(LogStream, self).__init__(log_stream.ls_buf,
+        super().__init__(log_stream.ls_buf,
                                         log_stream.ls_blk,
                                         log_stream.ls_blk_count,
                                         True)
@@ -202,7 +202,7 @@ class LogStreamCache(LogBlocks):
     """
 
     def __init__(self, log_cache):
-        super(LogStreamCache, self).__init__(log_cache.lc_buf,
+        super().__init__(log_cache.lc_buf,
                                              log_cache.lc_blk,
                                              log_cache.lc_blk_count,
                                              False)
@@ -279,9 +279,9 @@ class MsgBuffer(object):
         for c in chars:
             line.append(c)
             if chr(c) == '\n':
-                yield line.decode()
+                yield line.decode(errors='backslashreplace')
                 line = bytearray()
-        yield line.decode()
+        yield line.decode(errors='backslashreplace')
 
     def _at(self, i):
         """ Returns a character at a given index. """
@@ -350,13 +350,14 @@ class LogQueue(object):
     def collect():
         """ Returns a list of all per-CPU log queues. """
         pcpu_lqs = addressof(kern.GetGlobalVariable('percpu_slot_oslog_queue'))
+        pcpu_lqs_type = pcpu_lqs.GetSBValue().GetType().name
         cpus = range(0, kern.globals.zpercpu_early_count)
 
-        def PCPUSlot(pcpu_var, i):
-            addr = unsigned(pcpu_var) + kern.PERCPU_BASE(i)
-            return kern.GetValueFromAddress(addr, pcpu_var)
+        def PCPUSlot(i):
+            addr = unsigned(pcpu_lqs) + kern.PERCPU_BASE(i)
+            return kern.GetValueFromAddress(addr, pcpu_lqs_type)
 
-        return [LogQueue(cpu, PCPUSlot(pcpu_lqs, cpu)) for cpu in cpus]
+        return [LogQueue(cpu, PCPUSlot(cpu)) for cpu in cpus]
 
 
 def show_log_stream_logs(pp, logs):

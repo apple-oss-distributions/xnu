@@ -92,6 +92,10 @@ get_lockdown_mode_state(void)
 	}
 	lck_mtx_unlock(&lockdown_mode_init_mtx);
 
+#if XNU_TARGET_OS_XR
+	printf("lockdown_mode: disabling lockdown mode on visionOS\n");
+	disable_lockdown_mode();
+#endif
 
 	return lockdown_mode_state;
 }

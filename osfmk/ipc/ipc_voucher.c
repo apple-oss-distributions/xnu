@@ -2055,9 +2055,9 @@ ipc_get_pthpriority_from_kmsg_voucher(
 {
 	mach_port_t voucher_port;
 	ipc_voucher_t pthread_priority_voucher;
-	mach_voucher_attr_raw_recipe_size_t content_size =
-	    sizeof(mach_voucher_attr_recipe_data_t) + sizeof(ipc_pthread_priority_value_t);
-	uint8_t content_data[content_size];
+	uint8_t content_data[sizeof(mach_voucher_attr_recipe_data_t) +
+	sizeof(ipc_pthread_priority_value_t)];
+	mach_voucher_attr_raw_recipe_size_t content_size = sizeof(content_data);
 	mach_voucher_attr_recipe_t cur_content;
 
 	kern_return_t kr = KERN_SUCCESS;
@@ -2182,7 +2182,7 @@ ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg)
 void
 ipc_voucher_receive_postprocessing(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option)
+	mach_msg_option64_t     option)
 {
 	uint8_t recipes[(MACH_VOUCHER_ATTR_KEY_NUM + 1) * sizeof(ipc_voucher_attr_recipe_data_t)];
 	ipc_voucher_attr_raw_recipe_array_size_t recipe_size = (MACH_VOUCHER_ATTR_KEY_NUM + 1) *

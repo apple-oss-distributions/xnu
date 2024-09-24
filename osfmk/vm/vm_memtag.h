@@ -30,9 +30,17 @@
 
 #ifdef  KERNEL
 
+#include <kern/assert.h>
 #include <mach/vm_types.h>
 
-#if CONFIG_KERNEL_TAGGING
+
+#if KASAN_TBI
+#define ENABLE_MEMTAG_INTERFACES        1
+#endif
+
+#if defined(ENABLE_MEMTAG_INTERFACES)
+
+__BEGIN_DECLS
 
 /* Zero-out a tagged memory region. */
 extern void vm_memtag_bzero(void *tagged_buf, vm_size_t n);
@@ -72,6 +80,12 @@ extern void
 vm_memtag_verify_tag(vm_offset_t tagged_address);
 
 /*
+ * Copy metadata between to mappings whenever we are relocating memory.
+ */
+extern void
+vm_memtag_relocate_tags(vm_offset_t new_address, vm_offset_t old_address, vm_offset_t size);
+
+/*
  * Temporarily enable/disable memtag checking.
  */
 extern void
@@ -79,14 +93,18 @@ vm_memtag_enable_checking(void);
 extern void
 vm_memtag_disable_checking(void);
 
+
 /*
  * Helper functions to manipulate tagged pointers. If more implementors of
  * the vm_memtag interface beyond KASAN-TBI were to come, then these definitions
  * should be ifdef guarded properly.
  */
+
 #define VM_MEMTAG_PTR_SIZE         56
 #define VM_MEMTAG_TAG_SIZE          4
 #define VM_MEMTAG_UPPER_SIZE        4
+#define VM_MEMTAG_BYTES_PER_TAG    16
+
 
 union vm_memtag_ptr {
 	long value;
@@ -119,16 +137,23 @@ vm_memtag_extract_tag(vm_offset_t tagged_ptr)
 	return p.ptr_tag;
 }
 
+__END_DECLS
+
 /*
  * when passed a tagged pointer, strip away the tag bits and return the
  * canonical address. Since it's used in a number of frequently called checks
  * (e.g. when packing VM pointers), the following definition hardcodes the
  * tag value to achieve optimal codegen and no external calls.
  */
-#define vm_memtag_canonicalize_address(addr)    vm_memtag_add_ptr_tag(addr, 0xF)
+#define vm_memtag_canonicalize_address(addr)            vm_memtag_add_ptr_tag(addr, 0xF)
 #define vm_memtag_canonicalize_user_address(addr)       vm_memtag_add_ptr_tag(addr, 0x0)
 
-#else /* CONFIG_KERNEL_TAGGING */
+#else /* ENABLE_MEMTAG_INTERFACES */
+
+
+#if KASAN_TBI
+#error "vm_memtag interfaces should be defined whenever KASAN-TBI is enabled"
+#endif /* KASAN_TBI */
 
 #define vm_memtag_bzero(p, s)                   bzero(p, s)
 #define vm_memtag_get_tag(a)                    (0xF)
@@ -138,11 +163,12 @@ vm_memtag_extract_tag(vm_offset_t tagged_ptr)
 #define vm_memtag_add_ptr_tag(p, t)             (p)
 #define vm_memtag_extract_tag(p)                (0xF)
 #define vm_memtag_canonicalize_address(a)       (a)
+#define vm_memtag_relocate_tags(n, o, l)        do { } while (0)
 #define vm_memtag_enable_checking()             do { } while (0)
 #define vm_memtag_disable_checking()            do { } while (0)
 
 
-#endif /* CONFIG_KERNEL_TAGGING */
+#endif /* ENABLE_MEMTAG_INTERFACES */
 
 #endif  /* KERNEL */
 

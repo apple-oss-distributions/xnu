@@ -2,55 +2,72 @@
 #
 # Copyright (C) 1999-2016 Apple Inc. All rights reserved.
 #
-# MakeInc.dir contains the recursion rules for the build system.
-# For instance, the "build_installhdrs_md" target is auto-generated
-# such that make(1) recurses into a specified set of subdirectories
-# (building "build_installhdrs_md" in turn at each level) before
-# building the special "do_installhdrs_md" target at the current
-# level. "do_installhdrs_md" is defined in MakeInc.rule.
+# MakeInc.dir allows makefiles throughout the XNU codebase to leverage recursive
+# build behavior with minimal effort while promoting code reuse.
+#
+# For instance, a makefile need only define the special variable SETUP_SUBDIRS
+# to be a list of subdirectories in order for the build system to automatically
+# (1) go into those subdirectories building the target `build_setup`, (2) wait
+# for those targets to be built, and then (3) build the target `do_build_setup`
+# in the current directory.
+#
+# There are a number of other such special variables including (but not limited
+# to): INSTINC_SUBDIRS, EXPINC_SUBDIRS, COMP_SUBDIRS, and CONFIG_SUBDIRS. For
+# some of these special variables, there are are also architecture-specific
+# variants if a makefile needs to specify architecture-dependent builds.
 #
 
-# $(1) is the name of the target to produce that will perform the
-#      recursive behavior via dependencies
-# $(2) is a list of subdirectories to recurse into
-# $(3) is the target to build with a sub-make after
-#      the subdirectories have been recursed into
-# $(4) should be "1" if TARGET should be pinned to the per-arch
-#      build COMPONENT directory, or empty if it should recurse
-#      in lockstep with the source recursion
+#
+# This function/template provides generic recursive build functionality that
+# allows you to specify a list of subdirectories, a target to build in those
+# subdirectories, and a target to build in the current directory afterwards.
+#
+# Parameters:
+#
+#    $(1): The target to build in each subdirectory.
+#    $(2): A list of subdirectories.
+#    $(3): The target to build in the current directory _after_ the subdirectory
+#          targets have already been built.
+#    $(4): This parameter controls the value of the TARGET make variable that's
+#          passed down to the sub-makes for each subdirectory. If it's anything
+#          but the empty string (but please just use 1 for consistency), then
+#          the TARGET variable is BUILD/obj/<CURRENT_BUILD_CONFIG>/<COMPONENT>.
+#          Otherwise, the TARGET variable is <TARGET>/<subdirectory>.
+#
 define RECURSIVE_BUILD_RULES_template
-$(1)_recurse_target_list = $$(addprefix $(1)_recurse_into_,$(2))
+$(1)_recurse_target_list := $(addprefix $(1)_recurse_into_,$(2))
 
 .PHONY: $$($(1)_recurse_target_list)
 
 $$($(1)_recurse_target_list):
-	$$(_v)$$(MKDIR) "$$(CURDIR)/$$(patsubst $(1)_recurse_into_%,%,$$@)"
-	$$(_v)$${MAKE} -C "$$(CURDIR)/$$(patsubst $(1)_recurse_into_%,%,$$@)"	\
-		-f "$$(SOURCE)$$(patsubst $(1)_recurse_into_%,%,$$@)/Makefile"	\
-		CURRENT_KERNEL_CONFIG=$${CURRENT_KERNEL_CONFIG}		\
-		CURRENT_ARCH_CONFIG=$${CURRENT_ARCH_CONFIG}		\
-		CURRENT_MACHINE_CONFIG=$${CURRENT_MACHINE_CONFIG}	\
-		CURRENT_BUILD_CONFIG=$${CURRENT_BUILD_CONFIG}		\
-		SOURCE="$$(SOURCE)$$(patsubst $(1)_recurse_into_%,%,$$@)/"	\
-		RELATIVE_SOURCE_PATH="$$(RELATIVE_SOURCE_PATH)/$$(patsubst $(1)_recurse_into_%,%,$$@)"	\
-		TARGET=$(if $(4),$${OBJPATH}/$$(COMPONENT),$$(TARGET)$$(patsubst $(1)_recurse_into_%,%,$$@)/)		\
-		OBJPATH=$${OBJPATH}					\
-		$(1);
+	$(_v)$(MKDIR) $(CURDIR)/$$(patsubst $(1)_recurse_into_%,%,$$@)
+	$(_v)$(MAKE) \
+		-C $(CURDIR)/$$(patsubst $(1)_recurse_into_%,%,$$@) \
+		-f $(SOURCE)$$(patsubst $(1)_recurse_into_%,%,$$@)/Makefile \
+		CURRENT_KERNEL_CONFIG=$(CURRENT_KERNEL_CONFIG) \
+		CURRENT_ARCH_CONFIG=$(CURRENT_ARCH_CONFIG) \
+		CURRENT_MACHINE_CONFIG=$(CURRENT_MACHINE_CONFIG) \
+		CURRENT_BUILD_CONFIG=$(CURRENT_BUILD_CONFIG) \
+		SOURCE=$(SOURCE)$$(patsubst $(1)_recurse_into_%,%,$$@)/ \
+		RELATIVE_SOURCE_PATH=$(RELATIVE_SOURCE_PATH)/$$(patsubst $(1)_recurse_into_%,%,$$@) \
+		TARGET=$(if $(4),$(OBJPATH)/$(COMPONENT),$(TARGET)$$(patsubst $(1)_recurse_into_%,%,$$@)/) \
+		OBJPATH=$(OBJPATH) \
+		$(1)
 
 .PHONY: $(1)
 
 $(1): $$($(1)_recurse_target_list)
-	$$(_v)$${MAKE} -C "$$(CURDIR)"						\
-		-f $$(firstword $$(MAKEFILE_LIST))				\
-		CURRENT_KERNEL_CONFIG=$${CURRENT_KERNEL_CONFIG}			\
-		CURRENT_ARCH_CONFIG=$${CURRENT_ARCH_CONFIG}			\
-		CURRENT_MACHINE_CONFIG=$${CURRENT_MACHINE_CONFIG}		\
-		CURRENT_BUILD_CONFIG=$${CURRENT_BUILD_CONFIG}			\
-		SOURCE=$$(SOURCE)						\
-		RELATIVE_SOURCE_PATH=$$(RELATIVE_SOURCE_PATH)			\
-		TARGET=$$(TARGET)						\
-		OBJPATH=$${OBJPATH}						\
-		$(3);
+	$(_v)$(MAKE) \
+		-f $(firstword $(MAKEFILE_LIST)) \
+		CURRENT_KERNEL_CONFIG=$(CURRENT_KERNEL_CONFIG) \
+		CURRENT_ARCH_CONFIG=$(CURRENT_ARCH_CONFIG) \
+		CURRENT_MACHINE_CONFIG=$(CURRENT_MACHINE_CONFIG) \
+		CURRENT_BUILD_CONFIG=$(CURRENT_BUILD_CONFIG) \
+		SOURCE=$(SOURCE) \
+		RELATIVE_SOURCE_PATH=$(RELATIVE_SOURCE_PATH) \
+		TARGET=$(TARGET) \
+		OBJPATH=$(OBJPATH) \
+		$(3)
 endef
 
 #

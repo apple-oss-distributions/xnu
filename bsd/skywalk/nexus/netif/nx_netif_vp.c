@@ -80,6 +80,10 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, vp_accept_all,
     "netif accept all");
 #endif /* (DEVELOPMENT || DEBUG) */
 
+/* XXX Until rdar://118519573 is resolved, do this as a workaround */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-align"
+
 static int
 netif_vp_na_channel_event_notify(struct nexus_adapter *,
     struct __kern_channel_event *, uint16_t);
@@ -211,7 +215,8 @@ netif_hwna_rx_get_pkts(struct __kern_channel_ring *ring, struct proc *p,
 	int err, cnt = 0;
 	sk_protect_t protect;
 	slot_idx_t ktail, idx;
-	struct __kern_packet *pkt_chain = NULL, **tailp = &pkt_chain;
+	struct __kern_packet *__single pkt_chain = NULL;
+	struct __kern_packet **tailp = &pkt_chain;
 	struct netif_stats *nifs = &NIFNA(KRNA(ring))->nifna_netif->nif_stats;
 
 	err = kr_enter(ring, ((flags & NA_NOTEF_CAN_SLEEP) != 0 ||
@@ -296,7 +301,7 @@ netif_llw_rx_notify_fast(struct __kern_channel_ring *ring, struct proc *p,
 		pkt_chain = SK_PTR_ADDR_KPKT(ring->ckr_scratch[i]);
 		ASSERT(pkt_chain != NULL);
 		(void) nx_netif_demux(NIFNA(KRNA(ring)), pkt_chain, NULL,
-		    NETIF_FLOW_SOURCE);
+		    NULL, NETIF_FLOW_SOURCE);
 	}
 	return 0;
 }
@@ -306,14 +311,14 @@ netif_llw_rx_notify_default(struct __kern_channel_ring *ring, struct proc *p,
     uint32_t flags)
 {
 	int err;
-	struct __kern_packet *pkt_chain = NULL;
+	struct __kern_packet *__single pkt_chain = NULL;
 
 	err = netif_hwna_rx_get_pkts(ring, p, flags, &pkt_chain);
 	if (err != 0) {
 		return err;
 	}
 	return nx_netif_demux(NIFNA(KRNA(ring)), pkt_chain, NULL,
-	           NETIF_FLOW_SOURCE);
+	           NULL, NETIF_FLOW_SOURCE);
 }
 
 static errno_t
@@ -388,7 +393,7 @@ static int
 netif_vp_na_activate_on(struct nexus_adapter *na)
 {
 	errno_t err;
-	struct netif_flow *nf;
+	struct netif_flow *__single nf;
 	struct netif_port_info npi;
 	struct nexus_netif_adapter *nifna;
 	struct nx_netif *nif;
@@ -469,104 +474,100 @@ netif_vp_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 }
 
 /*
- * XXX
- * The native path sends to the dev ring directly, bypassing aqm.
- * This is ok since this is only used by llw now. This will need to
- * change when we add native support for filters.
+ * A variation of netif data path for llw, which sends packets to the appropriate
+ * HW queue directly, bypassing AQM.
  */
 static int
 netif_vp_send_pkt_chain_low_latency(struct nexus_netif_adapter *dev_nifna,
     struct __kern_packet *pkt_chain, struct proc *p)
 {
+#pragma unused(p)
 	struct __kern_packet *pkt = pkt_chain, *next;
-	struct nexus_adapter *na = &dev_nifna->nifna_up;
-	struct __kern_channel_ring *ring = &na->na_tx_rings[0];
-	struct netif_stats *nifs = &dev_nifna->nifna_netif->nif_stats;
-	sk_protect_t protect;
-	slot_idx_t ktail, idx;
-	uint32_t cnt;
-	int err_stat = -1;
+	struct __kern_packet *dpkt, *__single dpkt_head = NULL, **dpkt_tail = &dpkt_head;
+	struct __kern_channel_ring *ring = &dev_nifna->nifna_up.na_tx_rings[0];
+#pragma unused(ring)
+	struct nx_netif *nif;
+	struct netif_queue *drvq;
+	struct netif_stats *nifs;
+	struct kern_nexus_provider *nxprov;
+	uint32_t pkt_count = 0, byte_count = 0;
 	errno_t err;
 
-	(void) kr_enter(ring, TRUE);
-	protect = sk_sync_protect();
-	if (__improbable(KR_DROP(ring))) {
-		SK_ERR("ring is not ready");
-		DTRACE_SKYWALK1(ring__drop, struct __kern_channel_ring *, ring);
-		err_stat = NETIF_STATS_VP_DROP_DEV_RING_DISABLED;
-		err = ENXIO;
-		goto done;
-	}
-	idx = ring->ckr_rhead;
-	ktail = ring->ckr_ktail;
-	if (idx == ktail) {
-		SK_ERR("no space to send");
-		DTRACE_SKYWALK1(no__space, struct __kern_channel_ring *, ring);
-		err_stat = NETIF_STATS_VP_DROP_DEV_RING_NO_SPACE;
-		goto sync;
-	}
-	cnt = 0;
-	while (pkt != NULL && idx != ktail) {
-		struct __slot_desc *slot = &ring->ckr_ksds[idx];
+	nif  = dev_nifna->nifna_netif;
+	nifs = &nif->nif_stats;
 
+	while (pkt != NULL) {
 		next = pkt->pkt_nextpkt;
 		pkt->pkt_nextpkt = NULL;
+
 		netif_vp_dump_packet(pkt);
-		err = netif_copy_or_attach_pkt(ring, slot, pkt);
-		if (__probable(err == 0)) {
-			cnt++;
-			idx = SLOT_NEXT(idx, ring->ckr_lim);
+
+		dpkt = nx_netif_pkt_to_pkt(dev_nifna, pkt, NETIF_CONVERT_TX);
+		if (__improbable(dpkt == NULL)) {
+			pkt = next; // nx_netif_pkt_to_pkt() frees pkt on error as well
+			err = ENOMEM;
+			goto error;
 		}
+
+		*dpkt_tail = dpkt;
+		dpkt_tail  = &dpkt->pkt_nextpkt;
+
 		pkt = next;
 	}
-	ring->ckr_rhead = idx;
-	STATS_ADD(nifs, NETIF_STATS_VP_LL_ENQUEUED, cnt);
-	DTRACE_SKYWALK2(ll__enqueued, struct __kern_channel_ring *, ring,
-	    uint32_t, cnt);
-sync:
-	ring->ckr_khead_pre = ring->ckr_khead;
-	err = ring->ckr_na_sync(ring, p, NA_SYNCF_SYNC_ONLY);
-	if (err != 0 && err != EAGAIN) {
-		SK_ERR("unexpected sync err %d", err);
-		DTRACE_SKYWALK1(sync__failed, struct __kern_channel_ring *,
-		    ring);
-		err_stat = NETIF_STATS_VP_DROP_UNEXPECTED_ERR;
-		goto done;
-	}
+
+	nxprov = NX_PROV(nif->nif_nx);
+	drvq   = NETIF_QSET_TX_QUEUE(nif->nif_default_llink->nll_default_qset, 0);
+
+	kern_packet_t ph = SK_PKT2PH(dpkt_head);
+
+	err = nxprov->nxprov_netif_ext.nxnpi_queue_tx_push(nxprov,
+	    nif->nif_nx, drvq->nq_ctx, &ph, &pkt_count, &byte_count);
+
+	STATS_ADD(nifs, NETIF_STATS_VP_LL_SENT, pkt_count);
+	DTRACE_SKYWALK3(ll__sent, struct __kern_channel_ring *, ring,
+	    uint32_t, pkt_count, uint32_t, byte_count);
+
+	kern_netif_increment_queue_stats(drvq, pkt_count, byte_count);
+
 	/*
-	 * Verify that the driver has detached packets from the consumed slots.
+	 * Free all unconsumed packets.
 	 */
-	idx = ring->ckr_khead_pre;
-	cnt = 0;
-	while (idx != ring->ckr_khead) {
-		struct __kern_slot_desc *ksd = KR_KSD(ring, idx);
+	if (ph != 0) {
+		int dropcnt;
 
-		cnt++;
-		VERIFY(!KSD_VALID_METADATA(ksd));
-		idx = SLOT_NEXT(idx, ring->ckr_lim);
+		nx_netif_free_packet_chain(SK_PTR_ADDR_KPKT(ph), &dropcnt);
+
+		STATS_ADD(nifs, NETIF_STATS_DROP, dropcnt);
+		DTRACE_SKYWALK2(ll__dropped, struct __kern_channel_ring *, ring,
+		    int, dropcnt);
 	}
-	ring->ckr_khead_pre = ring->ckr_khead;
-	STATS_ADD(nifs, NETIF_STATS_VP_LL_SENT, cnt);
-	DTRACE_SKYWALK2(ll__sent, struct __kern_channel_ring *, ring,
-	    uint32_t, cnt);
-	err = 0;
 
-done:
-	sk_sync_unprotect(protect);
-	kr_exit(ring);
+	return err;
 
+error:
 	/*
-	 * Free all unsent packets.
+	 * Free all packets.
 	 */
 	if (pkt != NULL) {
 		int dropcnt;
 
 		nx_netif_free_packet_chain(pkt, &dropcnt);
-		if (err_stat != -1) {
-			STATS_ADD(nifs, err_stat, dropcnt);
-		}
+
 		STATS_ADD(nifs, NETIF_STATS_DROP, dropcnt);
+		DTRACE_SKYWALK2(ll__dropped, struct __kern_channel_ring *, ring,
+		    int, dropcnt);
 	}
+
+	if (dpkt_head != NULL) {
+		int dropcnt;
+
+		nx_netif_free_packet_chain(dpkt_head, &dropcnt);
+
+		STATS_ADD(nifs, NETIF_STATS_DROP, dropcnt);
+		DTRACE_SKYWALK2(ll__dropped, struct __kern_channel_ring *, ring,
+		    int, dropcnt);
+	}
+
 	return err;
 }
 
@@ -673,7 +674,8 @@ netif_vp_na_txsync(struct __kern_channel_ring *kring, struct proc *p,
 {
 #pragma unused(flags)
 	kern_channel_slot_t last_slot = NULL, slot = NULL;
-	struct __kern_packet *head = NULL, **tailp = &head, *pkt;
+	struct __kern_packet *__single head = NULL;
+	struct __kern_packet **tailp = &head, *pkt;
 	struct nexus_netif_adapter *nifna, *dev_nifna;
 	struct nx_netif *nif;
 	struct netif_stats *nifs;
@@ -780,14 +782,14 @@ netif_vp_na_krings_delete(struct nexus_adapter *na, struct kern_channel *ch,
 
 static int
 netif_vp_region_params_setup(struct nexus_adapter *na,
-    struct skmem_region_params *srp, struct kern_pbufpool **tx_pp)
+    struct skmem_region_params srp[SKMEM_REGIONS], struct kern_pbufpool **tx_pp)
 {
 #pragma unused (tx_pp)
 	uint32_t max_mtu;
 	uint32_t buf_sz, buf_cnt, nslots, afslots, evslots, totalrings;
 	struct nexus_adapter *devna;
 	struct kern_nexus *nx;
-	struct nx_netif *nif;
+	struct nx_netif *__single nif;
 	int err, i;
 
 	for (i = 0; i < SKMEM_REGIONS; i++) {
@@ -912,7 +914,7 @@ netif_vp_na_mem_new(struct kern_nexus *nx, struct nexus_adapter *na)
 {
 #pragma unused(nx)
 	struct skmem_region_params srp[SKMEM_REGIONS];
-	struct kern_pbufpool *tx_pp = NULL;
+	struct kern_pbufpool *__single tx_pp = NULL;
 	int err;
 
 	err = netif_vp_region_params_setup(na, srp, &tx_pp);
@@ -1127,7 +1129,8 @@ netif_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 	emd = (struct __kern_channel_event_metadata *)(void *)baddr;
 	emd->emd_etype = ev->ev_type;
 	emd->emd_nevents = 1;
-	bcopy(ev, (baddr + __KERN_CHANNEL_EVENT_OFFSET), ev_len);
+	bcopy(ev, (baddr + __KERN_CHANNEL_EVENT_OFFSET),
+	    ev->ev_dlen + sizeof(struct __kern_channel_event));
 	err = __buflet_set_data_length(buf,
 	    (ev_len + __KERN_CHANNEL_EVENT_OFFSET));
 	VERIFY(err == 0);
@@ -1140,7 +1143,7 @@ netif_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 		sk_sync_unprotect(protect);
 		kr_exit(ring);
 		STATS_INC(nifs, NETIF_STATS_EV_DROP_KRSPACE);
-		err = ENOSPC;
+		err = ENOBUFS;
 		goto error;
 	}
 	err = kern_channel_slot_attach_packet(ring, slot, ph);
@@ -1230,3 +1233,6 @@ error:
 	NETIF_RUNLOCK(nif);
 	return err;
 }
+
+/* XXX Remove once rdar://118519573 is resolved */
+#pragma clang diagnostic pop

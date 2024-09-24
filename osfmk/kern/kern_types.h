@@ -234,17 +234,6 @@ typedef struct affinity_set             *affinity_set_t;
 typedef struct run_queue               *run_queue_t;
 #define RUN_QUEUE_NULL                 ((run_queue_t) 0)
 
-typedef struct grrr_run_queue               *grrr_run_queue_t;
-#define GRRR_RUN_QUEUE_NULL                 ((grrr_run_queue_t) 0)
-
-typedef struct grrr_group                                       *grrr_group_t;
-#define GRRR_GROUP_NULL                                         ((grrr_group_t) 0)
-
-#if defined(CONFIG_SCHED_MULTIQ)
-typedef struct sched_group              *sched_group_t;
-#define SCHED_GROUP_NULL                ((sched_group_t) 0)
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
-
 #else   /* MACH_KERNEL_PRIVATE */
 
 struct wait_queue_set;
@@ -344,17 +333,9 @@ typedef enum {
 	REASON_USER,
 	REASON_CLPC_SYSTEM,
 	REASON_CLPC_USER,
+	REASON_PMGR_SYSTEM,
 } processor_reason_t;
 
-#define SHUTDOWN_TEMPORARY      0x0001
-#define LOCK_STATE              0x0002
-#define UNLOCK_STATE            0x0004
-#define WAIT_FOR_START          0x0008
-#define WAIT_FOR_LAST_START     0x0010
-#if DEVELOPMENT || DEBUG
-#define ASSERT_IN_SLEEP            0x10000000
-#define ASSERT_POWERDOWN_SUSPENDED 0x20000000
-#endif
 
 /*
  * struct sched_clutch_edge

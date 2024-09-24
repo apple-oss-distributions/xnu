@@ -719,6 +719,8 @@ enum {
 	DUMMYNET_NLC_DISABLED,
 };
 
+extern const char *dummynet_event2str(int);
+
 enum    { DN_INOUT, DN_IN, DN_OUT };
 /*
  * The signature for the callback is:

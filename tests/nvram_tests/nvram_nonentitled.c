@@ -65,6 +65,38 @@ T_DECL(TestNVRAMSync, "Test NVRAM Sync")
 	ReleaseOptionsRef(optionsRef);
 }
 
+// Test iokit matching for property
+T_DECL(TestIOKitMatch, "Test IOKit matching for property")
+{
+	const char *varToTest = "iokitTestVar";
+	const char *pathToTest = CFSTR("IODeviceTree:/options");
+	const char *propToTest = CFSTR("iokitTestVar");
+	CFMutableDictionaryRef matchingDict = NULL;
+
+	optionsRef = CreateOptionsRef();
+	TestVarOp(OP_SET, varToTest, DefaultSetVal, KERN_SUCCESS, optionsRef);
+
+	matchingDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	if (!matchingDict) {
+		T_FAIL("Failed to allocate matching dictionary");
+		goto exit;
+	}
+	// match to both path and property
+	CFDictionaryAddValue(matchingDict, CFSTR(kIOPathMatchKey), pathToTest);
+	CFDictionaryAddValue(matchingDict, CFSTR(kIOPropertyExistsMatchKey), propToTest);
+
+	io_service_t service  = IOServiceGetMatchingService(kIOMasterPortDefault, matchingDict);
+	if (!service) {
+		T_FAIL("Failed to get matching service");
+		goto exit;
+	}
+	T_ASSERT_NE(service, IO_OBJECT_NULL, "Got service match for property %s", varToTest);
+
+exit:
+	TestVarOp(OP_DEL, varToTest, NULL, KERN_SUCCESS, optionsRef);
+	ReleaseOptionsRef(optionsRef);
+}
+
 #if !(__x86_64__)
 #if (TARGET_OS_OSX)
 // Test that writing of system variables without system entitlement should fail

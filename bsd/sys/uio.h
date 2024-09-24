@@ -253,7 +253,7 @@ user_size_t uio_curriovlen( uio_t a_uio );
 #define UIO_MAXIOV      1024            /* max 1K of iov's */
 #define UIO_SMALLIOV    8               /* 8 on stack, else malloc */
 
-extern int uiomove(const char * cp, int n, struct uio *uio);
+extern int uiomove(const char *__sized_by(n) cp, int n, struct uio *uio);
 extern int uiomove64(const __uint64_t cp, int n, struct uio *uio);
 __END_DECLS
 

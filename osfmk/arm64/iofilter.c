@@ -28,7 +28,7 @@
 
 #include <pexpert/arm64/board_config.h>
 
-#if HAS_GUARDED_IO_FILTER
+#if HAS_GUARDED_IO_FILTER && !CONFIG_SPTM
 
 #include <vm/pmap.h>
 #include <arm/pmap/pmap_data.h>
@@ -124,4 +124,4 @@ io_filter_main(uint64_t addr, uint64_t value, uint64_t width, unsigned int io_at
 
 	return io_filter_write(addr, value, width, io_attr_index, io_filter_entry_index);
 }
-#endif /* HAS_GUARDED_IO_FILTER */
+#endif /* HAS_GUARDED_IO_FILTER && !CONFIG_SPTM*/

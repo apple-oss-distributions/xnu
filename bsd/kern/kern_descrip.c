@@ -170,6 +170,31 @@ static LCK_GRP_DECLARE(file_lck_grp, "file");
 #pragma mark fileglobs
 
 /*!
+ * @function fg_alloc_init
+ *
+ * @brief
+ * Allocate and minimally initialize a file structure.
+ */
+struct fileglob *
+fg_alloc_init(vfs_context_t ctx)
+{
+	struct fileglob *fg;
+
+	fg = zalloc_flags(fg_zone, Z_WAITOK | Z_ZERO);
+	lck_mtx_init(&fg->fg_lock, &file_lck_grp, LCK_ATTR_NULL);
+
+	os_ref_init_raw(&fg->fg_count, &f_refgrp);
+	fg->fg_ops = &uninitops;
+
+	kauth_cred_ref(ctx->vc_ucred);
+	fg->fg_cred = ctx->vc_ucred;
+
+	os_atomic_inc(&nfiles, relaxed);
+
+	return fg;
+}
+
+/*!
  * @function fg_free
  *
  * @brief
@@ -203,7 +228,10 @@ void
 fg_ref(proc_t p, struct fileglob *fg)
 {
 #if DEBUG || DEVELOPMENT
-	proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
+	/* Allow fileglob refs to be taken outside of a process context. */
+	if (p != FG_NOPROC) {
+		proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
+	}
 #else
 	(void)p;
 #endif
@@ -243,7 +271,7 @@ fg_drop(proc_t p, struct fileglob *fg)
 	 * If the descriptor was in a message, POSIX-style locks
 	 * aren't passed with the descriptor.
 	 */
-	if (p && DTYPE_VNODE == FILEGLOB_DTYPE(fg) &&
+	if (p != FG_NOPROC && DTYPE_VNODE == FILEGLOB_DTYPE(fg) &&
 	    (p->p_ladvflag & P_LADVLOCK)) {
 		struct flock lf = {
 			.l_whence = SEEK_SET,
@@ -1093,13 +1121,11 @@ fileproc_alloc_init(void)
 void
 fileproc_free(struct fileproc *fp)
 {
-	os_ref_count_t __unused refc = os_ref_release(&fp->fp_iocount);
-#if DEVELOPMENT || DEBUG
+	os_ref_count_t refc = os_ref_release(&fp->fp_iocount);
 	if (0 != refc) {
 		panic("%s: pid %d refc: %u != 0",
 		    __func__, proc_pid(current_proc()), refc);
 	}
-#endif
 	if (fp->fp_guard_attrs) {
 		guarded_fileproc_unguard(fp);
 	}
@@ -1350,19 +1376,10 @@ falloc_withinit(
 		fp_init(fp, initarg);
 	}
 
-	fg = zalloc_flags(fg_zone, Z_WAITOK | Z_ZERO);
-	lck_mtx_init(&fg->fg_lock, &file_lck_grp, LCK_ATTR_NULL);
+	fg = fg_alloc_init(ctx);
 
 	os_ref_retain_locked(&fp->fp_iocount);
-	os_ref_init_raw(&fg->fg_count, &f_refgrp);
-	fg->fg_ops = &uninitops;
 	fp->fp_glob = fg;
-
-	kauth_cred_ref(ctx->vc_ucred);
-
-	fp->f_cred = ctx->vc_ucred;
-
-	os_atomic_inc(&nfiles, relaxed);
 
 	proc_fdlock(p);
 
@@ -2760,6 +2777,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 	boolean_t is64bit;
 	int has_entitlement = 0;
 	kauth_cred_t p_cred;
+	cs_blob_add_flags_t csblob_add_flags = 0;
 
 	AUDIT_ARG(fd, uap->fd);
 	AUDIT_ARG(cmd, uap->cmd);
@@ -3473,6 +3491,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
+
+		if ((fp->fp_glob->fg_flag & FWRITE) == 0) {
+			error = EBADF;
+			goto out;
+		}
 		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
@@ -3536,14 +3559,23 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		goto out;
 
 	case F_NOCACHE:
-		if (fp->f_type != DTYPE_VNODE) {
+	case F_NOCACHE_EXT:
+		if ((fp->f_type != DTYPE_VNODE) || (cmd == F_NOCACHE_EXT &&
+		    (vnode_vtype((struct vnode *)fp_get_data(fp)) != VREG))) {
 			error = EBADF;
 			goto out;
 		}
 		if (uap->arg) {
 			os_atomic_or(&fp->fp_glob->fg_flag, FNOCACHE, relaxed);
+			if (cmd == F_NOCACHE_EXT) {
+				/*
+				 * We're reusing the O_NOCTTY bit for this purpose as it is only
+				 * used for open(2) and is mutually exclusive with a regular file.
+				 */
+				os_atomic_or(&fp->fp_glob->fg_flag, O_NOCTTY, relaxed);
+			}
 		} else {
-			os_atomic_andnot(&fp->fp_glob->fg_flag, FNOCACHE, relaxed);
+			os_atomic_andnot(&fp->fp_glob->fg_flag, FNOCACHE | O_NOCTTY, relaxed);
 		}
 		goto out;
 
@@ -3887,6 +3919,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		break;
 	}
 
+#if DEVELOPMENT || DEBUG
+	case F_ADDSIGS_MAIN_BINARY:
+		csblob_add_flags |= CS_BLOB_ADD_ALLOW_MAIN_BINARY;
+		OS_FALLTHROUGH;
+#endif
 	case F_ADDSIGS:
 	case F_ADDFILESIGS:
 	case F_ADDFILESIGS_FOR_DYLD_SIM:
@@ -3989,7 +4026,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 				goto outdrop;
 			}
 
-			if (cmd == F_ADDSIGS) {
+			if (cmd == F_ADDSIGS || cmd == F_ADDSIGS_MAIN_BINARY) {
 				error = copyin(fs.fs_blob_start,
 				    (void *) kernel_blob_addr,
 				    fs.fs_blob_size);
@@ -4029,7 +4066,8 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			    kernel_blob_size,
 			    NULL,
 			    blob_add_flags,
-			    &blob);
+			    &blob,
+			    csblob_add_flags);
 
 			/* ubc_blob_add() has consumed "kernel_blob_addr" if it is zeroed */
 			if (error) {
@@ -5869,7 +5907,7 @@ out:
 void
 fileport_releasefg(struct fileglob *fg)
 {
-	(void)fg_drop(PROC_NULL, fg);
+	(void)fg_drop(FG_NOPROC, fg);
 }
 
 /*

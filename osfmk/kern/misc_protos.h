@@ -153,12 +153,12 @@ extern int copyinstr(
 /* Move arbitrarily-aligned data from a user space to kernel space */
 extern int copyinmsg(
 	const user_addr_t   user_addr,
-	char                *kernel_addr,
+	void                *kernel_addr,
 	mach_msg_size_t     nbytes);
 
 /* Move arbitrarily-aligned data from a kernel space to user space */
 extern int copyoutmsg(
-	const char      *kernel_addr,
+	const void      *kernel_addr,
 	user_addr_t     user_addr,
 	mach_msg_size_t nbytes);
 
@@ -195,6 +195,7 @@ extern int kdb_printf_unbuffered(const char *format, ...) __printflike(1, 2);
 
 extern int snprintf(char *, size_t, const char *, ...) __printflike(3, 4);
 extern int scnprintf(char *, size_t, const char *, ...) __printflike(3, 4);
+extern const char *tsnprintf(char *, size_t, const char *, ...) __printflike(3, 4);
 
 extern void log(int level, char *fmt, ...) __printflike(2, 3);
 

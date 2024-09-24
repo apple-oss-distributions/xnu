@@ -90,14 +90,16 @@ struct secasvar {
 	u_int32_t flags;                /* holder for SADB_KEY_FLAGS */
 	u_int16_t flags2;               /* holder for SADB_SA2_KEY_FLAGS */
 
-	struct sadb_key *key_auth;      /* Key for Authentication */
-	struct sadb_key *key_enc;       /* Key for Encryption */
-	caddr_t iv;                     /* Initialization Vector */
-	u_int ivlen;                    /* length of IV */
-	void *sched_auth;               /* intermediate authentication key */
-	void *sched_enc;                /* intermediate encryption key */
+	struct sadb_key *__sized_by(key_auth_len) key_auth;     /* Key for Authentication */
+	struct sadb_key *__sized_by(key_enc_len) key_enc;       /* Key for Encryption */
+	caddr_t __sized_by(ivlen) iv;                           /* Initialization Vector */
+	void *__sized_by(schedlen_auth) sched_auth;             /* intermediate authentication key */
+	void *__sized_by(schedlen_enc) sched_enc;               /* intermediate encryption key */
+	uint32_t key_auth_len;
+	uint32_t key_enc_len;
 	size_t schedlen_auth;
 	size_t schedlen_enc;
+	u_int ivlen;                                            /* length of IV */
 
 	struct secreplay *replay[MAX_REPLAY_WINDOWS]; /* replay prevention */
 
@@ -131,12 +133,12 @@ struct secasvar {
 
 /* replay prevention */
 struct secreplay {
-	u_int8_t wsize;         /* window size */
-	u_int32_t count;        /* used by sender/receiver */
-	u_int32_t seq;          /* used by sender/receiver */
-	u_int32_t lastseq;      /* used by sender/receiver */
-	caddr_t bitmap;         /* used by receiver */
-	int overflow;           /* overflow flag */
+	u_int8_t wsize;                          /* window size */
+	u_int32_t count;                         /* used by sender/receiver */
+	u_int32_t seq;                           /* used by sender */
+	u_int32_t lastseq;                       /* used by sender/receiver */
+	caddr_t __sized_by(wsize) bitmap;        /* used by receiver */
+	int overflow;                            /* overflow flag */
 };
 
 /* socket table due to send PF_KEY messages. */

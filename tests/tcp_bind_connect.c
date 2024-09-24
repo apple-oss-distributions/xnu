@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,6 +37,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "net_test_lib.h"
+
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.net"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("networking"),
+	T_META_CHECK_LEAKS(false),
+	T_META_ENABLED(!TARGET_OS_BRIDGE));
+
+
 #define MAX_IPv6_STR_LEN        64
 
 static char l_addr_str[MAX_IPv6_STR_LEN];
@@ -67,8 +77,8 @@ tcp_connect_v4(int client_fd, struct sockaddr_in *sin_to, int expected_error)
 	int listen_fd = -1;
 	socklen_t socklen;
 	int val = 2;
-	struct sockaddr_in sin_local = {};
-	struct sockaddr_in sin_peer = {};
+	struct sockaddr_in sin_local = { 0 };
+	struct sockaddr_in sin_peer = { 0 };
 	struct sockaddr_in sin;
 
 	init_sin_address(&sin);
@@ -121,8 +131,8 @@ tcp_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to, int expected_error)
 	socklen_t socklen;
 	int off = 0;
 	int val = 30;
-	struct sockaddr_in6 sin6_local = {};
-	struct sockaddr_in6 sin6_peer = {};
+	struct sockaddr_in6 sin6_local = { 0 };
+	struct sockaddr_in6 sin6_peer = { 0 };
 	struct sockaddr_in6 sin6;
 
 	init_sin6_address(&sin6);
@@ -171,25 +181,79 @@ tcp_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to, int expected_error)
 	return 0;
 }
 
-T_DECL(tcp_bind_ipv4_loopback, "TCP bind with a IPv4 loopback address")
+static int
+tcp_bind_v4(int client_fd, struct sockaddr_in *sin, int expected_error)
+{
+	int retval = bind(client_fd, (const struct sockaddr *)sin, sin->sin_len);
+
+	if (expected_error == 0) {
+		if (retval == 0) {
+			T_PASS("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == 0");
+		} else if (errno == EADDRNOTAVAIL || errno == EAGAIN) {
+			T_SKIP("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		} else {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		}
+	} else {
+		if (retval == 0) {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == 0, expected errno: %d - %s", expected_error, strerror(expected_error));
+		} else if (errno == expected_error) {
+			T_PASS("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1, expected errno: %d - %s", expected_error, strerror(expected_error));
+		} else if (errno == EADDRNOTAVAIL || errno == EAGAIN) {
+			T_SKIP("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		} else {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		}
+	}
+	return 0;
+}
+
+static int
+tcp_bind_v6(int client_fd, struct sockaddr_in6 *sin6, int expected_error)
+{
+	int retval = bind(client_fd, (const struct sockaddr *)sin6, sin6->sin6_len);
+
+	if (expected_error == 0) {
+		if (retval == 0) {
+			T_PASS("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == 0");
+		} else if (errno == EADDRNOTAVAIL || errno == EAGAIN) {
+			T_SKIP("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		} else {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		}
+	} else {
+		if (retval == 0) {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == 0, expected errno: %d - %s", expected_error, strerror(expected_error));
+		} else if (errno == expected_error) {
+			T_PASS("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1, expected errno: %d - %s", expected_error, strerror(expected_error));
+		} else if (errno == EADDRNOTAVAIL || errno == EAGAIN) {
+			T_SKIP("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		} else {
+			T_FAIL("bind(client_fd, (const struct sockaddr *)sin, sin->sin_len) == -1 errno: %d - %s", errno, strerror(errno));
+		}
+	}
+	return 0;
+}
+
+T_DECL(tcp_bind_ipv4_loopback, "TCP bind with a IPv4 loopback address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_ASSERT_POSIX_SUCCESS(bind(s, (const struct sockaddr *)&sin, sizeof(sin)), 0, NULL);
+	T_EXPECT_NULL(tcp_bind_v4(s, &sin, 0), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_loopback, "TCP connect with a IPv4 loopback address")
+T_DECL(tcp_connect_ipv4_loopback, "TCP connect with a IPv4 loopback address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr), 1, NULL);
@@ -201,25 +265,25 @@ T_DECL(tcp_connect_ipv4_loopback, "TCP connect with a IPv4 loopback address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_multicast, "TCP bind with a IPv4 multicast address")
+T_DECL(tcp_bind_ipv4_multicast, "TCP bind with a IPv4 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "224.0.0.1", &sin.sin_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin, sizeof(sin)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_bind_v4(s, &sin, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_multicast, "TCP connect with an IPv4 multicast address")
+T_DECL(tcp_connect_ipv4_multicast, "TCP connect with an IPv4 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "224.0.0.1", &sin.sin_addr), 1, NULL);
@@ -231,25 +295,25 @@ T_DECL(tcp_connect_ipv4_multicast, "TCP connect with an IPv4 multicast address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4__broadcast, "TCP bind with the IPv4 broadcast address")
+T_DECL(tcp_bind_ipv4__broadcast, "TCP bind with the IPv4 broadcast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "255.255.255.255", &sin.sin_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin, sizeof(sin)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_bind_v4(s, &sin, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4__broadcast, "TCP connect with the IPv4 broadcast address")
+T_DECL(tcp_connect_ipv4__broadcast, "TCP connect with the IPv4 broadcast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "255.255.255.255", &sin.sin_addr), 1, NULL);
@@ -261,25 +325,10 @@ T_DECL(tcp_connect_ipv4__broadcast, "TCP connect with the IPv4 broadcast address
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_null, "TCP bind with the null IPv4 address")
+T_DECL(tcp_bind_ipv4_null, "TCP bind with the null IPv4 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in sin = {};
-
-	init_sin_address(&sin);
-	T_ASSERT_EQ(inet_pton(AF_INET, "0.0.0.0", &sin.sin_addr), 1, NULL);
-
-	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
-
-	T_ASSERT_POSIX_SUCCESS(bind(s, (const struct sockaddr *)&sin, sizeof(sin)), NULL);
-
-	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
-}
-
-T_DECL(tcp_connect_ipv4_null, "TCP connect with the null IPv4 address")
-{
-	int s = -1;
-	struct sockaddr_in sin = {};
+	struct sockaddr_in sin = { 0 };
 
 	init_sin_address(&sin);
 	T_ASSERT_EQ(inet_pton(AF_INET, "0.0.0.0", &sin.sin_addr), 1, NULL);
@@ -291,10 +340,25 @@ T_DECL(tcp_connect_ipv4_null, "TCP connect with the null IPv4 address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv6_loopback, "TCP bind with the IPv6 loopback address")
+T_DECL(tcp_connect_ipv4_null, "TCP connect with the null IPv4 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in sin = { 0 };
+
+	init_sin_address(&sin);
+	T_ASSERT_EQ(inet_pton(AF_INET, "0.0.0.0", &sin.sin_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connect_v4(s, &sin, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_bind_ipv6_loopback, "TCP bind with the IPv6 loopback address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
 
 	sin6.sin6_scope_id = if_nametoindex("lo0");
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
@@ -302,15 +366,16 @@ T_DECL(tcp_bind_ipv6_loopback, "TCP bind with the IPv6 loopback address")
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
 	init_sin6_address(&sin6);
-	T_ASSERT_POSIX_SUCCESS(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv6_loopback, "TCP connect with the IPv6 loopback address")
+T_DECL(tcp_connect_ipv6_loopback, "TCP connect with the IPv6 loopback address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
@@ -322,10 +387,10 @@ T_DECL(tcp_connect_ipv6_loopback, "TCP connect with the IPv6 loopback address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv6_multicast, "TCP bind with a IPv6 multicast address")
+T_DECL(tcp_bind_ipv6_multicast, "TCP bind with a IPv6 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	sin6.sin6_scope_id = if_nametoindex("lo0");
@@ -333,15 +398,15 @@ T_DECL(tcp_bind_ipv6_multicast, "TCP bind with a IPv6 multicast address")
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv6_multicast, "TCP connect with a IPv6 multicast address")
+T_DECL(tcp_connect_ipv6_multicast, "TCP connect with a IPv6 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	sin6.sin6_scope_id = if_nametoindex("lo0");
@@ -354,25 +419,25 @@ T_DECL(tcp_connect_ipv6_multicast, "TCP connect with a IPv6 multicast address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_null_ipv6, "TCP bind with the IPv6 null address")
+T_DECL(tcp_bind_null_ipv6, "TCP bind with the IPv6 null address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::", &sin6.sin6_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_ASSERT_POSIX_SUCCESS(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), NULL);
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_null_ipv6, "TCP connect with the IPv6 null address")
+T_DECL(tcp_connect_null_ipv6, "TCP connect with the IPv6 null address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::", &sin6.sin6_addr), 1, NULL);
@@ -384,25 +449,25 @@ T_DECL(tcp_connect_null_ipv6, "TCP connect with the IPv6 null address")
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_multicast_mapped_ipv6, "TCP bind with IPv4 multicast mapped IPv6 address")
+T_DECL(tcp_bind_ipv4_multicast_mapped_ipv6, "TCP bind with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:224.0.0.1", &sin6.sin6_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_multicast_mapped_ipv6, "TCP connect with IPv4 multicast mapped IPv6 address")
+T_DECL(tcp_connect_ipv4_multicast_mapped_ipv6, "TCP connect with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:224.0.0.1", &sin6.sin6_addr), 1, NULL);
@@ -414,25 +479,25 @@ T_DECL(tcp_connect_ipv4_multicast_mapped_ipv6, "TCP connect with IPv4 multicast 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_broadcast_mapped_ipv6, "TCP bind with IPv4 broadcast mapped IPv6 address")
+T_DECL(tcp_bind_ipv4_broadcast_mapped_ipv6, "TCP bind with IPv4 broadcast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:255.255.255.255", &sin6.sin6_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_broadcast_mapped_ipv6, "TCP connect with IPv4 broadcast mapped IPv6 address")
+T_DECL(tcp_connect_ipv4_broadcast_mapped_ipv6, "TCP connect with IPv4 broadcast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:255.255.255.255", &sin6.sin6_addr), 1, NULL);
@@ -444,10 +509,25 @@ T_DECL(tcp_connect_ipv4_broadcast_mapped_ipv6, "TCP connect with IPv4 broadcast 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_null_mapped_ipv6, "TCP bind with IPv4 null mapped IPv6 address")
+T_DECL(tcp_bind_ipv4_null_mapped_ipv6, "TCP bind with IPv4 null mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:0.0.0.0", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connect_ipv4_null_mapped_ipv6, "TCP connect with IPv4 null mapped IPv6 address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:0.0.0.0", &sin6.sin6_addr), 1, NULL);
@@ -459,40 +539,10 @@ T_DECL(tcp_bind_ipv4_null_mapped_ipv6, "TCP bind with IPv4 null mapped IPv6 addr
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_null_mapped_ipv6, "TCP connect with IPv4 null mapped IPv6 address")
+T_DECL(tcp_bind_ipv4_multicast_compatible_ipv6, "TCP bind with IPv4 multicast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
-
-	init_sin6_address(&sin6);
-	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:0.0.0.0", &sin6.sin6_addr), 1, NULL);
-
-	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
-
-	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, 0), NULL);
-
-	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
-}
-
-T_DECL(tcp_bind_ipv4_multicast_compatible_ipv6, "TCP bind with IPv4 multicast compatible IPv6 address")
-{
-	int s = -1;
-	struct sockaddr_in6 sin6 = {};
-
-	init_sin6_address(&sin6);
-	T_ASSERT_EQ(inet_pton(AF_INET6, "::224.0.0.1", &sin6.sin6_addr), 1, NULL);
-
-	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
-
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), EAFNOSUPPORT, NULL);
-
-	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
-}
-
-T_DECL(tcp_connect_ipv4_multicast_compatible_ipv6, "TCP connect with IPv4 multicast compatible IPv6 address")
-{
-	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::224.0.0.1", &sin6.sin6_addr), 1, NULL);
@@ -504,25 +554,25 @@ T_DECL(tcp_connect_ipv4_multicast_compatible_ipv6, "TCP connect with IPv4 multic
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_broadcast_compatible_ipv6, "TCP bind with IPv4 broadcast compatible IPv6 address")
+T_DECL(tcp_connect_ipv4_multicast_compatible_ipv6, "TCP connect with IPv4 multicast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
-	T_ASSERT_EQ(inet_pton(AF_INET6, "::255.255.255.255", &sin6.sin6_addr), 1, NULL);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::224.0.0.1", &sin6.sin6_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_EXPECT_POSIX_FAILURE(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), EAFNOSUPPORT, NULL);
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_broadcast_compatible_ipv6, "TCP connect with IPv4 broadcast compatible IPv6 address")
+T_DECL(tcp_bind_ipv4_broadcast_compatible_ipv6, "TCP bind with IPv4 broadcast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::255.255.255.255", &sin6.sin6_addr), 1, NULL);
@@ -534,25 +584,25 @@ T_DECL(tcp_connect_ipv4_broadcast_compatible_ipv6, "TCP connect with IPv4 broadc
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_bind_ipv4_null_compatible_ipv6, "TCP bind with IPv4 null compatible IPv6 address")
+T_DECL(tcp_connect_ipv4_broadcast_compatible_ipv6, "TCP connect with IPv4 broadcast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
-	T_ASSERT_EQ(inet_pton(AF_INET6, "::0.0.0.0", &sin6.sin6_addr), 1, NULL);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::255.255.255.255", &sin6.sin6_addr), 1, NULL);
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
-	T_ASSERT_POSIX_SUCCESS(bind(s, (const struct sockaddr *)&sin6, sizeof(sin6)), NULL);
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, EAFNOSUPPORT), NULL);
 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_null_compatible_ipv6, "TCP connect with IPv4 null compatible IPv6 address")
+T_DECL(tcp_bind_ipv4_null_compatible_ipv6, "TCP bind with IPv4 null compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
 
 	init_sin6_address(&sin6);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::0.0.0.0", &sin6.sin6_addr), 1, NULL);
@@ -564,17 +614,32 @@ T_DECL(tcp_connect_ipv4_null_compatible_ipv6, "TCP connect with IPv4 null compat
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_connect_ipv4_mapped_ipv6_r77991079, "rdar://77991079")
+T_DECL(tcp_connect_ipv4_null_compatible_ipv6, "TCP connect with IPv4 null compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
-	struct sockaddr_in6 sin6 = {};
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::0.0.0.0", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connect_ipv4_mapped_ipv6_r77991079, "rdar://77991079", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
 
 	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
 
 	init_sin6_address(&sin6);
 	sin6.sin6_port = htons(20001);
 	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:0.0.0.5", &sin6.sin6_addr), 1, NULL);
-	sin6.sin6_scope_id = -1;
+	sin6.sin6_scope_id = (uint32_t)-1;
 
 	connect(s, (struct sockaddr *)&sin6, sizeof(struct sockaddr_in6));
 

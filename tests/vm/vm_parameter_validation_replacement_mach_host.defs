@@ -1,0 +1,22 @@
+// declaration of mach_memory_object_memory_entry in mach_host.defs
+// in 32-bit userspace is incompatible with the kernel's definition
+// rdar://117927965 (mach_memory_object_memory_entry() declaration does not match its definition)
+
+subsystem KernelServer replacement_mach_host 200;
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+#include <mach/clock_types.defs>
+#include <mach_debug/mach_debug_types.defs>
+
+skip;  // host_info
+skip;  // host_kernel_version
+skip;  // host_page_size
+
+routine replacement_mach_memory_object_memory_entry(
+		host		:host_t;
+		internal	:boolean_t;
+		size		:mach_vm_size_t;  // was vm_size_t
+		permission	:vm_prot_t;
+		pager		:memory_object_t;
+	out	entry_handle	:mach_port_move_send_t);
+

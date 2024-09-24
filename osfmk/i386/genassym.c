@@ -70,7 +70,7 @@
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <i386/pmap.h>
 #include <i386/Diagnostics.h>
 #include <i386/mp_desc.h>

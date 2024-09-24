@@ -34,8 +34,8 @@
 #include <libkern/crypto/sha1.h>
 #include <libkern/libkern.h>
 //for write protection
-#include <vm/vm_kern.h>
-#include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 
 #define PTR_ADD(type, base, offset)             (type)((uintptr_t)(base) + (offset))
 

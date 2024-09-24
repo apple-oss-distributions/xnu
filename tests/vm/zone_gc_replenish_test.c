@@ -62,7 +62,7 @@ alloc_thread_func(__unused void *arg)
 
 T_DECL(zone_gc_replenish_test,
     "Test zone garbage collection, exhaustion and replenishment",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	pthread_attr_t attr;
 	pthread_t gc_thread;

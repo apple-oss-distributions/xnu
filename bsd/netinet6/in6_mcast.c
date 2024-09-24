@@ -70,7 +70,6 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/protosw.h>
-#include <sys/sysctl.h>
 #include <sys/tree.h>
 #include <sys/mcache.h>
 
@@ -83,6 +82,7 @@
 #include <net/net_api_stats.h>
 #include <net/route.h>
 #include <net/sockaddr_utils.h>
+#include <net/net_sysctl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -319,10 +319,12 @@ im6o_grow(struct ip6_moptions *imo)
 	}
 
 	imo->im6o_membership = nmships;
-	nmships = NULL;
-	imo->im6o_mfilters = nmfilters;
-	nmfilters = NULL;
 	imo->im6o_max_memberships = newmax;
+	nmships = NULL;
+
+	imo->im6o_mfilters = nmfilters;
+	imo->im6o_max_filters = newmax;
+	nmfilters = NULL;
 
 	return 0;
 cleanup:
@@ -743,13 +745,17 @@ im6f_graft(struct in6_mfilter *imf, const uint8_t st1,
     const struct sockaddr_in6 *psin)
 {
 	struct in6_msource      *lims;
+	struct ip6_msource      *__single lims_forged;
 
 	lims = in6ms_alloc(Z_WAITOK);
 	lims->im6s_addr = psin->sin6_addr;
 	lims->im6sl_st[0] = MCAST_UNDEFINED;
 	lims->im6sl_st[1] = st1;
+
+	/* Removal of __unsafe_forge_single tracked by rdar://121702748 */
+	lims_forged = __unsafe_forge_single(struct ip6_msource *, lims);
 	RB_INSERT(ip6_msource_tree, &imf->im6f_sources,
-	    (struct ip6_msource *)lims);
+	    lims_forged);
 	++imf->im6f_nsrc;
 
 	return lims;
@@ -1628,6 +1634,7 @@ in6p_findmoptions(struct inpcb *inp)
 	imo->im6o_num_memberships = 0;
 	imo->im6o_max_memberships = IPV6_MIN_MEMBERSHIPS;
 	imo->im6o_membership = immp;
+	imo->im6o_max_filters = IPV6_MIN_MEMBERSHIPS;
 	imo->im6o_mfilters = imfp;
 
 	/* Initialize per-group source filters. */
@@ -3086,6 +3093,8 @@ static int
 sysctl_ip6_mcast_filters SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp)
+	/* int: ifindex + 4 * 32 bits of IPv6 address */
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 5, name, namelen);
 
 	struct in6_addr                  mcaddr;
 	struct in6_addr                  src;
@@ -3093,24 +3102,12 @@ sysctl_ip6_mcast_filters SYSCTL_HANDLER_ARGS
 	struct in6_multi                *inm;
 	struct in6_multistep            step;
 	struct ip6_msource              *ims;
-	int                              *name;
 	int                              retval = 0;
-	u_int                            namelen;
 	uint32_t                         fmode, ifindex;
-
-
-	namelen = arg2;
 
 	if (req->newptr != USER_ADDR_NULL) {
 		return EPERM;
 	}
-
-	/* int: ifindex + 4 * 32 bits of IPv6 address */
-	if (namelen != 5) {
-		return EINVAL;
-	}
-
-	name = __unsafe_forge_bidi_indexable(int *, arg1, namelen * sizeof(int));
 
 	ifindex = name[0];
 	ifnet_head_lock_shared();

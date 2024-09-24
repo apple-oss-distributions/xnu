@@ -139,7 +139,7 @@ tests()
 	}
 }
 
-T_DECL(arith_inc_dec, "bounded_ptr.arith.inc_dec") {
+T_DECL(arith_inc_dec, "bounded_ptr.arith.inc_dec", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

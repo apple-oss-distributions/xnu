@@ -93,6 +93,7 @@
 #include <netinet/tcp_var.h>
 #include <sys/kdebug.h>
 #include <libkern/OSAtomic.h>
+#include <net/droptap.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -534,7 +535,7 @@ int
 sbwait(struct sockbuf *sb)
 {
 	boolean_t nointr = (sb->sb_flags & SB_NOINTR);
-	void *lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 	struct socket *so = sb->sb_so;
 	lck_mtx_t *mutex_held;
 	struct timespec ts;
@@ -645,7 +646,7 @@ sowakeup(struct socket *so, struct sockbuf *sb, struct socket *so2)
 	}
 	if (sb->sb_flags & SB_UPCALL) {
 		void (*sb_upcall)(struct socket *, void *, int);
-		caddr_t sb_upcallarg;
+		caddr_t __single sb_upcallarg;
 		int lock = !(sb->sb_flags & SB_UPCALL_LOCK);
 
 		sb_upcall = sb->sb_upcall;
@@ -832,6 +833,37 @@ sbrelease(struct sockbuf *sb)
 	sb->sb_mbmax = 0;
 }
 
+void
+so_update_tx_data_stats(struct socket *so, uint32_t num_pkts, uint32_t space)
+{
+	so->so_tc_stats[SO_STATS_DATA].txpackets += num_pkts;
+	so->so_tc_stats[SO_STATS_DATA].txbytes += space;
+}
+
+static void
+sb_update_data_stats(struct sockbuf *sb, uint32_t space)
+{
+	if (sb->sb_flags & SB_RECV) {
+		sb->sb_so->so_tc_stats[SO_STATS_DATA].rxpackets += 1;
+		sb->sb_so->so_tc_stats[SO_STATS_DATA].rxbytes += space;
+	} else {
+		sb->sb_so->so_tc_stats[SO_STATS_DATA].txpackets += 1;
+		sb->sb_so->so_tc_stats[SO_STATS_DATA].txbytes += space;
+	}
+}
+
+static void
+sb_update_no_space_stats(struct sockbuf *sb, uint32_t space)
+{
+	if (sb->sb_flags & SB_RECV) {
+		sb->sb_so->so_tc_stats[SO_STATS_SBNOSPACE].rxpackets += 1;
+		sb->sb_so->so_tc_stats[SO_STATS_SBNOSPACE].rxbytes += space;
+	} else {
+		sb->sb_so->so_tc_stats[SO_STATS_SBNOSPACE].txpackets += 1;
+		sb->sb_so->so_tc_stats[SO_STATS_SBNOSPACE].txbytes += space;
+	}
+}
+
 /*
  * Routines to add and remove
  * data from an mbuf queue.
@@ -866,8 +898,8 @@ sbrelease(struct sockbuf *sb)
 static int
 sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 {
-	struct socket *so = sb->sb_so;
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	struct socket *__single so = sb->sb_so;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
 
 	if (m == NULL || (sb->sb_flags & SB_DROP)) {
 		if (m != NULL && !nodrop) {
@@ -886,7 +918,9 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 		ASSERT(nodrop == FALSE);
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m != NULL ? m_length(m) : 0, false, (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
+			    m != NULL ? m_length(m) : 0, false,
+			    (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
@@ -945,8 +979,8 @@ sbappend_nodrop(struct sockbuf *sb, struct mbuf *m)
 int
 sbappendstream(struct sockbuf *sb, struct mbuf *m)
 {
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
-	struct socket *so = sb->sb_so;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
+	struct socket *__single so = sb->sb_so;
 
 	if (m == NULL || (sb->sb_flags & SB_DROP)) {
 		if (m != NULL) {
@@ -965,7 +999,9 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m != NULL ? m_length(m) : 0, false, (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
+			    m != NULL ? m_length(m) : 0, false,
+			    (m != NULL && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
@@ -1102,8 +1138,8 @@ sblastmbufchk(struct sockbuf *sb, const char *where)
 static int
 sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 {
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
-	struct socket *so = sb->sb_so;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
+	struct socket *__single so = sb->sb_so;
 	struct mbuf *m;
 	int space = 0;
 
@@ -1119,6 +1155,8 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 	}
 
 	if (space > sbspace(sb) && !(sb->sb_flags & SB_UNIX)) {
+		sb_update_no_space_stats(sb, space);
+
 		if (nodrop == FALSE) {
 			m_freem(m0);
 		}
@@ -1129,7 +1167,9 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 		ASSERT(nodrop == FALSE);
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL,
+			    m0 != NULL ? m_length(m0) : 0, false,
+			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -1226,16 +1266,15 @@ sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0, struct
 
 	if (asa != NULL) {
 		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
-#if _MSIZE <= UINT8_MAX
-		if (asa->sa_len > MLEN) {
+		if (MLEN <= UINT8_MAX && asa->sa_len > MLEN) {
 			return NULL;
 		}
-#endif
-		_CASSERT(sizeof(asa->sa_len) == sizeof(__uint8_t));
 		space += asa->sa_len;
 	}
 
 	if (sb != NULL && space > sbspace(sb)) {
+		sb_update_no_space_stats(sb, space);
+
 		return NULL;
 	}
 
@@ -1255,7 +1294,7 @@ sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0, struct
 			return NULL;
 		}
 		m->m_len = asa->sa_len;
-		bcopy((caddr_t)asa, mtod(m, caddr_t), asa->sa_len);
+		SOCKADDR_COPY(asa, mtod(m, caddr_t), asa->sa_len);
 
 		m->m_next = control;
 	} else {
@@ -1274,21 +1313,20 @@ sbconcat_mbufs(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0, struct
  *			1		Success
  */
 int
-sbappendchain(struct sockbuf *sb, struct mbuf *m, int space)
+sbappendchain(struct sockbuf *sb, struct mbuf *m)
 {
 	struct mbuf *n, *nlast;
+	int space = 0;
 
 	if (m == NULL) {
 		return 0;
 	}
 
-	if (space != 0 && space > sbspace(sb)) {
-		return 0;
-	}
-
 	for (n = m; n->m_next != NULL; n = n->m_next) {
+		space += n->m_len;
 		sballoc(sb, n);
 	}
+	space += n->m_len;
 	sballoc(sb, n);
 	nlast = n;
 
@@ -1299,6 +1337,8 @@ sbappendchain(struct sockbuf *sb, struct mbuf *m, int space)
 	}
 	sb->sb_lastrecord = m;
 	sb->sb_mbtail = nlast;
+
+	sb_update_data_stats(sb, space);
 
 	SBLASTMBUFCHK(sb, __func__);
 	SBLASTRECORDCHK(sb, "sbappendadddr 2");
@@ -1320,8 +1360,8 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 	int result = 0;
 	boolean_t sb_unix = (sb->sb_flags & SB_UNIX);
 	struct mbuf *mbuf_chain = NULL;
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
-	struct socket *so = sb->sb_so;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
+	struct socket *__single so = sb->sb_so;
 
 	if (error_out) {
 		*error_out = 0;
@@ -1348,7 +1388,10 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 		/* Call socket data in filters */
 
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control,
+			    m0 != NULL ? m_length(m0) : 0,
+			    false,
+			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -1391,7 +1434,7 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 
 	mbuf_chain = sbconcat_mbufs(sb, asa, m0, control);
 	SBLASTRECORDCHK(sb, "sbappendadddr 1");
-	result = sbappendchain(sb, mbuf_chain, 0);
+	result = sbappendchain(sb, mbuf_chain);
 	if (result == 0) {
 		if (m0) {
 			m_freem(m0);
@@ -1418,12 +1461,12 @@ is_cmsg_valid(struct mbuf *control, struct cmsghdr *cmsg)
 		return FALSE;
 	}
 
-	if ((uint8_t *)control->m_data >= (uint8_t *)cmsg + cmsg->cmsg_len) {
+	if ((uintptr_t)control->m_data >= (uintptr_t)cmsg + cmsg->cmsg_len) {
 		return FALSE;
 	}
 
-	if ((uint8_t *)control->m_data + control->m_len <
-	    (uint8_t *)cmsg + cmsg->cmsg_len) {
+	if ((uintptr_t)control->m_data + control->m_len <
+	    (uintptr_t)cmsg + cmsg->cmsg_len) {
 		return FALSE;
 	}
 
@@ -1452,6 +1495,8 @@ sbappendcontrol_internal(struct sockbuf *sb, struct mbuf *m0,
 		space += m->m_len;
 	}
 	if (space > sbspace(sb) && !(sb->sb_flags & SB_UNIX)) {
+		sb_update_no_space_stats(sb, space);
+
 		return 0;
 	}
 	n->m_next = m0;                 /* concatenate data to control */
@@ -1471,6 +1516,8 @@ sbappendcontrol_internal(struct sockbuf *sb, struct mbuf *m0,
 	sb->sb_lastrecord = control;
 	sb->sb_mbtail = mlast;
 
+	sb_update_data_stats(sb, space);
+
 	SBLASTMBUFCHK(sb, __func__);
 	SBLASTRECORDCHK(sb, "sbappendcontrol 2");
 	return 1;
@@ -1480,8 +1527,8 @@ int
 sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
     int *error_out)
 {
-	struct soflow_hash_entry *dgram_flow_entry = NULL;
-	struct socket *so = sb->sb_so;
+	struct soflow_hash_entry *__single dgram_flow_entry = NULL;
+	struct socket *__single so = sb->sb_so;
 	int result = 0;
 	boolean_t sb_unix = (sb->sb_flags & SB_UNIX);
 
@@ -1504,7 +1551,9 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control, m0 != NULL ? m_length(m0) : 0, false, (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control,
+			    m0 != NULL ? m_length(m0) : 0, false,
+			    (m0 != NULL && m0->m_pkthdr.rcvif) ? m0->m_pkthdr.rcvif->if_index : 0);
 		}
 
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
@@ -1642,6 +1691,7 @@ sbcompress(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 {
 	int eor = 0, compress = (!(sb->sb_flags & SB_NOCOMPRESS));
 	struct mbuf *o;
+	int space = 0;
 
 	if (m == NULL) {
 		/* There is nothing to compress; just update the tail */
@@ -1653,6 +1703,7 @@ sbcompress(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 	}
 
 	while (m != NULL) {
+		space += m->m_len;
 		eor |= m->m_flags & M_EOR;
 		if (compress && m->m_len == 0 && (eor == 0 ||
 		    (((o = m->m_next) || (o = n)) && o->m_type == m->m_type))) {
@@ -1707,6 +1758,7 @@ sbcompress(struct sockbuf *sb, struct mbuf *m, struct mbuf *n)
 			printf("semi-panic: sbcompress\n");
 		}
 	}
+	sb_update_data_stats(sb, space);
 done:
 	SBLASTMBUFCHK(sb, __func__);
 }
@@ -1731,7 +1783,7 @@ sb_empty_assert(struct sockbuf *sb, const char *where)
 void
 sbflush(struct sockbuf *sb)
 {
-	void *lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 	struct socket *so = sb->sb_so;
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
@@ -1929,7 +1981,7 @@ sbdroprecord(struct sockbuf *sb)
  * with the specified type for presentation on a socket buffer.
  */
 struct mbuf *
-sbcreatecontrol(caddr_t p, int size, int type, int level)
+sbcreatecontrol(caddr_t __sized_by(size) p, int size, int type, int level)
 {
 	struct cmsghdr *cp;
 	struct mbuf *m;
@@ -1952,7 +2004,7 @@ sbcreatecontrol(caddr_t p, int size, int type, int level)
 }
 
 struct mbuf **
-sbcreatecontrol_mbuf(caddr_t p, int size, int type, int level, struct mbuf **mp)
+sbcreatecontrol_mbuf(caddr_t __sized_by(size) p, int size, int type, int level, struct mbuf **mp)
 {
 	struct mbuf *m;
 	struct cmsghdr *cp;
@@ -2042,7 +2094,8 @@ pru_connectx_notsupp(struct socket *so, struct sockaddr *src,
 }
 
 int
-pru_control_notsupp(struct socket *so, u_long cmd, caddr_t data,
+pru_control_notsupp(struct socket *so,
+    u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data,
     struct ifnet *ifp, struct proc *p)
 {
 #pragma unused(so, cmd, data, ifp, p)
@@ -2454,11 +2507,11 @@ int
 sblock(struct sockbuf *sb, uint32_t flags)
 {
 	boolean_t nointr = ((sb->sb_flags & SB_NOINTR) || (flags & SBL_NOINTR));
-	void *lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 	struct socket *so = sb->sb_so;
 	void * wchan;
 	int error = 0;
-	thread_t tp = current_thread();
+	thread_t __single tp = current_thread();
 
 	VERIFY((flags & SBL_VALID) == flags);
 
@@ -2559,9 +2612,9 @@ sblock(struct sockbuf *sb, uint32_t flags)
 void
 sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 {
-	void *lr_saved = __builtin_return_address(0);
+	void *__single lr_saved = __unsafe_forge_single(void *, __builtin_return_address(0));
 	struct socket *so = sb->sb_so;
-	thread_t tp = current_thread();
+	thread_t __single tp = current_thread();
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
 	if (so == NULL) {
@@ -2652,7 +2705,7 @@ static void
 soevupcall(struct socket *so, uint32_t hint)
 {
 	if (so->so_event != NULL) {
-		caddr_t so_eventarg = so->so_eventarg;
+		caddr_t __single so_eventarg = so->so_eventarg;
 
 		hint &= so->so_eventmask;
 		if (hint != 0) {
@@ -2720,10 +2773,10 @@ soevent_ifdenied(struct socket *so)
 			uuid_string_t buf;
 
 			uuid_unparse(ev_ifdenied.ev_data.euuid, buf);
-			log(LOG_DEBUG, "%s[%d]: so 0x%llx [%d,%d] epid %llu "
+			log(LOG_DEBUG, "%s[%d]: so %llu [%d,%d] epid %llu "
 			    "euuid %s%s has %d redundant events supressed\n",
 			    __func__, so->last_pid,
-			    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+			    so->so_gencnt, SOCK_DOM(so),
 			    SOCK_TYPE(so), ev_ifdenied.ev_data.epid, buf,
 			    ((so->so_flags & SOF_DELEGATED) ?
 			    " [delegated]" : ""), so->so_ifdenied_notifies);
@@ -2733,9 +2786,9 @@ soevent_ifdenied(struct socket *so)
 			uuid_string_t buf;
 
 			uuid_unparse(ev_ifdenied.ev_data.euuid, buf);
-			log(LOG_DEBUG, "%s[%d]: so 0x%llx [%d,%d] epid %llu "
+			log(LOG_DEBUG, "%s[%d]: so %llu [%d,%d] epid %llu "
 			    "euuid %s%s event posted\n", __func__,
-			    so->last_pid, (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    so->last_pid, so->so_gencnt,
 			    SOCK_DOM(so), SOCK_TYPE(so),
 			    ev_ifdenied.ev_data.epid, buf,
 			    ((so->so_flags & SOF_DELEGATED) ?
@@ -2761,22 +2814,6 @@ dup_sockaddr(struct sockaddr *sa, int canwait)
 	return sa2;
 }
 
-void * __header_indexable
-alloc_sockaddr(size_t size, zalloc_flags_t flags)
-{
-	VERIFY((size) <= UINT8_MAX);
-
-	__typed_allocators_ignore_push
-	void * buf = kheap_alloc(KHEAP_SONAME, size, flags | Z_ZERO);
-	__typed_allocators_ignore_pop
-	if (buf != NULL) {
-		struct sockaddr *sa = SA(buf);
-		sa->sa_len = (uint8_t)size;
-	}
-
-	return buf;
-}
-
 /*
  * Create an external-format (``xsocket'') structure using the information
  * in the kernel-format socket structure pointed to by so.  This is done
@@ -2789,12 +2826,12 @@ void
 sotoxsocket(struct socket *so, struct xsocket *xso)
 {
 	xso->xso_len = sizeof(*xso);
-	xso->xso_so = (_XSOCKET_PTR(struct socket *))VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (_XSOCKET_PTR(struct socket *))VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = (short)(so->so_options & 0xffff);
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (_XSOCKET_PTR(caddr_t))VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (_XSOCKET_PTR(caddr_t))VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);
@@ -2820,12 +2857,12 @@ void
 sotoxsocket64(struct socket *so, struct xsocket64 *xso)
 {
 	xso->xso_len = sizeof(*xso);
-	xso->xso_so = (u_int64_t)VM_KERNEL_ADDRPERM(so);
+	xso->xso_so = (u_int64_t)VM_KERNEL_ADDRHASH(so);
 	xso->so_type = so->so_type;
 	xso->so_options = (short)(so->so_options & 0xffff);
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = (u_int64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+	xso->so_pcb = (u_int64_t)VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		xso->xso_protocol = SOCK_PROTO(so);
 		xso->xso_family = SOCK_DOM(so);

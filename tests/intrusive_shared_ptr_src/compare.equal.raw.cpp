@@ -99,7 +99,7 @@ tests_convert()
 	}
 }
 
-T_DECL(compare_equal_raw, "intrusive_shared_ptr.compare.equal.raw") {
+T_DECL(compare_equal_raw, "intrusive_shared_ptr.compare.equal.raw", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests_convert<Derived, Base>();

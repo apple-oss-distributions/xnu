@@ -78,7 +78,7 @@ tests()
 	}
 }
 
-T_DECL(operator_subscript, "safe_allocation.operator.subscript") {
+T_DECL(operator_subscript, "safe_allocation.operator.subscript", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 }

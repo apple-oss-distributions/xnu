@@ -155,7 +155,7 @@ static struct inpcb *
 in6_pcblookup_local_and_cleanup(struct inpcbinfo *pcbinfo,
     struct in6_addr *laddr, u_int lport_arg, uint32_t ifscope, int wild_okay)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 
 	/* Perform normal lookup */
 	inp = in6_pcblookup_local(pcbinfo, laddr, lport_arg, ifscope, wild_okay);
@@ -182,21 +182,21 @@ in6_pcblookup_local_and_cleanup(struct inpcbinfo *pcbinfo,
 
 /*
  * Bind an INPCB to an address and/or port.  This routine should not alter
- * the caller-supplied local address "nam".
+ * the caller-supplied local address "nam" or remote address "remote".
  */
 int
-in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
+in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, struct proc *p)
 {
-	struct socket *so = inp->inp_socket;
-	struct inpcbinfo *pcbinfo = inp->inp_pcbinfo;
+	struct socket *__single so = inp->inp_socket;
+	struct inpcbinfo *__single pcbinfo = inp->inp_pcbinfo;
 	u_short lport = 0;
 	int wild = 0, reuseport = (so->so_options & SO_REUSEPORT);
-	struct ifnet *outif = NULL;
+	ifnet_ref_t outif = NULL;
 	struct sockaddr_in6 sin6;
 	uint32_t lifscope = IFSCOPE_NONE;
 	int error = 0;
 #if XNU_TARGET_OS_OSX
-	kauth_cred_t cred;
+	kauth_cred_t __single cred;
 #endif /* XNU_TARGET_OS_OSX */
 
 	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
@@ -213,6 +213,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	}
 
 	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
 
 	socket_unlock(so, 0); /* keep reference */
 	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
@@ -273,7 +274,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				reuseport = SO_REUSEADDR | SO_REUSEPORT;
 			}
 		} else if (!IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr)) {
-			struct ifaddr *ifa;
+			struct ifaddr *__single ifa;
 
 			ifa = ifa_ifwithaddr(SA(&sin6));
 			if (ifa == NULL) {
@@ -290,7 +291,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				 * the application dare to use it.
 				 */
 				IFA_LOCK_SPIN(ifa);
-				if (((struct in6_ifaddr *)ifa)->ia6_flags &
+				if ((ifatoia6(ifa))->ia6_flags &
 				    (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY |
 				    IN6_IFF_DETACHED | IN6_IFF_CLAT46)) {
 					IFA_UNLOCK(ifa);
@@ -367,7 +368,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 #endif /* SKYWALK */
 
 		if (lport != 0) {
-			struct inpcb *t;
+			struct inpcb *__single t;
 			uid_t u;
 
 #if XNU_TARGET_OS_OSX
@@ -575,7 +576,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 
 	if (lport == 0) {
 		int e;
-		if ((e = in6_pcbsetport(&inp->in6p_laddr, inp, p, 1)) != 0) {
+		if ((e = in6_pcbsetport(&inp->in6p_laddr, remote, inp, p, 1)) != 0) {
 			/* Undo any address bind from above. */
 #if SKYWALK
 			netns_release(&inp->inp_netns_token);
@@ -590,7 +591,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		}
 	} else {
 		inp->inp_lport = lport;
-		if (in_pcbinshash(inp, 1) != 0) {
+		if (in_pcbinshash(inp, remote, 1) != 0) {
 #if SKYWALK
 			netns_release(&inp->inp_netns_token);
 			netns_release(&inp->inp_wildcard_netns_token);
@@ -627,7 +628,7 @@ int
 in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
     struct in6_addr *plocal_addr6, struct ifnet **outif)
 {
-	struct in6_addr *addr6 = NULL;
+	struct in6_addr *__single addr6 = NULL;
 	struct in6_addr src_storage;
 	int error = 0;
 	unsigned int ifscope;
@@ -651,6 +652,7 @@ in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
 	}
 
 	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
 
 	if (!TAILQ_EMPTY(&in6_ifaddrhead)) {
 		/*
@@ -678,7 +680,7 @@ in6_pcbladdr(struct inpcb *inp, struct sockaddr *nam,
 	    &inp->in6p_route, outif, &src_storage, ifscope, &error);
 
 	if (outif != NULL) {
-		struct rtentry *rt = inp->in6p_route.ro_rt;
+		rtentry_ref_t rt = inp->in6p_route.ro_rt;
 		/*
 		 * If in6_selectsrc() returns a route, it should be one
 		 * which points to the same ifp as outif.  Just in case
@@ -727,10 +729,10 @@ int
 in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 {
 	struct in6_addr addr6;
-	struct sockaddr_in6 *sin6 = SIN6(nam);
-	struct inpcb *pcb;
+	struct sockaddr_in6 *__single sin6 = SIN6(nam);
+	struct inpcb *__single pcb;
 	int error = 0;
-	struct ifnet *outif = NULL;
+	ifnet_ref_t outif = NULL;
 	struct socket *so = inp->inp_socket;
 
 #if CONTENT_FILTER
@@ -780,7 +782,7 @@ in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	}
 	if (IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
 		if (inp->inp_lport == 0) {
-			error = in6_pcbbind(inp, NULL, p);
+			error = in6_pcbbind(inp, NULL, nam, p);
 			if (error) {
 				goto done;
 			}
@@ -829,7 +831,7 @@ done:
 void
 in6_pcbdisconnect(struct inpcb *inp)
 {
-	struct socket *so = inp->inp_socket;
+	struct socket *__single so = inp->inp_socket;
 
 #if CONTENT_FILTER
 	if (so) {
@@ -865,7 +867,7 @@ in6_pcbdisconnect(struct inpcb *inp)
 void
 in6_pcbdetach(struct inpcb *inp)
 {
-	struct socket *so = inp->inp_socket;
+	struct socket *__single so = inp->inp_socket;
 
 	if (so->so_pcb == NULL) {
 		/* PCB has been disposed */
@@ -910,8 +912,8 @@ in6_pcbdetach(struct inpcb *inp)
 #endif /* SKYWALK */
 
 	if (!(so->so_flags & SOF_PCBCLEARING)) {
-		struct ip_moptions *imo;
-		struct ip6_moptions *im6o;
+		struct ip_moptions *__single imo;
+		struct ip6_moptions *__single im6o;
 
 		inp->inp_vflag = 0;
 		if (inp->in6p_options != NULL) {
@@ -949,9 +951,9 @@ in6_pcbdetach(struct inpcb *inp)
 struct sockaddr *
 in6_sockaddr(in_port_t port, struct in6_addr *addr_p, uint32_t ifscope)
 {
-	struct sockaddr_in6 *sin6;
+	struct sockaddr_in6 *__single sin6;
 
-	sin6 = SIN6(alloc_sockaddr(sizeof(*sin6),
+	sin6 = (struct sockaddr_in6 *)(alloc_sockaddr(sizeof(*sin6),
 	    Z_WAITOK | Z_NOFAIL));
 
 	sin6->sin6_family = AF_INET6;
@@ -1009,7 +1011,7 @@ in6_sockaddr_s(in_port_t port, struct in6_addr *addr_p,
 int
 in6_getsockaddr(struct socket *so, struct sockaddr **nam)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	struct in6_addr addr;
 	in_port_t port;
 
@@ -1030,7 +1032,7 @@ in6_getsockaddr(struct socket *so, struct sockaddr **nam)
 int
 in6_getsockaddr_s(struct socket *so, struct sockaddr_in6 *ss)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	struct in6_addr addr;
 	in_port_t port;
 
@@ -1051,7 +1053,7 @@ in6_getsockaddr_s(struct socket *so, struct sockaddr_in6 *ss)
 int
 in6_getpeeraddr(struct socket *so, struct sockaddr **nam)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	struct in6_addr addr;
 	in_port_t port;
 
@@ -1072,7 +1074,7 @@ in6_getpeeraddr(struct socket *so, struct sockaddr **nam)
 int
 in6_mapped_sockaddr(struct socket *so, struct sockaddr **nam)
 {
-	struct  inpcb *inp = sotoinpcb(so);
+	struct  inpcb *__single inp = sotoinpcb(so);
 	int     error;
 
 	if (inp == NULL) {
@@ -1125,9 +1127,10 @@ in6_pcbnotify(struct inpcbinfo *pcbinfo, struct sockaddr *dst, u_int fport_arg,
     const struct sockaddr *src, u_int lport_arg, int cmd, void *cmdarg,
     void (*notify)(struct inpcb *, int))
 {
-	struct inpcbhead *head = pcbinfo->ipi_listhead;
-	struct inpcb *inp, *ninp;
-	struct sockaddr_in6 sa6_src, *sa6_dst;
+	struct inpcbhead *__single head = pcbinfo->ipi_listhead;
+	struct inpcb *__single inp, *__single ninp;
+	struct sockaddr_in6 sa6_src;
+	struct sockaddr_in6 *__single sa6_dst;
 	uint16_t fport = (uint16_t)fport_arg, lport = (uint16_t)lport_arg;
 	u_int32_t flowinfo;
 	int errno;
@@ -1233,15 +1236,15 @@ struct inpcb *
 in6_pcblookup_local(struct inpcbinfo *pcbinfo, struct in6_addr *laddr,
     u_int lport_arg, uint32_t ifscope, int wild_okay)
 {
-	struct inpcb *inp;
+	struct inpcb *__single inp;
 	int matchwild = 3, wildcard;
 	uint16_t lport = (uint16_t)lport_arg;
-	struct inpcbporthead *porthash;
-	struct inpcb *match = NULL;
-	struct inpcbport *phd;
+	struct inpcbporthead *__single porthash;
+	struct inpcb *__single match = NULL;
+	struct inpcbport *__single phd;
 
 	if (!wild_okay) {
-		struct inpcbhead *head;
+		struct inpcbhead *__single head;
 		/*
 		 * Look for an unconnected (wildcard foreign addr) PCB that
 		 * matches the local address and port we're looking for.
@@ -1279,6 +1282,7 @@ in6_pcblookup_local(struct inpcbinfo *pcbinfo, struct in6_addr *laddr,
 			break;
 		}
 	}
+
 	if (phd != NULL) {
 		/*
 		 * Port is in use by one or more PCBs. Look for best
@@ -1325,7 +1329,7 @@ in6_pcblookup_local(struct inpcbinfo *pcbinfo, struct in6_addr *laddr,
 void
 in6_losing(struct inpcb *in6p)
 {
-	struct rtentry *rt;
+	rtentry_ref_t rt;
 
 	if ((rt = in6p->in6p_route.ro_rt) != NULL) {
 		RT_LOCK(rt);
@@ -1373,8 +1377,8 @@ in6_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
     u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg, uint32_t lifscope, int wildcard,
     uid_t *uid, gid_t *gid, struct ifnet *ifp, bool relaxed)
 {
-	struct inpcbhead *head;
-	struct inpcb *inp;
+	struct inpcbhead *__single head;
+	struct inpcb *__single inp;
 	uint16_t fport = (uint16_t)fport_arg, lport = (uint16_t)lport_arg;
 	int found;
 
@@ -1424,7 +1428,7 @@ in6_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 		}
 	}
 	if (wildcard) {
-		struct inpcb *local_wild = NULL;
+		struct inpcb *__single local_wild = NULL;
 
 		head = &pcbinfo->ipi_hashbase[INP_PCBHASH(INADDR_ANY, lport, 0,
 		    pcbinfo->ipi_hashmask)];
@@ -1490,8 +1494,8 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
     u_int fport_arg, uint32_t fifscope, struct in6_addr *laddr, u_int lport_arg, uint32_t lifscope, int wildcard,
     struct ifnet *ifp)
 {
-	struct inpcbhead *head;
-	struct inpcb *inp;
+	struct inpcbhead *__single head;
+	struct inpcb *__single inp;
 	uint16_t fport = (uint16_t)fport_arg, lport = (uint16_t)lport_arg;
 
 	lck_rw_lock_shared(&pcbinfo->ipi_lock);
@@ -1535,7 +1539,7 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 		}
 	}
 	if (wildcard) {
-		struct inpcb *local_wild = NULL;
+		struct inpcb *__single local_wild = NULL;
 
 		head = &pcbinfo->ipi_hashbase[INP_PCBHASH(INADDR_ANY, lport, 0,
 		    pcbinfo->ipi_hashmask)];
@@ -1593,7 +1597,7 @@ in6_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in6_addr *faddr,
 void
 init_sin6(struct sockaddr_in6 *sin6, struct mbuf *m)
 {
-	struct ip6_hdr *ip;
+	struct ip6_hdr *__single ip;
 
 	ip = mtod(m, struct ip6_hdr *);
 	SOCKADDR_ZERO(sin6, sizeof(*sin6));
@@ -1642,7 +1646,7 @@ init_sin6(struct sockaddr_in6 *sin6, struct mbuf *m)
 void
 in6p_route_copyout(struct inpcb *inp, struct route_in6 *dst)
 {
-	struct route_in6 *src = &inp->in6p_route;
+	struct route_in6 *__single src = &inp->in6p_route;
 
 	socket_lock_assert_owned(inp->inp_socket);
 
@@ -1657,7 +1661,7 @@ in6p_route_copyout(struct inpcb *inp, struct route_in6 *dst)
 void
 in6p_route_copyin(struct inpcb *inp, struct route_in6 *src)
 {
-	struct route_in6 *dst = &inp->in6p_route;
+	struct route_in6 *__single dst = &inp->in6p_route;
 
 	socket_lock_assert_owned(inp->inp_socket);
 

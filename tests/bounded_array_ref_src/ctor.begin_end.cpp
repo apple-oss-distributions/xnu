@@ -74,7 +74,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_begin_end, "bounded_array_ref.ctor.begin_end") {
+T_DECL(ctor_begin_end, "bounded_array_ref.ctor.begin_end", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

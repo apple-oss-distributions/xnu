@@ -31,6 +31,7 @@
 
 #include <kern/kcdata.h>
 
+#include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -280,6 +281,10 @@ __options_decl(stackshot_flags_t, uint64_t, {
 	STACKSHOT_DISABLE_LATENCY_INFO             = 0x40000000,
 	STACKSHOT_SAVE_DYLD_COMPACTINFO            = 0x80000000,
 	STACKSHOT_INCLUDE_DRIVER_THREADS_IN_KERNEL = 0x100000000,
+	/* Include all Exclaves address space layouts, instead of just on-core ones (default) */
+	STACKSHOT_EXCLAVES                         = 0x200000000,
+	/* Skip Exclaves stack collection */
+	STACKSHOT_SKIP_EXCLAVES                    = 0x400000000,
 }); // Note: Add any new flags to kcdata.py (stackshot_in_flags)
 
 __options_decl(microstackshot_flags_t, uint32_t, {
@@ -313,6 +318,10 @@ __options_closed_decl(kf_override_flag_t, uint32_t, {
 	KF_DISABLE_PROD_TRC_VALIDATION            = 0x4000,
 	KF_IO_TIMEOUT_OVRD                        = 0x8000,
 	KF_PREEMPTION_DISABLED_DEBUG_OVRD         = 0x10000,
+	/*
+	 * Disable panics (with retaining backtraces) on leaked proc refs across syscall boundary.
+	 */
+	KF_DISABLE_PROCREF_TRACKING_OVRD          = 0x20000,
 });
 
 boolean_t kern_feature_override(kf_override_flag_t fmask);
@@ -326,7 +335,7 @@ __options_decl(eph_panic_flags_t, uint64_t, {
 	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED        = 0x20,                               /* ERROR: stackshot caused a nested panic */
 	EMBEDDED_PANIC_HEADER_FLAG_NESTED_PANIC                   = 0x40,                               /* ERROR: panic handler encountered a panic */
 	EMBEDDED_PANIC_HEADER_FLAG_BUTTON_RESET_PANIC             = 0x80,                               /* INFO: force-reset panic: user held power button to force shutdown */
-	EMBEDDED_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC         = 0x100,                              /* INFO: panic was triggered by a companion processor (not Xnu) */
+	EMBEDDED_PANIC_HEADER_FLAG_COMPANION_PROC_INITIATED_PANIC = 0x100,                              /* INFO: panic was triggered by a companion processor (external to the SOC) */
 	EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED                = 0x200,                              /* ERROR: coredump failed to complete */
 	EMBEDDED_PANIC_HEADER_FLAG_COMPRESS_FAILED                = 0x400,                              /* ERROR: stackshot failed to compress */
 	EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED      = 0x800,                              /* INFO: stackshot data is compressed */
@@ -335,9 +344,13 @@ __options_decl(eph_panic_flags_t, uint64_t, {
 	EMBEDDED_PANIC_HEADER_FLAG_COREFILE_UNLINKED              = 0x4000,                             /* ERROR: coredump output file is not linked */
 	EMBEDDED_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000,                             /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
 	EMBEDDED_PANIC_HEADER_FLAG_EXCLAVE_PANIC                  = 0x10000,                            /* INFO: panic originated from exclaves */
+	EMBEDDED_PANIC_HEADER_FLAG_USERSPACE_INITIATED_PANIC      = 0x20000,                            /* INFO: panic was initiated by userspace */
+	EMBEDDED_PANIC_HEADER_FLAG_INTEGRATED_COPROC_INITIATED_PANIC = 0x40000,                         /* INFO: panic was initiated by an SOC-integrated coprocessor */
 });
 
-#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 5
+#define MAX_PANIC_INITIATOR_SIZE 256
+
+#define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 6
 #define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
 #define EMBEDDED_PANIC_HEADER_OSVERSION_LEN 32
 
@@ -375,6 +388,8 @@ struct embedded_panic_header {
 	uint64_t eph_roots_installed;                                  /* bitmap indicating which roots are installed on this system */
 	uint32_t eph_ext_paniclog_offset;
 	uint32_t eph_ext_paniclog_len;
+	uint32_t eph_panic_initiator_offset;
+	uint32_t eph_panic_initiator_len;
 } __attribute__((packed));
 
 
@@ -383,7 +398,7 @@ struct embedded_panic_header {
 
 __options_decl(mph_panic_flags_t, uint64_t, {
 	MACOS_PANIC_HEADER_FLAG_NESTED_PANIC                   = 0x01,                                /* ERROR: panic handler encountered a panic */
-	MACOS_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC         = 0x02,                                /* INFO: panic was triggered by a companion processor (not Xnu) */
+	MACOS_PANIC_HEADER_FLAG_COMPANION_PROC_INITIATED_PANIC = 0x02,                                /* INFO: panic was triggered by a companion processor (external to the SOC) */
 	MACOS_PANIC_HEADER_FLAG_STACKSHOT_SUCCEEDED            = 0x04,                                /* INFO: stackshot completed */
 	MACOS_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED      = 0x08,                                /* INFO: stackshot data is compressed */
 	MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC  = 0x10,                                /* ERROR: stackshot failed to sync with external debugger */
@@ -397,7 +412,9 @@ __options_decl(mph_panic_flags_t, uint64_t, {
 	MACOS_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED     = 0x1000,                              /* ERROR: coredump policy requires encryption, but encryptions is not initialized or available */
 	MACOS_PANIC_HEADER_FLAG_KERNEL_COREDUMP_SKIPPED_EXCLUDE_REGIONS_UNAVAILABLE     = 0x2000,     /* ERROR: coredump region exclusion list is not available */
 	MACOS_PANIC_HEADER_FLAG_COREFILE_UNLINKED              = 0x4000,                              /* ERROR: coredump output file is not linked */
-	MACOS_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000                               /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+	MACOS_PANIC_HEADER_FLAG_INCOHERENT_PANICLOG            = 0x8000,                              /* ERROR: paniclog integrity check failed (a warning to consumer code i.e. DumpPanic) */
+	MACOS_PANIC_HEADER_FLAG_USERSPACE_INITIATED_PANIC      = 0x10000,                             /* INFO: panic was initiated by userspace */
+	MACOS_PANIC_HEADER_FLAG_INTEGRATED_COPROC_INITIATED_PANIC = 0x20000,                          /* INFO: panic was initiated by an SOC-integrated coprocessor */
 });
 
 struct macos_panic_header {
@@ -548,16 +565,18 @@ enum {
 /*
  * Values for a 64-bit mask that's passed to the debugger.
  */
-#define DEBUGGER_OPTION_NONE                        0x0ULL
-#define DEBUGGER_OPTION_PANICLOGANDREBOOT           0x1ULL /* capture a panic log and then reboot immediately */
-#define DEBUGGER_OPTION_INITPROC_PANIC              0x20ULL
-#define DEBUGGER_OPTION_COPROC_INITIATED_PANIC      0x40ULL /* panic initiated by a co-processor */
-#define DEBUGGER_OPTION_SKIP_LOCAL_COREDUMP         0x80ULL /* don't try to save local coredumps for this panic */
-#define DEBUGGER_OPTION_ATTEMPTCOREDUMPANDREBOOT    0x100ULL /* attempt to save coredump. always reboot */
-#define DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE   0x200ULL /* backtrace the specified thread in the paniclog (x86 only) */
-#define DEBUGGER_OPTION_PRINT_CPU_USAGE_PANICLOG    0x400ULL /* print extra CPU usage data in the panic log */
-#define DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS      0x800ULL /* (bridgeOS) skip the kPEPanicEnd callouts -- don't wait for x86 to finish sending panic data */
-#define DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE        0x1000ULL /* sync() early in Panic - Can add unbounded delay, may be unsafe for some panic scenarios. Intended for userspace, watchdogs and RTBuddy panics */
+#define DEBUGGER_OPTION_NONE                              0x0ULL
+#define DEBUGGER_OPTION_PANICLOGANDREBOOT                 0x1ULL /* capture a panic log and then reboot immediately */
+#define DEBUGGER_OPTION_INITPROC_PANIC                    0x20ULL
+#define DEBUGGER_OPTION_COMPANION_PROC_INITIATED_PANIC    0x40ULL /* panic triggered by a companion processor (external to the SOC) */
+#define DEBUGGER_OPTION_SKIP_LOCAL_COREDUMP               0x80ULL /* don't try to save local coredumps for this panic */
+#define DEBUGGER_OPTION_ATTEMPTCOREDUMPANDREBOOT          0x100ULL /* attempt to save coredump. always reboot */
+#define DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE         0x200ULL /* backtrace the specified thread in the paniclog (x86 only) */
+#define DEBUGGER_OPTION_PRINT_CPU_USAGE_PANICLOG          0x400ULL /* print extra CPU usage data in the panic log */
+#define DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS            0x800ULL /* (bridgeOS) skip the kPEPanicEnd callouts -- don't wait for x86 to finish sending panic data */
+#define DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE              0x1000ULL /* sync() early in Panic - Can add unbounded delay, may be unsafe for some panic scenarios. Intended for userspace, watchdogs and RTBuddy panics */
+#define DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC         0x2000ULL /* panic initiated by userspace */
+#define DEBUGGER_OPTION_INTEGRATED_COPROC_INITIATED_PANIC 0x4000ULL /* panic initiated by an SOC-integrated coprocessor */
 
 #define DEBUGGER_INTERNAL_OPTIONS_MASK              (DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE)
 
@@ -606,6 +625,9 @@ struct proc;
 
 __abortlike __printflike(4, 5)
 void panic_with_options(unsigned int reason, void *ctx,
+    uint64_t debugger_options_mask, const char *str, ...);
+__abortlike __printflike(5, 6)
+void panic_with_options_and_initiator(const char* initiator, unsigned int reason, void *ctx,
     uint64_t debugger_options_mask, const char *str, ...);
 void Debugger(const char * message);
 void populate_model_name(char *);
@@ -700,7 +722,7 @@ extern char     kernel_uuid_string[];
 extern char     panic_disk_error_description[];
 extern size_t   panic_disk_error_description_size;
 
-extern unsigned char    *kernel_uuid;
+extern unsigned char    *__counted_by(sizeof(uuid_t)) kernel_uuid;
 extern unsigned int     debug_boot_arg;
 extern int     verbose_panic_flow_logging;
 
@@ -774,7 +796,7 @@ extern size_t panic_stackshot_buf_len;
 extern size_t panic_stackshot_len;
 #endif /* defined (__x86_64__) */
 
-void    SavePanicInfo(const char *message, void *panic_data, uint64_t panic_options);
+void    SavePanicInfo(const char *message, void *panic_data, uint64_t panic_options, const char* panic_initiator);
 void    paniclog_flush(void);
 void    panic_display_zalloc(void); /* in zalloc.c */
 void    panic_display_kernel_aslr(void);
@@ -809,7 +831,7 @@ typedef enum {
 
 __printflike(3, 0)
 kern_return_t DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_panic_str, va_list *db_panic_args,
-    uint64_t db_panic_options, void *db_panic_data_ptr, boolean_t db_proceed_on_sync_failure, unsigned long db_panic_caller);
+    uint64_t db_panic_options, void *db_panic_data_ptr, boolean_t db_proceed_on_sync_failure, unsigned long db_panic_caller, const char *db_panic_initiator);
 void handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int subcode, void *state);
 
 void DebuggerWithContext(unsigned int reason, void *ctx, const char *message, uint64_t debugger_options_mask, unsigned long debugger_caller);

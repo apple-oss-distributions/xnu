@@ -152,6 +152,8 @@ uint32_t unp_log_enable_flags = 0;
 SYSCTL_UINT(_net_local, OID_AUTO, log, CTLFLAG_RD | CTLFLAG_LOCKED,
     &unp_log_enable_flags, 0, "");
 
+SYSCTL_UINT(_net_local, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &unp_count, 0, "");
 
 /*
  * mDNSResponder tracing.  When enabled, endpoints connected to
@@ -423,18 +425,25 @@ uipc_rcvd(struct socket *so, __unused int flags)
 	struct unpcb *unp = sotounpcb(so);
 	struct socket *so2;
 
-	if (unp == 0) {
+	if (unp == NULL) {
 		return EINVAL;
 	}
-	switch (so->so_type) {
-	case SOCK_DGRAM:
-		panic("uipc_rcvd DGRAM?");
-	/*NOTREACHED*/
-
-	case SOCK_STREAM:
 #define rcv (&so->so_rcv)
 #define snd (&so2->so_snd)
-		if (unp->unp_conn == 0) {
+	switch (so->so_type) {
+	case SOCK_DGRAM:
+		if (unp->unp_conn == NULL) {
+			break;
+		}
+		so2 = unp->unp_conn->unp_socket;
+		unp_get_locks_in_order(so, so2);
+		if (sb_notify(&so2->so_snd)) {
+			sowakeup(so2, &so2->so_snd, so);
+		}
+		socket_unlock(so2, 1);
+		break;
+	case SOCK_STREAM:
+		if (unp->unp_conn == NULL) {
 			break;
 		}
 
@@ -451,13 +460,10 @@ uipc_rcvd(struct socket *so, __unused int flags)
 		if (sb_notify(&so2->so_snd)) {
 			sowakeup(so2, &so2->so_snd, so);
 		}
-
 		socket_unlock(so2, 1);
-
 #undef snd
 #undef rcv
 		break;
-
 	default:
 		panic("uipc_rcvd unknown socktype");
 	}
@@ -558,8 +564,6 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			if (sb_notify(&so2->so_rcv)) {
 				sowakeup(so2, &so2->so_rcv, so);
 			}
-			so2->so_tc_stats[0].rxpackets += 1;
-			so2->so_tc_stats[0].rxbytes += len;
 		} else if (control != NULL && error == 0) {
 			/* A socket filter took control; don't touch it */
 			control = NULL;
@@ -658,8 +662,6 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			if (sb_notify(&so2->so_rcv)) {
 				sowakeup(so2, &so2->so_rcv, so);
 			}
-			so2->so_tc_stats[0].rxpackets += 1;
-			so2->so_tc_stats[0].rxbytes += len;
 		} else if (control != NULL && error == 0) {
 			/* A socket filter took control; don't touch it */
 			control = NULL;
@@ -676,8 +678,7 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		panic("uipc_send unknown socktype");
 	}
 
-	so->so_tc_stats[0].txpackets += 1;
-	so->so_tc_stats[0].txbytes += len;
+	so_update_tx_data_stats(so, 1, len);
 
 	/*
 	 * SEND_EOF is equivalent to a SEND followed by
@@ -1150,7 +1151,8 @@ unp_bind(
 	if (namelen >= SOCK_MAXADDRLEN) {
 		return EINVAL;
 	}
-	bcopy(soun->sun_path, buf, namelen);
+	char *path = UNP_FORGE_PATH(soun, namelen);
+	bcopy(path, buf, namelen);
 	buf[namelen] = 0;
 
 	socket_unlock(so, 0);
@@ -1282,7 +1284,8 @@ unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 
 	soisconnecting(so);
 
-	bcopy(soun->sun_path, buf, len);
+	char *path = UNP_FORGE_PATH(soun, len);
+	bcopy(path, buf, len);
 	buf[len] = 0;
 
 	socket_unlock(so, 0);
@@ -1447,8 +1450,7 @@ unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 		 * terminating character into account.)
 		 */
 		if (unpst_tracemdns &&
-		    !strncmp(soun->sun_path, MDNSRESPONDER_PATH,
-		    sizeof(MDNSRESPONDER_PATH))) {
+		    !strbufcmp(soun->sun_path, MDNSRESPONDER_PATH)) {
 			unp->unp_flags |= UNP_TRACE_MDNS;
 			unp2->unp_flags |= UNP_TRACE_MDNS;
 		}
@@ -1717,36 +1719,36 @@ unpcb_to_compat(struct unpcb *up, struct unpcb_compat *cp)
 {
 #if defined(__LP64__)
 	cp->unp_link.le_next = (u_int32_t)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_next);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_next);
 	cp->unp_link.le_prev = (u_int32_t)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_prev);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_prev);
 #else
 	cp->unp_link.le_next = (struct unpcb_compat *)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_next);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_next);
 	cp->unp_link.le_prev = (struct unpcb_compat **)
-	    VM_KERNEL_ADDRPERM(up->unp_link.le_prev);
+	    VM_KERNEL_ADDRHASH(up->unp_link.le_prev);
 #endif
 	cp->unp_socket = (_UNPCB_PTR(struct socket *))
-	    VM_KERNEL_ADDRPERM(up->unp_socket);
+	    VM_KERNEL_ADDRHASH(up->unp_socket);
 	cp->unp_vnode = (_UNPCB_PTR(struct vnode *))
-	    VM_KERNEL_ADDRPERM(up->unp_vnode);
+	    VM_KERNEL_ADDRHASH(up->unp_vnode);
 	cp->unp_ino = up->unp_ino;
 	cp->unp_conn = (_UNPCB_PTR(struct unpcb_compat *))
-	    VM_KERNEL_ADDRPERM(up->unp_conn);
-	cp->unp_refs = (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_refs.lh_first);
+	    VM_KERNEL_ADDRHASH(up->unp_conn);
+	cp->unp_refs = (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_refs.lh_first);
 #if defined(__LP64__)
 	cp->unp_reflink.le_next =
-	    (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_reflink.le_next);
+	    (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_reflink.le_next);
 	cp->unp_reflink.le_prev =
-	    (u_int32_t)VM_KERNEL_ADDRPERM(up->unp_reflink.le_prev);
+	    (u_int32_t)VM_KERNEL_ADDRHASH(up->unp_reflink.le_prev);
 #else
 	cp->unp_reflink.le_next =
-	    (struct unpcb_compat *)VM_KERNEL_ADDRPERM(up->unp_reflink.le_next);
+	    (struct unpcb_compat *)VM_KERNEL_ADDRHASH(up->unp_reflink.le_next);
 	cp->unp_reflink.le_prev =
-	    (struct unpcb_compat **)VM_KERNEL_ADDRPERM(up->unp_reflink.le_prev);
+	    (struct unpcb_compat **)VM_KERNEL_ADDRHASH(up->unp_reflink.le_prev);
 #endif
 	cp->unp_addr = (_UNPCB_PTR(struct sockaddr_un *))
-	    VM_KERNEL_ADDRPERM(up->unp_addr);
+	    VM_KERNEL_ADDRHASH(up->unp_addr);
 	cp->unp_cc = up->unp_cc;
 	cp->unp_mbcnt = up->unp_mbcnt;
 	cp->unp_gencnt = up->unp_gencnt;
@@ -1832,18 +1834,20 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 			bzero(&xu, sizeof(xu));
 			xu.xu_len = sizeof(xu);
 			xu.xu_unpp = (_UNPCB_PTR(struct unpcb_compat *))
-			    VM_KERNEL_ADDRPERM(unp);
+			    VM_KERNEL_ADDRHASH(unp);
 			/*
 			 * XXX - need more locking here to protect against
 			 * connect/disconnect races for SMP.
 			 */
 			if (unp->unp_addr) {
 				struct sockaddr_un *dst __single = &xu.xu_au.xuu_addr;
-				SOCKADDR_COPY(unp->unp_addr, dst, unp->unp_addr->sun_len);
+				SOCKADDR_COPY(unp->unp_addr, dst,
+				    unp->unp_addr->sun_len);
 			}
 			if (unp->unp_conn && unp->unp_conn->unp_addr) {
 				struct sockaddr_un *dst __single = &xu.xu_cau.xuu_caddr;
-				SOCKADDR_COPY(unp->unp_conn->unp_addr, dst, unp->unp_conn->unp_addr->sun_len);
+				SOCKADDR_COPY(unp->unp_conn->unp_addr, dst,
+				    unp->unp_conn->unp_addr->sun_len);
 			}
 			unpcb_to_compat(unp, &xu.xu_unp);
 			sotoxsocket(unp->unp_socket, &xu.xu_socket);
@@ -1963,24 +1967,24 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 
 			bzero(&xu, xu_len);
 			xu.xu_len = (u_int32_t)xu_len;
-			xu.xu_unpp = (u_int64_t)VM_KERNEL_ADDRPERM(unp);
+			xu.xu_unpp = (u_int64_t)VM_KERNEL_ADDRHASH(unp);
 			xu.xunp_link.le_next = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_link.le_next);
+			    VM_KERNEL_ADDRHASH(unp->unp_link.le_next);
 			xu.xunp_link.le_prev = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_link.le_prev);
+			    VM_KERNEL_ADDRHASH(unp->unp_link.le_prev);
 			xu.xunp_socket = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_socket);
+			    VM_KERNEL_ADDRHASH(unp->unp_socket);
 			xu.xunp_vnode = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_vnode);
+			    VM_KERNEL_ADDRHASH(unp->unp_vnode);
 			xu.xunp_ino = unp->unp_ino;
 			xu.xunp_conn = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_conn);
+			    VM_KERNEL_ADDRHASH(unp->unp_conn);
 			xu.xunp_refs = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_refs.lh_first);
+			    VM_KERNEL_ADDRHASH(unp->unp_refs.lh_first);
 			xu.xunp_reflink.le_next = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_reflink.le_next);
+			    VM_KERNEL_ADDRHASH(unp->unp_reflink.le_next);
 			xu.xunp_reflink.le_prev = (u_int64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_reflink.le_prev);
+			    VM_KERNEL_ADDRHASH(unp->unp_reflink.le_prev);
 			xu.xunp_cc = unp->unp_cc;
 			xu.xunp_mbcnt = unp->unp_mbcnt;
 			xu.xunp_gencnt = unp->unp_gencnt;
@@ -1994,12 +1998,14 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 			 * connect/disconnect races for SMP.
 			 */
 			if (unp->unp_addr) {
-				bcopy(unp->unp_addr, &xu.xu_au,
+				struct sockaddr_un *dst __single = &xu.xu_au.xuu_addr;
+				SOCKADDR_COPY(unp->unp_addr, dst,
 				    unp->unp_addr->sun_len);
 			}
 			if (unp->unp_conn && unp->unp_conn->unp_addr) {
-				bcopy(unp->unp_conn->unp_addr,
-				    &xu.xu_cau,
+				struct sockaddr_un *dst __single = &xu.xu_cau.xuu_caddr;
+				SOCKADDR_COPY(unp->unp_conn->unp_addr,
+				    dst,
 				    unp->unp_conn->unp_addr->sun_len);
 			}
 
@@ -2047,13 +2053,15 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 	unp_gen_t gencnt;
 	struct xunpgen xug;
 	struct unp_head *head;
-	void *buf __single = NULL;
-	size_t item_size = ROUNDUP64(sizeof(struct xunpcb_n)) +
+	size_t item_size = 0;
+	uint8_t *__sized_by(item_size) buf = NULL;
+
+	const size_t size = ROUNDUP64(sizeof(struct xunpcb_n)) +
 	    ROUNDUP64(sizeof(struct xsocket_n)) +
 	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
 	    ROUNDUP64(sizeof(struct xsockstat_n));
-
-	buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	buf = kalloc_data(size, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	item_size = size;
 
 	lck_rw_lock_shared(&unp_list_mtx);
 
@@ -2118,12 +2126,12 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 
 		xu->xunp_len = sizeof(struct xunpcb_n);
 		xu->xunp_kind = XSO_UNPCB;
-		xu->xunp_unpp = (uint64_t)VM_KERNEL_ADDRPERM(unp);
-		xu->xunp_vnode = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_vnode);
+		xu->xunp_unpp = (uint64_t)VM_KERNEL_ADDRHASH(unp);
+		xu->xunp_vnode = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_vnode);
 		xu->xunp_ino = unp->unp_ino;
-		xu->xunp_conn = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_conn);
-		xu->xunp_refs = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_refs.lh_first);
-		xu->xunp_reflink = (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_reflink.le_next);
+		xu->xunp_conn = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_conn);
+		xu->xunp_refs = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_refs.lh_first);
+		xu->xunp_reflink = (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_reflink.le_next);
 		xu->xunp_cc = unp->unp_cc;
 		xu->xunp_mbcnt = unp->unp_mbcnt;
 		xu->xunp_flags = unp->unp_flags;
@@ -2131,11 +2139,13 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 
 		if (unp->unp_addr) {
 			struct sockaddr_un *dst __single = &xu->xu_au.xuu_addr;
-			SOCKADDR_COPY(unp->unp_addr, dst, unp->unp_addr->sun_len);
+			SOCKADDR_COPY(unp->unp_addr, dst,
+			    unp->unp_addr->sun_len);
 		}
 		if (unp->unp_conn && unp->unp_conn->unp_addr) {
 			struct sockaddr_un *dst __single = &xu->xu_cau.xuu_caddr;
-			SOCKADDR_COPY(unp->unp_conn->unp_addr, dst, unp->unp_conn->unp_addr->sun_len);
+			SOCKADDR_COPY(unp->unp_conn->unp_addr, dst,
+			    unp->unp_conn->unp_addr->sun_len);
 		}
 		sotoxsocket_n(unp->unp_socket, xso);
 		sbtoxsockbuf_n(unp->unp_socket ?
@@ -2166,7 +2176,7 @@ unp_pcblist_n SYSCTL_HANDLER_ARGS
 	}
 done:
 	lck_rw_done(&unp_list_mtx);
-	kfree_data(buf, item_size);
+	kfree_data_sized_by(buf, item_size);
 	return error;
 }
 
@@ -2512,9 +2522,10 @@ unp_gc(thread_call_param_t arg0, thread_call_param_t arg1)
 #pragma unused(arg0, arg1)
 	struct fileglob *fg;
 	struct socket *so;
-	static struct fileglob **extra_ref;
+	static struct fileglob **__indexable extra_ref;
 	struct fileglob **fpp;
 	int nunref, i;
+	static struct proc *UNP_FG_NOPROC = __unsafe_forge_single(struct proc *, FG_NOPROC);
 
 restart:
 	lck_mtx_lock(&uipc_lock);
@@ -2645,6 +2656,10 @@ restart:
 	 * 91/09/19, bsy@cs.cmu.edu
 	 */
 	size_t extra_ref_size = nfiles;
+	if (extra_ref_size == 0) {
+		lck_mtx_unlock(&uipc_lock);
+		return;
+	}
 	extra_ref = kalloc_type(struct fileglob *, extra_ref_size, Z_WAITOK);
 	if (extra_ref == NULL) {
 		lck_mtx_unlock(&uipc_lock);
@@ -2699,7 +2714,7 @@ restart:
 		}
 	}
 	for (i = nunref, fpp = extra_ref; --i >= 0; ++fpp) {
-		fg_drop(PROC_NULL, *fpp);
+		fg_drop(UNP_FG_NOPROC, *fpp);
 	}
 
 	kfree_type(struct fileglob *, extra_ref_size, extra_ref);

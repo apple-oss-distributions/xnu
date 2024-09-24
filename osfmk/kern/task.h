@@ -154,6 +154,31 @@ struct task_writes_counters {
 	uint64_t task_metadata_writes;
 };
 
+struct task_pend_token {
+	union {
+		struct {
+			uint32_t        tpt_update_sockets      :1,
+			    tpt_update_timers       :1,
+			    tpt_update_watchers     :1,
+			    tpt_update_live_donor   :1,
+			    tpt_update_coal_sfi     :1,
+			    tpt_update_throttle     :1,
+			    tpt_update_thread_sfi   :1,
+			    tpt_force_recompute_pri :1,
+			    tpt_update_tg_ui_flag   :1,
+			    tpt_update_turnstile    :1,
+			    tpt_update_tg_app_flag  :1,
+			    tpt_update_game_mode    :1,
+			    tpt_update_carplay_mode :1;
+		};
+		uint32_t tpt_value;
+	};
+};
+
+typedef struct task_pend_token task_pend_token_s;
+typedef struct task_pend_token *task_pend_token_t;
+
+
 struct task_watchports;
 #include <bank/bank_internal.h>
 
@@ -189,10 +214,6 @@ struct task {
 	queue_chain_t   tasks;  /* global list of tasks */
 	struct task_watchports *watchports; /* watchports passed in spawn */
 	turnstile_inheritor_t returnwait_inheritor; /* inheritor for task_wait */
-
-#if defined(CONFIG_SCHED_MULTIQ)
-	sched_group_t sched_group;
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
 
 	/* Threads in this task */
 	queue_head_t            threads;
@@ -235,9 +256,13 @@ struct task {
 	 * These flavors TASK_FLAVOR_* are defined in mach_types.h
 	 */
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_task_ports") itk_task_ports[TASK_SELF_PORT_COUNT];
+#if CONFIG_CSR
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_settable_self") itk_settable_self;   /* a send right */
+#endif /* CONFIG_CSR */
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_self") itk_self;                     /* immovable/pinned task port, does not hold right */
 	struct exception_action exc_actions[EXC_TYPES_COUNT];
+	/* special exception port used by task_register_hardened_exception_handler */
+	struct hardened_exception_action hardened_exception_action;
 	/* a send right each valid element  */
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_host") itk_host;                     /* a send right */
 	struct ipc_port * XNU_PTRAUTH_SIGNED_PTR("task.itk_bootstrap") itk_bootstrap;           /* a send right */
@@ -267,7 +292,7 @@ struct task {
 	counter_t cow_faults;         /* copy on write fault counter */
 	counter_t messages_sent;      /* messages sent counter */
 	counter_t messages_received;  /* messages received counter */
-	uint32_t decompressions;      /* decompression counter */
+	uint32_t decompressions;      /* decompression counter (from threads that already terminated) */
 	uint32_t syscalls_mach;       /* mach system call counter */
 	uint32_t syscalls_unix;       /* unix system call counter */
 	uint32_t c_switch;            /* total context switches */
@@ -307,8 +332,8 @@ struct task {
 #define TF_DYLD_ALL_IMAGE_FINAL   0x00400000                            /* all_image_info_addr can no longer be changed */
 #define TF_HASPROC              0x00800000                              /* task points to a proc */
 #define TF_HAS_REPLY_PORT_TELEMETRY 0x10000000                          /* Rate limit telemetry for reply port security semantics violations rdar://100244531 */
-#define TF_HAS_EXCEPTION_TELEMETRY  0x20000000                          /* Rate limit telemetry for exception identity violations rdar://100729339 */
 #define TF_GAME_MODE            0x40000000                              /* Set the game mode bit for CLPC */
+#define TF_CARPLAY_MODE         0x80000000                              /* Set the carplay mode bit for CLPC */
 
 /*
  * WARNING: These TF_ and TFRO_ flags are NOT automatically inherited by a child of fork
@@ -326,7 +351,12 @@ struct task {
 #define TFRO_PLATFORM                   0x00000400                      /* task is a platform binary */
 #define TFRO_FILTER_MSG                 0x00004000                      /* task calls into message filter callback before sending a message */
 #define TFRO_PAC_EXC_FATAL              0x00010000                      /* task is marked a corpse if a PAC exception occurs */
+#define TFRO_JIT_EXC_FATAL              0x00020000                      /* kill the task on access violations from privileged JIT code */
 #define TFRO_PAC_ENFORCE_USER_STATE     0x01000000                      /* Enforce user and kernel signed thread state */
+#if CONFIG_EXCLAVES
+#define TFRO_HAS_KD_ACCESS              0x02000000                      /* Access to the kernel exclave resource domain  */
+#endif /* CONFIG_EXCLAVES */
+#define TFRO_FREEZE_EXCEPTION_PORTS     0x04000000                      /* Setting new exception ports on the task/thread is disallowed */
 
 /*
  * Task is running within a 64-bit address space.
@@ -383,12 +413,6 @@ struct task {
 
 #define task_set_reply_port_telemetry(task) \
 	((task)->t_flags |= TF_HAS_REPLY_PORT_TELEMETRY)
-
-#define task_has_exception_telemetry(task) \
-	(((task)->t_flags & TF_HAS_EXCEPTION_TELEMETRY) != 0)
-
-#define task_set_exception_telemetry(task) \
-	((task)->t_flags |= TF_HAS_EXCEPTION_TELEMETRY)
 
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0
@@ -463,6 +487,8 @@ struct task {
 	struct task_requested_policy requested_policy;
 	struct task_effective_policy effective_policy;
 
+	struct task_pend_token pended_coalition_changes;
+
 	/*
 	 * Can be merged with imp_donor bits, once the IMPORTANCE_INHERITANCE macro goes away.
 	 */
@@ -516,6 +542,7 @@ struct task {
 	unsigned int    task_ios13extended_footprint_limit:1;
 #endif /* __arm64__ */
 	unsigned int    task_region_footprint:1;
+	unsigned int    task_region_info_flags:1;
 	unsigned int    task_has_crossed_thread_limit:1;
 	unsigned int    task_rr_in_flight:1; /* a t_rr_synchronzie() is in flight */
 	/*
@@ -569,8 +596,8 @@ struct task {
 #endif /* CONFIG_DEFERRED_RECLAIM */
 
 #if CONFIG_EXCLAVES
-	void *conclave;
-	void *exclave_crash_info;
+	void * XNU_PTRAUTH_SIGNED_PTR("task.conclave") conclave;
+	void * XNU_PTRAUTH_SIGNED_PTR("task.exclave_crash_info") exclave_crash_info;
 	uint32_t exclave_crash_info_length;
 #endif /* CONFIG_EXCLAVES */
 };
@@ -595,21 +622,10 @@ task_require(struct task *task)
 	zone_id_require(ZONE_ID_PROC_TASK, proc_and_task_size, task_get_proc_raw(task));
 }
 
-/*
- * task_lock() and task_unlock() need to be callable from the `bsd/` tree of
- * XNU and are therefore promoted to full functions instead of macros so that
- * they can be linked against.
- *
- * We provide `extern` declarations here for consumers of `task.h` in `osfmk/`,
- * then separately provide `inline` definitions in `task.c`. Together with the
- * `BUILD_LTO=1` build argument, this guarantees these functions are always
- * inlined regardless of whether called from the `osfmk/` tree or `bsd/` tree.
- */
-extern void task_lock(task_t);
-extern void task_unlock(task_t);
-
+#define task_lock(task)                 lck_mtx_lock(&(task)->lock)
 #define task_lock_assert_owned(task)    LCK_MTX_ASSERT(&(task)->lock, LCK_MTX_ASSERT_OWNED)
 #define task_lock_try(task)             lck_mtx_try_lock(&(task)->lock)
+#define task_unlock(task)               lck_mtx_unlock(&(task)->lock)
 
 #define task_objq_lock_init(task)       lck_mtx_init(&(task)->task_objq_lock, &vm_object_lck_grp, &vm_object_lck_attr)
 #define task_objq_lock_destroy(task)    lck_mtx_destroy(&(task)->task_objq_lock, &vm_object_lck_grp)
@@ -773,9 +789,7 @@ extern kern_return_t    task_release(
 	task_t          task);
 
 /* Suspend/resume a task where the kernel owns the suspend count */
-extern kern_return_t    task_suspend_internal_locked(   task_t          task);
 extern kern_return_t    task_suspend_internal(          task_t          task);
-extern kern_return_t    task_resume_internal_locked(    task_t          task);
 extern kern_return_t    task_resume_internal(           task_t          task);
 
 /* Suspends a task by placing a hold on its threads */
@@ -1001,7 +1015,8 @@ extern bool     task_set_ca_client_wi(
 extern kern_return_t task_set_dyld_info(
 	task_t            task,
 	mach_vm_address_t addr,
-	mach_vm_size_t    size);
+	mach_vm_size_t    size,
+	bool              finalize_value);
 
 extern void task_set_mach_header_address(
 	task_t task,
@@ -1040,6 +1055,11 @@ extern uint64_t get_task_phys_footprint_interval_max(task_t, int reset);
 #endif /* CONFIG_FOOTPRINT_INTERVAL_MAX */
 extern uint64_t get_task_phys_footprint_lifetime_max(task_t);
 extern uint64_t get_task_phys_footprint_limit(task_t);
+extern uint64_t get_task_neural_nofootprint_total(task_t task);
+#if CONFIG_LEDGER_INTERVAL_MAX
+extern uint64_t get_task_neural_nofootprint_total_interval_max(task_t, int reset);
+#endif /* CONFIG_NEURAL_INTERVAL_MAX */
+extern uint64_t get_task_neural_nofootprint_total_lifetime_max(task_t);
 extern uint64_t get_task_purgeable_size(task_t);
 extern uint64_t get_task_cpu_time(task_t);
 extern uint64_t get_task_dispatchqueue_offset(task_t);
@@ -1146,6 +1166,7 @@ struct _task_ledger_indices {
 	int tkm_shared;
 	int phys_mem;
 	int wired_mem;
+	int conclave_mem;
 	int internal;
 	int iokit_mapped;
 	int external;
@@ -1179,6 +1200,7 @@ struct _task_ledger_indices {
 	int neural_footprint;
 	int neural_nofootprint_compressed;
 	int neural_footprint_compressed;
+	int neural_nofootprint_total;
 	int platform_idle_wakeups;
 	int interrupt_wakeups;
 #if CONFIG_SCHED_SFI
@@ -1247,6 +1269,7 @@ extern boolean_t task_is_active(task_t task);
 extern boolean_t task_is_halting(task_t task);
 extern void task_clear_return_wait(task_t task, uint32_t flags);
 extern void task_wait_to_return(void) __attribute__((noreturn));
+extern void task_post_signature_processing_hook(task_t task);
 extern event_t task_get_return_wait_event(task_t task);
 
 extern void task_bank_reset(task_t task);
@@ -1278,6 +1301,11 @@ extern void task_set_game_mode(task_t task, bool enabled);
 extern bool task_set_game_mode_locked(task_t task, bool enabled);
 extern bool task_get_game_mode(task_t task);
 
+extern void task_set_carplay_mode(task_t task, bool enabled);
+/* returns true if update must be pushed to coalition (Automatically handled by task_set_carplay_mode) */
+extern bool task_set_carplay_mode_locked(task_t task, bool enabled);
+extern bool task_get_carplay_mode(task_t task);
+
 extern queue_head_t * task_io_user_clients(task_t task);
 extern void     task_set_message_app_suspended(task_t task, boolean_t enable);
 
@@ -1295,6 +1323,9 @@ extern bool task_is_pac_exception_fatal(task_t task);
 extern void task_set_pac_exception_fatal_flag(task_t task);
 #endif /*__has_feature(ptrauth_calls)*/
 
+extern bool task_is_jit_exception_fatal(task_t task);
+extern void task_set_jit_exception_fatal_flag(task_t task);
+
 extern bool task_needs_user_signed_thread_state(task_t task);
 extern void task_set_tecs(task_t task);
 extern void task_get_corpse_vmobject_list(task_t task, vmobject_list_output_t* list, size_t* list_size);
@@ -1308,6 +1339,13 @@ extern int get_task_cdhash(task_t task, char cdhash[CS_CDHASH_LEN]);
 
 extern boolean_t kdp_task_is_locked(task_t task);
 
+/* redeclaration from task_server.h for the sake of kern_exec.c */
+extern kern_return_t _kernelrpc_mach_ports_register3(
+	task_t                  task,
+	mach_port_t             port1,
+	mach_port_t             port2,
+	mach_port_t             port3);
+
 /* Kernel side prototypes for MIG routines */
 extern kern_return_t task_get_exception_ports(
 	task_t                          task,
@@ -1319,14 +1357,13 @@ extern kern_return_t task_get_exception_ports(
 	thread_state_flavor_array_t     flavors);
 
 #if CONFIG_EXCLAVES
-int task_add_conclave(task_t task, const char *task_conclave_id);
-kern_return_t task_start_conclave_and_lookup_resources(mach_port_name_t port,
-    bool conclave_start, struct exclaves_resource_user *resource_user,
-    int resource_count);
-kern_return_t task_inherit_conclave(task_t old_task, task_t new_task);
+int task_add_conclave(task_t task, void *, int64_t, const char *task_conclave_id);
+kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnode, int64_t off);
+kern_return_t task_launch_conclave(mach_port_name_t port);
 void task_clear_conclave(task_t task);
 void task_stop_conclave(task_t task, bool gather_crash_bt);
 kern_return_t task_stop_conclave_upcall(void);
+kern_return_t task_stop_conclave_upcall_complete(void);
 kern_return_t task_suspend_conclave_upcall(uint64_t *, size_t);
 struct xnuupcalls_conclavesharedbuffer_s;
 kern_return_t task_crash_info_conclave_upcall(task_t task,
@@ -1361,6 +1398,7 @@ extern ipc_port_t convert_task_to_port(task_t);
 extern ipc_port_t convert_task_to_port_kernel(task_t);
 extern ipc_port_t convert_task_to_port_external(task_t);
 extern ipc_port_t convert_task_to_port_pinned(task_t);
+extern void       convert_task_array_to_ports(task_array_t, size_t, mach_task_flavor_t);
 
 extern ipc_port_t convert_task_read_to_port(task_t);
 extern ipc_port_t convert_task_read_to_port_kernel(task_read_t);
@@ -1425,6 +1463,27 @@ extern struct label *get_task_crash_label(task_t task);
 extern void set_task_crash_label(task_t task, struct label *label);
 #endif /* CONFIG_MACF */
 
+/* task_find_region_details() */
+__options_closed_decl(find_region_details_options_t, uint32_t, {
+	FIND_REGION_DETAILS_OPTIONS_NONE        = 0x00000000,
+	FIND_REGION_DETAILS_AT_OFFSET           = 0x00000001,
+	FIND_REGION_DETAILS_GET_VNODE           = 0x00000002,
+});
+#define FIND_REGION_DETAILS_OPTIONS_ALL (       \
+	        FIND_REGION_DETAILS_AT_OFFSET | \
+	        FIND_REGION_DETAILS_GET_VNODE   \
+	        )
+extern int task_find_region_details(
+	task_t task,
+	vm_map_offset_t offset,
+	find_region_details_options_t options,
+	uintptr_t *vp_p, /* caller must call vnode_put(vp) when done */
+	uint32_t *vid_p,
+	bool *is_mapped_shared_p,
+	uint64_t *start_p,
+	uint64_t *len_p);
+
+
 #endif  /* KERNEL_PRIVATE */
 
 extern task_t   kernel_task;
@@ -1449,6 +1508,11 @@ extern void             task_suspension_token_deallocate(
 
 extern boolean_t task_self_region_footprint(void);
 extern void task_self_region_footprint_set(boolean_t newval);
+
+/* VM_REGION_INFO_FLAGS defined in vm_region.h */
+extern int task_self_region_info_flags(void);
+extern kern_return_t task_self_region_info_flags_set(int newval);
+
 extern void task_ledgers_footprint(ledger_t ledger,
     ledger_amount_t *ledger_resident,
     ledger_amount_t *ledger_compressed);
@@ -1481,9 +1545,12 @@ extern bool task_is_translated(task_t task);
 
 
 #ifdef MACH_KERNEL_PRIVATE
+
 void task_procname(task_t task, char *buf, int size);
-void task_best_name(task_t task, char *buf, size_t size);
+const char *task_best_name(task_t task);
+
 #endif /* MACH_KERNEL_PRIVATE */
+
 
 __END_DECLS
 

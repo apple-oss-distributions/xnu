@@ -33,7 +33,7 @@ T_GLOBAL_META(
 #ifndef TEST_UNENTITLED
 T_DECL(fsctl_get_uninitialized,
     "Initial fsctl.get should return zeros",
-    T_META_ASROOT(false))
+    T_META_ASROOT(false), T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -55,7 +55,7 @@ T_DECL(fsctl_get_uninitialized,
 }
 
 T_DECL(fsctl_set,
-    "fsctl.set should succeed and fsctl.get should verify")
+    "fsctl.set should succeed and fsctl.get should verify", T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -119,7 +119,7 @@ verify_mount_fallback_values(const char *mount_path, disk_conditioner_info *info
 }
 
 T_DECL(fsctl_set_zero,
-    "fsctl.set zero values should fall back to original mount settings")
+    "fsctl.set zero values should fall back to original mount settings", T_META_TAG_VM_PREFERRED)
 {
 	char *mount_path;
 	disk_conditioner_info info = {0};
@@ -136,7 +136,7 @@ T_DECL(fsctl_set_zero,
 }
 
 T_DECL(fsctl_set_out_of_bounds,
-    "fsctl.set out-of-bounds values should fall back to original mount settings")
+    "fsctl.set out-of-bounds values should fall back to original mount settings", T_META_TAG_VM_PREFERRED)
 {
 	char *mount_path;
 	disk_conditioner_info info;
@@ -157,7 +157,7 @@ T_DECL(fsctl_set_out_of_bounds,
 }
 
 T_DECL(fsctl_restore_mount_fields,
-    "fsctl.set should restore fields on mount_t that it temporarily overrides")
+    "fsctl.set should restore fields on mount_t that it temporarily overrides", T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -214,7 +214,7 @@ T_DECL(fsctl_restore_mount_fields,
 
 T_DECL(fsctl_get_nonroot,
     "fsctl.get should not require root",
-    T_META_ASROOT(false))
+    T_META_ASROOT(false), T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -236,7 +236,7 @@ T_DECL(fsctl_get_nonroot,
 
 T_DECL(fsctl_set_nonroot,
     "fsctl.set should require root",
-    T_META_ASROOT(false))
+    T_META_ASROOT(false), T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -273,7 +273,7 @@ T_DECL(fsctl_set_nonroot,
 
 T_DECL(fsctl_delays,
     "Validate I/O delays when DMC is enabled",
-    T_META_RUN_CONCURRENTLY(false))
+    T_META_RUN_CONCURRENTLY(false), T_META_TAG_VM_PREFERRED)
 {
 	char *path;
 	int fd;
@@ -325,7 +325,7 @@ T_DECL(fsctl_delays,
 #pragma mark Unentitled Tests
 
 T_DECL(fsctl_get_unentitled,
-    "fsctl.get should not require entitlement")
+    "fsctl.get should not require entitlement", T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;
@@ -341,7 +341,7 @@ T_DECL(fsctl_get_unentitled,
 }
 
 T_DECL(fsctl_set_unentitled,
-    "fsctl.set should require entitlement")
+    "fsctl.set should require entitlement", T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	char *mount_path;

@@ -156,7 +156,7 @@ tests_convert()
 	check_eq(a, b);
 }
 
-T_DECL(compare_order, "bounded_ptr.compare.order") {
+T_DECL(compare_order, "bounded_ptr.compare.order", T_META_TAG_VM_PREFERRED) {
 	tests<Derived, Derived>();
 	tests<Derived, Derived const>();
 	tests<Derived, Derived volatile>();

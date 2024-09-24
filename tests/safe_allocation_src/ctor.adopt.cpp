@@ -30,7 +30,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_adopt, "safe_allocation.ctor.adopt") {
+T_DECL(ctor_adopt, "safe_allocation.ctor.adopt", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

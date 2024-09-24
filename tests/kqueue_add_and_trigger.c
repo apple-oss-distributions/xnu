@@ -11,7 +11,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
  *
  */
 
-T_DECL(kqueue_add_and_trigger_evfilt_user, "Add and trigger EVFILT_USER events with kevent ")
+T_DECL(kqueue_add_and_trigger_evfilt_user, "Add and trigger EVFILT_USER events with kevent ", T_META_TAG_VM_PREFERRED)
 {
 	int kq_fd, ret;
 	struct kevent ret_kev;

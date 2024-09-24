@@ -1,0 +1,21 @@
+// declaration of vm_wire in host_priv.defs
+// in 32-bit userspace is incompatible with the kernel's definition
+// rdar://118258929
+
+subsystem KernelServer replacement_host_priv 400;
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+#include <mach/clock_types.defs>
+#include <mach_debug/mach_debug_types.defs>
+
+skip; // host_get_boot_info
+skip; // host_reboot
+skip; // host_priv_statistics
+skip; // host_default_memory_manager
+
+routine replacement_vm_wire(
+		host_priv	: host_priv_t;
+		task		: vm_map_t;
+		address		: mach_vm_address_t;  // was vm_address_t
+		size		: mach_vm_size_t;  // was vm_size_t
+		desired_access	: vm_prot_t);

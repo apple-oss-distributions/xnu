@@ -136,7 +136,7 @@ static void in6_rtqtimo(void *);
 static void in6_sched_rtqtimo(struct timeval *);
 
 static struct radix_node *in6_addroute(void *, void *, struct radix_node_head *,
-    struct radix_node *);
+    struct radix_node[2]);
 static struct radix_node *in6_deleteroute(void *, void *,
     struct radix_node_head *);
 static struct radix_node *in6_matroute(void *, struct radix_node_head *);
@@ -156,11 +156,11 @@ static int in6dynroutes;
  */
 static struct radix_node *
 in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
-    struct radix_node *treenodes)
+    struct radix_node treenodes[2])
 {
-	struct rtentry *rt = (struct rtentry *)treenodes;
-	struct sockaddr_in6 *sin6 = SIN6(rt_key(rt));
-	struct radix_node *ret;
+	rtentry_ref_t rt = RT(treenodes);
+	struct sockaddr_in6 *__single sin6 = SIN6(rt_key(rt));
+	struct radix_node *__single ret;
 	char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
 	uint32_t flags = rt->rt_flags;
 	boolean_t verbose = (rt_verbose > 0);
@@ -230,7 +230,7 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	 */
 	ret = rn_addroute(v_arg, n_arg, head, treenodes);
 	if (ret == NULL && (rt->rt_flags & RTF_HOST)) {
-		struct rtentry *rt2;
+		rtentry_ref_t rt2;
 		/*
 		 * We are trying to add a host route, but can't.
 		 * Find out if it is because of an
@@ -273,15 +273,14 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 				(void) rtrequest_locked(RTM_DELETE, rt_key(rt2),
 				    rt2->rt_gateway, rt_mask(rt2),
 				    rt2->rt_flags, NULL);
-				ret = rn_addroute(v_arg, n_arg, head,
-				    treenodes);
+				ret = rn_addroute(v_arg, n_arg, head, treenodes);
 			} else {
 				RT_UNLOCK(rt2);
 			}
 			rtfree_locked(rt2);
 		}
 	} else if (ret == NULL && (rt->rt_flags & RTF_CLONING)) {
-		struct rtentry *rt2;
+		rtentry_ref_t rt2;
 		/*
 		 * We are trying to add a net route, but can't.
 		 * The following case should be allowed, so we'll make a
@@ -344,13 +343,13 @@ done:
 static struct radix_node *
 in6_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 {
-	struct radix_node *rn;
+	struct radix_node *__single rn;
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 
 	rn = rn_delete(v_arg, netmask_arg, head);
 	if (rn != NULL) {
-		struct rtentry *rt = (struct rtentry *)rn;
+		rtentry_ref_t rt = RT(rn);
 
 		RT_LOCK(rt);
 		if (rt->rt_flags & RTF_DYNAMIC) {
@@ -376,7 +375,7 @@ in6_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 struct radix_node *
 in6_validate(struct radix_node *rn)
 {
-	struct rtentry *rt = (struct rtentry *)rn;
+	rtentry_ref_t rt = RT(rn);
 
 	RT_LOCK_ASSERT_HELD(rt);
 
@@ -423,12 +422,14 @@ static struct radix_node *
 in6_matroute_args(void *v_arg, struct radix_node_head *head,
     rn_matchf_t *f, void *w)
 {
-	struct radix_node *rn = rn_match_args(v_arg, head, f, w);
+	struct radix_node *__single rn = rn_match_args(v_arg, head, f, w);
 
 	if (rn != NULL) {
-		RT_LOCK_SPIN((struct rtentry *)rn);
+		rtentry_ref_t rt = RT(rn);
+
+		RT_LOCK_SPIN(rt);
 		in6_validate(rn);
-		RT_UNLOCK((struct rtentry *)rn);
+		RT_UNLOCK(rt);
 	}
 	return rn;
 }
@@ -459,8 +460,8 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 {
 #pragma unused(head)
 	char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
-	struct rtentry *rt = (struct rtentry *)rn;
-	boolean_t verbose = (rt_verbose > 1);
+	rtentry_ref_t rt = RT(rn);
+	boolean_t verbose = (rt_verbose > 2);
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
@@ -564,8 +565,8 @@ struct rtqk_arg {
 static int
 in6_rtqkill(struct radix_node *rn, void *rock)
 {
-	struct rtqk_arg *ap = rock;
-	struct rtentry *rt = (struct rtentry *)rn;
+	struct rtqk_arg *__single ap = rock;
+	rtentry_ref_t rt = RT(rn);
 	boolean_t verbose = (rt_verbose > 1);
 	uint64_t timenow;
 	int err;
@@ -663,7 +664,7 @@ static void
 in6_rtqtimo(void *targ)
 {
 #pragma unused(targ)
-	struct radix_node_head *rnh;
+	struct radix_node_head *__single rnh;
 	struct rtqk_arg arg;
 	struct timeval atv;
 	static uint64_t last_adjusted_timeout = 0;
@@ -754,7 +755,7 @@ in6_sched_rtqtimo(struct timeval *atv)
 void
 in6_rtqdrain(void)
 {
-	struct radix_node_head *rnh;
+	struct radix_node_head *__single rnh;
 	struct rtqk_arg arg;
 
 	if (rt_verbose > 1) {
@@ -777,7 +778,7 @@ in6_rtqdrain(void)
 int
 in6_inithead(void **head, int off)
 {
-	struct radix_node_head *rnh;
+	struct radix_node_head *__single rnh;
 
 	/* If called from route_init(), make sure it is exactly once */
 	VERIFY(head != (void **)&rt_tables[AF_INET6] || *head == NULL);

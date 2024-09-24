@@ -36,6 +36,8 @@
 #include <arm/cpuid.h>
 #include <arm/caches_internal.h>
 #include <pexpert/arm/consistent_debug.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 
 #if !defined(ROUNDUP)
 #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))

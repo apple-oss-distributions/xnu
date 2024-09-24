@@ -92,8 +92,6 @@
 
 #include <net/sockaddr_utils.h>
 
-#define CONST_LLADDR(s) ((const u_char*)((s)->sdl_data + (s)->sdl_nlen))
-
 static const size_t MAX_HW_LEN = 10;
 
 /*
@@ -142,7 +140,7 @@ struct llinfo_arp {
 #define LLINFO_PROBING                 0x2 /* waiting for an ARP reply */
 };
 
-static LIST_HEAD(, llinfo_arp) llinfo_arp;
+static LIST_HEAD(, llinfo_arp) llinfo_arp = LIST_HEAD_INITIALIZER(llinfo_arp);
 
 static thread_call_t arp_timeout_tcall;
 static int arp_timeout_run;             /* arp_timeout is scheduled to run */
@@ -169,12 +167,11 @@ static void arp_llinfo_refresh(struct rtentry *);
 
 static __inline void arp_llreach_use(struct llinfo_arp *);
 static __inline int arp_llreach_reachable(struct llinfo_arp *);
-static void arp_llreach_alloc(struct rtentry *, struct ifnet *, void *,
-    unsigned int, boolean_t, uint32_t *);
+static void arp_llreach_alloc(struct rtentry *, struct ifnet *,
+    void *__sized_by(alen)addr,
+    unsigned int alen, boolean_t, uint32_t *);
 
 extern int tvtohz(struct timeval *);
-
-static int arpinit_done;
 
 SYSCTL_DECL(_net_link_ether);
 SYSCTL_NODE(_net_link_ether, PF_INET, inet, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "");
@@ -264,24 +261,12 @@ SYSCTL_PROC(_net_link_ether_inet, OID_AUTO, stats,
     0, 0, arp_getstat, "S,arpstat",
     "ARP statistics (struct arpstat, net/if_arp.h)");
 
-static KALLOC_TYPE_DEFINE(llinfo_arp_zone, struct llinfo_arp, NET_KT_DEFAULT);
-
-void
-arp_init(void)
-{
-	VERIFY(!arpinit_done);
-
-	LIST_INIT(&llinfo_arp);
-
-	arpinit_done = 1;
-}
-
 static struct llinfo_arp *
 arp_llinfo_alloc(zalloc_flags_t how)
 {
-	struct llinfo_arp *la = zalloc_flags(llinfo_arp_zone, how | Z_ZERO);
+	struct llinfo_arp *la = kalloc_type(struct llinfo_arp, how | Z_ZERO);
 
-	if (la) {
+	if (la != NULL) {
 		/*
 		 * The type of queue (Q_DROPHEAD) here is just a hint;
 		 * the actual logic that works on this queue performs
@@ -296,7 +281,7 @@ arp_llinfo_alloc(zalloc_flags_t how)
 static void
 arp_llinfo_free(void *arg)
 {
-	struct llinfo_arp *la = arg;
+	struct llinfo_arp *__single la = arg;
 
 	if (la->la_le.le_next != NULL || la->la_le.le_prev != NULL) {
 		panic("%s: trying to free %p when it is in use", __func__, la);
@@ -312,7 +297,7 @@ arp_llinfo_free(void *arg)
 		la->la_rt->rt_llinfo_purge(la->la_rt);
 	}
 
-	zfree(llinfo_arp_zone, la);
+	kfree_type(struct llinfo_arp, la);
 }
 
 static bool
@@ -378,7 +363,7 @@ arp_llinfo_flushq(struct llinfo_arp *la)
 static void
 arp_llinfo_purge(struct rtentry *rt)
 {
-	struct llinfo_arp *la = rt->rt_llinfo;
+	struct llinfo_arp *__single la = rt->rt_llinfo;
 
 	RT_LOCK_ASSERT_HELD(rt);
 	VERIFY(rt->rt_llinfo_purge == arp_llinfo_purge && la != NULL);
@@ -394,7 +379,7 @@ arp_llinfo_purge(struct rtentry *rt)
 static void
 arp_llinfo_get_ri(struct rtentry *rt, struct rt_reach_info *ri)
 {
-	struct llinfo_arp *la = rt->rt_llinfo;
+	struct llinfo_arp *__single la = rt->rt_llinfo;
 	struct if_llreach *lr = la->la_llreach;
 
 	if (lr == NULL) {
@@ -416,7 +401,7 @@ arp_llinfo_get_ri(struct rtentry *rt, struct rt_reach_info *ri)
 static void
 arp_llinfo_get_iflri(struct rtentry *rt, struct ifnet_llreach_info *iflri)
 {
-	struct llinfo_arp *la = rt->rt_llinfo;
+	struct llinfo_arp *__single la = rt->rt_llinfo;
 	struct if_llreach *lr = la->la_llreach;
 
 	if (lr == NULL) {
@@ -457,7 +442,8 @@ arp_llinfo_refresh(struct rtentry *rt)
 }
 
 void
-arp_llreach_set_reachable(struct ifnet *ifp, void *addr, unsigned int alen)
+arp_llreach_set_reachable(struct ifnet *ifp, void *__sized_by(alen)addr,
+    unsigned int alen)
 {
 	/* Nothing more to do if it's disabled */
 	if (arp_llreach_base == 0) {
@@ -545,7 +531,7 @@ arp_llreach_reachable(struct llinfo_arp *la)
  * NOTE: This is currently only for ARP/Ethernet.
  */
 static void
-arp_llreach_alloc(struct rtentry *rt, struct ifnet *ifp, void *addr,
+arp_llreach_alloc(struct rtentry *rt, struct ifnet *ifp, void *__sized_by(alen)addr,
     unsigned int alen, boolean_t solicited, uint32_t *p_rt_event_code)
 {
 	VERIFY(rt->rt_expire == 0 || rt->rt_rmx.rmx_expire != 0);
@@ -555,7 +541,7 @@ arp_llreach_alloc(struct rtentry *rt, struct ifnet *ifp, void *addr,
 	    !(rt->rt_ifp->if_flags & IFF_LOOPBACK) &&
 	    ifp->if_addrlen == IF_LLREACH_MAXLEN &&     /* Ethernet */
 	    alen == ifp->if_addrlen) {
-		struct llinfo_arp *la = rt->rt_llinfo;
+		struct llinfo_arp *__single la = rt->rt_llinfo;
 		struct if_llreach *lr;
 		const char *why = NULL, *type = "";
 
@@ -635,7 +621,7 @@ struct arptf_arg {
 static void
 arptfree(struct llinfo_arp *la, void *arg)
 {
-	struct arptf_arg *ap = arg;
+	struct arptf_arg *__single ap = arg;
 	struct rtentry *rt = la->la_rt;
 	uint64_t timenow;
 
@@ -901,13 +887,12 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 {
 #pragma unused(sa)
 	struct sockaddr *gate = rt->rt_gateway;
-	struct llinfo_arp *la = rt->rt_llinfo;
+	struct llinfo_arp *__single la = rt->rt_llinfo;
 	static struct sockaddr_dl null_sdl =
 	{ .sdl_len = sizeof(null_sdl), .sdl_family = AF_LINK };
 	uint64_t timenow;
 	char buf[MAX_IPv4_STR_LEN];
 
-	VERIFY(arpinit_done);
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
 
@@ -1048,7 +1033,8 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 			 * hardware.
 			 */
 			rt_setexpire(rt, 0);
-			ifnet_lladdr_copy_bytes(rt->rt_ifp, LLADDR(SDL(gate)),
+			struct sockaddr_dl *gate_ll = SDL(gate);
+			ifnet_lladdr_copy_bytes(rt->rt_ifp, LLADDR(gate_ll),
 			    SDL(gate)->sdl_alen = rt->rt_ifp->if_addrlen);
 			if (useloopback) {
 				if (rt->rt_ifp != lo_ifp) {
@@ -1112,12 +1098,14 @@ arp_rtrequest(int req, struct rtentry *rt, struct sockaddr *sa)
 /*
  * convert hardware address to hex string for logging errors.
  */
-static const char *
-sdl_addr_to_hex(const struct sockaddr_dl *sdl, char *orig_buf, int buflen)
+static const char *__bidi_indexable
+sdl_addr_to_hex(const struct sockaddr_dl *sdl_orig,
+    char *__sized_by(buflen)orig_buf, int buflen)
 {
 	char *buf = orig_buf;
 	int i;
-	const u_char *lladdr = (u_char *)(size_t)sdl->sdl_data;
+	const struct sockaddr_dl *sdl = SDL(sdl_orig);
+	const uint8_t *lladdr = CONST_LLADDR(sdl);
 	int maxbytes = buflen / 3;
 
 	if (maxbytes > sdl->sdl_alen) {
@@ -1225,7 +1213,7 @@ arp_lookup_route(const struct in_addr *addr, int create, int proxy,
 boolean_t
 arp_is_entry_probing(route_t p_route)
 {
-	struct llinfo_arp *llinfo = p_route->rt_llinfo;
+	struct llinfo_arp *__single llinfo = p_route->rt_llinfo;
 
 	if (llinfo != NULL &&
 	    llinfo->la_llreach != NULL &&
@@ -1291,13 +1279,14 @@ arp_send_probe_notification(route_t route)
  */
 errno_t
 arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
-    struct sockaddr_dl *ll_dest, size_t ll_dest_len, route_t hint,
+    struct sockaddr_dl *__sized_by(ll_dest_len)ll_dest,
+    size_t ll_dest_len, route_t hint,
     mbuf_t packet)
 {
 	route_t route __single = NULL;   /* output route */
 	errno_t result = 0;
 	struct sockaddr_dl *gateway;
-	struct llinfo_arp *llinfo = NULL;
+	struct llinfo_arp *__single llinfo = NULL;
 	boolean_t usable, probing = FALSE;
 	uint64_t timenow;
 	struct if_llreach *lr;
@@ -1637,7 +1626,7 @@ release:
 
 errno_t
 arp_ip_handle_input(ifnet_t ifp, u_short arpop,
-    const struct sockaddr_dl *sender_hw, const struct sockaddr_in *sender_ip,
+    const struct sockaddr_dl *sender_hw_orig, const struct sockaddr_in *sender_ip,
     const struct sockaddr_in *target_ip)
 {
 	char ipv4str[MAX_IPv4_STR_LEN];
@@ -1647,14 +1636,19 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 	struct in_ifaddr *ia;
 	struct in_ifaddr *best_ia = NULL;
 	struct sockaddr_in best_ia_sin;
-	route_t route = NULL;
+	route_t __single route = NULL;
 	char buf[3 * MAX_HW_LEN]; /* enough for MAX_HW_LEN byte hw address */
-	struct llinfo_arp *llinfo;
+	struct llinfo_arp *__single llinfo;
 	errno_t error;
 	int created_announcement = 0;
 	int bridged = 0, is_bridge = 0;
 	uint32_t rt_evcode = 0;
 
+	/*
+	 * Forge the sender_hw sockaddr to extract the
+	 * complete hardware address.
+	 */
+	const struct sockaddr_dl *sender_hw = SDL(sender_hw_orig);
 	/*
 	 * Here and other places within this routine where we don't hold
 	 * rnh_lock, trade accuracy for speed for the common scenarios
@@ -1752,7 +1746,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 			IFA_UNLOCK(ifa);
 			continue;
 		}
-		best_ia = (struct in_ifaddr *)ifa;
+		best_ia = (struct in_ifaddr *__single)ifa;
 		best_ia_sin = best_ia->ia_addr;
 		ifa_addref(ifa);
 		IFA_UNLOCK(ifa);

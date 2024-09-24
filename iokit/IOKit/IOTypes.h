@@ -50,19 +50,47 @@ extern "C" {
 #endif
 
 #ifndef NULL
-#if defined (__cplusplus)
 #ifdef XNU_KERNEL_PRIVATE
+#if defined (__cplusplus)
 #define NULL nullptr
 #else
+#define NULL ((void *)0)
+#endif
+#else // XNU_KERNEL_PRIVATE
+
+#ifdef KERNEL
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Xcode doesn't currently set up search paths correctly for Kernel extensions,
+ * so the clang headers are not seen in the correct order to use their types.
+ */
+#endif
+#define USE_CLANG_TYPES 0
+#else
+#if defined(__has_feature) && __has_feature(modules)
+#define USE_CLANG_TYPES 1
+#else
+#define USE_CLANG_TYPES 0
+#endif
+#endif
+
+#if USE_CLANG_TYPES
+#define __need_NULL
+#include <stddef.h>
+#undef __need_NULL
+#elif defined (__cplusplus)
 #if __cplusplus >= 201103L && (defined(__arm__) || defined(__arm64__))
 #define NULL nullptr
 #else
 #define NULL    0
 #endif
-#endif
 #else
 #define NULL ((void *)0)
 #endif
+
+#undef USE_CLANG_TYPES
+
+#endif // XNU_KERNEL_PRIVATE
 #endif
 
 /*

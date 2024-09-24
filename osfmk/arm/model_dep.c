@@ -28,6 +28,7 @@
 
 #include <debug.h>
 #include <mach_kdp.h>
+#include <kern/kern_stackshot.h>
 
 #include <kern/thread.h>
 #include <machine/pmap.h>
@@ -63,11 +64,16 @@
 #include <sys/codesign.h>
 #include <sys/time.h>
 
+#if CONFIG_SPTM
+#include <kern/percpu.h>
+#include <arm64/sptm/pmap/pmap_data.h>
+#endif
+
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOKitServer.h>
 
 #include <mach/vm_prot.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/pmap.h>
 #include <vm/vm_shared_region.h>
 #include <mach/time_value.h>
@@ -91,19 +97,12 @@
 
 #if CONFIG_EXCLAVES
 #include <kern/exclaves_panic.h>
+#include <kern/exclaves_inspection.h>
 #endif
 
 #if     MACH_KDP
 void    kdp_trap(unsigned int, struct arm_saved_state *);
 #endif
-
-extern kern_return_t    do_panic_stackshot(void *);
-extern void                    kdp_snapshot_preflight(int pid, void * tracebuf,
-    uint32_t tracebuf_size, uint64_t flags,
-    kcdata_descriptor_t data_p,
-    uint64_t since_timestamp, uint32_t pagetable_mask);
-extern int              kdp_stack_snapshot_bytes_traced(void);
-extern int              kdp_stack_snapshot_bytes_uncompressed(void);
 
 /*
  * Increment the PANICLOG_VERSION if you change the format of the panic
@@ -150,6 +149,9 @@ extern uint8_t          gPlatformECID[8];
 extern uint32_t         gPlatformMemoryID;
 
 extern uint64_t         last_hwaccess_thread;
+extern uint8_t          last_hwaccess_type; /* 0 : read, 1 : write. */
+extern uint8_t          last_hwaccess_size;
+extern uint64_t         last_hwaccess_paddr;
 
 /*Choosing the size for gTargetTypeBuffer as 16 and size for gModelTypeBuffer as 32
  *  since the target name and model name typically  doesn't exceed this size */
@@ -188,6 +190,7 @@ volatile unsigned int debugger_sync = 0;
 volatile unsigned int mp_kdp_trap = 0; /* CPUs signalled by the debug CPU will spin on this */
 volatile unsigned int debug_cpus_spinning = 0; /* Number of signalled CPUs still spinning on mp_kdp_trap (in DebuggerXCall). */
 unsigned int          DebugContextCount = 0;
+bool                  trap_is_stackshot = false; /* Whether the trap is for a stackshot */
 
 #if defined(__arm64__)
 uint8_t PE_smc_stashed_x86_system_state = 0xFF;
@@ -363,6 +366,7 @@ panic_display_hung_cpus_help(void)
 }
 
 
+
 static void
 panic_display_pvhs_locked(void)
 {
@@ -402,8 +406,22 @@ panic_display_last_pc_lr(void)
 #endif
 }
 
+#if CONFIG_EXCLAVES
 static void
-do_print_all_backtraces(const char *message, uint64_t panic_options)
+panic_report_exclaves_stackshot(void)
+{
+	if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_FOUND) {
+		paniclog_append_noflush("** Exclaves panic stackshot found\n");
+	} else if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_NOT_FOUND) {
+		paniclog_append_noflush("** Exclaves panic stackshot not found\n");
+	} else if (exclaves_panic_ss_status == EXCLAVES_PANIC_STACKSHOT_DECODE_FAILED) {
+		paniclog_append_noflush("!! Exclaves panic stackshot decode failed !!\n");
+	}
+}
+#endif /* CONFIG_EXCLAVES */
+
+static void
+do_print_all_backtraces(const char *message, uint64_t panic_options, const char *panic_initiator)
 {
 	int             logversion = PANICLOG_VERSION;
 	thread_t        cur_thread = current_thread();
@@ -421,6 +439,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	char *stackshot_begin_loc = NULL;
 	kc_format_t kc_format;
 	bool filesetKC = false;
+	uint32_t panic_initiator_len = 0;
 #if CONFIG_EXT_PANICLOG
 	uint32_t ext_paniclog_bytes = 0;
 #endif
@@ -451,6 +470,12 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 		    gPlatformECID[2], gPlatformECID[1], gPlatformECID[0]);
 		if (last_hwaccess_thread) {
 			paniclog_append_noflush("AppleHWAccess Thread: 0x%llx\n", last_hwaccess_thread);
+			if (!last_hwaccess_size) {
+				paniclog_append_noflush("AppleHWAccess last access: no access data, this is unexpected.\n");
+			} else {
+				const char *typ = last_hwaccess_type ? "write" : "read";
+				paniclog_append_noflush("AppleHWAccess last access: %s of size %u at address 0x%llx\n", typ, last_hwaccess_size, last_hwaccess_paddr);
+			}
 		}
 		paniclog_append_noflush("Boot args: %s\n", PE_boot_args());
 	}
@@ -680,11 +705,23 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	}
 	panic_info->eph_roots_installed = roots_installed;
 
+	if (panic_initiator != NULL) {
+		bytes_remaining = debug_buf_size - (unsigned int)((uintptr_t)debug_buf_ptr - (uintptr_t)debug_buf_base);
+		// If panic_initiator isn't null, safely copy up to MAX_PANIC_INITIATOR_SIZE
+		panic_initiator_len = strnlen(panic_initiator, MAX_PANIC_INITIATOR_SIZE);
+		// Calculate the bytes to write, accounting for remaining buffer space, and ensuring the lowest size we can have is 0
+		panic_initiator_len = MAX(0, MIN(panic_initiator_len, bytes_remaining));
+		panic_info->eph_panic_initiator_offset = (panic_initiator_len != 0) ? PE_get_offset_into_panic_region(debug_buf_ptr) : 0;
+		panic_info->eph_panic_initiator_len = panic_initiator_len;
+		memcpy(debug_buf_ptr, panic_initiator, panic_initiator_len);
+		debug_buf_ptr += panic_initiator_len;
+	}
+
 	if (debug_ack_timeout_count) {
 		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_DEBUGGERSYNC;
 		panic_info->eph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
 		paniclog_append_noflush("!! debugger synchronization failed, no stackshot !!\n");
-	} else if (stackshot_active()) {
+	} else if (panic_stackshot_active()) {
 		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED;
 		panic_info->eph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
 		paniclog_append_noflush("!! panicked during stackshot, skipping panic stackshot !!\n");
@@ -723,6 +760,9 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 				panic_info->eph_stackshot_len = bytes_traced;
 
 				panic_info->eph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
+#if CONFIG_EXCLAVES
+				panic_report_exclaves_stackshot();
+#endif /* CONFIG_EXCLAVES */
 				if (stackshot_flags & STACKSHOT_DO_COMPRESS) {
 					panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED;
 					bytes_uncompressed = kdp_stack_snapshot_bytes_uncompressed();
@@ -732,13 +772,16 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 				}
 			} else {
 				bytes_used = kcdata_memory_get_used_bytes(&kc_panic_data);
+#if CONFIG_EXCLAVES
+				panic_report_exclaves_stackshot();
+#endif /* CONFIG_EXCLAVES */
 				if (bytes_used > 0) {
 					/* Zero out the stackshot data */
 					bzero(stackshot_begin_loc, bytes_used);
 					panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_INCOMPLETE;
 
 					panic_info->eph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
-					paniclog_append_noflush("\n** Stackshot Incomplete ** Bytes Filled %llu **\n", bytes_used);
+					paniclog_append_noflush("\n** Stackshot Incomplete ** Bytes Filled %llu, err %d **\n", bytes_used, err);
 				} else {
 					bzero(stackshot_begin_loc, bytes_used);
 					panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_FAILED_ERROR;
@@ -776,7 +819,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
  * Entry to print_all_backtraces is serialized by the debugger lock
  */
 static void
-print_all_backtraces(const char *message, uint64_t panic_options)
+print_all_backtraces(const char *message, uint64_t panic_options, const char *panic_initiator)
 {
 	unsigned int initial_not_in_kdp = not_in_kdp;
 
@@ -791,7 +834,7 @@ print_all_backtraces(const char *message, uint64_t panic_options)
 	 * not_in_kdp.
 	 */
 	not_in_kdp = 0;
-	do_print_all_backtraces(message, panic_options);
+	do_print_all_backtraces(message, panic_options, panic_initiator);
 
 	not_in_kdp = initial_not_in_kdp;
 
@@ -837,7 +880,7 @@ panic_print_symbol_name(vm_address_t search)
 
 void
 SavePanicInfo(
-	const char *message, __unused void *panic_data, uint64_t panic_options)
+	const char *message, __unused void *panic_data, uint64_t panic_options, const char* panic_initiator)
 {
 	/*
 	 * This should be initialized by the time we get here, but
@@ -858,8 +901,16 @@ SavePanicInfo(
 		panic_info->eph_panic_flags  |= EMBEDDED_PANIC_HEADER_FLAG_BUTTON_RESET_PANIC;
 	}
 
-	if (panic_options & DEBUGGER_OPTION_COPROC_INITIATED_PANIC) {
-		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC;
+	if (panic_options & DEBUGGER_OPTION_COMPANION_PROC_INITIATED_PANIC) {
+		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COMPANION_PROC_INITIATED_PANIC;
+	}
+
+	if (panic_options & DEBUGGER_OPTION_INTEGRATED_COPROC_INITIATED_PANIC) {
+		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_INTEGRATED_COPROC_INITIATED_PANIC;
+	}
+
+	if (panic_options & DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC) {
+		panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_USERSPACE_INITIATED_PANIC;
 	}
 
 #if defined(XNU_TARGET_OS_BRIDGE)
@@ -886,7 +937,7 @@ SavePanicInfo(
 	PanicInfoSaved = TRUE;
 
 
-	print_all_backtraces(message, panic_options);
+	print_all_backtraces(message, panic_options, panic_initiator);
 
 	assert(panic_info->eph_panic_log_len != 0);
 	panic_info->eph_other_log_len = PE_get_offset_into_panic_region(debug_buf_ptr) - panic_info->eph_other_log_offset;
@@ -931,6 +982,41 @@ paniclog_flush()
 	PE_sync_panic_buffers();
 }
 
+#if CONFIG_SPTM
+/*
+ * Patch thread state to appear as if a debugger stop IPI occurred, when a thread
+ * is parked in SPTM panic loop. This allows stackshot to proceed as usual.
+ */
+static void
+DebuggerPatchupThreadState(
+	int cpu, xnu_saved_registers_t *regp)
+{
+	cpu_data_t         *target_cpu_datap;
+	arm_saved_state_t  *statep;
+	vm_offset_t        kstackptr;
+
+	target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
+	statep = target_cpu_datap->cpu_active_thread->machine.kpcb;
+	kstackptr = (vm_offset_t)target_cpu_datap->cpu_active_thread->machine.kstackptr;
+
+	target_cpu_datap->ipi_pc = regp->pc;
+	target_cpu_datap->ipi_lr = regp->lr;
+	target_cpu_datap->ipi_fp = regp->fp;
+
+	if (statep != NULL) {
+		statep->ss_64.fp = regp->fp;
+		statep->ss_64.lr = regp->lr;
+		statep->ss_64.sp = regp->sp;
+		statep->ss_64.pc = regp->pc;
+	} else if ((void *)kstackptr != NULL) {
+		arm_kernel_saved_state_t *kstatep = (arm_kernel_saved_state_t *)kstackptr;
+		kstatep->fp = regp->fp;
+		kstatep->lr = regp->lr;
+		kstatep->sp = regp->sp;
+	}
+}
+#endif
+
 /*
  * @function DebuggerXCallEnter
  *
@@ -955,7 +1041,9 @@ DebuggerXCallEnter(
 {
 	uint64_t max_mabs_time, current_mabs_time;
 	int cpu;
+	int timeout_cpu = -1;
 	int max_cpu;
+	unsigned int sync_pending;
 	cpu_data_t      *target_cpu_datap;
 	cpu_data_t      *cpu_data_ptr = getCpuDatap();
 
@@ -975,8 +1063,8 @@ DebuggerXCallEnter(
 	debugger_sync = 0;
 	mp_kdp_trap = 1;
 	debug_cpus_spinning = 0;
+	trap_is_stackshot = is_stackshot;
 
-#pragma unused(is_stackshot)
 
 	/*
 	 * Try to signal all CPUs (except ourselves, of course).  Use debugger_sync to
@@ -1022,12 +1110,20 @@ DebuggerXCallEnter(
 		 * all other CPUs have either responded or are spinning in a context that is
 		 * debugger safe.
 		 */
-		while ((debugger_sync != 0) && (max_mabs_time == 0 || current_mabs_time < max_mabs_time)) {
+		do {
 			current_mabs_time = mach_absolute_time();
-		}
+			sync_pending = os_atomic_load(&debugger_sync, acquire);
+		} while ((sync_pending != 0) && (max_mabs_time == 0 || current_mabs_time < max_mabs_time));
 	}
 
-	if (!proceed_on_sync_failure && (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
+	if (!immediate_halt && max_mabs_time > 0 && current_mabs_time >= max_mabs_time) {
+		/*
+		 * We timed out trying to IPI the other CPUs. Skip counting any CPUs that
+		 * are offline; then we must account for the remainder, either counting
+		 * them as halted, or trying to dbgwrap them to get them to halt in the
+		 * case where the system is going down and we are running a dev fused
+		 * device.
+		 */
 		__builtin_arm_dmb(DMB_ISH);
 		for (cpu = 0; cpu <= max_cpu; cpu++) {
 			target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
@@ -1043,85 +1139,93 @@ DebuggerXCallEnter(
 				 * This is a processor that was successfully sent a SIGPdebug signal
 				 * but which hasn't acknowledged it because it went offline with
 				 * interrupts disabled before the IPI was delivered, so count it
-				 * here.
+				 * as halted here.
 				 */
 				os_atomic_dec(&debugger_sync, relaxed);
 				kprintf("%s>found CPU %d offline, debugger_sync=%d\n", __FUNCTION__, cpu, debugger_sync);
 				continue;
 			}
+			timeout_cpu = cpu;
+#if CONFIG_SPTM
+			if (proceed_on_sync_failure) {
+				/*
+				 * If a core is spinning in the SPTM panic loop, consider it
+				 * as sync'd, and try to patch up the thread state from the
+				 * SPTM callee saved registers.
+				 */
+				bool sptm_panic_loop = false;
+				vm_offset_t base = other_percpu_base(cpu);
+				pmap_sptm_percpu_data_t *sptm_pcpu = PERCPU_GET_WITH_BASE(base, pmap_sptm_percpu);
+				uint64_t sptm_cpuid = sptm_pcpu->sptm_cpu_id;
 
-			kprintf("%s>Debugger synch pending on cpu %d\n", __FUNCTION__, cpu);
+				if (sptm_get_cpu_state(sptm_cpuid, CPUSTATE_PANIC_SPIN, &sptm_panic_loop)
+				    == SPTM_SUCCESS) {
+					xnu_saved_registers_t regs;
+
+					if (sptm_copy_callee_saved_state(sptm_cpuid, &regs)
+					    == LIBSPTM_SUCCESS) {
+						DebuggerPatchupThreadState(cpu, &regs);
+					}
+
+					kprintf("%s>found CPU %d in SPTM\n", __FUNCTION__, cpu);
+					os_atomic_dec(&debugger_sync, relaxed);
+				}
+			}
+#endif
 		}
 
 		if (debugger_sync == 0) {
 			return KERN_SUCCESS;
-		} else {
-			DebuggerXCallReturn();
-			kprintf("%s>returning KERN_OPERATION_TIMED_OUT\n", __FUNCTION__);
-			return KERN_OPERATION_TIMED_OUT;
+		} else if (!proceed_on_sync_failure) {
+			panic("%s>Debugger synch pending on cpu %d\n",
+			    __FUNCTION__, timeout_cpu);
 		}
-	} else if (immediate_halt || (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
-		/*
-		 * For the moment, we're aiming for a timeout that the user shouldn't notice,
-		 * but will be sufficient to let the other core respond.
-		 */
-		__builtin_arm_dmb(DMB_ISH);
+	}
+	if (immediate_halt || (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
+		if (immediate_halt) {
+			__builtin_arm_dmb(DMB_ISH);
+		}
 		for (cpu = 0; cpu <= max_cpu; cpu++) {
 			target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
 
 			if ((target_cpu_datap == NULL) || (target_cpu_datap == cpu_data_ptr)) {
 				continue;
 			}
-			if (!(target_cpu_datap->cpu_signal & SIGPdebug) && !immediate_halt) {
+			paniclog_append_noflush("Attempting to forcibly halt cpu %d\n", cpu);
+			dbgwrap_status_t halt_status = ml_dbgwrap_halt_cpu(cpu, 0);
+			if (halt_status < 0) {
+				paniclog_append_noflush("cpu %d failed to halt with error %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
+			} else {
+				if (halt_status > 0) {
+					paniclog_append_noflush("cpu %d halted with warning %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
+				}
+				target_cpu_datap->halt_status = CPU_HALTED;
+			}
+		}
+		for (cpu = 0; cpu <= max_cpu; cpu++) {
+			target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
+
+			if ((target_cpu_datap == NULL) || (target_cpu_datap == cpu_data_ptr)) {
 				continue;
 			}
-			if (proceed_on_sync_failure) {
-				paniclog_append_noflush("Attempting to forcibly halt cpu %d\n", cpu);
-				dbgwrap_status_t halt_status = ml_dbgwrap_halt_cpu(cpu, 0);
-				if (halt_status < 0) {
-					paniclog_append_noflush("cpu %d failed to halt with error %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
-				} else {
-					if (halt_status > 0) {
-						paniclog_append_noflush("cpu %d halted with warning %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
-					}
-					target_cpu_datap->halt_status = CPU_HALTED;
-				}
+			dbgwrap_status_t halt_status = ml_dbgwrap_halt_cpu_with_state(cpu,
+			    NSEC_PER_SEC, &target_cpu_datap->halt_state);
+			if ((halt_status < 0) || (halt_status == DBGWRAP_WARN_CPU_OFFLINE)) {
+				paniclog_append_noflush("Unable to obtain state for cpu %d with status %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
+				debug_ack_timeout_count++;
 			} else {
-				kprintf("Debugger synch pending on cpu %d\n", cpu);
+				paniclog_append_noflush("cpu %d successfully halted\n", cpu);
+				target_cpu_datap->halt_status = CPU_HALTED_WITH_STATE;
 			}
 		}
-		if (proceed_on_sync_failure) {
-			for (cpu = 0; cpu <= max_cpu; cpu++) {
-				target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
-
-				if ((target_cpu_datap == NULL) || (target_cpu_datap == cpu_data_ptr) ||
-				    (target_cpu_datap->halt_status == CPU_NOT_HALTED)) {
-					continue;
-				}
-				dbgwrap_status_t halt_status = ml_dbgwrap_halt_cpu_with_state(cpu,
-				    NSEC_PER_SEC, &target_cpu_datap->halt_state);
-				if ((halt_status < 0) || (halt_status == DBGWRAP_WARN_CPU_OFFLINE)) {
-					paniclog_append_noflush("Unable to obtain state for cpu %d with status %d: %s\n", cpu, halt_status, ml_dbgwrap_strerror(halt_status));
-				} else {
-					paniclog_append_noflush("cpu %d successfully halted\n", cpu);
-					target_cpu_datap->halt_status = CPU_HALTED_WITH_STATE;
-				}
-			}
-			if (immediate_halt) {
-				paniclog_append_noflush("Immediate halt requested on all cores\n");
-			} else {
-				paniclog_append_noflush("Debugger synchronization timed out; waited %llu nanoseconds\n",
-				    os_atomic_load(&debug_ack_timeout, relaxed));
-			}
-			debug_ack_timeout_count++;
-			return KERN_SUCCESS;
+		if (immediate_halt) {
+			paniclog_append_noflush("Immediate halt requested on all cores\n");
 		} else {
-			DebuggerXCallReturn();
-			return KERN_OPERATION_TIMED_OUT;
+			paniclog_append_noflush("Debugger synchronization timed out; timeout %llu nanoseconds\n",
+			    os_atomic_load(&debug_ack_timeout, relaxed));
 		}
-	} else {
-		return KERN_SUCCESS;
 	}
+	return KERN_SUCCESS;
 }
 
 /*
@@ -1164,12 +1268,17 @@ DebuggerXCallReturn(
 	 * CPUS to update debugger_sync. If we time out, let's hope for all CPUs to be
 	 * spinning in a debugger-safe context
 	 */
-	while ((os_atomic_load_exclusive(&debug_cpus_spinning, relaxed) != 0) &&
+	while ((os_atomic_load_exclusive(&debug_cpus_spinning, acquire) != 0) &&
 	    (max_mabs_time == 0 || current_mabs_time < max_mabs_time)) {
 		__builtin_arm_wfe();
 		current_mabs_time = mach_absolute_time();
 	}
 	os_atomic_clear_exclusive();
+
+	// checking debug_ack_timeout != 0 is a workaround for rdar://124242354
+	if (current_mabs_time >= max_mabs_time && os_atomic_load(&debug_ack_timeout, relaxed) != 0) {
+		panic("Resuming from debugger synchronization failed: waited %llu nanoseconds\n", os_atomic_load(&debug_ack_timeout, relaxed));
+	}
 }
 
 extern void wait_while_mp_kdp_trap(bool check_SIGPdebug);
@@ -1247,11 +1356,26 @@ DebuggerXCall(
 	 * before spinning, so we at least cover the IPI reception path. After spinning, however,
 	 * we reset the timestamp so as to avoid hitting the interrupt timeout assert().
 	 */
-	if ((serialmode & SERIALMODE_OUTPUT) || stackshot_active()) {
+	if ((serialmode & SERIALMODE_OUTPUT) || trap_is_stackshot) {
 		INTERRUPT_MASKED_DEBUG_END();
 	}
 
-	os_atomic_dec(&debugger_sync, relaxed);
+	/*
+	 * Before we decrement debugger sync, do stackshot preflight work (if applicable).
+	 * Namely, we want to signal that we're available to do stackshot work, and we need to
+	 * signal so before the stackshot-calling CPU starts work.
+	 */
+
+	if (trap_is_stackshot) {
+		stackshot_cpu_preflight();
+	}
+
+	os_atomic_dec(&debugger_sync, release);
+
+	/* If we trapped because we're doing a stackshot, do our work first. */
+	if (trap_is_stackshot) {
+		stackshot_aux_cpu_entry();
+	}
 
 
 	wait_while_mp_kdp_trap(false);
@@ -1261,7 +1385,7 @@ DebuggerXCall(
 	 * signalled all of the other CPUs will wait (in DebuggerXCallReturn) for
 	 * all of the CPUs to exit the above loop before continuing.
 	 */
-	os_atomic_dec(&debug_cpus_spinning, relaxed);
+	os_atomic_dec(&debug_cpus_spinning, release);
 
 #if SCHED_HYGIENE_DEBUG
 	/*
@@ -1277,7 +1401,7 @@ DebuggerXCall(
 	abandon_preemption_disable_measurement();
 #endif /* SCHED_HYGIENE_DEBUG */
 
-	if ((serialmode & SERIALMODE_OUTPUT) || stackshot_active()) {
+	if ((serialmode & SERIALMODE_OUTPUT) || trap_is_stackshot) {
 		INTERRUPT_MASKED_DEBUG_START(current_thread()->machine.int_handler_addr, current_thread()->machine.int_type);
 	}
 

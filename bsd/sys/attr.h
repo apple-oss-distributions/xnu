@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2018, 2023 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -50,24 +50,11 @@
 #define FSOPT_PACK_INVAL_ATTRS  0x00000008
 
 #ifdef PRIVATE
-#define FSOPT_EXCHANGE_DATA_ONLY 0x0000010
+/* Additional FSOPT values in attr_private.h */
 #endif
 
 #define FSOPT_ATTR_CMN_EXTENDED 0x00000020
-#ifdef PRIVATE
-#define FSOPT_LIST_SNAPSHOT     0x00000040
-#ifndef FSOPT_NOFIRMLINKPATH /*a copy is in fsgetpath.h */
-#define FSOPT_NOFIRMLINKPATH     0x00000080
-#endif /* FSOPT_NOFIRMLINKPATH */
-#define FSOPT_FOLLOW_FIRMLINK    0x00000100
-#endif /* PRIVATE */
 #define FSOPT_RETURN_REALDEV     0x00000200
-#ifdef PRIVATE
-#ifndef FSOPT_ISREALFSID  /*a copy is in fsgetpath.h */
-#define FSOPT_ISREALFSID         FSOPT_RETURN_REALDEV
-#endif
-#define FSOPT_UTIMES_NULL        0x00000400
-#endif /* PRIVATE */
 #define FSOPT_NOFOLLOW_ANY       0x00000800
 
 /* we currently aren't anywhere near this amount for a valid
@@ -376,6 +363,9 @@ typedef struct vol_capabilities_attr {
  * VOL_CAP_INT_ATTRIBUTION_TAG: When set, the volume supports establishing
  * an owner relationship between a file (excluding small files) and a process
  * on the first read/write/truncate/clone operation.
+ *
+ * VOL_CAP_INT_PUNCHHOLE: When set, the volume supports the F_PUNCHHOLE
+ * fcntl.
  */
 #define VOL_CAP_INT_SEARCHFS                    0x00000001
 #define VOL_CAP_INT_ATTRLIST                    0x00000002
@@ -393,8 +383,7 @@ typedef struct vol_capabilities_attr {
 #define VOL_CAP_INT_NAMEDSTREAMS                0x00002000
 #define VOL_CAP_INT_EXTENDED_ATTR               0x00004000
 #ifdef PRIVATE
-/* Volume supports kqueue notifications for remote events */
-#define VOL_CAP_INT_REMOTE_EVENT                0x00008000
+/* Additional VOL_CAP_INT values in attr_private.h */
 #endif /* PRIVATE */
 #define VOL_CAP_INT_CLONE                       0x00010000
 #define VOL_CAP_INT_SNAPSHOT                    0x00020000
@@ -403,6 +392,7 @@ typedef struct vol_capabilities_attr {
 #define VOL_CAP_INT_RENAME_OPENFAIL             0x00100000
 #define VOL_CAP_INT_RENAME_SECLUDE              0x00200000
 #define VOL_CAP_INT_ATTRIBUTION_TAG             0x00400000
+#define VOL_CAP_INT_PUNCHHOLE                   0x00800000
 
 typedef struct vol_attributes_attr {
 	attribute_set_t validattr;
@@ -662,4 +652,9 @@ struct searchstate {
 #define FST_EOF (-1)                            /* end-of-file offset */
 
 #endif /* __APPLE_API_UNSTABLE */
+
+#ifdef PRIVATE
+#include <sys/attr_private.h>
+#endif
+
 #endif /* !_SYS_ATTR_H_ */

@@ -716,6 +716,16 @@ pmap_get_trust_level_kdp(
 	pmap_cs_trust_t *trust_level);
 
 /**
+ * Acquire the start and end address for the JIT region for the pmap, if any.
+ * This function does NOT take a lock on the pmap and does not trap into the PPL.
+ */
+kern_return_t
+pmap_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end);
+
+/**
  * Copy over the main binary association from the old address space to the new address
  * space. This is required since a fork copies over all associations from one address space
  * to another, and we need to make sure the main binary association is made before any

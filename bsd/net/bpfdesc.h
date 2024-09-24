@@ -81,6 +81,12 @@
 #include <net/if.h>
 #include <uuid/uuid.h>
 
+#if __has_ptrcheck
+#define BPF_BIDI_INDEXABLE __bidi_indexable
+#else
+#define BPF_BIDI_INDEXABLE
+#endif
+
 /*
  * Descriptor associated with each open bpf file.
  */
@@ -94,10 +100,14 @@ struct bpf_d {
 	 *                 wakeup read (replace sbuf with fbuf).
 	 *   fbuf (free) - When read is done, put cluster here.
 	 * On receiving, if sbuf is full and fbuf is 0, packet is dropped.
+	 *
+	 * Ideally, these buffers would all be marked with
+	 * __sized_by(bd_bufsize), but due to how they are rotated, it's
+	 * not possible to maintain that relationship.
 	 */
-	caddr_t         bd_sbuf;        /* store slot */
-	caddr_t         bd_hbuf;        /* hold slot */
-	caddr_t         bd_fbuf;        /* free slot */
+	caddr_t BPF_BIDI_INDEXABLE bd_sbuf; /* store slot */
+	caddr_t BPF_BIDI_INDEXABLE bd_hbuf; /* hold slot */
+	caddr_t BPF_BIDI_INDEXABLE bd_fbuf; /* free slot */
 	uint32_t        bd_slen;        /* current length of store buffer */
 	uint32_t        bd_hlen;        /* current length of hold buffer */
 	uint32_t        bd_scnt;        /* number of packets in store buffer */
@@ -112,7 +122,8 @@ struct bpf_d {
 
 	uint32_t        bd_rtout;       /* Read timeout in 'ticks' */
 	struct bpf_if   *bd_bif;        /* interface descriptor */
-	struct bpf_insn *bd_filter;     /* filter code */
+	struct bpf_insn *__counted_by(bd_filter_len) bd_filter; /* filter code */
+	uint32_t        bd_filter_len;  /* filter code length  */
 	uint64_t        bd_rcount;      /* number of packets received */
 	uint64_t        bd_dcount;      /* number of received packets dropped */
 	uint64_t        bd_fcount;      /* number of received packets which matched filter */
@@ -136,6 +147,7 @@ struct bpf_d {
 	thread_call_t   bd_thread_call; /* for BPF timeouts with select */
 	int             bd_traffic_class; /* traffic service class */
 	int             bd_flags;       /* flags */
+	int             bd_tstamp;      /* select time stamping function */
 
 	int             bd_refcnt;
 #define BPF_REF_HIST    4               /* how many callers to keep around */
@@ -149,8 +161,8 @@ struct bpf_d {
 	pid_t           bd_pid;
 
 	uint8_t         bd_prev_slen;
-	caddr_t         bd_prev_sbuf;
-	caddr_t         bd_prev_fbuf;
+	caddr_t BPF_BIDI_INDEXABLE bd_prev_sbuf;
+	caddr_t BPF_BIDI_INDEXABLE bd_prev_fbuf;
 
 	struct bpf_comp_stats bd_bcs;
 };
@@ -179,6 +191,7 @@ struct bpf_d {
 #define BPF_COMP_REQ            0x0200  /* compression requested */
 #define BPF_COMP_ENABLED        0x0400  /* compression enabled */
 #define BPF_BATCH_WRITE         0x0800  /* batch write enabled */
+#define BPF_DIVERT_IN           0x1000  /* divert input */
 
 /*
  * Descriptor associated with each attached hardware interface.

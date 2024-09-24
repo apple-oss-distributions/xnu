@@ -177,12 +177,12 @@ kctl_test_send_list(kern_ctl_ref kctlref, u_int32_t unit,
 {
 #pragma unused(unitinfo)
 	errno_t error = 0;
-	mbuf_t m_remain = NULL;
+	mbuf_ref_t m_remain = NULL;
 	uint32_t unsent_count = 0;
 
 	error = ctl_enqueuembuf_list(kctlref, unit, m, flags, &m_remain);
 	if (m_remain != NULL) {
-		mbuf_t tmp = m_remain;
+		mbuf_ref_t tmp = m_remain;
 
 		while (tmp != NULL) {
 			unsent_count += 1;

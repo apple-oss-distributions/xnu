@@ -170,13 +170,11 @@ core_analytics_send_event_lazy(
 	static constexpr uint64_t kDelayBetweenRetries = 1000; // microseconds
 	core_analytics_serialized_event_t serialized;
 	if (!core_analytics_hub_functions) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "Dropping attempt to send a CoreAnalytics event before CoreAnalyticsHub has registered.");
 		return EAGAIN;
 	}
 
 	ret = core_analytics_serialize_event(event_spec, event, &serialized);
 	if (ret != 0) {
-		os_log_with_startup_serial(OS_LOG_DEFAULT, "Unable to serialize CoreAnalytics event: %d", ret);
 		return ret;
 	}
 	for (size_t i = 0; i < kMaxRetries; i++) {
@@ -185,10 +183,8 @@ core_analytics_send_event_lazy(
 			break;
 		} else {
 			if (i != kMaxRetries - 1) {
-				os_log_with_startup_serial(OS_LOG_DEFAULT, "Unable to send CoreAnalytics event. Delaying for %llu u.s. to see if the queue drains.", kDelayBetweenRetries);
 				delay(kDelayBetweenRetries);
 			} else {
-				os_log_with_startup_serial(OS_LOG_DEFAULT, "Unable to send CoreAnalytics event. Giving up.");
 				ret = EAGAIN;
 				break;
 			}

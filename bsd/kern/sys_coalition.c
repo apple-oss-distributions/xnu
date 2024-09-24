@@ -1,3 +1,32 @@
+/*
+ * Copyright (c) 2000-2024 Apple Computer, Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+
+
 #include <kern/kern_types.h>
 #include <kern/thread_group.h>
 #include <mach/mach_types.h>
@@ -6,12 +35,17 @@
 #include <kern/coalition.h>
 
 #include <sys/coalition.h>
+#include <sys/coalition_private.h>
 #include <sys/errno.h>
 #include <sys/kauth.h>
 #include <sys/kernel.h>
 #include <sys/sysproto.h>
 #include <sys/systm.h>
 #include <sys/ubc.h> /* mach_to_bsd_errno */
+
+#include <kern/policy_internal.h>
+
+#include <IOKit/IOBSD.h> /* IOTaskHasEntitlement */
 
 /* Coalitions syscalls */
 
@@ -436,6 +470,132 @@ out:
 	}
 	return error;
 }
+
+static int
+coalition_policy_set_suppress(coalition_t coal, coalition_policy_suppress_t value)
+{
+	int error = 0;
+
+	kern_return_t kr;
+
+	switch (value) {
+	case COALITION_POLICY_SUPPRESS_NONE:
+		kr = jetsam_coalition_set_policy(coal, TASK_POLICY_DARWIN_BG, TASK_POLICY_DISABLE);
+		error = mach_to_bsd_errno(kr);
+		break;
+	case COALITION_POLICY_SUPPRESS_DARWIN_BG:
+		kr = jetsam_coalition_set_policy(coal, TASK_POLICY_DARWIN_BG, TASK_POLICY_ENABLE);
+		error = mach_to_bsd_errno(kr);
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	return error;
+}
+
+static int
+coalition_policy_get_suppress(coalition_t coal, int32_t *retval)
+{
+	int value = 0;
+	kern_return_t kr = jetsam_coalition_get_policy(coal,
+	    TASK_POLICY_DARWIN_BG, &value);
+
+	if (kr != KERN_SUCCESS) {
+		return mach_to_bsd_errno(kr);
+	}
+
+	switch (value) {
+	case TASK_POLICY_DISABLE:
+		*retval = (int32_t)COALITION_POLICY_SUPPRESS_NONE;
+		break;
+	case TASK_POLICY_ENABLE:
+		*retval = (int32_t)COALITION_POLICY_SUPPRESS_DARWIN_BG;
+		break;
+	default:
+		panic("unknown coalition policy suppress value %d", value);
+		break;
+	}
+
+	return 0;
+}
+
+int
+sys_coalition_policy_set(proc_t p, struct coalition_policy_set_args *uap, __unused int32_t *retval)
+{
+	uint64_t cid = uap->cid;
+	coalition_policy_flavor_t flavor = uap->flavor;
+	uint32_t value = uap->value;
+
+	int error = 0;
+
+	if (!IOTaskHasEntitlement(proc_task(p), COALITION_POLICY_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	coalition_t coal = coalition_find_by_id(cid);
+	if (coal == COALITION_NULL) {
+		return ESRCH;
+	}
+
+	if (coalition_type(coal) != COALITION_TYPE_JETSAM) {
+		error = ENOTSUP;
+		goto bad;
+	}
+
+	switch (flavor) {
+	case COALITION_POLICY_SUPPRESS:
+		error = coalition_policy_set_suppress(coal, (coalition_policy_suppress_t)value);
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+bad:
+	coalition_release(coal);
+	return error;
+}
+
+int
+sys_coalition_policy_get(proc_t p, struct coalition_policy_get_args *uap, int32_t *retval)
+{
+	uint64_t cid = uap->cid;
+	coalition_policy_flavor_t flavor = uap->flavor;
+
+	int error = 0;
+
+	if (!IOTaskHasEntitlement(proc_task(p), COALITION_POLICY_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	coalition_t coal = coalition_find_by_id(cid);
+	if (coal == COALITION_NULL) {
+		return ESRCH;
+	}
+
+	if (coalition_type(coal) != COALITION_TYPE_JETSAM) {
+		error = ENOTSUP;
+		goto bad;
+	}
+
+	switch (flavor) {
+	case COALITION_POLICY_SUPPRESS:
+		error = coalition_policy_get_suppress(coal, retval);
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+
+bad:
+	coalition_release(coal);
+	return error;
+}
+
+
+
 #if DEVELOPMENT || DEBUG
 static int sysctl_coalition_get_ids SYSCTL_HANDLER_ARGS
 {
@@ -682,5 +842,50 @@ SYSCTL_INT(_kern, OID_AUTO, unrestrict_coalitions,
     "unrestrict the coalition interface");
 
 #endif /* DEVELOPMENT */
+
+#include <kern/energy_perf.h>
+
+static int sysctl_coalition_gpu_energy_test SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	if (!req->newptr) {
+		return ENOTSUP;
+	}
+
+	uint64_t value[4] = {};
+
+	int error = SYSCTL_IN(req, value, sizeof(value));
+	if (error) {
+		return error;
+	}
+
+	kern_return_t kr = KERN_SUCCESS;
+	energy_id_t energy_id_out = 0;
+
+	switch (value[0]) {
+	case 1:
+		kr = current_energy_id(&energy_id_out);
+		break;
+	case 2:
+		kr = task_id_token_to_energy_id((mach_port_name_t) value[1], &energy_id_out);
+		break;
+	case 3:
+		kr = energy_id_report_energy(ENERGY_ID_SOURCE_GPU,
+		    (energy_id_t)value[1], (energy_id_t)value[2], value[3]);
+		break;
+	}
+
+	if (kr != KERN_SUCCESS) {
+		return mach_to_bsd_errno(kr);
+	}
+
+	value[0] = energy_id_out;
+
+	return SYSCTL_OUT(req, value, sizeof(value[0]));
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, coalition_gpu_energy_test, CTLFLAG_MASKED | CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_coalition_gpu_energy_test, "Q", "test coalition gpu energy");
+
 
 #endif /* DEVELOPMENT || DEBUG */

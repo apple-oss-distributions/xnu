@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -84,7 +84,7 @@ tcp_ccdbg_trace(struct tcpcb *tp, struct tcphdr *th, int32_t event)
 #if !CONFIG_DTRACE
 #pragma unused(th)
 #endif /* !CONFIG_DTRACE */
-	struct inpcb *inp = tp->t_inpcb;
+	struct inpcb *__single inp = tp->t_inpcb;
 
 	if (tcp_cc_debug && tcp_ccdbg_unit > 0) {
 		struct tcp_cc_debug_state dbg_state;

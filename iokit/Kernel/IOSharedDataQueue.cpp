@@ -34,6 +34,8 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 
+#include <vm/vm_kern_xnu.h>
+
 #ifdef enqueue
 #undef enqueue
 #endif

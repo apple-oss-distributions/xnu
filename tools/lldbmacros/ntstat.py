@@ -252,57 +252,62 @@ def ShowNstatSrc(insrc):
             insrc : cvalue object which points to 'struct nstat_src *'
     """
     src = Cast(insrc, 'nstat_src *')
-    prov = src.provider
+    prov = src.nts_provider
     prov = Cast(prov, 'nstat_provider *')
     prov_string = GetNstatProviderString(prov.nstat_provider_id)
     out_string = ""
     if src :
-        format_string = "  nstat_src {0: <#0x}: prov={1: <8s} next={2: <#020x} prev={3: <#020x} srcref={4: <d}"
-        out_string += format_string.format(src, prov_string, src.ns_control_link.tqe_next, src.ns_control_link.tqe_prev, src.srcref)
+        format_string = "  nstat_src {0: <#0x}: prov={1: <8s} next={2: <#020x} prev={3: <#020x} srcref={4: <d} seq={5: <d}"
+        out_string += format_string.format(src, prov_string, src.nts_client_link.tqe_next, src.nts_client_link.tqe_prev, src.nts_srcref, src.nts_seq)
 
         if ((prov.nstat_provider_id == NSTAT_PROVIDER.TCP_USERLAND) or
             (prov.nstat_provider_id == NSTAT_PROVIDER.UDP_USERLAND) or
             (prov.nstat_provider_id == NSTAT_PROVIDER.QUIC_USERLAND)) :
-            out_string += GetNstatTUShadowBrief(src.cookie);
+            out_string += GetNstatTUShadowBrief(src.nts_cookie);
         elif ((prov.nstat_provider_id == NSTAT_PROVIDER.CONN_USERLAND) or
             (prov.nstat_provider_id == NSTAT_PROVIDER.UDP_SUBFLOW)) :
-            out_string += GetNstatGenericShadowBrief(src.cookie);
+            out_string += GetNstatGenericShadowBrief(src.nts_cookie);
         elif ((prov.nstat_provider_id == NSTAT_PROVIDER.TCP_KERNEL) or
             (prov.nstat_provider_id == NSTAT_PROVIDER.UDP_KERNEL)) :
-            out_string += GetNstatTUCookieBrief(src.cookie);
+            out_string += GetNstatTUCookieBrief(src.nts_cookie);
 
     print(out_string)
 
-def ShowNstatCtrl(inctrl):
-    """ Display an nstat_control_state struct
+def ShowNstatClient(inclient, reverse):
+    """ Display an nstat_client struct
         params:
-            ctrl : value object representing an nstat_control_state in the kernel
+            client : value object representing an nstat_client in the kernel
     """
-    ctrl = Cast(inctrl, 'nstat_control_state *')
+    client = Cast(inclient, 'nstat_client *')
     out_string = ""
-    if ctrl :
-        format_string = "nstat_control_state {0: <#0x}: next={1: <#020x} src-head={2: <#020x} tail={3: <#020x}"
-        out_string += format_string.format(ctrl, ctrl.ncs_next, ctrl.ncs_src_queue.tqh_first, ctrl.ncs_src_queue.tqh_last)
-        procdetails = ctrl.ncs_procdetails
+    if client :
+        format_string = "nstat_client {0: <#0x}: next={1: <#020x} src-head={2: <#020x} tail={3: <#020x}"
+        out_string += format_string.format(client, client.ntc_next, client.ntc_src_queue.tqh_first, client.ntc_src_queue.tqh_last)
+        procdetails = client.ntc_procdetails
         if (procdetails) :
             format_string = "  --> procdetails {0: <#0x}: pid={1: <d} name={2: <s} refcnt={3: <d}"
             out_string += format_string.format(procdetails, procdetails.pdet_pid, procdetails.pdet_procname, procdetails.pdet_refcnt)
 
     print(out_string)
-
-    for src in IterateTAILQ_HEAD(ctrl.ncs_src_queue, 'ns_control_link'):
+    if reverse:
+         print("\nreverse nstat_src list:\n")
+         iterator = ReverseIterateTAILQ_AnonymousHEAD(client.ntc_src_queue, 'nts_client_link', 'struct nstat_src *')
+    else:
+         print("\nreverse nstat_src list:\n")
+         iterator = IterateTAILQ_HEAD(client.ntc_src_queue, 'nts_client_link')
+    for src in iterator:
         ShowNstatSrc(src)
 
 ######################################
 # Print functions
 ######################################
-def PrintNstatControlList():
-    print("nstat_controls list:\n")
-    ctrl = kern.globals.nstat_controls
-    ctrl = cast(ctrl, 'nstat_control_state *')
-    while ctrl != 0:
-        ShowNstatCtrl(ctrl)
-        ctrl = cast(ctrl.ncs_next, 'nstat_control_state *')
+def PrintNstatClientList(reverse):
+    print("nstat_clients list:\n")
+    client = kern.globals.nstat_clients
+    client = cast(client, 'nstat_client *')
+    while client != 0:
+        ShowNstatClient(client, reverse)
+        client = cast(client.ntc_next, 'nstat_client *')
 
 def PrintNstatProcdetailList(reverse):
     procdetails_head = kern.globals.nstat_procdetails_head
@@ -351,7 +356,7 @@ def ShowAllNtstat(cmd_args=None, cmd_options={}) :
     """
     reverse = '-R' in cmd_options
 
-    PrintNstatControlList()
+    PrintNstatClientList(reverse)
     PrintNstatTUShadowList(reverse)
     PrintNstatGenericShadowList(reverse)
     PrintNstatProcdetailList(reverse)

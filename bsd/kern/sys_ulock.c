@@ -59,6 +59,8 @@
 #include <kern/zalloc.h>
 #include <kern/debug.h>
 
+#include <vm/vm_map_xnu.h>
+
 #include <pexpert/pexpert.h>
 
 #define XNU_TEST_BITMAP
@@ -92,6 +94,9 @@
 
 static LCK_GRP_DECLARE(ull_lck_grp, "ulocks");
 
+#if XNU_TARGET_OS_XR
+#define ULL_TICKET_LOCK 1
+#endif /* XNU_TARGET_OS_XR */
 
 #if ULL_TICKET_LOCK
 typedef lck_ticket_t ull_lock_t;
@@ -420,8 +425,7 @@ ull_put(ull_t *ull)
 	ull_free(ull);
 }
 
-extern kern_return_t vm_map_page_info(vm_map_t map, vm_map_offset_t offset, vm_page_info_flavor_t flavor, vm_page_info_t info, mach_msg_type_number_t *count);
-extern vm_map_t current_map(void);
+
 extern boolean_t machine_thread_on_core(thread_t thread);
 
 static int

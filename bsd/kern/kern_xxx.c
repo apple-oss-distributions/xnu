@@ -178,7 +178,7 @@ sys_panic_with_data(struct proc *p,
 		return EPERM;
 	}
 
-	char *proc_name = proc_best_name(p);
+	const char *proc_name = proc_best_name(p);
 
 	if (uap->msg != USER_ADDR_NULL) {
 		message = (char *)kalloc_data(kPanicStringMaxLen, Z_WAITOK | Z_ZERO);
@@ -221,7 +221,6 @@ finish:
 }
 
 extern void OSKextResetAfterUserspaceReboot(void);
-extern void zone_gc_drain(void);
 extern uint64_t pmap_release_pages_fast(void);
 
 static int

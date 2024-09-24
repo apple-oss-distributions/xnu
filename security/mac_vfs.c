@@ -469,8 +469,7 @@ mac_vnode_notify_create(vfs_context_t ctx, struct mount *mp,
 
 void
 mac_vnode_notify_rename(vfs_context_t ctx, struct vnode *fvp,
-    struct vnode *fdvp, struct componentname *fcnp, struct vnode *tvp,
-    struct vnode *tdvp, struct componentname *tcnp, bool swap)
+    struct vnode *tdvp, struct componentname *tcnp)
 {
 	kauth_cred_t cred;
 
@@ -486,31 +485,7 @@ mac_vnode_notify_rename(vfs_context_t ctx, struct vnode *fvp,
 	}
 
 	VFS_KERNEL_DEBUG_START1(13, fvp);
-	MAC_POLICY_ITERATE({
-		/* BEGIN IGNORE CODESTYLE */
-		if (swap) {
-			if (mpc->mpc_ops->mpo_vnode_notify_swap != NULL) {
-				MAC_PERFORM_CALL(vnode_notify_swap, mpc);
-				mpc->mpc_ops->mpo_vnode_notify_swap(cred, fvp, mac_vnode_label(fvp),
-					tvp, mac_vnode_label(tvp));
-				MAC_PERFORM_RSLT(vnode_notify_swap, mpc);
-			} else if (mpc->mpc_ops->mpo_vnode_notify_rename != NULL) {
-				MAC_PERFORM_CALL(vnode_notify_swap_rename, mpc);
-				/* Call notify_rename twice, one for each member of the swap. */
-				mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, mac_vnode_label(fvp),
-					tdvp, mac_vnode_label(tdvp), tcnp);
-				mpc->mpc_ops->mpo_vnode_notify_rename(cred, tvp, mac_vnode_label(tvp),
-					fdvp, mac_vnode_label(fdvp), fcnp);
-				MAC_PERFORM_RSLT(vnode_notify_swap_rename, mpc);
-			}
-		} else if (mpc->mpc_ops->mpo_vnode_notify_rename != NULL) {
-			MAC_PERFORM_CALL(vnode_notify_rename, mpc);
-			mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, mac_vnode_label(fvp),
-		            tdvp, mac_vnode_label(tdvp), tcnp);
-			MAC_PERFORM_RSLT(vnode_notify_rename, mpc);
-		}
-		/* END IGNORE CODESTYLE */
-	});
+	MAC_PERFORM(vnode_notify_rename, cred, fvp, mac_vnode_label(fvp), tdvp, mac_vnode_label(tdvp), tcnp);
 	VFS_KERNEL_DEBUG_END1(13, fvp);
 }
 
@@ -1758,8 +1733,8 @@ mac_vnode_check_label_update(vfs_context_t ctx, struct vnode *vp,
 }
 
 int
-mac_vnode_check_rename(vfs_context_t ctx, struct vnode *dvp,
-    struct vnode *vp, struct componentname *cnp, struct vnode *tdvp,
+mac_vnode_check_rename(vfs_context_t ctx, struct vnode *fdvp,
+    struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
     struct vnode *tvp, struct componentname *tcnp)
 {
 	kauth_cred_t cred;
@@ -1776,25 +1751,24 @@ mac_vnode_check_rename(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 
-	VFS_KERNEL_DEBUG_START1(57, vp);
-	MAC_CHECK(vnode_check_rename_from, cred, dvp, mac_vnode_label(dvp), vp,
-	    mac_vnode_label(vp), cnp);
+	VFS_KERNEL_DEBUG_START1(57, fvp);
+	MAC_CHECK(vnode_check_rename_from, cred, fdvp, mac_vnode_label(fdvp), fvp, mac_vnode_label(fvp), fcnp);
 	if (error) {
-		VFS_KERNEL_DEBUG_END1(57, vp);
+		VFS_KERNEL_DEBUG_END1(57, fvp);
 		return error;
 	}
 
 	MAC_CHECK(vnode_check_rename_to, cred, tdvp, mac_vnode_label(tdvp), tvp,
-	    tvp != NULL ? mac_vnode_label(tvp) : NULL, dvp == tdvp, tcnp);
+	    tvp != NULL ? mac_vnode_label(tvp) : NULL, fdvp == tdvp, tcnp);
 	if (error) {
-		VFS_KERNEL_DEBUG_END1(57, vp);
+		VFS_KERNEL_DEBUG_END1(57, fvp);
 		return error;
 	}
 
-	MAC_CHECK(vnode_check_rename, cred, dvp, mac_vnode_label(dvp), vp,
-	    mac_vnode_label(vp), cnp, tdvp, mac_vnode_label(tdvp), tvp,
+	MAC_CHECK(vnode_check_rename, cred, fdvp, mac_vnode_label(fdvp), fvp,
+	    mac_vnode_label(fvp), fcnp, tdvp, mac_vnode_label(tdvp), tvp,
 	    tvp != NULL ? mac_vnode_label(tvp) : NULL, tcnp);
-	VFS_KERNEL_DEBUG_END1(57, vp);
+	VFS_KERNEL_DEBUG_END1(57, fvp);
 	return error;
 }
 
@@ -2415,10 +2389,11 @@ mac_mount_check_snapshot_revert(vfs_context_t ctx, struct mount *mp,
 }
 
 int
-mac_mount_check_remount(vfs_context_t ctx, struct mount *mp)
+mac_mount_check_remount(vfs_context_t ctx, struct mount *mp, int flags)
 {
 	kauth_cred_t cred;
 	int error;
+	uint64_t visflags = (uint64_t)(flags & (MNT_CMDFLAGS | MNT_VISFLAGMASK));
 
 #if SECURITY_MAC_CHECK_ENFORCE
 	/* 21167099 - only check if we allow write */
@@ -2431,7 +2406,7 @@ mac_mount_check_remount(vfs_context_t ctx, struct mount *mp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(82, mp);
-	MAC_CHECK(mount_check_remount, cred, mp, mac_mount_label(mp));
+	MAC_CHECK(mount_check_remount, cred, mp, mac_mount_label(mp), visflags);
 	VFS_KERNEL_DEBUG_END1(82, mp);
 
 	return error;
@@ -2889,4 +2864,87 @@ mac_vnode_notify_unlink(vfs_context_t ctx, struct vnode *dvp, struct vnode *vp,
 	MAC_PERFORM(vnode_notify_unlink, cred, dvp, mac_vnode_label(dvp), vp,
 	    mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(98, vp);
+}
+
+void
+mac_vnode_notify_rename_swap(vfs_context_t ctx, struct vnode *fdvp,
+    struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
+    struct vnode *tvp, struct componentname *tcnp)
+{
+	kauth_cred_t cred;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return;
+	}
+
+	VFS_KERNEL_DEBUG_START1(99, fvp);
+	MAC_POLICY_ITERATE({
+		/* BEGIN IGNORE CODESTYLE */
+		if (mpc->mpc_ops->mpo_vnode_notify_swap != NULL) {
+			MAC_PERFORM_CALL(vnode_notify_swap, mpc);
+			mpc->mpc_ops->mpo_vnode_notify_swap(cred, fvp, mac_vnode_label(fvp), tvp, mac_vnode_label(tvp));
+			MAC_PERFORM_RSLT(vnode_notify_swap, mpc);
+		} else if (mpc->mpc_ops->mpo_vnode_notify_rename != NULL) {
+			MAC_PERFORM_CALL(vnode_notify_swap_rename, mpc);
+			/* Call notify_rename twice, one for each member of the swap. */
+			mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, mac_vnode_label(fvp), tdvp, mac_vnode_label(tdvp), tcnp);
+			mpc->mpc_ops->mpo_vnode_notify_rename(cred, tvp, mac_vnode_label(tvp), fdvp, mac_vnode_label(fdvp), fcnp);
+			MAC_PERFORM_RSLT(vnode_notify_swap_rename, mpc);
+		}
+		/* END IGNORE CODESTYLE */
+	});
+	VFS_KERNEL_DEBUG_END1(99, fvp);
+}
+
+int
+mac_vnode_check_rename_swap(vfs_context_t ctx, struct vnode *fdvp,
+    struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
+    struct vnode *tvp, struct componentname *tcnp)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_vnode_enforce) {
+		return 0;
+	}
+#endif
+	cred = vfs_context_ucred(ctx);
+	if (!mac_cred_check_enforce(cred)) {
+		return 0;
+	}
+
+	VFS_KERNEL_DEBUG_START1(100, fvp);
+	error = 0;
+	MAC_POLICY_ITERATE({
+		/* BEGIN IGNORE CODESTYLE */
+		int __step_err;
+		if (mpc->mpc_ops->mpo_vnode_check_swap != NULL) {
+			MAC_CHECK_CALL(vnode_check_swap, mpc);
+			__step_err = mpc->mpc_ops->mpo_vnode_check_swap(cred, fvp, mac_vnode_label(fvp), tvp, mac_vnode_label(tvp));
+			MAC_CHECK_RSLT(vnode_check_swap, mpc);
+			error = mac_error_select(__step_err, error);
+		} else if (mpc->mpc_ops->mpo_vnode_check_rename != NULL) {
+		        MAC_PERFORM_CALL(vnode_check_swap_rename, mpc);
+			/* Call check_rename twice, one for each member of the swap. */
+			__step_err = mpc->mpc_ops->mpo_vnode_check_rename(cred, fdvp, mac_vnode_label(fdvp), fvp, mac_vnode_label(fvp), fcnp,
+			    tdvp, mac_vnode_label(tdvp), tvp, mac_vnode_label(tvp), tcnp);
+			error = mac_error_select(__step_err, error);
+			__step_err = mpc->mpc_ops->mpo_vnode_check_rename(cred, tdvp, mac_vnode_label(tdvp), tvp, mac_vnode_label(tvp), tcnp,
+			    fdvp, mac_vnode_label(fdvp), fvp, mac_vnode_label(fvp), fcnp);
+			error = mac_error_select(__step_err, error);
+			MAC_PERFORM_RSLT(vnode_check_swap_rename, mpc);
+		}
+		/* END IGNORE CODESTYLE */
+	});
+	VFS_KERNEL_DEBUG_END1(100, fvp);
+	return error;
 }

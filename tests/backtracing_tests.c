@@ -342,7 +342,7 @@ backtrace_thread(void *arg)
 }
 
 T_DECL(backtrace_user, "test that the kernel can backtrace user stacks",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true), T_META_TAG_VM_PREFERRED)
 {
 	pthread_t thread;
 
@@ -355,7 +355,7 @@ T_DECL(backtrace_user, "test that the kernel can backtrace user stacks",
 }
 
 T_DECL(backtrace_user_bounds,
-    "test that the kernel doesn't write frames out of expected bounds")
+    "test that the kernel doesn't write frames out of expected bounds", T_META_TAG_VM_PREFERRED)
 {
 	uint64_t bt_init[USER_FRAMES] = {};
 	size_t bt_filled = USER_FRAMES, bt_filled_after = 0;
@@ -419,7 +419,7 @@ T_DECL(backtrace_user_bounds,
 
 T_DECL(backtrace_user_async,
     "test that the kernel can backtrace user async stacks",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false), T_META_TAG_VM_PREFERRED)
 {
 #if !defined(__LP64__)
 	T_SKIP("unsupported on LP32");
@@ -437,7 +437,7 @@ T_DECL(backtrace_user_async,
 
 T_DECL(backtrace_user_resume,
     "test that the kernel can resume a backtrace into a smaller buffer",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false), T_META_TAG_VM_PREFERRED)
 {
 	pthread_t thread;
 	T_QUIET; T_ASSERT_POSIX_ZERO(pthread_create(&thread, NULL, backtrace_thread,
@@ -447,7 +447,7 @@ T_DECL(backtrace_user_resume,
 
 T_DECL(backtrace_kernel_pack_unpack,
     "test that a kernel backtrace can be packed and unpacked losslessly",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false), T_META_TAG_VM_PREFERRED)
 {
 	int error = sysctlbyname("kern.backtrace.kernel_tests", NULL, NULL,
 	    (void *)PACK_UNPACK_SCENARIO, 0);
@@ -457,7 +457,7 @@ T_DECL(backtrace_kernel_pack_unpack,
 
 T_DECL(backtrace_kernel_packed,
     "test that a kernel backtrace can be recorded as packed losslessly",
-    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false), T_META_TAG_VM_PREFERRED)
 {
 	int error = sysctlbyname("kern.backtrace.kernel_tests", NULL, NULL,
 	    (void *)PACKED_SCENARIO, 0);
@@ -503,7 +503,7 @@ spin_backtrace_async(void)
 T_DECL(backtrace_user_async_spin_forever,
     "try spinning forever with an async call stack set up",
     T_META_ENABLED(false), T_META_CHECK_LEAKS(false),
-    T_META_ALL_VALID_ARCHS(false))
+    T_META_ALL_VALID_ARCHS(false), T_META_TAG_VM_PREFERRED)
 {
 #if !defined(__LP64__)
 	T_SKIP("unsupported on LP32");

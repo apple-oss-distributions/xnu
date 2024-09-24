@@ -95,6 +95,7 @@ typedef struct vm_object_fault_info     *vm_object_fault_info_t;
 typedef struct upl              *upl_t;
 typedef struct vm_map_copy      *vm_map_copy_t;
 typedef struct vm_named_entry   *vm_named_entry_t;
+typedef struct vm_page          *vm_page_t;
 
 #define PMAP_NULL               ((pmap_t) NULL)
 #define VM_OBJECT_NULL          ((vm_object_t) NULL)

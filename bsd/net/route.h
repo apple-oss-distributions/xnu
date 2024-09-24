@@ -143,7 +143,7 @@ struct rt_metrics {
 /*
  * Routing statistics.
  */
-struct  rtstat {
+struct rtstat {
 	short   rts_badredirect;        /* bogus redirect calls */
 	short   rts_dynamic;            /* routes created by redirects */
 	short   rts_newgateway;         /* routes modified by redirects */
@@ -183,6 +183,10 @@ struct rt_msghdr2 {
 	int     rtm_use;        /* from rtentry */
 	u_int32_t rtm_inits;    /* which metrics we are initializing */
 	struct rt_metrics rtm_rmx; /* metrics themselves */
+};
+
+struct rt_msghdr_prelude {
+	u_short rtm_msglen;     /* to skip over non-understood messages */
 };
 
 #define RTM_VERSION     5       /* Up the ante and ignore older versions */

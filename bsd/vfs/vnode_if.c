@@ -711,7 +711,7 @@ struct vnodeop_desc vnop_readdir_desc = {
 	VDESC_NO_OFFSET,
 	VDESC_NO_OFFSET,
 	VDESC_NO_OFFSET,
-	VOPARG_OFFSETOF(struct vnop_symlink_args, a_context),
+	VOPARG_OFFSETOF(struct vnop_readdir_args, a_context),
 	NULL
 };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -80,6 +80,7 @@
 #include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
+#include <os/ptrtools.h>
 
 #include <net/route.h>
 #include <net/ntstat.h>
@@ -107,9 +108,6 @@
 #include <netinet/tcp_var.h>
 #include <netinet/tcpip.h>
 #include <netinet/tcp_cc.h>
-#if TCPDEBUG
-#include <netinet/tcp_debug.h>
-#endif
 #include <netinet/tcp_log.h>
 #include <sys/kdebug.h>
 #include <mach/sdt.h>
@@ -148,7 +146,11 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, ecn_setup_percentage,
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, accurate_ecn,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_acc_ecn, 0,
-    "Accurate ECN mode (0: disable, 1: enable ACE feedback");
+    "Accurate ECN mode (0: disable, 1: enable Accurate ECN feedback");
+
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, l4s,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_l4s, 0,
+    "L4S mode (0: disable, 1: enable L4S");
 
 // TO BE REMOVED
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, do_ack_compression,
@@ -168,7 +170,7 @@ sysctl_change_ecn_setting SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 	int i, err = 0, changed = 0;
-	struct ifnet *ifp;
+	ifnet_ref_t ifp;
 
 	err = sysctl_io_number(req, tcp_ecn_outbound, sizeof(int32_t),
 	    &i, &changed);
@@ -292,7 +294,7 @@ __attribute__((noinline))
 static int32_t
 tcp_tfo_check(struct tcpcb *tp, int32_t len)
 {
-	struct socket *so = tp->t_inpcb->inp_socket;
+	struct socket *__single so = tp->t_inpcb->inp_socket;
 	unsigned int optlen = 0;
 	unsigned int cookie_len;
 
@@ -367,7 +369,8 @@ fallback:
 /* Returns the number of bytes written to the TCP option-space */
 __attribute__((noinline))
 static unsigned int
-tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen, u_char *opt)
+tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen,
+    u_char *__counted_by(optlen + 2 + TFO_COOKIE_LEN_DEFAULT) opt)
 {
 	u_char out[CCAES_BLOCK_SIZE];
 	unsigned ret = 0;
@@ -396,10 +399,10 @@ tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen, u_char *opt)
 __attribute__((noinline))
 static unsigned int
 tcp_tfo_write_cookie(struct tcpcb *tp, unsigned int optlen, int32_t len,
-    u_char *opt)
+    u_char *__counted_by(TCP_MAXOLEN) opt)
 {
 	uint8_t tfo_len;
-	struct socket *so = tp->t_inpcb->inp_socket;
+	struct socket *__single so = tp->t_inpcb->inp_socket;
 	unsigned ret = 0;
 	int res;
 	u_char *bp;
@@ -426,7 +429,7 @@ tcp_tfo_write_cookie(struct tcpcb *tp, unsigned int optlen, int32_t len,
 	 * TCP-option space. That way we avoid the need for an intermediate
 	 * variable.
 	 */
-	res = tcp_cache_get_cookie(tp, bp + TCPOLEN_FASTOPEN_REQ, &tfo_len);
+	res = tcp_cache_get_cookie(tp, bp + TCPOLEN_FASTOPEN_REQ, tfo_len, &tfo_len);
 	if (res == 0) {
 		*bp++ = TCPOPT_FASTOPEN;
 		*bp++ = TCPOLEN_FASTOPEN_REQ;
@@ -543,7 +546,7 @@ check_heuristic:
 	}
 }
 
-int
+uint32_t
 tcp_flight_size(struct tcpcb *tp)
 {
 	int ret;
@@ -556,7 +559,21 @@ tcp_flight_size(struct tcpcb *tp)
 	 */
 	ret = tp->snd_nxt - tp->snd_una - tp->sackhint.sack_bytes_acked;
 
+	if (TCP_RACK_ENABLED(tp)) {
+		/* In flight is bytes sent - bytes that left the network + bytes retransmitted */
+		const uint32_t bytes_sent = SEQ_MAX(tp->snd_max, tp->snd_nxt) - tp->snd_una;
+		const uint32_t bytes_not_in_flight = tp->bytes_sacked + tp->bytes_lost;
+		ret = bytes_sent - bytes_not_in_flight + tp->bytes_retransmitted;
+	}
+
 	if (ret < 0) {
+		/* It shouldn't happen when RACK is enabled */
+		if (TCP_RACK_ENABLED(tp)) {
+			os_log_error(OS_LOG_DEFAULT, "flight_size (%d) can't be negative "
+			    "(snd_nxt:%u snd_max:%u, snd_una:%u, sacked:%u lost:%u retransmitted:%u)",
+			    ret, tp->snd_nxt, tp->snd_max, tp->snd_una,
+			    tp->bytes_sacked, tp->bytes_lost, tp->bytes_retransmitted);
+		}
 		/*
 		 * This happens when the RTO-timer fires because snd_nxt gets artificially
 		 * decreased. If we then receive some SACK-blogs, sack_bytes_acked is
@@ -573,14 +590,14 @@ tcp_flight_size(struct tcpcb *tp)
  * when this function is called
  */
 static void
-tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *lp, uint8_t *optlen)
+tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp, uint8_t *optlen)
 {
 	uint8_t max_len = TCP_MAXOLEN - *optlen;
 	uint8_t len = TCPOLEN_ACCECN_EMPTY;
 
-	uint32_t e1b = (uint32_t)(tp->t_rcv_ect1_bytes & TCP_ACO_MASK);
-	uint32_t e0b = (uint32_t)(tp->t_rcv_ect0_bytes & TCP_ACO_MASK);
-	uint32_t ceb =  (uint32_t)(tp->t_rcv_ce_bytes & TCP_ACO_MASK);
+	uint32_t e1b = (uint32_t)(tp->t_aecn.t_rcv_ect1_bytes & TCP_ACO_MASK);
+	uint32_t e0b = (uint32_t)(tp->t_aecn.t_rcv_ect0_bytes & TCP_ACO_MASK);
+	uint32_t ceb =  (uint32_t)(tp->t_aecn.t_rcv_ce_bytes & TCP_ACO_MASK);
 
 	if (max_len < TCPOLEN_ACCECN_EMPTY) {
 		TCP_LOG(tp, "not enough space to add any AccECN option");
@@ -691,13 +708,14 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *lp, uint8_t *o
 int
 tcp_output(struct tcpcb *tp)
 {
-	struct inpcb *inp = tp->t_inpcb;
-	struct socket *so = inp->inp_socket;
+	uint32_t tcp_now_local = os_access_once(tcp_now);
+	struct inpcb *__single inp = tp->t_inpcb;
+	struct socket *__single so = inp->inp_socket;
 	int32_t len, recwin, sendwin, off;
 	uint32_t max_len = 0;
 	uint16_t flags;
 	int error;
-	struct mbuf *m;
+	mbuf_ref_t m;
 	struct ip *ip = NULL;
 	struct ip6_hdr *ip6 = NULL;
 	struct tcphdr *th;
@@ -705,28 +723,27 @@ tcp_output(struct tcpcb *tp)
 	unsigned int ipoptlen, optlen, hdrlen;
 	int idle, sendalot, lost = 0;
 	int sendalot_cnt = 0;
-	int i, sack_rxmit;
+	int i, rack_sack_rxmit = 0;
 	int tso = 0;
 	int sack_bytes_rxmt;
 	tcp_seq old_snd_nxt = 0;
 	struct sackhole *p;
+	struct tcp_seg_sent *seg;
 #if IPSEC
 	size_t ipsec_optlen = 0;
 #endif /* IPSEC */
 	int    idle_time = 0;
-	struct mbuf *packetlist = NULL;
-	struct mbuf *tp_inp_options = inp->inp_depend4.inp4_options;
+	struct mbuf *__single packetlist = NULL;
+	struct mbuf *__single tp_inp_options = inp->inp_depend4.inp4_options;
 	int isipv6 = inp->inp_vflag & INP_IPV6;
 	int packchain_listadd = 0;
 	int so_options = so->so_options;
-	struct rtentry *rt;
+	rtentry_ref_t rt;
 	u_int32_t svc_flags = 0, allocated_len;
 #if MPTCP
 	boolean_t mptcp_acknow;
 #endif /* MPTCP */
-	boolean_t cell = FALSE;
-	boolean_t wifi = FALSE;
-	boolean_t wired = FALSE;
+	stats_functional_type ifnet_count_type = stats_functional_type_none;
 	boolean_t sack_rescue_rxt = FALSE;
 	int sotc = so->so_traffic_class;
 	boolean_t do_not_compress = FALSE;
@@ -743,10 +760,11 @@ tcp_output(struct tcpcb *tp)
 	/* Since idle_time is signed integer, the following integer subtraction
 	 * will take care of wrap around of tcp_now
 	 */
-	idle_time = tcp_now - tp->t_rcvtime;
+	idle_time = tcp_now_local - tp->t_rcvtime;
 	if (idle && idle_time >= TCP_IDLETIMEOUT(tp)) {
 		if (CC_ALGO(tp)->after_idle != NULL &&
-		    (tp->tcp_cc_index != TCP_CC_ALGO_CUBIC_INDEX ||
+		    ((tp->tcp_cc_index != TCP_CC_ALGO_CUBIC_INDEX &&
+		    tp->tcp_cc_index != TCP_CC_ALGO_PRAGUE_INDEX) ||
 		    idle_time >= TCP_CC_CWND_NONVALIDATED_PERIOD)) {
 			CC_ALGO(tp)->after_idle(tp);
 			tcp_ccdbg_trace(tp, NULL, TCP_CC_IDLE_TIMEOUT);
@@ -784,6 +802,7 @@ tcp_output(struct tcpcb *tp)
 #endif /* MPTCP */
 
 again:
+	tcp_now_local = os_access_once(tcp_now);
 #if MPTCP
 	mptcp_acknow = FALSE;
 
@@ -926,18 +945,29 @@ again:
 	}
 
 	if (rt != NULL) {
-		cell = IFNET_IS_CELLULAR(rt->rt_ifp);
-		wifi = (!cell && IFNET_IS_WIFI(rt->rt_ifp));
-		wired = (!wifi && IFNET_IS_WIRED(rt->rt_ifp));
+		ifnet_count_type = IFNET_COUNT_TYPE(rt->rt_ifp);
 	}
 
 	/*
 	 * If we've recently taken a timeout, snd_max will be greater than
 	 * snd_nxt.  There may be SACK information that allows us to avoid
 	 * resending already delivered data.  Adjust snd_nxt accordingly.
+	 * It is ok to use this function with RACK as well as it is estimating
+	 * max_len based on a SACK hole.
 	 */
 	if (SACK_ENABLED(tp) && SEQ_LT(tp->snd_nxt, tp->snd_max)) {
-		max_len = tcp_sack_adjust(tp);
+		if (TCP_RACK_ENABLED(tp)) {
+			/*
+			 * Calculated in the same manner as when rack_in_recovery
+			 * is set and new data is transmitted after retransmitted data
+			 */
+			int32_t cwin = tp->snd_cwnd - tcp_flight_size(tp);
+			if (cwin > 0) {
+				max_len = tcp_rack_adjust(tp, (uint32_t)cwin);
+			}
+		} else {
+			max_len = tcp_sack_adjust(tp);
+		}
 	}
 	sendalot = 0;
 	off = tp->snd_nxt - tp->snd_una;
@@ -957,66 +987,84 @@ again:
 	 * snd_cwnd in tcp_input().
 	 */
 	/*
-	 * Still in sack recovery , reset rxmit flag to zero.
+	 * Still in sack recovery, reset rxmit flag to zero.
 	 */
-	sack_rxmit = 0;
+	rack_sack_rxmit = 0;
 	sack_bytes_rxmt = 0;
 	len = 0;
 	p = NULL;
-	if (SACK_ENABLED(tp) && IN_FASTRECOVERY(tp) &&
-	    (p = tcp_sack_output(tp, &sack_bytes_rxmt))) {
-		int32_t cwin;
+	seg = NULL;
 
-		if (tcp_do_better_lr) {
-			cwin = min(tp->snd_wnd, tp->snd_cwnd) - tcp_flight_size(tp);
-			if (cwin <= 0 && sack_rxmted == FALSE) {
-				/* Allow to clock out at least on per period */
-				cwin = tp->t_maxseg;
-			}
-
-			sack_rxmted = TRUE;
-		} else {
-			cwin = min(tp->snd_wnd, tp->snd_cwnd) - sack_bytes_rxmt;
+	if (SACK_ENABLED(tp) && IN_FASTRECOVERY(tp)) {
+		int32_t cwin = min(tp->snd_wnd, tp->snd_cwnd) - tcp_flight_size(tp);
+		if (cwin <= 0 && sack_rxmted == FALSE) {
+			/* Allow to clock out at least on per period */
+			cwin = tp->t_maxseg;
 		}
+
+		sack_rxmted = TRUE;
 		if (cwin < 0) {
 			cwin = 0;
 		}
-		/* Do not retransmit SACK segments beyond snd_recover */
-		if (SEQ_GT(p->end, tp->snd_recover)) {
-			/*
-			 * (At least) part of sack hole extends beyond
-			 * snd_recover. Check to see if we can rexmit data
-			 * for this hole.
-			 */
-			if (SEQ_GEQ(p->rxmit, tp->snd_recover)) {
-				/*
-				 * Can't rexmit any more data for this hole.
-				 * That data will be rexmitted in the next
-				 * sack recovery episode, when snd_recover
-				 * moves past p->rxmit.
-				 */
-				p = NULL;
-				goto after_sack_rexmit;
-			} else {
-				/* Can rexmit part of the current hole */
-				len = ((int32_t)min(cwin,
-				    tp->snd_recover - p->rxmit));
+
+		if (TCP_RACK_ENABLED(tp)) {
+			uint16_t rack_seg_len = 0;
+			if ((seg = tcp_rack_output(tp, cwin, &rack_seg_len)) != NULL) {
+				len = min(cwin, rack_seg_len);
+
+				if (len > 0) {
+					off = seg->start_seq - tp->snd_una;
+					rack_sack_rxmit = 1;
+					sendalot = 1;
+					tcpstat.tcps_rack_rexmits++;
+				} else {
+					seg = NULL;
+				}
 			}
-		} else {
-			len = ((int32_t)min(cwin, p->end - p->rxmit));
-		}
-		if (len > 0) {
-			off = p->rxmit - tp->snd_una;
-			sack_rxmit = 1;
-			sendalot = 1;
-			/* Everything sent after snd_nxt will allow us to account for fast-retransmit of the retransmitted segment */
-			tp->send_highest_sack = tp->snd_nxt;
-			tp->t_new_dupacks = 0;
-			tcpstat.tcps_sack_rexmits++;
-			tcpstat.tcps_sack_rexmit_bytes +=
-			    min(len, tp->t_maxseg);
-		} else {
-			len = 0;
+		} else if ((p = tcp_sack_output(tp, &sack_bytes_rxmt)) != NULL) {
+			/* Do not retransmit SACK segments beyond snd_recover */
+			if (SEQ_GT(p->end, tp->snd_recover)) {
+				/*
+				 * (At least) part of sack hole extends beyond
+				 * snd_recover. Check to see if we can rexmit data
+				 * for this hole.
+				 */
+				if (SEQ_GEQ(p->rxmit, tp->snd_recover)) {
+					/*
+					 * Can't rexmit any more data for this hole.
+					 * That data will be rexmitted in the next
+					 * sack recovery episode, when snd_recover
+					 * moves past p->rxmit.
+					 */
+					p = NULL;
+					goto after_sack_rexmit;
+				} else {
+					/* Can rexmit part of the current hole */
+					len = ((int32_t)min(cwin,
+					    tp->snd_recover - p->rxmit));
+				}
+			} else {
+				len = ((int32_t)min(cwin, p->end - p->rxmit));
+			}
+			if (len > 0) {
+				off = p->rxmit - tp->snd_una;
+				rack_sack_rxmit = 1;
+				sendalot = 1;
+				/*
+				 * Optimization to avoid double retransmission due to SACK recovery
+				 * and when tp->snd_nxt points to already retransmitted segments
+				 */
+				if (SEQ_LT(tp->snd_nxt, tp->snd_max) && SEQ_LEQ(tp->snd_nxt, p->rxmit) &&
+				    (uint32_t)len <= max_len) {
+					sendalot = 0;
+				}
+
+				tcpstat.tcps_sack_rexmits++;
+				tcpstat.tcps_sack_rexmit_bytes +=
+				    min(len, tp->t_maxseg);
+			} else {
+				len = 0;
+			}
 		}
 	}
 after_sack_rexmit:
@@ -1075,22 +1123,15 @@ after_sack_rexmit:
 	 * be set to snd_una, the offset will be 0, and the length may
 	 * wind up 0.
 	 *
-	 * If sack_rxmit is true we are retransmitting from the scoreboard
-	 * in which case len is already set.
+	 * If sack_rxmit or rack_rxmit is true we are retransmitting from
+	 * the scoreboard in which case len is already set.
 	 */
-	if (sack_rxmit == 0) {
-		if (sack_bytes_rxmt == 0) {
+	bool rack_in_recovery = TCP_RACK_ENABLED(tp) && IN_FASTRECOVERY(tp);
+	if (rack_sack_rxmit == 0) {
+		if (sack_bytes_rxmt == 0 && !rack_in_recovery) {
 			len = min(so->so_snd.sb_cc, sendwin) - off;
 		} else {
-			int32_t cwin;
-
-			if (tcp_do_better_lr) {
-				cwin = tp->snd_cwnd - tcp_flight_size(tp);
-			} else {
-				cwin = tp->snd_cwnd -
-				    (tp->snd_nxt - tp->sack_newdata) -
-				    sack_bytes_rxmt;
-			}
+			int32_t cwin = tp->snd_cwnd - tcp_flight_size(tp);
 			if (cwin < 0) {
 				cwin = 0;
 			}
@@ -1118,10 +1159,11 @@ after_sack_rexmit:
 			 * data from scoreboard or any new data. Check
 			 * if we can do a rescue retransmit towards the
 			 * tail end of recovery window.
+			 * We don't do rescue retransmit for RACK.
 			 */
 			if (len == 0 && cwin > 0 &&
 			    SEQ_LT(tp->snd_fack, tp->snd_recover) &&
-			    !(tp->t_flagsext & TF_RESCUE_RXT)) {
+			    !(tp->t_flagsext & TF_RESCUE_RXT) && !TCP_RACK_ENABLED(tp)) {
 				len = min((tp->snd_recover - tp->snd_fack),
 				    tp->t_maxseg);
 				len = imin(len, cwin);
@@ -1154,12 +1196,12 @@ after_sack_rexmit:
 	 * know that foreign host supports TAO, suppress sending segment.
 	 */
 	if ((flags & TH_SYN) && SEQ_GT(tp->snd_nxt, tp->snd_una)) {
-		if (tp->t_state == TCPS_SYN_RECEIVED && tfo_enabled(tp) && tp->snd_nxt == tp->snd_una + 1) {
+		if (tp->t_state == TCPS_SYN_RECEIVED && TFO_ENABLED(tp) && tp->snd_nxt == tp->snd_una + 1) {
 			/* We are sending the SYN again! */
 			off--;
 			len++;
 		} else {
-			if (tp->t_state != TCPS_SYN_RECEIVED || tfo_enabled(tp)) {
+			if (tp->t_state != TCPS_SYN_RECEIVED || TFO_ENABLED(tp)) {
 				flags &= ~TH_SYN;
 			}
 
@@ -1176,7 +1218,7 @@ after_sack_rexmit:
 					error = tcp_ip_output(so, tp, packetlist,
 					    packchain_listadd, tp_inp_options,
 					    (so_options & SO_DONTROUTE),
-					    (sack_rxmit || (sack_bytes_rxmt != 0)),
+					    (rack_sack_rxmit || (sack_bytes_rxmt != 0)),
 					    isipv6);
 				}
 
@@ -1207,7 +1249,7 @@ after_sack_rexmit:
 	 * tcp_tfo_check. In case TFO is not enabled, never ever send
 	 * SYN+data.
 	 */
-	if ((flags & TH_SYN) && !tfo_enabled(tp)) {
+	if ((flags & TH_SYN) && !TFO_ENABLED(tp)) {
 		len = 0;
 		flags &= ~TH_FIN;
 	}
@@ -1219,7 +1261,7 @@ after_sack_rexmit:
 		len = 0;
 	}
 
-	if ((flags & TH_SYN) && tp->t_state <= TCPS_SYN_SENT && tfo_enabled(tp)) {
+	if ((flags & TH_SYN) && tp->t_state <= TCPS_SYN_SENT && TFO_ENABLED(tp)) {
 		len = tcp_tfo_check(tp, len);
 	}
 
@@ -1304,7 +1346,7 @@ after_sack_rexmit:
 	if (len > tp->t_maxseg) {
 		if ((tp->t_flags & TF_TSO) && tcp_do_tso && hwcksum_tx &&
 		    kipf_count == 0 &&
-		    tp->rcv_numsacks == 0 && sack_rxmit == 0 &&
+		    tp->rcv_numsacks == 0 && rack_sack_rxmit == 0 &&
 		    sack_bytes_rxmt == 0 &&
 		    inp->inp_options == NULL &&
 		    inp->in6p_options == NULL
@@ -1383,9 +1425,15 @@ after_sack_rexmit:
 	}
 #endif /* MPTCP */
 
-	if (sack_rxmit) {
-		if (SEQ_LT(p->rxmit + len, tp->snd_una + so->so_snd.sb_cc)) {
-			flags &= ~TH_FIN;
+	if (rack_sack_rxmit) {
+		if (TCP_RACK_ENABLED(tp)) {
+			if (SEQ_LT(seg->start_seq + len, tp->snd_una + so->so_snd.sb_cc)) {
+				flags &= ~TH_FIN;
+			}
+		} else {
+			if (SEQ_LT(p->rxmit + len, tp->snd_una + so->so_snd.sb_cc)) {
+				flags &= ~TH_FIN;
+			}
 		}
 	} else {
 		if (SEQ_LT(tp->snd_nxt + len, tp->snd_una + so->so_snd.sb_cc)) {
@@ -1479,9 +1527,12 @@ after_sack_rexmit:
 			goto send;
 		}
 		if (SEQ_LT(tp->snd_nxt, tp->snd_max)) {
+			if (TCP_RACK_ENABLED(tp) && rack_sack_rxmit == 0) {
+				len = min(len, tp->snd_max - tp->snd_nxt);
+			}
 			goto send;
 		}
-		if (sack_rxmit) {
+		if (rack_sack_rxmit) {
 			goto send;
 		}
 
@@ -1490,7 +1541,7 @@ after_sack_rexmit:
 		 * is being used, then we always send it, regardless of Nagle,...
 		 */
 		if (tp->t_state == TCPS_SYN_RECEIVED &&
-		    tfo_enabled(tp) &&
+		    TFO_ENABLED(tp) &&
 		    (tp->t_tfo_flags & TFO_F_COOKIE_VALID) &&
 		    tp->snd_nxt == tp->iss + 1) {
 			goto send;
@@ -1715,7 +1766,7 @@ just_return:
 		error = tcp_ip_output(so, tp, packetlist,
 		    packchain_listadd,
 		    tp_inp_options, (so_options & SO_DONTROUTE),
-		    (sack_rxmit || (sack_bytes_rxmt != 0)), isipv6);
+		    (rack_sack_rxmit || (sack_bytes_rxmt != 0)), isipv6);
 	}
 	/* tcp was closed while we were in ip; resume close */
 	if (inp->inp_sndinprog_cnt == 0 &&
@@ -1748,7 +1799,7 @@ send:
 	 * for the rest of the connection.
 	 */
 	if (TCP_ACC_ECN_ON(tp) && tp->t_state == TCPS_ESTABLISHED &&
-	    tp->snd_una == tp->iss + 1 && (tp->snd_fack == 0)
+	    tp->snd_una == tp->iss + 1 && (tp->snd_fack == tp->iss)
 	    && tp->t_rxtshift > 0) {
 		if ((tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0) {
 			tp->ecn_flags |= TE_RETRY_WITHOUT_ACO;
@@ -1770,6 +1821,7 @@ send:
 	}
 	if (flags & TH_SYN) {
 		tp->snd_nxt = tp->iss;
+		tp->snd_fack = tp->iss;
 		if ((tp->t_flags & TF_NOOPT) == 0) {
 			u_short mss;
 
@@ -1810,7 +1862,7 @@ send:
 
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = htonl(tcp_now + tp->t_ts_offset);
+		*lp++ = htonl(tcp_now_local + tp->t_ts_offset);
 		*lp   = htonl(tp->ts_recent);
 		optlen += TCPOLEN_TSTAMP_APPA;
 	}
@@ -1860,12 +1912,12 @@ send:
 	}
 #endif /* MPTCP */
 
-	if (tfo_enabled(tp) && !(tp->t_flags & TF_NOOPT) &&
+	if (TFO_ENABLED(tp) && !(tp->t_flags & TF_NOOPT) &&
 	    (flags & (TH_SYN | TH_ACK)) == TH_SYN) {
 		optlen += tcp_tfo_write_cookie(tp, optlen, len, opt);
 	}
 
-	if (tfo_enabled(tp) &&
+	if (TFO_ENABLED(tp) &&
 	    (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
 	    (tp->t_tfo_flags & TFO_F_OFFER_COOKIE)) {
 		optlen += tcp_tfo_write_cookie_rep(tp, optlen, opt);
@@ -1895,6 +1947,16 @@ send:
 			u_int32_t *lp;
 
 			nsack = (MAX_TCPOPTLEN - optlen - 2) / TCPOLEN_SACK;
+			/*
+			 * Send lesser SACK blocks when we want
+			 * to send the smallest recommended AccECN Option
+			 * if the space wouldn't permit sending all blocks.
+			 */
+			if (nsack > 2 && TCP_ACC_ECN_ON(tp) &&
+			    (tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0 &&
+			    tp->ecn_flags & (TE_ACO_ECT1 | TE_ACO_ECT0)) {
+				nsack--;
+			}
 			nsack = min(nsack, (tp->rcv_numsacks +
 			    (TCP_SEND_DSACK_OPT(tp) ? 1 : 0)));
 			sackoptlen = (2 + nsack * TCPOLEN_SACK);
@@ -1976,7 +2038,7 @@ send:
 	 */
 	if (TCP_ACC_ECN_ON(tp) && TCPS_HAVEESTABLISHED(tp->t_state) &&
 	    (tp->ecn_flags & TE_ACE_FINAL_ACK_3WHS) == 0) {
-		uint8_t ace = tp->t_rcv_ce_packets & TCP_ACE_MASK;
+		uint8_t ace = tp->t_aecn.t_rcv_ce_packets & TCP_ACE_MASK;
 		if (ace & 0x01) {
 			flags |= TH_ECE;
 		} else {
@@ -2036,11 +2098,11 @@ send:
 					 * distinct from cases where the fields
 					 * are incorrectly zeroed.
 					 */
-					tp->t_rcv_ce_packets = 5;
-					tp->t_snd_ce_packets = 5;
+					tp->t_aecn.t_rcv_ce_packets = 5;
+					tp->t_aecn.t_snd_ce_packets = 5;
 
 					/* Initialize CE byte counter to 0 */
-					tp->t_rcv_ce_bytes = tp->t_snd_ce_bytes = 0;
+					tp->t_aecn.t_rcv_ce_bytes = tp->t_aecn.t_snd_ce_bytes = 0;
 
 					if (tp->ecn_flags & TE_ACE_SETUP_NON_ECT) {
 						tp->t_prev_ace_flags = TH_CWR;
@@ -2078,10 +2140,13 @@ send:
 						}
 					}
 					/*
-					 * We are not yet committing to send IP ECT packets when
-					 * Accurate ECN mode is on
+					 * We now send ECT1 packets when
+					 * L4S and Accurate ECN mode is on
 					 */
-					tp->ecn_flags |= (TE_ACE_SETUPSENT);
+					tp->ecn_flags |= TE_ACE_SETUPSENT;
+					if (TCP_L4S_ENABLED(tp)) {
+						tp->ecn_flags |= TE_SENDIPECT;
+					}
 				} else if (tp->ecn_flags & TE_SETUPRECEIVED) {
 					/*
 					 * Setting TH_ECE makes this an ECN-setup
@@ -2120,22 +2185,24 @@ send:
 					tcpstat.tcps_ecn_server_success--;
 					tp->ecn_flags |= TE_LOST_SYNACK;
 				}
-
-				tp->ecn_flags &=
-				    ~(TE_SETUPRECEIVED | TE_SENDIPECT |
-				    TE_SENDCWR);
+				if (!TCP_ACC_ECN_ENABLED(tp)) {
+					/* Do this only for classic ECN. */
+					tp->ecn_flags &=
+					    ~(TE_SETUPRECEIVED | TE_SENDIPECT |
+					    TE_SENDCWR);
+				}
 			}
 		}
 	} else if ((flags & (TH_SYN | TH_ACK)) == TH_SYN &&
 	    (tp->ecn_flags & TE_ENABLE_ECN)) {
 		if (tcp_send_ecn_flags_on_syn(tp)) {
 			if (TCP_ACC_ECN_ENABLED(tp)) {
-				/* We are negotiating AccECN in SYN */
-				flags |= TH_ACE;
 				/*
-				 * For AccECN, we only set the ECN-setup sent
-				 * flag as we are not committing to set ECT yet.
+				 * We are negotiating AccECN in SYN.
+				 * We only set TE_SENDIPECT after the handshake
+				 * is complete.
 				 */
+				flags |= TH_ACE;
 				tp->ecn_flags |= (TE_ACE_SETUPSENT);
 			} else {
 				/*
@@ -2197,7 +2264,7 @@ send:
 	 * the CWR flag on data packets. Pure acks don't have this set.
 	 */
 	if ((tp->ecn_flags & TE_SENDCWR) != 0 && len != 0 &&
-	    !SEQ_LT(tp->snd_nxt, tp->snd_max) && !sack_rxmit) {
+	    !SEQ_LT(tp->snd_nxt, tp->snd_max) && !rack_sack_rxmit) {
 		flags |= TH_CWR;
 		tp->ecn_flags &= ~TE_SENDCWR;
 	}
@@ -2297,7 +2364,7 @@ send:
 		if (tp->t_bwmeas->bw_size > 0) {
 			tp->t_flagsext |= TF_BWMEAS_INPROGRESS;
 			tp->t_bwmeas->bw_start = tp->snd_max;
-			tp->t_bwmeas->bw_ts = tcp_now;
+			tp->t_bwmeas->bw_ts = tcp_now_local;
 		}
 	}
 
@@ -2315,15 +2382,15 @@ send:
 		}
 		if ((tp->t_flagsext & TF_FORCE) && len == 1) {
 			tcpstat.tcps_sndprobe++;
-		} else if (SEQ_LT(tp->snd_nxt, tp->snd_max) || sack_rxmit) {
+		} else if (SEQ_LT(tp->snd_nxt, tp->snd_max) || rack_sack_rxmit) {
 			tcpstat.tcps_sndrexmitpack++;
 			tcpstat.tcps_sndrexmitbyte += len;
 			if (nstat_collect) {
 				nstat_route_tx(inp->inp_route.ro_rt, 1,
 				    len, NSTAT_TX_FLAG_RETRANSMIT);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    txpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    txbytes, len);
 				tp->t_stat.txretransmitbytes += len;
 				tp->t_stat.rxmitpkts++;
@@ -2336,9 +2403,9 @@ send:
 			tcpstat.tcps_sndbyte += len;
 
 			if (nstat_collect) {
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    txpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired,
+				INP_ADD_STAT(inp, ifnet_count_type,
 				    txbytes, len);
 			}
 			if (tp->ecn_flags & TE_SENDIPECT) {
@@ -2532,13 +2599,13 @@ send:
 	if (do_not_compress) {
 		m->m_pkthdr.comp_gencnt = 0;
 	} else {
-		if (TSTMP_LT(tp->t_comp_lastinc + tcp_ack_compression_rate, tcp_now)) {
+		if (TSTMP_LT(tp->t_comp_lastinc + tcp_ack_compression_rate, tcp_now_local)) {
 			tp->t_comp_gencnt++;
 			/* 0 means no compression, thus jump this */
 			if (tp->t_comp_gencnt <= TCP_ACK_COMPRESSION_DUMMY) {
 				tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
 			}
-			tp->t_comp_lastinc = tcp_now;
+			tp->t_comp_lastinc = tcp_now_local;
 		}
 		m->m_pkthdr.comp_gencnt = tp->t_comp_gencnt;
 	}
@@ -2547,9 +2614,21 @@ send:
 		ip6 = mtod(m, struct ip6_hdr *);
 		th = (struct tcphdr *)(void *)(ip6 + 1);
 		tcp_fillheaders(m, tp, ip6, th);
-		if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
-		    !SEQ_LT(tp->snd_nxt, tp->snd_max) && !sack_rxmit) {
-			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
+
+		if (TCP_L4S_ENABLED(tp) && TCP_ACC_ECN_ON(tp)) {
+			/* We send ECT1 for ALL packets (data, control, fast retransmits, RTO) */
+			if ((tp->ecn_flags & TE_SENDIPECT) != 0 && !(flags & TH_SYN)) {
+				ip6->ip6_flow |= htonl(IPTOS_ECN_ECT1 << 20);
+				uint64_t tx_time = tcp_pacer_get_packet_tx_time(tp, (uint16_t)len);
+				if (tx_time) {
+					tcp_set_mbuf_tx_time(m, tx_time);
+				}
+			}
+		} else {
+			if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
+			    !SEQ_LT(tp->snd_nxt, tp->snd_max) && !rack_sack_rxmit) {
+				ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
+			}
 		}
 		svc_flags |= PKT_SCF_IPV6;
 #if PF_ECN
@@ -2561,10 +2640,22 @@ send:
 		th = (struct tcphdr *)(void *)(ip + 1);
 		/* this picks up the pseudo header (w/o the length) */
 		tcp_fillheaders(m, tp, ip, th);
-		if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
-		    !SEQ_LT(tp->snd_nxt, tp->snd_max) &&
-		    !sack_rxmit && !(flags & TH_SYN)) {
-			ip->ip_tos |= IPTOS_ECN_ECT0;
+
+		if (TCP_L4S_ENABLED(tp) && TCP_ACC_ECN_ON(tp)) {
+			/* We send ECT1 for ALL packets (data, control, fast retransmits, RTO) */
+			if ((tp->ecn_flags & TE_SENDIPECT) != 0 && !(flags & TH_SYN)) {
+				ip->ip_tos |= IPTOS_ECN_ECT1;
+				uint64_t tx_time = tcp_pacer_get_packet_tx_time(tp, (uint16_t)len);
+				if (tx_time) {
+					tcp_set_mbuf_tx_time(m, tx_time);
+				}
+			}
+		} else {
+			if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
+			    !SEQ_LT(tp->snd_nxt, tp->snd_max) &&
+			    !rack_sack_rxmit && !(flags & TH_SYN)) {
+				ip->ip_tos |= IPTOS_ECN_ECT0;
+			}
 		}
 #if PF_ECN
 		m_pftag(m)->pftag_hdr = (void *)ip;
@@ -2597,7 +2688,7 @@ send:
 	 * Note the state of this retransmit segment to detect spurious
 	 * retransmissions.
 	 */
-	if (sack_rxmit == 0) {
+	if (rack_sack_rxmit == 0) {
 		if (len || (flags & (TH_SYN | TH_FIN)) ||
 		    tp->t_timer[TCPT_PERSIST]) {
 			th->th_seq = htonl(tp->snd_nxt);
@@ -2620,15 +2711,21 @@ send:
 			th->th_seq = htonl(tp->snd_max);
 		}
 	} else {
-		th->th_seq = htonl(p->rxmit);
+		/* Use RACK if enabled otherwise use SACK */
+		if (TCP_RACK_ENABLED(tp)) {
+			th->th_seq = htonl(seg->start_seq);
+			tcp_rxtseg_insert(tp, seg->start_seq, (seg->start_seq + len - 1));
+		} else {
+			th->th_seq = htonl(p->rxmit);
+			tcp_rxtseg_insert(tp, p->rxmit, (p->rxmit + len - 1));
+			p->rxmit += len;
+			tp->sackhint.sack_bytes_rexmit += len;
+		}
 		if (len > 0) {
+			m->m_pkthdr.tx_start_seq = ntohl(th->th_seq);
 			m->m_pkthdr.pkt_flags |=
 			    (PKTF_TCP_REXMT | PKTF_START_SEQ);
-			m->m_pkthdr.tx_start_seq = p->rxmit;
 		}
-		tcp_rxtseg_insert(tp, p->rxmit, (p->rxmit + len - 1));
-		p->rxmit += len;
-		tp->sackhint.sack_bytes_rexmit += len;
 	}
 	th->th_ack = htonl(tp->rcv_nxt);
 	tp->last_ack_sent = tp->rcv_nxt;
@@ -2757,7 +2854,7 @@ send:
 				tp->t_flags |= TF_SENTFIN;
 			}
 		}
-		if (sack_rxmit) {
+		if (rack_sack_rxmit) {
 			goto timer;
 		}
 		if (sack_rescue_rxt == TRUE) {
@@ -2769,13 +2866,13 @@ send:
 		}
 		if (SEQ_GT(tp->snd_nxt, tp->snd_max)) {
 			tp->snd_max = tp->snd_nxt;
-			tp->t_sndtime = tcp_now;
+			tp->t_sndtime = tcp_now_local;
 			/*
 			 * Time this transmission if not a retransmission and
 			 * not currently timing anything.
 			 */
 			if (tp->t_rtttime == 0) {
-				tp->t_rtttime = tcp_now;
+				tp->t_rtttime = tcp_now_local;
 				tp->t_rtseq = startseq;
 				tcpstat.tcps_segstimed++;
 
@@ -2790,7 +2887,7 @@ send:
 		 */
 timer:
 		if (tp->t_timer[TCPT_REXMT] == 0 &&
-		    ((sack_rxmit && tp->snd_nxt != tp->snd_max) ||
+		    ((rack_sack_rxmit && tp->snd_nxt != tp->snd_max) ||
 		    tp->snd_nxt != tp->snd_una || (flags & TH_FIN))) {
 			if (tp->t_timer[TCPT_PERSIST]) {
 				tp->t_timer[TCPT_PERSIST] = 0;
@@ -2816,30 +2913,12 @@ timer:
 		    (tp->t_flagsext & (TF_SENT_TLPROBE | TF_PKTS_REORDERED)) == 0) {
 			uint32_t pto, srtt;
 
-			if (tcp_do_better_lr) {
-				srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-				pto = 2 * srtt;
-				if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
-					pto += tcp_delack;
-				} else {
-					pto += 2;
-				}
+			srtt = tp->t_srtt >> TCP_RTT_SHIFT;
+			pto = 2 * srtt;
+			if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
+				pto += tcp_delack;
 			} else {
-				/*
-				 * Using SRTT alone to set PTO can cause spurious
-				 * retransmissions on wireless networks where there
-				 * is a lot of variance in RTT. Taking variance
-				 * into account will avoid this.
-				 */
-				srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-				pto = ((TCP_REXMTVAL(tp)) * 3) >> 1;
-				pto = max(2 * srtt, pto);
-				if ((tp->snd_max - tp->snd_una) == tp->t_maxseg) {
-					pto = max(pto,
-					    (((3 * pto) >> 2) + tcp_delack * 2));
-				} else {
-					pto = max(10, pto);
-				}
+				pto += 2;
 			}
 
 			/* if RTO is less than PTO, choose RTO instead */
@@ -2865,18 +2944,9 @@ timer:
 		}
 		if (SEQ_GT(tp->snd_nxt + xlen, tp->snd_max)) {
 			tp->snd_max = tp->snd_nxt + len;
-			tp->t_sndtime = tcp_now;
+			tp->t_sndtime = tcp_now_local;
 		}
 	}
-
-#if TCPDEBUG
-	/*
-	 * Trace.
-	 */
-	if (so_options & SO_DEBUG) {
-		tcp_trace(TA_OUTPUT, tp->t_state, tp, mtod(m, void *), th, 0);
-	}
-#endif
 
 	/*
 	 * Fill in IP length and desired time to live and
@@ -3057,6 +3127,19 @@ timer:
 		tp->t_pktlist_head = tp->t_pktlist_tail = m;
 	}
 
+	/* Append segment to time-ordered list and RB tree used for RACK */
+	if (TCP_RACK_ENABLED(tp) && len) {
+		uint8_t retransmit_flag = 0;
+		if (tp->t_flagsext & TF_SENT_TLPROBE) {
+			/* Only set the at least once retransmitted flag */
+			retransmit_flag = (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) ? TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE : 0;
+		} else {
+			/* Set both RACK and EVER retransmitted flags */
+			retransmit_flag = (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) ? TCP_SEGMENT_RETRANSMITTED : 0;
+		}
+		tcp_seg_sent_insert(tp, seg, ntohl(th->th_seq), ntohl(th->th_seq) + len, tcp_now_local, retransmit_flag);
+	}
+
 	if (sendalot == 0 || (tp->t_state != TCPS_ESTABLISHED) ||
 	    (tp->t_flags & TF_ACKNOW) ||
 	    (tp->t_flagsext & TF_FORCE) ||
@@ -3073,7 +3156,7 @@ timer:
 			error = tcp_ip_output(so, tp, packetlist,
 			    packchain_listadd, tp_inp_options,
 			    (so_options & SO_DONTROUTE),
-			    (sack_rxmit || (sack_bytes_rxmt != 0)), isipv6);
+			    (rack_sack_rxmit || (sack_bytes_rxmt != 0)), isipv6);
 			if (error) {
 				/*
 				 * Take into account the rest of unsent
@@ -3116,7 +3199,13 @@ timer:
 			 * the TF_SENTFIN flag handles that case.
 			 */
 			if ((flags & TH_SYN) == 0) {
-				if (sack_rxmit) {
+				/*
+				 * RACK will mark these segments lost on its own
+				 * when new ACK arrives, no need to adjust anything here.
+				 * In fact doing so would be wrong, as RACK segments are
+				 * ordered in time (not sequence number).
+				 */
+				if (rack_sack_rxmit && !TCP_RACK_ENABLED(tp)) {
 					if (SEQ_GT((p->rxmit - lost),
 					    tp->snd_una)) {
 						p->rxmit -= lost;
@@ -3238,8 +3327,8 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	boolean_t chain;
 	boolean_t unlocked = FALSE;
 	boolean_t ifdenied = FALSE;
-	struct inpcb *inp = tp->t_inpcb;
-	struct ifnet *outif = NULL;
+	struct inpcb *__single inp = tp->t_inpcb;
+	struct ifnet *__single outif = NULL;
 	bool check_qos_marking_again = (so->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE) ? FALSE : TRUE;
 
 	union {
@@ -3268,7 +3357,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
 	}
 
-	struct flowadv *adv =
+	struct flowadv *__single adv =
 	    (isipv6 ? &ip6oa.ip6oa_flowadv : &ipoa.ipoa_flowadv);
 
 	/* If socket was bound to an ifindex, tell ip_output about it */
@@ -3612,7 +3701,7 @@ static int
 tcp_recv_throttle(struct tcpcb *tp)
 {
 	uint32_t base_rtt, newsize;
-	struct sockbuf *sbrcv = &tp->t_inpcb->inp_socket->so_rcv;
+	struct sockbuf *__single sbrcv = &tp->t_inpcb->inp_socket->so_rcv;
 
 	if (tcp_use_rtt_recvbg == 1 &&
 	    TSTMP_SUPPORTED(tp)) {

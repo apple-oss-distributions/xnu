@@ -89,12 +89,12 @@ spawn_and_signal(int signal)
 	printf("wait returned with pid %d, status %d\n", ret, status);
 }
 
-T_DECL(suspended_spawn_continue, "Tests spawning a suspended process and continuing it", T_META_TIMEOUT(2))
+T_DECL(suspended_spawn_continue, "Tests spawning a suspended process and continuing it", T_META_TIMEOUT(2), T_META_TAG_VM_PREFERRED)
 {
 	spawn_and_signal(SIGCONT);
 }
 
-T_DECL(suspended_spawn_kill, "Tests spawning a suspended process and killing it", T_META_TIMEOUT(2))
+T_DECL(suspended_spawn_kill, "Tests spawning a suspended process and killing it", T_META_TIMEOUT(2), T_META_TAG_VM_PREFERRED)
 {
 	spawn_and_signal(SIGKILL);
 }

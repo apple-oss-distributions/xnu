@@ -192,7 +192,7 @@ static int stf_checkaddr4(struct stf_softc *, const struct in_addr *,
 static int stf_checkaddr6(struct stf_softc *, struct in6_addr *,
     struct ifnet *);
 static void stf_rtrequest(int, struct rtentry *, struct sockaddr *);
-static errno_t stf_ioctl(ifnet_t ifp, u_long cmd, void *data);
+static errno_t stf_ioctl(ifnet_t ifp, u_long cmd, void *__sized_by(IOCPARM_LEN(cmd)) data);
 static errno_t stf_output(ifnet_t ifp, mbuf_t m);
 
 /*
@@ -222,7 +222,7 @@ stf_add_proto(
 	__unused u_int32_t                                              demux_count)
 {
 	/* Only one protocol may be attached at a time */
-	struct stf_softc* stf = ifnet_softc(ifp);
+	struct stf_softc *__single stf = ifnet_softc(ifp);
 	if (stf->sc_protocol_family == 0) {
 		stf->sc_protocol_family = protocol_family;
 	} else {
@@ -277,7 +277,8 @@ stf_demux(
 	__unused char                   *frame_ptr,
 	protocol_family_t               *protocol_family)
 {
-	struct stf_softc* stf = ifnet_softc(ifp);
+	struct stf_softc *__single stf = ifnet_softc(ifp);
+
 	*protocol_family = stf->sc_protocol_family;
 	return 0;
 }
@@ -288,7 +289,7 @@ stf_set_bpf_tap(
 	bpf_tap_mode    mode,
 	bpf_packet_func callback)
 {
-	struct stf_softc        *sc = ifnet_softc(ifp);
+	struct stf_softc *__single sc = ifnet_softc(ifp);
 
 	sc->tap_mode = mode;
 	sc->tap_callback = callback;
@@ -299,10 +300,10 @@ stf_set_bpf_tap(
 void
 stfattach(void)
 {
-	struct stf_softc *sc;
+	struct stf_softc *__single sc;
 	int error;
-	const struct encaptab *p;
-	struct ifnet_init_eparams       stf_init;
+	const struct encaptab *__single p;
+	struct ifnet_init_eparams stf_init;
 
 	error = proto_register_plumber(PF_INET6, APPLE_IF_FAM_STF,
 	    stf_attach_inet6, NULL);
@@ -375,8 +376,8 @@ stf_encapcheck(
 	void *arg)
 {
 	struct ip ip;
-	struct in6_ifaddr *ia6;
-	struct stf_softc *sc;
+	struct in6_ifaddr *__single ia6;
+	struct stf_softc *__single  sc;
 	struct in_addr a, b;
 
 	sc = (struct stf_softc *)arg;
@@ -397,7 +398,7 @@ stf_encapcheck(
 		return 0;
 	}
 
-	mbuf_copydata((struct mbuf *)(size_t)m, 0, sizeof(ip), &ip);
+	mbuf_copydata(__DECONST(struct mbuf *, m), 0, sizeof(ip), &ip);
 
 	if (ip.ip_v != 4) {
 		return 0;
@@ -445,9 +446,9 @@ stf_encapcheck(
 static struct in6_ifaddr *
 stf_getsrcifa6(struct ifnet *ifp)
 {
-	struct ifaddr *ia;
-	struct in_ifaddr *ia4;
-	struct sockaddr_in6 *sin6;
+	struct ifaddr *__single ia;
+	struct in_ifaddr *__single ia4;
+	struct sockaddr_in6 *__single sin6;
 	struct in_addr in;
 
 	ifnet_lock_shared(ifp);
@@ -486,7 +487,7 @@ stf_getsrcifa6(struct ifnet *ifp)
 
 		ifa_addref(ia);         /* for caller */
 		ifnet_lock_done(ifp);
-		return (struct in6_ifaddr *)ia;
+		return ifatoia6(ia);
 	}
 	ifnet_lock_done(ifp);
 
@@ -503,15 +504,15 @@ stf_pre_output(
 	__unused char *desk_linkaddr,
 	__unused char *frame_type)
 {
-	struct mbuf *m = *m0;
-	struct stf_softc *sc;
-	const struct sockaddr_in6 *dst6;
-	const struct in_addr *in4;
+	mbuf_ref_t m = *m0;
+	struct stf_softc *__single sc;
+	const struct sockaddr_in6 *__single dst6;
+	const struct in_addr *__single in4;
 	u_int8_t tos;
-	struct ip *ip;
-	struct ip6_hdr *ip6;
-	struct in6_ifaddr *ia6;
-	struct sockaddr_in      *dst4;
+	struct ip *__single ip;
+	struct ip6_hdr *__single ip6;
+	struct in6_ifaddr *__single ia6;
+	struct sockaddr_in *__single dst4;
 	struct ip_out_args ipoa;
 	errno_t result = 0;
 
@@ -641,7 +642,7 @@ stf_checkaddr4(
 	const struct in_addr *in,
 	struct ifnet *inifp)    /* incoming interface */
 {
-	struct in_ifaddr *ia4;
+	struct in_ifaddr *__single ia4;
 
 	/*
 	 * reject packets with the following address:
@@ -681,7 +682,7 @@ stf_checkaddr4(
 	 */
 	if (sc && (ifnet_flags(sc->sc_if) & IFF_LINK2) == 0 && inifp) {
 		struct sockaddr_in sin;
-		struct rtentry *rt;
+		rtentry_ref_t rt;
 
 		SOCKADDR_ZERO(&sin, sizeof(sin));
 		sin.sin_family = AF_INET;
@@ -741,13 +742,13 @@ in_stf_input(
 	struct mbuf *m,
 	int off)
 {
-	struct stf_softc *sc;
-	struct ip *ip;
+	struct stf_softc *__single sc;
+	struct ip *__single ip;
 	struct ip6_hdr ip6;
 	u_int8_t otos, itos;
 	int proto;
-	struct ifnet *ifp;
-	struct ifnet_stat_increment_param       stats;
+	struct ifnet *__single ifp;
+	struct ifnet_stat_increment_param stats;
 
 	ip = mtod(m, struct ip *);
 	proto = ip->ip_p;
@@ -804,7 +805,7 @@ in_stf_input(
 	ip6.ip6_flow |= htonl((u_int32_t)itos << 20);
 
 	m->m_pkthdr.rcvif = ifp;
-	mbuf_pkthdr_setheader(m, mbuf_data(m));
+	mbuf_pkthdr_setheader(m, mtod(m, void*));
 	mbuf_adj(m, off);
 
 	if (ifp->if_bpf) {
@@ -844,11 +845,11 @@ static errno_t
 stf_ioctl(
 	ifnet_t         ifp,
 	u_long          cmd,
-	void            *data)
+	void            *__sized_by(IOCPARM_LEN(cmd)) data)
 {
-	struct ifaddr *ifa;
-	struct ifreq *ifr;
-	struct sockaddr_in6 *sin6;
+	struct ifaddr *__single ifa;
+	struct ifreq *__single ifr;
+	struct sockaddr_in6 *__single sin6;
 	int error;
 
 	error = 0;

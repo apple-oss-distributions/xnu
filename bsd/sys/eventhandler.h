@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -109,7 +109,8 @@ typedef struct eventhandler_entry       *eventhandler_tag;
 #define EHL_LOCK_ASSERT(p, x)   LCK_MTX_ASSERT(&(p)->el_lock, x)
 #define EHL_LOCK_DESTROY(p)     lck_mtx_destroy(&(p)->el_lock, &el_lock_grp)
 
-#define evhlog(x)       do { if (evh_debug >= 1) log x; } while (0)
+#define evhlog(type, ...)       do { if (__improbable(evh_debug >= 1)) os_log_##type(OS_LOG_DEFAULT, __VA_ARGS__); } while (0)
+#define evhlog2(type, ...)      do { if (__improbable(evh_debug >= 2)) os_log_##type(OS_LOG_DEFAULT, __VA_ARGS__); } while (0)
 
 /*
  * Macro to invoke the handlers for a given event.
@@ -122,13 +123,13 @@ typedef struct eventhandler_entry       *eventhandler_tag;
 	EHL_LOCK_ASSERT((list), LCK_MTX_ASSERT_OWNED);                  \
 	(list)->el_runcount++;                                          \
 	VERIFY((list)->el_runcount > 0);                                \
-	evhlog((LOG_DEBUG, "eventhandler_invoke(\"" __STRING(name) "\")"));     \
+	evhlog2(debug, "eventhandler_invoke(\"" __STRING(name) "\")");  \
 	TAILQ_FOREACH(_ep, &((list)->el_entries), ee_link) {            \
 	        if (_ep->ee_priority != EHE_DEAD_PRIORITY) {            \
 	                EHL_UNLOCK((list));                             \
 	                _t = (struct eventhandler_entry_ ## name *)_ep; \
-	                evhlog((LOG_DEBUG, "eventhandler_invoke: executing %p", \
-	                    (void *)VM_KERNEL_UNSLIDE((uint64_t)(_t->eh_func))));   \
+	                evhlog2(debug, "eventhandler_invoke: executing %p", \
+	                    (void *)VM_KERNEL_UNSLIDE((uint64_t)(_t->eh_func)));   \
 	                _t->eh_func(_ep->ee_arg , ## __VA_ARGS__);      \
 	                EHL_LOCK_SPIN((list));                          \
 	        }                                                       \
@@ -183,14 +184,17 @@ do {                                                                    \
 } while (0)
 
 #define EVENTHANDLER_REGISTER(evthdlr_ref, name, func, arg, priority)           \
-	eventhandler_register(evthdlr_ref, NULL, #name, ptrauth_nop_cast(void * __single, &func), arg, priority)
+	eventhandler_register(evthdlr_ref, NULL, #name, ptrauth_nop_cast(void * __single, func), arg, priority)
 
 #define EVENTHANDLER_DEREGISTER(evthdlr_ref, name, tag)                                 \
 do {                                                                    \
 	struct eventhandler_list *__single _el;                                  \
                                                                         \
 	if ((_el = eventhandler_find_list(evthdlr_ref, #name)) != NULL)         \
+	{                                                               \
+	        evhlog2(debug, "eventhandler_deregister event_type=" __STRING(name) ); \
 	        eventhandler_deregister(_el, tag);                      \
+	}                                                               \
 } while(0)
 
 void eventhandler_init(void);

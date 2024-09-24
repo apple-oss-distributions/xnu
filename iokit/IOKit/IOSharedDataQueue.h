@@ -88,7 +88,7 @@ public:
  * @param size The size of the data queue memory region.
  * @result Returns the newly allocated IOSharedDataQueue instance.  Zero is returned on failure.
  */
-	static OSPtr<IOSharedDataQueue> withCapacity(UInt32 size);
+	static OSPtr<IOSharedDataQueue> withCapacity(UInt32 size __xnu_data_size);
 
 /*!
  * @function withEntries
@@ -98,7 +98,7 @@ public:
  * @param entrySize Size of each entry.
  * @result Reeturns the newly allocated IOSharedDataQueue instance.  Zero is returned on failure.
  */
-	static OSPtr<IOSharedDataQueue> withEntries(UInt32 numEntries, UInt32 entrySize);
+	static OSPtr<IOSharedDataQueue> withEntries(UInt32 numEntries, UInt32 entrySize __xnu_data_size);
 
 /*!
  * @function initWithCapacity

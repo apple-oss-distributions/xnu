@@ -269,7 +269,7 @@ nx_netif_netagent_flow_bind(struct nx_netif *nif, struct nx_flow_req *nfr)
 	struct nxbind nxb;
 	struct proc *p;
 	struct kern_nexus *nx = nif->nif_nx;
-	struct netif_port_info *npi = NULL;
+	struct netif_port_info *__single npi = NULL;
 	pid_t pid = nfr->nfr_pid;
 	int err;
 #if SK_LOG
@@ -291,14 +291,14 @@ nx_netif_netagent_flow_bind(struct nx_netif *nif, struct nx_flow_req *nfr)
 	nxb.nxb_uniqueid = proc_uniqueid(p);
 	nxb.nxb_pid = pid;
 	nxb.nxb_flags |= NXBF_MATCH_KEY;
-	nxb.nxb_key_len = sizeof(uuid_key);
-	nxb.nxb_key = sk_alloc_data(nxb.nxb_key_len, Z_WAITOK | Z_NOFAIL,
+	nxb.nxb_key = sk_alloc_data(sizeof(uuid_key), Z_WAITOK | Z_NOFAIL,
 	    skmem_tag_nx_key);
+	nxb.nxb_key_len = sizeof(uuid_key);
 	bcopy(uuid_key, nxb.nxb_key, nxb.nxb_key_len);
 
 	err = nx_netif_netagent_fill_port_info(nif, nfr, &npi);
 	if (err != 0) {
-		sk_free_data(nxb.nxb_key, nxb.nxb_key_len);
+		sk_free_data_sized_by(nxb.nxb_key, nxb.nxb_key_len);
 		nfr->nfr_proc = NULL;
 		proc_rele(p);
 		return err;
@@ -309,7 +309,7 @@ nx_netif_netagent_flow_bind(struct nx_netif *nif, struct nx_flow_req *nfr)
 	nx_port = NEXUS_PORT_ANY;
 	err = NX_DOM(nx)->nxdom_bind_port(nx, &nx_port, &nxb, npi);
 	if (err != 0) {
-		sk_free_data(nxb.nxb_key, nxb.nxb_key_len);
+		sk_free_data_sized_by(nxb.nxb_key, nxb.nxb_key_len);
 		if (npi != NULL) {
 			sk_free_data(npi, sizeof(*npi));
 		}
@@ -643,7 +643,7 @@ SK_NO_INLINE_ATTRIBUTE
 static int
 nx_netif_netagent_handle_interpose_flow_add(struct nx_netif *nif,
     uuid_t flow_uuid, pid_t pid, struct necp_client_nexus_parameters *cparams,
-    void **results, size_t *results_length)
+    void * __sized_by(*results_length) *results, size_t *results_length)
 {
 #pragma unused(cparams)
 	int err;
@@ -678,7 +678,7 @@ SK_NO_INLINE_ATTRIBUTE
 static int
 nx_netif_netagent_handle_custom_ether_flow_add(struct nx_netif *nif,
     uuid_t flow_uuid, pid_t pid, struct necp_client_nexus_parameters *cparams,
-    void **results, size_t *results_length)
+    void * __sized_by(*results_length) *results, size_t *results_length)
 {
 	int err;
 	struct nx_flow_req nfr;
@@ -716,7 +716,7 @@ SK_NO_INLINE_ATTRIBUTE
 static int
 nx_netif_netagent_handle_ipv6_ula_flow_add(struct nx_netif *nif,
     uuid_t flow_uuid, pid_t pid, struct necp_client_nexus_parameters *cparams,
-    void **results, size_t *results_length)
+    void *__sized_by(*results_length) *results, size_t *results_length)
 {
 	int err;
 	struct nx_flow_req nfr;
@@ -801,7 +801,7 @@ SK_NO_INLINE_ATTRIBUTE
 static int
 nx_netif_netagent_handle_flow_add(struct nx_netif *nif,
     uuid_t flow_uuid, pid_t pid, struct necp_client_nexus_parameters *cparams,
-    void **results, size_t *results_length)
+    void * __sized_by(*results_length) *results, size_t *results_length)
 {
 	int err = 0;
 
@@ -844,7 +844,7 @@ nx_netif_netagent_handle_flow_del(struct nx_netif *nif,
 static int
 nx_netif_netagent_event(u_int8_t event, uuid_t flow_uuid, pid_t pid,
     void *context, void *ctx, struct necp_client_agent_parameters *cparams,
-    void **results, size_t *results_length)
+    void * __sized_by(*results_length) *results, size_t *results_length)
 {
 #pragma unused(context)
 	struct nx_netif *nif;

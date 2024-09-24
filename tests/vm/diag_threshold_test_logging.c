@@ -39,7 +39,7 @@ T_GLOBAL_META(
 
 
 T_DECL(diag_mem_threshold_logging_test,
-    "Logging test, log while handling posix signals")
+    "Logging test, log while handling posix signals", T_META_TAG_VM_PREFERRED)
 {
 	//diag_mem_threshold_set_setup(&diag_mem_threshold_logging_test);
 	int  iret1, iret2;

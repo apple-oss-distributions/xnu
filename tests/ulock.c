@@ -97,7 +97,7 @@ test_waker(void *arg __unused)
 }
 
 T_DECL(ulock_non_owner_wake, "ulock_wake respects non-owner wakes",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	pthread_t waiter, waker;
 
@@ -123,7 +123,7 @@ T_DECL(ulock_non_owner_wake, "ulock_wake respects non-owner wakes",
 	pthread_join(waiter, NULL);
 }
 
-T_DECL(ulock_wait_deadline, "ulock_wait2 with deadline", T_META_CHECK_LEAKS(false))
+T_DECL(ulock_wait_deadline, "ulock_wait2 with deadline", T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr = mach_timebase_info(&timebase_info);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_timebase_info");

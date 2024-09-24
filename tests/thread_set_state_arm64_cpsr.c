@@ -64,7 +64,7 @@ phase2()
 #endif
 
 T_DECL(thread_set_state_arm64_cpsr,
-    "Test that user mode cannot control privileged fields in CPSR/PSTATE.")
+    "Test that user mode cannot control privileged fields in CPSR/PSTATE.", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 #if !__arm64__
 	T_SKIP("Running on non-arm64 target, skipping...");

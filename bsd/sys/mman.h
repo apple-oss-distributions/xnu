@@ -298,8 +298,18 @@ void pshm_cache_init(void);     /* for bsd_init() */
  */
 struct mmap_args;
 struct fileproc;
-int pshm_mmap(struct proc *p, struct mmap_args *uap, user_addr_t *retval,
-    struct fileproc *fp, off_t pageoff);
+int pshm_mmap(
+	struct proc       *p,
+	vm_map_offset_t    user_addr,
+	vm_map_size_t      user_size,
+	int                prot,
+	int                flags,
+	struct fileproc   *fp,
+	off_t              file_pos,
+	off_t              pageoff,
+	user_addr_t       *retval);
+
+
 /* Really need to overhaul struct fileops to avoid this... */
 struct pshmnode;
 struct stat;

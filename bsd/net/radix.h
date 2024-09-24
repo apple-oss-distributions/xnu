@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,6 +65,10 @@
 #define _RADIX_H_
 
 #include <sys/appleapiopts.h>
+#include <sys/cdefs.h>
+#include <sys/socket.h>
+#include <stdint.h>
+
 #if KERNEL_PRIVATE
 #include <kern/kalloc.h>
 #endif /* KERNEL_PRIVATE */
@@ -74,6 +78,9 @@
 #ifdef MALLOC_DECLARE
 MALLOC_DECLARE(M_RTABLE);
 #endif
+
+
+#define __RN_INLINE_LENGTHS (__BIGGEST_ALIGNMENT__ > 4)
 
 /*
  * Radix search tree node layout.
@@ -88,6 +95,11 @@ struct radix_node {
 #define RNF_NORMAL      1               /* leaf contains normal route */
 #define RNF_ROOT        2               /* leaf is root leaf for tree */
 #define RNF_ACTIVE      4               /* This node is alive (for rtfree) */
+#if __RN_INLINE_LENGTHS
+	u_char  __rn_keylen;
+	u_char  __rn_masklen;
+	short   pad2;
+#endif /* __RN_INLINE_LENGTHS */
 	union {
 		struct {                        /* leaf only data: */
 			caddr_t rn_Key;         /* object of search */
@@ -117,63 +129,216 @@ struct radix_node {
 #endif
 
 #define rn_dupedkey     rn_u.rn_leaf.rn_Dupedkey
-#define rn_key          rn_u.rn_leaf.rn_Key
-#define rn_mask         rn_u.rn_leaf.rn_Mask
 #define rn_offset       rn_u.rn_node.rn_Off
 #define rn_left         rn_u.rn_node.rn_L
 #define rn_right        rn_u.rn_node.rn_R
 
 /*
- * Key storage for radix nodes.
+ * The `__rn_key' and `__rn_mask' fields are considered
+ * private in the BSD codebase, and should not be accessed directly.
+ * Outside of the BSD codebase these fields are exposed for the
+ * backwards compatibility.
  */
-#if __has_ptrcheck
-typedef char * __indexable rn_addr_storage_t;
-#define __RN_ADDR_STORAGE_MAX 255
-#define __RN_GET_STORAGE(p)                                     \
-	__unsafe_forge_bidi_indexable(char *, (p), __RN_ADDR_STORAGE_MAX)
-#else /* !__has_ptrcheck */
-typedef  char * rn_addr_storage_t;
-#define __RN_GET_STORAGE(p) (rn_addr_storage_t)(p)
-#endif /* __has_ptrcheck */
+#define __rn_key          rn_u.rn_leaf.rn_Key
+#define __rn_mask         rn_u.rn_leaf.rn_Mask
 
+#if !defined(BSD_KERNEL_PRIVATE)
+#define rn_key __rn_key
+#define rn_mask __rn_mask
+#endif /* !defined(BSD_KERNEL_PRIVATE) */
+
+typedef struct radix_node * __single radix_node_ref_t;
+
+#define rn_is_leaf(r) ((r)->rn_bit < 0)
+
+
+/*
+ * Sets the routing key bytes and length.
+ */
+static inline void
 __attribute__((always_inline))
-static inline __stateful_pure
-rn_addr_storage_t
-rn_get_key(struct radix_node *rn)
+rn_set_key(struct radix_node *rn, void *key __sized_by(keylen), uint8_t keylen)
 {
-	return __RN_GET_STORAGE(rn->rn_u.rn_leaf.rn_Key);
+#if __RN_INLINE_LENGTHS
+	rn->__rn_keylen = keylen;
+#else /* !__RN_INLINE_LENGTHS */
+	(void)keylen;
+#endif /* !__RN_INLINE_LENGTHS */
+	rn->__rn_key = key;
 }
 
+/*
+ * Returns the routing key length.
+ */
+static inline uint8_t
+__attribute__((always_inline)) __stateful_pure
+rn_get_keylen(struct radix_node *rn)
+{
+#if __RN_INLINE_LENGTHS
+	return rn->__rn_keylen;
+#else /* !__RN_INLINE_LENGTHS */
+	if (rn->__rn_key != NULL) {
+		return *((uint8_t *)rn->__rn_key);
+	} else {
+		return 0;
+	}
+#endif /* !__RN_INLINE_LENGTHS */
+}
+
+/*
+ * Returns the pointer to the routing key associated with
+ * the radix tree node.
+ * If the `-fbounds-safety' feature is both available and enabled,
+ * the returned value is sized by the corresponding key len.
+ * Otherwise, the returned value is a plain C pointer.
+ */
+static inline char * __header_indexable
+__attribute__((always_inline)) __stateful_pure
+rn_get_key(struct radix_node *rn)
+{
+	return __unsafe_forge_bidi_indexable(char *, rn->rn_u.rn_leaf.rn_Key,
+	           rn_get_keylen(rn));
+}
+
+/*
+ * Sets the routing mask bytes and length.
+ */
+static inline void
 __attribute__((always_inline))
-static inline __stateful_pure
-rn_addr_storage_t
+rn_set_mask(struct radix_node *rn, void *mask __sized_by(masklen), uint8_t masklen)
+{
+#if __RN_INLINE_LENGTHS
+	/*
+	 * Unlike the keys, the masks are always sockaddrs.
+	 * The first byte is the length of the addressable bytes,
+	 * whereas the second is the address family.
+	 *
+	 * To avoid memory traps, we are taking into the consideration
+	 * both the addressable length and the address family.
+	 */
+	uint8_t sa_len = *((uint8_t*)mask);
+	uint8_t sa_family = *(((uint8_t*)mask) + 1);
+	uint8_t allocation_size =
+	    (sa_family == AF_INET)    ? 16     /* sizeof(struct sockaddr_in) */
+	    : (sa_family == AF_INET6) ? 28     /* sizeof(struct sockaddr_in6) */
+	    : masklen;
+	/* Set the allocation size to be the max(sa_len, masklen, allocation_size) */
+	allocation_size = allocation_size < sa_len ? sa_len : allocation_size;
+	allocation_size = allocation_size < masklen ? masklen : allocation_size;
+	rn->__rn_masklen = allocation_size;
+#else /* !__RN_INLINE_LENGTHS */
+	(void)masklen;
+#endif /* !__RN_INLINE_LENGTHS */
+	rn->__rn_mask = mask;
+}
+
+/*
+ * Returns the routing mask length.
+ */
+static inline uint8_t
+__attribute__((always_inline)) __stateful_pure
+rn_get_masklen(struct radix_node *rn)
+{
+#if __RN_INLINE_LENGTHS
+	return rn->__rn_masklen;
+#else /* !__RN_INLINE_LENGTHS */
+	if (rn->__rn_mask != NULL) {
+		return *((uint8_t *)rn->__rn_mask);
+	} else {
+		return 0;
+	}
+#endif /* !__RN_INLINE_LENGTHS */
+}
+
+/*
+ * Returns the pointer to the routing mask associated with
+ * the radix tree node.
+ * If the `-fbounds-safety' feature is both available and enabled,
+ * the returned value is sized by the corresponding mask len.
+ * Otherwise, the returned value is a plain C pointer.
+ */
+static inline char * __header_indexable
+__attribute__((always_inline)) __stateful_pure
 rn_get_mask(struct radix_node *rn)
 {
-	return __RN_GET_STORAGE(rn->rn_u.rn_leaf.rn_Mask);
+	return __unsafe_forge_bidi_indexable(char *, rn->rn_u.rn_leaf.rn_Mask,
+	           rn_get_masklen(rn));
 }
 
 /*
  * Annotations to tree concerning potential routes applying to subtrees.
  */
-
 struct radix_mask {
 	short   rm_bit;                 /* bit offset; -1-index(netmask) */
 	char    rm_unused;              /* cf. rn_bmask */
 	u_char  rm_flags;               /* cf. rn_flags */
+#if __RN_INLINE_LENGTHS
+	u_char  __rm_masklen;
+	u_char  pad[3];
+#endif /* __RN_INNLINE_LENGTHS */
 	struct  radix_mask *rm_mklist;  /* more masks to try */
 	union   {
-		caddr_t rm_mask;                /* the mask */
+		caddr_t __rm_mask;              /* the mask, see note below. */
 		struct  radix_node *rm_leaf;    /* for normal routes */
 	};
 	int     rm_refs;                /* # of references to this struct */
 };
 
-__attribute__((always_inline))
-static inline __stateful_pure
-rn_addr_storage_t
+typedef struct radix_mask * __single radix_mask_ref_t;
+
+/*
+ * The `__rm_mask' field is considered private in the BSD
+ * codebase, and should not be accessed directly.
+ * Outside of the BSD codebase it is exposed for the
+ * backwards compatibility.
+ */
+#if !defined(BSD_KERNEL_PRIVATE)
+#define rm_mask __rm_mask
+#endif /* !defined(BSD_KERNEL_PRIVATE) */
+
+static inline void
+rm_set_mask(struct radix_mask *rm, void *mask __sized_by(masklen), uint8_t masklen)
+{
+#if __RN_INLINE_LENGTHS
+	rm->__rm_masklen = masklen;
+#else /* !__RN_INLINE_LENGTHS */
+	(void)masklen;
+#endif /* !__RN_INLINE_LENGTHS */
+	rm->__rm_mask = mask;
+}
+
+
+/*
+ * Returns the routing mask length.
+ */
+static inline uint8_t
+__attribute__((always_inline)) __stateful_pure
+rm_get_masklen(struct radix_mask *rm)
+{
+#if __RN_INLINE_LENGTHS
+	return rm->__rm_masklen;
+#else /* !__RN_INLINE_LENGTHS */
+	if (rn->__rn_mask != NULL) {
+		return *((uint8_t *)rm->__rm_mask);
+	} else {
+		return 0;
+	}
+#endif /* !__RN_INLINE_LENGTHS */
+}
+
+/*
+ * Returns the pointer to the routing mask associated with
+ * the radix tree mask node.
+ * If the `-fbounds-safety' feature is both available and enabled,
+ * the returned value is sized by the corresponding mask len.
+ * Otherwise, the returned value is a plain C pointer.
+ */
+static inline char * __header_indexable
+__attribute__((always_inline)) __stateful_pure
 rm_get_mask(struct radix_mask *rm)
 {
-	return __RN_GET_STORAGE(rm->rm_mask);
+	return __unsafe_forge_bidi_indexable(char *, rm->__rm_mask,
+	           rm_get_masklen(rm));
 }
 
 #define MKGet(m) {\
@@ -232,6 +397,8 @@ struct radix_node_head {
 	struct  radix_node rnh_nodes[3];        /* empty tree for common case */
 	int     rnh_cnt;                        /* tree dimension */
 };
+
+typedef struct radix_node_head * __single radix_node_head_ref_t;
 
 #ifndef KERNEL
 #define Bcmp(a, b, n) bcmp(((char *)(a)), ((char *)(b)), (n))

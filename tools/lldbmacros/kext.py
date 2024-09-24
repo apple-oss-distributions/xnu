@@ -1,6 +1,8 @@
 from collections import namedtuple
+from functools import cached_property
 import os
 import io
+from typing import Any, Generator
 import core
 from uuid import UUID
 
@@ -34,12 +36,14 @@ from xnu import (
     ArgumentStringToInt,
     GetObjectAtIndexFromArray,
     ResolveFSPath,
-    uuid_regex
+    uuid_regex,
+    GetLLDBThreadForKernelThread
 )
 
 import kmemory
 import macho
 import lldb
+import concurrent.futures
 
 
 #
@@ -52,11 +56,23 @@ import lldb
 #   segments - Mach-O segments (if available)
 #   summary  - OSKextLoadedSummary
 #   kmod     - kmod_info_t
-KextSummary = namedtuple(
-    'KextSummary',
-    'uuid vmaddr name address segments summary kmod'
-)
+class KextSummary:
+    def __init__(self, uuid: str, vmaddr, name: str, address: int, segments: list[MachOSegment], summary: core.value):
+        self.uuid = uuid
+        self.vmaddr = vmaddr
+        self.name = name
+        self.address = address
+        self.segments = segments
+        self.summary = summary
 
+    @cached_property
+    def kmod(self):
+        try:
+            kmod = GetKmodWithAddr(unsigned(self.address))
+        except ValueError:
+            kmod = None
+
+        return kmod
 
 # Segment helpers
 
@@ -120,7 +136,7 @@ def LoadMachO(address, size):
     return macho.MemMachO(bufio)
 
 
-def IterateKextSummaries(target):
+def IterateKextSummaries(target) -> Generator[KextSummary, Any, None]:
     """ Generator walking over all kext summaries. """
 
     hdr   = target.chkFindFirstGlobalVariable('gLoadedKextSummaries').Dereference()
@@ -138,13 +154,12 @@ def IterateKextSummaries(target):
             name=str(kext.name),
             address=unsigned(kext.address),
             segments=mobj.segments,
-            summary=kext,
-            kmod=GetKmodWithAddr(unsigned(kext.address))
+            summary=kext
         )
 
 
 @cache_dynamically
-def GetAllKextSummaries(target=None):
+def GetAllKextSummaries(target=None) -> list[KextSummary]:
     """ Return all kext summaries. (cached) """
 
     return list(IterateKextSummaries(target))
@@ -221,7 +236,9 @@ def GetUUIDSummary(uuid):
          'version', 'name'))
 def GetKextSummary(kmod):
     """ returns a string representation of kext information """
-
+    if not kmod:
+        return "kmod info missing"
+    
     format_string = (
         "{mod: <#020x} {mod.address: <#020x} {mod.size: <#020x} "
         "{mod.id: >3d} {mod.reference_count: >5d} {seg.vmaddr: <#020x} "
@@ -464,7 +481,77 @@ def AddKextSymsByName(kextname, all=False):
     return True
 
 
-@lldb_command('addkext', 'AF:N:')
+def AddKextByAddress(addr: str):
+    """ Given an address, load the kext which contains that address """
+
+    match = (
+        (kinfo, seg_contains(kinfo.segments, addr))
+        for kinfo in GetAllKextSummaries()
+        if any(seg_contains(kinfo.segments, addr))
+    )
+
+    # Load all kexts which contain given address.
+    print(GetKextSummary.header)
+    for kinfo, segs in match:
+        for s in segs:
+            print(f"{GetKextSummary(kinfo.kmod)} segment: {s.name} offset = {(addr - s.vmaddr):0x}")
+            FetchDSYM(kinfo)
+
+
+def AddKextByThread(addr: str):
+    """ Given a thread, load all kexts needed to symbolicate its backtrace """
+
+    thread_value = kern.GetValueFromAddress(addr, "thread_t")
+    thread_lldb_SBThread = GetLLDBThreadForKernelThread(thread_value)
+
+    kexts_needed = dict()
+    printed_header = False
+    for frame in thread_lldb_SBThread.frames:
+        if not frame.name:
+            frame_addr = frame.GetPC()
+
+            match = (
+                (kinfo, seg_contains(kinfo.segments, frame_addr))
+                for kinfo in GetAllKextSummaries()
+                if any(seg_contains(kinfo.segments, frame_addr))
+            )
+
+            if match and not printed_header:
+                print(GetKextSummary.header)
+                printed_header = True
+
+            for kinfo, segs in match:
+                for s in segs:
+                    print(f"{GetKextSummary(kinfo.kmod)} segment: {s.name} offset = {(frame_addr - s.vmaddr):0x}")
+                    kexts_needed[kinfo.uuid] = kinfo
+    
+    print(f"Fetching {len(kexts_needed)} dSyms")
+    pool = concurrent.futures.ThreadPoolExecutor()
+    for kinfo in kexts_needed.values():
+        pool.submit(FetchDSYM, kinfo)
+    pool.shutdown(wait=True)
+
+
+def AddKextByUUID(uuid: str):
+    """ Loads the dSym for a specific UUID, or all dSym """
+
+    kernel_uuid = str(kern.globals.kernel_uuid_string).lower()
+    load_all_kexts = (uuid == "all")
+    if not load_all_kexts and len(uuid_regex.findall(uuid)) == 0:
+        raise ArgumentError("Unknown argument {:s}".format(uuid))
+
+    pool = concurrent.futures.ThreadPoolExecutor()
+    for sum in GetAllKextSummaries():
+        cur_uuid = sum.uuid.lower()
+        if load_all_kexts or (uuid == cur_uuid):
+            if kernel_uuid != cur_uuid:
+                pool.submit(FetchDSYM, sum)
+    pool.shutdown(wait=True)
+
+    kern.symbolicator = None
+
+
+@lldb_command('addkext', 'AF:T:N:')
 def AddKextSyms(cmd_args=[], cmd_options={}):
     """ Add kext symbols into lldb.
         This command finds symbols for a uuid and load the required executable
@@ -474,6 +561,7 @@ def AddKextSyms(cmd_args=[], cmd_options={}):
             addkext -F <abs/path/to/executable> <load_address> : Load kext with executable at specified load address
             addkext -N <name> : Load one kext that matches the name provided. eg. (lldb) addkext -N corecrypto
             addkext -N <name> -A: Load all kext that matches the name provided. eg. to load all kext with Apple in name do (lldb) addkext -N Apple -A
+            addkext -T <thread>: Given a thread, load all kexts needed to symbolicate its backtrace
             addkext all    : Will load all the kext symbols - SLOW
     """
 
@@ -502,26 +590,17 @@ def AddKextSyms(cmd_args=[], cmd_options={}):
     if "-N" in cmd_options:
         kext_name = cmd_options["-N"]
         return AddKextSymsByName(kext_name, "-A" in cmd_options)
+    
+    # Load all kexts needed to symbolicate a thread's backtrace
+    if "-T" in cmd_options:
+        return AddKextByThread(cmd_options["-T"])
 
     # Load kexts by UUID or "all"
     if len(cmd_args) < 1:
         raise ArgumentError("No arguments specified.")
 
-    kernel_uuid = str(kern.globals.kernel_uuid_string).lower()
     uuid = cmd_args[0].lower()
-
-    load_all_kexts = (uuid == "all")
-    if not load_all_kexts and len(uuid_regex.findall(uuid)) == 0:
-        raise ArgumentError("Unknown argument {:s}".format(uuid))
-
-    for sum in GetAllKextSummaries():
-        cur_uuid = sum.uuid.lower()
-        if load_all_kexts or (uuid == cur_uuid):
-            if kernel_uuid != cur_uuid:
-                FetchDSYM(sum)
-
-    kern.symbolicator = None
-    return True
+    return AddKextByUUID(uuid)
 
 
 @lldb_command('addkextaddr')
@@ -533,20 +612,7 @@ def AddKextAddr(cmd_args=[]):
         raise ArgumentError("Insufficient arguments")
 
     addr = ArgumentStringToInt(cmd_args[0])
-    kernel_uuid = str(kern.globals.kernel_uuid_string).lower()
-
-    match = (
-        (kinfo, seg_contains(kinfo.segments, addr))
-        for kinfo in GetAllKextSummaries()
-        if any(seg_contains(kinfo.segments, addr))
-    )
-
-    # Load all kexts which contain given address.
-    print(GetKextSummary.header)
-    for kinfo, segs in match:
-        for s in segs:
-            print(GetKextSummary(kinfo.kmod) + " segment: {} offset = {:#0x}".format(s.name, (addr - s.vmaddr)))
-            FetchDSYM(kinfo)
+    AddKextByAddress(addr)
 
 
 class KextMemoryObject(kmemory.MemoryObject):
@@ -555,7 +621,7 @@ class KextMemoryObject(kmemory.MemoryObject):
     MO_KIND = "kext mach-o"
 
     def __init__(self, kmem, address, kinfo):
-        super(KextMemoryObject, self).__init__(kmem, address)
+        super().__init__(kmem, address)
         self.kinfo = kinfo
         self.target = kmem.target
 
@@ -613,7 +679,7 @@ class MainBinaryMemoryObject(kmemory.MemoryObject):
     MO_KIND = "kernel mach-o"
 
     def __init__(self, kmem, address, section):
-        super(MainBinaryMemoryObject, self).__init__(kmem, address)
+        super().__init__(kmem, address)
         self.section = section
         self.target = kmem.target
 

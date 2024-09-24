@@ -191,6 +191,9 @@ core_init_execution_modes(void)
 	pmcr1 = __builtin_arm_rsr64("PMCR1_EL1");
 	pmcr1 |= PMCR1_INIT;
 	__builtin_arm_wsr64("PMCR1_EL1", pmcr1);
+#if CONFIG_EXCLAVES
+	__builtin_arm_wsr64("PMCR1_EL12", pmcr1);
+#endif
 }
 
 #define PMSR_OVF(CTR) (1ULL << (CTR))
@@ -299,6 +302,8 @@ core_idle(__unused cpu_data_t *cpu)
 #if HAS_UNCORE_CTRS
 
 static bool mt_uncore_initted = false;
+
+static bool mt_uncore_suspended_cpd = false;
 
 /*
  * Uncore Performance Monitor
@@ -452,6 +457,18 @@ uncmon_unlock(struct uncore_monitor *mon, int intrs_en)
 	(void)ml_set_interrupts_enabled(intrs_en);
 }
 
+static bool
+uncmon_is_remote(unsigned int monid)
+{
+	if (monid >= MAX_NMONITORS) {
+		panic("monotonic: %s: invalid monid %u (> %u)", __FUNCTION__, monid, MAX_NMONITORS);
+	}
+	struct uncore_monitor *mon = &uncore_monitors[monid];
+#pragma unused(mon)
+	LCK_SPIN_ASSERT(&mon->um_lock, LCK_ASSERT_OWNED);
+	return monid == uncmon_get_curid();
+}
+
 /*
  * Helper functions for accessing the hardware -- these require the monitor be
  * locked to prevent other CPUs' PMI handlers from making local modifications
@@ -588,8 +605,7 @@ uncmon_write_counter_locked_r(unsigned int mon_id, unsigned int ctr,
 #endif /* UNCORE_PER_CLUSTER */
 
 static inline void
-uncmon_update_locked(unsigned int monid, unsigned int __unused curid,
-    unsigned int ctr)
+uncmon_update_locked(unsigned int monid, unsigned int ctr)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
 	if (!mon->um_sleeping) {
@@ -611,7 +627,7 @@ uncmon_update_locked(unsigned int monid, unsigned int __unused curid,
 #endif /* UNCORE_PER_CLUSTER */
 			    , ctr,
 			    monid, mon->um_snaps[ctr], snap,
-			    curid == monid ? "local" : "remote",
+			    uncmon_get_curid() == monid ? "local" : "remote",
 			    mon->um_last_read_id == monid ? "local" : "remote",
 			    mon->um_last_read_id,
 			    mon->um_read_since_sleep ? "" : ", first read since sleep"
@@ -821,8 +837,7 @@ uncore_init(__unused mt_device_t dev)
  */
 
 static void
-uncmon_read_all_counters(unsigned int monid, unsigned int curmonid,
-    uint64_t ctr_mask, uint64_t *counts)
+uncmon_read_all_counters(unsigned int monid, uint64_t ctr_mask, uint64_t *counts)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
 
@@ -831,7 +846,7 @@ uncmon_read_all_counters(unsigned int monid, unsigned int curmonid,
 	for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 		if (ctr_mask & (1ULL << ctr)) {
 			if (!mon->um_sleeping) {
-				uncmon_update_locked(monid, curmonid, ctr);
+				uncmon_update_locked(monid, ctr);
 			}
 			counts[ctr] = mon->um_counts[ctr];
 		}
@@ -859,13 +874,12 @@ uncore_read(uint64_t ctr_mask, uint64_t *counts_out)
 		return EINVAL;
 	}
 
-	unsigned int curmonid = uncmon_get_curid();
 	for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 		/*
 		 * Find this monitor's starting offset into the `counts_out` array.
 		 */
 		uint64_t *counts = counts_out + (UNCORE_NCTRS * monid);
-		uncmon_read_all_counters(monid, curmonid, ctr_mask, counts);
+		uncmon_read_all_counters(monid, ctr_mask, counts);
 	}
 
 	return 0;
@@ -905,18 +919,20 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 	/*
 	 * Clear the UPMCs the first time an event is added.
 	 */
-	unsigned int curmonid = uncmon_get_curid();
 	if (uncore_active_ctrs == 0) {
 		/*
 		 * Suspend powerdown until the next reset.
 		 */
+		assert(!mt_uncore_suspended_cpd);
 		suspend_cluster_powerdown();
+		mt_uncore_suspended_cpd = true;
 
 		for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 			struct uncore_monitor *mon = &uncore_monitors[monid];
-			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
+			bool remote = uncmon_is_remote(monid);
+
 			if (!mon->um_sleeping) {
 				for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 					if (remote) {
@@ -968,18 +984,19 @@ uncore_reset(void)
 {
 	mt_uncore_enabled = false;
 
-	unsigned int curmonid = uncmon_get_curid();
+	if (!mt_uncore_suspended_cpd) {
+		/* If we haven't already suspended CPD, we need to do so now to ensure we can issue remote reads
+		 * to every cluster. */
+		suspend_cluster_powerdown();
+		mt_uncore_suspended_cpd = true;
+	}
 
 	if (mt_owns_counters()) {
-		if (uncore_active_ctrs != 0) {
-			resume_cluster_powerdown();
-		}
-
 		for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 			struct uncore_monitor *mon = &uncore_monitors[monid];
-			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
+			bool remote = uncmon_is_remote(monid);
 			if (!mon->um_sleeping) {
 				if (remote) {
 #if UNCORE_PER_CLUSTER
@@ -1024,9 +1041,9 @@ uncore_reset(void)
 	if (mt_owns_counters()) {
 		for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 			struct uncore_monitor *mon = &uncore_monitors[monid];
-			bool remote = monid != curmonid;
 
 			int intrs_en = uncmon_lock(mon);
+			bool remote = uncmon_is_remote(monid);
 			if (!mon->um_sleeping) {
 				if (remote) {
 	#if UNCORE_PER_CLUSTER
@@ -1039,6 +1056,12 @@ uncore_reset(void)
 			uncmon_unlock(mon, intrs_en);
 		}
 	}
+
+	/* After reset, no counters should be active, so we can allow powerdown again */
+	if (mt_uncore_suspended_cpd) {
+		resume_cluster_powerdown();
+		mt_uncore_suspended_cpd = false;
+	}
 }
 
 /*
@@ -1046,10 +1069,11 @@ uncore_reset(void)
  */
 
 static void
-uncmon_set_enabled_l(unsigned int monid, bool enable)
+uncmon_set_enabled_l_locked(unsigned int monid, bool enable)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
-	int intrs_en = uncmon_lock(mon);
+#pragma unused(mon)
+	LCK_SPIN_ASSERT(&mon->um_lock, LCK_ASSERT_OWNED);
 
 	if (enable) {
 		uncmon_init_locked_l(monid);
@@ -1058,17 +1082,16 @@ uncmon_set_enabled_l(unsigned int monid, bool enable)
 	} else {
 		uncmon_set_counting_locked_l(monid, 0);
 	}
-
-	uncmon_unlock(mon, intrs_en);
 }
 
 #if UNCORE_PER_CLUSTER
 
 static void
-uncmon_set_enabled_r(unsigned int monid, bool enable)
+uncmon_set_enabled_r_locked(unsigned int monid, bool enable)
 {
 	struct uncore_monitor *mon = &uncore_monitors[monid];
-	int intrs_en = uncmon_lock(mon);
+#pragma unused(mon)
+	LCK_SPIN_ASSERT(&mon->um_lock, LCK_ASSERT_OWNED);
 
 	if (!mon->um_sleeping) {
 		if (enable) {
@@ -1079,8 +1102,6 @@ uncmon_set_enabled_r(unsigned int monid, bool enable)
 			uncmon_set_counting_locked_r(monid, 0);
 		}
 	}
-
-	uncmon_unlock(mon, intrs_en);
 }
 
 #endif /* UNCORE_PER_CLUSTER */
@@ -1090,15 +1111,17 @@ uncore_set_enabled(bool enable)
 {
 	mt_uncore_enabled = enable;
 
-	unsigned int curmonid = uncmon_get_curid();
 	for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
-		if (monid != curmonid) {
+		struct uncore_monitor *mon = &uncore_monitors[monid];
+		int intrs_en = uncmon_lock(mon);
+		if (uncmon_is_remote(monid)) {
 #if UNCORE_PER_CLUSTER
-			uncmon_set_enabled_r(monid, enable);
+			uncmon_set_enabled_r_locked(monid, enable);
 #endif /* UNCORE_PER_CLUSTER */
 		} else {
-			uncmon_set_enabled_l(monid, enable);
+			uncmon_set_enabled_l_locked(monid, enable);
 		}
+		uncmon_unlock(mon, intrs_en);
 	}
 }
 
@@ -1137,7 +1160,7 @@ uncore_fiq(uint64_t upmsr)
 	 */
 	for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 		if (UPMSR_OVF(upmsr, ctr)) {
-			uncmon_update_locked(monid, monid, ctr);
+			uncmon_update_locked(monid, ctr);
 			mon->um_snaps[ctr] = 0;
 			uncmon_write_counter_locked_l(monid, ctr, 0);
 		}
@@ -1163,14 +1186,12 @@ uncore_save(void)
 		return;
 	}
 
-	unsigned int curmonid = uncmon_get_curid();
-
 	for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
 		struct uncore_monitor *mon = &uncore_monitors[monid];
 		int intrs_en = uncmon_lock(mon);
 
 		if (mt_uncore_enabled) {
-			if (monid != curmonid) {
+			if (uncmon_is_remote(monid)) {
 #if UNCORE_PER_CLUSTER
 				uncmon_set_counting_locked_r(monid, 0);
 #endif /* UNCORE_PER_CLUSTER */
@@ -1181,7 +1202,7 @@ uncore_save(void)
 
 		for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 			if (uncore_active_ctrs & (1U << ctr)) {
-				uncmon_update_locked(monid, curmonid, ctr);
+				uncmon_update_locked(monid, ctr);
 				mon->um_snaps[ctr] = 0;
 				uncmon_write_counter_locked_l(monid, ctr, 0);
 			}
@@ -1198,6 +1219,8 @@ uncore_restore(void)
 	if (!uncore_active_ctrs) {
 		return;
 	}
+	/* Ensure interrupts disabled before reading uncmon_get_curid */
+	bool intr = ml_set_interrupts_enabled(false);
 	unsigned int curmonid = uncmon_get_curid();
 
 	struct uncore_monitor *mon = &uncore_monitors[curmonid];
@@ -1220,6 +1243,7 @@ uncore_restore(void)
 
 out:
 	uncmon_unlock(mon, intrs_en);
+	ml_set_interrupts_enabled(intr);
 }
 
 #endif /* HAS_UNCORE_CTRS */

@@ -400,49 +400,49 @@ T_HELPER_DECL(allocate_pages, "allocates pages to compress") {
 T_DECL(compr_10MB_zero,
     "Compression latency for 10MB - zero pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(10, ALL_ZEROS);
 }
 
 T_DECL(compr_10MB_mostly_zero,
     "Compression latency for 10MB - mostly zero pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(10, MOSTLY_ZEROS);
 }
 
 T_DECL(compr_10MB_random,
     "Compression latency for 10MB - random pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(10, RANDOM);
 }
 
 T_DECL(compr_10MB_typical,
     "Compression latency for 10MB - typical pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(10, TYPICAL);
 }
 
 T_DECL(compr_100MB_zero,
     "Compression latency for 100MB - zero pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(100, ALL_ZEROS);
 }
 
 T_DECL(compr_100MB_mostly_zero,
     "Compression latency for 100MB - mostly zero pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(100, MOSTLY_ZEROS);
 }
 
 T_DECL(compr_100MB_random,
     "Compression latency for 100MB - random pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(100, RANDOM);
 }
 #endif
@@ -450,6 +450,6 @@ T_DECL(compr_100MB_random,
 T_DECL(compr_100MB_typical,
     "Compression latency for 100MB - typical pages",
     T_META_ASROOT(true),
-    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY)) {
+    T_META_SYSCTL_INT(SYSCTL_FREEZE_TO_MEMORY), T_META_TAG_VM_NOT_ELIGIBLE) {
 	run_compressor_test(100, TYPICAL);
 }

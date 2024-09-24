@@ -29,12 +29,15 @@
 #include <skywalk/os_skywalk_private.h>
 #include <skywalk/packet/pbufpool_var.h>
 #include <sys/sdt.h>
+#include <net/droptap.h>
 
 static struct kern_pbufpool *pp_alloc(zalloc_flags_t);
 static void pp_free(struct kern_pbufpool *);
 static uint32_t pp_alloc_packet_common(struct kern_pbufpool *, uint16_t,
-    uint64_t *, uint32_t, boolean_t, alloc_cb_func_t, const void *, uint32_t);
-static void pp_free_packet_array(struct kern_pbufpool *, uint64_t *, uint32_t);
+    uint64_t *__counted_by(num), uint32_t num, boolean_t, alloc_cb_func_t,
+    const void *, uint32_t);
+static void pp_free_packet_array(struct kern_pbufpool *,
+    uint64_t *__counted_by(num)array, uint32_t num);
 static int pp_metadata_ctor_no_buflet(struct skmem_obj_info *,
     struct skmem_obj_info *, void *, uint32_t);
 static int pp_metadata_ctor_max_buflet(struct skmem_obj_info *,
@@ -49,7 +52,7 @@ static struct __kern_quantum *pp_metadata_init(struct __metadata_preamble *,
     struct kern_pbufpool *, uint16_t, uint32_t, struct skmem_obj **);
 static struct __metadata_preamble *pp_metadata_fini(struct __kern_quantum *,
     struct kern_pbufpool *, struct mbuf **, struct __kern_packet **,
-    struct skmem_obj **, struct skmem_obj **);
+    struct skmem_obj **, struct skmem_obj **, struct skmem_obj **, struct skmem_obj **);
 static void pp_purge_upp_locked(struct kern_pbufpool *pp, pid_t pid);
 static void pp_buf_seg_ctor(struct sksegment *, IOSKMemoryBufferRef, void *);
 static void pp_buf_seg_dtor(struct sksegment *, IOSKMemoryBufferRef, void *);
@@ -60,10 +63,12 @@ static void pp_free_buflet_common(const kern_pbufpool_t, kern_buflet_t);
 static mach_vm_address_t pp_alloc_buffer_common(const kern_pbufpool_t pp,
     struct skmem_obj_info *oi, uint32_t skmflag, bool large);
 static inline uint32_t
-pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t num, uint32_t skmflag, bool large);
+pp_alloc_buflet_common(struct kern_pbufpool *pp,
+    uint64_t *__counted_by(num)array, uint32_t num, uint32_t skmflag,
+    bool large);
 
 #define KERN_PBUFPOOL_U_HASH_SIZE       64      /* hash table size */
+#define KERN_BUF_MIN_STRIDING_SIZE      256 * 1024
 
 /*
  * Since the inputs are small (indices to the metadata region), we can use
@@ -81,6 +86,12 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
 	KERN_PBUFPOOL_U_HASH_SIZE - 1)])
 
 static SKMEM_TYPE_DEFINE(pp_zone, struct kern_pbufpool);
+
+#define SKMEM_TAG_PBUFPOOL_HASH  "com.apple.skywalk.pbufpool.hash"
+static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_hash, SKMEM_TAG_PBUFPOOL_HASH);
+
+#define SKMEM_TAG_PBUFPOOL_BFT_HASH  "com.apple.skywalk.pbufpool.bft.hash"
+static SKMEM_TAG_DEFINE(skmem_tag_pbufpool_bft_hash, SKMEM_TAG_PBUFPOOL_BFT_HASH);
 
 struct kern_pbufpool_u_htbl {
 	struct kern_pbufpool_u_bkt upp_hash[KERN_PBUFPOOL_U_HASH_SIZE];
@@ -318,8 +329,12 @@ pp_close(struct kern_pbufpool *pp)
 	}
 }
 
+/*
+ * -fbounds-safety: All callers of pp_regions_params_adjust use SKMEM_REGIONS
+ * size for the srp_array. This is same as marking it __counted_by(SKMEM_REGIONS)
+ */
 void
-pp_regions_params_adjust(struct skmem_region_params *srp_array,
+pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
     nexus_meta_type_t md_type, nexus_meta_subtype_t md_subtype, uint32_t md_cnt,
     uint16_t max_frags, uint32_t buf_size, uint32_t large_buf_size,
     uint32_t buf_cnt, uint32_t buf_seg_size, uint32_t flags)
@@ -424,6 +439,14 @@ pp_regions_params_adjust(struct skmem_region_params *srp_array,
 		buf_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
 	}
 	ASSERT((buf_srp->srp_cflags & SKMEM_REGION_CR_NOMAGAZINES) != 0);
+	if (buf_srp->srp_r_obj_size >= KERN_BUF_MIN_STRIDING_SIZE) {
+		/*
+		 * A buffer size larger than 256K indicates striding is in use, which
+		 * means a buffer could be detached from a buflet. In this case, magzine
+		 * layer should be enabled.
+		 */
+		buf_srp->srp_cflags &= ~SKMEM_REGION_CR_NOMAGAZINES;
+	}
 	ASSERT((buf_srp->srp_cflags & SKMEM_REGION_CR_UREADONLY) == 0);
 	if ((flags & PP_REGION_CONFIG_BUF_UREADONLY) != 0) {
 		buf_srp->srp_cflags |= SKMEM_REGION_CR_UREADONLY;
@@ -523,9 +546,9 @@ pp_metadata_construct(struct __kern_quantum *kqum, struct __user_quantum *uqum,
 	case NEXUS_META_TYPE_PACKET: {
 		struct __kern_packet *kpkt = SK_PTR_ADDR_KPKT(kqum);
 		struct __user_packet *upkt = SK_PTR_ADDR_UPKT(uqum);
-		struct __packet_opt *opt;
-		struct __flow *flow;
-		struct __packet_compl *compl;
+		struct __packet_opt *__single opt;
+		struct __flow *__single flow;
+		struct __packet_compl *__single compl;
 		uint64_t pflags;
 
 		if (raw) {
@@ -644,7 +667,7 @@ pp_metadata_ctor_common(struct skmem_obj_info *oi0,
 	struct __kern_quantum *kqum;
 	struct __user_quantum *uqum;
 	uint16_t bufcnt = (no_buflet ? 0 : pp->pp_max_frags);
-	struct skmem_obj *blist = NULL;
+	struct skmem_obj *__single blist = NULL;
 	int error;
 
 #if (DEVELOPMENT || DEBUG)
@@ -706,7 +729,7 @@ pp_metadata_ctor_common(struct skmem_obj_info *oi0,
 	/* allocate (constructed) buflet(s) with buffer(s) attached */
 	if (PP_HAS_BUFFER_ON_DEMAND(pp) && bufcnt != 0) {
 		(void) skmem_cache_batch_alloc(PP_KBFT_CACHE_DEF(pp), &blist,
-		    bufcnt, skmflag);
+		    PP_KBFT_CACHE_DEF(pp)->skm_objsize, bufcnt, skmflag);
 	}
 
 	error = pp_metadata_construct(kqum, uqum, SKMEM_OBJ_IDX_REG(oi), pp,
@@ -736,12 +759,16 @@ __attribute__((always_inline))
 static void
 pp_metadata_destruct_common(struct __kern_quantum *kqum,
     struct kern_pbufpool *pp, bool raw, struct skmem_obj **blist_def,
-    struct skmem_obj **blist_large)
+    struct skmem_obj **blist_nocache_def, struct skmem_obj **blist_large,
+    struct skmem_obj **blist_nocache_large)
 {
 	struct __kern_buflet *kbuf, *nbuf;
-	struct skmem_obj *p_blist_def = NULL, *p_blist_large = NULL;
+	struct skmem_obj *__single p_blist_def = NULL, *__single p_blist_large = NULL;
+	struct skmem_obj *__single p_blist_nocache_def = NULL, *__single p_blist_nocache_large = NULL;
 	struct skmem_obj **pp_blist_def = &p_blist_def;
 	struct skmem_obj **pp_blist_large = &p_blist_large;
+	struct skmem_obj **pp_blist_nocache_def = &p_blist_nocache_def;
+	struct skmem_obj **pp_blist_nocache_large = &p_blist_nocache_large;
 	uint16_t bufcnt, i = 0;
 	bool first_buflet_empty;
 
@@ -790,7 +817,12 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 		break;
 	}
 
-	nbuf = __DECONST(struct __kern_buflet *, kbuf->buf_nbft_addr);
+	/*
+	 * -fbounds-safety: buf_nbft_addr is a mach_vm_address_t which is
+	 * unsafe, so we forge it here.
+	 */
+	nbuf = __unsafe_forge_single(struct __kern_buflet *,
+	    __DECONST(struct __kern_buflet *, kbuf->buf_nbft_addr));
 	BUF_NBFT_ADDR(kbuf, 0);
 	BUF_NBFT_IDX(kbuf, OBJ_IDX_NONE);
 	if (!first_buflet_empty) {
@@ -799,17 +831,38 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 	}
 
 	while (nbuf != NULL) {
+		ASSERT(nbuf->buf_ctl != NULL);
 		if (BUFLET_HAS_LARGE_BUF(nbuf)) {
-			*pp_blist_large = (struct skmem_obj *)(void *)nbuf;
-			pp_blist_large =
-			    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			/*
+			 * bc_usecnt larger than 1 means the buffer has been cloned and is
+			 * still being used by other bflts. In this case, when we free
+			 * this bflt we need to explicitly ask for it to not be cached again
+			 * into magzine layer to prevent immediate reuse of the buffer and
+			 * data corruption.
+			 */
+			if (nbuf->buf_ctl->bc_usecnt > 1) {
+				*pp_blist_nocache_large = (struct skmem_obj *)(void *)nbuf;
+				pp_blist_nocache_large =
+				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			} else {
+				*pp_blist_large = (struct skmem_obj *)(void *)nbuf;
+				pp_blist_large =
+				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			}
 		} else {
-			*pp_blist_def = (struct skmem_obj *)(void *)nbuf;
-			pp_blist_def =
-			    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			if (nbuf->buf_ctl->bc_usecnt > 1) {
+				*pp_blist_nocache_def = (struct skmem_obj *)(void *)nbuf;
+				pp_blist_nocache_def =
+				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			} else {
+				*pp_blist_def = (struct skmem_obj *)(void *)nbuf;
+				pp_blist_def =
+				    &((struct skmem_obj *)(void *)nbuf)->mo_next;
+			}
 		}
 		BUF_NBFT_IDX(nbuf, OBJ_IDX_NONE);
-		nbuf = __DECONST(struct __kern_buflet *, nbuf->buf_nbft_addr);
+		nbuf = __unsafe_forge_single(struct __kern_buflet *,
+		    __DECONST(struct __kern_buflet *, nbuf->buf_nbft_addr));
 		++i;
 	}
 
@@ -822,6 +875,14 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 	if (p_blist_large != NULL) {
 		*pp_blist_large = *blist_large;
 		*blist_large = p_blist_large;
+	}
+	if (p_blist_nocache_def != NULL) {
+		*pp_blist_nocache_def = *blist_nocache_def;
+		*blist_nocache_def = p_blist_nocache_def;
+	}
+	if (p_blist_nocache_large != NULL) {
+		*pp_blist_nocache_large = *blist_nocache_large;
+		*blist_nocache_large = p_blist_nocache_large;
 	}
 
 	/* if we're about to return this object to the slab, clean it up */
@@ -866,18 +927,34 @@ pp_metadata_destruct_common(struct __kern_quantum *kqum,
 
 __attribute__((always_inline))
 static void
-pp_metadata_destruct(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
-    bool raw)
+pp_free_kbft_list(struct kern_pbufpool *pp, struct skmem_obj *blist_def, struct skmem_obj *blist_nocache_def,
+    struct skmem_obj *blist_large, struct skmem_obj *blist_nocache_large)
 {
-	struct skmem_obj *blist_def = NULL, *blist_large = NULL;
-
-	pp_metadata_destruct_common(kqum, pp, raw, &blist_def, &blist_large);
 	if (blist_def != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_DEF(pp), blist_def);
 	}
 	if (blist_large != NULL) {
 		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
 	}
+	if (blist_nocache_def != NULL) {
+		skmem_cache_batch_free_nocache(PP_KBFT_CACHE_DEF(pp), blist_nocache_def);
+	}
+	if (blist_nocache_large != NULL) {
+		skmem_cache_batch_free_nocache(PP_KBFT_CACHE_LARGE(pp), blist_nocache_large);
+	}
+}
+
+__attribute__((always_inline))
+static void
+pp_metadata_destruct(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
+    bool raw)
+{
+	struct skmem_obj *__single blist_def = NULL, *__single blist_large = NULL;
+	struct skmem_obj *__single blist_nocache_def = NULL, *__single blist_nocache_large = NULL;
+
+	pp_metadata_destruct_common(kqum, pp, raw, &blist_def, &blist_nocache_def,
+	    &blist_large, &blist_nocache_large);
+	pp_free_kbft_list(pp, blist_def, blist_nocache_def, blist_large, blist_nocache_large);
 }
 
 static void
@@ -890,7 +967,7 @@ pp_metadata_dtor(void *addr, void *arg)
 static void
 pp_buf_seg_ctor(struct sksegment *sg, IOSKMemoryBufferRef md, void *arg)
 {
-	struct kern_pbufpool *pp = arg;
+	struct kern_pbufpool *__single pp = arg;
 
 	if (pp->pp_pbuf_seg_ctor != NULL) {
 		pp->pp_pbuf_seg_ctor(pp, sg, md);
@@ -900,7 +977,7 @@ pp_buf_seg_ctor(struct sksegment *sg, IOSKMemoryBufferRef md, void *arg)
 static void
 pp_buf_seg_dtor(struct sksegment *sg, IOSKMemoryBufferRef md, void *arg)
 {
-	struct kern_pbufpool *pp = arg;
+	struct kern_pbufpool *__single pp = arg;
 
 	if (pp->pp_pbuf_seg_dtor != NULL) {
 		pp->pp_pbuf_seg_dtor(pp, sg, md);
@@ -962,9 +1039,9 @@ pp_buflet_large_buffer_metadata_ctor(struct skmem_obj_info *oi0,
 static void
 pp_buflet_metadata_dtor(void *addr, void *arg)
 {
-	struct __kern_buflet *kbft = addr;
+	struct __kern_buflet *__single kbft = addr;
 	void *objaddr = kbft->buf_objaddr;
-	struct kern_pbufpool *pp = arg;
+	struct kern_pbufpool *__single pp = arg;
 	uint32_t usecnt = 0;
 	bool large = BUFLET_HAS_LARGE_BUF(kbft);
 
@@ -993,8 +1070,12 @@ pp_buflet_metadata_dtor(void *addr, void *arg)
 	}
 }
 
+/*
+ * -fbounds-safety: all callers of pp_create use srp_array with a known size:
+ * SKMEM_REGIONS. This is same as marking it __counted_by(SKMEM_REGIONS)
+ */
 struct kern_pbufpool *
-pp_create(const char *name, struct skmem_region_params *srp_array,
+pp_create(const char *name, struct skmem_region_params srp_array[SKMEM_REGIONS],
     pbuf_seg_ctor_fn_t buf_seg_ctor, pbuf_seg_dtor_fn_t buf_seg_dtor,
     const void *ctx, pbuf_ctx_retain_fn_t ctx_retain,
     pbuf_ctx_release_fn_t ctx_release, uint32_t ppcreatef)
@@ -1006,7 +1087,9 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	nexus_meta_subtype_t md_subtype;
 	uint32_t md_cflags;
 	uint16_t max_frags;
+	uint32_t buf_def_cflags;
 	char cname[64];
+	const char *__null_terminated cache_name = NULL;
 	struct skmem_region_params *kmd_srp;
 	struct skmem_region_params *buf_srp;
 	struct skmem_region_params *kbft_srp;
@@ -1213,13 +1296,13 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	/*
 	 * Create the metadata cache; magazines layer is determined by caller.
 	 */
-	(void) snprintf(cname, sizeof(cname), "kmd.%s", name);
+	cache_name = tsnprintf(cname, sizeof(cname), "kmd.%s", name);
 	if (PP_HAS_BUFFER_ON_DEMAND(pp)) {
-		pp->pp_kmd_cache = skmem_cache_create(cname, md_size, 0,
+		pp->pp_kmd_cache = skmem_cache_create(cache_name, md_size, 0,
 		    pp_metadata_ctor_no_buflet, pp_metadata_dtor, NULL, pp,
 		    pp->pp_kmd_region, md_cflags);
 	} else {
-		pp->pp_kmd_cache = skmem_cache_create(cname, md_size, 0,
+		pp->pp_kmd_cache = skmem_cache_create(cache_name, md_size, 0,
 		    pp_metadata_ctor_max_buflet, pp_metadata_dtor, NULL, pp,
 		    pp->pp_kmd_region, md_cflags);
 	}
@@ -1234,8 +1317,8 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	 * Create the buflet metadata cache
 	 */
 	if (pp->pp_kbft_region != NULL) {
-		(void) snprintf(cname, sizeof(cname), "kbft_def.%s", name);
-		PP_KBFT_CACHE_DEF(pp) = skmem_cache_create(cname,
+		cache_name = tsnprintf(cname, sizeof(cname), "kbft_def.%s", name);
+		PP_KBFT_CACHE_DEF(pp) = skmem_cache_create(cache_name,
 		    kbft_srp->srp_c_obj_size, 0,
 		    pp_buflet_default_buffer_metadata_ctor,
 		    pp_buflet_metadata_dtor, NULL, pp, pp->pp_kbft_region,
@@ -1250,9 +1333,9 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 		if (PP_HAS_LARGE_BUF(pp)) {
 			/* Aggressive memory reclaim flag set to kbft_large for now */
 			md_cflags |= SKMEM_CR_RECLAIM;
-			(void) snprintf(cname, sizeof(cname), "kbft_large.%s",
-			    name);
-			PP_KBFT_CACHE_LARGE(pp) = skmem_cache_create(cname,
+			cache_name = tsnprintf(cname, sizeof(cname),
+			    "kbft_large.%s", name);
+			PP_KBFT_CACHE_LARGE(pp) = skmem_cache_create(cache_name,
 			    kbft_srp->srp_c_obj_size, 0,
 			    pp_buflet_large_buffer_metadata_ctor,
 			    pp_buflet_metadata_dtor,
@@ -1288,18 +1371,20 @@ pp_create(const char *name, struct skmem_region_params *srp_array,
 	 * Create the buffer object cache without the magazines layer.
 	 * We rely on caching the constructed metadata object instead.
 	 */
-	(void) snprintf(cname, sizeof(cname), "buf_def.%s", name);
-	if ((PP_BUF_CACHE_DEF(pp) = skmem_cache_create(cname, def_buf_obj_size,
+	cache_name = tsnprintf(cname, sizeof(cname), "buf_def.%s", name);
+	buf_def_cflags = buf_srp->srp_cflags & SKMEM_REGION_CR_NOMAGAZINES ? SKMEM_CR_NOMAGAZINES : 0;
+	if ((PP_BUF_CACHE_DEF(pp) = skmem_cache_create(cache_name,
+	    def_buf_obj_size,
 	    0, NULL, NULL, NULL, pp, PP_BUF_REGION_DEF(pp),
-	    SKMEM_CR_NOMAGAZINES)) == NULL) {
+	    buf_def_cflags)) == NULL) {
 		SK_ERR("\"%s\" (0x%llx) failed to create \"%s\" cache",
 		    pp->pp_name, SK_KVA(pp), cname);
 		goto failed;
 	}
 
 	if (PP_BUF_REGION_LARGE(pp) != NULL) {
-		(void) snprintf(cname, sizeof(cname), "buf_large.%s", name);
-		if ((PP_BUF_CACHE_LARGE(pp) = skmem_cache_create(cname,
+		cache_name = tsnprintf(cname, sizeof(cname), "buf_large.%s", name);
+		if ((PP_BUF_CACHE_LARGE(pp) = skmem_cache_create(cache_name,
 		    lbuf_srp->srp_c_obj_size, 0, NULL, NULL, NULL, pp,
 		    PP_BUF_REGION_LARGE(pp), SKMEM_CR_NOMAGAZINES)) == NULL) {
 			SK_ERR("\"%s\" (0x%llx) failed to create \"%s\" cache",
@@ -1408,8 +1493,21 @@ pp_init_upp_locked(struct kern_pbufpool *pp, boolean_t can_block)
 	}
 
 	/* allocated-address hash table */
-	pp->pp_u_hash_table = can_block ? zalloc(pp_u_htbl_zone) :
-	    zalloc_noblock(pp_u_htbl_zone);
+	/*
+	 * -fbounds-safety: We switched to sk_alloc (aka kalloc) from zalloc, so
+	 * if we see any performance hit, we can check if this caused it.
+	 */
+	if (can_block) {
+		pp->pp_u_hash_table = sk_alloc_type_array(
+			struct kern_pbufpool_u_bkt, KERN_PBUFPOOL_U_HASH_SIZE,
+			Z_WAITOK, skmem_tag_pbufpool_hash);
+		pp->pp_u_hash_table_size = KERN_PBUFPOOL_U_HASH_SIZE;
+	} else {
+		pp->pp_u_hash_table = sk_alloc_type_array(
+			struct kern_pbufpool_u_bkt, KERN_PBUFPOOL_U_HASH_SIZE,
+			Z_NOWAIT, skmem_tag_pbufpool_hash);
+		pp->pp_u_hash_table_size = KERN_PBUFPOOL_U_HASH_SIZE;
+	}
 	if (pp->pp_u_hash_table == NULL) {
 		SK_ERR("failed to zalloc packet buffer pool upp hash table");
 		err = ENOMEM;
@@ -1437,8 +1535,9 @@ pp_destroy_upp_locked(struct kern_pbufpool *pp)
 		}
 #endif /* DEBUG || DEVELOPMENT */
 
-		zfree(pp_u_htbl_zone, pp->pp_u_hash_table);
-		pp->pp_u_hash_table = NULL;
+		kfree_type_counted_by(struct kern_pbufpool_u_bkt,
+		    pp->pp_u_hash_table_size,
+		    pp->pp_u_hash_table);
 	}
 	ASSERT(pp->pp_u_bufinuse == 0);
 }
@@ -1489,7 +1588,8 @@ pp_insert_upp_bft_chain_locked(struct kern_pbufpool *pp,
 {
 	while (kbft != NULL) {
 		pp_insert_upp_bft_locked(pp, kbft, pid);
-		kbft = __DECONST(kern_buflet_t, kbft->buf_nbft_addr);
+		kbft = __unsafe_forge_single(struct __kern_buflet *,
+		    __DECONST(kern_buflet_t, kbft->buf_nbft_addr));
 	}
 }
 
@@ -1508,7 +1608,7 @@ pp_insert_upp_common(struct kern_pbufpool *pp, struct __kern_quantum *kqum,
 	SLIST_INSERT_HEAD(&bkt->upp_head, kqum, qum_upp_link);
 	pp->pp_u_bufinuse++;
 
-	kbft = (kern_buflet_t)kqum->qum_buf[0].buf_nbft_addr;
+	kbft = __unsafe_forge_single(struct __kern_buflet *, (kern_buflet_t)kqum->qum_buf[0].buf_nbft_addr);
 	if (kbft != NULL) {
 		ASSERT(((kern_buflet_t)kbft)->buf_flag & BUFLET_FLAG_EXTERNAL);
 		ASSERT(kqum->qum_qflags & QUM_F_INTERNALIZED);
@@ -1532,19 +1632,18 @@ pp_insert_upp(struct kern_pbufpool *pp, struct __kern_quantum *kqum, pid_t pid)
 }
 
 void
-pp_insert_upp_batch(struct kern_pbufpool *pp, pid_t pid, uint64_t *array,
-    uint32_t num)
+pp_insert_upp_batch(struct kern_pbufpool *pp, pid_t pid,
+    uint64_t *__counted_by(num)array, uint32_t num)
 {
 	uint32_t i = 0;
 
 	ASSERT(array != NULL && num > 0);
 	PP_LOCK(pp);
-	while (num != 0) {
+	while (i < num) {
 		struct __kern_quantum *kqum = SK_PTR_ADDR_KQUM(array[i]);
 
 		ASSERT(kqum != NULL);
 		pp_insert_upp_common(pp, kqum, pid);
-		--num;
 		++i;
 	}
 	PP_UNLOCK(pp);
@@ -1628,7 +1727,7 @@ pp_remove_upp_bft_chain_locked(struct kern_pbufpool *pp,
 		ASSERT(kbft->buf_flag & BUFLET_FLAG_EXTERNAL);
 		BUF_NBFT_IDX(pbft, bft_idx);
 		BUF_NBFT_ADDR(pbft, kbft);
-		kbe = (struct __kern_buflet_ext *)kbft;
+		kbe = __container_of(kbft, struct __kern_buflet_ext, kbe_overlay);
 		bft_idx = kbe->kbe_buf_user->buf_nbft_idx;
 		++nbfts;
 	} while ((bft_idx != OBJ_IDX_NONE) && (nbfts < upkt_nbfts));
@@ -1782,8 +1881,21 @@ pp_init_upp_bft_locked(struct kern_pbufpool *pp, boolean_t can_block)
 	}
 
 	/* allocated-address hash table */
-	pp->pp_u_bft_hash_table = can_block ? zalloc(pp_u_htbl_zone) :
-	    zalloc_noblock(pp_u_htbl_zone);
+	/*
+	 * -fbounds-safety: We switched to sk_alloc (aka kalloc) from zalloc, so
+	 * if we see any performance hit, we can check if this caused it.
+	 */
+	if (can_block) {
+		pp->pp_u_bft_hash_table = sk_alloc_type_array(
+			struct kern_pbufpool_u_bft_bkt, KERN_PBUFPOOL_U_HASH_SIZE,
+			Z_WAITOK, skmem_tag_pbufpool_bft_hash);
+		pp->pp_u_bft_hash_table_size = KERN_PBUFPOOL_U_HASH_SIZE;
+	} else {
+		pp->pp_u_bft_hash_table = sk_alloc_type_array(
+			struct kern_pbufpool_u_bft_bkt, KERN_PBUFPOOL_U_HASH_SIZE,
+			Z_NOWAIT, skmem_tag_pbufpool_bft_hash);
+		pp->pp_u_bft_hash_table_size = KERN_PBUFPOOL_U_HASH_SIZE;
+	}
 	if (pp->pp_u_bft_hash_table == NULL) {
 		SK_ERR("failed to zalloc packet buffer pool upp buflet hash table");
 		err = ENOMEM;
@@ -1812,8 +1924,9 @@ pp_destroy_upp_bft_locked(struct kern_pbufpool *pp)
 		}
 #endif /* DEBUG || DEVELOPMENT */
 
-		zfree(pp_u_htbl_zone, pp->pp_u_bft_hash_table);
-		pp->pp_u_bft_hash_table = NULL;
+		kfree_type_counted_by(struct kern_pbufpool_u_bft_bkt,
+		    pp->pp_u_bft_hash_table_size,
+		    pp->pp_u_bft_hash_table);
 	}
 	ASSERT(pp->pp_u_bftinuse == 0);
 }
@@ -1896,15 +2009,19 @@ pp_metadata_init(struct __metadata_preamble *mdp, struct kern_pbufpool *pp,
 		if (PP_HAS_BUFFER_ON_DEMAND(pp)) {
 			ASSERT(kbuf->buf_ctl == NULL);
 			ASSERT(kbuf->buf_addr == 0);
-			kbuf = __DECONST(struct __kern_buflet *,
-			    kbuf->buf_nbft_addr);
+			/*
+			 * -fbounds-safety: buf_nbft_addr is a mach_vm_address_t
+			 * which is unsafe, so we just forge it here.
+			 */
+			kbuf = __unsafe_forge_single(struct __kern_buflet *,
+			    __DECONST(struct __kern_buflet *, kbuf->buf_nbft_addr));
 		}
 		/* initialize kernel buflet */
 		for (i = 0; i < bufcnt; i++) {
 			ASSERT(kbuf != NULL);
 			KBUF_INIT(kbuf);
-			kbuf = __DECONST(struct __kern_buflet *,
-			    kbuf->buf_nbft_addr);
+			kbuf = __unsafe_forge_single(struct __kern_buflet *,
+			    __DECONST(struct __kern_buflet *, kbuf->buf_nbft_addr));
 		}
 		ASSERT((kbuf == NULL) || (bufcnt == 0));
 		break;
@@ -1934,28 +2051,30 @@ pp_metadata_init(struct __metadata_preamble *mdp, struct kern_pbufpool *pp,
 __attribute__((always_inline))
 static inline uint32_t
 pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
-    uint64_t *array, uint32_t num, boolean_t tagged, alloc_cb_func_t cb,
-    const void *ctx, uint32_t skmflag)
+    uint64_t *__counted_by(num)array, uint32_t num, boolean_t tagged,
+    alloc_cb_func_t cb, const void *ctx, uint32_t skmflag)
 {
 	struct __metadata_preamble *mdp;
 	struct __kern_quantum *kqum = NULL;
 	uint32_t allocp, need = num;
-	struct skmem_obj *plist, *blist = NULL;
+	struct skmem_obj *__single plist, *__single blist = NULL;
+	uint64_t *array_cp;  /* -fbounds-safety */
 
 	ASSERT(bufcnt <= pp->pp_max_frags);
 	ASSERT(array != NULL && num > 0);
 	ASSERT(PP_BATCH_CAPABLE(pp));
 
 	/* allocate (constructed) packet(s) with buffer(s) attached */
-	allocp = skmem_cache_batch_alloc(pp->pp_kmd_cache, &plist, num,
-	    skmflag);
+	allocp = skmem_cache_batch_alloc(pp->pp_kmd_cache, &plist,
+	    pp->pp_kmd_cache->skm_objsize, num, skmflag);
 
 	/* allocate (constructed) buflet(s) with buffer(s) attached */
 	if (PP_HAS_BUFFER_ON_DEMAND(pp) && bufcnt != 0 && allocp != 0) {
 		(void) skmem_cache_batch_alloc(PP_KBFT_CACHE_DEF(pp), &blist,
-		    (allocp * bufcnt), skmflag);
+		    PP_KBFT_CACHE_DEF(pp)->skm_objsize, (allocp * bufcnt), skmflag);
 	}
 
+	array_cp = array;
 	while (plist != NULL) {
 		struct skmem_obj *plistn;
 
@@ -1983,17 +2102,17 @@ pp_alloc_packet_common(struct kern_pbufpool *pp, uint16_t bufcnt,
 #endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		if (tagged) {
-			*array = SK_PTR_ENCODE(kqum, METADATA_TYPE(kqum),
+			*array_cp = SK_PTR_ENCODE(kqum, METADATA_TYPE(kqum),
 			    METADATA_SUBTYPE(kqum));
 		} else {
-			*array = (uint64_t)kqum;
+			*array_cp = (uint64_t)kqum;
 		}
 
 		if (cb != NULL) {
-			(cb)(*array, (num - need), ctx);
+			(cb)(*array_cp, (num - need), ctx);
 		}
 
-		++array;
+		++array_cp;
 		plist = plistn;
 
 		ASSERT(need > 0);
@@ -2018,8 +2137,8 @@ pp_alloc_packet(struct kern_pbufpool *pp, uint16_t bufcnt, uint32_t skmflag)
 
 int
 pp_alloc_packet_batch(struct kern_pbufpool *pp, uint16_t bufcnt,
-    uint64_t *array, uint32_t *size, boolean_t tagged, alloc_cb_func_t cb,
-    const void *ctx, uint32_t skmflag)
+    uint64_t *__counted_by(*size)array, uint32_t *size, boolean_t tagged,
+    alloc_cb_func_t cb, const void *ctx, uint32_t skmflag)
 {
 	uint32_t i, n;
 	int err;
@@ -2027,10 +2146,20 @@ pp_alloc_packet_batch(struct kern_pbufpool *pp, uint16_t bufcnt,
 	ASSERT(array != NULL && size > 0);
 
 	n = *size;
-	*size = 0;
+	/*
+	 * -fbounds-safety: Originally there was this line here: *size = 0; but
+	 * we removed this because array is now __counted_by(*size), so *size =
+	 * 0 leads to brk 0x5519. Also, *size is set to i anyway.
+	 */
 
 	i = pp_alloc_packet_common(pp, bufcnt, array, n, tagged,
 	    cb, ctx, skmflag);
+	/*
+	 * -fbounds-safety: Since array is __counted_by(*size), we need to be
+	 * extra careful when *size is updated, like below. Here, we know i will
+	 * be less than or equal to the original *size value, so updating *size
+	 * is okay.
+	 */
 	*size = i;
 
 	if (__probable(i == n)) {
@@ -2052,7 +2181,7 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 	struct __metadata_preamble *mdp;
 	struct __kern_packet *kpkt = NULL;
 	uint32_t allocp, need = num;
-	struct skmem_obj *plist, *blist = NULL;
+	struct skmem_obj *__single plist, *__single blist = NULL;
 	int err;
 
 	ASSERT(pktq != NULL && num > 0);
@@ -2061,13 +2190,13 @@ pp_alloc_pktq(struct kern_pbufpool *pp, uint16_t bufcnt,
 	ASSERT(PP_BATCH_CAPABLE(pp));
 
 	/* allocate (constructed) packet(s) with buffer(s) attached */
-	allocp = skmem_cache_batch_alloc(pp->pp_kmd_cache, &plist, num,
-	    skmflag);
+	allocp = skmem_cache_batch_alloc(pp->pp_kmd_cache, &plist,
+	    pp->pp_kmd_cache->skm_objsize, num, skmflag);
 
 	/* allocate (constructed) buflet(s) with buffer(s) attached */
 	if (PP_HAS_BUFFER_ON_DEMAND(pp) && bufcnt != 0 && allocp != 0) {
 		(void) skmem_cache_batch_alloc(PP_KBFT_CACHE_DEF(pp), &blist,
-		    (allocp * bufcnt), skmflag);
+		    PP_KBFT_CACHE_DEF(pp)->skm_objsize, (allocp * bufcnt), skmflag);
 	}
 
 	while (plist != NULL) {
@@ -2145,7 +2274,8 @@ __attribute__((always_inline))
 static inline struct __metadata_preamble *
 pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
     struct mbuf **mp, struct __kern_packet **kpp, struct skmem_obj **blist_def,
-    struct skmem_obj **blist_large)
+    struct skmem_obj **blist_nocache_def, struct skmem_obj **blist_large,
+    struct skmem_obj **blist_nocahce_large)
 {
 	struct __metadata_preamble *mdp = METADATA_PREAMBLE(kqum);
 
@@ -2196,8 +2326,8 @@ pp_metadata_fini(struct __kern_quantum *kqum, struct kern_pbufpool *pp,
 	}
 
 	if (__improbable(PP_HAS_BUFFER_ON_DEMAND(pp))) {
-		pp_metadata_destruct_common(kqum, pp, FALSE, blist_def,
-		    blist_large);
+		pp_metadata_destruct_common(kqum, pp, FALSE, blist_def, blist_nocache_def,
+		    blist_large, blist_nocahce_large);
 	}
 	return mdp;
 }
@@ -2206,14 +2336,15 @@ void
 pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 {
 	struct __metadata_preamble *mdp;
-	struct skmem_obj *top = NULL;
-	struct skmem_obj *blist_def = NULL;
-	struct skmem_obj *blist_large = NULL;
+	struct skmem_obj *__single obj_mdp;
+	struct skmem_obj *__single top = NULL;
+	struct skmem_obj *__single blist_def = NULL, *__single blist_nocache_def = NULL;
+	struct skmem_obj *__single blist_large = NULL, *__single blist_nocache_large = NULL;
 	struct skmem_obj **list = &top;
-	struct mbuf *mtop = NULL;
+	struct mbuf *__single mtop = NULL;
 	struct mbuf **mp = &mtop;
-	struct __kern_packet *kptop = NULL;
-	struct __kern_packet **kpp = &kptop, *pkt, *next;
+	struct __kern_packet *__single kptop = NULL;
+	struct __kern_packet **__single kpp = &kptop, *pkt, *next;
 	struct kern_pbufpool *pp;
 	int c = 0;
 
@@ -2227,9 +2358,10 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 
 		ASSERT(SK_PTR_ADDR_KQUM(pkt)->qum_pp == pp);
 		mdp = pp_metadata_fini(SK_PTR_ADDR_KQUM(pkt), pp,
-		    mp, kpp, &blist_def, &blist_large);
+		    mp, kpp, &blist_def, &blist_nocache_def, &blist_large, &blist_nocache_large);
 
-		*list = (struct skmem_obj *)mdp;
+		obj_mdp = __unsafe_forge_single(struct skmem_obj *, mdp);
+		*list = obj_mdp;
 		list = &(*list)->mo_next;
 		c++;
 
@@ -2245,14 +2377,7 @@ pp_free_packet_chain(struct __kern_packet *pkt_chain, int *npkt)
 
 	ASSERT(top != NULL);
 	skmem_cache_batch_free(pp->pp_kmd_cache, top);
-	if (blist_def != NULL) {
-		skmem_cache_batch_free(PP_KBFT_CACHE_DEF(pp), blist_def);
-		blist_def = NULL;
-	}
-	if (blist_large != NULL) {
-		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
-		blist_large = NULL;
-	}
+	pp_free_kbft_list(pp, blist_def, blist_nocache_def, blist_large, blist_nocache_large);
 	if (mtop != NULL) {
 		DTRACE_SKYWALK(free__attached__mbuf);
 		if (__probable(mtop->m_nextpkt != NULL)) {
@@ -2282,18 +2407,50 @@ pp_free_pktq(struct pktq *pktq)
 	KPKTQ_DISPOSE(pktq);
 }
 
+void
+pp_drop_pktq(struct pktq *pktq, struct ifnet *ifp, uint16_t flags,
+    drop_reason_t reason, const char *funcname, uint16_t linenum)
+{
+	drop_func_t dropfunc;
+	struct __kern_packet *kpkt;
+
+	if (KPKTQ_EMPTY(pktq)) {
+		return;
+	}
+	if (__probable(droptap_total_tap_count == 0)) {
+		goto nodroptap;
+	}
+
+	if (flags & DROPTAP_FLAG_DIR_OUT) {
+		dropfunc = droptap_output_packet;
+	} else if (flags & DROPTAP_FLAG_DIR_IN) {
+		dropfunc = droptap_input_packet;
+	} else {
+		goto nodroptap;
+	}
+
+	KPKTQ_FOREACH(kpkt, pktq) {
+		dropfunc(SK_PKT2PH(kpkt), reason, funcname, linenum, flags, ifp,
+		    kpkt->pkt_qum.qum_pid, NULL, -1, NULL, 0, 0);
+	}
+
+nodroptap:
+	pp_free_pktq(pktq);
+}
+
 __attribute__((always_inline))
 static inline void
-pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
+pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *__counted_by(num)array, uint32_t num)
 {
 	struct __metadata_preamble *mdp;
-	struct skmem_obj *top = NULL;
-	struct skmem_obj *blist_def = NULL;
-	struct skmem_obj *blist_large = NULL;
+	struct skmem_obj *__single obj_mdp = NULL;
+	struct skmem_obj *__single top = NULL;
+	struct skmem_obj *__single blist_def = NULL, *__single blist_nocache_def = NULL;
+	struct skmem_obj *__single blist_large = NULL, *__single blist_nocache_large = NULL;
 	struct skmem_obj **list = &top;
-	struct mbuf *mtop = NULL;
+	struct mbuf *__single mtop = NULL;
 	struct mbuf **mp = &mtop;
-	struct __kern_packet *kptop = NULL;
+	struct __kern_packet *__single kptop = NULL;
 	struct __kern_packet **kpp = &kptop;
 	uint32_t i;
 
@@ -2304,9 +2461,10 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
 	for (i = 0; i < num; i++) {
 		ASSERT(SK_PTR_ADDR_KQUM(array[i])->qum_pp == pp);
 		mdp = pp_metadata_fini(SK_PTR_ADDR_KQUM(array[i]), pp,
-		    mp, kpp, &blist_def, &blist_large);
+		    mp, kpp, &blist_def, &blist_nocache_def, &blist_large, &blist_nocache_large);
 
-		*list = (struct skmem_obj *)mdp;
+		obj_mdp = __unsafe_forge_single(struct skmem_obj *, mdp);
+		*list = obj_mdp;
 		list = &(*list)->mo_next;
 		array[i] = 0;
 
@@ -2322,14 +2480,7 @@ pp_free_packet_array(struct kern_pbufpool *pp, uint64_t *array, uint32_t num)
 
 	ASSERT(top != NULL);
 	skmem_cache_batch_free(pp->pp_kmd_cache, top);
-	if (blist_def != NULL) {
-		skmem_cache_batch_free(PP_KBFT_CACHE_DEF(pp), blist_def);
-		blist_def = NULL;
-	}
-	if (blist_large != NULL) {
-		skmem_cache_batch_free(PP_KBFT_CACHE_LARGE(pp), blist_large);
-		blist_large = NULL;
-	}
+	pp_free_kbft_list(pp, blist_def, blist_nocache_def, blist_large, blist_nocache_large);
 	if (mtop != NULL) {
 		DTRACE_SKYWALK(free__attached__mbuf);
 		if (__probable(mtop->m_nextpkt != NULL)) {
@@ -2352,7 +2503,7 @@ pp_free_packet(struct kern_pbufpool *pp, uint64_t kqum)
 }
 
 void
-pp_free_packet_batch(const kern_pbufpool_t pp, uint64_t *array, uint32_t size)
+pp_free_packet_batch(const kern_pbufpool_t pp, uint64_t *__counted_by(size)array, uint32_t size)
 {
 	pp_free_packet_array(pp, array, size);
 }
@@ -2365,10 +2516,43 @@ pp_free_packet_single(struct __kern_packet *pkt)
 	    pkt->pkt_qum.qum_pp), SK_PTR_ADDR(pkt));
 }
 
+void
+pp_drop_packet_single(struct __kern_packet *pkt, struct ifnet *ifp, uint16_t flags,
+    drop_reason_t reason, const char *funcname, uint16_t linenum)
+{
+	drop_func_t dropfunc;
+
+	if (pkt->pkt_length == 0) {
+		return;
+	}
+	if (__probable(droptap_total_tap_count == 0)) {
+		goto nodroptap;
+	}
+
+	if (flags & DROPTAP_FLAG_DIR_OUT) {
+		dropfunc = droptap_output_packet;
+	} else if (flags & DROPTAP_FLAG_DIR_IN) {
+		dropfunc = droptap_input_packet;
+	} else {
+		goto nodroptap;
+	}
+
+	dropfunc(SK_PKT2PH(pkt), reason, funcname, linenum, flags, ifp,
+	    pkt->pkt_qum.qum_pid, NULL, -1, NULL, 0, 0);
+
+nodroptap:
+	pp_free_packet_single(pkt);
+}
+
 static mach_vm_address_t
 pp_alloc_buffer_common(const kern_pbufpool_t pp, struct skmem_obj_info *oi,
     uint32_t skmflag, bool large)
 {
+	/*
+	 * XXX -fbounds-safety: We can't change this mach_vm_address_t to some
+	 * other (safe) pointer type, because IOSkywalkFamily depends on this
+	 * being mach_vm_address_t
+	 */
 	mach_vm_address_t baddr;
 	struct skmem_cache *skm = large ? PP_BUF_CACHE_LARGE(pp):
 	    PP_BUF_CACHE_DEF(pp);
@@ -2387,7 +2571,8 @@ pp_alloc_buffer_common(const kern_pbufpool_t pp, struct skmem_obj_info *oi,
 		SK_ERR("pp \"%s\" MTBF failure", pp->pp_name);
 		net_update_uptime();
 		if (baddr != 0) {
-			skmem_cache_free(skm, (void *)baddr);
+			skmem_cache_free(skm,
+			    __unsafe_forge_single(struct skmem_obj *, baddr));
 			baddr = 0;
 		}
 	}
@@ -2398,7 +2583,8 @@ pp_alloc_buffer_common(const kern_pbufpool_t pp, struct skmem_obj_info *oi,
 		    SK_KVA(pp));
 		return 0;
 	}
-	skmem_cache_get_obj_info(skm, (void *)baddr, oi, NULL);
+	skmem_cache_get_obj_info(skm,
+	    __unsafe_forge_single(struct skmem_obj *, baddr), oi, NULL);
 	ASSERT(SKMEM_OBJ_BUFCTL(oi) != NULL);
 	ASSERT((mach_vm_address_t)SKMEM_OBJ_ADDR(oi) == baddr);
 	return baddr;
@@ -2434,26 +2620,35 @@ void
 pp_free_buffer(const kern_pbufpool_t pp, mach_vm_address_t addr)
 {
 	ASSERT(pp != NULL && addr != 0);
-	skmem_cache_free(PP_BUF_CACHE_DEF(pp), (void *)addr);
+	skmem_cache_free(PP_BUF_CACHE_DEF(pp), __unsafe_forge_single(
+		    struct skmem_obj *, addr));
 }
 
 __attribute__((always_inline))
 static inline uint32_t
-pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t num, uint32_t skmflag, bool large)
+pp_alloc_buflet_common(struct kern_pbufpool *pp,
+    uint64_t *__counted_by(num)array, uint32_t num, uint32_t skmflag,
+    bool large)
 {
 	struct __kern_buflet *kbft = NULL;
 	uint32_t allocd, need = num;
-	struct skmem_obj *list;
+	struct skmem_obj *__single list;
+	uint64_t *array_cp;  /* -fbounds-safety */
 
 	ASSERT(array != NULL && num > 0);
 	ASSERT(PP_BATCH_CAPABLE(pp));
 	ASSERT(PP_KBFT_CACHE_DEF(pp) != NULL);
 	ASSERT(PP_BUF_SIZE_LARGE(pp) != 0 || !large);
 
-	allocd = skmem_cache_batch_alloc(large ? PP_KBFT_CACHE_LARGE(pp) :
-	    PP_KBFT_CACHE_DEF(pp), &list, num, skmflag);
+	if (large) {
+		allocd = skmem_cache_batch_alloc(PP_KBFT_CACHE_LARGE(pp), &list,
+		    PP_KBFT_CACHE_LARGE(pp)->skm_objsize, num, skmflag);
+	} else {
+		allocd = skmem_cache_batch_alloc(PP_KBFT_CACHE_DEF(pp), &list,
+		    PP_KBFT_CACHE_DEF(pp)->skm_objsize, num, skmflag);
+	}
 
+	array_cp = array;
 	while (list != NULL) {
 		struct skmem_obj *listn;
 
@@ -2468,8 +2663,8 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp, uint64_t *array,
 #endif /* CONFIG_KERNEL_TAGGING && !defined(KASAN_LIGHT) */
 
 		KBUF_EXT_INIT(kbft, pp);
-		*array = (uint64_t)kbft;
-		++array;
+		*array_cp = (uint64_t)kbft;
+		++array_cp;
 		list = listn;
 		ASSERT(need > 0);
 		--need;
@@ -2487,13 +2682,14 @@ pp_alloc_buflet(struct kern_pbufpool *pp, kern_buflet_t *kbft, uint32_t skmflag,
 	if (__improbable(!pp_alloc_buflet_common(pp, &bft, 1, skmflag, large))) {
 		return ENOMEM;
 	}
-	*kbft = (kern_buflet_t)bft;
+	*kbft = __unsafe_forge_single(kern_buflet_t, bft);
 	return 0;
 }
 
 errno_t
-pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t *size, uint32_t skmflag, bool large)
+pp_alloc_buflet_batch(struct kern_pbufpool *pp,
+    uint64_t *__counted_by(*size)array, uint32_t *size, uint32_t skmflag,
+    bool large)
 {
 	uint32_t i, n;
 	int err;
@@ -2501,8 +2697,6 @@ pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
 	ASSERT(array != NULL && size > 0);
 
 	n = *size;
-	*size = 0;
-
 	i = pp_alloc_buflet_common(pp, array, n, skmflag, large);
 	*size = i;
 
@@ -2531,13 +2725,15 @@ pp_free_buflet_common(const kern_pbufpool_t pp, kern_buflet_t kbft)
 		ASSERT(kbft->buf_ctl != NULL);
 		ASSERT(((struct __kern_buflet_ext *)kbft)->
 		    kbe_buf_upp_link.sle_next == NULL);
-		/*
-		 * external buflet has buffer attached at construction,
-		 * so we don't free the buffer here.
-		 */
-		skmem_cache_free(BUFLET_HAS_LARGE_BUF(kbft) ?
-		    PP_KBFT_CACHE_LARGE(pp) : PP_KBFT_CACHE_DEF(pp),
-		    (void *)kbft);
+		if (kbft->buf_ctl->bc_usecnt > 1) {
+			skmem_cache_free_nocache(BUFLET_HAS_LARGE_BUF(kbft) ?
+			    PP_KBFT_CACHE_LARGE(pp) : PP_KBFT_CACHE_DEF(pp),
+			    (void *)kbft);
+		} else {
+			skmem_cache_free(BUFLET_HAS_LARGE_BUF(kbft) ?
+			    PP_KBFT_CACHE_LARGE(pp) : PP_KBFT_CACHE_DEF(pp),
+			    (void *)kbft);
+		}
 	} else if (__probable(kbft->buf_addr != 0)) {
 		void *objaddr = kbft->buf_objaddr;
 		uint32_t usecnt = 0;

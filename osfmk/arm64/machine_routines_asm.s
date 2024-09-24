@@ -93,6 +93,7 @@ Lcre_start_\@:
 	.align 2
 	.globl EXT(ml_enable_user_jop_key)
 LEXT(ml_enable_user_jop_key)
+	ARM64_PROLOG
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x0
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
@@ -109,6 +110,7 @@ LEXT(ml_enable_user_jop_key)
 	.align 2
 	.globl EXT(ml_disable_user_jop_key)
 LEXT(ml_disable_user_jop_key)
+	ARM64_PROLOG
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x1
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
@@ -131,6 +133,7 @@ LEXT(ml_disable_user_jop_key)
 	.align 2
 	.globl EXT(set_bp_ret)
 LEXT(set_bp_ret)
+	ARM64_PROLOG
 	// Load bpret boot-arg
 	adrp		x14, EXT(bp_ret)@page
 	add		x14, x14, EXT(bp_ret)@pageoff
@@ -149,9 +152,9 @@ LEXT(set_bp_ret)
 	.align 2
 	.globl EXT(set_nex_pg)
 LEXT(set_nex_pg)
-	mrs		x14, MPIDR_EL1
+	ARM64_PROLOG
 	// Skip if this isn't a p-core; NEX powergating isn't available for e-cores
-	and		x14, x14, #(MPIDR_PNE)
+	ARM64_IS_PCORE  x14
 	cbz		x14, Lnex_pg_done
 
 
@@ -166,6 +169,7 @@ Lnex_pg_done:
 	.align	2
 	.globl	EXT(get_fpscr)
 LEXT(get_fpscr)
+	ARM64_PROLOG
 #if	__ARM_VFP__
 	mrs	x1, FPSR			// Grab FPSR
 	mov	x4, #(FPSR_MASK & 0xFFFF)
@@ -192,6 +196,7 @@ LEXT(get_fpscr)
  *		and FPCR are not responsible for condition codes.
  */
 LEXT(set_fpscr)
+	ARM64_PROLOG
 #if	__ARM_VFP__
 	mov	x4, #(FPSR_MASK & 0xFFFF)
 	mov	x5, #(FPSR_MASK & 0xFFFF0000)
@@ -225,23 +230,25 @@ LEXT(set_fpscr)
 	.align 2
 	.globl EXT(update_mdscr)
 LEXT(update_mdscr)
-	mov	x4, #0
-	mrs	x2, MDSCR_EL1
-	bic	x2, x2, x0
-	orr	x2, x2, x1
+	ARM64_PROLOG
+	mov	x17, #0
+	mrs	x16, MDSCR_EL1
+	bic	x16, x16, x0
+	orr	x16, x16, x1
 1:
-	bic	x2, x2, #0x2000
-	msr	MDSCR_EL1, x2
+	bic	x16, x16, #0x2000
+	msr	MDSCR_EL1, x16
 #if defined(CONFIG_KERNEL_INTEGRITY)
 	/*
 	 * verify KDE didn't get set (including via ROP)
 	 * If set, clear it and then panic
 	 */
-	ands	x3, x2, #0x2000
-	orr	x4, x4, x3
-	bne	1b
-	cmp	x4, xzr
-	b.ne	Lupdate_mdscr_panic
+	tst	x16, #0x2000
+	beq	2f
+	mov	x17, #1
+	b	1b
+2:
+	cbnz	x17, Lupdate_mdscr_panic
 #endif
 	ret
 
@@ -262,6 +269,7 @@ Lupdate_mdscr_panic_str:
 	.align 2
 	.globl EXT(set_mmu_ttb_alternate)
 LEXT(set_mmu_ttb_alternate)
+	ARM64_JUMP_TARGET
 	dsb		sy
 #if defined(KERNEL_INTEGRITY_KTRR)
 	mov		x1, lr
@@ -281,6 +289,7 @@ LEXT(set_mmu_ttb_alternate)
 	.align 2
 	.globl EXT(set_mmu_ttb)
 LEXT(set_mmu_ttb)
+	ARM64_PROLOG
 #if __ARM_KERNEL_PROTECT__
 	/* All EL1-mode ASIDs are odd. */
 	orr		x0, x0, #(1 << TTBR_ASID_SHIFT)
@@ -296,6 +305,7 @@ LEXT(set_mmu_ttb)
 	.align 2
 	.globl EXT(ml_get_ppl_cpu_data)
 LEXT(ml_get_ppl_cpu_data)
+	ARM64_PROLOG
 	LOAD_PMAP_CPU_DATA x0, x1, x2
 	ret
 #endif
@@ -307,6 +317,7 @@ LEXT(ml_get_ppl_cpu_data)
 	.align 2
 	.globl EXT(set_aux_control)
 LEXT(set_aux_control)
+	ARM64_PROLOG
 	msr		ACTLR_EL1, x0
 	// Synchronize system
 	isb		sy
@@ -317,6 +328,7 @@ LEXT(set_aux_control)
 	.align 2
 	.globl EXT(set_vbar_el1)
 LEXT(set_vbar_el1)
+	ARM64_PROLOG
 #if defined(KERNEL_INTEGRITY_KTRR)
 	b		EXT(pinst_set_vbar)
 #else
@@ -333,6 +345,7 @@ LEXT(set_vbar_el1)
 	.align 2
 	.globl EXT(set_tcr)
 LEXT(set_tcr)
+	ARM64_PROLOG
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 #if DEBUG || DEVELOPMENT
 	// Assert that T0Z is always equal to T1Z
@@ -382,8 +395,9 @@ L_set_locked_reg_panic_str:
 	.align 2
 	.globl EXT(mmu_kvtop)
 LEXT(mmu_kvtop)
+	ARM64_PROLOG
 	mrs		x2, DAIF									// Load current DAIF
-	msr		DAIFSet, #(DAIFSC_IRQF | DAIFSC_FIQF)		// Disable IRQ
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
 	at		s1e1r, x0									// Translation Stage 1 EL1
 	isb		sy
 	mrs		x1, PAR_EL1									// Read result
@@ -403,10 +417,11 @@ L_mmu_kvtop_invalid:
 	.align 2
 	.globl EXT(mmu_uvtop)
 LEXT(mmu_uvtop)
+	ARM64_PROLOG
 	lsr		x8, x0, #56									// Extract top byte
 	cbnz	x8, L_mmu_uvtop_invalid						// Tagged pointers are invalid
 	mrs		x2, DAIF									// Load current DAIF
-	msr		DAIFSet, #(DAIFSC_IRQF | DAIFSC_FIQF)		// Disable IRQ
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
 	at		s1e0r, x0									// Translation Stage 1 EL0
 	isb		sy
 	mrs		x1, PAR_EL1									// Read result
@@ -426,8 +441,9 @@ L_mmu_uvtop_invalid:
 	.align 2
 	.globl EXT(mmu_kvtop_wpreflight)
 LEXT(mmu_kvtop_wpreflight)
+	ARM64_PROLOG
 	mrs		x2, DAIF									// Load current DAIF
-	msr		DAIFSet, #(DAIFSC_IRQF | DAIFSC_FIQF)		// Disable IRQ
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
 	at		s1e1w, x0									// Translation Stage 1 EL1
 	mrs		x1, PAR_EL1									// Read result
 	msr		DAIF, x2									// Restore interrupt state
@@ -465,6 +481,7 @@ LEXT(copyio_fault_region_begin)
 	.align 2
 	.globl EXT(arm64_panic_lockdown_test_copyio)
 LEXT(arm64_panic_lockdown_test_copyio)
+	ARM64_PROLOG
 	ldr		x0, [x0]
 	ret
 #endif /* CONFIG_XNUPOST */
@@ -478,35 +495,92 @@ LEXT(arm64_panic_lockdown_test_copyio)
 LEXT(_bcopyin)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	COPYIO_RECOVER_RANGE 3f
+	COPYIO_RECOVER_RANGE 5f
+	/* If len is less than 256 bytes, do 16 bytewise copy */
+	cmp		x2, #256
+	b.lt	2f
+	sub		x2, x2, #256
+	/* 256 bytes at a time */
+1:
+	/* 0-64 bytes */
+	ldp		x3, x4, [x0]
+	stp		x3, x4, [x1]
+	ldp		x5, x6, [x0, #16]
+	stp		x5, x6, [x1, #16]
+	ldp		x3, x4, [x0, #32]
+	stp		x3, x4, [x1, #32]
+	ldp		x5, x6, [x0, #48]
+	stp		x5, x6, [x1, #48]
+
+	/* 64-128 bytes */
+	ldp		x3, x4, [x0, #64]
+	stp		x3, x4, [x1, #64]
+	ldp		x5, x6, [x0, #80]
+	stp		x5, x6, [x1, #80]
+	ldp		x3, x4, [x0, #96]
+	stp		x3, x4, [x1, #96]
+	ldp		x5, x6, [x0, #112]
+	stp		x5, x6, [x1, #112]
+
+	/* 128-192 bytes */
+	ldp		x3, x4, [x0, #128]
+	stp		x3, x4, [x1, #128]
+	ldp		x5, x6, [x0, #144]
+	stp		x5, x6, [x1, #144]
+	ldp		x3, x4, [x0, #160]
+	stp		x3, x4, [x1, #160]
+	ldp		x5, x6, [x0, #176]
+	stp		x5, x6, [x1, #176]
+
+	/* 192-256 bytes */
+	ldp		x3, x4, [x0, #192]
+	stp		x3, x4, [x1, #192]
+	ldp		x5, x6, [x0, #208]
+	stp		x5, x6, [x1, #208]
+	ldp		x3, x4, [x0, #224]
+	stp		x3, x4, [x1, #224]
+	ldp		x5, x6, [x0, #240]
+	stp		x5, x6, [x1, #240]
+
+	add		x0, x0, #256
+	add		x1, x1, #256
+
+	subs	x2, x2, #256
+	b.ge	1b
+	/* Fixup the len and test for completion */
+	adds	x2, x2, #256
+	b.eq	5f
+2:
 	/* If len is less than 16 bytes, just do a bytewise copy */
 	cmp		x2, #16
-	b.lt	2f
+	b.lt	4f
 	sub		x2, x2, #16
-1:
+3:
 	/* 16 bytes at a time */
 	ldp		x3, x4, [x0], #16
 	stp		x3, x4, [x1], #16
 	subs	x2, x2, #16
-	b.ge	1b
+	b.ge	3b
 	/* Fixup the len and test for completion */
 	adds	x2, x2, #16
-	b.eq	3f
-2:	/* Bytewise */
+	b.eq	5f
+4:	/* Bytewise */
 	subs	x2, x2, #1
 	ldrb	w3, [x0], #1
 	strb	w3, [x1], #1
-	b.hi	2b
-3:
+	b.hi	4b
+5:
 	mov		x0, xzr
 	/*
-	 * x3 and x4 now contain user-controlled values which may be used to form
+	 * x3, x4, x5 and x6 now contain user-controlled values which may be used to form
 	 * addresses under speculative execution past the _bcopyin(); prevent any
 	 * attempts by userspace to influence kernel execution by zeroing them out
 	 * before we return.
 	 */
 	mov		x3, xzr
 	mov		x4, xzr
+	mov		x5, xzr
+	mov		x6, xzr
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -672,26 +746,80 @@ LEXT(_copyout_atomic64)
 LEXT(_bcopyout)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	COPYIO_RECOVER_RANGE 3f
+	COPYIO_RECOVER_RANGE 5f
+	/* If len is less than 256 bytes, do 16 bytewise copy */
+	cmp		x2, #256
+	b.lt	2f
+	sub		x2, x2, #256
+	/* 256 bytes at a time */
+1:
+	/* 0-64 bytes */
+	ldp		x3, x4, [x0]
+	stp		x3, x4, [x1]
+	ldp		x5, x6, [x0, #16]
+	stp		x5, x6, [x1, #16]
+	ldp		x3, x4, [x0, #32]
+	stp		x3, x4, [x1, #32]
+	ldp		x5, x6, [x0, #48]
+	stp		x5, x6, [x1, #48]
+
+	/* 64-128 bytes */
+	ldp		x3, x4, [x0, #64]
+	stp		x3, x4, [x1, #64]
+	ldp		x5, x6, [x0, #80]
+	stp		x5, x6, [x1, #80]
+	ldp		x3, x4, [x0, #96]
+	stp		x3, x4, [x1, #96]
+	ldp		x5, x6, [x0, #112]
+	stp		x5, x6, [x1, #112]
+
+	/* 128-192 bytes */
+	ldp		x3, x4, [x0, #128]
+	stp		x3, x4, [x1, #128]
+	ldp		x5, x6, [x0, #144]
+	stp		x5, x6, [x1, #144]
+	ldp		x3, x4, [x0, #160]
+	stp		x3, x4, [x1, #160]
+	ldp		x5, x6, [x0, #176]
+	stp		x5, x6, [x1, #176]
+
+	/* 192-256 bytes */
+	ldp		x3, x4, [x0, #192]
+	stp		x3, x4, [x1, #192]
+	ldp		x5, x6, [x0, #208]
+	stp		x5, x6, [x1, #208]
+	ldp		x3, x4, [x0, #224]
+	stp		x3, x4, [x1, #224]
+	ldp		x5, x6, [x0, #240]
+	stp		x5, x6, [x1, #240]
+
+	add		x0, x0, #256
+	add		x1, x1, #256
+	subs	x2, x2, #256
+	b.ge	1b
+	/* Fixup the len and test for completion */
+	adds	x2, x2, #256
+	b.eq	5f
+2:
 	/* If len is less than 16 bytes, just do a bytewise copy */
 	cmp		x2, #16
-	b.lt	2f
+	b.lt	4f
 	sub		x2, x2, #16
-1:
+3:
 	/* 16 bytes at a time */
 	ldp		x3, x4, [x0], #16
 	stp		x3, x4, [x1], #16
 	subs	x2, x2, #16
-	b.ge	1b
+	b.ge	3b
 	/* Fixup the len and test for completion */
 	adds	x2, x2, #16
-	b.eq	3f
-2:  /* Bytewise */
+	b.eq	5f
+4:  /* Bytewise */
 	subs	x2, x2, #1
 	ldrb	w3, [x0], #1
 	strb	w3, [x1], #1
-	b.hi	2b
-3:
+	b.hi	4b
+5:
 	mov		x0, #0
 	POP_FRAME
 	ARM64_STACK_EPILOG
@@ -887,6 +1015,7 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	.align 2
 	.globl EXT(arm_debug_read_dscr)
 LEXT(arm_debug_read_dscr)
+	ARM64_PROLOG
 	PANIC_UNIMPLEMENTED
 
 /*
@@ -901,6 +1030,7 @@ LEXT(arm_debug_read_dscr)
        .align 2
        .globl EXT(arm_debug_set_cp14)
 LEXT(arm_debug_set_cp14)
+	ARM64_PROLOG
 	PANIC_UNIMPLEMENTED
 
 #if defined(APPLE_ARM64_ARCH_FAMILY)
@@ -915,6 +1045,7 @@ LEXT(arm_debug_set_cp14)
 	.align 2
 	.globl EXT(arm64_prepare_for_sleep)
 LEXT(arm64_prepare_for_sleep)
+	ARM64_PROLOG
 	PUSH_FRAME
 
 #if APPLEVIRTUALPLATFORM
@@ -923,22 +1054,23 @@ LEXT(arm64_prepare_for_sleep)
 #define PSCI_FN_ID_SYSTEM_SUSPEND	0xC400000E
 
 	/*
-	 * Power off non-boot CPUs individually. Then for the boot CPU (0),
-	 * power off the whole system.  This assumes the deep_sleep=true case.
+	 * For a VM, it always powers off CPUs individually, including the boot cpu.
+	 * If the boot cpu is going into deep sleep, power off the system instead.
 	 */
-	cbnz	x1, 1f
-
+	cbz		x0, vm_sleep_individual_cpu  // skip if not deep_sleep
+	cbnz	x1, vm_sleep_individual_cpu  // skip if not boot cpu
+vm_sleep_system:
 	MOV64	x0, PSCI_FN_ID_SYSTEM_SUSPEND
 	mov		x1, x2
 	hvc		0
 	b		.
 
-1:
+vm_sleep_individual_cpu:
 	MOV64	x0, PSCI_FN_ID_CPU_OFF
 	hvc		0
 	b		.
 
-#endif /* VMAPPLE */
+#endif /* APPLEVIRTUALPLATFORM */
 
 
 #if HAS_CLUSTER
@@ -1000,6 +1132,7 @@ is_deep_sleep:
 #endif
 
 not_deep_sleep:
+#if !NO_CPU_OVRD
 	// Set "OK to power down" (<rdar://problem/12390433>)
 	mrs		x9, CPU_OVRD
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_down)
@@ -1007,6 +1140,7 @@ not_deep_sleep:
 	orr		x9, x9, #(ARM64_REG_CYC_OVRD_disWfiRetn)
 #endif
 	msr		CPU_OVRD, x9
+#endif
 
 	EXEC_END
 
@@ -1027,9 +1161,11 @@ LEXT(arm64_force_wfi_clock_gate)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
 
+#if !NO_CPU_OVRD
 	mrs		x0, CPU_OVRD
 	orr		x0, x0, #(ARM64_REG_CYC_OVRD_ok2pwrdn_force_up)
 	msr		CPU_OVRD, x0
+#endif
 	
 	POP_FRAME
 	ARM64_STACK_EPILOG
@@ -1040,6 +1176,7 @@ LEXT(arm64_force_wfi_clock_gate)
 	.align 2
 	.globl EXT(arm64_retention_wfi)
 LEXT(arm64_retention_wfi)
+	ARM64_PROLOG
 	wfi
 	cbz		lr, Lwfi_retention	// If lr is 0, we entered retention state and lost all GPRs except sp and pc
 	ret					// Otherwise just return to cpu_idle()
@@ -1058,6 +1195,7 @@ Lwfi_retention:
 	.align 2
 	.globl EXT(arm64_prepare_for_sleep)
 LEXT(arm64_prepare_for_sleep)
+	ARM64_PROLOG
 	PUSH_FRAME
 Lwfi_inst:
 	dsb		sy
@@ -1073,6 +1211,7 @@ Lwfi_inst:
 	.align 2
 	.globl EXT(arm64_force_wfi_clock_gate)
 LEXT(arm64_force_wfi_clock_gate)
+	ARM64_PROLOG
 	PUSH_FRAME
 	nop
 	POP_FRAME
@@ -1097,7 +1236,7 @@ LEXT(arm64_replace_bootstack)
 	// Set the exception stack pointer
 	ldr		x0, [x0, CPU_EXCEPSTACK_TOP]
 	mrs		x4, DAIF					// Load current DAIF; use x4 as pinst may trash x1-x3
-	msr		DAIFSet, #(DAIFSC_IRQF | DAIFSC_FIQF | DAIFSC_ASYNCF)		// Disable IRQ/FIQ/serror
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
 	// Set SP_EL1 to exception stack
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 	mov		x1, lr
@@ -1126,6 +1265,7 @@ LEXT(arm64_replace_bootstack)
 	.align 2
 	.globl EXT(monitor_call)
 LEXT(monitor_call)
+	ARM64_PROLOG
 	smc 	0x11
 	ret
 #endif
@@ -1177,6 +1317,7 @@ LEXT(monitor_call)
 	.align 2
 	.globl EXT(ml_sign_thread_state)
 LEXT(ml_sign_thread_state)
+	ARM64_PROLOG
 	COMPUTE_THREAD_STATE_HASH
 	str		x1, [x0, SS64_JOPHASH]
 #if DEBUG || DEVELOPMENT
@@ -1196,6 +1337,7 @@ LEXT(ml_sign_thread_state)
 	.align 2
 	.globl EXT(ml_check_signed_state)
 LEXT(ml_check_signed_state)
+	ARM64_PROLOG
 	CHECK_THREAD_STATE_INTERRUPTS tmp=x16
 	ldr		x16, [x0, SS64_JOPHASH]
 	COMPUTE_THREAD_STATE_HASH
@@ -1241,6 +1383,7 @@ Lintr_enabled_str:
 	.align 2
 	.globl EXT(ml_auth_thread_state_invalid_cpsr)
 LEXT(ml_auth_thread_state_invalid_cpsr)
+	ARM64_STACK_PROLOG
 	PUSH_FRAME
 	mov		x1, x0
 	adr		x0, Linvalid_cpsr_str
@@ -1269,6 +1412,7 @@ Linvalid_cpsr_str:
 	.align 2
 	.globl EXT(ml_pac_safe_interrupts_disable)
 LEXT(ml_pac_safe_interrupts_disable)
+	ARM64_PROLOG
 	mrs		x16, DAIF
 	and		x17, x16, DAIF_STANDARD_DISABLE
 	cmp		x17, DAIF_STANDARD_DISABLE
@@ -1289,6 +1433,7 @@ Lalready_disabled:
 	.align 2
 	.globl EXT(ml_pac_safe_interrupts_restore)
 LEXT(ml_pac_safe_interrupts_restore)
+	ARM64_PROLOG
 	msr		DAIF, x0
 	ret
 
@@ -1298,6 +1443,7 @@ LEXT(ml_pac_safe_interrupts_restore)
 	.align 2
 	.globl EXT(fill32_dczva)
 LEXT(fill32_dczva)
+	ARM64_PROLOG
 0:
 	dc	zva, x0
 	add	x0, x0, #64
@@ -1309,6 +1455,7 @@ LEXT(fill32_dczva)
 	.align 2
 	.globl EXT(fill32_nt)
 LEXT(fill32_nt)
+	ARM64_PROLOG
 	dup.4s	v0, w2
 0:
 	stnp	q0, q0, [x0]

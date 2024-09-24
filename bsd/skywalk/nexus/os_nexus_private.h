@@ -576,7 +576,7 @@ struct nx_llink_info {
 struct nx_llink_info_req {
 	uint16_t        nlir_version;
 	uint16_t        nlir_llink_cnt;
-	struct nx_llink_info nlir_llink[0];
+	struct nx_llink_info nlir_llink[__counted_by(nlir_llink_cnt)];
 };
 
 /*

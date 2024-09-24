@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -43,7 +43,9 @@ SYSCTL_INT(_net_inet_ip_log, OID_AUTO, privacy,
     CTLFLAG_RW | CTLFLAG_LOCKED, &inp_log_privacy, 0, "");
 
 void
-inp_log_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fbuf, socklen_t fbuflen)
+inp_log_addresses(struct inpcb *inp, char *__sized_by(lbuflen) lbuf,
+    socklen_t lbuflen, char *__sized_by(fbuflen) fbuf,
+    socklen_t fbuflen)
 {
 	/*
 	 * Ugly but %{private} does not work in the kernel version of os_log()

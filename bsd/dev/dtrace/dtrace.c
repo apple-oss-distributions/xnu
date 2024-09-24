@@ -3590,15 +3590,15 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 	case DIF_VAR_EXECNAME:
 	{
 		char *xname = (char *)mstate->dtms_scratch_ptr;
-		char *pname = proc_best_name(curproc);
+		const char *pname = proc_best_name(curproc);
 		size_t scratch_size = sizeof(proc_name_t);
-		
+
 		/* The scratch allocation's lifetime is that of the clause. */
 		if (!DTRACE_INSCRATCH(mstate, scratch_size)) {
 			DTRACE_CPUFLAG_SET(CPU_DTRACE_NOSCRATCH);
 			return 0;
 		}
-			
+
 		if (!dtrace_priv_proc_relaxed(state))
 			return (0);
 
@@ -13625,6 +13625,11 @@ dtrace_dof_ecbdesc(dof_hdr_t *dof, dof_sec_t *sec, dtrace_vstate_t *vstate,
 	dtrace_probedesc_t *desc;
 	dtrace_predicate_t *pred = NULL;
 
+	if (!(sec->dofs_flags & DOF_SECF_LOAD)) {
+		dtrace_dof_error(dof, "Non loadable section with ECB description");
+		return (NULL);
+	}
+
 	if (sec->dofs_size < sizeof (dof_ecbdesc_t)) {
 		dtrace_dof_error(dof, "truncated ECB description");
 		return (NULL);
@@ -13810,6 +13815,9 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 			}
 		}
 
+		if (!(sec->dofs_flags & DOF_SECF_LOAD))
+			continue; /* just ignore non-loadable sections */
+
 		if (sec->dofs_align & (sec->dofs_align - 1)) {
 			dtrace_dof_error(dof, "bad section alignment");
 			return (-1);
@@ -13818,12 +13826,6 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 		if (sec->dofs_offset & (sec->dofs_align - 1)) {
 			dtrace_dof_error(dof, "misaligned section");
 			return (-1);
-		}
-
-		if (sec->dofs_flags & DOF_SECF_LOAD) {
-			len = dof->dofh_loadsz;
-		} else {
-			len = dof->dofh_filesz;
 		}
 
 		if (sec->dofs_offset > len || sec->dofs_size > len ||
@@ -13892,6 +13894,11 @@ dtrace_dof_options(dof_hdr_t *dof, dtrace_state_t *state)
 
 		if (sec->dofs_type != DOF_SECT_OPTDESC)
 			continue;
+
+		if (!(sec->dofs_flags & DOF_SECF_LOAD)) {
+			dtrace_dof_error(dof, "Non loadable option section");
+			return (EINVAL);
+		}
 
 		if (sec->dofs_align != sizeof (uint64_t)) {
 			dtrace_dof_error(dof, "bad alignment in "

@@ -35,8 +35,10 @@
 #include <kern/assert.h>
 #include <kern/debug.h>
 #include <kern/smr_types.h>
-#include <kern/startup.h>
 #include <os/atomic_private.h>
+#if XNU_KERNEL_PRIVATE
+#include <kern/startup.h>
+#endif
 
 __BEGIN_DECLS
 

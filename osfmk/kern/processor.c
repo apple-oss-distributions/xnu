@@ -81,6 +81,7 @@
 #include <kperf/kperf.h>
 #endif /* KPERF */
 #include <ipc/ipc_port.h>
+#include <machine/commpage.h>
 
 #include <security/mac_mach_internal.h>
 
@@ -97,20 +98,20 @@
 #include <mach/processor_set_server.h>
 #include <san/kcov.h>
 
-/*
- * The first pset and the pset_node are created by default for all platforms.
- * Those typically represent the boot-cluster. For AMP platforms, all clusters
- * of the same type are part of the same pset_node. This allows for easier
- * CPU selection logic.
- */
+/* The boot pset and pset node */
 struct processor_set    pset0;
 struct pset_node        pset_node0;
 
 #if __AMP__
-struct pset_node        pset_node1;
+/* Additional AMP node */
+static struct pset_node        pset_node1;
+/*
+ * For AMP platforms, all clusters of the same type are part of
+ * the same pset_node. This allows for easier CPU selection logic.
+ */
 pset_node_t             ecore_node;
 pset_node_t             pcore_node;
-#endif
+#endif /* __AMP__ */
 
 LCK_SPIN_DECLARE(pset_node_lock, LCK_GRP_NULL);
 
@@ -134,11 +135,24 @@ processor_t             processor_list;
 unsigned int            processor_count;
 static processor_t      processor_list_tail;
 SIMPLE_LOCK_DECLARE(processor_list_lock, 0);
+SIMPLE_LOCK_DECLARE(processor_start_state_lock, 0);
 
 uint32_t                processor_avail_count;
 uint32_t                processor_avail_count_user;
 uint32_t                primary_processor_avail_count;
 uint32_t                primary_processor_avail_count_user;
+
+#if XNU_SUPPORT_BOOTCPU_SHUTDOWN
+TUNABLE(bool, support_bootcpu_shutdown, "support_bootcpu_shutdown", true);
+#else
+TUNABLE(bool, support_bootcpu_shutdown, "support_bootcpu_shutdown", false);
+#endif
+
+#if __x86_64__ || XNU_ENABLE_PROCESSOR_EXIT
+TUNABLE(bool, enable_processor_exit, "processor_exit", true);
+#else
+TUNABLE(bool, enable_processor_exit, "processor_exit", false);
+#endif
 
 SECURITY_READ_ONLY_LATE(int)    master_cpu = 0;
 
@@ -187,10 +201,45 @@ ipi_test()
 
 int sched_enable_smt = 1;
 
+cpumap_t processor_offline_state_map[PROCESSOR_OFFLINE_MAX];
+
+void
+processor_update_offline_state_locked(processor_t processor,
+    processor_offline_state_t new_state)
+{
+	simple_lock_assert(&sched_available_cores_lock, LCK_ASSERT_OWNED);
+
+	processor_offline_state_t old_state = processor->processor_offline_state;
+
+	uint cpuid = (uint)processor->cpu_id;
+
+	assert(old_state < PROCESSOR_OFFLINE_MAX);
+	assert(new_state < PROCESSOR_OFFLINE_MAX);
+
+	processor->processor_offline_state = new_state;
+
+	bit_clear(processor_offline_state_map[old_state], cpuid);
+	bit_set(processor_offline_state_map[new_state], cpuid);
+}
+
+void
+processor_update_offline_state(processor_t processor,
+    processor_offline_state_t new_state)
+{
+	spl_t s = splsched();
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+	processor_update_offline_state_locked(processor, new_state);
+	simple_unlock(&sched_available_cores_lock);
+	splx(s);
+}
+
 void
 processor_bootstrap(void)
 {
-	/* Initialize PSET node and PSET associated with boot cluster */
+	simple_lock_init(&sched_available_cores_lock, 0);
+	simple_lock_init(&processor_start_state_lock, 0);
+
+	/* Initialize boot pset node */
 	pset_node0.psets = &pset0;
 	pset_node0.pset_cluster_type = PSET_SMP;
 
@@ -198,31 +247,36 @@ processor_bootstrap(void)
 	const ml_topology_info_t *topology_info = ml_get_topology_info();
 
 	/*
+	 * Continue initializing boot pset and node.
 	 * Since this is an AMP system, fill up cluster type and ID information; this should do the
 	 * same kind of initialization done via ml_processor_register()
 	 */
 	ml_topology_cluster_t *boot_cluster = topology_info->boot_cluster;
 	pset0.pset_id = boot_cluster->cluster_id;
 	pset0.pset_cluster_id = boot_cluster->cluster_id;
-	if (boot_cluster->cluster_type == CLUSTER_TYPE_E) {
-		pset0.pset_cluster_type      = PSET_AMP_E;
-		pset_node0.pset_cluster_type = PSET_AMP_E;
-		ecore_node = &pset_node0;
+	pset_cluster_type_t boot_type = cluster_type_to_pset_cluster_type(boot_cluster->cluster_type);
+	pset0.pset_cluster_type = boot_type;
+	pset_node0.pset_cluster_type = boot_type;
 
-		pset_node1.pset_cluster_type = PSET_AMP_P;
-		pcore_node = &pset_node1;
-	} else {
-		pset0.pset_cluster_type      = PSET_AMP_P;
-		pset_node0.pset_cluster_type = PSET_AMP_P;
+	/* Initialize pset node pointers according to their type */
+	switch (boot_type) {
+	case PSET_AMP_P:
 		pcore_node = &pset_node0;
-
-		pset_node1.pset_cluster_type = PSET_AMP_E;
 		ecore_node = &pset_node1;
+		break;
+	case PSET_AMP_E:
+		ecore_node = &pset_node0;
+		pcore_node = &pset_node1;
+		break;
+	default:
+		panic("Unexpected boot pset cluster type %d", boot_type);
 	}
+	ecore_node->pset_cluster_type = PSET_AMP_E;
+	pcore_node->pset_cluster_type = PSET_AMP_P;
 
 	/* Link pset_node1 to pset_node0 */
 	pset_node0.node_list = &pset_node1;
-#endif
+#endif /* __AMP__ */
 
 	pset_init(&pset0, &pset_node0);
 	queue_init(&tasks);
@@ -264,11 +318,10 @@ processor_init(
 	processor->quantum_end = UINT64_MAX;
 	processor->deadline = UINT64_MAX;
 	processor->first_timeslice = FALSE;
-	processor->processor_offlined = false;
+	processor->processor_online = false;
 	processor->processor_primary = processor; /* no SMT relationship known at this point */
 	processor->processor_secondary = NULL;
 	processor->is_SMT = false;
-	processor->is_recommended = true;
 	processor->processor_self = IP_NULL;
 	processor->processor_list = NULL;
 	processor->must_idle = false;
@@ -276,8 +329,8 @@ processor_init(
 	processor->last_startup_reason = REASON_SYSTEM;
 	processor->last_shutdown_reason = REASON_NONE;
 	processor->shutdown_temporary = false;
-	processor->shutdown_locked = false;
-	processor->last_recommend_reason = REASON_SYSTEM;
+	processor->processor_inshutdown = false;
+	processor->processor_instartup = false;
 	processor->last_derecommend_reason = REASON_NONE;
 	processor->running_timers_active = false;
 	for (int i = 0; i < RUNNING_TIMER_MAX; i++) {
@@ -286,12 +339,14 @@ processor_init(
 		running_timer_clear(processor, i);
 	}
 	recount_processor_init(processor);
-	simple_lock_init(&processor->start_state_lock, 0);
 
 	s = splsched();
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+
 	pset_lock(pset);
 	bit_set(pset->cpu_bitmask, cpu_id);
 	bit_set(pset->recommended_bitmask, cpu_id);
+	atomic_bit_set(&pset->node->pset_recommended_map, pset->pset_id, memory_order_relaxed);
 	bit_set(pset->primary_map, cpu_id);
 	bit_set(pset->cpu_state_map[PROCESSOR_OFF_LINE], cpu_id);
 	if (pset->cpu_set_count++ == 0) {
@@ -300,7 +355,19 @@ processor_init(
 		pset->cpu_set_low = (cpu_id < pset->cpu_set_low)? cpu_id: pset->cpu_set_low;
 		pset->cpu_set_hi = (cpu_id > pset->cpu_set_hi)? cpu_id: pset->cpu_set_hi;
 	}
+
+	processor->last_recommend_reason = REASON_SYSTEM;
+	sched_processor_change_mode_locked(processor, PCM_RECOMMENDED, true);
 	pset_unlock(pset);
+
+	processor->processor_offline_state = PROCESSOR_OFFLINE_NOT_BOOTED;
+	bit_set(processor_offline_state_map[processor->processor_offline_state], cpu_id);
+
+	if (processor == master_processor) {
+		processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_STARTING);
+	}
+
+	simple_unlock(&sched_available_cores_lock);
 	splx(s);
 
 	simple_lock(&processor_list_lock, LCK_GRP_NULL);
@@ -364,6 +431,7 @@ processor_pset(
 
 #if CONFIG_SCHED_EDGE
 
+/* Returns the scheduling type for the pset */
 cluster_type_t
 pset_type_for_id(uint32_t cluster_id)
 {
@@ -574,6 +642,9 @@ pset_init(
 	pset->online_processor_count = 0;
 	pset->load_average = 0;
 	bzero(&pset->pset_load_average, sizeof(pset->pset_load_average));
+#if CONFIG_SCHED_EDGE
+	bzero(&pset->pset_runnable_depth, sizeof(pset->pset_runnable_depth));
+#endif /* CONFIG_SCHED_EDGE */
 	pset->cpu_set_low = pset->cpu_set_hi = 0;
 	pset->cpu_set_count = 0;
 	pset->last_chosen = -1;
@@ -759,281 +830,352 @@ processor_info(
 	}
 }
 
+/*
+ * Now that we're enforcing all CPUs actually boot, we may need a way to
+ * relax the timeout.
+ */
+TUNABLE(uint32_t, cpu_boot_timeout_secs, "cpu_boot_timeout_secs", 1); /* seconds, default to 1 second */
+
+static const char *
+    processor_start_panic_strings[] = {
+	[PROCESSOR_FIRST_BOOT]                  = "boot for the first time",
+	[PROCESSOR_BEFORE_ENTERING_SLEEP]       = "come online while entering system sleep",
+	[PROCESSOR_WAKE_FROM_SLEEP]             = "come online after returning from system sleep",
+	[PROCESSOR_CLUSTER_POWERDOWN_SUSPEND]   = "come online while disabling cluster powerdown",
+	[PROCESSOR_CLUSTER_POWERDOWN_RESUME]    = "come online before enabling cluster powerdown",
+	[PROCESSOR_POWERED_CORES_CHANGE]        = "come online during dynamic cluster power state change",
+};
+
 void
-processor_wait_for_start(processor_t processor)
+processor_wait_for_start(processor_t processor, processor_start_kind_t start_kind)
 {
+	if (!processor->processor_booted) {
+		panic("processor_boot() missing for cpu %d", processor->cpu_id);
+	}
+
+	uint32_t boot_timeout_extended = cpu_boot_timeout_secs *
+	    debug_cpu_performance_degradation_factor;
+
 	spl_t s = splsched();
-	simple_lock(&processor->start_state_lock, LCK_GRP_NULL);
-	while (processor->state == PROCESSOR_START) {
-		assert_wait_timeout((event_t)&processor->state, THREAD_UNINT, 1000, 1000 * NSEC_PER_USEC); /* 1 second */
-		simple_unlock(&processor->start_state_lock);
+	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
+	while (processor->processor_instartup) {
+		assert_wait_timeout((event_t)&processor->processor_instartup,
+		    THREAD_UNINT, boot_timeout_extended, NSEC_PER_SEC);
+		simple_unlock(&processor_start_state_lock);
 		splx(s);
 
 		wait_result_t wait_result = thread_block(THREAD_CONTINUE_NULL);
 		if (wait_result == THREAD_TIMED_OUT) {
-			panic("%s>cpu %d failed to start\n", __FUNCTION__, processor->cpu_id);
+			panic("cpu %d failed to %s, waited %d seconds\n",
+			    processor->cpu_id,
+			    processor_start_panic_strings[start_kind],
+			    boot_timeout_extended);
 		}
 
 		s = splsched();
-		simple_lock(&processor->start_state_lock, LCK_GRP_NULL);
+		simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
 	}
-	simple_unlock(&processor->start_state_lock);
+
+	if (processor->processor_inshutdown) {
+		panic("%s>cpu %d still in shutdown",
+		    __func__, processor->cpu_id);
+	}
+
+	simple_unlock(&processor_start_state_lock);
+
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+
+	if (!processor->processor_online) {
+		panic("%s>cpu %d not online",
+		    __func__, processor->cpu_id);
+	}
+
+	if (processor->processor_offline_state == PROCESSOR_OFFLINE_STARTED_NOT_WAITED) {
+		processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_RUNNING);
+	} else {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_RUNNING);
+	}
+
+	simple_unlock(&sched_available_cores_lock);
 	splx(s);
 }
 
 LCK_GRP_DECLARE(processor_updown_grp, "processor_updown");
 LCK_MTX_DECLARE(processor_updown_lock, &processor_updown_grp);
 
-static kern_return_t
-processor_startup(
-	processor_t                     processor,
-	processor_reason_t              reason,
-	uint32_t                        flags)
+static void
+processor_dostartup(
+	processor_t     processor,
+	bool            first_boot)
 {
-	processor_set_t         pset;
-	thread_t                        thread;
-	kern_return_t           result;
-	spl_t                           s;
-
-	if (processor == PROCESSOR_NULL || processor->processor_set == PROCESSOR_SET_NULL) {
-		return KERN_INVALID_ARGUMENT;
+	if (!processor->processor_booted && !first_boot) {
+		panic("processor %d not booted", processor->cpu_id);
 	}
 
-	if ((flags & (LOCK_STATE | UNLOCK_STATE)) && (reason != REASON_SYSTEM)) {
-		return KERN_INVALID_ARGUMENT;
-	}
+	lck_mtx_assert(&cluster_powerdown_lock, LCK_MTX_ASSERT_OWNED);
+	lck_mtx_assert(&processor_updown_lock, LCK_MTX_ASSERT_OWNED);
 
-	lck_mtx_lock(&processor_updown_lock);
+	processor_set_t pset = processor->processor_set;
 
-	if (processor == master_processor) {
-		processor_t             prev;
+	assert(processor->processor_self);
 
-		processor->last_startup_reason = reason;
+	spl_t s = splsched();
 
-		ml_cpu_power_enable(processor->cpu_id);
+	simple_lock(&processor_start_state_lock, LCK_GRP_NULL);
+	assert(processor->processor_inshutdown || first_boot);
+	processor->processor_inshutdown = false;
+	assert(processor->processor_instartup == false);
+	processor->processor_instartup = true;
+	simple_unlock(&processor_start_state_lock);
 
-		prev = thread_bind(processor);
-		thread_block(THREAD_CONTINUE_NULL);
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
 
-		result = cpu_start(processor->cpu_id);
-
-		thread_bind(prev);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return result;
-	}
-
-	bool scheduler_disable = false;
-
-	if ((processor->processor_primary != processor) && (sched_enable_smt == 0)) {
-		if (cpu_can_exit(processor->cpu_id)) {
-			lck_mtx_unlock(&processor_updown_lock);
-			return KERN_SUCCESS;
-		}
-		/*
-		 * This secondary SMT processor must start in order to service interrupts,
-		 * so instead it will be disabled at the scheduler level.
-		 */
-		scheduler_disable = true;
-	}
-
-	s = splsched();
-	pset = processor->processor_set;
 	pset_lock(pset);
-	if (flags & LOCK_STATE) {
-		processor->shutdown_locked = true;
-	} else if (flags & UNLOCK_STATE) {
-		processor->shutdown_locked = false;
+
+	if (first_boot) {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_NOT_BOOTED);
+	} else {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_FULLY_OFFLINE);
 	}
 
-	if (processor->state == PROCESSOR_START) {
-		pset_unlock(pset);
-		splx(s);
+	processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_STARTING);
 
-		processor_wait_for_start(processor);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return KERN_SUCCESS;
-	}
-
-	if ((processor->state != PROCESSOR_OFF_LINE) || ((flags & SHUTDOWN_TEMPORARY) && !processor->shutdown_temporary)) {
-		pset_unlock(pset);
-		splx(s);
-
-		lck_mtx_unlock(&processor_updown_lock);
-		return KERN_FAILURE;
-	}
+	assert(processor->state == PROCESSOR_OFF_LINE);
 
 	pset_update_processor_state(pset, processor, PROCESSOR_START);
-	processor->last_startup_reason = reason;
 	pset_unlock(pset);
+
+	simple_unlock(&sched_available_cores_lock);
+
 	splx(s);
-
-	/*
-	 *	Create the idle processor thread.
-	 */
-	if (processor->idle_thread == THREAD_NULL) {
-		result = idle_thread_create(processor);
-		if (result != KERN_SUCCESS) {
-			s = splsched();
-			pset_lock(pset);
-			pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
-			pset_unlock(pset);
-			splx(s);
-
-			lck_mtx_unlock(&processor_updown_lock);
-			return result;
-		}
-	}
-
-	/*
-	 *	If there is no active thread, the processor
-	 *	has never been started.  Create a dedicated
-	 *	start up thread.
-	 */
-	if (processor->active_thread == THREAD_NULL &&
-	    processor->startup_thread == THREAD_NULL) {
-		result = kernel_thread_create(processor_start_thread, NULL, MAXPRI_KERNEL, &thread);
-		if (result != KERN_SUCCESS) {
-			s = splsched();
-			pset_lock(pset);
-			pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
-			pset_unlock(pset);
-			splx(s);
-
-			lck_mtx_unlock(&processor_updown_lock);
-			return result;
-		}
-
-		s = splsched();
-		thread_lock(thread);
-		thread->bound_processor = processor;
-		processor->startup_thread = thread;
-		thread->state = TH_RUN;
-		thread->last_made_runnable_time = thread->last_basepri_change_time = mach_absolute_time();
-		thread_unlock(thread);
-		splx(s);
-
-		thread_deallocate(thread);
-	}
-
-	if (processor->processor_self == IP_NULL) {
-		ipc_processor_init(processor);
-	}
 
 	ml_cpu_power_enable(processor->cpu_id);
 	ml_cpu_begin_state_transition(processor->cpu_id);
 	ml_broadcast_cpu_event(CPU_BOOT_REQUESTED, processor->cpu_id);
-	result = cpu_start(processor->cpu_id);
-#if defined (__arm__) || defined (__arm64__)
-	assert(result == KERN_SUCCESS);
-#else
-	if (result != KERN_SUCCESS) {
-		s = splsched();
-		pset_lock(pset);
-		pset_update_processor_state(pset, processor, PROCESSOR_OFF_LINE);
-		pset_unlock(pset);
-		splx(s);
-		ml_cpu_end_state_transition(processor->cpu_id);
 
-		lck_mtx_unlock(&processor_updown_lock);
-		return result;
-	}
-#endif
-	if (scheduler_disable) {
-		assert(processor->processor_primary != processor);
-		sched_processor_enable(processor, FALSE);
+	cpu_start(processor->cpu_id);
+
+	s = splsched();
+	simple_lock(&sched_available_cores_lock, LCK_GRP_NULL);
+
+	if (processor->processor_offline_state == PROCESSOR_OFFLINE_STARTING) {
+		processor_update_offline_state_locked(processor, PROCESSOR_OFFLINE_STARTED_NOT_RUNNING);
+	} else {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_STARTED_NOT_WAITED);
 	}
 
-	if (flags & WAIT_FOR_START) {
-		processor_wait_for_start(processor);
-	}
+	simple_unlock(&sched_available_cores_lock);
+	splx(s);
 
 	ml_cpu_end_state_transition(processor->cpu_id);
+	/*
+	 * Note: Because the actual wait-for-start happens sometime later,
+	 * this races with processor_up calling CPU_BOOTED.
+	 * To fix that, this should happen after the first wait for start
+	 * confirms the CPU has booted.
+	 */
 	ml_broadcast_cpu_event(CPU_ACTIVE, processor->cpu_id);
+}
 
-#if CONFIG_KCOV
-	kcov_start_cpu(processor->cpu_id);
-#endif
+void
+processor_exit_reason(processor_t processor, processor_reason_t reason, bool is_system_sleep)
+{
+	assert(processor);
+	assert(processor->processor_set);
+
+	lck_mtx_lock(&processor_updown_lock);
+
+	if (sched_is_in_sleep()) {
+		assert(reason == REASON_SYSTEM);
+	}
+
+	assert((processor != master_processor) || (reason == REASON_SYSTEM) || support_bootcpu_shutdown);
+
+	processor->last_shutdown_reason = reason;
+
+	bool is_final_system_sleep = is_system_sleep && (processor == master_processor);
+
+	processor_doshutdown(processor, is_final_system_sleep);
 
 	lck_mtx_unlock(&processor_updown_lock);
-	return KERN_SUCCESS;
 }
 
+/*
+ * Called `processor_exit` in Unsupported KPI.
+ * AppleARMCPU and AppleACPIPlatform call this in response to haltCPU().
+ *
+ * Behavior change: on both platforms, now xnu does the processor_sleep,
+ * and ignores processor_exit calls from kexts.
+ */
 kern_return_t
-processor_exit_reason(processor_t processor, processor_reason_t reason, uint32_t flags)
+processor_exit_from_kext(
+	__unused processor_t processor)
 {
-	if (processor == PROCESSOR_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (sched_is_in_sleep() && (reason != REASON_SYSTEM)) {
-#ifdef RHODES_CLUSTER_POWERDOWN_WORKAROUND
-		/*
-		 * Must allow CLPC to finish powering down the whole cluster,
-		 * or IOCPUSleepKernel() will fail to restart the offline cpus.
-		 */
-		if (reason != REASON_CLPC_SYSTEM) {
-			return KERN_FAILURE;
-		}
-#else
-		return KERN_FAILURE;
-#endif
-	}
-
-	if ((reason == REASON_USER) && !cpu_can_exit(processor->cpu_id)) {
-		return sched_processor_enable(processor, FALSE);
-	} else if ((reason == REASON_SYSTEM) || cpu_can_exit(processor->cpu_id)) {
-		return processor_shutdown(processor, reason, flags);
-	}
-
-	return KERN_INVALID_ARGUMENT;
+	/* This is a no-op now. */
+	return KERN_FAILURE;
 }
 
-kern_return_t
-processor_exit(
+void
+processor_sleep(
 	processor_t     processor)
 {
-	return processor_exit_reason(processor, REASON_SYSTEM, 0);
+	lck_mtx_assert(&cluster_powerdown_lock, LCK_MTX_ASSERT_OWNED);
+
+	processor_exit_reason(processor, REASON_SYSTEM, true);
 }
 
 kern_return_t
 processor_exit_from_user(
 	processor_t     processor)
 {
-	return processor_exit_reason(processor, REASON_USER, 0);
-}
-
-kern_return_t
-processor_start_reason(processor_t processor, processor_reason_t reason, uint32_t flags)
-{
 	if (processor == PROCESSOR_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (sched_is_in_sleep() && (reason != REASON_SYSTEM)) {
-		return KERN_FAILURE;
-	}
+	kern_return_t result;
 
-	if ((reason == REASON_USER) && !cpu_can_exit(processor->cpu_id)) {
-		return sched_processor_enable(processor, TRUE);
-	} else {
-		return processor_startup(processor, reason, flags);
-	}
+	lck_mtx_lock(&cluster_powerdown_lock);
+
+	result = sched_processor_exit_user(processor);
+
+	lck_mtx_unlock(&cluster_powerdown_lock);
+
+	return result;
 }
 
-kern_return_t
-processor_start(
-	processor_t                     processor)
+void
+processor_start_reason(processor_t processor, processor_reason_t reason)
 {
-	return processor_start_reason(processor, REASON_SYSTEM, 0);
+	lck_mtx_lock(&processor_updown_lock);
+
+	assert(processor);
+	assert(processor->processor_set);
+	assert(processor->processor_booted);
+
+	if (sched_is_in_sleep()) {
+		assert(reason == REASON_SYSTEM);
+	}
+
+	processor->last_startup_reason = reason;
+
+	processor_dostartup(processor, false);
+
+	lck_mtx_unlock(&processor_updown_lock);
+}
+
+/*
+ * Called `processor_start` in Unsupported KPI.
+ * AppleARMCPU calls this to boot processors.
+ * AppleACPIPlatform expects ml_processor_register to call processor_boot.
+ *
+ * Behavior change: now ml_processor_register also boots CPUs on ARM, and xnu
+ * ignores processor_start calls from kexts.
+ */
+kern_return_t
+processor_start_from_kext(
+	__unused processor_t processor)
+{
+	/* This is a no-op now. */
+	return KERN_FAILURE;
 }
 
 kern_return_t
 processor_start_from_user(
 	processor_t                     processor)
 {
-	return processor_start_reason(processor, REASON_USER, 0);
+	if (processor == PROCESSOR_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kern_return_t result;
+
+	lck_mtx_lock(&cluster_powerdown_lock);
+
+	result = sched_processor_start_user(processor);
+
+	lck_mtx_unlock(&cluster_powerdown_lock);
+
+	return result;
+}
+
+/*
+ * Boot up a processor for the first time.
+ *
+ * This will also be called against the main processor during system boot,
+ * even though it's already running.
+ */
+void
+processor_boot(
+	processor_t                     processor)
+{
+	lck_mtx_lock(&cluster_powerdown_lock);
+	lck_mtx_lock(&processor_updown_lock);
+
+	assert(!sched_is_in_sleep());
+	assert(!sched_is_cpu_init_completed());
+
+	if (processor->processor_booted) {
+		panic("processor %d already booted", processor->cpu_id);
+	}
+
+	if (processor == master_processor) {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_STARTED_NOT_WAITED);
+	} else {
+		assert(processor->processor_offline_state == PROCESSOR_OFFLINE_NOT_BOOTED);
+	}
+
+	/*
+	 *	Create the idle processor thread.
+	 */
+	if (processor->idle_thread == THREAD_NULL) {
+		idle_thread_create(processor, processor_start_thread);
+	}
+
+	if (processor->processor_self == IP_NULL) {
+		ipc_processor_init(processor);
+	}
+
+	if (processor == master_processor) {
+		processor->last_startup_reason = REASON_SYSTEM;
+
+		ml_cpu_power_enable(processor->cpu_id);
+
+		processor_t prev = thread_bind(processor);
+		thread_block(THREAD_CONTINUE_NULL);
+
+		cpu_start(processor->cpu_id);
+
+		assert(processor->state == PROCESSOR_RUNNING);
+		processor_update_offline_state(processor, PROCESSOR_OFFLINE_RUNNING);
+
+		thread_bind(prev);
+	} else {
+		processor->last_startup_reason = REASON_SYSTEM;
+
+		/*
+		 * We don't wait for startup to finish, so all CPUs can start
+		 * in parallel.
+		 */
+		processor_dostartup(processor, true);
+	}
+
+	processor->processor_booted = true;
+
+	lck_mtx_unlock(&processor_updown_lock);
+	lck_mtx_unlock(&cluster_powerdown_lock);
+}
+
+/*
+ * Wake a previously booted processor from a temporarily powered off state.
+ */
+void
+processor_wake(
+	processor_t                     processor)
+{
+	lck_mtx_assert(&cluster_powerdown_lock, LCK_MTX_ASSERT_OWNED);
+
+	assert(processor->processor_booted);
+	processor_start_reason(processor, REASON_SYSTEM);
 }
 
 kern_return_t
@@ -1110,7 +1252,7 @@ processor_get_assignment(
 	}
 
 	state = processor->state;
-	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE || state == PROCESSOR_PENDING_OFFLINE) {
+	if (state == PROCESSOR_OFF_LINE || state == PROCESSOR_PENDING_OFFLINE) {
 		return KERN_FAILURE;
 	}
 
@@ -1293,23 +1435,25 @@ processor_set_statistics(
  */
 static kern_return_t
 processor_set_things(
-	processor_set_t pset,
-	void **thing_list,
+	processor_set_t         pset,
+	mach_port_array_t      *thing_list,
 	mach_msg_type_number_t *countp,
-	int type,
-	mach_task_flavor_t flavor)
+	int                     type,
+	mach_task_flavor_t      flavor)
 {
 	unsigned int i;
 	task_t task;
 	thread_t thread;
 
+	mach_port_array_t task_addr;
 	task_t *task_list;
 	vm_size_t actual_tasks, task_count_cur, task_count_needed;
 
+	mach_port_array_t thread_addr;
 	thread_t *thread_list;
 	vm_size_t actual_threads, thread_count_cur, thread_count_needed;
 
-	void *addr, *newaddr;
+	mach_port_array_t addr, newaddr;
 	vm_size_t count, count_needed;
 
 	if (pset == PROCESSOR_SET_NULL || pset != &pset0) {
@@ -1319,11 +1463,13 @@ processor_set_things(
 	task_count_cur = 0;
 	task_count_needed = 0;
 	task_list = NULL;
+	task_addr = NULL;
 	actual_tasks = 0;
 
 	thread_count_cur = 0;
 	thread_count_needed = 0;
 	thread_list = NULL;
+	thread_addr = NULL;
 	actual_threads = 0;
 
 	for (;;) {
@@ -1348,29 +1494,32 @@ processor_set_things(
 
 		/* grow task array */
 		if (task_count_needed > task_count_cur) {
-			kfree_type(task_t, task_count_cur, task_list);
+			mach_port_array_free(task_addr, task_count_cur);
 			assert(task_count_needed > 0);
 			task_count_cur = task_count_needed;
 
-			task_list = kalloc_type(task_t, task_count_cur, Z_WAITOK | Z_ZERO);
-			if (task_list == NULL) {
-				kfree_type(thread_t, thread_count_cur, thread_list);
+			task_addr = mach_port_array_alloc(task_count_cur,
+			    Z_WAITOK | Z_ZERO);
+			if (task_addr == NULL) {
+				mach_port_array_free(thread_addr, thread_count_cur);
 				return KERN_RESOURCE_SHORTAGE;
 			}
+			task_list = (task_t *)task_addr;
 		}
 
 		/* grow thread array */
 		if (thread_count_needed > thread_count_cur) {
-			kfree_type(thread_t, thread_count_cur, thread_list);
-
+			mach_port_array_free(thread_addr, thread_count_cur);
 			assert(thread_count_needed > 0);
 			thread_count_cur = thread_count_needed;
 
-			thread_list = kalloc_type(thread_t, thread_count_cur, Z_WAITOK | Z_ZERO);
-			if (thread_list == NULL) {
-				kfree_type(task_t, task_count_cur, task_list);
+			thread_addr = mach_port_array_alloc(thread_count_cur,
+			    Z_WAITOK | Z_ZERO);
+			if (thread_addr == NULL) {
+				mach_port_array_free(task_addr, task_count_cur);
 				return KERN_RESOURCE_SHORTAGE;
 			}
+			thread_list = (thread_t *)thread_addr;
 		}
 	}
 
@@ -1458,10 +1607,10 @@ processor_set_things(
 		for (i = 0; i < actual_tasks; i++) {
 			task_deallocate(task_list[i]);
 		}
-		kfree_type(task_t, task_count_cur, task_list);
+		mach_port_array_free(task_addr, task_count_cur);
+		task_list = NULL;
 		task_count_cur = 0;
 		actual_tasks = 0;
-		task_list = NULL;
 	}
 #endif
 
@@ -1469,32 +1618,33 @@ processor_set_things(
 		if (actual_threads == 0) {
 			/* no threads available to return */
 			assert(task_count_cur == 0);
-			kfree_type(thread_t, thread_count_cur, thread_list);
+			mach_port_array_free(thread_addr, thread_count_cur);
+			thread_list = NULL;
 			*thing_list = NULL;
 			*countp = 0;
 			return KERN_SUCCESS;
 		}
 		count_needed = actual_threads;
 		count = thread_count_cur;
-		addr = thread_list;
+		addr = thread_addr;
 	} else {
 		if (actual_tasks == 0) {
 			/* no tasks available to return */
 			assert(thread_count_cur == 0);
-			kfree_type(task_t, task_count_cur, task_list);
+			mach_port_array_free(task_addr, task_count_cur);
 			*thing_list = NULL;
 			*countp = 0;
 			return KERN_SUCCESS;
 		}
 		count_needed = actual_tasks;
 		count = task_count_cur;
-		addr = task_list;
+		addr = task_addr;
 	}
 
 	/* if we allocated too much, must copy */
 	if (count_needed < count) {
-		newaddr = kalloc_type(void *, count_needed, Z_WAITOK | Z_ZERO);
-		if (newaddr == 0) {
+		newaddr = mach_port_array_alloc(count_needed, Z_WAITOK | Z_ZERO);
+		if (newaddr == NULL) {
 			for (i = 0; i < actual_tasks; i++) {
 				if (type == PSET_THING_THREAD) {
 					thread_deallocate(thread_list[i]);
@@ -1502,18 +1652,18 @@ processor_set_things(
 					task_deallocate(task_list[i]);
 				}
 			}
-			kfree_type(void *, count, addr);
+			mach_port_array_free(addr, count);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
 		bcopy(addr, newaddr, count_needed * sizeof(void *));
-		kfree_type(void *, count, addr);
+		mach_port_array_free(addr, count);
 
 		addr = newaddr;
 		count = count_needed;
 	}
 
-	*thing_list = (void **)addr;
+	*thing_list = addr;
 	*countp = (mach_msg_type_number_t)count;
 
 	return KERN_SUCCESS;
@@ -1532,44 +1682,14 @@ processor_set_tasks_internal(
 	mach_task_flavor_t      flavor)
 {
 	kern_return_t ret;
-	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)task_list, count, PSET_THING_TASK, flavor);
+	ret = processor_set_things(pset, task_list, count, PSET_THING_TASK, flavor);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
 
 	/* do the conversion that Mig should handle */
-	switch (flavor) {
-	case TASK_FLAVOR_CONTROL:
-		for (i = 0; i < *count; i++) {
-			if ((*task_list)[i] == current_task()) {
-				/* if current_task(), return pinned port */
-				(*task_list)[i] = (task_t)convert_task_to_port_pinned((*task_list)[i]);
-			} else {
-				(*task_list)[i] = (task_t)convert_task_to_port((*task_list)[i]);
-			}
-		}
-		break;
-	case TASK_FLAVOR_READ:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_read_to_port((*task_list)[i]);
-		}
-		break;
-	case TASK_FLAVOR_INSPECT:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_inspect_to_port((*task_list)[i]);
-		}
-		break;
-	case TASK_FLAVOR_NAME:
-		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_name_to_port((*task_list)[i]);
-		}
-		break;
-	default:
-		return KERN_INVALID_ARGUMENT;
-	}
-
+	convert_task_array_to_ports(*task_list, *count, flavor);
 	return KERN_SUCCESS;
 }
 
@@ -1613,8 +1733,8 @@ processor_set_tasks_with_flavor(
 #if defined(SECURE_KERNEL)
 kern_return_t
 processor_set_threads(
-	__unused processor_set_t                pset,
-	__unused thread_array_t         *thread_list,
+	__unused processor_set_t         pset,
+	__unused thread_act_array_t     *thread_list,
 	__unused mach_msg_type_number_t *count)
 {
 	return KERN_FAILURE;
@@ -1622,8 +1742,8 @@ processor_set_threads(
 #elif !defined(XNU_TARGET_OS_OSX)
 kern_return_t
 processor_set_threads(
-	__unused processor_set_t                pset,
-	__unused thread_array_t         *thread_list,
+	__unused processor_set_t         pset,
+	__unused thread_act_array_t     *thread_list,
 	__unused mach_msg_type_number_t *count)
 {
 	return KERN_NOT_SUPPORTED;
@@ -1632,21 +1752,19 @@ processor_set_threads(
 kern_return_t
 processor_set_threads(
 	processor_set_t         pset,
-	thread_array_t          *thread_list,
+	thread_act_array_t      *thread_list,
 	mach_msg_type_number_t  *count)
 {
 	kern_return_t ret;
-	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)thread_list, count, PSET_THING_THREAD, TASK_FLAVOR_CONTROL);
+	ret = processor_set_things(pset, thread_list, count,
+	    PSET_THING_THREAD, TASK_FLAVOR_CONTROL);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
 
 	/* do the conversion that Mig should handle */
-	for (i = 0; i < *count; i++) {
-		(*thread_list)[i] = (thread_t)convert_thread_to_port((*thread_list)[i]);
-	}
+	convert_thread_array_to_ports(*thread_list, *count, TASK_FLAVOR_CONTROL);
 	return KERN_SUCCESS;
 }
 #endif
@@ -1654,7 +1772,8 @@ processor_set_threads(
 pset_cluster_type_t
 recommended_pset_type(thread_t thread)
 {
-#if CONFIG_THREAD_GROUPS && __AMP__
+	/* Only used by the AMP scheduler policy */
+#if CONFIG_THREAD_GROUPS && __AMP__ && !CONFIG_SCHED_EDGE
 	if (thread == THREAD_NULL) {
 		return PSET_AMP_E;
 	}
@@ -1703,13 +1822,51 @@ recommended_pset_type(thread_t thread)
 	case CLUSTER_TYPE_P:
 		return PSET_AMP_P;
 	}
-#else
+#else /* !CONFIG_THREAD_GROUPS || !__AMP__ || CONFIG_SCHED_EDGE */
 	(void)thread;
 	return PSET_SMP;
-#endif
+#endif /* !CONFIG_THREAD_GROUPS || !__AMP__ || CONFIG_SCHED_EDGE */
 }
 
-#if CONFIG_THREAD_GROUPS && __AMP__
+#if __arm64__
+
+pset_cluster_type_t
+cluster_type_to_pset_cluster_type(cluster_type_t cluster_type)
+{
+	switch (cluster_type) {
+#if __AMP__
+	case CLUSTER_TYPE_E:
+		return PSET_AMP_E;
+	case CLUSTER_TYPE_P:
+		return PSET_AMP_P;
+#endif /* __AMP__ */
+	case CLUSTER_TYPE_SMP:
+		return PSET_SMP;
+	default:
+		panic("Unexpected cluster type %d", cluster_type);
+	}
+}
+
+pset_node_t
+cluster_type_to_pset_node(cluster_type_t cluster_type)
+{
+	switch (cluster_type) {
+#if __AMP__
+	case CLUSTER_TYPE_E:
+		return ecore_node;
+	case CLUSTER_TYPE_P:
+		return pcore_node;
+#endif /* __AMP__ */
+	case CLUSTER_TYPE_SMP:
+		return &pset_node0;
+	default:
+		panic("Unexpected cluster type %d", cluster_type);
+	}
+}
+
+#endif /* __arm64__ */
+
+#if CONFIG_THREAD_GROUPS && __AMP__ && !CONFIG_SCHED_EDGE
 
 void
 sched_perfcontrol_inherit_recommendation_from_tg(perfcontrol_class_t perfctl_class, boolean_t inherit)

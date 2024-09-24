@@ -128,6 +128,10 @@
 #include <kern/turnstile.h>
 #include <kern/mpsc_queue.h>
 
+#if CONFIG_EXCLAVES
+#include <mach/exclaves.h>
+#endif /* CONFIG_EXCLAVES */
+
 #include <kern/waitq.h>
 #include <san/kasan.h>
 #include <san/kcov_data.h>
@@ -201,7 +205,9 @@ struct thread_ro {
 	struct task                *tro_task;
 
 	struct ipc_port            *tro_self_port;
+#if CONFIG_CSR
 	struct ipc_port            *tro_settable_self_port;             /* send right */
+#endif /* CONFIG_CSR */
 	struct ipc_port            *tro_ports[THREAD_SELF_PORT_COUNT];  /* no right */
 
 	struct exception_action    *tro_exc_actions;
@@ -242,6 +248,12 @@ __options_decl(thread_set_status_flags_t, uint32_t, {
 
 	/* Check for entitlement */
 	TSSF_CHECK_ENTITLEMENT = 0x200,
+
+	/* Stash diversifier from task */
+	TSSF_TASK_USER_DIV = 0x400,
+
+	/* Only take the PC from the new thread state */
+	TSSF_ONLY_PC = 0x800,
 });
 
 /*
@@ -289,7 +301,29 @@ __options_decl(thread_exclaves_state_flags_t, uint16_t, {
 	 * xnu or Darwin userspace. Must not re-enter exclaves via RPC or return to
 	 * Darwin userspace. */
 	TH_EXCLAVES_SCHEDULER_REQUEST          = 0x4,
+	/* Thread is calling into xnu proxy server directly (but may have
+	 * returned to xnu due to an exclaves scheduler request or having
+	 * upcalled). Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_XNUPROXY                   = 0x8,
+	/* Thread is calling into the exclaves scheduler directly.
+	 * Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_SCHEDULER_CALL             = 0x10,
+	/* Thread has called the stop upcall and once the thread returns from
+	 * downcall, exit_with_reason needs to be called on the task.
+	 */
+	TH_EXCLAVES_STOP_UPCALL_PENDING        = 0x20,
+	/* Thread is expecting that an exclaves-side thread may be spawned.
+	 */
+	TH_EXCLAVES_SPAWN_EXPECTED             = 0x40,
 });
+#define TH_EXCLAVES_STATE_ANY           ( \
+    TH_EXCLAVES_RPC               | \
+    TH_EXCLAVES_UPCALL            | \
+    TH_EXCLAVES_SCHEDULER_REQUEST | \
+    TH_EXCLAVES_XNUPROXY          | \
+    TH_EXCLAVES_SCHEDULER_CALL)
 
 __options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
 	/* Thread is on Stackshot's inspection queue */
@@ -605,10 +639,6 @@ struct thread {
 	struct thread_group     *thread_group;
 #endif
 
-#if defined(CONFIG_SCHED_MULTIQ)
-	sched_group_t           sched_group;
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
-
 	/* Data used during setrun/dispatch */
 	processor_t             bound_processor;        /* bound to a processor? */
 	processor_t             last_processor;         /* processor last dispatched on */
@@ -622,10 +652,6 @@ struct thread {
 
 	/* Call out from scheduler */
 	void                  (*sched_call)(int type, thread_t thread);
-
-#if defined(CONFIG_SCHED_PROTO)
-	uint32_t                runqueue_generation;    /* last time runqueue was drained */
-#endif
 
 	/* Statistics and timesharing calculations */
 #if defined(CONFIG_SCHED_TIMESHARE_CORE)
@@ -670,16 +696,16 @@ struct thread {
 	/* Various bits of state to stash across a continuation, exclusive to the current thread block point */
 	union {
 		struct {
+			/* set before ipc_mqueue_receive() as implicit arguments */
+			mach_msg_recv_bufs_t    recv_bufs;      /* receive context */
+			mach_msg_option64_t     option;         /* 64 bits options for receive */
+			ipc_object_t            object;         /* object received on */
+
+			/* set by ipc_mqueue_receive() as implicit results */
 			mach_msg_return_t       state;          /* receive state */
 			mach_port_seqno_t       seqno;          /* seqno of recvd message */
-			ipc_object_t            object;         /* object received on */
-			mach_vm_address_t       msg_addr;       /* receive msg buffer pointer */
-			mach_vm_address_t       aux_addr;       /* receive aux buffer pointer */
-			mach_msg_size_t         max_msize;      /* max rcv size for msg */
-			mach_msg_size_t         max_asize;      /* max rcv size for aux data */
 			mach_msg_size_t         msize;          /* actual size for the msg */
 			mach_msg_size_t         asize;          /* actual size for aux data */
-			mach_msg_option64_t     option;         /* 64 bits options for receive */
 			mach_port_name_t        receiver_name;  /* the receive port name */
 			union {
 				struct ipc_kmsg   *XNU_PTRAUTH_SIGNED_PTR("thread.ith_kmsg")  kmsg;  /* received message */
@@ -722,6 +748,9 @@ struct thread {
 #endif
 	circle_queue_head_t     ith_messages;           /* messages to reap */
 	mach_port_t             ith_kernel_reply_port;  /* reply port for kernel RPCs */
+
+	/* VM Fault Tolerance */
+	bool                    th_vm_faults_disabled;
 
 	/* Ast/Halt data structures */
 	vm_offset_t             recover;                /* page fault recover(copyin/out) */
@@ -979,13 +1008,9 @@ struct thread {
 #endif
 
 #if CONFIG_EXCLAVES
-	/* Per-thread IPC buffer for exclaves communication. Only modified by the
+	/* Per-thread IPC context for exclaves communication. Only modified by the
 	 * current thread on itself. */
-	void                    *th_exclaves_ipc_buffer;
-	/* Exclaves scheduling context ID corresponding to IPC buffer, communicated
-	 * to the exclaves scheduler component. Only modified by the current
-	 * thread on itself. */
-	uint64_t                th_exclaves_scheduling_context_id;
+	exclaves_ctx_t      th_exclaves_ipc_ctx;
 	/* Thread exclaves interrupt-safe state. Only mutated by the current thread
 	 * on itself with interrupts disabled, and only ever read by the current
 	 * thread (with no locking), including from interrupt context, or during
@@ -1012,16 +1037,16 @@ struct thread {
 #endif /* CONFIG_EXCLAVES */
 };
 
+#define ith_receive         saved.receive
+/* arguments */
+#define ith_recv_bufs       saved.receive.recv_bufs
+#define ith_object          saved.receive.object
+#define ith_option          saved.receive.option
+/* results */
 #define ith_state           saved.receive.state
 #define ith_seqno           saved.receive.seqno
-#define ith_object          saved.receive.object
-#define ith_msg_addr        saved.receive.msg_addr
-#define ith_aux_addr        saved.receive.aux_addr
-#define ith_max_msize       saved.receive.max_msize
-#define ith_max_asize       saved.receive.max_asize
 #define ith_msize           saved.receive.msize
 #define ith_asize           saved.receive.asize
-#define ith_option          saved.receive.option
 #define ith_receiver_name   saved.receive.receiver_name
 #define ith_kmsg            saved.receive.kmsg
 #if MACH_FLIPC
@@ -1073,6 +1098,9 @@ extern void             thread_inspect_deallocate(
 
 extern void             thread_read_deallocate(
 	thread_read_t           thread);
+
+extern kern_return_t    thread_terminate(
+	thread_t                thread);
 
 extern void             thread_terminate_self(void);
 
@@ -1418,7 +1446,8 @@ extern kern_return_t main_thread_create_waiting(task_t    task,
 extern kern_return_t    thread_create_workq_waiting(
 	task_t                  task,
 	thread_continue_t       thread_return,
-	thread_t                *new_thread);
+	thread_t                *new_thread,
+	bool                    is_permanently_bound);
 
 extern  void    thread_yield_internal(
 	mach_msg_timeout_t      interval);
@@ -1607,6 +1636,8 @@ extern boolean_t        thread_should_halt(
 extern boolean_t        thread_should_abort(
 	thread_t);
 
+extern bool current_thread_in_kernel_fault(void);
+
 extern int is_64signalregset(void);
 
 extern void act_set_kperf(thread_t);
@@ -1652,10 +1683,8 @@ extern vm_offset_t      kernel_stack_depth_max;
 extern void guard_ast(thread_t);
 extern void fd_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
-#if CONFIG_VNGUARD
 extern void vn_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
-#endif
 extern void mach_port_guard_ast(thread_t,
     mach_exception_code_t, mach_exception_subcode_t);
 extern void virt_memory_guard_ast(thread_t,
@@ -1795,6 +1824,7 @@ extern ipc_port_t convert_thread_to_port(thread_t);
 extern ipc_port_t convert_thread_to_port_pinned(thread_t);
 extern ipc_port_t convert_thread_inspect_to_port(thread_inspect_t);
 extern ipc_port_t convert_thread_read_to_port(thread_read_t);
+extern void       convert_thread_array_to_ports(thread_act_array_t, size_t, mach_thread_flavor_t);
 extern boolean_t is_external_pageout_thread(void);
 extern boolean_t is_vm_privileged(void);
 extern boolean_t set_vm_privilege(boolean_t);

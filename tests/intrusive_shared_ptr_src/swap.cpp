@@ -90,7 +90,7 @@ tests()
 	}
 }
 
-T_DECL(swap, "intrusive_shared_ptr.swap") {
+T_DECL(swap, "intrusive_shared_ptr.swap", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

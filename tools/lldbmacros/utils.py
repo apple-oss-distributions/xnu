@@ -47,7 +47,7 @@ def EnableLLDBAPILogging():
     cmd_str = enable_log_base_cmd + ' kdp-remote packets'
     print(cmd_str)
     print(lldb_run_command(cmd_str))
-    print(lldb_run_command("version"))
+    print(f"{lldb.SBDebugger.GetVersionString()}\n")
     print("Please collect the logs from %s for filing a radar. If you had encountered an exception in a lldbmacro command please re-run it." % logfile_name)
     print("Please make sure to provide the output of 'version', 'image list' and output of command that failed.")
     return
@@ -82,18 +82,21 @@ def SBValueToPointer(sbval):
     else:
         return int(sbval.GetAddress())
 
-def ArgumentStringToInt(arg_string):
-    """ convert '1234' or '0x123' to int
+def ArgumentStringToInt(arg_string) -> int:
+    """ converts an argument to an int
         params:
-          arg_string: str - typically string passed from commandline. ex '1234' or '0xA12CD'
+            arg_string: str - typically a string passed from the commandline.
+                        Accepted inputs:
+                        1. A base 2/8/10/16 literal representation, e.g. "0b101"/"0o5"/"5"/"0x5"
+                        2. An LLDB expression, e.g. "((char*)foo_ptr + sizeof(bar_type))"
         returns:
-          int - integer representation of the string
+            int - integer representation of the string
     """
-    arg_string = arg_string.strip()
-    if arg_string.find('0x') >=0:
-        return int(arg_string, 16)
-    else:
-        return int(arg_string)
+    try:
+        return int(arg_string, 0)
+    except ValueError:
+        val = LazyTarget.GetTarget().chkEvaluateExpression(arg_string)
+        return val.signed
 
 def GetLongestMatchOption(searchstr, options=[], ignore_case=True):
     """ Get longest matched string from set of options. 

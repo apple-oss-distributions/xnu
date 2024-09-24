@@ -94,10 +94,24 @@ IOLockSleepDeadline( IOLock * lock, void *event,
 	           (wait_interrupt_t) interType, __OSAbsoluteTime(deadline));
 }
 
+int
+IOLockSleepWithInheritor( IOLock *lock, UInt32 lck_sleep_action,
+    void *event, thread_t inheritor, UInt32 interType, uint64_t deadline)
+{
+	return (int) lck_mtx_sleep_with_inheritor(lock, (lck_sleep_action_t) lck_sleep_action, (event_t) event, inheritor,
+	           (wait_interrupt_t) interType, deadline);
+}
+
 void
 IOLockWakeup(IOLock * lock, void *event, bool oneThread)
 {
 	thread_wakeup_prim((event_t) event, oneThread, THREAD_AWAKENED);
+}
+
+void
+IOLockWakeupAllWithInheritor(IOLock * lock, void *event)
+{
+	wakeup_all_with_inheritor((event_t) event, THREAD_AWAKENED);
 }
 
 

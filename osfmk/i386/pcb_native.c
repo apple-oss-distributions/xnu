@@ -75,7 +75,7 @@
 #include <kern/machine.h>
 #include <ipc/ipc_port.h>
 #include <vm/vm_kern.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/pmap.h>
 #include <vm/vm_protos.h>
 
@@ -114,7 +114,7 @@ extern zone_t           ids_zone;               /* zone for debug_state area */
 extern int              tecs_mode_supported;
 extern boolean_t        cpuid_tsx_supported;
 
-bool lbr_need_tsx_workaround = false;
+static bool lbr_need_tsx_workaround = false;
 
 int force_thread_policy_tecs;
 
@@ -129,10 +129,10 @@ struct cpu_lbrs {
 	struct lbr_group        msr_lbrs[X86_MAX_LBRS];
 };
 
-const struct cpu_lbrs *cpu_lbr_setp = NULL;
-int cpu_lbr_type;
+static const struct cpu_lbrs *cpu_lbr_setp = NULL;
+static int cpu_lbr_type;
 
-const struct cpu_lbrs nhm_cpu_lbrs = {
+static const struct cpu_lbrs nhm_cpu_lbrs = {
 	16 /* LBR count */,
 	{
 		{ 0x680 /* FROM_0 */, 0x6c0 /* TO_0 */, 0 /* INFO_0 */ },
@@ -232,9 +232,11 @@ i386_lbr_init(i386_cpu_info_t *info_p, bool is_master)
 	}
 
 	if (is_master) {
-		/* All NHM+ CPUs support PERF_CAPABILITIES, so no need to check cpuid for its presence */
-		cpu_lbr_type = PERFCAP_LBR_TYPE(rdmsr64(MSR_IA32_PERF_CAPABILITIES));
-
+		if (info_p->cpuid_features & CPUID_FEATURE_PDCM) {
+			/* All NHM+ CPUs should support this MSR */
+			cpu_lbr_type = PERFCAP_LBR_TYPE(
+				rdmsr64(MSR_IA32_PERF_CAPABILITIES));
+		}
 		/* Sanity-check the LBR type -- some VMMs do not properly support it */
 		if (cpu_lbr_type < PERFCAP_LBR_TYPE_MISPRED || cpu_lbr_type > PERFCAP_LBR_TYPE_EIP_WITH_LBRINFO) {
 			kprintf("CPU-reported LBR type is invalid or is not supported (%d)."
@@ -461,7 +463,7 @@ i386_lbr_synch(thread_t thr)
 	old_pcb->lbrs.lbr_tos = rdmsr64(MSR_IA32_LASTBRANCH_TOS);
 }
 
-void
+static void
 i386_switch_lbrs(thread_t old, thread_t new)
 {
 	pcb_t   new_pcb;

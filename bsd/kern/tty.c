@@ -1133,6 +1133,10 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 	}
 
 	switch (cmd) {                  /* Process the ioctl. */
+	/*
+	 * Note: FIOASYNC and FIONBIO (only) can be called on pty primaries
+	 * before the replica side is open.
+	 */
 	case FIOASYNC:                  /* set/clear async i/o */
 		if (*(int *)data) {
 			SET(tp->t_state, TS_ASYNC);
@@ -1177,12 +1181,14 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 				goto out;
 			}
 			if ((error = suser(kauth_cred_get(), &p->p_acflag))) {
-				if (constty == tp) {
-					ttyfree_locked(constty);
-				} else {
-					ttyfree(constty);
+				if (constty) {
+					if (constty == tp) {
+						ttyfree_locked(constty);
+					} else {
+						ttyfree(constty);
+					}
+					constty = NULL;
 				}
-				constty = NULL;
 				goto out;
 			}
 			if (tp != constty) {

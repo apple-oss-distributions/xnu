@@ -35,8 +35,8 @@
 #include <os/hash.h>
 #include <mach/vm_map.h>
 #include <mach/vm_param.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_memtag.h>
 #include <vm/pmap.h>
 
@@ -409,7 +409,7 @@ __btlib_grow(bt_library_t btl)
 		addr = btl->btl_slabs[slab] + btl->btl_faulted_pos;
 
 		kr = kernel_memory_populate(addr, PAGE_SIZE,
-		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_DIAG);
+		    KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN, VM_KERN_MEMORY_DIAG);
 	}
 
 done:
@@ -475,7 +475,7 @@ __btlib_validate(
 	bt_library_t            btl,
 	bt_hash_t              *bthp,
 	uint32_t                size,
-	uint32_t                param)
+	uint32_t                __assert_only param)
 {
 	bt_stack_t bts;
 	btref_t ref;
@@ -1363,7 +1363,7 @@ btlog_create(btlog_type_t type, uint32_t count, uint32_t sample)
 	btlogu_t btlu;
 
 	kr = kmem_alloc(kernel_map, &btlu.bta, pair.btsp_size,
-	    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
+	    KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN, VM_KERN_MEMORY_DIAG);
 
 	if (kr != KERN_SUCCESS) {
 		return NULL;
@@ -1431,7 +1431,7 @@ btlog_enable(btlogu_t btlu)
 	size = __btlog_size(btlu).btsp_size;
 	if (size > PAGE_SIZE) {
 		kr = kernel_memory_populate(btlu.bta + PAGE_SIZE,
-		    size - PAGE_SIZE, KMA_KOBJECT | KMA_ZERO,
+		    size - PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_SPRAYQTN,
 		    VM_KERN_MEMORY_DIAG);
 	}
 

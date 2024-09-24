@@ -30,7 +30,7 @@
 #define IOKIT_ENABLE_SHARED_PTR
 
 #include <sys/cdefs.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <os/hash.h>
 
 #include <libkern/c++/OSContainers.h>

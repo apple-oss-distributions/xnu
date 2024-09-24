@@ -91,9 +91,10 @@
 
 #include <mach/mach_vm.h>
 
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_protos.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_memory_entry_xnu.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <kern/locks.h>
 #include <os/overflow.h>
@@ -521,7 +522,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 			assert(shm_handle->shm_handle_next == NULL);
 			chunk_size = map_size - mapped_size;
 		}
-		rv = vm_map_enter_mem_object(
+		rv = mach_vm_map_kernel(
 			current_map(),          /* process map */
 			&attach_va,             /* attach address */
 			chunk_size,             /* size to map */

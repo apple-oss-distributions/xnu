@@ -140,8 +140,8 @@ def lldbwrap_update_class_dict(basename, basecls, attr):
             upcast = UPCASTS.get(result.__class__)
             if not upcast:
                 return result
+            upcast(result)
             if result.IsValid():
-                upcast(result)
                 return result
             lldbwrap_raise(ValueError, fn, None, *args, **kwargs)
 
@@ -170,6 +170,7 @@ def lldbwrap_update_class_dict(basename, basecls, attr):
         'GetValueAsUnsigned',
         'TypeIsPointerType',
         'IsValid',
+        'SetPreferDynamicValue'
     ])
 
     DO_NOT_WRAP_PREFIX = [
@@ -422,6 +423,22 @@ class SBTarget(lldb.SBTarget, metaclass=LLDBWrapMetaclass):
             for i in range(0, count * size, size)
         )
 
+    def xStripPtr(self, sbvalue):
+        """ Strips top bits in a pointer value """
+
+        if strip := getattr(self, '_strip_ptr', None):
+            return strip(sbvalue)
+
+        is_tagged = self.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+
+        if is_tagged:
+            strip = lambda sbv: self.xCreateValueFromAddress(sbv.GetName(), sbv.GetValueAsAddress(), sbv.GetType())
+        else:
+            strip = lambda sbv : sbv
+
+        self._strip_ptr = strip
+        return strip(sbvalue)
+
     def xIterAsInt8(self, addr, count):
         """ Conveniency wrapper to xIterAsScalar() on int8_t """
         return self.xIterAsScalar(I8_STRUCT, addr, count)
@@ -507,11 +524,10 @@ class SBTarget(lldb.SBTarget, metaclass=LLDBWrapMetaclass):
             # a value if the name is None, don't ask.
             name = 'newvalue'
 
-        v = self.rawCreateValueFromAddress(name, addr, ty)
+        v = self.CreateValueFromAddress(name, addr, ty)
         if v.IsValid():
             if QUIRK_100103405 and not addr:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v
 
         lldbwrap_raise(ValueError, self.CreateValueFromAddress, None, name)
@@ -674,7 +690,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
 
     if QUIRK_99806493:
         def Cast(self, ty):
-            v = super(SBValue, self).Cast(ty)
+            v = super().Cast(ty)
             SBValue.xUpcast(v)
 
             if not v.IsValid() or not v.TypeIsPointerType():
@@ -714,7 +730,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
 
     if QUIRK_100162262:
         def AddressOf(self):
-            v = super(SBValue, self).AddressOf().Persist()
+            v = super().AddressOf().Persist()
             # no need for QUIRK_100103405
             v.__class__ = SBValue
             return v
@@ -730,7 +746,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
         def Dereference(self):
             addr = self.GetValueAsAddress()
             if addr == self.GetValueAsUnsigned():
-                v = super(SBValue, self).Dereference()
+                v = super().Dereference()
                 SBValue.xUpcast(v)
                 return v
 
@@ -739,7 +755,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
 
     if QUIRK_102642763:
         def GetChildMemberWithName(self, name):
-            v = super(SBValue, self).GetChildMemberWithName(name)
+            v = self.rawGetChildMemberWithName(name)
             SBValue.xUpcast(v)
             if v.IsValid():
                 return v
@@ -757,7 +773,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
             return self.xCreateValueFromAddress(name, self.GetLoadAddress() + offs, mty)
 
         def GetValueForExpressionPath(self, path):
-            v = super(SBValue, self).GetValueForExpressionPath(path)
+            v = self.rawGetValueForExpressionPath(path)
             SBValue.xUpcast(v)
             if v.IsValid():
                 return v
@@ -774,6 +790,18 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
                 return v
 
             return self.xCreateValueFromAddress(name, self.GetLoadAddress() + offs, mty)
+
+
+    def IsValid(self):
+        """
+        SBValue.IsValid() is necessary but not sufficient to check an SBValue is in a valid state.
+
+        'IsValid means this is an SBValue with something in it that wasn't an obvious error, something you might ask questions of.  
+        In particular, it's something you can ask GetError().Success() which is the real way to tell if you have an SBValue you should be using.'
+
+        For XNU macros, we always care about whether we have an SBValue we can use - so we overload IsValid() for convenience
+        """
+        return super().IsValid() and self.error.success
 
     #
     # Extensions
@@ -883,7 +911,8 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
                 self.GetLoadAddress(), rawty.GetArrayElementType())
 
         if fl & lldb.eTypeIsPointer:
-            return self.chkDereference() if self.GetValueAsAddress() else None
+            sbv_new = self.GetTarget().xStripPtr(self)
+            return sbv_new.chkDereference() if self.GetValueAsAddress() else None
 
         lldbwrap_raise(TypeError, self.xDereference, "Type can't be dereferenced")
 
@@ -923,8 +952,9 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
             res = self.GetValueAsUnsigned(err)
             if QUIRK_99785324 and res and flags & lldb.eTypeIsEnumeration:
                 try:
+                    addr_of = self.rawAddressOf()
                     if (res >> (self.GetByteSize() * 8 - 1) and
-                            not self.rawAddressOf().IsValid()):
+                            not (addr_of.IsValid() and addr_of.error.success)):
                         #
                         # This field is:
                         # - likely a bitfield (we can't take its AddressOf())
@@ -986,11 +1016,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetScalarByName(self, name):
         """ same as chkGetChildMemberWithName(name).xGetValueAsScalar() """
 
-        v = super(SBValue, self).GetChildMemberWithName(name)
+        v = self.rawGetChildMemberWithName(name)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsScalar()
 
         lldbwrap_raise(ValueError, self.GetChildMemberWithName, None, name)
@@ -998,11 +1028,10 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetScalarAtIndex(self, index):
         """ same as chkGetChildAtIndex(index).xGetValueAsScalar() """
 
-        v = super(SBValue, self).GetChildAtIndex(index)
+        v = self.GetChildAtIndex(index)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsScalar()
 
         lldbwrap_raise(ValueError, self.GetChildAtIndex, None, index)
@@ -1010,11 +1039,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetScalarByPath(self, path):
         """ same as chkGetValueForExpressionPath(path).xGetValueAsScalar() """
 
-        v = super(SBValue, self).GetValueForExpressionPath(path)
+        v = self.rawGetValueForExpressionPath(path)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsScalar()
 
         lldbwrap_raise(ValueError, self.GetValueForExpressionPath, None, path)
@@ -1023,11 +1052,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetIntegerByName(self, name):
         """ same as chkGetChildMemberWithName(name).xGetValueAsInteger() """
 
-        v = super(SBValue, self).GetChildMemberWithName(name)
+        v = self.rawGetChildMemberWithName(name)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsInteger()
 
         lldbwrap_raise(ValueError, self.GetChildMemberWithName, None, name)
@@ -1035,11 +1064,10 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetIntegerAtIndex(self, index):
         """ same as chkGetChildAtIndex(index).xGetValueAsInteger() """
 
-        v = super(SBValue, self).GetChildAtIndex(index)
+        v = self.GetChildAtIndex(index)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsInteger()
 
         lldbwrap_raise(ValueError, self.GetChildAtIndex, None, index)
@@ -1047,11 +1075,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetIntegerByPath(self, path):
         """ same as chkGetValueForExpressionPath(path).xGetValueAsInteger() """
 
-        v = super(SBValue, self).GetValueForExpressionPath(path)
+        v = self.rawGetValueForExpressionPath(path)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsInteger()
 
         lldbwrap_raise(ValueError, self.GetValueForExpressionPath, None, path)
@@ -1060,9 +1088,9 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetPointeeByName(self, name):
         """ same as chkGetChildMemberWithName(name).xDereference() """
 
-        v = super(SBValue, self).GetChildMemberWithName(name)
+        v = self.rawGetChildMemberWithName(name)
+        SBValue.xUpcast(v)
         if v.IsValid():
-            SBValue.xUpcast(v)
             return v.xDereference()
 
         lldbwrap_raise(ValueError, self.GetChildMemberWithName, None, name)
@@ -1070,9 +1098,8 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetPointeeAtIndex(self, index):
         """ same as chkGetChildAtIndex(index).xDereference() """
 
-        v = super(SBValue, self).GetChildAtIndex(index)
+        v = self.GetChildAtIndex(index)
         if v.IsValid():
-            SBValue.xUpcast(v)
             return v.xDereference()
 
         lldbwrap_raise(ValueError, self.GetChildAtIndex, None, index)
@@ -1080,9 +1107,9 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetPointeeByPath(self, path):
         """ same as chkGetValueForExpressionPath(path).xDereference() """
 
-        v = super(SBValue, self).GetValueForExpressionPath(path)
+        v = self.rawGetValueForExpressionPath(path)
+        SBValue.xUpcast(v)
         if v.IsValid():
-            SBValue.xUpcast(v)
             return v.xDereference()
 
         lldbwrap_raise(ValueError, self.GetValueForExpressionPath, None, path)
@@ -1091,7 +1118,8 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetLoadAddressByName(self, name):
         """ same as chkGetChildMemberWithName(name).GetLoadAddress() """
 
-        v = super(SBValue, self).GetChildMemberWithName(name)
+        v = self.rawGetChildMemberWithName(name)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
@@ -1102,7 +1130,7 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetLoadAddressAtIndex(self, index):
         """ same as chkGetChildAtIndex(index).GetLoadAddress() """
 
-        v = super(SBValue, self).GetChildAtIndex(index)
+        v = self.GetChildAtIndex(index)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
@@ -1113,7 +1141,8 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetLoadAddressByPath(self, path):
         """ same as chkGetValueForExpressionPath(path).GetLoadAddress() """
 
-        v = super(SBValue, self).GetValueForExpressionPath(path)
+        v = self.rawGetValueForExpressionPath(path)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
@@ -1125,11 +1154,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetCStringByName(self, name, *args):
         """ same as chkGetChildMemberWithName(name).xGetValueAsCString() """
 
-        v = super(SBValue, self).GetChildMemberWithName(name)
+        v = self.rawGetChildMemberWithName(name)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsCString(*args)
 
         lldbwrap_raise(ValueError, self.GetChildMemberWithName, None, name)
@@ -1137,11 +1166,10 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetCStringAtIndex(self, index, *args):
         """ same as chkGetChildAtIndex(index).xGetValueAsCString() """
 
-        v = super(SBValue, self).GetChildAtIndex(index)
+        v = self.GetChildAtIndex(index)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsCString(*args)
 
         lldbwrap_raise(ValueError, self.GetChildAtIndex, None, index)
@@ -1149,11 +1177,11 @@ class SBValue(lldb.SBValue, metaclass=LLDBWrapMetaclass):
     def xGetCStringByPath(self, path, *args):
         """ same as chkGetValueForExpressionPath(path).xGetValueAsCString() """
 
-        v = super(SBValue, self).GetValueForExpressionPath(path)
+        v = self.rawGetValueForExpressionPath(path)
+        SBValue.xUpcast(v)
         if v.IsValid():
             if QUIRK_100103405:
                 v.SetPreferDynamicValue(0)
-            v.__class__ = SBValue
             return v.xGetValueAsCString(*args)
 
         lldbwrap_raise(ValueError, self.GetValueForExpressionPath, None, path)

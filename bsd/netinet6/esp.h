@@ -98,6 +98,8 @@ struct esptail {
 #ifdef BSD_KERNEL_PRIVATE
 struct secasvar;
 
+#define ESP_AUTH_MAXSUMSIZE   64
+
 #define ESP_ASSERT(_cond, _format, ...)                                                  \
 	do {                                                                             \
 	        if (__improbable(!(_cond))) {                                            \
@@ -161,7 +163,7 @@ extern int esp_kpipe_input(ifnet_t, kern_packet_t, kern_packet_t);
 
 extern int esp_schedule(const struct esp_algorithm *, struct secasvar *);
 extern int esp_auth(struct mbuf *, size_t, size_t,
-    struct secasvar *, u_char *);
+    struct secasvar *, u_char *__sized_by(ESP_AUTH_MAXSUMSIZE));
 extern int esp_auth_data(struct secasvar *, uint8_t *, size_t, uint8_t *, size_t);
 
 extern void esp_init(void);

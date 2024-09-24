@@ -173,7 +173,8 @@ spawn_coalition_leader(const char *path, char *const *argv, uint64_t resource_co
 
 T_DECL(mark_coalition_swappable, "Set coalition is swappable",
     T_META_ASROOT(true),
-    T_META_BOOTARGS_SET("kern.swap_all_apps=1"))
+    T_META_BOOTARGS_SET("kern.swap_all_apps=1"),
+    T_META_TAG_VM_PREFERRED)
 {
 	char testpath[PATH_MAX];
 	uint32_t testpath_buf_size;

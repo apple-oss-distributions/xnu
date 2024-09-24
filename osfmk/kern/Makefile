@@ -107,6 +107,8 @@ PRIVATE_EXPORT_FILES = \
 	mach_filter.h \
 	mach_node_link.h \
 	sched_clutch.h \
+	smr.h \
+	smr_hash.h \
 	socd_client_kern.h \
 	task_ident.h \
 	ticket_lock.h \
@@ -122,11 +124,11 @@ XNU_ONLY_EXPORTS = \
 	lock_ptr.h \
 	recount.h \
 	sched_hygiene.h \
-	smr.h \
-	smr_hash.h \
 	sync_sema.h \
 	ux_handler.h \
-	workload_config.h
+	workload_config.h \
+	kern_stackshot.h
+
 
 INSTALL_MI_LIST = ${DATAFILES}
 
@@ -156,11 +158,15 @@ TIGHTBEAM_FILES := \
 	exclaves_eic.tightbeam \
 	exclaves_log.tightbeam \
 	exclaves_upcalls.tightbeam \
-	stackshot.tightbeam \
-	exclaves_frame_mint.tightbeam
+	exclaves_frame_mint.tightbeam \
+	exclaves_xnuproxy.tightbeam
 
 TIGHTBEAM_MODULES := \
-	SharedMemoryBase.tbmodule
+	StackshotTypes.tbmodule \
+	Stackshot.tbmodule \
+	SharedMemoryBase.tbmodule \
+	ExclavesCHelloServer.tbmodule
+
 endif
 
 # This makes sure to not include any tbmodules which don't exist in the SDK and

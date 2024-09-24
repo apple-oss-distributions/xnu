@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -76,7 +76,6 @@ net_filter_event_description(uint32_t state)
 	return sbuf;
 }
 
-
 static void
 net_filter_event_callback(struct eventhandler_entry_arg arg0 __unused,
     enum net_filter_event_subsystems state)
@@ -85,6 +84,8 @@ net_filter_event_callback(struct eventhandler_entry_arg arg0 __unused,
 
 	os_log(OS_LOG_DEFAULT, "net_filter_event: new state (0x%x) %s",
 	    state, sbuf_data(sbuf));
+	evhlog(debug, "%s: eventhandler saw event type=net_filter_event_state event_code=%s",
+	    __func__, sbuf_data(sbuf));
 	sbuf_delete(sbuf);
 }
 
@@ -110,7 +111,12 @@ net_filter_event_enqueue_callback(struct nwk_wq_entry *nwk_kwqe)
 static void
 net_filter_event_enqueue(void)
 {
-	struct nwk_wq_entry *nwk_wqe;
+	struct nwk_wq_entry *__single nwk_wqe;
+
+	struct sbuf *sbuf = net_filter_event_description(net_filter_event_state);
+	evhlog(debug, "%s: eventhandler enqueuing event of type=net_filter_event_state event_code=%s",
+	    __func__, sbuf_data(sbuf));
+	sbuf_delete(sbuf);
 
 	nwk_wqe = kalloc_type(struct nwk_wq_entry, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	nwk_wqe->func = net_filter_event_enqueue_callback;
@@ -143,13 +149,11 @@ void
 net_filter_event_register(net_filter_event_callback_t callback)
 {
 	net_filter_event_init();
-	eventhandler_register(&net_filter_evhdlr_ctxt, NULL,
-	    "net_filter_event",
-	    ptrauth_nop_cast(void *, callback),
+	(void)EVENTHANDLER_REGISTER(&net_filter_evhdlr_ctxt,
+	    net_filter_event, callback,
 	    eventhandler_entry_dummy_arg,
 	    EVENTHANDLER_PRI_ANY);
 }
-
 
 static int
 net_filter_event_sysctl(struct sysctl_oid *oidp, void *arg1, int arg2,

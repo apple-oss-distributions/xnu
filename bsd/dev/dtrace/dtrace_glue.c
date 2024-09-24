@@ -48,7 +48,7 @@
 #include <mach/vm_param.h>
 #include <mach/mach_vm.h>
 #include <mach/task.h>
-#include <vm/vm_map.h> /* All the bits we care about are guarded by MACH_KERNEL_PRIVATE :-( */
+#include <vm/vm_map_xnu.h> /* All the bits we care about are guarded by MACH_KERNEL_PRIVATE :-( */
 
 /*
  * pid/proc
@@ -104,9 +104,6 @@ sprunlock(proc_t *p)
  * uread/uwrite
  */
 
-// These are not exported from vm_map.h.
-extern kern_return_t vm_map_read_user(vm_map_t map, vm_map_address_t src_addr, void *dst_p, vm_size_t size);
-extern kern_return_t vm_map_write_user(vm_map_t map, void *src_p, vm_map_address_t dst_addr, vm_size_t size);
 
 /* Not called from probe context */
 int

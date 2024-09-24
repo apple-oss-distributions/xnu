@@ -63,6 +63,7 @@
 #endif
 
 #include <pexpert/arm64/apple_arm64_regs.h>
+#include <pexpert/arm64/apple_arm64_cpu.h>
 #include <pexpert/arm64/AIC.h>
 
 #ifndef ASSEMBLER
@@ -88,5 +89,11 @@
 #define CPU_VERSION_C0                       0x20
 #define CPU_VERSION_UNKNOWN                  0xff
 
+
+/*
+ * Conservatively assume that BTI will be enforced.
+ * Individual SoCs and kernel configurations may have different behavior.
+ */
+#define BTI_ENFORCED 1
 
 #endif /* !_PEXPERT_ARM64_APPLE_ARM64_COMMON_H */

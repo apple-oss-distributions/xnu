@@ -3,7 +3,6 @@ OPTIONS/fb			optional fb
 OPTIONS/debug			optional debug
 
 osfmk/vm/vm_apple_protect.c	 standard
-osfmk/vm/vm_fourk_pager.c	 standard
 
 osfmk/arm64/hi_res_clock_map.c 	optional hi_res_clock
 
@@ -14,15 +13,15 @@ osfmk/arm/pmap/pmap_iommu.c		optional nos_arm_pmap
 osfmk/arm/pmap/pmap_misc.c		optional nos_arm_pmap
 osfmk/arm/pmap/pmap_ppl_interface.c	optional nos_arm_pmap
 
-osfmk/arm64/sptm/pmap/pmap.c		optional config_sptm
-osfmk/arm64/sptm/pmap/pmap_cs.c		optional config_sptm
-osfmk/arm64/sptm/pmap/pmap_data.c	optional config_sptm
-osfmk/arm64/sptm/pmap/pmap_iommu.c	optional config_sptm
-osfmk/arm64/sptm/pmap/pmap_misc.c	optional config_sptm
-osfmk/arm64/sptm/pmap/pmap_ppl_interface.c	optional config_sptm
+osfmk/arm64/sptm/pmap/pmap.c		optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/pmap/pmap_cs.c		optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/pmap/pmap_data.c	optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/pmap/pmap_iommu.c	optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/pmap/pmap_misc.c	optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/pmap/pmap_ppl_interface.c	optional nos_arm_asm config_sptm
+osfmk/arm64/sptm/start_sptm.s		optional nos_arm_asm config_sptm
+osfmk/arm64/amcc_rorgn_sptm.c		optional nos_arm_asm config_sptm
 osfmk/arm64/sptm/arm_init_sptm.c	optional config_sptm
-osfmk/arm64/sptm/start_sptm.s		optional config_sptm
-osfmk/arm64/amcc_rorgn_sptm.c		optional config_sptm
 
 osfmk/arm64/bsd_arm64.c		optional mach_bsd
 osfmk/arm/machdep_call.c	optional mach_bsd
@@ -114,6 +113,9 @@ osfmk/arm64/alternate_debugger.c		optional alternate_debugger
 osfmk/arm64/alternate_debugger_asm.s		optional alternate_debugger
 
 osfmk/arm64/machine_remote_time.c optional config_mach_bridge_recv_time
+osfmk/arm64/sme.c		standard
 osfmk/arm64/corecrypto/sha256_compress_arm64.s	standard
+
+osfmk/arm64/bti_telemetry.c optional config_bti_telemetry
 
 osfmk/arm/counter.c	standard

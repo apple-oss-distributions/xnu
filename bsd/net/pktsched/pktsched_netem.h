@@ -35,7 +35,7 @@ struct kern_pbufpool;
 typedef int (netem_output_func_t)(void *handle, pktsched_pkt_t *pkts,
     uint32_t n_pkts);
 
-extern int netem_config(struct netem **ne, const char *name, struct ifnet *ifp,
+extern int netem_config(struct netem **ne, const char *__null_terminated name, struct ifnet *ifp,
     const struct if_netem_params *p, void *output_handle,
     netem_output_func_t *output_func, uint32_t output_max_batch_size);
 extern void netem_get_params(struct netem *ne, struct if_netem_params *p);

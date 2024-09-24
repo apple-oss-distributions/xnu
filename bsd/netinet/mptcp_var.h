@@ -565,7 +565,7 @@ extern void mptcp_subflow_workloop(struct mptses *);
 extern void mptcp_sched_create_subflows(struct mptses *);
 
 extern void mptcp_finish_usrclosed(struct mptses *mpte);
-extern struct mptopt *mptcp_sopt_alloc(zalloc_flags_t);
+extern struct mptopt *mptcp_sopt_alloc(void);
 extern const char *mptcp_sopt2str(int, int);
 extern void mptcp_sopt_free(struct mptopt *);
 extern void mptcp_sopt_insert(struct mptses *, struct mptopt *);

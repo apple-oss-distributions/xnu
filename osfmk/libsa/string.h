@@ -119,6 +119,8 @@ __BEGIN_DECLS
 #pragma mark _FORTIFY_SOURCE helpers
 
 /*
+ * If _FORTIFY_SOURCE is undefined, it is assumed to be 1.
+ *
  * _FORTIFY_SOURCE > 0 will enable checked memory/string functions.
  *
  * _FORTIFY_SOURCE_STRICT will enable stricter checking (optional)
@@ -224,8 +226,8 @@ __BEGIN_DECLS
 #endif
 
 #if __XNU_FORTIFY_SOURCE == 0 || __has_ptrcheck
-#define __xnu_struct_size_check(ptr, size)   ((void)0)
-#define __xnu_member_size_check(ptr, size)   ((void)0)
+#define __xnu_struct_size_check(ptr, size, how)   ((void)0)
+#define __xnu_member_size_check(ptr, size, how)   ((void)0)
 #else
 __xnu_string_inline __cold __dead2 void
 __xnu_fortify_trap_write(void)
@@ -242,19 +244,14 @@ __xnu_fortify_trap_read(void)
 #endif
 }
 
-#define __xnu_fortify_trap(ptr)  _Generic(ptr, \
-	const char *: __xnu_fortify_trap_read(),                                \
-	const void *: __xnu_fortify_trap_read(),                                \
-	default:      __xnu_fortify_trap_write())
-
-#define __xnu_struct_size_check(ptr, size)  ({ \
+#define __xnu_struct_size_check(ptr, size, how)  ({ \
 	if (__xnu_struct_size(ptr) < (size)) {                                  \
-	        __xnu_fortify_trap(ptr);                                        \
+	        __xnu_fortify_trap_ ## how();                                   \
 	}                                                                       \
 })
-#define __xnu_member_size_check(ptr, size)  ({ \
+#define __xnu_member_size_check(ptr, size, how)  ({ \
 	if (__xnu_member_size(ptr) < (size)) {                                  \
-	        __xnu_fortify_trap(ptr);                                        \
+	        __xnu_fortify_trap_ ## how();                                   \
 	}                                                                       \
 })
 #endif
@@ -296,8 +293,8 @@ __xnu_struct_size_precondition(s2, n, "read overflow (second argument)")
 		const void * __sized_by(n),
 		size_t n) __asm("_bcmp");
 
-	__xnu_struct_size_check(s1, n);
-	__xnu_struct_size_check(s2, n);
+	__xnu_struct_size_check(s1, n, read);
+	__xnu_struct_size_check(s2, n, read);
 #if __has_builtin(__builtin_bcmp)
 	return __builtin_bcmp(s1, s2, n);
 #else
@@ -322,8 +319,8 @@ __xnu_struct_size_precondition(s2, n, "read overflow (second argument)")
 		const void *__sized_by(n),
 		size_t n) __asm("_memcmp");
 
-	__xnu_struct_size_check(s1, n);
-	__xnu_struct_size_check(s2, n);
+	__xnu_struct_size_check(s1, n, read);
+	__xnu_struct_size_check(s2, n, read);
 #if __has_builtin(__builtin_memcmp)
 	return __builtin_memcmp(s1, s2, n);
 #else
@@ -358,7 +355,7 @@ __xnu_struct_size_precondition(s, n, "write overflow")
 		const void *__sized_by(n),
 		size_t n) __asm("_bzero");
 
-	__xnu_struct_size_check(s, n);
+	__xnu_struct_size_check(s, n, write);
 #if __has_builtin(__builtin_bzero)
 	__builtin_bzero(s, n);
 #else
@@ -383,7 +380,7 @@ __xnu_object_size_precondition(s, n, "write overflow")
 		int,
 		size_t n) __asm("_memset");
 
-	__xnu_object_size_check(s, n);
+	__xnu_object_size_check(s, n, write);
 #if __has_builtin(__builtin_memset)
 	return __builtin_memset(s, c, n);
 #else
@@ -412,8 +409,8 @@ __xnu_object_size_precondition(src, n, "read overflow")
 		const void *src __sized_by(n),
 		size_t n) __asm("_memmove");
 
-	__xnu_object_size_check(dst, n);
-	__xnu_object_size_check(src, n);
+	__xnu_object_size_check(dst, n, write);
+	__xnu_object_size_check(src, n, read);
 #if __has_builtin(__builtin_memmove)
 	return __builtin_memmove(dst, src, n);
 #else
@@ -436,8 +433,8 @@ __xnu_struct_size_precondition(src, n, "read overflow")
 		const void *src __sized_by(n),
 		size_t n) __asm("_memmove");
 
-	__xnu_struct_size_check(dst, n);
-	__xnu_struct_size_check(src, n);
+	__xnu_struct_size_check(dst, n, write);
+	__xnu_struct_size_check(src, n, read);
 #if __has_builtin(__builtin_memmove)
 	return __builtin_memmove(dst, src, n);
 #else
@@ -588,7 +585,7 @@ __xnu_member_size_precondition(s1, s1len, "read overflow")
 		const char *__null_terminated s2,
 		size_t s1len) __asm("_strlcmp");
 
-	__xnu_member_size_check(s1, s1len);
+	__xnu_member_size_check(s1, s1len, read);
 	return __xnu_strlcmp(s1, s2, s1len);
 }
 #endif
@@ -614,8 +611,8 @@ __xnu_member_size_precondition(s2, s2len, "read overflow")
 		const char *__counted_by(s2len) s2,
 		size_t s2len) __asm("_strbufcmp");
 
-	__xnu_member_size_check(s1, s1len);
-	__xnu_member_size_check(s2, s2len);
+	__xnu_member_size_check(s1, s1len, read);
+	__xnu_member_size_check(s2, s2len, read);
 	return __xnu_strbufcmp(s1, s1len, s2, s2len);
 }
 
@@ -680,7 +677,7 @@ __xnu_member_size_precondition(s1, s1len, "read overflow")
 		const char *__null_terminated s2,
 		size_t s1len) __asm("_strlcasecmp");
 
-	__xnu_member_size_check(s1, s1len);
+	__xnu_member_size_check(s1, s1len, read);
 	return __xnu_strlcasecmp(s1, s2, s1len);
 }
 
@@ -705,8 +702,8 @@ __xnu_member_size_precondition(s2, s2len, "read overflow")
 		const char *__counted_by(s2len) s2,
 		size_t s2len) __asm("_strbufcasecmp");
 
-	__xnu_member_size_check(s1, s1len);
-	__xnu_member_size_check(s2, s2len);
+	__xnu_member_size_check(s1, s1len, read);
+	__xnu_member_size_check(s2, s2len, read);
 	return __xnu_strbufcasecmp(s1, s1len, s2, s2len);
 }
 
@@ -761,7 +758,7 @@ __xnu_member_size_precondition(dst, n, "write overflow")
 		const char *__null_terminated,
 		size_t n) __asm("_strlcpy");
 
-	__xnu_member_size_check(dst, n);
+	__xnu_member_size_check(dst, n, write);
 #if __has_builtin(__builtin_strlcpy)
 	return __builtin_strlcpy(dst, src, n);
 #else
@@ -798,8 +795,8 @@ __xnu_member_size_precondition(src, srcsz, "read overflow")
 		const char *__counted_by(srcsz) src,
 		size_t srcsz) __asm("_strbufcpy");
 
-	__xnu_member_size_check(dst, dstsz);
-	__xnu_member_size_check(src, srcsz);
+	__xnu_member_size_check(dst, dstsz, write);
+	__xnu_member_size_check(src, srcsz, read);
 	return __xnu_strbufcpy(dst, dstsz, src, srcsz);
 }
 
@@ -826,7 +823,7 @@ __xnu_member_size_precondition(dst, n, "write overflow")
 		const char *__null_terminated,
 		size_t n) __asm("_strlcat");
 
-	__xnu_member_size_check(dst, n);
+	__xnu_member_size_check(dst, n, write);
 #if __has_builtin(__builtin_strlcat)
 	return __builtin_strlcat(dst, src, n);
 #else
@@ -863,8 +860,8 @@ __xnu_member_size_precondition(src, srcsz, "read overflow")
 		const char *__counted_by(srcsz) src,
 		size_t srcsz) __asm("_strbufcat");
 
-	__xnu_member_size_check(dst, dstsz);
-	__xnu_member_size_check(src, srcsz);
+	__xnu_member_size_check(dst, dstsz, write);
+	__xnu_member_size_check(src, srcsz, read);
 	return __xnu_strbufcat(dst, dstsz, src, srcsz);
 }
 

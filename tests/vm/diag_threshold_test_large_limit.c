@@ -40,7 +40,7 @@ simple_test_large_limit_testexecution(__unused struct test_case *test_case, void
 
 
 T_DECL(diag_mem_threshold_large_limit_test,
-    "Large limit test, set a limit over 2Gb and wait for exception")
+    "Large limit test, set a limit over 2Gb and wait for exception", T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_mem_threshold_large_limit_test);
 }

@@ -20,6 +20,8 @@
 #include "ktrace_meta.h"
 #include "../drop_priv.h"
 
+
+
 #define MAX_CPUS    64
 #define MAX_THREADS 64
 
@@ -128,7 +130,8 @@ timestamp_secs(ktrace_session_t s, uint64_t timestamp)
 // timer fire.
 
 T_DECL(kperf_sample_active_cpus,
-    "make sure that kperf samples all active CPUs")
+    "make sure that kperf samples all active CPUs",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -342,7 +345,8 @@ T_DECL(kperf_sample_active_cpus,
 #define FIRES_THRESHOLD (5000)
 
 T_DECL(kperf_timer_fires_enough_times,
-    "ensure the correct number of timers fire in a period of time")
+    "ensure the correct number of timers fire in a period of time",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -508,7 +512,8 @@ cpu_oversample_log(struct cpu_oversample *cpu, unsigned int cpuid)
 }
 
 T_DECL(kperf_timer_not_oversampling,
-    "ensure that time between fires is long enough")
+    "ensure that time between fires is long enough",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -688,7 +693,8 @@ T_DECL(kperf_timer_not_oversampling,
 	dispatch_main();
 }
 
-T_DECL(kperf_timer_stress, "repeatedly enable and disable timers")
+T_DECL(kperf_timer_stress, "repeatedly enable and disable timers",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -803,7 +809,8 @@ expect_kdebug_trigger(const char *filter_desc, const uint32_t *debugids,
 	        (KDBG_EVENTID(TRIGGER_CLASS, TRIGGER_SUBCLASS, TRIGGER_CODE))
 
 T_DECL(kperf_kdebug_trigger_classes,
-    "test that kdebug trigger samples on classes")
+    "test that kdebug trigger samples on classes",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -820,7 +827,8 @@ T_DECL(kperf_kdebug_trigger_classes,
 }
 
 T_DECL(kperf_kdebug_trigger_subclasses,
-    "test that kdebug trigger samples on subclasses")
+    "test that kdebug trigger samples on subclasses",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -837,7 +845,8 @@ T_DECL(kperf_kdebug_trigger_subclasses,
 }
 
 T_DECL(kperf_kdebug_trigger_debugids,
-    "test that kdebug trigger samples on debugids")
+    "test that kdebug trigger samples on debugids",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -862,7 +871,8 @@ reset_kperf(void)
 }
 
 T_DECL(kperf_kdbg_callstacks,
-    "test that the kdbg_callstacks samples on syscalls")
+    "test that the kdbg_callstacks samples on syscalls",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -950,7 +960,8 @@ expect_stacks_traced(void (^setup)(ktrace_session_t s), void (^complete)(void))
 	});
 }
 
-T_DECL(kperf_pet, "test that PET mode samples kernel and user stacks")
+T_DECL(kperf_pet, "test that PET mode samples kernel and user stacks",
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -966,7 +977,8 @@ T_DECL(kperf_pet, "test that PET mode samples kernel and user stacks")
 
 T_DECL(kperf_lightweight_pet,
     "test that lightweight PET mode samples kernel and user stacks",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true),
+	T_META_TAG_VM_PREFERRED)
 {
 	start_controlling_ktrace();
 
@@ -997,7 +1009,8 @@ T_DECL(kperf_lightweight_pet,
 	dispatch_main();
 }
 
-T_DECL(kperf_pet_stress, "repeatedly enable and disable PET mode")
+T_DECL(kperf_pet_stress, "repeatedly enable and disable PET mode",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -1017,7 +1030,8 @@ T_DECL(kperf_pet_stress, "repeatedly enable and disable PET mode")
 #pragma mark - PMCs
 
 T_DECL(kperf_pmc_config_only,
-    "shouldn't show PMC config events unless requested")
+    "shouldn't show PMC config events unless requested",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -1107,7 +1121,8 @@ skip_if_monotonic_unsupported(void)
 #define INSTRS_CYCLES_LOWER 50
 
 T_DECL(kperf_sample_instrs_cycles,
-    "ensure instructions and cycles are sampled")
+    "ensure instructions and cycles are sampled",
+	T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 
@@ -1177,7 +1192,8 @@ T_DECL(kperf_sample_instrs_cycles,
 static_assert(sizeof(LABEL) > MAX_LABEL_LEN,
     "should be larger than the max length of a label");
 
-T_DECL(kperf_dispatch_labels, "ensure dispatch queue labels are sampled")
+T_DECL(kperf_dispatch_labels, "ensure dispatch queue labels are sampled",
+	T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 	start_controlling_ktrace();
@@ -1306,7 +1322,8 @@ test_child_process(pid_t child_pid)
 }
 
 T_DECL(kperf_unblessed_refusal,
-    "check that an unblessed child cannot access ktrace")
+    "check that an unblessed child cannot access ktrace",
+	T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 	pid_t child_pid = spawn_bless_helper();
@@ -1317,7 +1334,8 @@ T_DECL(kperf_unblessed_refusal,
 		exit_status, exit_status == 0 ? "ok" : strerror(exit_status));
 }
 
-T_DECL(kperf_blessed_ownership, "check that a blessed child can access ktrace")
+T_DECL(kperf_blessed_ownership, "check that a blessed child can access ktrace",
+	T_META_TAG_VM_PREFERRED)
 {
 	T_LOG("parent pid is %d\n", getpid());
 	T_SETUPBEGIN;
@@ -1332,3 +1350,4 @@ T_DECL(kperf_blessed_ownership, "check that a blessed child can access ktrace")
 	ret = kperf_bless_set(-1);
 	T_ASSERT_POSIX_SUCCESS(ret, "removed blessing from child");
 }
+

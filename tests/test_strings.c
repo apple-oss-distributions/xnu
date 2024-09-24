@@ -36,6 +36,10 @@ panic(const char *fmt, ...)
 #pragma clang diagnostic ignored "-Wdeclaration-after-statement"
 #pragma clang diagnostic ignored "-Wgnu-designator"
 
+T_GLOBAL_META(
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED);
+
 T_DECL(strbufcmp, "strbufcmp") {
 #define T_COMPARE(A, AS, B, BS, EQ) T_ASSERT_EQ(strbufcmp_impl((A), (AS), (B), (BS)), (EQ), "compare '%s'.%zu, '%s'.%zu", (A), (AS), (B), (BS))
 	// two identical strings

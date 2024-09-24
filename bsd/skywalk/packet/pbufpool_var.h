@@ -31,6 +31,7 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <skywalk/core/skywalk_var.h>
+#include <net/droptap.h>
 
 struct __kern_quantum;
 struct __kern_packet;
@@ -80,13 +81,13 @@ struct kern_pbufpool {
 	/*
 	 * User packet pool: packet metadata hash table
 	 */
-	struct kern_pbufpool_u_bkt *pp_u_hash_table;
+	struct kern_pbufpool_u_bkt *__counted_by(pp_u_hash_table_size) pp_u_hash_table;
 	uint64_t                pp_u_bufinuse;
 
 	/*
 	 * User packet pool: buflet hash table
 	 */
-	struct kern_pbufpool_u_bft_bkt *pp_u_bft_hash_table;
+	struct kern_pbufpool_u_bft_bkt *__counted_by(pp_u_bft_hash_table_size) pp_u_bft_hash_table;
 	uint64_t                pp_u_bftinuse;
 
 	void                    *pp_ctx;
@@ -99,6 +100,9 @@ struct kern_pbufpool {
 	pbufpool_name_t         pp_name;
 	pbuf_seg_ctor_fn_t      pp_pbuf_seg_ctor;
 	pbuf_seg_dtor_fn_t      pp_pbuf_seg_dtor;
+
+	uint32_t                pp_u_hash_table_size;
+	uint32_t                pp_u_bft_hash_table_size;
 };
 
 /* valid values for pp_flags */
@@ -170,7 +174,7 @@ extern void pp_close(struct kern_pbufpool *);
 #define PPCREATEF_DYNAMIC       0x10    /* dynamic per-CPU magazines */
 
 extern struct kern_pbufpool *pp_create(const char *name,
-    struct skmem_region_params *srp_array, pbuf_seg_ctor_fn_t buf_seg_ctor,
+    struct skmem_region_params srp_array[SKMEM_REGIONS], pbuf_seg_ctor_fn_t buf_seg_ctor,
     pbuf_seg_dtor_fn_t buf_seg_dtor, const void *ctx,
     pbuf_ctx_retain_fn_t ctx_retain, pbuf_ctx_release_fn_t ctx_release,
     uint32_t ppcreatef);
@@ -182,7 +186,7 @@ extern void pp_insert_upp(struct kern_pbufpool *, struct __kern_quantum *,
 extern void pp_insert_upp_locked(struct kern_pbufpool *,
     struct __kern_quantum *, pid_t);
 extern void pp_insert_upp_batch(struct kern_pbufpool *pp, pid_t pid,
-    uint64_t *array, uint32_t num);
+    uint64_t *__counted_by(num) array, uint32_t num);
 extern struct __kern_quantum *pp_remove_upp(struct kern_pbufpool *, obj_idx_t,
     int *);
 extern struct __kern_quantum *pp_remove_upp_locked(struct kern_pbufpool *,
@@ -231,29 +235,35 @@ extern boolean_t pp_release(struct kern_pbufpool *);
 /* configure packet pool buffer region (backing IOMD) as thread safe */
 #define PP_REGION_CONFIG_BUF_THREADSAFE        0x00002000
 
-extern void pp_regions_params_adjust(struct skmem_region_params *,
+extern void pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
     nexus_meta_type_t, nexus_meta_subtype_t, uint32_t, uint16_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t);
 
 extern uint64_t pp_alloc_packet(struct kern_pbufpool *, uint16_t, uint32_t);
 extern uint64_t pp_alloc_packet_by_size(struct kern_pbufpool *, uint32_t,
     uint32_t);
-extern int pp_alloc_packet_batch(struct kern_pbufpool *, uint16_t, uint64_t *,
-    uint32_t *, boolean_t, alloc_cb_func_t, const void *, uint32_t);
+extern int pp_alloc_packet_batch(struct kern_pbufpool *, uint16_t,
+    uint64_t *__counted_by(*size), uint32_t *size, boolean_t, alloc_cb_func_t,
+    const void *, uint32_t);
 extern int pp_alloc_pktq(struct kern_pbufpool *, uint16_t, struct pktq *,
     uint32_t, alloc_cb_func_t, const void *, uint32_t);
 extern void pp_free_packet(struct kern_pbufpool *, uint64_t);
-extern void pp_free_packet_batch(struct kern_pbufpool *, uint64_t *, uint32_t);
+extern void pp_free_packet_batch(struct kern_pbufpool *, uint64_t *__counted_by(size) array, uint32_t size);
 extern void pp_free_packet_single(struct __kern_packet *);
+extern void pp_drop_packet_single(struct __kern_packet *, struct ifnet *, uint16_t,
+    drop_reason_t, const char *, uint16_t);
 extern void pp_free_packet_chain(struct __kern_packet *, int *);
 extern void pp_free_pktq(struct pktq *);
+extern void pp_drop_pktq(struct pktq *, struct ifnet *, uint16_t,
+    drop_reason_t, const char *, uint16_t);
 extern errno_t pp_alloc_buffer(const kern_pbufpool_t, mach_vm_address_t *,
     kern_segment_t *, kern_obj_idx_seg_t *, uint32_t);
 extern void pp_free_buffer(const kern_pbufpool_t, mach_vm_address_t);
 extern errno_t pp_alloc_buflet(struct kern_pbufpool *pp, kern_buflet_t *kbft,
     uint32_t skmflag, bool large);
-extern errno_t pp_alloc_buflet_batch(struct kern_pbufpool *pp, uint64_t *array,
-    uint32_t *size, uint32_t skmflag, bool large);
+extern errno_t pp_alloc_buflet_batch(struct kern_pbufpool *pp,
+    uint64_t *__counted_by(*size) array, uint32_t *size, uint32_t skmflag,
+    bool large);
 extern void pp_free_buflet(const kern_pbufpool_t, kern_buflet_t);
 extern void pp_reap_caches(boolean_t);
 __END_DECLS

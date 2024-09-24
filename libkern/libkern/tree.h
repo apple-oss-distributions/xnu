@@ -458,7 +458,7 @@ _sc_ void name##_RB_SETCOLOR(struct type*,int)
  */
 #define RB_GENERATE(name, type, field, cmp)                         \
 struct type *name##_RB_GETPARENT(struct type *elm) {                \
-	struct type *parent = _RB_PARENT(elm, field);                   \
+	struct type *__single parent = _RB_PARENT(elm, field);          \
 	if( parent == NULL || parent == (struct type*)RB_PLACEHOLDER) { \
 	        return __unsafe_forge_single(struct type*, NULL);       \
 	}                                                               \
@@ -471,7 +471,7 @@ int name##_RB_GETCOLOR(struct type *elm) {                          \
 	return(color);                                                  \
 }                                                                   \
 void name##_RB_SETCOLOR(struct type *elm,int color) {               \
-	struct type *parent = name##_RB_GETPARENT(elm);                 \
+	struct type *__single parent = name##_RB_GETPARENT(elm);        \
 	if(parent == (struct type*)NULL) {                              \
 	        parent = (struct type*) RB_PLACEHOLDER;                 \
 	}                                                               \
@@ -488,7 +488,7 @@ struct type *name##_RB_SETPARENT(struct type *elm, struct type *parent) {       
 void                                                                \
 name##_RB_INSERT_COLOR(struct name *head, struct type *elm)         \
 {                                                                   \
-	struct type *parent, *gparent, *tmp;                            \
+	struct type *__single parent, *__single gparent, *__single tmp; \
 	while ((parent = name##_RB_GETPARENT(elm)) != NULL &&           \
 	    name##_RB_GETCOLOR(parent) == RB_RED) {                     \
 	        gparent = name##_RB_GETPARENT(parent);                  \
@@ -532,7 +532,7 @@ name##_RB_INSERT_COLOR(struct name *head, struct type *elm)         \
 void                                                                    \
 name##_RB_REMOVE_COLOR(struct name *head, struct type *parent, struct type *elm) \
 {                                                                       \
-	struct type *tmp;                                               \
+	struct type *__single tmp;                                      \
 	while ((elm == NULL || name##_RB_GETCOLOR(elm) == RB_BLACK) &&  \
 	    elm != RB_ROOT(head)) {                                     \
 	        if (RB_LEFT(parent, field) == elm) {                    \
@@ -552,7 +552,7 @@ name##_RB_REMOVE_COLOR(struct name *head, struct type *parent, struct type *elm)
 	                } else {                                        \
 	                        if (RB_RIGHT(tmp, field) == NULL ||     \
 	                            name##_RB_GETCOLOR(RB_RIGHT(tmp, field)) == RB_BLACK) {\
-	                                struct type *oleft;             \
+	                                struct type *__single oleft;      \
 	                                if ((oleft = RB_LEFT(tmp, field)) \
 	                                    != NULL)                    \
 	                                        name##_RB_SETCOLOR(oleft,  RB_BLACK);\
@@ -585,7 +585,7 @@ name##_RB_REMOVE_COLOR(struct name *head, struct type *parent, struct type *elm)
 	                } else {                                        \
 	                        if (RB_LEFT(tmp, field) == NULL ||      \
 	                            name##_RB_GETCOLOR(RB_LEFT(tmp, field)) == RB_BLACK) {\
-	                                struct type *oright;            \
+	                                struct type *__single oright;       \
 	                                if ((oright = RB_RIGHT(tmp, field)) \
 	                                    != NULL)                    \
 	                                        name##_RB_SETCOLOR(oright,  RB_BLACK);\
@@ -610,14 +610,14 @@ name##_RB_REMOVE_COLOR(struct name *head, struct type *parent, struct type *elm)
 struct type *                                                           \
 name##_RB_REMOVE(struct name *head, struct type *elm)                   \
 {                                                                       \
-	struct type *child, *parent, *old = elm;                        \
+	struct type *__single child, *__single parent, *__single old = elm; \
 	int color;                                                      \
 	if (RB_LEFT(elm, field) == NULL)                                \
 	        child = RB_RIGHT(elm, field);                           \
 	else if (RB_RIGHT(elm, field) == NULL)                          \
 	        child = RB_LEFT(elm, field);                            \
 	else {                                                          \
-	        struct type *left;                                      \
+	        struct type *__single left;                             \
 	        elm = RB_RIGHT(elm, field);                             \
 	        while ((left = RB_LEFT(elm, field)) != NULL)            \
 	                elm = left;                                     \
@@ -728,8 +728,8 @@ __attribute__((unused))                                                 \
 struct type *                                                           \
 name##_RB_NFIND(struct name *head, struct type *elm)                    \
 {                                                                       \
-	struct type *tmp = RB_ROOT(head);                               \
-	struct type *res = NULL;                                        \
+	struct type *__single tmp = RB_ROOT(head);                          \
+	struct type *__single res = NULL;                                   \
 	int comp;                                                       \
 	while (tmp) {                                                   \
 	        comp = cmp(elm, tmp);                                   \

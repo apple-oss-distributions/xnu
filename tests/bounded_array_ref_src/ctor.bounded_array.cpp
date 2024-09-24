@@ -64,6 +64,6 @@ tests()
 	}
 }
 
-T_DECL(ctor_bounded_array, "bounded_array_ref.ctor.bounded_array") {
+T_DECL(ctor_bounded_array, "bounded_array_ref.ctor.bounded_array", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 }

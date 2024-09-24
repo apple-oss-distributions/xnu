@@ -28,44 +28,12 @@
 #include <arm64/proc_reg.h>
 #include <pexpert/arm/protos.h>
 #include <kern/sched_prim.h>
+#ifdef PL011_UART
+#include <pexpert/arm/pl011.h>
+#endif /* PL011_UART */
 #if HIBERNATION
 #include <machine/pal_hibernate.h>
 #endif /* HIBERNATION */
-
-/**
- * Fun and helpful icon to use for announcements regarding serial deprecation,
- * disablement. This helps catch people's eye to get them to realize the message
- * is something other than normal serial spew. Please don't remove. :)
- */
-const char hexley[] =
-    "                                                             \n"
-    "           %(                                                \n"
-    "      #%  /(((   %(&                #(((                     \n"
-    "   *((((  #((((  &(((&      %((((((((((&((((((((%            \n"
-    "    %(.     (%     *((     %((((((((((%((((((((((((#         \n"
-    "   *(%      ((      #((     (((@(%((((((((%((#((((((((.      \n"
-    "   &(&      ((#      ((&     (( ((((((((((@(%((((((((((%     \n"
-    "   &((,     ((%     &((#     &  (((((/   %(%(((((((((((((((( \n"
-    "    &((((&#,%((#&%((((/   @((& &(((       (&(((((((#(((((((  \n"
-    "       %#((((((((%#  *## (((((((((@    %@@((&((((((((&((&    \n"
-    "             ((/       &##&######%(    @&((((((((((((((%     \n"
-    "             ((&          ###########&#((((&(((((((((&       \n"
-    "             #(%            /##########%%%(((((((&/          \n"
-    "             &((            &%///&@,##&((((((((              \n"
-    "            ((((((          .#&/##@(((     ((((%             \n"
-    "            #(((%(((,   ((((*.....*(((((&  (((((%            \n"
-    "             %(&&(((((((((#.......((((((((( &#%%             \n"
-    "              ((# (((((((@......../(%((((((((                \n"
-    "              %((  (((((@..........((((@((((((               \n"
-    "              &((       ............(((((((((,               \n"
-    "              #((#     /............(((((#                   \n"
-    "               ((&      .............((((((                  \n"
-    "               ((#     ((...........#((((((%                 \n"
-    "               (((   @(((((.......#((((((((      .@&&@/      \n"
-    "               %((.   @(((((((#.@((((((((#(@((((((((((#(@    \n"
-    "               &((&@##@@((((((((&((((((((@#(((((((((&.       \n"
-    "               *((& ##&(       /##(&#((#(&                   \n"
-    "                                %##@&###                     \n\n";
 
 struct pe_serial_functions {
 	/* Initialize the underlying serial hardware. */
@@ -124,7 +92,7 @@ MARK_AS_HIBERNATE_DATA_CONST_LATE static struct pe_serial_functions* gPESF = NUL
 MARK_AS_HIBERNATE_DATA static bool uart_initted = false;
 
 /* Whether uart should run in simple mode that works during hibernation resume. */
-MARK_AS_HIBERNATE_DATA static bool uart_hibernation = false;
+MARK_AS_HIBERNATE_DATA bool uart_hibernation = false;
 
 /** Set <=> transmission is authorized.
  * Always set, unless SERIALMODE_ON_DEMAND is provided at boot,
@@ -146,6 +114,13 @@ static uint32_t serial_irq_status = 0;
  * serial_enable_irq.
  */
 static bool disable_uart_irq = 0;
+
+static void
+register_serial_functions(struct pe_serial_functions *fns)
+{
+	fns->next = gPESF;
+	gPESF = fns;
+}
 
 /**
  * Indicates whether or not a given device's irqs have been set up by calling
@@ -220,12 +195,13 @@ MARK_AS_HIBERNATE_DATA static volatile apple_uart_registers_t *apple_uart_regist
 MARK_AS_HIBERNATE_DATA static vm_offset_t dockchannel_uart_base = 0;
 #endif /* HIBERNATION || defined(DOCKCHANNEL_UART) */
 
+#ifdef PL011_UART
+static volatile pl011_registers_t *pl011_registers = NULL;
+#endif /* PL011_UART */
+
 /*****************************************************************************/
 
 #ifdef APPLE_UART
-static int32_t dt_sampling  = -1;
-static int32_t dt_ubrdiv    = -1;
-
 static void apple_uart_set_baud_rate(uint32_t baud_rate);
 
 /**
@@ -239,14 +215,14 @@ apple_uart_init(void)
 	ucon.clock_selection = UCON_CLOCK_SELECTION_NCLK;
 	ucon.transmit_mode = UCON_TRANSMIT_MODE_INTERRUPT_OR_POLLING;
 	ucon.receive_mode = UCON_RECEIVE_MODE_INTERRUPT_OR_POLLING;
-	apple_uart_registers->ucon = ucon;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ucon, ucon.raw);
 
 	// Configure 8-N-1 communication.
 	ulcon_t ulcon = { .raw = 0 };
 	ulcon.word_length = ULCON_WORD_LENGTH_8_BITS;
 	ulcon.parity_mode = ULCON_PARITY_MODE_NONE;
 	ulcon.number_of_stop_bits = ULCON_STOP_BITS_1;
-	apple_uart_registers->ulcon = ulcon;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ulcon, ulcon.raw);
 
 	apple_uart_set_baud_rate(115200);
 
@@ -255,7 +231,7 @@ apple_uart_init(void)
 	ufcon.fifo_enable = 1;
 	ufcon.tx_fifo_reset = 1;
 	ufcon.rx_fifo_reset = 1;
-	apple_uart_registers->ufcon = ufcon;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ufcon, ufcon.raw);
 }
 
 static void
@@ -263,22 +239,26 @@ apple_uart_enable_irq(void)
 {
 	// Set the Tx FIFO interrupt trigger level to 0 bytes so interrupts occur when
 	// the Tx FIFO is completely empty; this leads to higher Tx throughput.
-	apple_uart_registers->ufcon.tx_fifo_interrupt_trigger_level_dma_watermark = UFCON_TX_FIFO_ITL_0_BYTES;
+	ufcon_t ufcon = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ufcon) };
+	ufcon.tx_fifo_interrupt_trigger_level_dma_watermark = UFCON_TX_FIFO_ITL_0_BYTES;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ufcon, ufcon.raw);
 
 	// Enable Tx interrupts.
-	apple_uart_registers->ucon.transmit_interrupt = 1;
+	ucon_t ucon = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ucon) };
+	ucon.transmit_interrupt = 1;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ucon, ucon.raw);
 }
 
 static bool
 apple_uart_disable_irq(void)
 {
 	/* Disables Tx interrupts */
-	ucon_t ucon = apple_uart_registers->ucon;
+	ucon_t ucon = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ucon) };
 	const bool irqs_were_enabled = ucon.transmit_interrupt;
 
 	if (irqs_were_enabled) {
 		ucon.transmit_interrupt = 0;
-		apple_uart_registers->ucon = ucon;
+		ml_io_write32((uintptr_t) &apple_uart_registers->ucon, ucon.raw);
 	}
 
 	return irqs_were_enabled;
@@ -287,14 +267,16 @@ apple_uart_disable_irq(void)
 static bool
 apple_uart_ack_irq(void)
 {
-	apple_uart_registers->utrstat.transmit_interrupt_status = 1;
+	utrstat_t utrstat = { .raw = 0 };
+	utrstat.transmit_interrupt_status = 1;
+	ml_io_write32((uintptr_t) &apple_uart_registers->utrstat, utrstat.raw);
 	return true;
 }
 
 static inline bool
 apple_uart_fifo_is_empty(void)
 {
-	const ufstat_t ufstat = apple_uart_registers->ufstat;
+	const ufstat_t ufstat = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ufstat) };
 	return !(ufstat.tx_fifo_full || ufstat.tx_fifo_count);
 }
 
@@ -309,64 +291,89 @@ apple_uart_drain_fifo(void)
 static void
 apple_uart_set_baud_rate(uint32_t baud_rate)
 {
-	uint32_t div = 0;
-	const uint32_t uart_clock = (uint32_t)gPEClockFrequencyInfo.fix_frequency_hz;
-	uint32_t sample_rate = 16;
+	// Maximum error tolerated from the target baud rate (measured in percentage
+	// points). Anything greater than this will trigger a kernel panic because
+	// UART communication will not be reliable.
+	const float kMaxErrorPercentage = 2.75;
 
-	if (baud_rate < 300) {
-		baud_rate = 9600;
-	}
+	// The acceptable sample rate range; higher sample rates are typically more
+	// desirable because you can more quickly detect the start bit.
+	const int kMinSampleRate = 10;
+	const int kMaxSampleRate = 16;
 
-	if (dt_sampling != -1) {
-		// Use the sampling rate specified in the Device Tree
-		sample_rate = dt_sampling & 0xf;
-	}
-
-	if (dt_ubrdiv != -1) {
-		// Use the ubrdiv specified in the Device Tree
-		div = dt_ubrdiv & 0xffff;
-	} else {
-		// Calculate ubrdiv. UBRDIV = (SourceClock / (BPS * Sample Rate)) - 1
-		div = uart_clock / (baud_rate * sample_rate);
-
-		uint32_t actual_baud = uart_clock / ((div + 0) * sample_rate);
-		uint32_t baud_low    = uart_clock / ((div + 1) * sample_rate);
-
-		// Adjust div to get the closest target baudrate
-		if ((baud_rate - baud_low) > (actual_baud - baud_rate)) {
-			div--;
+	// Find the first configuration that achieves the target baud rate accuracy,
+	// starting with the highest sample rate.
+	const float kSourceClock = gPEClockFrequencyInfo.fix_frequency_hz;
+	int ubr_div = 0;
+	int sample_rate = 0;
+	bool found_configuration = false;
+	for (int _sample_rate = kMaxSampleRate; _sample_rate >= kMinSampleRate; _sample_rate--) {
+		const float ideal_ubr_div = (kSourceClock / (baud_rate * _sample_rate)) - 1;
+		if ((ideal_ubr_div - (int)ideal_ubr_div) < 0.00001f) {
+			// The ideal baud rate divisor is (basically) attainable.
+			ubr_div = (int)ideal_ubr_div;
+			sample_rate = _sample_rate;
+			found_configuration = true;
+			break;
+		} else {
+			// The ideal baud rate divisor is not attainable; try rounding.
+			const int ubr_div_rounded_down = (int)ideal_ubr_div;
+			const int ubr_div_rounded_up = ubr_div_rounded_down + 1;
+			const float higher_baud_rate = kSourceClock / ((ubr_div_rounded_down + 1) * _sample_rate);
+			const float lower_baud_rate = kSourceClock / ((ubr_div_rounded_up + 1) * _sample_rate);
+			if ((((higher_baud_rate - baud_rate) / baud_rate) * 100) < kMaxErrorPercentage) {
+				ubr_div = ubr_div_rounded_down;
+				sample_rate = _sample_rate;
+				found_configuration = true;
+				break;
+			}
+			if ((((baud_rate - lower_baud_rate) / baud_rate) * 100) < kMaxErrorPercentage) {
+				ubr_div = ubr_div_rounded_up;
+				sample_rate = _sample_rate;
+				found_configuration = true;
+				break;
+			}
 		}
 	}
 
-	ubrdiv_t ubrdiv = apple_uart_registers->ubrdiv;
+	if (!found_configuration) {
+		panic("Unable to find a configuration for the UART that would result in a nominal baud rate close enough to %u", baud_rate);
+	}
+
+	// Found an acceptable configuration; write this to the register.
+	ubrdiv_t ubrdiv = { .raw = 0 };
 	ubrdiv.sample_rate = 16 - sample_rate;
-	ubrdiv.ubr_div = div;
-	apple_uart_registers->ubrdiv = ubrdiv;
+	assert((0 <= ubr_div) && (ubr_div <= UINT16_MAX));
+	ubrdiv.ubr_div = ubr_div;
+	ml_io_write32((uintptr_t) &apple_uart_registers->ubrdiv, ubrdiv.raw);
 }
 
 MARK_AS_HIBERNATE_TEXT static unsigned int
 apple_uart_transmit_ready(void)
 {
-	return !apple_uart_registers->ufstat.tx_fifo_full;
+	ufstat_t ufstat = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ufstat) };
+	return !ufstat.tx_fifo_full;
 }
 
 MARK_AS_HIBERNATE_TEXT static void
 apple_uart_transmit_data(uint8_t c)
 {
-	apple_uart_registers->utxh.txdata = c;
+	utxh_t utxh = { .txdata = c };
+	ml_io_write32((uintptr_t) &apple_uart_registers->utxh, utxh.raw);
 }
 
 static unsigned int
 apple_uart_receive_ready(void)
 {
-	const ufstat_t ufstat = apple_uart_registers->ufstat;
+	ufstat_t ufstat = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->ufstat) };
 	return ufstat.rx_fifo_full || ufstat.rx_fifo_count;
 }
 
 static uint8_t
 apple_uart_receive_data(void)
 {
-	return apple_uart_registers->urxh.rxdata;
+	urxh_t urxh = { .raw = ml_io_read32((uintptr_t) &apple_uart_registers->urxh) };
+	return urxh.rxdata;
 }
 
 MARK_AS_HIBERNATE_DATA_CONST_LATE
@@ -382,6 +389,35 @@ static struct pe_serial_functions apple_serial_functions =
 	.acknowledge_irq = apple_uart_ack_irq,
 	.device = SERIAL_APPLE_UART
 };
+
+static void
+apple_uart_setup(const DeviceTreeNode *const devicetree_node)
+{
+	// Get the physical address range of the Apple UART register block.
+	const struct {
+		uint64_t block_offset; // TODO: make this scale with #address-cells
+		uint64_t block_size; // TODO: make this scale with #size-cells
+	} *reg;
+	unsigned int reg_size;
+	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
+		panic("Unable to find the 'reg' property on the Apple UART devicetree node");
+	}
+	assert(reg_size == sizeof(*reg));
+
+	// Create a virtual mapping to that physical address range.
+	const vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+	apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base_phys + reg->block_offset, reg->block_size);
+
+	// Check if interrupts are supported.
+	const void *unused;
+	unsigned int unused_size;
+	if (SecureDTGetProperty(devicetree_node, "interrupts", &unused, &unused_size) == kSuccess) {
+		apple_serial_functions.has_irq = true;
+	}
+
+	// Register the Apple UART serial driver.
+	register_serial_functions(&apple_serial_functions);
+}
 
 #endif /* APPLE_UART */
 
@@ -406,6 +442,64 @@ static struct pe_serial_functions dockchannel_serial_functions;
 //=======================
 // Local funtions
 //=======================
+
+static void
+dockchannel_setup(const DeviceTreeNode *const devicetree_node)
+{
+	// Get the physical address ranges of the Dock Channels register blocks.
+	const struct {
+		uint64_t channels_block_offset; // TODO: make this scale with #address-cells
+		uint64_t channels_block_size; // TODO: make this scale with #size-cells
+		uint64_t agents_block_offset; // TODO: make this scale with #address-cells
+		uint64_t agents_block_size; // TODO: make this scale with #size-cells
+	} *reg;
+	unsigned int reg_size;
+	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
+		panic("Unable to find the 'reg' property on the Dock Channels devicetree node");
+	}
+	assert(reg_size == sizeof(*reg));
+
+	// Create virtual mappings for those physical address rangess.
+	const vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+	dockchannel_uart_base = ml_io_map(soc_base_phys + reg->channels_block_offset, reg->channels_block_size);
+	dock_agent_base = ml_io_map(soc_base_phys + reg->agents_block_offset, reg->agents_block_size);
+
+	// Configure various Dock Channels settings.
+	const uint32_t *max_aop_clk;
+	unsigned int max_aop_clk_size;
+	if (SecureDTGetProperty(devicetree_node, "max-aop-clk", (const void **)&max_aop_clk, &max_aop_clk_size) == kSuccess) {
+		assert(max_aop_clk_size == sizeof(*max_aop_clk));
+		max_dockchannel_drain_period = (uint32_t)(*max_aop_clk * 0.03);
+	} else {
+		max_dockchannel_drain_period = (uint32_t)DOCKCHANNEL_DRAIN_PERIOD;
+	}
+	const uint32_t *enable_sw_drain;
+	unsigned int enable_sw_drain_size;
+	if (SecureDTGetProperty(devicetree_node, "enable-sw-drain", (const void **)&enable_sw_drain, &enable_sw_drain_size) == kSuccess) {
+		assert(enable_sw_drain_size == sizeof(*enable_sw_drain));
+		use_sw_drain = *enable_sw_drain;
+	} else {
+		use_sw_drain = 0;
+	}
+	const uint32_t *_dock_wstat_mask;
+	unsigned int dock_wstat_mask_size;
+	if (SecureDTGetProperty(devicetree_node, "dock-wstat-mask", (const void **)&_dock_wstat_mask, &dock_wstat_mask_size) == kSuccess) {
+		assert(dock_wstat_mask_size == sizeof(*_dock_wstat_mask));
+		dock_wstat_mask = *_dock_wstat_mask;
+	} else {
+		dock_wstat_mask = 0x1ff;
+	}
+	const void *unused;
+	unsigned int unused_size;
+	if (SecureDTGetProperty(devicetree_node, "interrupts", &unused, &unused_size) == kSuccess) {
+		dockchannel_serial_functions.has_irq = true;
+	}
+	prev_dockchannel_spaces = rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
+	dockchannel_drain_deadline = mach_absolute_time() + dockchannel_stall_grace;
+
+	// Register the Dock Channels serial driver.
+	register_serial_functions(&dockchannel_serial_functions);
+}
 
 static int
 dockchannel_drain_on_stall()
@@ -540,185 +634,95 @@ static struct pe_serial_functions dockchannel_serial_functions =
 
 #endif /* DOCKCHANNEL_UART */
 
-/****************************************************************************/
-#ifdef PI3_UART
-vm_offset_t pi3_gpio_base_vaddr = 0;
-vm_offset_t pi3_aux_base_vaddr = 0;
-static unsigned int
-pi3_uart_tr0(void)
-{
-	return (unsigned int) BCM2837_GET32(BCM2837_AUX_MU_LSR_REG_V) & 0x20;
-}
-
-static void
-pi3_uart_td0(uint8_t c)
-{
-	BCM2837_PUT32(BCM2837_AUX_MU_IO_REG_V, (uint32_t) c);
-}
-
-static unsigned int
-pi3_uart_rr0(void)
-{
-	return (unsigned int) BCM2837_GET32(BCM2837_AUX_MU_LSR_REG_V) & 0x01;
-}
-
-static uint8_t
-pi3_uart_rd0(void)
-{
-	return (uint8_t) BCM2837_GET32(BCM2837_AUX_MU_IO_REG_V);
-}
-
-static void
-pi3_uart_init(void)
-{
-	// Scratch variable
-	uint32_t i;
-
-	// Reset mini uart registers
-	BCM2837_PUT32(BCM2837_AUX_ENABLES_V, 1);
-	BCM2837_PUT32(BCM2837_AUX_MU_CNTL_REG_V, 0);
-	BCM2837_PUT32(BCM2837_AUX_MU_LCR_REG_V, 3);
-	BCM2837_PUT32(BCM2837_AUX_MU_MCR_REG_V, 0);
-	BCM2837_PUT32(BCM2837_AUX_MU_IER_REG_V, 0);
-	BCM2837_PUT32(BCM2837_AUX_MU_IIR_REG_V, 0xC6);
-	BCM2837_PUT32(BCM2837_AUX_MU_BAUD_REG_V, 270);
-
-	i = (uint32_t)BCM2837_FSEL_REG(14);
-	// Configure GPIOs 14 & 15 for alternate function 5
-	i &= ~(BCM2837_FSEL_MASK(14));
-	i |= (BCM2837_FSEL_ALT5 << BCM2837_FSEL_OFFS(14));
-	i &= ~(BCM2837_FSEL_MASK(15));
-	i |= (BCM2837_FSEL_ALT5 << BCM2837_FSEL_OFFS(15));
-
-	BCM2837_PUT32(BCM2837_FSEL_REG(14), i);
-
-	BCM2837_PUT32(BCM2837_GPPUD_V, 0);
-
-	// Barrier before AP spinning for 150 cycles
-	__builtin_arm_isb(ISB_SY);
-
-	for (i = 0; i < 150; i++) {
-		asm volatile ("add x0, x0, xzr");
-	}
-
-	__builtin_arm_isb(ISB_SY);
-
-	BCM2837_PUT32(BCM2837_GPPUDCLK0_V, (1 << 14) | (1 << 15));
-
-	__builtin_arm_isb(ISB_SY);
-
-	for (i = 0; i < 150; i++) {
-		asm volatile ("add x0, x0, xzr");
-	}
-
-	__builtin_arm_isb(ISB_SY);
-
-	BCM2837_PUT32(BCM2837_GPPUDCLK0_V, 0);
-
-	BCM2837_PUT32(BCM2837_AUX_MU_CNTL_REG_V, 3);
-}
-
-SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) pi3_uart_serial_functions =
-{
-	.init = pi3_uart_init,
-	.transmit_ready = pi3_uart_tr0,
-	.transmit_data = pi3_uart_td0,
-	.receive_ready = pi3_uart_rr0,
-	.receive_data = pi3_uart_rd0,
-	.device = SERIAL_PI3_UART
-};
-
-#endif /* PI3_UART */
-
 /*****************************************************************************/
 
-#ifdef VMAPPLE_UART
-
-static vm_offset_t vmapple_uart0_base_vaddr = 0;
-
-#define PL011_LCR_WORD_LENGTH_8  0x60u
-#define PL011_LCR_FIFO_DISABLE   0x00u
-
-#define PL011_LCR_FIFO_ENABLE    0x10u
-
-#define PL011_LCR_ONE_STOP_BIT   0x00u
-#define PL011_LCR_PARITY_DISABLE 0x00u
-#define PL011_LCR_BREAK_DISABLE  0x00u
-#define PL011_IBRD_DIV_38400     0x27u
-#define PL011_FBRD_DIV_38400     0x09u
-#define PL011_ICR_CLR_ALL_IRQS   0x07ffu
-#define PL011_CR_UART_ENABLE     0x01u
-#define PL011_CR_TX_ENABLE       0x100u
-#define PL011_CR_RX_ENABLE       0x200u
-
-#define VMAPPLE_UART0_DR         *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x00))
-#define VMAPPLE_UART0_ECR        *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x04))
-#define VMAPPLE_UART0_FR         *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x18))
-#define VMAPPLE_UART0_IBRD       *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x24))
-#define VMAPPLE_UART0_FBRD       *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x28))
-#define VMAPPLE_UART0_LCR_H      *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x2c))
-#define VMAPPLE_UART0_CR         *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x30))
-#define VMAPPLE_UART0_TIMSC      *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x38))
-#define VMAPPLE_UART0_ICR        *((volatile uint32_t *) (vmapple_uart0_base_vaddr + 0x44))
+#ifdef PL011_UART
 
 static unsigned int
-vmapple_uart_transmit_ready(void)
+pl011_uart_transmit_ready(void)
 {
-	return (unsigned int) !(VMAPPLE_UART0_FR & 0x20);
+	const uartfr_t uartfr = { .raw = pl011_registers->uartfr.raw };
+	return uartfr.txff != 1;
 }
 
 static void
-vmapple_uart_transmit_data(uint8_t c)
+pl011_uart_transmit_data(uint8_t c)
 {
-	VMAPPLE_UART0_DR = (uint32_t) c;
+	uartdr_t uartdr = { .data = c };
+	pl011_registers->uartdr.raw = uartdr.raw;
 }
 
 static unsigned int
-vmapple_uart_receive_ready(void)
+pl011_uart_receive_ready(void)
 {
-	return (unsigned int) !(VMAPPLE_UART0_FR & 0x10);
+	const uartfr_t uartfr = { .raw = pl011_registers->uartfr.raw };
+	return uartfr.rxfe != 1;
 }
 
 static uint8_t
-vmapple_uart_receive_data(void)
+pl011_uart_receive_data(void)
 {
-	return (uint8_t) (VMAPPLE_UART0_DR & 0xff);
+	const uartdr_t uartdr = { .raw = pl011_registers->uartdr.raw };
+	return uartdr.data;
 }
 
 static void
-vmapple_uart_init(void)
+pl011_uart_init(void)
 {
-	VMAPPLE_UART0_CR = 0x0;
-	VMAPPLE_UART0_ECR = 0x0;
-	VMAPPLE_UART0_LCR_H = (
-		PL011_LCR_WORD_LENGTH_8 |
-		PL011_LCR_FIFO_ENABLE |
-		PL011_LCR_ONE_STOP_BIT |
-		PL011_LCR_PARITY_DISABLE |
-		PL011_LCR_BREAK_DISABLE
-		);
-	VMAPPLE_UART0_IBRD = PL011_IBRD_DIV_38400;
-	VMAPPLE_UART0_FBRD = PL011_FBRD_DIV_38400;
-	VMAPPLE_UART0_TIMSC = 0x0;
-	VMAPPLE_UART0_ICR = PL011_ICR_CLR_ALL_IRQS;
-	VMAPPLE_UART0_CR = (
-		PL011_CR_UART_ENABLE |
-		PL011_CR_TX_ENABLE |
-		PL011_CR_RX_ENABLE
-		);
+	// Before programming the control registers, we must first disable the UART.
+	// We can accomplish this by manually resetting the UARTCR register.
+	uartcr_t uartcr = { .raw = 0 };
+	uartcr.rxe = 1; // This bit's reset value is 1.
+	uartcr.txe = 1; // This bit's reset value is 1.
+	pl011_registers->uartcr.raw = uartcr.raw;
+
+	// Configure 8-N-1 communication and enable FIFOs.
+	uartlcr_h_t uartlcr_h = { .raw = 0 };
+	uartlcr_h.brk = 0;
+	uartlcr_h.pen = 0;
+	uartlcr_h.stp2 = 0;
+	uartlcr_h.fen = 1;
+	uartlcr_h.wlen = 0b11;
+	pl011_registers->uartlcr_h.raw = uartlcr_h.raw;
+
+	// Re-enable the UART.
+	uartcr.uarten = 1;
+	pl011_registers->uartcr.raw = uartcr.raw;
 }
 
-SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) vmapple_uart_serial_functions =
+SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) pl011_uart_serial_functions =
 {
-	.init = vmapple_uart_init,
-	.transmit_ready = vmapple_uart_transmit_ready,
-	.transmit_data = vmapple_uart_transmit_data,
-	.receive_ready = vmapple_uart_receive_ready,
-	.receive_data = vmapple_uart_receive_data,
-	.device = SERIAL_VMAPPLE_UART
+	.init = pl011_uart_init,
+	.transmit_ready = pl011_uart_transmit_ready,
+	.transmit_data = pl011_uart_transmit_data,
+	.receive_ready = pl011_uart_receive_ready,
+	.receive_data = pl011_uart_receive_data,
+	.device = SERIAL_PL011_UART
 };
 
-#endif /* VMAPPLE_UART */
+static void
+pl011_uart_setup(const DeviceTreeNode *const devicetree_node)
+{
+	// Get the physical address range of the PL011 UART register block.
+	const struct {
+		uint64_t block_offset; // TODO: make this scale with #address-cells
+		uint64_t block_size; // TODO: make this scale with #size-cells
+	} *reg;
+	unsigned int reg_size;
+	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
+		panic("Unable to find the 'reg' property on the PL011 UART devicetree node");
+	}
+	assert(reg_size == sizeof(*reg));
+
+	// Create a virtual mapping to that physical address range.
+	const vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+	pl011_registers = (pl011_registers_t *)ml_io_map(soc_base_phys + reg->block_offset, reg->block_size);
+
+	// Register the PL011 UART serial driver.
+	register_serial_functions(&pl011_uart_serial_functions);
+}
+
+#endif /* PL011_UART */
 
 /*****************************************************************************/
 
@@ -739,13 +743,6 @@ static void uart_puts_force_poll(
 static void uart_puts_force_poll_device(
 	const char *str,
 	struct pe_serial_functions *fns);
-
-static void
-register_serial_functions(struct pe_serial_functions *fns)
-{
-	fns->next = gPESF;
-	gPESF = fns;
-}
 
 #if HIBERNATION
 /**
@@ -788,14 +785,29 @@ serial_hibernation_cleanup(void)
 }
 #endif /* HIBERNATION */
 
+/**
+ * @brief This array maps "compatible" strings from the devicetree identifying
+ * different serial device drivers to their corresponding setup functions.
+ */
+static const struct {
+	const char *const compatible;
+	void(*const setup)(const DeviceTreeNode * const devicetree_node);
+} driver_setup_functions[] = {
+#ifdef APPLE_UART
+	{ .compatible = "uart-1,samsung", .setup = apple_uart_setup },
+#endif // APPLE_UART
+#ifdef DOCKCHANNEL_UART
+	{ .compatible = "aapl,dock-channels", .setup = dockchannel_setup },
+#endif // DOCKCHANNEL_UART
+#ifdef PL011_UART
+	{ .compatible = "arm,pl011", .setup = pl011_uart_setup },
+#endif // PL011_UART
+};
+
 int
 serial_init(void)
 {
-	DTEntry         entryP = NULL;
-	uint32_t        prop_size;
 	vm_offset_t     soc_base;
-	uintptr_t const *reg_prop;
-	uint32_t const  *prop_value __unused = NULL;
 
 	struct pe_serial_functions *fns = gPESF;
 
@@ -828,137 +840,58 @@ serial_init(void)
 
 	PE_parse_boot_argn("disable-uart-irq", &disable_uart_irq, sizeof(disable_uart_irq));
 
-#ifdef PI3_UART
-	if (SecureDTFindEntry("name", "gpio", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		pi3_gpio_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+	// Check the "defaults" devicetree node to see whether or not a serial
+	// device was specified. Specifically, check for the presence of a
+	// "serial-device" phandle property.
+	const DeviceTreeNode *defaults_node;
+	if (SecureDTFindNodeWithStringProperty("name", "defaults", &defaults_node) != kSuccess) {
+		panic("Unable to find the 'defaults' devicetree node.");
 	}
-	if (SecureDTFindEntry("name", "aux", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		pi3_aux_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
-	}
-	if ((pi3_gpio_base_vaddr != 0) && (pi3_aux_base_vaddr != 0)) {
-		register_serial_functions(&pi3_uart_serial_functions);
-	}
-#endif /* PI3_UART */
-
-#ifdef VMAPPLE_UART
-	if (SecureDTFindEntry("name", "uart0", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		vmapple_uart0_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+	bool serial_device_phandle_specified = false;
+	const uint32_t *phandle;
+	unsigned int phandle_size;
+	if (SecureDTGetProperty(defaults_node, "serial-device", (const void **)&phandle, &phandle_size) == kSuccess) {
+		assert(phandle_size == sizeof(*phandle));
+		serial_device_phandle_specified = true;
 	}
 
-	if (vmapple_uart0_base_vaddr != 0) {
-		register_serial_functions(&vmapple_uart_serial_functions);
-	}
-#endif /* VMAPPLE_UART */
-
-#ifdef DOCKCHANNEL_UART
-	uint32_t no_dockchannel_uart = 0;
-	if (SecureDTFindEntry("name", "dockchannel-uart", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		// Should be two reg entries
-		if (prop_size / sizeof(uintptr_t) != 4) {
-			panic("Malformed dockchannel-uart property");
-		}
-		dockchannel_uart_base = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
-		dock_agent_base = ml_io_map(soc_base + *(reg_prop + 2), *(reg_prop + 3));
-		PE_parse_boot_argn("no-dockfifo-uart", &no_dockchannel_uart, sizeof(no_dockchannel_uart));
-		// Keep the old name for boot-arg
-		if (no_dockchannel_uart == 0) {
-			register_serial_functions(&dockchannel_serial_functions);
-			SecureDTGetProperty(entryP, "max-aop-clk", (void const **)&prop_value, &prop_size);
-			max_dockchannel_drain_period = (uint32_t)((prop_value)?  (*prop_value * 0.03) : DOCKCHANNEL_DRAIN_PERIOD);
-			prop_value = NULL;
-			SecureDTGetProperty(entryP, "enable-sw-drain", (void const **)&prop_value, &prop_size);
-			use_sw_drain = (prop_value)?  *prop_value : 0;
-			prop_value = NULL;
-			SecureDTGetProperty(entryP, "dock-wstat-mask", (void const **)&prop_value, &prop_size);
-			dock_wstat_mask = (prop_value)?  *prop_value : 0x1ff;
-			prop_value = NULL;
-			SecureDTGetProperty(entryP, "interrupts", (void const **)&prop_value, &prop_size);
-			if (prop_value) {
-				dockchannel_serial_functions.has_irq = true;
-			}
-
-			/* Set sane defaults for dockchannel globals. */
-			prev_dockchannel_spaces = rDOCKCHANNELS_DEV_WSTAT(DOCKCHANNEL_UART_CHANNEL) & dock_wstat_mask;
-			dockchannel_drain_deadline = mach_absolute_time() + dockchannel_stall_grace;
-		} else {
-			dockchannel_clear_intr();
-		}
-		// If no dockchannel-uart is found in the device tree, fall back
-		// to looking for the traditional UART serial console.
+	// Allow people to manually specify a serial device phandle via bootarg.
+	uint32_t phandle_bootarg;
+	if (PE_parse_boot_argn("serial-device", &phandle_bootarg, sizeof(phandle_bootarg))) {
+		phandle = &phandle_bootarg;
+		serial_device_phandle_specified = true;
 	}
 
-#endif /* DOCKCHANNEL_UART */
-
-#ifdef APPLE_UART
-	char const *serial_compat = 0;
-	uint32_t use_legacy_uart = 1;
-
-	/*
-	 * The boot serial port should have a property named "boot-console".
-	 * If we don't find it there, look for "uart0" and "uart1".
-	 */
-	if (SecureDTFindEntry("boot-console", NULL, &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
-		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
-	} else if (SecureDTFindEntry("name", "uart0", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
-		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
-	} else if (SecureDTFindEntry("name", "uart1", &entryP) == kSuccess) {
-		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		apple_uart_registers = (apple_uart_registers_t *)ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
-		SecureDTGetProperty(entryP, "compatible", (void const **)&serial_compat, &prop_size);
+	// Return early if no serial device phandle was specified either in the
+	// devicetree or via bootarg.
+	if (!serial_device_phandle_specified) {
+		return 0;
 	}
 
-	if (NULL != entryP) {
-		prop_value = NULL;
-		SecureDTGetProperty(entryP, "sampling", (void const **)&prop_value, &prop_size);
-		if (prop_value) {
-			dt_sampling = *prop_value;
-		}
+	// Look at the "compatible" string in the devicetree node referenced by the
+	// "serial-device" phandle property to see which driver we should use.
+	const DeviceTreeNode *serial_device_node;
+	if (SecureDTFindNodeWithPhandle(*phandle, &serial_device_node) != kSuccess) {
+		panic("Unable to find a devicetree node with phandle %x", *phandle);
+	}
+	const char *compatible;
+	unsigned int compatible_size;
+	if (SecureDTGetProperty(serial_device_node, "compatible", (const void **)&compatible, &compatible_size) != kSuccess) {
+		panic("The serial device devicetree node doesn't have a 'compatible' string");
+	}
 
-		prop_value = NULL;
-		SecureDTGetProperty(entryP, "ubrdiv", (void const **)&prop_value, &prop_size);
-		if (prop_value) {
-			dt_ubrdiv = *prop_value;
-		}
-
-		prop_value = NULL;
-		SecureDTGetProperty(entryP, "interrupts", (void const **)&prop_value, &prop_size);
-		if (prop_value) {
-			apple_serial_functions.has_irq = true;
-		}
-
-		prop_value = NULL;
-		SecureDTGetProperty(entryP, "disable-legacy-uart", (void const **)&prop_value, &prop_size);
-		if (prop_value) {
-			use_legacy_uart = 0;
+	// Call the setup function for the identified serial device driver.
+	bool found_matching_driver = false;
+	const int n_drivers = sizeof(driver_setup_functions) / sizeof(driver_setup_functions[0]);
+	for (int i = 0; i < n_drivers; i++) {
+		if (strcmp(compatible, driver_setup_functions[i].compatible) == 0) {
+			found_matching_driver = true;
+			driver_setup_functions[i].setup(serial_device_node);
 		}
 	}
-
-	/* Check if we should enable this deprecated serial device. */
-	PE_parse_boot_argn("use-legacy-uart", &use_legacy_uart, sizeof(use_legacy_uart));
-
-	if (serial_compat && !strcmp(serial_compat, "uart-1,samsung")) {
-		if (use_legacy_uart) {
-			register_serial_functions(&apple_serial_functions);
-		} else {
-			char legacy_serial_msg[] =
-			    "Expecting more output? Wondering why Clippy turned into a platypus?\n\n"
-			    "UART was manually disabled either via the 'use-legacy-uart=0' boot-arg or via\n"
-			    "the disable-legacy-uart property in the boot-console uart device tree node.\n"
-			    "Serial output over dockchannels is still enabled on devices with support.\n";
-			apple_serial_functions.init();
-			uart_puts_force_poll_device(hexley, &apple_serial_functions);
-			uart_puts_force_poll_device(legacy_serial_msg, &apple_serial_functions);
-		}
+	if (!found_matching_driver) {
+		panic("Unable to find serial device driver for '%s'", compatible);
 	}
-#endif /* APPLE_UART */
 
 	fns = gPESF;
 	while (fns != NULL) {

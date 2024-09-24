@@ -76,13 +76,13 @@
 #include <mach/vm_inherit.h>
 #include <mach/vm_param.h>
 #include <kern/thread.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_object.h>
+#include <vm/vm_map_internal.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_object_xnu.h>
 #include <kern/task.h>
 #include <kern/host.h>
 #include <ipc/ipc_port.h>
-#include <vm/vm_debug.h>
+#include <vm/vm_debug_internal.h>
 #endif
 
 #if !MACH_VM_DEBUG
@@ -559,7 +559,8 @@ vm32_mapped_pages_info(
 	    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
 	for (;;) {
-		(void) mach_vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		(void) mach_vm_allocate_kernel(ipc_kernel_map, &addr, size,
+		    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_IPC));
 		(void) vm_map_unwire(
 			ipc_kernel_map,
 			vm_map_trunc_page(addr,

@@ -152,6 +152,10 @@ typedef struct {
 /* 0xFFC */ uint32_t arm_cpufamily;
 /* 0x1000 */ uint64_t cp_aprr_shadow_tpro_rw;
 /* 0x1008 */ uint64_t cp_aprr_shadow_tpro_ro;
+/* 0x1010 */ uint64_t cp_asb_target_value;
+/* 0x1018 */ uint64_t cp_asb_target_address;
+/* 0x1020 */ uint64_t cp_asb_target_kern_value;
+/* 0x1028 */ uint64_t cp_asb_target_kern_address;
 } x86_64_commpage_t;
 
 #endif /* _ARM_CPU_X86_64_CAPABILITIES_H */

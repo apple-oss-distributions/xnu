@@ -7,7 +7,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 #define NUM_PROC_UUID_POLICY_FLAGS 4
 
-T_DECL(proc_uuid_policy_26567533, "Tests passing a NULL uuid in (uap->uuid).", T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(proc_uuid_policy_26567533, "Tests passing a NULL uuid in (uap->uuid).", T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	int i, ret;
 	uuid_t null_uuid;

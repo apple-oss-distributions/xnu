@@ -111,17 +111,25 @@ Daemons have different memory limits when they're inactive (in band 0) vs. activ
 Memorystatus makes most memory decisions based on the `memorystatus_available_pages` metric. This metric reflects the number of pages that memorystatus thinks could quickly be made free. This metric is defined in the `VM_CHECK_MEMORYSTATUS` macro in `osfmk/vm/vm_page.h`.
 
 Currently on non-macOS systems, it's defined as `pageable_external + free + secluded_over_target + purgeable`. Breaking that down:
-- pageable_external: file backed page count
-- free: free page count
-- secluded_over_target: `(vm_page_secluded_count - vm_page_secluded_target)`. This target comes from the device tree `kern.secluded_mem_mb`. Secluded memory is a special pool of memory that's intended for the camera so that it can startup faster on memory constrained systems.
-- purgeable: The number of purgeable volatile pages in the system. Purgeable memory is an API for clients to specify that the VM can treat the contents of a range of pages as volatile and quickly free the backing pages under pressure. See `osfmk/mach/vm_purgable.h` for the API. Note that the API was accidentally exported with incorrect spelling ("purgable" instead of "purgeable")
+- `pageable_external`: file backed page count
+- `free`: free page count
+- `secluded_over_target`: `(vm_page_secluded_count - vm_page_secluded_target)`. This target comes from the device tree `kern.secluded_mem_mb`. Secluded memory is a special pool of memory that's intended for the camera so that it can startup faster on memory constrained systems.
+- `purgeable`: The number of purgeable volatile pages in the system. Purgeable memory is an API for clients to specify that the VM can treat the contents of a range of pages as volatile and quickly free the backing pages under pressure. See `osfmk/mach/vm_purgable.h` for the API. Note that the API was accidentally exported with incorrect spelling ("purgable" instead of "purgeable")
 
 Since we purge purgeable memory and trim the secluded pool quickly under memory pressure, this can generally be approximated to `free + file_backed` for a system under pressure.
-
 
 The `VM_CHECK_MEMORYSTATUS` macro is called whenever a page is allocated, wired, freed, etc... Basically `memorystatus_available_pages` is supposed to always be accurate down to a page level. On our larger memory systems (8 and 16GB iPads in particular) this might be overkill.
 And it calls into `memorystatus_pages_update` to actually update `memorystatus_available_pages` and issue the blind wakeup of the memorystatus thread if necessary. `memorystatus_pages_update` is also responsible for waking the freezer and memory pressure notification threads.
 
+The following configurable (EDT) thresholds determine which actions to take when `memorystatus_available_pages` is low. Each action is taken until `memorystatus_available_pages` rises back above the threshold.
+
+- `kern.memstat_pressure_mb`: only processes which have violated their "soft/HWM" memory limits may be killed (see `JETSAM_REASON_MEMORY_HIGHWATER`).\*
+- `kern.memstat_idle_mb`: only processes whose priority is `JETSAM_PRIORITY_IDLE` may be killed (see `JETSAM_REASON_MEMORY_IDLE_EXIT`)
+- `kern.memstat_critical_mb`: any process may be killed in ascending jetsam priority order (see `JETSAM_REASON_MEMORY_VMPAGESHORTAGE`)
+
+\*Note that the memorystatus pressure threshold does *not* determine the "system memory pressure level" (used to send pressure notifications and trigger sustained-pressure jetsams), which is monitored via a different subsystem.
+
+## Threads
 <a name="threads"></a>
 
 This section lists the threads that comprise the memorystatus subsystem. More details on each thread are below.
@@ -132,7 +140,7 @@ This section lists the threads that comprise the memorystatus subsystem. More de
 | VM\_freezer | `memorystatus_freeze_thread` | `memorystatus_freeze_wakeup` |
 | VM\_pressure | `vm_pressure_thread` | `vm_pressure_thread` |
 
-### VM\_memorystatus_1
+### VM\_memorystatus\_1
 
 This is the jetsam thread. It's responsible for running the system health check and performing most jetsam kills (see `doc/memorystatus/kill.md` for a kill breakdown).
 

@@ -47,7 +47,7 @@ expect_special_port_description(const char *(*fn)(int),
 }
 
 T_DECL(host_special_port_descriptions,
-    "verify that host special ports can be described")
+    "verify that host special ports can be described", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_HSP(portdef) \
 	        expect_special_port_description(mach_host_special_port_description, \
@@ -83,10 +83,11 @@ T_DECL(host_special_port_descriptions,
 	TEST_HSP(HOST_IOCOMPRESSIONSTATS_PORT);
 	TEST_HSP(HOST_MEMORY_ERROR_PORT);
 	TEST_HSP(HOST_MANAGEDAPPDISTD_PORT);
+	TEST_HSP(HOST_DOUBLEAGENTD_PORT);
 
 #undef TEST_HSP
 
-	T_EXPECT_EQ(HOST_MANAGEDAPPDISTD_PORT, HOST_MAX_SPECIAL_PORT,
+	T_EXPECT_EQ(HOST_DOUBLEAGENTD_PORT, HOST_MAX_SPECIAL_PORT,
 	    "checked all of the ports");
 
 	const char *invalid_hsp =
@@ -96,7 +97,7 @@ T_DECL(host_special_port_descriptions,
 }
 
 T_DECL(task_special_port_descriptions,
-    "verify that task special ports can be described")
+    "verify that task special ports can be described", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_TSP(portdef) \
 	        expect_special_port_description(mach_task_special_port_description, \
@@ -124,7 +125,7 @@ T_DECL(task_special_port_descriptions,
 }
 
 T_DECL(thread_special_port_descriptions,
-    "verify that thread special ports can be described")
+    "verify that thread special ports can be described", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_TSP(portdef) \
 	        expect_special_port_description(mach_thread_special_port_description, \
@@ -154,7 +155,7 @@ expect_special_port_id(int (*fn)(const char *id), int port, const char *portid)
 }
 
 T_DECL(host_special_port_mapping,
-    "verify that task special port names can be mapped to numbers")
+    "verify that task special port names can be mapped to numbers", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_HSP(portdef) \
 	        expect_special_port_id(mach_host_special_port_for_id, \
@@ -195,7 +196,7 @@ T_DECL(host_special_port_mapping,
 }
 
 T_DECL(task_special_port_mapping,
-    "verify that task special port names can be mapped to numbers")
+    "verify that task special port names can be mapped to numbers", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_TSP(portdef) \
 	        expect_special_port_id(mach_task_special_port_for_id, \
@@ -219,7 +220,7 @@ T_DECL(task_special_port_mapping,
 }
 
 T_DECL(thread_special_port_mapping,
-    "verify that thread special port names can be mapped to numbers")
+    "verify that thread special port names can be mapped to numbers", T_META_TAG_VM_PREFERRED)
 {
 #define TEST_TSP(portdef) \
 	        expect_special_port_id(mach_thread_special_port_for_id, \

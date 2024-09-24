@@ -28,6 +28,32 @@
 
 #ifndef _VA_LIST_T
 #define _VA_LIST_T
+
+#if defined(KERNEL)
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Xcode doesn't currently set up search paths correctly for Kernel extensions,
+ * so the clang headers are not seen in the correct order to use their types.
+ */
+#endif
+#define USE_CLANG_STDARG 0
+#else
+#if defined(__has_feature) && __has_feature(modules)
+#define USE_CLANG_STDARG 1
+#else
+#define USE_CLANG_STDARG 0
+#endif
+#endif
+
+#if USE_CLANG_STDARG
+#define __need_va_list
+#include <stdarg.h>
+#undef __need_va_list
+#else
 #include <machine/types.h> /* __darwin_va_list */
 typedef __darwin_va_list va_list;
+#endif
+
+#undef USE_CLANG_STDARG
+
 #endif /* _VA_LIST_T */

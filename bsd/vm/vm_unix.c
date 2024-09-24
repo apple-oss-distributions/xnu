@@ -96,16 +96,20 @@
 #include <bsm/audit_kevents.h>
 
 #include <kern/kalloc.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_map_internal.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <mach/shared_region.h>
-#include <vm/vm_shared_region.h>
+#include <vm/vm_shared_region_internal.h>
 
-#include <vm/vm_dyld_pager.h>
-
-#include <vm/vm_protos.h>
+#include <vm/vm_dyld_pager_internal.h>
+#include <vm/vm_protos_internal.h>
+#if DEVELOPMENT || DEBUG
+#include <vm/vm_compressor_info.h>         /* for c_segment_info */
+#include <vm/vm_compressor_xnu.h>          /* for vm_compressor_serialize_segment_debug_info() */
+#endif
+#include <vm/vm_reclaim_xnu.h>
 
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_freeze.h>
@@ -129,10 +133,6 @@
 #if VM_MAP_DEBUG_APPLE_PROTECT
 SYSCTL_INT(_vm, OID_AUTO, map_debug_apple_protect, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_debug_apple_protect, 0, "");
 #endif /* VM_MAP_DEBUG_APPLE_PROTECT */
-
-#if VM_MAP_DEBUG_FOURK
-SYSCTL_INT(_vm, OID_AUTO, map_debug_fourk, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_debug_fourk, 0, "");
-#endif /* VM_MAP_DEBUG_FOURK */
 
 #if DEVELOPMENT || DEBUG
 
@@ -175,7 +175,7 @@ sysctl_kmem_gobj_stats SYSCTL_HANDLER_ARGS
 	return SYSCTL_OUT(req, &stats, sizeof(stats));
 }
 
-SYSCTL_PROC(_vm, OID_AUTO, sysctl_kmem_gobj_stats,
+SYSCTL_PROC(_vm, OID_AUTO, kmem_gobj_stats,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED,
     0, 0, &sysctl_kmem_gobj_stats, "S,kmem_gobj_stats", "");
 
@@ -244,6 +244,38 @@ sysctl_vm_self_region_page_size SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_vm, OID_AUTO, self_region_page_size, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, &sysctl_vm_self_region_page_size, "I", "");
 
+static int
+sysctl_vm_self_region_info_flags SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, oidp)
+	int     error = 0;
+	int     value;
+	kern_return_t kr;
+
+	value = task_self_region_info_flags();
+	error = SYSCTL_OUT(req, &value, sizeof(int));
+	if (error) {
+		return error;
+	}
+
+	if (!req->newptr) {
+		return 0;
+	}
+
+	error = SYSCTL_IN(req, &value, sizeof(int));
+	if (error) {
+		return error;
+	}
+
+	kr = task_self_region_info_flags_set(value);
+	if (kr != KERN_SUCCESS) {
+		return EINVAL;
+	}
+
+	return 0;
+}
+SYSCTL_PROC(_vm, OID_AUTO, self_region_info_flags, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0, &sysctl_vm_self_region_info_flags, "I", "");
+
 
 #if DEVELOPMENT || DEBUG
 extern int panic_on_unsigned_execute;
@@ -297,10 +329,8 @@ SYSCTL_UINT(_vm, OID_AUTO, user_pte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_u
 SYSCTL_UINT(_vm, OID_AUTO, kernel_pte_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &inuse_kernel_ptepages_count, 0, "");
 #if !CONFIG_SPTM
 extern unsigned int free_page_size_tt_count;
-extern unsigned int free_two_page_size_tt_count;
 extern unsigned int free_tt_count;
 SYSCTL_UINT(_vm, OID_AUTO, free_1page_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_page_size_tt_count, 0, "");
-SYSCTL_UINT(_vm, OID_AUTO, free_2page_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_two_page_size_tt_count, 0, "");
 SYSCTL_UINT(_vm, OID_AUTO, free_tte_root, CTLFLAG_RD | CTLFLAG_LOCKED, &free_tt_count, 0, "");
 #endif
 #if DEVELOPMENT || DEBUG
@@ -310,12 +340,9 @@ extern unsigned long pmap_asid_hits;
 SYSCTL_ULONG(_vm, OID_AUTO, pmap_asid_hits, CTLFLAG_RD | CTLFLAG_LOCKED, &pmap_asid_hits, "");
 extern unsigned long pmap_asid_misses;
 SYSCTL_ULONG(_vm, OID_AUTO, pmap_asid_misses, CTLFLAG_RD | CTLFLAG_LOCKED, &pmap_asid_misses, "");
+extern unsigned long pmap_speculation_restrictions;
+SYSCTL_ULONG(_vm, OID_AUTO, pmap_speculation_restrictions, CTLFLAG_RD | CTLFLAG_LOCKED, &pmap_speculation_restrictions, "");
 #endif
-#endif /* __arm64__ */
-
-#if __arm64__
-extern int fourk_pager_data_request_debug;
-SYSCTL_INT(_vm, OID_AUTO, fourk_pager_data_request_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &fourk_pager_data_request_debug, 0, "");
 #endif /* __arm64__ */
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -352,8 +379,6 @@ SYSCTL_INT(_vm, OID_AUTO, vm_shadow_max_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &v
 
 SYSCTL_INT(_vm, OID_AUTO, vm_debug_events, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_debug_events, 0, "");
 
-__attribute__((noinline)) int __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(
-	mach_port_t task_access_port, int32_t calling_pid, uint32_t calling_gid, int32_t target_pid, mach_task_flavor_t flavor);
 /*
  * Sysctl's related to data/stack execution.  See osfmk/vm/vm_map.c
  */
@@ -537,21 +562,66 @@ useracc(
 		prot == B_READ ? VM_PROT_READ : VM_PROT_WRITE);
 }
 
-int
-vslock(
-	user_addr_t     addr,
-	user_size_t     len)
+#if XNU_PLATFORM_MacOSX
+static inline kern_return_t
+vslock_sanitize(
+	vm_map_t                map,
+	user_addr_ut            addr_u,
+	user_size_ut            len_u,
+	vm_sanitize_caller_t    vm_sanitize_caller,
+	vm_map_offset_t        *start,
+	vm_map_offset_t        *end,
+	vm_map_size_t          *size)
 {
-	kern_return_t   kret;
-	vm_map_t        map;
+	return vm_sanitize_addr_size(addr_u, len_u, vm_sanitize_caller,
+	           map,
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, start, end,
+	           size);
+}
+#endif /* XNU_PLATFORM_MacOSX */
 
-	map = current_map();
-	kret = vm_map_wire_kernel(map,
-	    vm_map_trunc_page(addr,
-	    vm_map_page_mask(map)),
-	    vm_map_round_page(addr + len,
-	    vm_map_page_mask(map)),
-	    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_BSD,
+int
+vslock(user_addr_ut addr, user_size_ut len)
+{
+	kern_return_t kret;
+
+#if XNU_PLATFORM_MacOSX
+	/*
+	 * Preserve previous behavior on macOS for overflows due to bin
+	 * compatibility i.e. return success for overflows without doing
+	 * anything. Error compatibility returns VM_ERR_RETURN_NOW (on macOS)
+	 * for overflow errors which gets converted to KERN_SUCCESS by
+	 * vm_sanitize_get_kr.
+	 */
+	vm_map_offset_t start, end;
+	vm_map_size_t   size;
+
+	kret = vslock_sanitize(current_map(),
+	    addr,
+	    len,
+	    VM_SANITIZE_CALLER_VSLOCK,
+	    &start,
+	    &end,
+	    &size);
+	if (__improbable(kret != KERN_SUCCESS)) {
+		switch (vm_sanitize_get_kr(kret)) {
+		case KERN_SUCCESS:
+			return 0;
+		case KERN_INVALID_ADDRESS:
+		case KERN_NO_SPACE:
+			return ENOMEM;
+		case KERN_PROTECTION_FAILURE:
+			return EACCES;
+		default:
+			return EINVAL;
+		}
+	}
+#endif /* XNU_PLATFORM_MacOSX */
+
+	kret = vm_map_wire_kernel(current_map(), addr,
+	    vm_sanitize_compute_unsafe_end(addr, len),
+	    vm_sanitize_wrap_prot(VM_PROT_READ | VM_PROT_WRITE),
+	    VM_KERN_MEMORY_BSD,
 	    FALSE);
 
 	switch (kret) {
@@ -568,10 +638,7 @@ vslock(
 }
 
 int
-vsunlock(
-	user_addr_t addr,
-	user_size_t len,
-	__unused int dirtied)
+vsunlock(user_addr_ut addr, user_size_ut len, __unused int dirtied)
 {
 #if FIXME  /* [ */
 	pmap_t          pmap;
@@ -599,12 +666,42 @@ vsunlock(
 #ifdef  lint
 	dirtied++;
 #endif  /* lint */
-	kret = vm_map_unwire(map,
-	    vm_map_trunc_page(addr,
-	    vm_map_page_mask(map)),
-	    vm_map_round_page(addr + len,
-	    vm_map_page_mask(map)),
-	    FALSE);
+
+#if XNU_PLATFORM_MacOSX
+	/*
+	 * Preserve previous behavior on macOS for overflows due to bin
+	 * compatibility i.e. return success for overflows without doing
+	 * anything. Error compatibility returns VM_ERR_RETURN_NOW (on macOS)
+	 * for overflow errors which gets converted to KERN_SUCCESS by
+	 * vm_sanitize_get_kr.
+	 */
+	vm_map_offset_t start, end;
+	vm_map_size_t   size;
+
+	kret = vslock_sanitize(map,
+	    addr,
+	    len,
+	    VM_SANITIZE_CALLER_VSUNLOCK,
+	    &start,
+	    &end,
+	    &size);
+	if (__improbable(kret != KERN_SUCCESS)) {
+		switch (vm_sanitize_get_kr(kret)) {
+		case KERN_SUCCESS:
+			return 0;
+		case KERN_INVALID_ADDRESS:
+		case KERN_NO_SPACE:
+			return ENOMEM;
+		case KERN_PROTECTION_FAILURE:
+			return EACCES;
+		default:
+			return EINVAL;
+		}
+	}
+#endif /* XNU_PLATFORM_MacOSX */
+
+	kret = vm_map_unwire(map, addr,
+	    vm_sanitize_compute_unsafe_end(addr, len), false);
 	switch (kret) {
 	case KERN_SUCCESS:
 		return 0;
@@ -762,1285 +859,6 @@ swapon(__unused proc_t procp, __unused struct swapon_args *uap, __unused int *re
 	return ENOTSUP;
 }
 
-/*
- * pid_for_task
- *
- * Find the BSD process ID for the Mach task associated with the given Mach port
- * name
- *
- * Parameters:	args		User argument descriptor (see below)
- *
- * Indirect parameters:	args->t		Mach port name
- *                      args->pid	Process ID (returned value; see below)
- *
- * Returns:	KERL_SUCCESS	Success
- *              KERN_FAILURE	Not success
- *
- * Implicit returns: args->pid		Process ID
- *
- */
-kern_return_t
-pid_for_task(
-	struct pid_for_task_args *args)
-{
-	mach_port_name_t        t = args->t;
-	user_addr_t             pid_addr  = args->pid;
-	proc_t p;
-	task_t          t1;
-	int     pid = -1;
-	kern_return_t   err = KERN_SUCCESS;
-
-	AUDIT_MACH_SYSCALL_ENTER(AUE_PIDFORTASK);
-	AUDIT_ARG(mach_port1, t);
-
-	t1 = port_name_to_task_name(t);
-
-	if (t1 == TASK_NULL) {
-		err = KERN_FAILURE;
-		goto pftout;
-	} else {
-		p = get_bsdtask_info(t1);
-		if (p) {
-			pid  = proc_pid(p);
-			err = KERN_SUCCESS;
-		} else if (task_is_a_corpse(t1)) {
-			pid = task_pid(t1);
-			err = KERN_SUCCESS;
-		} else {
-			err = KERN_FAILURE;
-		}
-	}
-	task_deallocate(t1);
-pftout:
-	AUDIT_ARG(pid, pid);
-	(void) copyout((char *) &pid, pid_addr, sizeof(int));
-	AUDIT_MACH_SYSCALL_EXIT(err);
-	return err;
-}
-
-/*
- *
- * tfp_policy = KERN_TFP_POLICY_DENY; Deny Mode: None allowed except for self
- * tfp_policy = KERN_TFP_POLICY_DEFAULT; default mode: all posix checks and upcall via task port for authentication
- *
- */
-static  int tfp_policy = KERN_TFP_POLICY_DEFAULT;
-
-/*
- *	Routine:	task_for_pid_posix_check
- *	Purpose:
- *			Verify that the current process should be allowed to
- *			get the target process's task port. This is only
- *			permitted if:
- *			- The current process is root
- *			OR all of the following are true:
- *			- The target process's real, effective, and saved uids
- *			  are the same as the current proc's euid,
- *			- The target process's group set is a subset of the
- *			  calling process's group set, and
- *			- The target process hasn't switched credentials.
- *
- *	Returns:	TRUE: permitted
- *			FALSE: denied
- */
-static int
-task_for_pid_posix_check(proc_t target)
-{
-	kauth_cred_t targetcred, mycred;
-	bool checkcredentials;
-	uid_t myuid;
-	int allowed;
-
-	/* No task_for_pid on bad targets */
-	if (target->p_stat == SZOMB) {
-		return FALSE;
-	}
-
-	mycred = kauth_cred_get();
-	myuid = kauth_cred_getuid(mycred);
-
-	/* If we're running as root, the check passes */
-	if (kauth_cred_issuser(mycred)) {
-		return TRUE;
-	}
-
-	/* We're allowed to get our own task port */
-	if (target == current_proc()) {
-		return TRUE;
-	}
-
-	/*
-	 * Under DENY, only root can get another proc's task port,
-	 * so no more checks are needed.
-	 */
-	if (tfp_policy == KERN_TFP_POLICY_DENY) {
-		return FALSE;
-	}
-
-	targetcred = kauth_cred_proc_ref(target);
-	allowed = TRUE;
-
-	checkcredentials = !proc_is_third_party_debuggable_driver(target);
-
-	if (checkcredentials) {
-		/* Do target's ruid, euid, and saved uid match my euid? */
-		if ((kauth_cred_getuid(targetcred) != myuid) ||
-		    (kauth_cred_getruid(targetcred) != myuid) ||
-		    (kauth_cred_getsvuid(targetcred) != myuid)) {
-			allowed = FALSE;
-			goto out;
-		}
-		/* Are target's groups a subset of my groups? */
-		if (kauth_cred_gid_subset(targetcred, mycred, &allowed) ||
-		    allowed == 0) {
-			allowed = FALSE;
-			goto out;
-		}
-	}
-
-	/* Has target switched credentials? */
-	if (target->p_flag & P_SUGID) {
-		allowed = FALSE;
-		goto out;
-	}
-
-out:
-	kauth_cred_unref(&targetcred);
-	return allowed;
-}
-
-/*
- *	__KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__
- *
- *	Description:	Waits for the user space daemon to respond to the request
- *			we made. Function declared non inline to be visible in
- *			stackshots and spindumps as well as debugging.
- */
-__attribute__((noinline)) int
-__KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(
-	mach_port_t task_access_port, int32_t calling_pid, uint32_t calling_gid, int32_t target_pid, mach_task_flavor_t flavor)
-{
-	return check_task_access_with_flavor(task_access_port, calling_pid, calling_gid, target_pid, flavor);
-}
-
-/*
- *	Routine:	task_for_pid
- *	Purpose:
- *		Get the task port for another "process", named by its
- *		process ID on the same host as "target_task".
- *
- *		Only permitted to privileged processes, or processes
- *		with the same user ID.
- *
- *		Note: if pid == 0, an error is return no matter who is calling.
- *
- * XXX This should be a BSD system call, not a Mach trap!!!
- */
-kern_return_t
-task_for_pid(
-	struct task_for_pid_args *args)
-{
-	mach_port_name_t        target_tport = args->target_tport;
-	int                     pid = args->pid;
-	user_addr_t             task_addr = args->t;
-	proc_t                  p = PROC_NULL;
-	task_t                  t1 = TASK_NULL;
-	task_t                  task = TASK_NULL;
-	mach_port_name_t        tret = MACH_PORT_NULL;
-	ipc_port_t              tfpport = MACH_PORT_NULL;
-	void                    * sright = NULL;
-	int                     error = 0;
-	boolean_t               is_current_proc = FALSE;
-	struct proc_ident       pident = {0};
-
-	AUDIT_MACH_SYSCALL_ENTER(AUE_TASKFORPID);
-	AUDIT_ARG(pid, pid);
-	AUDIT_ARG(mach_port1, target_tport);
-
-	/* Always check if pid == 0 */
-	if (pid == 0) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
-		return KERN_FAILURE;
-	}
-
-	t1 = port_name_to_task(target_tport);
-	if (t1 == TASK_NULL) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
-		return KERN_FAILURE;
-	}
-
-
-	p = proc_find(pid);
-	if (p == PROC_NULL) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-	pident = proc_ident(p);
-	is_current_proc = (p == current_proc());
-
-#if CONFIG_AUDIT
-	AUDIT_ARG(process, p);
-#endif
-
-	if (!(task_for_pid_posix_check(p))) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-
-	if (proc_task(p) == TASK_NULL) {
-		error = KERN_SUCCESS;
-		goto tfpout;
-	}
-
-	/*
-	 * Grab a task reference and drop the proc reference as the proc ref
-	 * shouldn't be held accross upcalls.
-	 */
-	task = proc_task(p);
-	task_reference(task);
-
-	proc_rele(p);
-	p = PROC_NULL;
-
-	/* IPC is not active on the task until after `exec_resettextvp` has been called.
-	 * We don't want to call into MAC hooks until we know that this has occured, otherwise
-	 * AMFI and others will read uninitialized fields from the csproc
-	 */
-	if (!task_is_ipc_active(task)) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-
-#if CONFIG_MACF
-	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_CONTROL);
-	if (error) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-#endif
-
-	/* If we aren't root and target's task access port is set... */
-	if (!kauth_cred_issuser(kauth_cred_get()) &&
-	    !is_current_proc &&
-	    (task_get_task_access_port(task, &tfpport) == 0) &&
-	    (tfpport != IPC_PORT_NULL)) {
-		if (tfpport == IPC_PORT_DEAD) {
-			error = KERN_PROTECTION_FAILURE;
-			goto tfpout;
-		}
-
-		/* Call up to the task access server */
-		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
-
-		if (error != MACH_MSG_SUCCESS) {
-			if (error == MACH_RCV_INTERRUPTED) {
-				error = KERN_ABORTED;
-			} else {
-				error = KERN_FAILURE;
-			}
-			goto tfpout;
-		}
-	}
-
-	/* Grant task port access */
-	extmod_statistics_incr_task_for_pid(task);
-
-	/* this reference will be consumed during conversion */
-	task_reference(task);
-	if (task == current_task()) {
-		/* return pinned self if current_task() so equality check with mach_task_self_ passes */
-		sright = (void *)convert_task_to_port_pinned(task);
-	} else {
-		sright = (void *)convert_task_to_port(task);
-	}
-	/* extra task ref consumed */
-
-	/*
-	 * Check if the task has been corpsified. We must do so after conversion
-	 * since we don't hold locks and may have grabbed a corpse control port
-	 * above which will prevent no-senders notification delivery.
-	 */
-	if (task_is_a_corpse(task)) {
-		ipc_port_release_send(sright);
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-
-	tret = ipc_port_copyout_send(
-		sright,
-		get_task_ipcspace(current_task()));
-
-	error = KERN_SUCCESS;
-
-tfpout:
-	task_deallocate(t1);
-	AUDIT_ARG(mach_port2, tret);
-	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-	if (task != TASK_NULL) {
-		task_deallocate(task);
-	}
-	if (p != PROC_NULL) {
-		proc_rele(p);
-	}
-	AUDIT_MACH_SYSCALL_EXIT(error);
-	return error;
-}
-
-/*
- *	Routine:	task_name_for_pid
- *	Purpose:
- *		Get the task name port for another "process", named by its
- *		process ID on the same host as "target_task".
- *
- *		Only permitted to privileged processes, or processes
- *		with the same user ID.
- *
- * XXX This should be a BSD system call, not a Mach trap!!!
- */
-
-kern_return_t
-task_name_for_pid(
-	struct task_name_for_pid_args *args)
-{
-	mach_port_name_t        target_tport = args->target_tport;
-	int                     pid = args->pid;
-	user_addr_t             task_addr = args->t;
-	proc_t                  p = PROC_NULL;
-	task_t                  t1 = TASK_NULL;
-	mach_port_name_t        tret = MACH_PORT_NULL;
-	void * sright;
-	int error = 0, refheld = 0;
-	kauth_cred_t target_cred;
-
-	AUDIT_MACH_SYSCALL_ENTER(AUE_TASKNAMEFORPID);
-	AUDIT_ARG(pid, pid);
-	AUDIT_ARG(mach_port1, target_tport);
-
-	t1 = port_name_to_task(target_tport);
-	if (t1 == TASK_NULL) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
-		return KERN_FAILURE;
-	}
-
-	p = proc_find(pid);
-	if (p != PROC_NULL) {
-		AUDIT_ARG(process, p);
-		target_cred = kauth_cred_proc_ref(p);
-		refheld = 1;
-
-		if ((p->p_stat != SZOMB)
-		    && ((current_proc() == p)
-		    || kauth_cred_issuser(kauth_cred_get())
-		    || ((kauth_cred_getuid(target_cred) == kauth_cred_getuid(kauth_cred_get())) &&
-		    ((kauth_cred_getruid(target_cred) == kauth_getruid())))
-		    || IOCurrentTaskHasEntitlement("com.apple.system-task-ports.name.safe")
-		    )) {
-			if (proc_task(p) != TASK_NULL) {
-				struct proc_ident pident = proc_ident(p);
-
-				task_t task = proc_task(p);
-
-				task_reference(task);
-				proc_rele(p);
-				p = PROC_NULL;
-#if CONFIG_MACF
-				error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_NAME);
-				if (error) {
-					task_deallocate(task);
-					goto noperm;
-				}
-#endif
-				sright = (void *)convert_task_name_to_port(task);
-				task = NULL;
-				tret = ipc_port_copyout_send(sright,
-				    get_task_ipcspace(current_task()));
-			} else {
-				tret  = MACH_PORT_NULL;
-			}
-
-			AUDIT_ARG(mach_port2, tret);
-			(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-			task_deallocate(t1);
-			error = KERN_SUCCESS;
-			goto tnfpout;
-		}
-	}
-
-#if CONFIG_MACF
-noperm:
-#endif
-	task_deallocate(t1);
-	tret = MACH_PORT_NULL;
-	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-	error = KERN_FAILURE;
-tnfpout:
-	if (refheld != 0) {
-		kauth_cred_unref(&target_cred);
-	}
-	if (p != PROC_NULL) {
-		proc_rele(p);
-	}
-	AUDIT_MACH_SYSCALL_EXIT(error);
-	return error;
-}
-
-/*
- *	Routine:	task_inspect_for_pid
- *	Purpose:
- *		Get the task inspect port for another "process", named by its
- *		process ID on the same host as "target_task".
- */
-int
-task_inspect_for_pid(struct proc *p __unused, struct task_inspect_for_pid_args *args, int *ret)
-{
-	mach_port_name_t        target_tport = args->target_tport;
-	int                     pid = args->pid;
-	user_addr_t             task_addr = args->t;
-
-	proc_t                  proc = PROC_NULL;
-	task_t                  t1 = TASK_NULL;
-	task_inspect_t          task_insp = TASK_INSPECT_NULL;
-	mach_port_name_t        tret = MACH_PORT_NULL;
-	ipc_port_t              tfpport = MACH_PORT_NULL;
-	int                     error = 0;
-	void                    *sright = NULL;
-	boolean_t               is_current_proc = FALSE;
-	struct proc_ident       pident = {0};
-
-	/* Disallow inspect port for kernel_task */
-	if (pid == 0) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		return EPERM;
-	}
-
-	t1 = port_name_to_task(target_tport);
-	if (t1 == TASK_NULL) {
-		(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-		return EINVAL;
-	}
-
-	proc = proc_find(pid);
-	if (proc == PROC_NULL) {
-		error = ESRCH;
-		goto tifpout;
-	}
-	pident = proc_ident(proc);
-	is_current_proc = (proc == current_proc());
-
-	if (!(task_for_pid_posix_check(proc))) {
-		error = EPERM;
-		goto tifpout;
-	}
-
-	task_insp = proc_task(proc);
-	if (task_insp == TASK_INSPECT_NULL) {
-		goto tifpout;
-	}
-
-	/*
-	 * Grab a task reference and drop the proc reference before making any upcalls.
-	 */
-	task_reference(task_insp);
-
-	proc_rele(proc);
-	proc = PROC_NULL;
-
-#if CONFIG_MACF
-	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_INSPECT);
-	if (error) {
-		error = EPERM;
-		goto tifpout;
-	}
-#endif
-
-	/* If we aren't root and target's task access port is set... */
-	if (!kauth_cred_issuser(kauth_cred_get()) &&
-	    !is_current_proc &&
-	    (task_get_task_access_port(task_insp, &tfpport) == 0) &&
-	    (tfpport != IPC_PORT_NULL)) {
-		if (tfpport == IPC_PORT_DEAD) {
-			error = EACCES;
-			goto tifpout;
-		}
-
-
-		/* Call up to the task access server */
-		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_INSPECT);
-
-		if (error != MACH_MSG_SUCCESS) {
-			if (error == MACH_RCV_INTERRUPTED) {
-				error = EINTR;
-			} else {
-				error = EPERM;
-			}
-			goto tifpout;
-		}
-	}
-
-	/* Check if the task has been corpsified */
-	if (task_is_a_corpse(task_insp)) {
-		error = EACCES;
-		goto tifpout;
-	}
-
-	/* could be IP_NULL, consumes a ref */
-	sright = (void*) convert_task_inspect_to_port(task_insp);
-	task_insp = TASK_INSPECT_NULL;
-	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
-
-tifpout:
-	task_deallocate(t1);
-	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-	if (proc != PROC_NULL) {
-		proc_rele(proc);
-	}
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-	if (task_insp != TASK_INSPECT_NULL) {
-		task_deallocate(task_insp);
-	}
-
-	*ret = error;
-	return error;
-}
-
-/*
- *	Routine:	task_read_for_pid
- *	Purpose:
- *		Get the task read port for another "process", named by its
- *		process ID on the same host as "target_task".
- */
-int
-task_read_for_pid(struct proc *p __unused, struct task_read_for_pid_args *args, int *ret)
-{
-	mach_port_name_t        target_tport = args->target_tport;
-	int                     pid = args->pid;
-	user_addr_t             task_addr = args->t;
-
-	proc_t                  proc = PROC_NULL;
-	task_t                  t1 = TASK_NULL;
-	task_read_t             task_read = TASK_READ_NULL;
-	mach_port_name_t        tret = MACH_PORT_NULL;
-	ipc_port_t              tfpport = MACH_PORT_NULL;
-	int                     error = 0;
-	void                    *sright = NULL;
-	boolean_t               is_current_proc = FALSE;
-	struct proc_ident       pident = {0};
-
-	/* Disallow read port for kernel_task */
-	if (pid == 0) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		return EPERM;
-	}
-
-	t1 = port_name_to_task(target_tport);
-	if (t1 == TASK_NULL) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		return EINVAL;
-	}
-
-	proc = proc_find(pid);
-	if (proc == PROC_NULL) {
-		error = ESRCH;
-		goto trfpout;
-	}
-	pident = proc_ident(proc);
-	is_current_proc = (proc == current_proc());
-
-	if (!(task_for_pid_posix_check(proc))) {
-		error = EPERM;
-		goto trfpout;
-	}
-
-	task_read = proc_task(proc);
-	if (task_read == TASK_INSPECT_NULL) {
-		goto trfpout;
-	}
-
-	/*
-	 * Grab a task reference and drop the proc reference before making any upcalls.
-	 */
-	task_reference(task_read);
-
-	proc_rele(proc);
-	proc = PROC_NULL;
-
-#if CONFIG_MACF
-	error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_READ);
-	if (error) {
-		error = EPERM;
-		goto trfpout;
-	}
-#endif
-
-	/* If we aren't root and target's task access port is set... */
-	if (!kauth_cred_issuser(kauth_cred_get()) &&
-	    !is_current_proc &&
-	    (task_get_task_access_port(task_read, &tfpport) == 0) &&
-	    (tfpport != IPC_PORT_NULL)) {
-		if (tfpport == IPC_PORT_DEAD) {
-			error = EACCES;
-			goto trfpout;
-		}
-
-
-		/* Call up to the task access server */
-		error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-		    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_READ);
-
-		if (error != MACH_MSG_SUCCESS) {
-			if (error == MACH_RCV_INTERRUPTED) {
-				error = EINTR;
-			} else {
-				error = EPERM;
-			}
-			goto trfpout;
-		}
-	}
-
-	/* Check if the task has been corpsified */
-	if (task_is_a_corpse(task_read)) {
-		error = EACCES;
-		goto trfpout;
-	}
-
-	/* could be IP_NULL, consumes a ref */
-	sright = (void*) convert_task_read_to_port(task_read);
-	task_read = TASK_READ_NULL;
-	tret = ipc_port_copyout_send(sright, get_task_ipcspace(current_task()));
-
-trfpout:
-	task_deallocate(t1);
-	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-	if (proc != PROC_NULL) {
-		proc_rele(proc);
-	}
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-	if (task_read != TASK_READ_NULL) {
-		task_deallocate(task_read);
-	}
-
-	*ret = error;
-	return error;
-}
-
-kern_return_t
-pid_suspend(struct proc *p __unused, struct pid_suspend_args *args, int *ret)
-{
-	task_t  target = NULL;
-	proc_t  targetproc = PROC_NULL;
-	int     pid = args->pid;
-	int     error = 0;
-	mach_port_t tfpport = MACH_PORT_NULL;
-
-	if (pid == 0) {
-		error = EPERM;
-		goto out;
-	}
-
-	targetproc = proc_find(pid);
-	if (targetproc == PROC_NULL) {
-		error = ESRCH;
-		goto out;
-	}
-
-	if (!task_for_pid_posix_check(targetproc) &&
-	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
-		error = EPERM;
-		goto out;
-	}
-
-#if CONFIG_MACF
-	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_SUSPEND);
-	if (error) {
-		error = EPERM;
-		goto out;
-	}
-#endif
-
-	target = proc_task(targetproc);
-#if XNU_TARGET_OS_OSX
-	if (target != TASK_NULL) {
-		/* If we aren't root and target's task access port is set... */
-		if (!kauth_cred_issuser(kauth_cred_get()) &&
-		    targetproc != current_proc() &&
-		    (task_get_task_access_port(target, &tfpport) == 0) &&
-		    (tfpport != IPC_PORT_NULL)) {
-			if (tfpport == IPC_PORT_DEAD) {
-				error = EACCES;
-				goto out;
-			}
-
-			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
-
-			if (error != MACH_MSG_SUCCESS) {
-				if (error == MACH_RCV_INTERRUPTED) {
-					error = EINTR;
-				} else {
-					error = EPERM;
-				}
-				goto out;
-			}
-		}
-	}
-#endif /* XNU_TARGET_OS_OSX */
-
-	task_reference(target);
-	error = task_pidsuspend(target);
-	if (error) {
-		if (error == KERN_INVALID_ARGUMENT) {
-			error = EINVAL;
-		} else {
-			error = EPERM;
-		}
-	}
-#if CONFIG_MEMORYSTATUS
-	else {
-		memorystatus_on_suspend(targetproc);
-	}
-#endif
-
-	task_deallocate(target);
-
-out:
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-
-	if (targetproc != PROC_NULL) {
-		proc_rele(targetproc);
-	}
-	*ret = error;
-	return error;
-}
-
-kern_return_t
-debug_control_port_for_pid(struct debug_control_port_for_pid_args *args)
-{
-	mach_port_name_t        target_tport = args->target_tport;
-	int                     pid = args->pid;
-	user_addr_t             task_addr = args->t;
-	proc_t                  p = PROC_NULL;
-	task_t                  t1 = TASK_NULL;
-	task_t                  task = TASK_NULL;
-	mach_port_name_t        tret = MACH_PORT_NULL;
-	ipc_port_t              tfpport = MACH_PORT_NULL;
-	ipc_port_t              sright = NULL;
-	int                     error = 0;
-	boolean_t               is_current_proc = FALSE;
-	struct proc_ident       pident = {0};
-
-	AUDIT_MACH_SYSCALL_ENTER(AUE_DBGPORTFORPID);
-	AUDIT_ARG(pid, pid);
-	AUDIT_ARG(mach_port1, target_tport);
-
-	/* Always check if pid == 0 */
-	if (pid == 0) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
-		return KERN_FAILURE;
-	}
-
-	t1 = port_name_to_task(target_tport);
-	if (t1 == TASK_NULL) {
-		(void) copyout((char *)&tret, task_addr, sizeof(mach_port_name_t));
-		AUDIT_MACH_SYSCALL_EXIT(KERN_FAILURE);
-		return KERN_FAILURE;
-	}
-
-	p = proc_find(pid);
-	if (p == PROC_NULL) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-	pident = proc_ident(p);
-	is_current_proc = (p == current_proc());
-
-#if CONFIG_AUDIT
-	AUDIT_ARG(process, p);
-#endif
-
-	if (!(task_for_pid_posix_check(p))) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-
-	if (proc_task(p) == TASK_NULL) {
-		error = KERN_SUCCESS;
-		goto tfpout;
-	}
-
-	/*
-	 * Grab a task reference and drop the proc reference before making any upcalls.
-	 */
-	task = proc_task(p);
-	task_reference(task);
-
-	proc_rele(p);
-	p = PROC_NULL;
-
-	if (!IOCurrentTaskHasEntitlement(DEBUG_PORT_ENTITLEMENT)) {
-#if CONFIG_MACF
-		error = mac_proc_check_get_task(kauth_cred_get(), &pident, TASK_FLAVOR_CONTROL);
-		if (error) {
-			error = KERN_FAILURE;
-			goto tfpout;
-		}
-#endif
-
-		/* If we aren't root and target's task access port is set... */
-		if (!kauth_cred_issuser(kauth_cred_get()) &&
-		    !is_current_proc &&
-		    (task_get_task_access_port(task, &tfpport) == 0) &&
-		    (tfpport != IPC_PORT_NULL)) {
-			if (tfpport == IPC_PORT_DEAD) {
-				error = KERN_PROTECTION_FAILURE;
-				goto tfpout;
-			}
-
-
-			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
-
-			if (error != MACH_MSG_SUCCESS) {
-				if (error == MACH_RCV_INTERRUPTED) {
-					error = KERN_ABORTED;
-				} else {
-					error = KERN_FAILURE;
-				}
-				goto tfpout;
-			}
-		}
-	}
-
-	/* Check if the task has been corpsified */
-	if (task_is_a_corpse(task)) {
-		error = KERN_FAILURE;
-		goto tfpout;
-	}
-
-	error = task_get_debug_control_port(task, &sright);
-	if (error != KERN_SUCCESS) {
-		goto tfpout;
-	}
-
-	tret = ipc_port_copyout_send(
-		sright,
-		get_task_ipcspace(current_task()));
-
-	error = KERN_SUCCESS;
-
-tfpout:
-	task_deallocate(t1);
-	AUDIT_ARG(mach_port2, tret);
-	(void) copyout((char *) &tret, task_addr, sizeof(mach_port_name_t));
-
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-	if (task != TASK_NULL) {
-		task_deallocate(task);
-	}
-	if (p != PROC_NULL) {
-		proc_rele(p);
-	}
-	AUDIT_MACH_SYSCALL_EXIT(error);
-	return error;
-}
-
-kern_return_t
-pid_resume(struct proc *p __unused, struct pid_resume_args *args, int *ret)
-{
-	task_t  target = NULL;
-	proc_t  targetproc = PROC_NULL;
-	int     pid = args->pid;
-	int     error = 0;
-	mach_port_t tfpport = MACH_PORT_NULL;
-
-	if (pid == 0) {
-		error = EPERM;
-		goto out;
-	}
-
-	targetproc = proc_find(pid);
-	if (targetproc == PROC_NULL) {
-		error = ESRCH;
-		goto out;
-	}
-
-	if (!task_for_pid_posix_check(targetproc) &&
-	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
-		error = EPERM;
-		goto out;
-	}
-
-#if CONFIG_MACF
-	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_RESUME);
-	if (error) {
-		error = EPERM;
-		goto out;
-	}
-#endif
-
-	target = proc_task(targetproc);
-#if XNU_TARGET_OS_OSX
-	if (target != TASK_NULL) {
-		/* If we aren't root and target's task access port is set... */
-		if (!kauth_cred_issuser(kauth_cred_get()) &&
-		    targetproc != current_proc() &&
-		    (task_get_task_access_port(target, &tfpport) == 0) &&
-		    (tfpport != IPC_PORT_NULL)) {
-			if (tfpport == IPC_PORT_DEAD) {
-				error = EACCES;
-				goto out;
-			}
-
-			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport,
-			    proc_selfpid(), kauth_getgid(), pid, TASK_FLAVOR_CONTROL);
-
-			if (error != MACH_MSG_SUCCESS) {
-				if (error == MACH_RCV_INTERRUPTED) {
-					error = EINTR;
-				} else {
-					error = EPERM;
-				}
-				goto out;
-			}
-		}
-	}
-#endif /* XNU_TARGET_OS_OSX */
-
-#if !XNU_TARGET_OS_OSX
-#if SOCKETS
-	resume_proc_sockets(targetproc);
-#endif /* SOCKETS */
-#endif /* !XNU_TARGET_OS_OSX */
-
-	task_reference(target);
-
-#if CONFIG_MEMORYSTATUS
-	memorystatus_on_resume(targetproc);
-#endif
-
-	error = task_pidresume(target);
-	if (error) {
-		if (error == KERN_INVALID_ARGUMENT) {
-			error = EINVAL;
-		} else {
-			if (error == KERN_MEMORY_ERROR) {
-				psignal(targetproc, SIGKILL);
-				error = EIO;
-			} else {
-				error = EPERM;
-			}
-		}
-	}
-
-	task_deallocate(target);
-
-out:
-	if (tfpport != IPC_PORT_NULL) {
-		ipc_port_release_send(tfpport);
-	}
-
-	if (targetproc != PROC_NULL) {
-		proc_rele(targetproc);
-	}
-
-	*ret = error;
-	return error;
-}
-
-#if !XNU_TARGET_OS_OSX
-/*
- * Freeze the specified process (provided in args->pid), or find and freeze a PID.
- * When a process is specified, this call is blocking, otherwise we wake up the
- * freezer thread and do not block on a process being frozen.
- */
-kern_return_t
-pid_hibernate(struct proc *p __unused, struct pid_hibernate_args *args, int *ret)
-{
-	int     error = 0;
-	proc_t  targetproc = PROC_NULL;
-	int     pid = args->pid;
-
-#ifndef CONFIG_FREEZE
-	#pragma unused(pid)
-#else
-
-	/*
-	 * If a pid has been provided, we obtain the process handle and call task_for_pid_posix_check().
-	 */
-
-	if (pid >= 0) {
-		targetproc = proc_find(pid);
-
-		if (targetproc == PROC_NULL) {
-			error = ESRCH;
-			goto out;
-		}
-
-		if (!task_for_pid_posix_check(targetproc)) {
-			error = EPERM;
-			goto out;
-		}
-	}
-
-#if CONFIG_MACF
-	//Note that targetproc may be null
-	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_HIBERNATE);
-	if (error) {
-		error = EPERM;
-		goto out;
-	}
-#endif
-
-	if (pid == -2) {
-		vm_pageout_anonymous_pages();
-	} else if (pid == -1) {
-		memorystatus_on_inactivity(targetproc);
-	} else {
-		error = memorystatus_freeze_process_sync(targetproc);
-	}
-
-out:
-
-#endif /* CONFIG_FREEZE */
-
-	if (targetproc != PROC_NULL) {
-		proc_rele(targetproc);
-	}
-	*ret = error;
-	return error;
-}
-#endif /* !XNU_TARGET_OS_OSX */
-
-#if SOCKETS
-int
-networking_memstatus_callout(proc_t p, uint32_t status)
-{
-	struct fileproc *fp;
-
-	/*
-	 * proc list lock NOT held
-	 * proc lock NOT held
-	 * a reference on the proc has been held / shall be dropped by the caller.
-	 */
-	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
-	LCK_MTX_ASSERT(&p->p_mlock, LCK_MTX_ASSERT_NOTOWNED);
-
-	proc_fdlock(p);
-
-	fdt_foreach(fp, p) {
-		switch (FILEGLOB_DTYPE(fp->fp_glob)) {
-#if NECP
-		case DTYPE_NETPOLICY:
-			necp_fd_memstatus(p, status,
-			    (struct necp_fd_data *)fp_get_data(fp));
-			break;
-#endif /* NECP */
-#if SKYWALK
-		case DTYPE_CHANNEL:
-			kern_channel_memstatus(p, status,
-			    (struct kern_channel *)fp_get_data(fp));
-			break;
-#endif /* SKYWALK */
-		default:
-			break;
-		}
-	}
-	proc_fdunlock(p);
-
-	return 1;
-}
-
-#if SKYWALK
-/*
- * Since we make multiple passes across the fileproc array, record the
- * first MAX_CHANNELS channel handles found.  MAX_CHANNELS should be
- * large enough to accomodate most, if not all cases.  If we find more,
- * we'll go to the slow path during second pass.
- */
-#define MAX_CHANNELS    8       /* should be more than enough */
-#endif /* SKYWALK */
-
-static int
-networking_defunct_callout(proc_t p, void *arg)
-{
-	struct pid_shutdown_sockets_args *args = arg;
-	int pid = args->pid;
-	int level = args->level;
-	struct fileproc *fp;
-#if SKYWALK
-	int i;
-	int channel_count = 0;
-	struct kern_channel *channel_array[MAX_CHANNELS];
-
-	bzero(&channel_array, sizeof(channel_array));
-#endif /* SKYWALK */
-
-	proc_fdlock(p);
-
-	fdt_foreach(fp, p) {
-		struct fileglob *fg = fp->fp_glob;
-
-		switch (FILEGLOB_DTYPE(fg)) {
-		case DTYPE_SOCKET: {
-			struct socket *so = (struct socket *)fg_get_data(fg);
-			if (proc_getpid(p) == pid || so->last_pid == pid ||
-			    ((so->so_flags & SOF_DELEGATED) && so->e_pid == pid)) {
-				/* Call networking stack with socket and level */
-				(void)socket_defunct(p, so, level);
-			}
-			break;
-		}
-#if NECP
-		case DTYPE_NETPOLICY:
-			/* first pass: defunct necp and get stats for ntstat */
-			if (proc_getpid(p) == pid) {
-				necp_fd_defunct(p,
-				    (struct necp_fd_data *)fg_get_data(fg));
-			}
-			break;
-#endif /* NECP */
-#if SKYWALK
-		case DTYPE_CHANNEL:
-			/* first pass: get channels and total count */
-			if (proc_getpid(p) == pid) {
-				if (channel_count < MAX_CHANNELS) {
-					channel_array[channel_count] =
-					    (struct kern_channel *)fg_get_data(fg);
-				}
-				++channel_count;
-			}
-			break;
-#endif /* SKYWALK */
-		default:
-			break;
-		}
-	}
-
-#if SKYWALK
-	/*
-	 * Second pass: defunct channels/flows (after NECP).  Handle
-	 * the common case of up to MAX_CHANNELS count with fast path,
-	 * and traverse the fileproc array again only if we exceed it.
-	 */
-	if (channel_count != 0 && channel_count <= MAX_CHANNELS) {
-		ASSERT(proc_getpid(p) == pid);
-		for (i = 0; i < channel_count; i++) {
-			ASSERT(channel_array[i] != NULL);
-			kern_channel_defunct(p, channel_array[i]);
-		}
-	} else if (channel_count != 0) {
-		ASSERT(proc_getpid(p) == pid);
-		fdt_foreach(fp, p) {
-			struct fileglob *fg = fp->fp_glob;
-
-			if (FILEGLOB_DTYPE(fg) == DTYPE_CHANNEL) {
-				kern_channel_defunct(p,
-				    (struct kern_channel *)fg_get_data(fg));
-			}
-		}
-	}
-#endif /* SKYWALK */
-	proc_fdunlock(p);
-
-	return PROC_RETURNED;
-}
-
-int
-pid_shutdown_sockets(struct proc *p __unused, struct pid_shutdown_sockets_args *args, int *ret)
-{
-	int                             error = 0;
-	proc_t                          targetproc = PROC_NULL;
-	int                             pid = args->pid;
-	int                             level = args->level;
-
-	if (level != SHUTDOWN_SOCKET_LEVEL_DISCONNECT_SVC &&
-	    level != SHUTDOWN_SOCKET_LEVEL_DISCONNECT_ALL) {
-		error = EINVAL;
-		goto out;
-	}
-
-	targetproc = proc_find(pid);
-	if (targetproc == PROC_NULL) {
-		error = ESRCH;
-		goto out;
-	}
-
-	if (!task_for_pid_posix_check(targetproc) &&
-	    !IOCurrentTaskHasEntitlement(PROCESS_RESUME_SUSPEND_ENTITLEMENT)) {
-		error = EPERM;
-		goto out;
-	}
-
-#if CONFIG_MACF
-	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_SHUTDOWN_SOCKETS);
-	if (error) {
-		error = EPERM;
-		goto out;
-	}
-#endif
-
-	proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS,
-	    networking_defunct_callout, args, NULL, NULL);
-
-out:
-	if (targetproc != PROC_NULL) {
-		proc_rele(targetproc);
-	}
-	*ret = error;
-	return error;
-}
-
-#endif /* SOCKETS */
-
-static int
-sysctl_settfp_policy(__unused struct sysctl_oid *oidp, void *arg1,
-    __unused int arg2, struct sysctl_req *req)
-{
-	int error = 0;
-	int new_value;
-
-	error = SYSCTL_OUT(req, arg1, sizeof(int));
-	if (error || req->newptr == USER_ADDR_NULL) {
-		return error;
-	}
-
-	if (!kauth_cred_issuser(kauth_cred_get())) {
-		return EPERM;
-	}
-
-	if ((error = SYSCTL_IN(req, &new_value, sizeof(int)))) {
-		goto out;
-	}
-	if ((new_value == KERN_TFP_POLICY_DENY)
-	    || (new_value == KERN_TFP_POLICY_DEFAULT)) {
-		tfp_policy = new_value;
-	} else {
-		error = EINVAL;
-	}
-out:
-	return error;
-}
-
 #if defined(SECURE_KERNEL)
 static int kern_secure_kernel = 1;
 #else
@@ -2048,11 +866,6 @@ static int kern_secure_kernel = 0;
 #endif
 
 SYSCTL_INT(_kern, OID_AUTO, secure_kernel, CTLFLAG_RD | CTLFLAG_LOCKED, &kern_secure_kernel, 0, "");
-
-SYSCTL_NODE(_kern, KERN_TFP, tfp, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "tfp");
-SYSCTL_PROC(_kern_tfp, KERN_TFP_POLICY, policy, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tfp_policy, sizeof(uint32_t), &sysctl_settfp_policy, "I", "policy");
-
 SYSCTL_INT(_vm, OID_AUTO, shared_region_trace_level, CTLFLAG_RW | CTLFLAG_LOCKED,
     &shared_region_trace_level, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, shared_region_version, CTLFLAG_RD | CTLFLAG_LOCKED,
@@ -2863,7 +1676,6 @@ shared_region_map_and_slide_cleanup(
 	}
 }
 
-
 /*
  * For each file mapped, we may have mappings for:
  *    TEXT, EXECUTE, LINKEDIT, DATA_CONST, __AUTH, DATA
@@ -3300,7 +2112,7 @@ map_with_linking_np(
 	}
 
 	/* get the VM to do the work */
-	kr = vm_map_with_linking(proc_task(p), regions, region_count, link_info, link_info_size, file_control);
+	kr = vm_map_with_linking(proc_task(p), regions, region_count, &link_info, link_info_size, file_control);
 
 done:
 	if (fp != NULL) {
@@ -3313,8 +2125,8 @@ done:
 	if (regions != NULL) {
 		kfree_data(regions, region_count * sizeof(regions[0]));
 	}
-	/* link info is used in the pager if things worked */
-	if (link_info != NULL && kr != KERN_SUCCESS) {
+	/* link info is NULL if it is used in the pager, if things worked */
+	if (link_info != NULL) {
 		kfree_data(link_info, link_info_size);
 	}
 
@@ -3578,6 +2390,56 @@ SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_async_queue,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
     &sysctl_vm_reclaim_drain_async_queue, "I", "");
 
+static int
+sysctl_vm_reclaim_from_pid SYSCTL_HANDLER_ARGS
+{
+	int error = EINVAL;
+	pid_t pid;
+	error = sysctl_handle_int(oidp, &pid, 0, req);
+	/* Only reclaim on write */
+	if (error || !req->newptr) {
+		return error;
+	}
+	if (pid <= 0) {
+		return EINVAL;
+	}
+	proc_t p = proc_find(pid);
+	if (p == PROC_NULL) {
+		return ESRCH;
+	}
+	task_t t = proc_task(p);
+	if (t == TASK_NULL) {
+		proc_rele(p);
+		return ESRCH;
+	}
+	task_reference(t);
+	proc_rele(p);
+	vm_deferred_reclamation_reclaim_from_task_sync(t, UINT64_MAX);
+	task_deallocate(t);
+	return 0;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, reclaim_from_pid,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
+    &sysctl_vm_reclaim_from_pid, "I",
+    "Drain the deferred reclamation buffer for a pid");
+
+static int
+sysctl_vm_reclaim_drain_all_buffers SYSCTL_HANDLER_ARGS
+{
+	/* Only reclaim on write */
+	if (!req->newptr) {
+		return EINVAL;
+	}
+	vm_deferred_reclamation_reclaim_all_memory(RECLAIM_OPTIONS_NONE);
+	return 0;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, reclaim_drain_all_buffers,
+    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED, 0, 0,
+    &sysctl_vm_reclaim_drain_all_buffers, "I",
+    "Drain all system-wide deferred reclamation buffers");
+
 
 extern uint64_t vm_reclaim_max_threshold;
 extern uint64_t vm_reclaim_trim_divisor;
@@ -3779,23 +2641,6 @@ kas_info(struct proc *p,
 	return error;
 #endif /* CONFIG_KAS_INFO */
 }
-
-#if __has_feature(ptrauth_calls)
-/*
- * Generate a random pointer signing key that isn't 0.
- */
-uint64_t
-generate_jop_key(void)
-{
-	uint64_t key;
-
-	do {
-		read_random(&key, sizeof key);
-	} while (key == 0);
-	return key;
-}
-#endif /* __has_feature(ptrauth_calls) */
-
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wcast-qual"
@@ -4112,6 +2957,7 @@ vm_map_malloc_ranges SYSCTL_HANDLER_ARGS
 	struct mach_vm_range r1, r2;
 	char str[20 * 4];
 	int len;
+	mach_vm_offset_t right_hole_max;
 
 	if (vm_map_get_user_range(map, UMEM_RANGE_ID_DEFAULT, &r1)) {
 		return ENOENT;
@@ -4120,9 +2966,15 @@ vm_map_malloc_ranges SYSCTL_HANDLER_ARGS
 		return ENOENT;
 	}
 
+#if XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT
+	right_hole_max = MACH_VM_JUMBO_ADDRESS;
+#else /* !XNU_TARGET_OS_IOS || !EXTENDED_USER_VA_SUPPORT */
+	right_hole_max = get_map_max(map);
+#endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
+
 	len = scnprintf(str, sizeof(str), "0x%llx:0x%llx 0x%llx:0x%llx",
 	    r1.max_address, r2.min_address,
-	    r2.max_address, get_map_max(map));
+	    r2.max_address, right_hole_max);
 
 	return SYSCTL_OUT(req, str, len);
 }
@@ -4160,6 +3012,20 @@ vm_map_user_range_heap SYSCTL_HANDLER_ARGS
 	return SYSCTL_OUT(req, &range, sizeof(range));
 }
 
+static int
+vm_map_user_range_large_file SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2, oidp)
+	struct mach_vm_range range;
+
+	if (vm_map_get_user_range(current_map(), UMEM_RANGE_ID_LARGE_FILE, &range)
+	    != KERN_SUCCESS) {
+		return EINVAL;
+	}
+
+	return SYSCTL_OUT(req, &range, sizeof(range));
+}
+
 /*
  * A sysctl that can be used to return ranges for the current VM map.
  * Used for testing VM ranges.
@@ -4168,6 +3034,8 @@ SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_default, CTLTYPE_STRUCT | CTLFLAG_R
     0, 0, &vm_map_user_range_default, "S,mach_vm_range", "");
 SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_heap, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, &vm_map_user_range_heap, "S,mach_vm_range", "");
+SYSCTL_PROC(_vm, OID_AUTO, vm_map_user_range_large_file, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, &vm_map_user_range_large_file, "S,mach_vm_range", "");
 
 #endif /* DEBUG || DEVELOPMENT */
 #endif /* CONFIG_MAP_RANGES */
@@ -4208,8 +3076,204 @@ extern int panic_object_not_alive;
 SYSCTL_INT(_vm, OID_AUTO, panic_object_not_alive, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, &panic_object_not_alive, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
-#if MACH_ASSERT
+#if FBDP_DEBUG_OBJECT_NO_PAGER
 extern int fbdp_no_panic;
 SYSCTL_INT(_vm, OID_AUTO, fbdp_no_panic, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, &fbdp_no_panic, 0, "");
 #endif /* MACH_ASSERT */
 
+
+#if DEVELOPMENT || DEBUG
+
+
+/* The largest possible single segment + its slots is (sizeof(c_segment_info) + C_SLOT_MAX_INDEX * sizeof(c_slot_info)), so this should be enough  */
+#define SYSCTL_SEG_BUF_SIZE (8 * 1024)
+
+extern uint32_t c_segments_available;
+
+struct sysctl_buf_header {
+	uint32_t magic;
+} __attribute__((packed));
+
+/* This sysctl iterates over the populated c_segments and writes some info about each one and its slots.
+ * instead of doing everything here, the function calls a function vm_compressor.c. */
+static int
+sysctl_compressor_segments(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char* buf = kalloc_data(SYSCTL_SEG_BUF_SIZE, Z_WAITOK | Z_ZERO);
+	if (!buf) {
+		return ENOMEM;
+	}
+	size_t offset = 0;
+	int error = 0;
+	int segno = 0;
+	/* 4 byte header to identify the version of the formatting of the data.
+	 * This should be incremented if c_segment_info or c_slot_info are changed */
+	((struct sysctl_buf_header*)buf)->magic = VM_C_SEGMENT_INFO_MAGIC;
+	offset += sizeof(uint32_t);
+
+	while (segno < c_segments_available) {
+		size_t left_sz = SYSCTL_SEG_BUF_SIZE - offset;
+		kern_return_t kr = vm_compressor_serialize_segment_debug_info(segno, buf + offset, &left_sz);
+		if (kr == KERN_NO_SPACE) {
+			/* failed to add another segment, push the current buffer out and try again */
+			if (offset == 0) {
+				error = EINVAL; /* no space to write but I didn't write anything, shouldn't really happen */
+				goto out;
+			}
+			/* write out chunk */
+			error = SYSCTL_OUT(req, buf, offset);
+			if (error) {
+				goto out;
+			}
+			offset = 0;
+			bzero(buf, SYSCTL_SEG_BUF_SIZE); /* zero any reserved bits that are not going to be filled */
+			/* don't increment segno, need to try again saving the current one */
+		} else if (kr != KERN_SUCCESS) {
+			error = EINVAL;
+			goto out;
+		} else {
+			offset += left_sz;
+			++segno;
+		}
+	}
+
+	if (offset > 0) { /* write last chunk */
+		error = SYSCTL_OUT(req, buf, offset);
+	}
+
+out:
+	kfree_data(buf, SYSCTL_SEG_BUF_SIZE)
+	return error;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, compressor_segments, CTLTYPE_STRUCT | CTLFLAG_LOCKED | CTLFLAG_RD, 0, 0, sysctl_compressor_segments, "S", "");
+
+
+extern uint32_t vm_compressor_fragmentation_level(void);
+
+static int
+sysctl_compressor_fragmentation_level(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	uint32_t value = vm_compressor_fragmentation_level();
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, compressor_fragmentation_level, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, sysctl_compressor_fragmentation_level, "IU", "");
+
+
+#define SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE (8 * 1024)
+
+
+/* This sysctl iterates over all the entries of the vm_map of the a given process and write some info about the vm_object pointed by the entries.
+ * This can be used for mapping where are all the pages of a process located in the compressor.
+ */
+static int
+sysctl_task_vm_objects_slotmap(__unused struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *req)
+{
+	int error = 0;
+	char *buf = NULL;
+	proc_t p = PROC_NULL;
+	task_t task = TASK_NULL;
+	vm_map_t map = VM_MAP_NULL;
+	__block size_t offset = 0;
+
+	/* go from pid to proc to task to vm_map. see sysctl_procargsx() for another example of this procession */
+	int *name = arg1;
+	int namelen = arg2;
+	if (namelen < 1) {
+		return EINVAL;
+	}
+	int pid = name[0];
+	p = proc_find(pid);  /* this increments a reference to the proc */
+	if (p == PROC_NULL) {
+		return EINVAL;
+	}
+	task = proc_task(p);
+	proc_rele(p);  /* decrement ref of proc */
+	p = PROC_NULL;
+	if (task == TASK_NULL) {
+		return EINVAL;
+	}
+	/* convert proc reference to task reference */
+	task_reference(task);
+	/* task reference to map reference */
+	map = get_task_map_reference(task);
+	task_deallocate(task);
+
+	if (map == VM_MAP_NULL) {
+		return EINVAL;  /* nothing allocated yet */
+	}
+
+	buf = kalloc_data(SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE, Z_WAITOK | Z_ZERO);
+	if (!buf) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	/* 4 byte header to identify the version of the formatting of the data.
+	 * This should be incremented if c_segment_info or c_slot_info are changed */
+	((struct sysctl_buf_header*)buf)->magic = VM_MAP_ENTRY_INFO_MAGIC;
+	offset += sizeof(uint32_t);
+
+	kern_return_t (^write_header)(int) = ^kern_return_t (int nentries) {
+		/* write the header, happens only once at the beginning so we should have enough space */
+		assert(offset + sizeof(struct vm_map_info_hdr) < SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE);
+		struct vm_map_info_hdr* out_hdr = (struct vm_map_info_hdr*)(buf + offset);
+		out_hdr->vmi_nentries = nentries;
+		offset += sizeof(struct vm_map_info_hdr);
+		return KERN_SUCCESS;
+	};
+
+	kern_return_t (^write_entry)(void*) = ^kern_return_t (void* entry) {
+		while (true) { /* try up to 2 times, first try write the the current buffer, otherwise to a new buffer */
+			size_t left_sz = SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE - offset;
+			kern_return_t kr = vm_map_dump_entry_and_compressor_pager(entry, buf + offset, &left_sz);
+			if (kr == KERN_NO_SPACE) {
+				/* failed to write anything, flush the current buffer and try again */
+				if (offset == 0) {
+					return KERN_FAILURE; /* no space to write but I didn't write anything yet, shouldn't really happen */
+				}
+				/* write out chunk */
+				int out_error = SYSCTL_OUT(req, buf, offset);
+				if (out_error) {
+					return KERN_FAILURE;
+				}
+				offset = 0;
+				bzero(buf, SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE); /* zero any reserved bits that are not going to be filled */
+				continue; /* need to retry the entry dump again with the cleaned buffer */
+			} else if (kr != KERN_SUCCESS) {
+				return kr;
+			}
+			offset += left_sz;
+			break;
+		}
+		return KERN_SUCCESS;
+	};
+
+	/* this foreach first calls to the first callback with the number of entries, then calls the second for every entry
+	 * when the buffer is exhausted, it is flushed to the sysctl and restarted */
+	kern_return_t kr = vm_map_entries_foreach(map, write_header, write_entry);
+
+	if (kr != KERN_SUCCESS) {
+		goto out;
+	}
+
+	if (offset > 0) { /* last chunk */
+		error = SYSCTL_OUT(req, buf, offset);
+	}
+
+out:
+	if (buf != NULL) {
+		kfree_data(buf, SYSCTL_VM_OBJECTS_SLOTMAP_BUF_SIZE)
+	}
+	if (map != NULL) {
+		vm_map_deallocate(map);
+	}
+	return error;
+}
+
+SYSCTL_PROC(_vm, OID_AUTO, task_vm_objects_slotmap, CTLTYPE_NODE | CTLFLAG_LOCKED | CTLFLAG_RD, 0, 0, sysctl_task_vm_objects_slotmap, "S", "");
+
+
+
+#endif /* DEVELOPMENT || DEBUG */

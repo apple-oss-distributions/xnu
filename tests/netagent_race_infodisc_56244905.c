@@ -6,6 +6,7 @@
 
 #include <fcntl.h>
 #include <pthread.h>
+#include <net/network_agent.h>
 #include <sys/kern_control.h>
 #include <sys/kern_event.h>
 #include <sys/ioctl.h>
@@ -30,14 +31,6 @@ static int finished = 0;
 #define NETAGENT_MESSAGE_TYPE_UNREGISTER 2
 #endif
 
-struct netagent_message_header {
-	uint8_t message_type;
-	uint8_t message_flags;
-	uint32_t message_id;
-	uint32_t message_error;
-	uint32_t message_payload_length;
-};
-
 struct kev_msg {
 	uint32_t total_size;
 	uint32_t vendor_code;
@@ -45,20 +38,6 @@ struct kev_msg {
 	uint32_t kev_subclass;
 	uint32_t id;
 	uint32_t event_code;
-};
-
-struct kev_netagent_data {
-	uuid_t netagent_uuid;
-};
-
-struct netagent {
-	uuid_t netagent_uuid;
-	char netagent_domain[32];
-	char netagent_type[32];
-	char netagent_desc[128];
-	uint32_t netagent_flags;
-	uint32_t netagent_data_size;
-	/*uint8_t netagent_data[0];*/
 };
 
 static void *

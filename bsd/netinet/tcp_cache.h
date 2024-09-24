@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -37,8 +37,8 @@
 #define ECN_MIN_CE_PROBES       10 /* Probes are basically the number of incoming packets */
 #define ECN_MAX_CE_RATIO        7 /* Ratio is the maximum number of CE-packets we accept per incoming "probe" */
 
-extern void tcp_cache_set_cookie(struct tcpcb *tp, u_char *cookie, u_int8_t len);
-extern int tcp_cache_get_cookie(struct tcpcb *tp, u_char *cookie, u_int8_t *len);
+extern void tcp_cache_set_cookie(struct tcpcb *tp, u_char *__counted_by(len) cookie, u_int8_t len);
+extern int tcp_cache_get_cookie(struct tcpcb *tp, u_char *__counted_by(buflen) cookie, uint8_t buflen, u_int8_t *len);
 extern unsigned int tcp_cache_get_cookie_len(struct tcpcb *tp);
 extern uint8_t tcp_cache_get_mptcp_version(struct sockaddr* dst);
 extern void tcp_cache_update_mptcp_version(struct tcpcb *tp, boolean_t succeeded);
@@ -65,7 +65,7 @@ extern void tcp_heuristics_ecn_update(struct necp_tcp_ecn_cache *necp_buffer,
     struct ifnet *ifp, union sockaddr_in_4_6 *local_address);
 extern boolean_t tcp_heuristic_do_tfo_with_address(struct ifnet *ifp,
     union sockaddr_in_4_6 *local_address, union sockaddr_in_4_6 *remote_address,
-    u_int8_t *cookie, u_int8_t *cookie_len);
+    u_int8_t *__counted_by(maxlen) cookie, u_int8_t maxlen, u_int8_t *cookie_len);
 extern void tcp_heuristics_tfo_update(struct necp_tcp_tfo_cache *necp_buffer,
     struct ifnet *ifp, union sockaddr_in_4_6 *local_address,
     union sockaddr_in_4_6 *remote_address);

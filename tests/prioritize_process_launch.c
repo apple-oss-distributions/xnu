@@ -471,7 +471,7 @@ register_workloop_for_port(
  * Create a port with sync IPC push and then pass the port to posix_spawn as a watch port and
  * test that spawned binary has the temp owner push of the port.
  */
-T_DECL(posix_spawn_basic_priority, "Basic posix spawn temp owner priority test", T_META_ASROOT(YES))
+T_DECL(posix_spawn_basic_priority, "Basic posix spawn temp owner priority test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid;
@@ -494,7 +494,7 @@ T_DECL(posix_spawn_basic_priority, "Basic posix spawn temp owner priority test",
  * test that spawned binary has the temp owner push of the port. The spawned binary will exec
  * and verify that it still has the push.
  */
-T_DECL(posix_spawn_exec_basic_priority, "Basic posix spawn/exec temp owner priority test", T_META_ASROOT(YES))
+T_DECL(posix_spawn_exec_basic_priority, "Basic posix spawn/exec temp owner priority test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid;
@@ -517,7 +517,7 @@ T_DECL(posix_spawn_exec_basic_priority, "Basic posix spawn/exec temp owner prior
  * test that spawned binary has the temp owner push of the port. The spawned binary will
  * posix_spawn set exec and verify that it still has the push.
  */
-T_DECL(posix_spawn_set_exec_basic_priority, "Basic posix spawn set exec temp owner priority test", T_META_ASROOT(YES))
+T_DECL(posix_spawn_set_exec_basic_priority, "Basic posix spawn set exec temp owner priority test", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid;
@@ -540,7 +540,7 @@ T_DECL(posix_spawn_set_exec_basic_priority, "Basic posix spawn set exec temp own
  * test that spawned binary has the temp owner push of the port. The spawned binary already
  * having the temp owner push will try to do set exec with watchports which should fail.
  */
-T_DECL(posix_spawn_set_exec_with_more_ports, "posix spawn set exec with more watch ports", T_META_ASROOT(YES))
+T_DECL(posix_spawn_set_exec_with_more_ports, "posix spawn set exec with more watch ports", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid;
@@ -563,7 +563,7 @@ T_DECL(posix_spawn_set_exec_with_more_ports, "posix spawn set exec with more wat
  * pass the same port as a watchport to another posix_spawn and verify that the boost was
  * transferred to the new process.
  */
-T_DECL(posix_spawn_multiple, "multiple posix_spawn with same watchport", T_META_ASROOT(YES))
+T_DECL(posix_spawn_multiple, "multiple posix_spawn with same watchport", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid1, pid2;
@@ -594,7 +594,7 @@ T_DECL(posix_spawn_multiple, "multiple posix_spawn with same watchport", T_META_
  * test that spawned binary has the temp owner push of the port. Destroy the port and verify
  * the temp owner push has gone away.
  */
-T_DECL(posix_spawn_dead_reply_port, "posix spawn with reply port destory", T_META_ASROOT(YES))
+T_DECL(posix_spawn_dead_reply_port, "posix spawn with reply port destory", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	kern_return_t kr;
@@ -625,7 +625,7 @@ T_DECL(posix_spawn_dead_reply_port, "posix spawn with reply port destory", T_MET
  * test that spawned binary has the temp owner push of the port. Destroy the port and verify
  * the temp owner push has gone.
  */
-T_DECL(posix_spawn_dead_port, "posix spawn with port destory", T_META_ASROOT(YES))
+T_DECL(posix_spawn_dead_port, "posix spawn with port destory", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	kern_return_t kr;
@@ -653,7 +653,7 @@ T_DECL(posix_spawn_dead_port, "posix spawn with port destory", T_META_ASROOT(YES
  * test that spawned binary has the temp owner push of the port. Copyin the port and verify
  * the temp owner push has gone.
  */
-T_DECL(posix_spawn_copyin_port, "posix spawn with copyin port", T_META_ASROOT(YES))
+T_DECL(posix_spawn_copyin_port, "posix spawn with copyin port", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	pid_t pid;
@@ -682,7 +682,7 @@ T_DECL(posix_spawn_copyin_port, "posix spawn with copyin port", T_META_ASROOT(YE
  * test that spawned binary has the temp owner push of the ports. Copyin ports one by one and verify
  * the push has gone.
  */
-T_DECL(posix_spawn_multiple_port, "posix spawn with multiple ports", T_META_ASROOT(YES))
+T_DECL(posix_spawn_multiple_port, "posix spawn with multiple ports", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port[2];
 	pid_t pid;
@@ -718,7 +718,7 @@ T_DECL(posix_spawn_multiple_port, "posix spawn with multiple ports", T_META_ASRO
  * servicer pass the port to posix_spawn as a watch port and test that spawned binary has the temp owner
  * push of the port and the servicer looses the boost.
  */
-T_DECL(posix_spawn_knote, "posix spawn with temp owner port attached to knote", T_META_ASROOT(YES))
+T_DECL(posix_spawn_knote, "posix spawn with temp owner port attached to knote", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 
@@ -741,7 +741,7 @@ T_DECL(posix_spawn_knote, "posix spawn with temp owner port attached to knote", 
  * push of the port and the servicer looses the boost, verify that once the spawned binary dies, the servicer
  * gets the push.
  */
-T_DECL(posix_spawn_knote_ret, "posix spawn with temp owner port attached to knote with spawned binary dead", T_META_ASROOT(YES))
+T_DECL(posix_spawn_knote_ret, "posix spawn with temp owner port attached to knote with spawned binary dead", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 
@@ -763,7 +763,7 @@ T_DECL(posix_spawn_knote_ret, "posix spawn with temp owner port attached to knot
  * push of the port and the servicer looses the boost, the spawn binary then does a sync bootstrap_checkin
  * with test binary to get the receive right and verify that is still has the boost.
  */
-T_DECL(mach_msg_sync_boostrap_checkin, "test mach msg option for sync bootstrap_checkin", T_META_ASROOT(YES))
+T_DECL(mach_msg_sync_boostrap_checkin, "test mach msg option for sync bootstrap_checkin", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t port;
 	mach_port_t sync_port;

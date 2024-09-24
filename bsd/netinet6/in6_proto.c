@@ -635,7 +635,7 @@ SYSCTL_INT(_net_inet6_ip6, IPV6CTL_DEFMCASTHLIM,
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_GIF_HLIM,
     gifhlim, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_gif_hlim, 0, "");
 SYSCTL_STRING(_net_inet6_ip6, IPV6CTL_KAME_VERSION,
-    kame_version, CTLFLAG_RD | CTLFLAG_LOCKED, (void *)((uintptr_t)(__KAME_VERSION)), 0, "");
+    kame_version, CTLFLAG_RD | CTLFLAG_LOCKED, __unsafe_forge_single(void *, __KAME_VERSION), 0, "");
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_USE_DEPRECATED,
     use_deprecated, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_use_deprecated, 0, "");
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_RR_PRUNE,

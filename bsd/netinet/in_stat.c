@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <string.h>
 #include <netinet/in_stat.h>
 
 #define IN_STAT_ACTIVITY_GRANULARITY            8       /* 8 sec granularity */
@@ -99,12 +100,4 @@ in_stat_set_activity_bitmap(activity_bitmap_t *activity, uint64_t now)
 		}
 		activity->bitmap[1] |= IN_STAT_SET_MOST_SIGNIFICANT_BIT;
 	}
-}
-
-void
-in_stat_clear_activity_bitmap(activity_bitmap_t *activity)
-{
-	activity->start = 0;
-	activity->bitmap[0] = 0;
-	activity->bitmap[1] = 0;
 }

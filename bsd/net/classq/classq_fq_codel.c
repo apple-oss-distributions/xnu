@@ -200,8 +200,8 @@ void
 fq_head_drop(fq_if_t *fqs, fq_t *fq)
 {
 	pktsched_pkt_t pkt;
-	volatile uint32_t *pkt_flags;
-	uint64_t *pkt_timestamp;
+	volatile uint32_t *__single pkt_flags;
+	uint64_t *__single pkt_timestamp;
 	struct ifclassq *ifq = fqs->fqs_ifq;
 
 	_PKTSCHED_PKT_INIT(&pkt);
@@ -242,7 +242,7 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 {
 	classq_pkt_type_t ptype = fqs->fqs_ptype;
 	uint32_t comp_gencnt = 0;
-	uint64_t *pkt_timestamp;
+	uint64_t *__single pkt_timestamp;
 	uint64_t old_timestamp = 0;
 	uint32_t old_pktlen = 0;
 	struct ifclassq *ifq = fqs->fqs_ifq;
@@ -293,9 +293,9 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 		old_timestamp = kpkt->pkt_timestamp;
 
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
-		pp_free_packet(*(struct kern_pbufpool **)(uintptr_t)&
-		    (((struct __kern_quantum *)kpkt)->qum_pp),
-		    (uint64_t)kpkt);
+		struct kern_pbufpool *pp =
+		    __DECONST(struct kern_pbufpool *, ((struct __kern_quantum *)kpkt)->qum_pp);
+		pp_free_packet(pp, (uint64_t)kpkt);
 	}
 #endif /* SKYWALK */
 
@@ -320,8 +320,8 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 	int droptype = DTYPE_NODROP, fc_adv = 0, ret = CLASSQEQ_SUCCESS;
 	u_int64_t now;
 	fq_t *fq = NULL;
-	uint64_t *pkt_timestamp;
-	volatile uint32_t *pkt_flags;
+	uint64_t *__single pkt_timestamp;
+	volatile uint32_t *__single pkt_flags;
 	uint32_t pkt_flowid, cnt;
 	uint8_t pkt_proto, pkt_flowsrc;
 	fq_tfc_type_t tfc_type = FQ_TFC_C;
@@ -715,8 +715,8 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 {
 	fq_if_classq_t *fq_cl = &FQ_CLASSQ(fq);
 	int64_t qdelay = 0;
-	volatile uint32_t *pkt_flags;
-	uint64_t *pkt_timestamp, pkt_tx_time = 0, pacing_delay = 0;
+	volatile uint32_t *__single pkt_flags;
+	uint64_t *__single pkt_timestamp, pkt_tx_time = 0, pacing_delay = 0;
 	uint64_t fq_min_delay_threshold = FQ_TARGET_DELAY(fq);
 	uint8_t pkt_flowsrc;
 	boolean_t l4s_pkt;

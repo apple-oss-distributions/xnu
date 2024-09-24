@@ -12,7 +12,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("IPC"));
 
-T_DECL(mktimer_kobject, "mktimer_kobject()", T_META_ALL_VALID_ARCHS(true), T_META_IGNORECRASHES(".*mktimer_kobject.*"))
+T_DECL(mktimer_kobject, "mktimer_kobject()", T_META_ALL_VALID_ARCHS(true), T_META_IGNORECRASHES(".*mktimer_kobject.*"), T_META_TAG_VM_PREFERRED)
 {
 	mach_port_t timer_port = MACH_PORT_NULL;
 	mach_port_t notify_port = MACH_PORT_NULL;

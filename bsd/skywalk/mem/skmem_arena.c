@@ -105,8 +105,8 @@ static int skmem_arena_create_finalize(struct skmem_arena *);
 static void skmem_arena_nexus_teardown(struct skmem_arena_nexus *, boolean_t);
 static void skmem_arena_necp_teardown(struct skmem_arena_necp *, boolean_t);
 static void skmem_arena_system_teardown(struct skmem_arena_system *, boolean_t);
-static struct skmem_arena *skmem_arena_alloc(skmem_arena_type_t,
-    const char *);
+static void skmem_arena_init_common(struct skmem_arena *ar,
+    skmem_arena_type_t type, size_t ar_zsize, const char *ar_str, const char *name);
 static void skmem_arena_free(struct skmem_arena *);
 static void skmem_arena_retain_locked(struct skmem_arena *);
 static void skmem_arena_reap_locked(struct skmem_arena *, boolean_t);
@@ -161,7 +161,7 @@ skmem_arena_sd_setup(const struct nexus_adapter *na,
 	struct skmem_arena_nexus *arn = (struct skmem_arena_nexus *)ar;
 	struct skmem_cache **cachep;
 	struct skmem_region *ksd_skr = NULL, *usd_skr = NULL;
-	const char *name = na->na_name;
+	const char *__null_terminated name = NULL;
 	char cname[64];
 	skmem_region_id_t usd_type, ksd_type;
 	int err = 0;
@@ -177,6 +177,7 @@ skmem_arena_sd_setup(const struct nexus_adapter *na,
 		ksd_type = SKMEM_REGION_RXFKSD;
 		cachep = &arn->arn_rxfksd_cache;
 	}
+	name = __unsafe_null_terminated_from_indexable(na->na_name);
 	ksd_skr = skmem_region_create(name, &srp[ksd_type], NULL, NULL, NULL);
 	if (ksd_skr == NULL) {
 		SK_ERR("\"%s\" ar 0x%llx flags %b failed to "
@@ -196,11 +197,12 @@ skmem_arena_sd_setup(const struct nexus_adapter *na,
 		ar->ar_regions[usd_type] = usd_skr;
 		skmem_region_mirror(ksd_skr, usd_skr);
 	}
-	snprintf(cname, sizeof(cname), tx ? "txa_ksd.%s" : "rxf_ksd.%s", name);
+	name = tsnprintf(cname, sizeof(cname), "%s_ksd.%.*s",
+	    tx ? "txa" : "rxf", (int)sizeof(na->na_name), na->na_name);
 	ASSERT(ar->ar_regions[ksd_type] != NULL);
-	*cachep = skmem_cache_create(cname,
-	    srp[ksd_type].srp_c_obj_size, 0, NULL, NULL, NULL, NULL,
-	    ar->ar_regions[ksd_type], SKMEM_CR_NOMAGAZINES);
+	*cachep = skmem_cache_create(name, srp[ksd_type].srp_c_obj_size, 0,
+	    NULL, NULL, NULL, NULL, ar->ar_regions[ksd_type],
+	    SKMEM_CR_NOMAGAZINES);
 	if (*cachep == NULL) {
 		SK_ERR("\"%s\" ar 0x%llx flags %b failed to create %s",
 		    ar->ar_name, SK_KVA(ar), ar->ar_flags, ARF_BITS, cname);
@@ -412,6 +414,18 @@ skmem_arena_pp_setup(struct skmem_arena *ar,
 	return true;
 }
 
+static void
+skmem_arena_init_common(struct skmem_arena *ar, skmem_arena_type_t type,
+    size_t ar_zsize, const char *ar_str, const char *name)
+{
+	ar->ar_type = type;
+	ar->ar_zsize = ar_zsize;
+	lck_mtx_init(&ar->ar_lock, &skmem_arena_lock_grp,
+	    LCK_ATTR_NULL);
+	(void) snprintf(ar->ar_name, sizeof(ar->ar_name),
+	    "%s.%s.%s", SKMEM_ARENA_PREFIX, ar_str, name);
+}
+
 /*
  * Create a nexus adapter arena.
  */
@@ -422,17 +436,23 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
     boolean_t kernel_only, struct kern_nexus_advisory *nxv, int *perr)
 {
 #define SRP_CFLAGS(_id)         (srp[_id].srp_cflags)
-	struct skmem_arena_nexus *arn;
 	struct skmem_arena *ar;
+	struct skmem_arena_nexus *__single arn;
 	char cname[64];
 	uint32_t i;
-	const char *name = na->na_name;
+	const char *__null_terminated name =
+	    __unsafe_null_terminated_from_indexable(na->na_name);
+	uint32_t msize = 0;
+	void *__sized_by(msize) maddr = NULL;
 
 	*perr = 0;
 
-	ar = skmem_arena_alloc(SKMEM_ARENA_TYPE_NEXUS, name);
+	arn = zalloc_flags(ar_nexus_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ar = &arn->arn_cmn;
+	skmem_arena_init_common(ar, SKMEM_ARENA_TYPE_NEXUS, AR_NEXUS_SIZE,
+	    "nexus", name);
+
 	ASSERT(ar != NULL && ar->ar_zsize == AR_NEXUS_SIZE);
-	arn = (struct skmem_arena_nexus *)ar;
 
 	/* these regions must not be readable/writeable */
 	ASSERT(SRP_CFLAGS(SKMEM_REGION_GUARD_HEAD) & SKMEM_REGION_CR_GUARD);
@@ -525,12 +545,12 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	}
 
 	if (nxv != NULL && nxv->nxv_reg != NULL) {
-		struct skmem_region *svr = nxv->nxv_reg;
+		struct skmem_region *skr = nxv->nxv_reg;
 
-		ASSERT(svr->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
-		ASSERT(svr->skr_seg_max_cnt == 1);
-		ar->ar_regions[SKMEM_REGION_NEXUSADV] = svr;
-		skmem_region_retain(svr);
+		ASSERT(skr->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
+		ASSERT(skr->skr_seg_max_cnt == 1);
+		ar->ar_regions[SKMEM_REGION_NEXUSADV] = skr;
+		skmem_region_retain(skr);
 
 		ASSERT(nxv->nxv_adv != NULL);
 		if (nxv->nxv_adv_type == NEXUS_ADVISORY_TYPE_FLOWSWITCH) {
@@ -627,10 +647,11 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	/* create skmem_cache for schema (without magazines) */
 	ASSERT(ar->ar_regions[SKMEM_REGION_SCHEMA] != NULL || kernel_only);
 	if (ar->ar_regions[SKMEM_REGION_SCHEMA] != NULL) {
-		(void) snprintf(cname, sizeof(cname), "schema.%s", name);
-		if ((arn->arn_schema_cache = skmem_cache_create(cname,
-		    srp[SKMEM_REGION_SCHEMA].srp_c_obj_size, 0, NULL, NULL,
-		    NULL, NULL, ar->ar_regions[SKMEM_REGION_SCHEMA],
+		name = tsnprintf(cname, sizeof(cname), "schema.%.*s",
+		    (int)sizeof(na->na_name), na->na_name);
+		if ((arn->arn_schema_cache = skmem_cache_create(name,
+		    srp[SKMEM_REGION_SCHEMA].srp_c_obj_size, 0, NULL,
+		    NULL, NULL, NULL, ar->ar_regions[SKMEM_REGION_SCHEMA],
 		    SKMEM_CR_NOMAGAZINES)) == NULL) {
 			SK_ERR("\"%s\" ar 0x%llx flags %b failed to create %s",
 			    ar->ar_name, SK_KVA(ar), ar->ar_flags, ARF_BITS,
@@ -640,12 +661,14 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	}
 
 	/* create skmem_cache for rings (without magazines) */
-	(void) snprintf(cname, sizeof(cname), "ring.%s", name);
+	name = tsnprintf(cname, sizeof(cname), "ring.%.*s",
+	    (int)sizeof(na->na_name), na->na_name);
 	ASSERT(ar->ar_regions[SKMEM_REGION_RING] != NULL || kernel_only);
 	if ((ar->ar_regions[SKMEM_REGION_RING] != NULL) &&
-	    (arn->arn_ring_cache = skmem_cache_create(cname,
-	    srp[SKMEM_REGION_RING].srp_c_obj_size, 0, NULL, NULL, NULL, NULL,
-	    ar->ar_regions[SKMEM_REGION_RING], SKMEM_CR_NOMAGAZINES)) == NULL) {
+	    (arn->arn_ring_cache = skmem_cache_create(name,
+	    srp[SKMEM_REGION_RING].srp_c_obj_size, 0, NULL, NULL, NULL,
+	    NULL, ar->ar_regions[SKMEM_REGION_RING],
+	    SKMEM_CR_NOMAGAZINES)) == NULL) {
 		SK_ERR("\"%s\" ar 0x%llx flags %b failed to create %s",
 		    ar->ar_name, SK_KVA(ar), ar->ar_flags, ARF_BITS, cname);
 		goto failed;
@@ -657,20 +680,23 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	 * as the object is allocated (and freed) only once.
 	 */
 	if (ar->ar_regions[SKMEM_REGION_USTATS] != NULL) {
-		struct skmem_region *str = ar->ar_regions[SKMEM_REGION_USTATS];
+		struct skmem_region *skr = ar->ar_regions[SKMEM_REGION_USTATS];
+		void *obj;
 
 		/* no kstats for nexus */
 		ASSERT(ar->ar_regions[SKMEM_REGION_KSTATS] == NULL);
-		ASSERT(str->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
-		ASSERT(str->skr_seg_max_cnt == 1);
+		ASSERT(skr->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
+		ASSERT(skr->skr_seg_max_cnt == 1);
 
-		if ((arn->arn_stats_obj = skmem_region_alloc(str, NULL,
-		    NULL, NULL, SKMEM_SLEEP)) == NULL) {
+		if ((obj = skmem_region_alloc(skr, &maddr,
+		    NULL, NULL, SKMEM_SLEEP, skr->skr_c_obj_size, &msize)) == NULL) {
 			SK_ERR("\"%s\" ar 0x%llx flags %b failed to alloc "
 			    "stats", ar->ar_name, SK_KVA(ar), ar->ar_flags,
 			    ARF_BITS);
 			goto failed;
 		}
+		arn->arn_stats_obj = obj;
+		arn->arn_stats_obj_size = skr->skr_c_obj_size;
 	}
 	ASSERT(ar->ar_regions[SKMEM_REGION_KSTATS] == NULL);
 
@@ -680,19 +706,23 @@ skmem_arena_create_for_nexus(const struct nexus_adapter *na,
 	 * as the object is allocated (and freed) only once.
 	 */
 	if (ar->ar_regions[SKMEM_REGION_FLOWADV] != NULL) {
-		struct skmem_region *str =
+		struct skmem_region *skr =
 		    ar->ar_regions[SKMEM_REGION_FLOWADV];
+		void *obj;
 
-		ASSERT(str->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
-		ASSERT(str->skr_seg_max_cnt == 1);
+		ASSERT(skr->skr_cflags & SKMEM_REGION_CR_MONOLITHIC);
+		ASSERT(skr->skr_seg_max_cnt == 1);
 
-		if ((arn->arn_flowadv_obj = skmem_region_alloc(str, NULL,
-		    NULL, NULL, SKMEM_SLEEP)) == NULL) {
+		if ((obj = skmem_region_alloc(skr, &maddr,
+		    NULL, NULL, SKMEM_SLEEP, skr->skr_c_obj_size, &msize)) == NULL) {
 			SK_ERR("\"%s\" ar 0x%llx flags %b failed to alloc "
 			    "flowadv", ar->ar_name, SK_KVA(ar), ar->ar_flags,
 			    ARF_BITS);
 			goto failed;
 		}
+		/* XXX -fbounds-safety: should get the count elsewhere */
+		arn->arn_flowadv_obj = obj;
+		arn->arn_flowadv_entries = sk_max_flows;
 	}
 
 	if (skmem_arena_create_finalize(ar) != 0) {
@@ -781,6 +811,7 @@ skmem_arena_nexus_teardown(struct skmem_arena_nexus *arn, boolean_t defunct)
 		skr = ar->ar_regions[SKMEM_REGION_USTATS];
 		ASSERT(skr != NULL && !(skr->skr_mode & SKR_MODE_NOREDIRECT));
 		skmem_region_free(skr, arn->arn_stats_obj, NULL);
+		arn->arn_stats_obj_size = 0;
 		arn->arn_stats_obj = NULL;
 		skmem_region_release(skr);
 		ar->ar_regions[SKMEM_REGION_USTATS] = NULL;
@@ -791,8 +822,13 @@ skmem_arena_nexus_teardown(struct skmem_arena_nexus *arn, boolean_t defunct)
 	if (arn->arn_flowadv_obj != NULL) {
 		skr = ar->ar_regions[SKMEM_REGION_FLOWADV];
 		ASSERT(skr != NULL && !(skr->skr_mode & SKR_MODE_NOREDIRECT));
-		skmem_region_free(skr, arn->arn_flowadv_obj, NULL);
+
+		/* XXX -fbounds-safety */
+		void *obj = __unsafe_forge_bidi_indexable(void *,
+		    arn->arn_flowadv_obj, skr->skr_c_obj_size);
+		skmem_region_free(skr, obj, NULL);
 		arn->arn_flowadv_obj = NULL;
+		arn->arn_flowadv_entries = 0;
 		skmem_region_release(skr);
 		ar->ar_regions[SKMEM_REGION_FLOWADV] = NULL;
 	}
@@ -894,15 +930,19 @@ skmem_arena_create_for_necp(const char *name,
     struct skmem_region_params *srp_ustats,
     struct skmem_region_params *srp_kstats, int *perr)
 {
-	struct skmem_arena_necp *arc;
+	struct skmem_arena_necp *__single arc;
 	struct skmem_arena *ar;
 	char cname[64];
+	const char *__null_terminated cache_name = NULL;
 
 	*perr = 0;
 
-	ar = skmem_arena_alloc(SKMEM_ARENA_TYPE_NECP, name);
+	arc = zalloc_flags(ar_necp_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ar = &arc->arc_cmn;
+	skmem_arena_init_common(ar, SKMEM_ARENA_TYPE_NECP, AR_NECP_SIZE,
+	    "necp", name);
+
 	ASSERT(ar != NULL && ar->ar_zsize == AR_NECP_SIZE);
-	arc = (struct skmem_arena_necp *)ar;
 
 	/*
 	 * Must be stats region, and must be user-mappable;
@@ -946,10 +986,10 @@ skmem_arena_create_for_necp(const char *name,
 	    ar->ar_regions[SKMEM_REGION_USTATS]);
 
 	/* create skmem_cache for kernel stats (without magazines) */
-	(void) snprintf(cname, sizeof(cname), "kstats.%s", name);
-	if ((arc->arc_kstats_cache = skmem_cache_create(cname,
-	    srp_kstats->srp_c_obj_size, 0, necp_stats_ctor, NULL, NULL, NULL,
-	    ar->ar_regions[SKMEM_REGION_KSTATS],
+	cache_name = tsnprintf(cname, sizeof(cname), "kstats.%s", name);
+	if ((arc->arc_kstats_cache = skmem_cache_create(cache_name,
+	    srp_kstats->srp_c_obj_size, 0, necp_stats_ctor, NULL, NULL,
+	    NULL, ar->ar_regions[SKMEM_REGION_KSTATS],
 	    SKMEM_CR_NOMAGAZINES)) == NULL) {
 		SK_ERR("\"%s\" ar 0x%llx flags %b failed to create %s",
 		    ar->ar_name, SK_KVA(ar), ar->ar_flags, ARF_BITS, cname);
@@ -1081,9 +1121,12 @@ skmem_arena_create_for_system(const char *name, int *perr)
 
 	*perr = 0;
 
-	ar = skmem_arena_alloc(SKMEM_ARENA_TYPE_SYSTEM, name);
+	ars = zalloc_flags(ar_system_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	ar = &ars->ars_cmn;
+	skmem_arena_init_common(ar, SKMEM_ARENA_TYPE_SYSTEM, AR_SYSTEM_SIZE,
+	    "system", name);
+
 	ASSERT(ar != NULL && ar->ar_zsize == AR_SYSTEM_SIZE);
-	ars = (struct skmem_arena_system *)ar;
 
 	AR_LOCK(ar);
 	/* retain system-wide sysctls region */
@@ -1359,67 +1402,6 @@ failed:
 	return err;
 }
 
-static inline struct kalloc_type_view *
-skmem_arena_zone(skmem_arena_type_t type)
-{
-	switch (type) {
-	case SKMEM_ARENA_TYPE_NEXUS:
-		return ar_nexus_zone;
-
-	case SKMEM_ARENA_TYPE_NECP:
-		return ar_necp_zone;
-
-	case SKMEM_ARENA_TYPE_SYSTEM:
-		return ar_system_zone;
-
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-		__builtin_unreachable();
-	}
-}
-
-static struct skmem_arena *
-skmem_arena_alloc(skmem_arena_type_t type, const char *name)
-{
-	const char *ar_str = NULL;
-	struct skmem_arena *ar;
-	size_t ar_zsize = 0;
-
-	switch (type) {
-	case SKMEM_ARENA_TYPE_NEXUS:
-		ar_zsize = AR_NEXUS_SIZE;
-		ar_str = "nexus";
-		break;
-
-	case SKMEM_ARENA_TYPE_NECP:
-		ar_zsize = AR_NECP_SIZE;
-		ar_str = "necp";
-		break;
-
-	case SKMEM_ARENA_TYPE_SYSTEM:
-		ar_zsize = AR_SYSTEM_SIZE;
-		ar_str = "system";
-		break;
-
-	default:
-		VERIFY(0);
-		/* NOTREACHED */
-		__builtin_unreachable();
-	}
-
-	ar = zalloc_flags(skmem_arena_zone(type), Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	ar->ar_type = type;
-	ar->ar_zsize = ar_zsize;
-
-	lck_mtx_init(&ar->ar_lock, &skmem_arena_lock_grp,
-	    LCK_ATTR_NULL);
-	(void) snprintf(ar->ar_name, sizeof(ar->ar_name),
-	    "%s.%s.%s", SKMEM_ARENA_PREFIX, ar_str, name);
-
-	return ar;
-}
-
 static void
 skmem_arena_free(struct skmem_arena *ar)
 {
@@ -1435,7 +1417,24 @@ skmem_arena_free(struct skmem_arena *ar)
 #endif /* DEBUG || DEVELOPMENT */
 
 	lck_mtx_destroy(&ar->ar_lock, &skmem_arena_lock_grp);
-	zfree(skmem_arena_zone(ar->ar_type), ar);
+	switch (ar->ar_type) {
+	case SKMEM_ARENA_TYPE_NEXUS:
+		zfree(ar_nexus_zone, ar);
+		break;
+
+	case SKMEM_ARENA_TYPE_NECP:
+		zfree(ar_necp_zone, ar);
+		break;
+
+	case SKMEM_ARENA_TYPE_SYSTEM:
+		zfree(ar_system_zone, ar);
+		break;
+
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+		__builtin_unreachable();
+	}
 }
 
 /*
@@ -1500,7 +1499,7 @@ int
 skmem_arena_mmap(struct skmem_arena *ar, struct proc *p,
     struct skmem_arena_mmap_info *ami)
 {
-	task_t task = proc_task(p);
+	struct task *__single task = proc_task(p);
 	IOReturn ioerr;
 	int err = 0;
 
@@ -1919,10 +1918,11 @@ skmem_arena_create_region_log(struct skmem_arena *ar)
 #endif /* SK_LOG */
 
 static size_t
-skmem_arena_mib_get_stats(struct skmem_arena *ar, void *out, size_t len)
+skmem_arena_mib_get_stats(struct skmem_arena *ar, void *__sized_by(len) out,
+    size_t len)
 {
 	size_t actual_space = sizeof(struct sk_stats_arena);
-	struct sk_stats_arena *sar = out;
+	struct sk_stats_arena *__single sar;
 	struct skmem_arena_mmap_info *ami = NULL;
 	pid_t proc_pid;
 	int i;
@@ -1930,6 +1930,7 @@ skmem_arena_mib_get_stats(struct skmem_arena *ar, void *out, size_t len)
 	if (out == NULL || len < actual_space) {
 		goto done;
 	}
+	sar = out;
 
 	AR_LOCK(ar);
 	(void) snprintf(sar->sar_name, sizeof(sar->sar_name),
@@ -1939,8 +1940,9 @@ skmem_arena_mib_get_stats(struct skmem_arena *ar, void *out, size_t len)
 	i = 0;
 	SLIST_FOREACH(ami, &ar->ar_map_head, ami_link) {
 		if (ami->ami_arena->ar_type == SKMEM_ARENA_TYPE_NEXUS) {
-			struct kern_channel *ch;
-			ch = container_of(ami, struct kern_channel, ch_mmap);
+			struct kern_channel *__single ch;
+			ch = __unsafe_forge_single(struct kern_channel *,
+			    container_of(ami, struct kern_channel, ch_mmap));
 			proc_pid = ch->ch_pid;
 		} else {
 			ASSERT((ami->ami_arena->ar_type ==
@@ -1980,8 +1982,8 @@ skmem_arena_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	struct skmem_arena *ar;
 	size_t actual_space;
 	size_t buffer_space;
-	size_t allocated_space;
-	caddr_t buffer = NULL;
+	size_t allocated_space = 0;
+	caddr_t __sized_by(allocated_space) buffer = NULL;
 	caddr_t scan;
 	int error = 0;
 
@@ -1995,11 +1997,13 @@ skmem_arena_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (buffer_space > SK_SYSCTL_ALLOC_MAX) {
 			buffer_space = SK_SYSCTL_ALLOC_MAX;
 		}
-		allocated_space = buffer_space;
-		buffer = sk_alloc_data(allocated_space, Z_WAITOK, skmem_tag_arena_mib);
-		if (__improbable(buffer == NULL)) {
+		caddr_t temp;
+		temp = sk_alloc_data(buffer_space, Z_WAITOK, skmem_tag_arena_mib);
+		if (__improbable(temp == NULL)) {
 			return ENOBUFS;
 		}
+		buffer = temp;
+		allocated_space = buffer_space;
 	} else if (req->oldptr == USER_ADDR_NULL) {
 		buffer_space = 0;
 	}
@@ -2029,7 +2033,7 @@ skmem_arena_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		}
 	}
 	if (buffer != NULL) {
-		sk_free_data(buffer, allocated_space);
+		sk_free_data_sized_by(buffer, allocated_space);
 	}
 
 	return error;

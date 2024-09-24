@@ -30,10 +30,15 @@
 #define _KERN_SCHED_CLUTCH_H_
 
 #include <kern/sched.h>
-#include <machine/atomic.h>
 #include <kern/priority_queue.h>
-#include <kern/thread_group.h>
 #include <kern/bits.h>
+
+#if !SCHED_TEST_HARNESS
+
+#include <machine/atomic.h>
+#include <kern/thread_group.h>
+
+#endif /* !SCHED_TEST_HARNESS */
 
 #if CONFIG_SCHED_CLUTCH
 
@@ -129,8 +134,10 @@ struct sched_clutch_root {
 	uint16_t                        scr_thr_count;
 	/* (P) root level urgency; represents the urgency of the whole hierarchy for pre-emption purposes */
 	int16_t                         scr_urgency;
+#if CONFIG_SCHED_EDGE
 	/* (P) runnable shared resource load enqueued in this cluster/root hierarchy */
 	uint16_t                        scr_shared_rsrc_load_runnable[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+#endif /* CONFIG_SCHED_EDGE */
 
 	uint32_t                        scr_cluster_id;
 	/* (I) processor set this hierarchy belongs to */

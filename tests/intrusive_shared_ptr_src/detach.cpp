@@ -26,7 +26,7 @@ tests()
 	CHECK(tracking_policy::releases == 0);
 }
 
-T_DECL(detach, "intrusive_shared_ptr.detach") {
+T_DECL(detach, "intrusive_shared_ptr.detach", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

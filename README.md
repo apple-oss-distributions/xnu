@@ -96,6 +96,8 @@ Define architectures in your environment or when running a make command.
 make ARCH_CONFIGS="X86_64" exporthdrs all
 ```
 
+
+
 ### Other Makefile Options
 
 * $ make MAKEJOBS=-j8    # this will use 8 processes during the build. The default is 2x the number of active CPUS.
@@ -104,6 +106,7 @@ make ARCH_CONFIGS="X86_64" exporthdrs all
 * $ make BUILD_LTO=0     # build without LLVM Link Time Optimization
 * $ make BOUND_CHECKS=0  # disable -fbound-attributes for this build
 * $ make REMOTEBUILD=user@remotehost # perform build on remote host
+* $ make BUILD_CODE_COVERAGE=1 # build with support for collecting code coverage information
 
 The XNU build system can optionally output color-formatted build output. To enable this, you can either
 set the `XNU_LOGCOLORS` environment variable to `y`, or you can pass `LOGCOLORS=y` to the make command.
@@ -418,6 +421,15 @@ DriverKit SDK headers used by userspace drivers.
 ExclaveKit SDK headers.
 9. `EXCLAVECORE`: If defined, enclosed code is visible exclusively in the
 ExclaveCore SDK headers.
+
+## VM header file name convention
+The VM headers follow the following naming conventions:
+* `*_internal.h` headers contain components of the VM subsystem only for use by VM code.
+* `*_xnu.h` headers contain components of the VM subsystem only for use by other xnu code.
+* `*.h` headers contain components of the VM subsystem exported to kexts.
+* `vm_iokit.h` header contains components of the VM subsystem exported to the iokit subsystem.
+* `vm_ubc.h` header contains components of the VM subsystem exported to the ubc subsystem.
+
 
 ## Module map file name convention
 

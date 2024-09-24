@@ -43,11 +43,13 @@
 #endif /* !LIBSYSCALL_INTERFACE */
 #endif /* !KERNEL */
 
-extern uint32_t os_cpu_copy_in_cksum(void *, void *, uint32_t, uint32_t);
+extern uint32_t os_cpu_copy_in_cksum(void *__sized_by(len), void *__sized_by(len),
+    uint32_t len, uint32_t);
 extern uint32_t os_cpu_in_cksum(const void *, uint32_t, uint32_t);
 
 uint32_t
-os_cpu_copy_in_cksum(void *src, void *dst, uint32_t len, uint32_t sum0)
+os_cpu_copy_in_cksum(void *__sized_by(len) src, void *__sized_by(len) dst,
+    uint32_t len, uint32_t sum0)
 {
 	bcopy(src, dst, len);
 	return os_cpu_in_cksum(dst, len, sum0);

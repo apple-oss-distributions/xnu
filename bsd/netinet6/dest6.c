@@ -84,7 +84,7 @@ int
 dest6_input(struct mbuf **mp, int *offp, int proto)
 {
 #pragma unused(proto)
-	struct mbuf *m = *mp;
+	struct mbuf *__single m = *mp;
 	int off = *offp, dstoptlen = 0, optlen = 0;
 	struct ip6_dest *dstopts = NULL;
 	u_int8_t *opt = NULL;
@@ -117,7 +117,7 @@ dest6_input(struct mbuf **mp, int *offp, int proto)
 			break;
 
 		default:                /* unknown option */
-			optlen = ip6_unknown_opt(opt, m,
+			optlen = ip6_unknown_opt(opt, dstoptlen, m,
 			    opt - mtod(m, u_int8_t *));
 			if (optlen == -1) {
 				return IPPROTO_DONE;

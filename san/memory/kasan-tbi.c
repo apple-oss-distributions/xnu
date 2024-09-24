@@ -270,7 +270,7 @@ kasan_tbi_tag_range(uintptr_t addr, size_t sz, uint8_t tag)
 	return (uintptr_t)vm_memtag_add_ptr_tag((long)addr, tag);
 }
 
-void
+static void
 kasan_tbi_copy_tags(vm_offset_t new_addr, vm_offset_t old_addr, vm_size_t size)
 {
 	assert((new_addr & KASAN_GRANULE_MASK) == 0);
@@ -467,6 +467,12 @@ __attribute__((always_inline)) void
 vm_memtag_verify_tag(vm_offset_t tagged_address)
 {
 	__asan_load1(tagged_address);
+}
+
+void
+vm_memtag_relocate_tags(vm_offset_t new_address, vm_offset_t old_address, vm_offset_t size)
+{
+	kasan_tbi_copy_tags(new_address, old_address, size);
 }
 
 __attribute__((always_inline)) void

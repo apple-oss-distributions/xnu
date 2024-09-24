@@ -28,7 +28,7 @@ struct packet2 {
 	uint8_t payload[16];
 };
 
-T_DECL(IP6_EXTHDR_CHECK_ICMPV6_61873584, "ICMPv6 test for IP6_EXTHDR_CHECK stale mbuf pointer vulnerability", T_META("as_root", "true"))
+T_DECL(IP6_EXTHDR_CHECK_ICMPV6_61873584, "ICMPv6 test for IP6_EXTHDR_CHECK stale mbuf pointer vulnerability", T_META("as_root", "true"), T_META_TAG_VM_PREFERRED)
 {
 	struct sockaddr_in6 daddr;
 	struct packet1 packet1;

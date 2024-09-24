@@ -78,7 +78,7 @@ tests_convert()
 	check_eq(a, b);
 }
 
-T_DECL(compare_equal, "intrusive_shared_ptr.compare.equal") {
+T_DECL(compare_equal, "intrusive_shared_ptr.compare.equal", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests_convert<Derived, Base>();

@@ -38,6 +38,7 @@ extern void test_pmap_call_overhead(unsigned int);
 extern uint64_t test_pmap_page_protect_overhead(unsigned int, unsigned int);
 #if CONFIG_SPTM
 extern kern_return_t test_pmap_huge_pv_list(unsigned int, unsigned int);
+extern kern_return_t test_pmap_reentrance(unsigned int);
 #endif
 
 static int
@@ -195,5 +196,21 @@ sysctl_test_pmap_huge_pv_list(__unused struct sysctl_oid *oidp, __unused void *a
 
 SYSCTL_PROC(_kern, OID_AUTO, pmap_huge_pv_list_test,
     CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_test_pmap_huge_pv_list, "-", "");
+
+static int
+sysctl_test_pmap_reentrance(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	return test_pmap_reentrance(num_loops);
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_reentrance_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_reentrance, "I", "");
 
 #endif

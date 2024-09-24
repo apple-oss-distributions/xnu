@@ -120,9 +120,6 @@
 
 #include <netinet6/tcp6_var.h>
 #include <netinet/tcpip.h>
-#if TCPDEBUG
-#include <netinet/tcp_debug.h>
-#endif
 #include <netinet/tcp_log.h>
 
 #include <netinet6/ip6protosw.h>
@@ -146,6 +143,7 @@
 #include <sys/kdebug.h>
 #include <mach/sdt.h>
 #include <pexpert/pexpert.h>
+#include <mach/mach_time.h>
 
 #define DBG_FNC_TCP_CLOSE       NETDBG_CODE(DBG_NETTCP, ((5 << 8) | 2))
 
@@ -197,27 +195,15 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, microuptime_init, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, minmss, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_minmss, TCP_MINMSS, "Minmum TCP Maximum Segment Size");
 
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
+SYSCTL_UINT(_net_inet_tcp, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
     &tcbinfo.ipi_count, 0, "Number of active PCBs");
-
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, tw_pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &tcbinfo.ipi_twcount, 0, "Number of pcbs in time-wait state");
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, icmp_may_rst, CTLFLAG_RW | CTLFLAG_LOCKED,
     static int, icmp_may_rst, 1,
     "Certain ICMP unreachable messages may abort connections in SYN_SENT");
 
-static int      tcp_strict_rfc1948 = 0;
-static int      tcp_isn_reseed_interval = 0;
 int             tcp_do_timestamps = 1;
 #if (DEVELOPMENT || DEBUG)
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, strict_rfc1948, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_strict_rfc1948, 0, "Determines if RFC1948 is followed exactly");
-
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, isn_reseed_interval,
-    CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_isn_reseed_interval, 0, "Seconds between reseeding of ISN secret");
-
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, do_timestamps,
     CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_do_timestamps, 0, "enable TCP timestamps");
 #endif /* (DEVELOPMENT || DEBUG) */
@@ -262,6 +248,7 @@ static void     tcp_notify(struct inpcb *, int);
 static KALLOC_TYPE_DEFINE(tcp_bwmeas_zone, struct bwmeas, NET_KT_DEFAULT);
 KALLOC_TYPE_DEFINE(tcp_reass_zone, struct tseg_qent, NET_KT_DEFAULT);
 KALLOC_TYPE_DEFINE(tcp_rxt_seg_zone, struct tcp_rxt_seg, NET_KT_DEFAULT);
+KALLOC_TYPE_DEFINE(tcp_seg_sent_zone, struct tcp_seg_sent, NET_KT_DEFAULT);
 
 extern int slowlink_wsize;      /* window correction for slow links */
 extern int path_mtu_discovery;
@@ -487,6 +474,24 @@ tcp_round_up(uint32_t val, uint32_t base)
 	return ((val + base) / base) * base;
 }
 
+uint32_t
+ntoh24(u_char *p)
+{
+	uint32_t v;
+
+	v  = (uint32_t)(p[0] << 16);
+	v |= (uint32_t)(p[1] << 8);
+	v |= (uint32_t)(p[2] << 0);
+	return v;
+}
+
+uint32_t
+tcp_packets_this_ack(struct tcpcb *tp, uint32_t acked)
+{
+	return acked / tp->t_maxseg +
+	       (((acked % tp->t_maxseg) != 0) ? 1 : 0);
+}
+
 static void
 tcp_tfo_init(void)
 {
@@ -495,6 +500,8 @@ tcp_tfo_init(void)
 	read_frandom(key, sizeof(key));
 	aes_encrypt_key128(key, &tfo_ctx);
 }
+
+static u_char isn_secret[32];
 
 /*
  * Tcp initialization
@@ -573,10 +580,12 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		    tcp_tcbhashsize);
 	}
 
-	tcbinfo.ipi_hashbase = hashinit(tcp_tcbhashsize, M_PCB,
-	    &tcbinfo.ipi_hashmask);
-	tcbinfo.ipi_porthashbase = hashinit(tcp_tcbhashsize, M_PCB,
-	    &tcbinfo.ipi_porthashmask);
+	hashinit_counted_by(tcp_tcbhashsize, tcbinfo.ipi_hashbase,
+	    tcbinfo.ipi_hashbase_count);
+	tcbinfo.ipi_hashmask = tcbinfo.ipi_hashbase_count - 1;
+	hashinit_counted_by(tcp_tcbhashsize, tcbinfo.ipi_porthashbase,
+	    tcbinfo.ipi_porthashbase_count);
+	tcbinfo.ipi_porthashmask = tcbinfo.ipi_porthashbase_count - 1;
 	tcbinfo.ipi_zone = tcpcbzone;
 
 	tcbinfo.ipi_gc = tcp_gc;
@@ -627,8 +636,13 @@ tcp_init(struct protosw *pp, struct domain *dp)
 	 * maximum allowed receive and send socket buffer size.
 	 */
 	if (mem_actual >= (1ULL << (GBSHIFT + 2))) {
-		tcp_autorcvbuf_max = 4 * 1024 * 1024;
-		tcp_autosndbuf_max = 4 * 1024 * 1024;
+		if (serverperfmode) {
+			tcp_autorcvbuf_max = 8 * 1024 * 1024;
+			tcp_autosndbuf_max = 8 * 1024 * 1024;
+		} else {
+			tcp_autorcvbuf_max = 4 * 1024 * 1024;
+			tcp_autosndbuf_max = 4 * 1024 * 1024;
+		}
 
 		SYSCTL_SKMEM_UPDATE_FIELD(tcp.autorcvbufmax, tcp_autorcvbuf_max);
 		SYSCTL_SKMEM_UPDATE_FIELD(tcp.autosndbufmax, tcp_autosndbuf_max);
@@ -636,6 +650,8 @@ tcp_init(struct protosw *pp, struct domain *dp)
 
 	/* Initialize the TCP CCA array */
 	tcp_cc_init();
+
+	read_frandom(&isn_secret, sizeof(isn_secret));
 }
 
 /*
@@ -888,12 +904,6 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		m->m_pkthdr.csum_flags = CSUM_TCP;
 		m->m_pkthdr.csum_data = offsetof(struct tcphdr, th_sum);
 	}
-#if TCPDEBUG
-	if (tp == NULL || (tp->t_inpcb->inp_socket->so_options & SO_DEBUG)) {
-		tcp_trace(TA_OUTPUT, 0, tp, mtod(m, void *), th, 0);
-	}
-#endif
-
 #if NECP
 	necp_mark_packet_from_socket(m, tp ? tp->t_inpcb : NULL, 0, 0, 0, 0);
 #endif /* NECP */
@@ -1110,8 +1120,16 @@ tcp_newtcpcb(struct inpcb *inp)
 	tp->t_flags = TF_REQ_SCALE | (tcp_do_timestamps ? TF_REQ_TSTMP : 0);
 	tp->t_flagsext |= TF_SACK_ENABLE;
 
+	if (tcp_rack) {
+		tp->t_flagsext |= TF_RACK_ENABLED;
+	}
+
 	TAILQ_INIT(&tp->snd_holes);
 	SLIST_INIT(&tp->t_rxt_segments);
+	TAILQ_INIT(&tp->t_segs_sent);
+	RB_INIT(&tp->t_segs_sent_tree);
+	TAILQ_INIT(&tp->t_segs_acked);
+	TAILQ_INIT(&tp->seg_pool.free_segs);
 	SLIST_INIT(&tp->t_notify_ack);
 	tp->t_inpcb = inp;
 	/*
@@ -1134,7 +1152,11 @@ tcp_newtcpcb(struct inpcb *inp)
 		tp->tcp_cc_index = TCP_CC_ALGO_BACKGROUND_INDEX;
 #endif
 	} else {
-		tp->tcp_cc_index = TCP_CC_ALGO_CUBIC_INDEX;
+		if (TCP_L4S_ENABLED(tp)) {
+			tp->tcp_cc_index = TCP_CC_ALGO_PRAGUE_INDEX;
+		} else {
+			tp->tcp_cc_index = TCP_CC_ALGO_CUBIC_INDEX;
+		}
 	}
 
 	tcp_cc_allocate_state(tp);
@@ -1159,9 +1181,11 @@ tcp_newtcpcb(struct inpcb *inp)
 	tp->t_persist_stop = 0;
 	tp->t_flagsext |= TF_RCVUNACK_WAITSS;
 	tp->t_rexmtthresh = (uint8_t)tcprexmtthresh;
+	tp->rack.reo_wnd_multi = 1;
 	tp->rfbuf_ts = tcp_now;
 	tp->rfbuf_space = tcp_initial_cwnd(tp);
 	tp->t_forced_acks = TCP_FORCED_ACKS_COUNT;
+	tp->bytes_lost = tp->bytes_sacked = tp->bytes_retransmitted = 0;
 
 	/* Enable bandwidth measurement on this connection */
 	tp->t_flagsext |= TF_MEASURESNDBW;
@@ -1182,10 +1206,6 @@ tcp_newtcpcb(struct inpcb *inp)
 		tp->t_comp_gencnt = TCP_ACK_COMPRESSION_DUMMY + 1;
 	}
 	tp->t_comp_lastinc = tcp_now;
-
-	if (__probable(tcp_randomize_timestamps)) {
-		tp->t_ts_offset = random_32;
-	}
 
 	/* Initialize Accurate ECN state */
 	tp->t_client_accecn_state = tcp_connection_client_accurate_ecn_feature_disabled;
@@ -1656,6 +1676,8 @@ no_valid_rt:
 		tcp_bwmeas_free(tp);
 	}
 	tcp_rxtseg_clean(tp);
+	tcp_segs_sent_clean(tp, true);
+
 	/* Free the packet list */
 	if (tp->t_pktlist_head != NULL) {
 		m_freem_list(tp->t_pktlist_head);
@@ -1842,30 +1864,30 @@ tcp_bwmeas_free(struct tcpcb *tp)
 }
 
 int
-get_tcp_inp_list(struct inpcb **inp_list, int n, inp_gen_t gencnt)
+get_tcp_inp_list(struct inpcb * __single *inp_list __counted_by(n), size_t n, inp_gen_t gencnt)
 {
 	struct tcpcb *tp;
 	struct inpcb *inp;
 	int i = 0;
 
 	LIST_FOREACH(inp, tcbinfo.ipi_listhead, inp_list) {
+		if (i >= n) {
+			break;
+		}
 		if (inp->inp_gencnt <= gencnt &&
 		    inp->inp_state != INPCB_STATE_DEAD) {
 			inp_list[i++] = inp;
-		}
-		if (i >= n) {
-			break;
 		}
 	}
 
 	TAILQ_FOREACH(tp, &tcp_tw_tailq, t_twentry) {
+		if (i >= n) {
+			break;
+		}
 		inp = tp->t_inpcb;
 		if (inp->inp_gencnt <= gencnt &&
 		    inp->inp_state != INPCB_STATE_DEAD) {
 			inp_list[i++] = inp;
-		}
-		if (i >= n) {
-			break;
 		}
 	}
 	return i;
@@ -1878,14 +1900,14 @@ get_tcp_inp_list(struct inpcb **inp_list, int n, inp_gen_t gencnt)
 static void
 tcpcb_to_otcpcb(struct tcpcb *tp, struct otcpcb *otp)
 {
-	otp->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	otp->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	otp->t_dupacks = tp->t_dupacks;
 	otp->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	otp->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
 	otp->t_timer[TCPT_KEEP_EXT] = tp->t_timer[TCPT_KEEP];
 	otp->t_timer[TCPT_2MSL_EXT] = tp->t_timer[TCPT_2MSL];
 	otp->t_inpcb =
-	    (_TCPCB_PTR(struct inpcb *))VM_KERNEL_ADDRPERM(tp->t_inpcb);
+	    (_TCPCB_PTR(struct inpcb *))VM_KERNEL_ADDRHASH(tp->t_inpcb);
 	otp->t_state = tp->t_state;
 	otp->t_flags = tp->t_flags;
 	otp->t_force = (tp->t_flagsext & TF_FORCE) ? 1 : 0;
@@ -2064,7 +2086,7 @@ SYSCTL_PROC(_net_inet_tcp, TCPCTL_PCBLIST, pcblist,
 static void
 tcpcb_to_xtcpcb64(struct tcpcb *tp, struct xtcpcb64 *otp)
 {
-	otp->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	otp->t_segq = (uint32_t)VM_KERNEL_ADDRHASH(tp->t_segq.lh_first);
 	otp->t_dupacks = tp->t_dupacks;
 	otp->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
 	otp->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
@@ -2203,7 +2225,7 @@ tcp_pcblist64 SYSCTL_HANDLER_ARGS
 		xt.xt_len = sizeof(xt);
 		inpcb_to_xinpcb64(inp, &xt.xt_inpcb);
 		xt.xt_inpcb.inp_ppcb =
-		    (uint64_t)VM_KERNEL_ADDRPERM(inp->inp_ppcb);
+		    (uint64_t)VM_KERNEL_ADDRHASH(inp->inp_ppcb);
 		if (inp->inp_ppcb != NULL) {
 			tcpcb_to_xtcpcb64((struct tcpcb *)inp->inp_ppcb,
 			    &xt);
@@ -2259,19 +2281,6 @@ tcp_pcblist_n SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_net_inet_tcp, OID_AUTO, pcblist_n,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     tcp_pcblist_n, "S,xtcpcb_n", "List of active TCP connections");
-
-static int
-tcp_progress_indicators SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-
-	return ntstat_tcp_progress_indicators(req);
-}
-
-SYSCTL_PROC(_net_inet_tcp, OID_AUTO, progress,
-    CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, 0, 0,
-    tcp_progress_indicators, "S", "Various items that indicate the current state of progress on the link");
-
 
 static int
 tcp_progress_probe_enable SYSCTL_HANDLER_ARGS
@@ -2732,10 +2741,10 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
  * depends on this property.  In addition, these ISNs should be
  * unguessable so as to prevent connection hijacking.  To satisfy
  * the requirements of this situation, the algorithm outlined in
- * RFC 1948 is used to generate sequence numbers.
+ * RFC 9293 is used to generate sequence numbers.
  *
  * For more information on the theory of operation, please see
- * RFC 1948.
+ * RFC 9293.
  *
  * Implementation details:
  *
@@ -2744,17 +2753,6 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
  * recycling on high speed LANs while still leaving over an hour
  * before rollover.
  *
- * Two sysctls control the generation of ISNs:
- *
- * net.inet.tcp.isn_reseed_interval controls the number of seconds
- * between seeding of isn_secret.  This is normally set to zero,
- * as reseeding should not be necessary.
- *
- * net.inet.tcp.strict_rfc1948 controls whether RFC 1948 is followed
- * strictly.  When strict compliance is requested, reseeding is
- * disabled and SYN-ACKs will be generated in the same manner as
- * SYNs.  Strict mode is disabled by default.
- *
  */
 
 #define ISN_BYTES_PER_SECOND 1048576
@@ -2762,35 +2760,12 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 tcp_seq
 tcp_new_isn(struct tcpcb *tp)
 {
-	u_int32_t md5_buffer[4];
+	uint32_t md5_buffer[4];
 	tcp_seq new_isn;
-	struct timeval timenow;
-	u_char isn_secret[32];
-	long isn_last_reseed = 0;
+	struct timespec timenow;
 	MD5_CTX isn_ctx;
 
-	/* Use arc4random for SYN-ACKs when not in exact RFC1948 mode. */
-	if (((tp->t_state == TCPS_LISTEN) || (tp->t_state == TCPS_TIME_WAIT)) &&
-	    tcp_strict_rfc1948 == 0)
-#ifdef __APPLE__
-	{ return RandomULong(); }
-#else
-	{ return arc4random(); }
-#endif
-	getmicrotime(&timenow);
-
-	/* Seed if this is the first use, reseed if requested. */
-	if ((isn_last_reseed == 0) ||
-	    ((tcp_strict_rfc1948 == 0) && (tcp_isn_reseed_interval > 0) &&
-	    (((u_int)isn_last_reseed + (u_int)tcp_isn_reseed_interval * hz)
-	    < (u_int)timenow.tv_sec))) {
-#ifdef __APPLE__
-		read_frandom(&isn_secret, sizeof(isn_secret));
-#else
-		read_random_unlimited(&isn_secret, sizeof(isn_secret));
-#endif
-		isn_last_reseed = timenow.tv_sec;
-	}
+	nanouptime(&timenow);
 
 	/* Compute the md5 hash and return the ISN. */
 	MD5Init(&isn_ctx);
@@ -2811,8 +2786,19 @@ tcp_new_isn(struct tcpcb *tp)
 	}
 	MD5Update(&isn_ctx, (u_char *) &isn_secret, sizeof(isn_secret));
 	MD5Final((u_char *) &md5_buffer, &isn_ctx);
+
 	new_isn = (tcp_seq) md5_buffer[0];
-	new_isn += timenow.tv_sec * (ISN_BYTES_PER_SECOND / hz);
+
+	/*
+	 * We use a 128ns clock, which is equivalent to 600 Mbps and wraps at
+	 * 549 seconds, thus safe for 2 MSL lifetime of TIME-WAIT-state.
+	 */
+	new_isn += (timenow.tv_sec * NSEC_PER_SEC + timenow.tv_nsec) >> 7;
+
+	if (__probable(tcp_randomize_timestamps)) {
+		tp->t_ts_offset = md5_buffer[1];
+	}
+
 	return new_isn;
 }
 
@@ -3602,6 +3588,93 @@ calculate_tcp_clock(void)
 	}
 }
 
+uint64_t
+microuptime_ns(void)
+{
+	uint64_t abstime = mach_absolute_time();
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(abstime, &ns);
+
+	return ns;
+}
+
+#define MAX_BURST_INTERVAL_KERNEL_PACING_NSEC                                  \
+	(10 * NSEC_PER_MSEC) // Don't delay more than 10ms between two bursts
+static uint64_t
+tcp_pacer_get_packet_interval(struct tcpcb *tp, uint16_t pkt_len)
+{
+	if (tp->t_pacer.rate == 0) {
+		os_log_error(OS_LOG_DEFAULT,
+		    "pacer rate shouldn't be 0, CCA is %s (cwnd=%u, smoothed rtt=%u ms)",
+		    CC_ALGO(tp)->name, tp->snd_cwnd, tp->t_srtt >> TCP_RTT_SHIFT);
+
+		return MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
+	}
+
+	uint64_t interval = (uint64_t)pkt_len * NSEC_PER_SEC / tp->t_pacer.rate;
+	if (interval > MAX_BURST_INTERVAL_KERNEL_PACING_NSEC) {
+		interval = MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
+	}
+
+	return interval;
+}
+
+/* Return packet tx_time in nanoseconds (absolute as well as continuous) */
+uint64_t
+tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
+{
+	/*
+	 * size is a static variable as this function is called
+	 * multiple times for mss-sized packets and for high-speeds,
+	 * we'd want to send multiple packets that add up to burst_size
+	 * at the same time.
+	 */
+	static uint32_t size = 0;
+	uint64_t now = microuptime_ns();
+
+	if (pkt_len == 0 || now == 0) {
+		return now;
+	}
+
+	if (tp->t_pacer.packet_tx_time == 0) {
+		tp->t_pacer.packet_tx_time = now;
+		size = pkt_len;
+	} else {
+		size += pkt_len;
+		if (size > tp->t_pacer.tso_burst_size) {
+			/*
+			 * Increment tx_time by packet_interval and
+			 * reset size to this packet's len
+			 */
+			tp->t_pacer.packet_tx_time +=
+			    tcp_pacer_get_packet_interval(tp, pkt_len);
+			size = pkt_len;
+			if (now > tp->t_pacer.packet_tx_time) {
+				/*
+				 * If current time is bigger, then application
+				 * has already paced the packet. Also, we can't
+				 * set tx_time in the past.
+				 */
+				tp->t_pacer.packet_tx_time = now;
+			}
+		}
+	}
+
+	return tp->t_pacer.packet_tx_time;
+}
+
+void
+tcp_set_mbuf_tx_time(struct mbuf *m, uint64_t tx_time)
+{
+	struct m_tag *tag = NULL;
+	tag = m_tag_create(KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM,
+	    sizeof(uint64_t), M_WAITOK, m);
+	if (tag != NULL) {
+		m_tag_prepend(m, tag);
+		*(uint64_t *)tag->m_tag_data = tx_time;
+	}
+}
+
 /*
  * Compute receive window scaling that we are going to request
  * for this connection based on  sb_hiwat. Try to leave some
@@ -3862,6 +3935,676 @@ tcp_rxtseg_total_size(struct tcpcb *tp)
 	return total_size;
 }
 
+int
+tcp_seg_cmp(const struct tcp_seg_sent *seg1, const struct tcp_seg_sent *seg2)
+{
+	return (int)(seg1->end_seq - seg2->end_seq);
+}
+
+RB_GENERATE(tcp_seg_sent_tree_head, tcp_seg_sent, seg_link, tcp_seg_cmp)
+
+uint32_t
+tcp_seg_len(struct tcp_seg_sent *seg)
+{
+	if (SEQ_LT(seg->end_seq, seg->start_seq)) {
+		os_log_error(OS_LOG_DEFAULT, "segment end(%u) can't be smaller "
+		    "than segment start(%u)", seg->end_seq, seg->start_seq);
+	}
+
+	return seg->end_seq - seg->start_seq;
+}
+
+static struct tcp_seg_sent *
+tcp_seg_alloc_init(struct tcpcb *tp)
+{
+	struct tcp_seg_sent *seg = TAILQ_FIRST(&tp->seg_pool.free_segs);
+	if (seg != NULL) {
+		TAILQ_REMOVE(&tp->seg_pool.free_segs, seg, free_link);
+		tp->seg_pool.free_segs_count--;
+	} else {
+		// TODO: remove Z_WAITOK and Z_NOFAIL?
+		seg = zalloc_flags(tcp_seg_sent_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		if (seg == NULL) {
+			return NULL;
+		}
+	}
+	bzero(seg, sizeof(*seg));
+
+	return seg;
+}
+
+static void
+tcp_update_seg_after_rto(struct tcpcb *tp, struct tcp_seg_sent *found_seg,
+    uint32_t xmit_ts, uint8_t flags)
+{
+	tcp_rack_transmit_seg(tp, found_seg, found_seg->start_seq, found_seg->end_seq,
+	    xmit_ts, flags);
+	struct tcp_seg_sent *seg = TAILQ_FIRST(&tp->t_segs_sent);
+	if (found_seg == seg) {
+		// Move this segment to the end of time-ordered list.
+		TAILQ_REMOVE(&tp->t_segs_sent, seg, tx_link);
+		TAILQ_INSERT_TAIL(&tp->t_segs_sent, seg, tx_link);
+	}
+}
+
+static void
+tcp_process_rxmt_segs_after_rto(struct tcpcb *tp, struct tcp_seg_sent *seg, tcp_seq start,
+    uint32_t xmit_ts, uint8_t flags)
+{
+	struct tcp_seg_sent segment = {};
+
+	while (seg != NULL) {
+		if (SEQ_LEQ(seg->start_seq, start)) {
+			tcp_update_seg_after_rto(tp, seg, xmit_ts, flags);
+			break;
+		} else {
+			/* The segment is a part of the total RTO retransmission */
+			tcp_update_seg_after_rto(tp, seg, xmit_ts, flags);
+
+			/* Find the next segment ending at the start of current segment */
+			segment.end_seq = seg->start_seq;
+			seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &segment);
+		}
+	}
+}
+
+static struct tcp_seg_sent *
+tcp_seg_sent_insert_before(struct tcpcb *tp, struct tcp_seg_sent *before, tcp_seq start, tcp_seq end,
+    uint32_t xmit_ts, uint8_t flags)
+{
+	struct tcp_seg_sent *seg = tcp_seg_alloc_init(tp);
+	/* segment MUST be allocated, there is no other fail-safe here */
+	tcp_rack_transmit_seg(tp, seg, start, end, xmit_ts, flags);
+	struct tcp_seg_sent *not_inserted = RB_INSERT(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, seg);
+	if (not_inserted) {
+		os_log(OS_LOG_DEFAULT, "segment %p[%u %u) was not inserted in the RB tree", not_inserted,
+		    not_inserted->start_seq, not_inserted->end_seq);
+	}
+	TAILQ_INSERT_BEFORE(before, seg, tx_link);
+
+	return seg;
+}
+
+static struct tcp_seg_sent *
+tcp_seg_rto_insert_end(struct tcpcb *tp, tcp_seq start, tcp_seq end,
+    uint32_t xmit_ts, uint8_t flags)
+{
+	struct tcp_seg_sent *seg = tcp_seg_alloc_init(tp);
+	/* segment MUST be allocated, there is no other fail-safe here */
+	tcp_rack_transmit_seg(tp, seg, start, end, xmit_ts, flags);
+	struct tcp_seg_sent *not_inserted = RB_INSERT(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, seg);
+	if (not_inserted) {
+		os_log(OS_LOG_DEFAULT, "segment %p[%u %u) was not inserted in the RB tree", not_inserted,
+		    not_inserted->start_seq, not_inserted->end_seq);
+	}
+	TAILQ_INSERT_TAIL(&tp->t_segs_sent, seg, tx_link);
+
+	return seg;
+}
+
+void
+tcp_seg_sent_insert(struct tcpcb *tp, struct tcp_seg_sent *seg, tcp_seq start, tcp_seq end,
+    uint32_t xmit_ts, uint8_t flags)
+{
+	if (seg != NULL) {
+		uint8_t seg_flags = seg->flags | flags;
+		if (seg->end_seq == end) {
+			/* Entire seg retransmitted in RACK recovery, start and end sequence doesn't change */
+			if (seg->start_seq != start) {
+				os_log_error(OS_LOG_DEFAULT, "Segment start (%u) is not same as retransmitted "
+				    "start sequence number (%u)", seg->start_seq, start);
+			}
+			tcp_rack_transmit_seg(tp, seg, seg->start_seq, seg->end_seq, xmit_ts, seg_flags);
+			TAILQ_REMOVE(&tp->t_segs_sent, seg, tx_link);
+			TAILQ_INSERT_TAIL(&tp->t_segs_sent, seg, tx_link);
+		} else {
+			/*
+			 * Original segment is retransmitted partially, update start_seq by len
+			 * and create new segment for retransmitted part
+			 */
+			struct tcp_seg_sent *partial_seg = tcp_seg_alloc_init(tp);
+			if (partial_seg == NULL) {
+				return;
+			}
+			seg->start_seq += (end - start);
+			tcp_rack_transmit_seg(tp, partial_seg, start, end, xmit_ts, seg_flags);
+			struct tcp_seg_sent *not_inserted = RB_INSERT(tcp_seg_sent_tree_head,
+			    &tp->t_segs_sent_tree, partial_seg);
+			if (not_inserted) {
+				os_log(OS_LOG_DEFAULT, "segment %p[%u %u) was not inserted in the RB tree", not_inserted,
+				    not_inserted->start_seq, not_inserted->end_seq);
+			}
+			TAILQ_INSERT_TAIL(&tp->t_segs_sent, partial_seg, tx_link);
+		}
+
+		return;
+	}
+
+	if ((flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE) == 0) {
+		/* This is a new segment */
+		seg = tcp_seg_alloc_init(tp);
+		if (seg == NULL) {
+			return;
+		}
+
+		tcp_rack_transmit_seg(tp, seg, start, end, xmit_ts, flags);
+		struct tcp_seg_sent *not_inserted = RB_INSERT(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, seg);
+		if (not_inserted) {
+			os_log(OS_LOG_DEFAULT, "segment %p[%u %u) was not inserted in the RB tree", not_inserted,
+			    not_inserted->start_seq, not_inserted->end_seq);
+		}
+		TAILQ_INSERT_TAIL(&tp->t_segs_sent, seg, tx_link);
+
+		return;
+	}
+	/*
+	 * Either retransmitted after an RTO or PTO.
+	 * During RTO, time-ordered list may lose its order.
+	 * If retransmitted after RTO, check if the segment
+	 * already exists in RB tree and update its xmit_ts. Also,
+	 * if this seg is at the top of ordered list, then move it
+	 * to the end.
+	 */
+	struct tcp_seg_sent segment = {};
+	struct tcp_seg_sent *found_seg = NULL, *rxmt_seg = NULL;
+
+	/* Set the end sequence to search for existing segment */
+	segment.end_seq = end;
+	found_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &segment);
+	if (found_seg != NULL) {
+		/* Found an exact match for retransmitted end sequence */
+		tcp_process_rxmt_segs_after_rto(tp, found_seg, start, xmit_ts, flags);
+		return;
+	}
+	/*
+	 * We come here when we don't find an exact match and end of segment
+	 * retransmitted after RTO lies within a segment.
+	 */
+	RB_FOREACH(found_seg, tcp_seg_sent_tree_head, &tp->t_segs_sent_tree) {
+		if (SEQ_LT(end, found_seg->end_seq) && SEQ_GT(end, found_seg->start_seq)) {
+			/*
+			 * This segment is partially retransmitted. We split this segment at the boundary of end
+			 * sequence. First insert the part being retransmitted at the end of time-ordered list.
+			 */
+			tcp_seg_rto_insert_end(tp, found_seg->start_seq, end, xmit_ts,
+			    found_seg->flags | flags);
+
+			if (SEQ_LEQ(found_seg->start_seq, start)) {
+				/*
+				 * We are done with the retransmitted part.
+				 * Move the start of existing segment
+				 */
+				found_seg->start_seq = end;
+			} else {
+				/*
+				 * This retransmitted sequence covers more than one segment
+				 * Look for segments covered by this retransmission below this segment
+				 */
+				segment.end_seq = found_seg->start_seq;
+				rxmt_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &segment);
+
+				if (rxmt_seg != NULL) {
+					/* rxmt_seg is just before the current segment */
+					tcp_process_rxmt_segs_after_rto(tp, rxmt_seg, start, xmit_ts, flags);
+				}
+
+				/* Move the start of existing segment */
+				found_seg->start_seq = end;
+			}
+			return;
+		}
+	}
+}
+
+static void
+tcp_seg_collect_acked_subtree(struct tcpcb *tp, struct tcp_seg_sent *seg,
+    uint32_t acked_xmit_ts, uint32_t tsecr)
+{
+	if (seg != NULL) {
+		tcp_seg_collect_acked_subtree(tp, RB_LEFT(seg, seg_link), acked_xmit_ts, tsecr);
+		tcp_seg_collect_acked_subtree(tp, RB_RIGHT(seg, seg_link), acked_xmit_ts, tsecr);
+		TAILQ_INSERT_TAIL(&tp->t_segs_acked, seg, ack_link);
+	}
+}
+
+/* Call this function with root of the rb tree */
+static void
+tcp_seg_collect_acked(struct tcpcb *tp, struct tcp_seg_sent *seg, tcp_seq th_ack,
+    uint32_t acked_xmit_ts, uint32_t tsecr)
+{
+	if (seg == NULL) {
+		return;
+	}
+
+	if (SEQ_GEQ(th_ack, seg->end_seq)) {
+		/* Delete the entire left sub-tree */
+		tcp_seg_collect_acked_subtree(tp, RB_LEFT(seg, seg_link), acked_xmit_ts, tsecr);
+		/* Evaluate the right sub-tree */
+		tcp_seg_collect_acked(tp, RB_RIGHT(seg, seg_link), th_ack, acked_xmit_ts, tsecr);
+		TAILQ_INSERT_TAIL(&tp->t_segs_acked, seg, ack_link);
+	} else {
+		/*
+		 * This ACK doesn't acknowledge the current root and its right sub-tree.
+		 * Evaluate the left sub-tree
+		 */
+		tcp_seg_collect_acked(tp, RB_LEFT(seg, seg_link), th_ack, acked_xmit_ts, tsecr);
+	}
+}
+
+static void
+tcp_seg_delete_acked(struct tcpcb *tp, uint32_t acked_xmit_ts, uint32_t tsecr)
+{
+	struct tcp_seg_sent *acked_seg = NULL, *next = NULL;
+
+	TAILQ_FOREACH_SAFE(acked_seg, &tp->t_segs_acked, ack_link, next) {
+		/* Advance RACK state if applicable */
+		if (acked_seg->xmit_ts > acked_xmit_ts) {
+			tcp_rack_update_segment_acked(tp, tsecr, acked_seg->xmit_ts, acked_seg->end_seq,
+			    !!(acked_seg->flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE));
+		}
+		/* Check for reordering */
+		tcp_rack_detect_reordering_acked(tp, acked_seg);
+
+		const uint32_t seg_len = tcp_seg_len(acked_seg);
+		if (acked_seg->flags & TCP_SEGMENT_LOST) {
+			if (tp->bytes_lost < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) can't be smaller than already "
+				    "lost segment length (%u)", tp->bytes_lost, seg_len);
+			}
+			tp->bytes_lost -= seg_len;
+		}
+		if (acked_seg->flags & TCP_RACK_RETRANSMITTED) {
+			if (tp->bytes_retransmitted < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_retransmitted (%u) can't be smaller "
+				    "than already retransmited segment length (%u)",
+				    tp->bytes_retransmitted, seg_len);
+			}
+			tp->bytes_retransmitted -= seg_len;
+		}
+		if (acked_seg->flags & TCP_SEGMENT_SACKED) {
+			if (tp->bytes_sacked < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_sacked (%u) can't be smaller than already "
+				    "SACKed segment length (%u)", tp->bytes_sacked, seg_len);
+			}
+			tp->bytes_sacked -= seg_len;
+		}
+		TAILQ_REMOVE(&tp->t_segs_acked, acked_seg, ack_link);
+		TAILQ_REMOVE(&tp->t_segs_sent, acked_seg, tx_link);
+		RB_REMOVE(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, acked_seg);
+		tcp_seg_delete(tp, acked_seg);
+	}
+}
+
+void
+tcp_segs_doack(struct tcpcb *tp, tcp_seq th_ack, struct tcpopt *to)
+{
+	uint32_t tsecr = 0, acked_xmit_ts = 0;
+	tcp_seq acked_seq = th_ack;
+	bool was_retransmitted = false;
+
+	if (TAILQ_EMPTY(&tp->t_segs_sent)) {
+		return;
+	}
+
+	if (((to->to_flags & TOF_TS) != 0) && (to->to_tsecr != 0)) {
+		tsecr = to->to_tsecr;
+	}
+
+	struct tcp_seg_sent seg = {};
+	struct tcp_seg_sent *found_seg = NULL, *next = NULL;
+
+	found_seg = TAILQ_LAST(&tp->t_segs_sent, tcp_seg_sent_head);
+
+	if (tp->rack.segs_retransmitted == false) {
+		if (SEQ_GEQ(th_ack, found_seg->end_seq)) {
+			/*
+			 * ACK acknowledges the last sent segment completely (snd_max),
+			 * we can remove all segments from time ordered list.
+			 */
+			acked_seq = found_seg->end_seq;
+			acked_xmit_ts = found_seg->xmit_ts;
+			was_retransmitted = !!(found_seg->flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE);
+			tcp_segs_sent_clean(tp, false);
+
+			/* Advance RACK state */
+			tcp_rack_update_segment_acked(tp, tsecr, acked_xmit_ts, acked_seq, was_retransmitted);
+			return;
+		}
+	}
+	/*
+	 * If either not all segments are ACKed OR the time-ordered list contains retransmitted
+	 * segments, do a RB tree search for largest (completely) ACKed segment and remove the ACKed
+	 * segment and all segments left of it from both RB tree and time-ordered list.
+	 *
+	 * Set the end sequence to search for ACKed segment.
+	 */
+	seg.end_seq = th_ack;
+
+	if ((found_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &seg)) != NULL) {
+		acked_seq = found_seg->end_seq;
+		acked_xmit_ts = found_seg->xmit_ts;
+		was_retransmitted = !!(found_seg->flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE);
+
+		/*
+		 * Remove all segments that are ACKed by this ACK.
+		 * We defer self-balancing of RB tree to the end
+		 * by calling RB_REMOVE after collecting all ACKed segments.
+		 */
+		tcp_seg_collect_acked(tp, RB_ROOT(&tp->t_segs_sent_tree), th_ack, acked_xmit_ts, tsecr);
+		tcp_seg_delete_acked(tp, acked_xmit_ts, tsecr);
+
+		/* Advance RACK state */
+		tcp_rack_update_segment_acked(tp, tsecr, acked_xmit_ts, acked_seq, was_retransmitted);
+
+		return;
+	}
+	/*
+	 * When TSO is enabled, it is possible that th_ack is less
+	 * than segment->end, hence we search the tree
+	 * until we find the largest (partially) ACKed segment.
+	 */
+	RB_FOREACH_SAFE(found_seg, tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, next) {
+		if (SEQ_LT(th_ack, found_seg->end_seq) && SEQ_GT(th_ack, found_seg->start_seq)) {
+			acked_seq = th_ack;
+			acked_xmit_ts = found_seg->xmit_ts;
+			was_retransmitted = !!(found_seg->flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE);
+
+			/* Remove all segments completely ACKed by this ack */
+			tcp_seg_collect_acked(tp, RB_ROOT(&tp->t_segs_sent_tree), th_ack, acked_xmit_ts, tsecr);
+			tcp_seg_delete_acked(tp, acked_xmit_ts, tsecr);
+			found_seg->start_seq = th_ack;
+
+			/* Advance RACK state */
+			tcp_rack_update_segment_acked(tp, tsecr, acked_xmit_ts, acked_seq, was_retransmitted);
+			break;
+		}
+	}
+}
+
+static bool
+tcp_seg_mark_sacked(struct tcpcb *tp, struct tcp_seg_sent *seg, uint32_t *newbytes_sacked)
+{
+	if (seg->flags & TCP_SEGMENT_SACKED) {
+		return false;
+	}
+
+	const uint32_t seg_len = tcp_seg_len(seg);
+
+	/* Check for reordering */
+	tcp_rack_detect_reordering_acked(tp, seg);
+
+	if (seg->flags & TCP_RACK_RETRANSMITTED) {
+		if (seg->flags & TCP_SEGMENT_LOST) {
+			/*
+			 * If the segment is not considered lost, we don't clear
+			 * retransmitted as it might still be in flight. The ONLY time
+			 * this can happen is when RTO happens and segment is retransmitted
+			 * and SACKed before RACK detects segment was lost.
+			 */
+			seg->flags &= ~(TCP_SEGMENT_LOST | TCP_RACK_RETRANSMITTED);
+			if (tp->bytes_lost < seg_len || tp->bytes_retransmitted < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) and/or bytes_retransmitted (%u) "
+				    "can't be smaller than already lost/retransmitted segment length (%u)", tp->bytes_lost,
+				    tp->bytes_retransmitted, seg_len);
+			}
+			tp->bytes_lost -= seg_len;
+			tp->bytes_retransmitted -= seg_len;
+		}
+	} else {
+		if (seg->flags & TCP_SEGMENT_LOST) {
+			seg->flags &= ~(TCP_SEGMENT_LOST);
+			if (tp->bytes_lost < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_lost (%u) can't be smaller "
+				    "than already lost segment length (%u)", tp->bytes_lost, seg_len);
+			}
+			tp->bytes_lost -= seg_len;
+		}
+	}
+	*newbytes_sacked += seg_len;
+	seg->flags |= TCP_SEGMENT_SACKED;
+	tp->bytes_sacked += seg_len;
+
+	return true;
+}
+
+static void
+tcp_segs_dosack_matched(struct tcpcb *tp, struct tcp_seg_sent *found_seg,
+    tcp_seq sblk_start, uint32_t tsecr,
+    uint32_t *newbytes_sacked)
+{
+	struct tcp_seg_sent seg = {};
+
+	while (found_seg != NULL) {
+		if (sblk_start == found_seg->start_seq) {
+			/*
+			 * Covered the entire SACK block.
+			 * Record segment flags before they get erased.
+			 */
+			uint8_t seg_flags = found_seg->flags;
+			bool newly_marked = tcp_seg_mark_sacked(tp, found_seg, newbytes_sacked);
+			if (newly_marked) {
+				/* Advance RACK state */
+				tcp_rack_update_segment_acked(tp, tsecr, found_seg->xmit_ts,
+				    found_seg->end_seq,
+				    !!(seg_flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE));
+			}
+			break;
+		} else if (SEQ_GT(sblk_start, found_seg->start_seq)) {
+			if ((found_seg->flags & TCP_SEGMENT_SACKED) != 0) {
+				/* No need to process an already SACKED segment */
+				break;
+			}
+			/*
+			 * This segment is partially ACKed by SACK block
+			 * as sblk_start > segment start. Since it is
+			 * partially SACKed, we should split the unSACKed and
+			 * SACKed parts.
+			 */
+			/* First create a new segment for unSACKed part */
+			tcp_seg_sent_insert_before(tp, found_seg, found_seg->start_seq, sblk_start,
+			    found_seg->xmit_ts, found_seg->flags);
+			/* Now, update the SACKed part */
+			found_seg->start_seq = sblk_start;
+			/* Record seg flags before they get erased. */
+			uint8_t seg_flags = found_seg->flags;
+			bool newly_marked = tcp_seg_mark_sacked(tp, found_seg, newbytes_sacked);
+			if (newly_marked) {
+				/* Advance RACK state */
+				tcp_rack_update_segment_acked(tp, tsecr, found_seg->xmit_ts,
+				    found_seg->end_seq,
+				    !!(seg_flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE));
+			}
+			break;
+		} else {
+			/*
+			 * This segment lies within the SACK block
+			 * Record segment flags before they get erased.
+			 */
+			uint8_t seg_flags = found_seg->flags;
+			bool newly_marked = tcp_seg_mark_sacked(tp, found_seg, newbytes_sacked);
+			if (newly_marked) {
+				/* Advance RACK state */
+				tcp_rack_update_segment_acked(tp, tsecr, found_seg->xmit_ts,
+				    found_seg->end_seq,
+				    !!(seg_flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE));
+			}
+			/* Find the next segment ending at the start of current segment */
+			seg.end_seq = found_seg->start_seq;
+			found_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &seg);
+		}
+	}
+}
+
+void
+tcp_segs_dosack(struct tcpcb *tp, tcp_seq sblk_start, tcp_seq sblk_end,
+    uint32_t tsecr, uint32_t *newbytes_sacked)
+{
+	/*
+	 * When we receive SACK, min RTT is computed after SACK processing which
+	 * means we are using min RTT from the previous ACK to advance RACK state
+	 * This is ok as we track a windowed min-filtered estimate over a period.
+	 */
+	struct tcp_seg_sent seg = {};
+	struct tcp_seg_sent *found_seg = NULL, *sacked_seg = NULL;
+
+	/* Set the end sequence to search for SACKed segment */
+	seg.end_seq = sblk_end;
+	found_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &seg);
+
+	if (found_seg != NULL) {
+		/* We found an exact match for sblk_end */
+		tcp_segs_dosack_matched(tp, found_seg, sblk_start, tsecr, newbytes_sacked);
+		return;
+	}
+	/*
+	 * We come here when we don't find an exact match and sblk_end
+	 * lies within a segment. This would happen only when TSO is used.
+	 */
+	RB_FOREACH(found_seg, tcp_seg_sent_tree_head, &tp->t_segs_sent_tree) {
+		if (SEQ_LT(sblk_end, found_seg->end_seq) && SEQ_GT(sblk_end, found_seg->start_seq)) {
+			/*
+			 * This segment is partially SACKed. We split this segment at the boundary
+			 * of SACK block. First insert the newly SACKed part
+			 */
+			tcp_seq start = SEQ_LEQ(sblk_start, found_seg->start_seq) ? found_seg->start_seq : sblk_start;
+			struct tcp_seg_sent *inserted = tcp_seg_sent_insert_before(tp, found_seg, start,
+			    sblk_end, found_seg->xmit_ts, found_seg->flags);
+			/* Record seg flags before they get erased. */
+			uint8_t seg_flags = inserted->flags;
+			/* Mark the SACKed segment */
+			tcp_seg_mark_sacked(tp, inserted, newbytes_sacked);
+
+			/* Advance RACK state */
+			tcp_rack_update_segment_acked(tp, tsecr, inserted->xmit_ts,
+			    inserted->end_seq, !!(seg_flags & TCP_SEGMENT_RETRANSMITTED_ATLEAST_ONCE));
+
+			if (sblk_start == found_seg->start_seq) {
+				/*
+				 * We are done with this SACK block.
+				 * Move the start of existing segment
+				 */
+				found_seg->start_seq = sblk_end;
+				break;
+			}
+
+			if (SEQ_GT(sblk_start, found_seg->start_seq)) {
+				/* Insert the remaining unSACKed part before the SACKED segment inserted above */
+				tcp_seg_sent_insert_before(tp, inserted, found_seg->start_seq,
+				    sblk_start, found_seg->xmit_ts, found_seg->flags);
+				/* Move the start of existing segment */
+				found_seg->start_seq = sblk_end;
+				break;
+			} else {
+				/*
+				 * This SACK block covers more than one segment
+				 * Look for segments SACKed below this segment
+				 */
+				seg.end_seq = found_seg->start_seq;
+				sacked_seg = RB_FIND(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, &seg);
+
+				if (sacked_seg != NULL) {
+					/* We found an exact match for sblk_end */
+					tcp_segs_dosack_matched(tp, sacked_seg, sblk_start, tsecr, newbytes_sacked);
+				}
+
+				/* Move the start of existing segment */
+				found_seg->start_seq = sblk_end;
+			}
+			break;
+		}
+	}
+}
+
+void
+tcp_segs_clear_sacked(struct tcpcb *tp)
+{
+	struct tcp_seg_sent *seg = NULL;
+
+	TAILQ_FOREACH(seg, &tp->t_segs_sent, tx_link)
+	{
+		const uint32_t seg_len = tcp_seg_len(seg);
+
+		if (seg->flags & TCP_SEGMENT_SACKED) {
+			seg->flags &= ~(TCP_SEGMENT_SACKED);
+			if (tp->bytes_sacked < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_sacked (%u) can't be smaller "
+				    "than already SACKed segment length (%u)", tp->bytes_sacked, seg_len);
+			}
+			tp->bytes_sacked -= seg_len;
+		}
+	}
+}
+
+void
+tcp_mark_seg_lost(struct tcpcb *tp, struct tcp_seg_sent *seg)
+{
+	const uint32_t seg_len = tcp_seg_len(seg);
+
+	if (seg->flags & TCP_SEGMENT_LOST) {
+		if (seg->flags & TCP_RACK_RETRANSMITTED) {
+			/* Retransmission was lost */
+			seg->flags &= ~TCP_RACK_RETRANSMITTED;
+			if (tp->bytes_retransmitted < seg_len) {
+				os_log_error(OS_LOG_DEFAULT, "bytes_retransmitted (%u) can't be "
+				    "smaller than retransmited segment length (%u)",
+				    tp->bytes_retransmitted, seg_len);
+				return;
+			}
+			tp->bytes_retransmitted -= seg_len;
+		}
+	} else {
+		seg->flags |= TCP_SEGMENT_LOST;
+		tp->bytes_lost += seg_len;
+	}
+}
+
+void
+tcp_seg_delete(struct tcpcb *tp, struct tcp_seg_sent *seg)
+{
+	if (tp->seg_pool.free_segs_count >= TCP_SEG_POOL_MAX_ITEM_COUNT) {
+		zfree(tcp_seg_sent_zone, seg);
+	} else {
+		bzero(seg, sizeof(*seg));
+		TAILQ_INSERT_TAIL(&tp->seg_pool.free_segs, seg, free_link);
+		tp->seg_pool.free_segs_count++;
+	}
+}
+
+void
+tcp_segs_sent_clean(struct tcpcb *tp, bool free_segs)
+{
+	struct tcp_seg_sent *seg = NULL, *next = NULL;
+
+	TAILQ_FOREACH_SAFE(seg, &tp->t_segs_sent, tx_link, next) {
+		/* Check for reordering */
+		tcp_rack_detect_reordering_acked(tp, seg);
+
+		TAILQ_REMOVE(&tp->t_segs_sent, seg, tx_link);
+		RB_REMOVE(tcp_seg_sent_tree_head, &tp->t_segs_sent_tree, seg);
+		tcp_seg_delete(tp, seg);
+	}
+	if (__improbable(!RB_EMPTY(&tp->t_segs_sent_tree))) {
+		os_log_error(OS_LOG_DEFAULT, "RB tree still contains segments while "
+		    "time ordered list is already empty");
+	}
+	if (__improbable(!TAILQ_EMPTY(&tp->t_segs_acked))) {
+		os_log_error(OS_LOG_DEFAULT, "Segment ACKed list shouldn't contain "
+		    "any segments as they are removed immediately after being ACKed");
+	}
+	/* Reset seg_retransmitted as we emptied the list */
+	tcp_rack_reset_segs_retransmitted(tp);
+	tp->bytes_lost = tp->bytes_sacked = tp->bytes_retransmitted = 0;
+
+	/* Empty the free segments pool */
+	if (free_segs) {
+		TAILQ_FOREACH_SAFE(seg, &tp->seg_pool.free_segs, free_link, next) {
+			TAILQ_REMOVE(&tp->seg_pool.free_segs, seg, free_link);
+			zfree(tcp_seg_sent_zone, seg);
+		}
+		tp->seg_pool.free_segs_count = 0;
+	}
+}
+
 void
 tcp_get_connectivity_status(struct tcpcb *tp,
     struct tcp_conn_status *connstatus)
@@ -3884,12 +4627,6 @@ tcp_get_connectivity_status(struct tcpcb *tp,
 	    (tp->t_inpcb->inp_last_outifp->if_eflags & IFEF_PROBE_CONNECTIVITY)) {
 		connstatus->probe_activated = 1;
 	}
-}
-
-boolean_t
-tfo_enabled(const struct tcpcb *tp)
-{
-	return (tp->t_flagsext & TF_FASTOPEN)? TRUE : FALSE;
 }
 
 void
@@ -4005,10 +4742,16 @@ tcp_fill_keepalive_offload_frames(ifnet_t ifp,
 	inp_gen_t gencnt;
 	u_int32_t frame_index = *used_frames_count;
 
+	/* Validation of the parameters */
 	if (ifp == NULL || frames_array == NULL ||
 	    frames_array_count == 0 ||
 	    frame_index >= frames_array_count ||
 	    frame_data_offset >= IFNET_KEEPALIVE_OFFLOAD_FRAME_DATA_SIZE) {
+		return;
+	}
+
+	/* Fast exit when no process is using the socket option TCP_KEEPALIVE_OFFLOAD */
+	if (ifp->if_tcp_kao_cnt == 0) {
 		return;
 	}
 

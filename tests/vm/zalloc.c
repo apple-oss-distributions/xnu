@@ -24,22 +24,22 @@ run_sysctl_test(const char *t, int64_t value)
 	return result;
 }
 
-T_DECL(basic_zone_test, "General zalloc test")
+T_DECL(basic_zone_test, "General zalloc test", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_basic_test", 0), "zone_basic_test");
 }
 
-T_DECL(read_only_zone_test, "Read-only zalloc test")
+T_DECL(read_only_zone_test, "Read-only zalloc test", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_ro_basic_test", 0), "zone_ro_basic_test");
 }
 
-T_DECL(zone_stress_test, "Zone stress test of edge cases")
+T_DECL(zone_stress_test, "Zone stress test of edge cases", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_stress_test", 0), "zone_stress_test");
 }
 
-T_DECL(zone_gc_stress_test, "stress test for zone_gc")
+T_DECL(zone_gc_stress_test, "stress test for zone_gc", T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ull, run_sysctl_test("zone_gc_stress_test", 10), "zone_gc_stress_test");
 }
@@ -48,7 +48,7 @@ T_DECL(zone_gc_stress_test, "stress test for zone_gc")
 
 T_DECL(zlog_smoke_test, "check that zlog functions at all",
     T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1),
-    T_META_BOOTARGS_SET("zlog1=" ZLOG_ZONE))
+    T_META_BOOTARGS_SET("zlog1=" ZLOG_ZONE), T_META_TAG_VM_PREFERRED)
 {
 	char *cmd[] = { "/usr/local/bin/zlog", "-l", "-z", ZLOG_ZONE, NULL };
 	dispatch_semaphore_t sema = dispatch_semaphore_create(0);

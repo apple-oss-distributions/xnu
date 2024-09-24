@@ -56,7 +56,7 @@ tests()
 	}
 }
 
-T_DECL(compare_equal_nullptr, "intrusive_shared_ptr.compare.equal.nullptr") {
+T_DECL(compare_equal_nullptr, "intrusive_shared_ptr.compare.equal.nullptr", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 }

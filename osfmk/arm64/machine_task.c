@@ -248,6 +248,51 @@ machine_task_init(__unused task_t new_task,
 {
 }
 
+/**
+ * Converts an OS version maj.min.patch into the format embedded in code
+ * signatures.
+ *
+ * @param maj_version major version number (x)
+ * @param min_version minor version number (y)
+ * @param patch_version patch version number (z)
+ * @return the version number encoded as xxxx.yy.zz
+ */
+static inline uint32_t
+sdk_version(uint16_t maj_version, uint8_t min_version, uint8_t patch_version)
+{
+	return (maj_version << 16) | (min_version << 8) | (patch_version << 0);
+}
+
+/**
+ * Determines whether the process was compiled with an SDK targeting an OS from
+ * fall 2024 or later.
+ *
+ * @param platform one of PLATFORM_*
+ * @param sdk the SDK version embedded in the code signature
+ */
+static bool
+platform_and_sdk_fall_2024_os_or_later(uint32_t platform, uint32_t sdk)
+{
+	switch (platform) {
+	case PLATFORM_MACOS:
+		return sdk >= sdk_version(15, 0, 0);
+	case PLATFORM_IOS:
+	case PLATFORM_IOSSIMULATOR:
+	case PLATFORM_MACCATALYST:
+		return sdk >= sdk_version(18, 0, 0);
+	case PLATFORM_TVOS:
+	case PLATFORM_TVOSSIMULATOR:
+		return sdk >= sdk_version(18, 0, 0);
+	case PLATFORM_WATCHOS:
+	case PLATFORM_WATCHOSSIMULATOR:
+		return sdk >= sdk_version(11, 0, 0);
+	case PLATFORM_DRIVERKIT:
+		return sdk >= sdk_version(24, 0, 0);
+	default:
+		return true;
+	}
+}
+
 /*
  * machine_task_process_signature
  *
@@ -281,7 +326,7 @@ machine_task_process_signature(
 	 * Those were allowed to use x18 for their purposes on Apple Silicon.
 	 */
 
-	if (platform == PLATFORM_MACOS && sdk < 0xd0000) {
+	if (platform == PLATFORM_MACOS && sdk < sdk_version(13, 0, 0)) {
 		task->preserve_x18 = true;
 	}
 #else /* !__ARM_KERNEL_PROTECT__ */
@@ -298,5 +343,21 @@ machine_task_process_signature(
 	}
 #endif /* !__ARM_KERNEL_PROTECT__ */
 
+	/* The task defaults to enable ARMv8.7 extensions if the SDK is recent. */
+	bool uses_1ghz_timebase = platform_and_sdk_fall_2024_os_or_later(platform, sdk);
+
+#if CONFIG_ROSETTA
+	/* Rosetta tasks expect Apple timebase. */
+	uses_1ghz_timebase = uses_1ghz_timebase && (!task_is_translated(task));
+#endif /* CONFIG_ROSETTA */
+
+	task->uses_1ghz_timebase = uses_1ghz_timebase;
+
 	return kr;
+}
+
+bool
+ml_task_uses_1ghz_timebase(const task_t task)
+{
+	return task->uses_1ghz_timebase;
 }

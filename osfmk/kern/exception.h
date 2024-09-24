@@ -47,7 +47,13 @@ struct exception_action {
 	thread_state_flavor_t   flavor;         /* state flavor to send */
 	exception_behavior_t    behavior;       /* exception type to raise */
 	boolean_t               privileged;     /* survives ipc_task_reset */
+	boolean_t               hardened;       /* associated with the task's hardened_exception_action */
 	struct label            *label;         /* MAC label associated with action */
+};
+struct hardened_exception_action {
+	struct exception_action ea;
+	uint32_t                signed_pc_key;
+	exception_mask_t        exception;
 };
 
 /* Initialize global state needed for exceptions. */

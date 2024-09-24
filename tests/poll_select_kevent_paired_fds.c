@@ -854,14 +854,15 @@ T_HELPER_DECL(writer_helper, "Write asynchronously")
 	    write_mode, read_name, read_mode) \
 	        T_DECL(desc_name##_r##read_name##_w##write_name##_procs, "read changes to a " \
 	                        #desc_name " with " #read_name " and writing " #write_str \
-	                        " across two processes") \
+	                        " across two processes", T_META_TAG_VM_PREFERRED) \
 	        { \
 	                drive_processes(fd_pair, read_mode, write_mode); \
 	        }
 #define WR_DECL_THREADS(desc_name, fd_pair, write_name, write_str, \
 	    write_mode, read_name, read_mode) \
 	        T_DECL(desc_name##_r##read_name##_w##write_name##_thds, "read changes to a " \
-	                        #desc_name " with " #read_name " and writing " #write_str) \
+	                        #desc_name " with " #read_name " and writing " #write_str, \
+	                                                T_META_TAG_VM_PREFERRED) \
 	        { \
 	                drive_threads(fd_pair, read_mode, write_mode); \
 	        }

@@ -39,6 +39,8 @@
 #define HAS_PARAVIRTUALIZED_PAC   1
 #define HAS_GIC_V3                1
 #define HAS_ARM_FEAT_SSBS2        1
+#define HAS_ARM_FEAT_SME          1
+#define HAS_ARM_FEAT_SME2         1
 
 #define __ARM_PAN_AVAILABLE__     1
 #define __ARM_16K_PG__            1
@@ -51,7 +53,7 @@
 #undef  __ARM64_PMAP_SUBPAGE_L1__
 
 #ifndef ASSEMBLER
-#define VMAPPLE_UART
+#define PL011_UART
 #define PLATFORM_PANIC_LOG_DISABLED
 #endif /* ! ASSEMBLER */
 

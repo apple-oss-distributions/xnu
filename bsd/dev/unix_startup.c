@@ -35,7 +35,7 @@
 #include <mach/mach_types.h>
 
 #include <kern/startup.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <mach/vm_prot.h>
 
 #include <sys/param.h>
@@ -90,9 +90,6 @@ SYSCTL_INT(_kern, OID_AUTO, nbuf, CTLFLAG_RD | CTLFLAG_LOCKED, &nbuf_headers, 0,
 SYSCTL_INT(_kern, OID_AUTO, maxnbuf, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &max_nbuf_headers, 0, "");
 
 __private_extern__ int customnbuf = 0;
-
-/* Indicates a server boot when set */
-TUNABLE(int, serverperfmode, "serverperfmode", 0);
 
 #if SOCKETS
 static unsigned int mbuf_poolsz;
@@ -337,8 +334,6 @@ extern int tcp_tcbhashsize;
 extern int max_cached_sock_count;
 #endif
 
-#define SERVER_PERF_MODE_VALIDATION_DISABLES 0x5dee
-extern unsigned int kern_feature_overrides;
 void
 bsd_scale_setup(int scale)
 {
@@ -388,9 +383,5 @@ bsd_scale_setup(int scale)
 		hard_maxproc = maxproc;
 	}
 #endif
-	if (serverperfmode) {
-		/* If running in serverperfmode disable some internal only diagnostics. */
-		kern_feature_overrides |= SERVER_PERF_MODE_VALIDATION_DISABLES;
-	}
 	bsd_exec_setup(scale);
 }

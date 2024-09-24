@@ -31,8 +31,8 @@
  */
 #include "lz4.h"
 #include "WKdm_new.h"
-#include <vm/vm_compressor_algorithms.h>
-#include <vm/vm_compressor.h>
+#include <vm/vm_compressor_algorithms_internal.h>
+#include <vm/vm_compressor_internal.h>
 
 #define MZV_MAGIC (17185)
 #if defined(__arm64__)
@@ -99,6 +99,7 @@ enum compressor_preselect_t {
 	CPRESELWK = 2,
 };
 
+/* changeable via sysctl */
 vm_compressor_mode_t vm_compressor_current_codec = VM_COMPRESSOR_DEFAULT_CODEC;
 
 boolean_t vm_compressor_force_sw_wkdm = FALSE;
@@ -396,9 +397,8 @@ metadecompressor(const uint8_t *source, uint8_t *dest, uint32_t csize,
 		rval = (int)lz4raw_decode_buffer(dest, PAGE_SIZE, source, csize, &compressor_dscratch->lz4decodestate[0]);
 		VM_DECOMPRESSOR_STAT(compressor_stats.lz4_decompressions += 1);
 		VM_DECOMPRESSOR_STAT(compressor_stats.lz4_decompressed_bytes += csize);
-#if DEVELOPMENT || DEBUG
-		uint32_t *d32 = dest;
-#endif
+
+		__assert_only uint32_t *d32 = dest;
 		assertf(rval == PAGE_SIZE, "LZ4 decode: size != pgsize %d, header: 0x%x, 0x%x, 0x%x",
 		    rval, *d32, *(d32 + 1), *(d32 + 2));
 		success = (rval == PAGE_SIZE);

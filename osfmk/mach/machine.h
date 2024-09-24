@@ -162,10 +162,11 @@ __END_DECLS
 #define CPU_TYPE_POWERPC                ((cpu_type_t) 18)
 #define CPU_TYPE_POWERPC64              (CPU_TYPE_POWERPC | CPU_ARCH_ABI64)
 /* skip				((cpu_type_t) 19)	*/
-/* skip				((cpu_type_t) 20 */
-/* skip				((cpu_type_t) 21 */
-/* skip				((cpu_type_t) 22 */
-/* skip				((cpu_type_t) 23 */
+/* skip				((cpu_type_t) 20) */
+/* skip				((cpu_type_t) 21) */
+/* skip				((cpu_type_t) 22) */
+/* skip				((cpu_type_t) 23) */
+/* skip				((cpu_type_t) 24) */
 
 /*
  *	Machine subtypes (these are defined here, instead of in a machine
@@ -396,6 +397,7 @@ __END_DECLS
 #define CPU_SUBTYPE_ARM64_32_ALL        ((cpu_subtype_t) 0)
 #define CPU_SUBTYPE_ARM64_32_V8 ((cpu_subtype_t) 1)
 
+
 #endif /* !__ASSEMBLER__ */
 
 /*
@@ -440,9 +442,14 @@ __END_DECLS
 #define CPUFAMILY_ARM_MONSOON_MISTRAL   0xe81e7ef6
 #define CPUFAMILY_ARM_VORTEX_TEMPEST    0x07d34b9f
 #define CPUFAMILY_ARM_LIGHTNING_THUNDER 0x462504d2
-#ifndef RC_HIDE_XNU_FIRESTORM
 #define CPUFAMILY_ARM_FIRESTORM_ICESTORM 0x1b588bb3
-#endif /* !RC_HIDE_XNU_FIRESTORM */
+#define CPUFAMILY_ARM_BLIZZARD_AVALANCHE 0xda33d83d
+#define CPUFAMILY_ARM_EVEREST_SAWTOOTH  0x8765edea
+#define CPUFAMILY_ARM_IBIZA             0xfa33415e
+#define CPUFAMILY_ARM_PALMA 0x72015832
+#define CPUFAMILY_ARM_COLL 0x2876f5b5
+#define CPUFAMILY_ARM_LOBOS 0x5f4dea93
+#define CPUFAMILY_ARM_DONAN 0x6f5129ac
 
 /* Described in rdar://64125549 */
 #define CPUSUBFAMILY_UNKNOWN            0

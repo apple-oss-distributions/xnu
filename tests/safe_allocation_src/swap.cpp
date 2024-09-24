@@ -98,7 +98,7 @@ tests()
 	}
 }
 
-T_DECL(swap, "safe_allocation.swap") {
+T_DECL(swap, "safe_allocation.swap", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

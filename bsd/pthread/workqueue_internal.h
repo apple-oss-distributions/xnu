@@ -85,6 +85,10 @@
 #define UT_WORKQ_EARLY_BOUND           0x40 /* Thread has been bound early */
 #define UT_WORKQ_CPUPERCENT            0x80 /* Thread has CPU percent policy active */
 #define UT_WORKQ_COOPERATIVE           0x100 /* Thread is part of cooperative pool */
+/* Thread is permanently bound to a thread request. This is a sticky flag. */
+#define UT_WORKQ_PERMANENT_BIND        0x200
+#define UT_WORKQ_WORK_INTERVAL_JOINED  0x400 /* Thread has joined a work interval */
+#define UT_WORKQ_WORK_INTERVAL_FAILED  0x800 /* Thread has failed to join a work interval */
 
 typedef union workq_threadreq_param_s {
 	struct {
@@ -100,7 +104,15 @@ typedef union workq_threadreq_param_s {
 #define TRP_PRIORITY            0x1
 #define TRP_POLICY              0x2
 #define TRP_CPUPERCENT          0x4
+#define TRP_BOUND_THREAD        0x8
 #define TRP_RELEASED            0x8000
+
+struct workq_threadreq_extended_param_s {
+	struct work_interval *trp_work_interval;
+#if CONFIG_PREADOPT_TG
+	struct thread_group *trp_permanent_preadopt_tg;
+#endif
+};
 
 /*!
  * @enum workq_tr_state_t
@@ -153,30 +165,43 @@ typedef union workq_threadreq_param_s {
  * This is always set under the kqlock, sometimes also under the workq lock.
  *
  * tr_entry is unused, tr_thread is the thread we're bound to.
+ *
  */
 __enum_decl(workq_tr_state_t, uint8_t, {
-	WORKQ_TR_STATE_IDLE        = 0, /* request isn't in flight       */
-	WORKQ_TR_STATE_NEW         = 1, /* request is being initiated    */
-	WORKQ_TR_STATE_QUEUED      = 2, /* request is being queued       */
-	WORKQ_TR_STATE_CANCELED    = 3, /* request is canceled           */
-	WORKQ_TR_STATE_BINDING     = 4, /* request is preposted for bind */
-	WORKQ_TR_STATE_BOUND       = 5, /* request is bound to a thread  */
+	WORKQ_TR_STATE_IDLE               = 0, /* request isn't in flight       */
+	WORKQ_TR_STATE_NEW                = 1, /* request is being initiated    */
+	WORKQ_TR_STATE_QUEUED             = 2, /* request is being queued       */
+	WORKQ_TR_STATE_CANCELED           = 3, /* request is canceled           */
+	WORKQ_TR_STATE_BINDING            = 4, /* request is preposted for bind */
+	WORKQ_TR_STATE_BOUND              = 5, /* request is bound to a thread  */
 });
 
 __options_decl(workq_tr_flags_t, uint8_t, {
-	WORKQ_TR_FLAG_KEVENT         = 0x01,
-	WORKQ_TR_FLAG_WORKLOOP       = 0x02,
-	WORKQ_TR_FLAG_OVERCOMMIT     = 0x04,
-	WORKQ_TR_FLAG_WL_PARAMS      = 0x08,
-	WORKQ_TR_FLAG_WL_OUTSIDE_QOS = 0x10,
-	WORKQ_TR_FLAG_COOPERATIVE    = 0x20,
+	WORKQ_TR_FLAG_KEVENT            = 0x01,
+	WORKQ_TR_FLAG_WORKLOOP          = 0x02,
+	WORKQ_TR_FLAG_OVERCOMMIT        = 0x04,
+	WORKQ_TR_FLAG_WL_PARAMS         = 0x08,
+	WORKQ_TR_FLAG_WL_OUTSIDE_QOS    = 0x10,
+	WORKQ_TR_FLAG_COOPERATIVE       = 0x20,
+	/*
+	 * A workqueue thread request with this flag will be permanently
+	 * bound to a newly created workqueue thread since the creation of
+	 * the associated kqworkloop until its teardown.
+	 */
+	WORKQ_TR_FLAG_PERMANENT_BIND    = 0x40,
 });
 
 typedef struct workq_threadreq_s {
 	union {
 		struct priority_queue_entry_sched tr_entry;
 		STAILQ_ENTRY(workq_threadreq_s) tr_link;
-		thread_t tr_thread;
+		struct {
+			thread_t tr_thread;
+			/*
+			 * tr_work_interval is only used when TRP_BOUND_THREAD is also set.
+			 */
+			struct work_interval *tr_work_interval;
+		};
 	};
 	uint16_t           tr_count;
 	workq_tr_flags_t   tr_flags;
@@ -257,7 +282,8 @@ struct workqueue {
 	uint8_t wq_cooperative_queue_scheduled_count[WORKQ_NUM_QOS_BUCKETS];
 	uint16_t wq_cooperative_queue_best_req_qos: 3, /* UN means no request, returns BG for BG/MT bucket */
 	    wq_cooperative_queue_has_limited_max_size:1, /* if set, max size of cooperative pool per QoS is 1 */
-	    unused:12;
+	    wq_exceeded_active_constrained_thread_limit:1,
+	    unused:11;
 	struct workq_threadreq_tailq wq_cooperative_queue[WORKQ_NUM_QOS_BUCKETS];
 };
 
@@ -302,6 +328,20 @@ void workq_kern_threadreq_modify(struct proc *p, struct workq_threadreq_s *kqr,
 // called with the kq req lock held
 void workq_kern_threadreq_update_inheritor(struct proc *p, struct workq_threadreq_s *kqr,
     thread_t owner, struct turnstile *ts, turnstile_update_flags_t flags);
+
+kern_return_t workq_kern_threadreq_permanent_bind(struct proc *p, struct workq_threadreq_s *kqr);
+
+void workq_kern_bound_thread_wakeup(struct workq_threadreq_s *kqr);
+
+void workq_kern_bound_thread_park(struct workq_threadreq_s *kqr);
+
+void workq_kern_bound_thread_terminate(struct workq_threadreq_s *kqr);
+
+bool workq_thread_is_permanently_bound(struct uthread *uth);
+
+// called with the kq req lock held
+void workq_kern_bound_thread_reset_pri(struct workq_threadreq_s *kqr,
+    struct uthread *uth);
 
 void workq_kern_threadreq_lock(struct proc *p);
 void workq_kern_threadreq_unlock(struct proc *p);

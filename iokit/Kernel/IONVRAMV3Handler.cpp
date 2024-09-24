@@ -229,6 +229,7 @@ private:
 	void findExistingEntry(const uuid_t varGuid, const char *varName, struct nvram_v3_var_entry **existing, unsigned int *existingIndex);
 	IOReturn syncRaw(void);
 	IOReturn syncBlock(void);
+	IOReturn handleEphDM(void);
 
 public:
 	virtual
@@ -627,6 +628,79 @@ exit:
 	return ret;
 }
 
+typedef struct {
+	const char            *name;
+	OSSharedPtr<OSObject> value;
+} ephDMAllowListEntry;
+
+static
+ephDMAllowListEntry ephDMEntries[] = {
+	// Mobile Obliteration clears the following variables after it runs
+	{ .name = "oblit-begins" },
+	{ .name = "orig-oblit" },
+	{ .name = "oblit-failure" },
+	{ .name = "oblit-inprogress" },
+	{ .name = "obliteration" },
+	// darwin-init is used for configuring internal builds
+	{ .name = "darwin-init" }
+};
+
+IOReturn
+IONVRAMV3Handler::handleEphDM(void)
+{
+	OSSharedPtr<IORegistryEntry> entry;
+	OSData*                      data;
+	OSSharedPtr<OSObject>        prop;
+	uint32_t                     ephDM = 0;
+	IOReturn                     ret = kIOReturnSuccess;
+	OSSharedPtr<const OSSymbol>  canonicalKey;
+	uint32_t                     skip = 0;
+
+	// For ephemeral data mode, NVRAM needs to be cleared on every boot
+	// For system region supported targets, iBoot clears the system region
+	// For other targets, iBoot clears all the persistent variables
+	// So xnu only needs to clear the common region
+	entry = IORegistryEntry::fromPath("/product", gIODTPlane);
+	if (entry) {
+		prop = entry->copyProperty("ephemeral-data-mode");
+		if (prop) {
+			data = OSDynamicCast(OSData, prop.get());
+			if (data) {
+				ephDM = *((uint32_t *)data->getBytesNoCopy());
+			}
+		}
+	}
+
+	require_action(ephDM != 0, exit, DEBUG_ALWAYS("ephemeral-data-mode not supported\n"));
+	require_action(_systemSize != 0, exit, DEBUG_ALWAYS("No system region, no need to clear\n"));
+
+	if (PE_parse_boot_argn("epdm-skip-nvram", &skip, sizeof(skip))) {
+		require_action(!(gInternalBuild && (skip == 1)), exit, DEBUG_ALWAYS("Internal build + epdm-skip-nvram set to true, skip nvram clearing\n"));
+	}
+
+	// Go through the allowlist and stash the values
+	for (uint32_t entry = 0; entry < ARRAY_SIZE(ephDMEntries); entry++) {
+		canonicalKey = keyWithGuidAndCString(gAppleNVRAMGuid, ephDMEntries[entry].name);
+		ephDMEntries[entry].value.reset(OSDynamicCast(OSData, _varDict->getObject(canonicalKey.get())), OSRetain);
+	}
+
+	DEBUG_ALWAYS("Obliterating common region\n");
+	ret = flush(gAppleNVRAMGuid, kIONVRAMOperationObliterate);
+	require_noerr_action(ret, exit, DEBUG_ERROR("Flushing common region failed, ret=%#08x\n", ret));
+
+	// Now write the allowlist variables back
+	for (uint32_t entry = 0; entry < ARRAY_SIZE(ephDMEntries); entry++) {
+		if (ephDMEntries[entry].value.get() == nullptr) {
+			continue;
+		}
+		ret = setVariableInternal(gAppleNVRAMGuid, ephDMEntries[entry].name, ephDMEntries[entry].value.get());
+		require_noerr_action(ret, exit, DEBUG_ERROR("Setting allowlist variable %s failed, ret=%#08x\n", ephDMEntries[entry].name, ret));
+	}
+
+exit:
+	return ret;
+}
+
 IOReturn
 IONVRAMV3Handler::unserializeVariables(void)
 {
@@ -743,6 +817,10 @@ skip:
 	_currentOffset = (uint32_t)offset;
 
 	DEBUG_ALWAYS("_commonSize %#x, _systemSize %#x, _currentOffset %#x\n", _commonSize, _systemSize, _currentOffset);
+
+	ret = handleEphDM();
+	verify_noerr_action(ret, panic("handleEphDM failed with ret=%08x", ret));
+
 	DEBUG_INFO("_commonUsed %#x, _systemUsed %#x\n", _commonUsed, _systemUsed);
 
 	_newData = true;

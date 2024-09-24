@@ -42,7 +42,7 @@ fsw_flow_add(struct nx_flowswitch *fsw, struct nx_flow_req *req0, int *error)
 	nexus_port_t nx_port = req0->nfr_nx_port;
 	struct flow_owner_bucket *fob;
 	struct flow_owner *fo = NULL;
-	void *fo_context = req0->nfr_context;
+	void *__single fo_context = req0->nfr_context;
 	boolean_t nx_bound = FALSE;
 	boolean_t new_mapping = FALSE;
 	struct nx_flow_req req;
@@ -145,9 +145,9 @@ fsw_flow_add(struct nx_flowswitch *fsw, struct nx_flow_req *req0, int *error)
 			nxb.nxb_uniqueid = proc_uniqueid(p);
 			nxb.nxb_pid = pid;
 			nxb.nxb_flags |= NXBF_MATCH_KEY;
-			nxb.nxb_key_len = sizeof(uuid_key);
-			nxb.nxb_key = sk_alloc_data(nxb.nxb_key_len,
+			nxb.nxb_key = sk_alloc_data(sizeof(uuid_key),
 			    Z_WAITOK | Z_NOFAIL, skmem_tag_nx_key);
+			nxb.nxb_key_len = sizeof(uuid_key);
 			bcopy(uuid_key, nxb.nxb_key, nxb.nxb_key_len);
 
 			/*
@@ -160,7 +160,7 @@ fsw_flow_add(struct nx_flowswitch *fsw, struct nx_flow_req *req0, int *error)
 			 */
 			if ((*error = NX_DOM(nx)->nxdom_bind_port(nx,
 			    &nx_port, &nxb, NULL)) != 0) {
-				sk_free_data(nxb.nxb_key, nxb.nxb_key_len);
+				sk_free_data_sized_by(nxb.nxb_key, nxb.nxb_key_len);
 				SK_ERR("%s(%d) failed to bind flow_uuid %s to a "
 				    "nx_port (err %d)", sk_proc_name_address(p),
 				    pid, sk_uuid_unparse(req.nfr_flow_uuid,
@@ -254,7 +254,7 @@ fsw_flow_add(struct nx_flowswitch *fsw, struct nx_flow_req *req0, int *error)
 	}
 
 	/* make sure rule ID isn't already being used */
-	struct flow_entry *fe;
+	struct flow_entry *__single fe;
 	if ((fe = flow_entry_find_by_uuid(fo, req.nfr_flow_uuid)) != NULL) {
 #if SK_LOG
 		char dbgbuf[FLOWENTRY_DBGBUF_SIZE];
@@ -344,7 +344,7 @@ fsw_flow_del(struct nx_flowswitch *fsw, struct nx_flow_req *req, bool nolinger,
 	struct kern_nexus *nx = fsw->fsw_nx;
 	struct flow_owner_bucket *fob;
 	struct flow_owner *fo;
-	void *fo_context = req->nfr_context;
+	void *__single fo_context = req->nfr_context;
 	pid_t pid = req->nfr_pid;
 	bool low_latency = ((req->nfr_flags & NXFLOWREQF_LOW_LATENCY) != 0);
 	int error;
@@ -451,8 +451,8 @@ int
 fsw_flow_config(struct nx_flowswitch *fsw, struct nx_flow_req *req)
 {
 	struct flow_mgr *fm = fsw->fsw_flow_mgr;
-	struct flow_entry *fe = NULL;
-	struct ns_token *nt = NULL;
+	struct flow_entry *__single fe = NULL;
+	struct ns_token *__single nt = NULL;
 	int error = 0;
 
 	FSW_RLOCK(fsw);
@@ -496,7 +496,7 @@ done:
 static void
 fsw_flow_route_ctor(void *arg, struct flow_route *fr)
 {
-	struct nx_flowswitch *fsw = arg;
+	struct nx_flowswitch *__single fsw = arg;
 	if (fsw->fsw_ctor != NULL) {
 		fsw->fsw_ctor(fsw, fr);
 	}
@@ -506,6 +506,6 @@ static int
 fsw_flow_route_resolve(void *arg, struct flow_route *fr,
     struct __kern_packet *pkt)
 {
-	struct nx_flowswitch *fsw = arg;
+	struct nx_flowswitch *__single fsw = arg;
 	return (fsw->fsw_resolve != NULL) ? fsw->fsw_resolve(fsw, fr, pkt) : 0;
 }

@@ -69,6 +69,7 @@ struct kp_kcallstack {
 		uintptr_t kpkc_word_frames[MAX_KCALLSTACK_FRAMES];
 		uint64_t kpkc_frames[MAX_KCALLSTACK_FRAMES] __kernel_ptr_semantics;
 	};
+	uint32_t kpkc_exclaves_offset;
 };
 
 struct kperf_context;
@@ -85,7 +86,7 @@ void kperf_ucallstack_log(struct kp_ucallstack *cs);
 
 #if CONFIG_EXCLAVES
 #include <kern/exclaves.tightbeam.h>
-void kperf_excallstack_log(const stackshot_ipcstackentry_s *ipcstack);
+void kperf_excallstack_log(const stackshottypes_ipcstackentry_s *ipcstack);
 bool kperf_exclave_callstack_pend(struct kperf_context *context, unsigned int actionid);
 #endif /* CONFIG_EXCLAVES */
 

@@ -118,6 +118,17 @@ static struct nxctl _usernxctl;
 struct nexus_controller kernnxctl = { .ncd_nxctl = &_kernnxctl };
 struct nexus_controller usernxctl = { .ncd_nxctl = &_usernxctl };
 
+/*
+ * -fbounds-safety: For static functions where additional size variables are
+ * added, we need to mark them __unused if this file is being built without
+ * -fbounds-safety.
+ */
+#if !__has_ptrcheck
+#define NX_FB_ARG __unused
+#else
+#define NX_FB_ARG
+#endif
+
 int
 nexus_init(void)
 {
@@ -426,8 +437,11 @@ nxctl_get_nexus_prov_list(struct nxctl *nxctl, struct sockopt *sopt)
 				err = copyout(nres, tmp_ptr,
 				    ncregs * sizeof(*nres));
 			} else {
-				bcopy(nres, CAST_DOWN(caddr_t, tmp_ptr),
+				caddr_t tmp;
+				tmp =  __unsafe_forge_bidi_indexable(caddr_t,
+				    CAST_DOWN(caddr_t, tmp_ptr),
 				    ncregs * sizeof(*nres));
+				bcopy(nres, tmp, ncregs * sizeof(*nres));
 			}
 		}
 		sk_free_data(nres, nres_sz);
@@ -601,8 +615,11 @@ nxctl_get_nexus_list(struct nxctl *nxctl, struct sockopt *sopt)
 					err = copyout(uuids, tmp_ptr,
 					    cnt_uuid * sizeof(uuid_t));
 				} else {
-					bcopy(uuids,
+					caddr_t tmp;
+					tmp = __unsafe_forge_bidi_indexable(caddr_t,
 					    CAST_DOWN(caddr_t, tmp_ptr),
+					    cnt_uuid * sizeof(uuid_t));
+					bcopy(uuids, tmp,
 					    cnt_uuid * sizeof(uuid_t));
 				}
 			}
@@ -712,7 +729,14 @@ nxctl_nexus_bind(struct nxctl *nxctl, struct sockopt *sopt)
 				goto done_unlocked;
 			}
 		} else {
-			bcopy((void *)nbr.nb_key, key, nbr.nb_key_len);
+			/*
+			 * -fbounds-safety: nbr.nb_key is user_addr_t. Changing
+			 * it to a pointer type is risky, so we just forge it
+			 * here instead.
+			 */
+			void *nb_key = __unsafe_forge_bidi_indexable(void *,
+			    nbr.nb_key, nbr.nb_key_len);
+			bcopy(nb_key, key, nbr.nb_key_len);
 		}
 	}
 
@@ -759,10 +783,14 @@ nxctl_nexus_bind(struct nxctl *nxctl, struct sockopt *sopt)
 	if (m_key) {
 		nxb->nxb_flags |= NXBF_MATCH_KEY;
 		ASSERT(key != NULL);
-		nxb->nxb_key = key;
-		key = NULL;     /* let nxb_free() free it */
 		ASSERT(nbr.nb_key_len != 0 &&
 		    nbr.nb_key_len <= NEXUS_MAX_KEY_LEN);
+		/*
+		 * -fbounds-safety: since nxb_key is __sized_by(nxb_key_len),
+		 * its assignment needs to be done side-by-side to nxb_key_len.
+		 */
+		nxb->nxb_key = key;
+		key = NULL;     /* let nxb_free() free it */
 		nxb->nxb_key_len = nbr.nb_key_len;
 	}
 
@@ -943,8 +971,9 @@ nxb_free(struct nxbind *nxb)
 	    (nxb->nxb_key != NULL) ? SK_KVA(nxb->nxb_key) : 0);
 
 	if (nxb->nxb_key != NULL) {
-		sk_free_data(nxb->nxb_key, nxb->nxb_key_len);
+		sk_free_data_sized_by(nxb->nxb_key, nxb->nxb_key_len);
 		nxb->nxb_key = NULL;
+		nxb->nxb_key_len = 0;
 	}
 	zfree(nxbind_zone, nxb);
 }
@@ -990,8 +1019,9 @@ nxb_move(struct nxbind *snxb, struct nxbind *dnxb)
 
 	/* in case the destination has a key attached, free it first */
 	if (dnxb->nxb_key != NULL) {
-		sk_free_data(dnxb->nxb_key, dnxb->nxb_key_len);
+		sk_free_data_sized_by(dnxb->nxb_key, dnxb->nxb_key_len);
 		dnxb->nxb_key = NULL;
+		dnxb->nxb_key_len = 0;
 	}
 
 	/* move everything from src to dst, and then wipe out src */
@@ -1096,8 +1126,11 @@ nxctl_get_channel_list(struct nxctl *nxctl, struct sockopt *sopt)
 				err = copyout(uuids, tmp_ptr,
 				    cnt_uuid * sizeof(uuid_t));
 			} else {
-				bcopy(uuids, CAST_DOWN(caddr_t, tmp_ptr),
+				caddr_t tmp;
+				tmp = __unsafe_forge_bidi_indexable(caddr_t,
+				    CAST_DOWN(caddr_t, tmp_ptr),
 				    cnt_uuid * sizeof(uuid_t));
+				bcopy(uuids, tmp, cnt_uuid * sizeof(uuid_t));
 			}
 		}
 		sk_free_data(uuids, uuids_sz);
@@ -1207,8 +1240,12 @@ nxctl_release(struct nxctl *nxctl)
 	return lastref;
 }
 
+/* XXX
+ * -fbounds-safety: Why is this taking a void *? All callers are passing nxctl.
+ * How come there's no nxctl_ctor?
+ */
 void
-nxctl_dtor(void *arg)
+nxctl_dtor(struct nxctl *arg)
 {
 	struct nxctl *nxctl = arg;
 
@@ -1507,8 +1544,8 @@ nxprov_create(struct proc *p, struct nxctl *nxctl, struct nxprov_reg *reg,
 #if CONFIG_NEXUS_NETIF
 	/* make sure netif_compat is the default here */
 	ASSERT(nxp->nxp_type != NEXUS_TYPE_NET_IF ||
-	    strcmp(nxdom_prov->nxdom_prov_name,
-	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0);
+	    strbufcmp(nxdom_prov->nxdom_prov_name, sizeof(nxdom_prov->nxdom_prov_name),
+	    NEXUS_PROVIDER_NET_IF_COMPAT, sizeof(NEXUS_PROVIDER_NET_IF_COMPAT)) == 0);
 #endif /* CONFIG_NEXUS_NETIF */
 
 	SK_LOCK();
@@ -1897,7 +1934,7 @@ nx_create(struct nxctl *nxctl, const uuid_t nxprov_uuid,
 	STAILQ_INIT(&nx->nx_ch_if_adv_head);
 	uuid_generate_random(nx->nx_uuid);
 	nx->nx_prov = nxprov;
-	nx->nx_ctx = (void *)(uintptr_t)nx_ctx;
+	nx->nx_ctx = __DECONST(void *, nx_ctx);
 	nx->nx_ctx_release = nx_ctx_release;
 	nx->nx_id = nxdom_prov->nxdom_prov_gencnt++;
 
@@ -2124,6 +2161,9 @@ nx_advisory_alloc(struct kern_nexus *nx, const char *name,
     struct skmem_region_params *srp_nexusadv, nexus_advisory_type_t type)
 {
 	struct __kern_nexus_adv_metadata *adv_md;
+	uint32_t msize = 0;
+	/* -fbounds-safety: why do we need maddr? */
+	void *__sized_by(msize) maddr = NULL;
 
 	_CASSERT(sizeof(struct __kern_nexus_adv_metadata) == sizeof(uint64_t));
 	_CASSERT((sizeof(struct sk_nexusadv) +
@@ -2140,8 +2180,10 @@ nx_advisory_alloc(struct kern_nexus *nx, const char *name,
 		return ENOMEM;
 	}
 
-	nx->nx_adv.nxv_adv = skmem_region_alloc(nx->nx_adv.nxv_reg, NULL,
-	    NULL, NULL, (SKMEM_NOSLEEP | SKMEM_PANIC));
+	nx->nx_adv.nxv_adv = skmem_region_alloc(nx->nx_adv.nxv_reg, &maddr,
+	    NULL, NULL, (SKMEM_NOSLEEP | SKMEM_PANIC),
+	    nx->nx_adv.nxv_reg->skr_c_obj_size, &msize);
+	nx->nx_adv.nxv_adv_size = nx->nx_adv.nxv_reg->skr_c_obj_size;
 	adv_md = nx->nx_adv.nxv_adv;
 	adv_md->knam_version = NX_ADVISORY_MD_CURRENT_VERSION;
 	adv_md->knam_type = type;
@@ -2166,6 +2208,7 @@ nx_advisory_free(struct kern_nexus *nx)
 		skmem_region_free(nx->nx_adv.nxv_reg,
 		    nx->nx_adv.nxv_adv, NULL);
 		nx->nx_adv.nxv_adv = NULL;
+		nx->nx_adv.nxv_adv_size = 0;
 		nx->nx_adv.nxv_adv_type = NEXUS_ADVISORY_TYPE_INVALID;
 		nx->nx_adv.flowswitch_nxv_adv = NULL;
 		skmem_region_release(nx->nx_adv.nxv_reg);
@@ -2408,8 +2451,9 @@ nx_init_slots(struct kern_nexus *nx, struct __kern_channel_ring *kring)
 	ASSERT(slot != NULL);
 
 	for (i = 0; i < kring->ckr_num_slots; i++) {
-		struct kern_slot_prop *slot_ctx_prop = NULL;
-		void *slot_ctx_arg = NULL;
+		struct kern_slot_prop *__single slot_ctx_prop = NULL;
+		/* -fbounds-safety: slot_ctx is unsafe anyway (mach_vmaddr_t) */
+		void *__single slot_ctx_arg = NULL;
 
 		ASSERT(&slot[i] <= kring->ckr_ksds_last);
 		if ((err = nxprov->nxprov_ext.nxpi_slot_init(nxprov, nx, kring,
@@ -2421,8 +2465,7 @@ nx_init_slots(struct kern_nexus *nx, struct __kern_channel_ring *kring)
 		}
 		/* we don't want this to be used by client, so verify here */
 		ASSERT(slot_ctx_prop == NULL);
-		kring->ckr_slot_ctxs[i].slot_ctx_arg =
-		    (mach_vm_address_t)slot_ctx_arg;
+		kring->ckr_slot_ctxs[i].slot_ctx_arg = slot_ctx_arg;
 		kring->ckr_slot_ctxs_set++;
 	}
 
@@ -2574,6 +2617,7 @@ nx_port_grow(struct kern_nexus *nx, nexus_port_size_t grow)
 		return ENOMEM;
 	}
 	nx->nx_ports_bmap = bmap;
+	nx->nx_ports_bmap_size = (num_ports / NX_PORT_CHUNK) * sizeof(*bmap);
 
 	if ((ports = sk_realloc_type_array(struct nx_port_info, old_num_ports,
 	    num_ports, nx->nx_ports, Z_WAITOK, skmem_tag_nx_port)) == NULL) {
@@ -2584,7 +2628,6 @@ nx_port_grow(struct kern_nexus *nx, nexus_port_size_t grow)
 
 	/* initialize the additional new ports */
 	bzero(&ports[nx->nx_num_ports], (grow * sizeof(*ports)));
-	nx->nx_ports = ports;
 
 	/* initialize new bitmaps (set all bits) */
 	for (i = (nx->nx_num_ports / NX_PORT_CHUNK);
@@ -2592,6 +2635,11 @@ nx_port_grow(struct kern_nexus *nx, nexus_port_size_t grow)
 		bmap[i] = NX_PORT_CHUNK_FREE;
 	}
 
+	/*
+	 * -fbounds-safety: Not sure if moving nx_ports assignment down here
+	 * would cause a regression.
+	 */
+	nx->nx_ports = ports;
 	nx->nx_num_ports = num_ports;
 
 	SK_DF(SK_VERB_NXPORT, "!!! nx 0x%llx ports %u/%u, %u ports added",
@@ -2807,8 +2855,12 @@ nx_port_bind(struct kern_nexus *nx, nexus_port_t nx_port, struct nxbind *nxb0)
 	return nx_port_bind_info(nx, nx_port, nxb0, NULL);
 }
 
+/*
+ * -fbounds-safety: all callers pass npi_info. Why don't we just change the
+ * input type to nx_port_info_header *?
+ */
 static int
-nx_port_info_size(void *info, size_t *sz)
+nx_port_info_size(struct nx_port_info_header *info, size_t *sz)
 {
 	struct nx_port_info_header *hdr = info;
 
@@ -2885,7 +2937,7 @@ nx_port_get_na(struct kern_nexus *nx, nexus_port_t nx_port)
 
 int
 nx_port_get_info(struct kern_nexus *nx, nexus_port_t port,
-    nx_port_info_type_t type, void *info, uint32_t len)
+    nx_port_info_type_t type, void *__sized_by(len)info, uint32_t len)
 {
 	struct nx_port_info *npi;
 	struct nx_port_info_header *hdr;
@@ -2894,7 +2946,12 @@ nx_port_get_info(struct kern_nexus *nx, nexus_port_t port,
 		return ENXIO;
 	}
 	npi = &nx->nx_ports[port];
-	hdr = npi->npi_info;
+	/*
+	 * -fbounds-safety: Changing npi_info to be __sized_by is a major
+	 * surgery. Just forge it here for now.
+	 */
+	hdr = __unsafe_forge_bidi_indexable(struct nx_port_info_header *,
+	    npi->npi_info, len);
 	if (hdr == NULL) {
 		return ENOENT;
 	}
@@ -2903,7 +2960,7 @@ nx_port_get_info(struct kern_nexus *nx, nexus_port_t port,
 		return EINVAL;
 	}
 
-	bcopy(npi->npi_info, info, len);
+	bcopy(hdr, info, len);
 	return 0;
 }
 
@@ -2924,13 +2981,14 @@ nx_port_is_defunct(struct kern_nexus *nx, nexus_port_t nx_port)
 void
 nx_port_free_all(struct kern_nexus *nx)
 {
-	uint32_t num_ports;
-
 	/* uncrustify doesn't handle C blocks properly */
 	/* BEGIN IGNORE CODESTYLE */
 	nx_port_foreach(nx, ^(nexus_port_t p) {
 		struct nxbind *nxb;
-		void *info;
+		/*
+		 * XXX -fbounds-safety: Come back to this after fixing npi_info
+		 */
+		void *__single info;
 		nxb = nx->nx_ports[p].npi_nxb;
 		info = nx->nx_ports[p].npi_info;
 		if (nxb != NULL) {
@@ -2947,14 +3005,13 @@ nx_port_free_all(struct kern_nexus *nx)
 	});
 	/* END IGNORE CODESTYLE */
 
-	num_ports = nx->nx_num_ports;
-	nx->nx_num_ports = 0;
 	nx->nx_active_ports = 0;
-	skn_free_data(ports_bmap,
-	    nx->nx_ports_bmap, (num_ports / NX_PORT_CHUNK) * sizeof(bitmap_t));
+	sk_free_data_sized_by(nx->nx_ports_bmap, nx->nx_ports_bmap_size);
 	nx->nx_ports_bmap = NULL;
-	sk_free_type_array(struct nx_port_info, num_ports, nx->nx_ports);
+	nx->nx_ports_bmap_size = 0;
+	sk_free_type_array_counted_by(struct nx_port_info, nx->nx_num_ports, nx->nx_ports);
 	nx->nx_ports = NULL;
+	nx->nx_num_ports = 0;
 }
 
 void
@@ -3056,7 +3113,8 @@ nexus_provider_info_populate(struct kern_nexus_provider *nxprov,
 	info->npi_instance_uuids_count = nxprov->nxprov_nx_count;
 
 	/* instance UUID list */
-	uuids = info->npi_instance_uuids;
+	uuids = __unsafe_forge_bidi_indexable(uuid_t *,
+	    info->npi_instance_uuids, sizeof(uuid_t) * info->npi_instance_uuids_count);
 	STAILQ_FOREACH(nx, &nxprov->nxprov_nx_head, nx_prov_link) {
 		uuid_copy(*uuids, nx->nx_uuid);
 		uuids++;
@@ -3137,9 +3195,21 @@ channel_ring_count(struct kern_channel *ch, enum txrx which)
 	return ch->ch_last[which] - ch->ch_first[which];
 }
 
+/*
+ * -fbounds-safety: kring's range is [first..last]. Marking it
+ * __counted_by(last) means range is [0..first..last]. The [0..first) might be
+ * problematic. However, the for loop in this function starts indexing from
+ * 'first', not 0, so that should be okay.
+ * XXX Until BATS starts using uncrustify-7 (rdar://90709826), having a space
+ * between __counted_by(entry_count) entries will be considered invalid code
+ * style and build will fail. Until rdar://117811249 is resolved, either stick
+ * to what makes BATS happy, or wrap IGNORE CODESTYLE around.
+ */
 static void
-populate_ring_entries(struct __kern_channel_ring *kring,
-    ring_id_t first, ring_id_t last, nexus_channel_ring_entry_t entries)
+populate_ring_entries(struct __kern_channel_ring *__counted_by(last)kring,
+    ring_id_t first, ring_id_t last,
+    nexus_channel_ring_entry *__counted_by(entry_count)entries,
+    uint32_t NX_FB_ARG entry_count)
 {
 	ring_id_t i;
 	nexus_channel_ring_entry_t scan;
@@ -3207,23 +3277,39 @@ nexus_channel_entry_populate(struct kern_channel *ch,
 	entry->nce_tx_rings = tx_last - tx_first;
 	entry->nce_rx_rings = rx_last - rx_first;
 	populate_ring_entries(ch->ch_na->na_tx_rings, tx_first, tx_last,
-	    entry->nce_ring_entries);
-	populate_ring_entries(ch->ch_na->na_rx_rings, rx_first, rx_last,
-	    entry->nce_ring_entries + entry->nce_tx_rings);
+	    entry->nce_ring_entries, entry->nce_tx_rings);
+
+	/*
+	 * -fbounds-safety: If entry->nce_tx_rings > 0 and
+	 * entry->nce_rx_rings == 0 (i.e. entry->nce_ring_count ==
+	 * entry->nce_tx_rings), simply passing
+	 * entry->nce_ring_entries + entry->nce_tx_rings to populate_ring_entries
+	 * will fail bounds check, because it is equivalent to assigning
+	 * nce_ring_entries + nce_tx_rings to a __single variable, and in this
+	 * case it goes out of bounds. It's same thing as having:
+	 *     int a[1];
+	 *     some_func(a + 1);  <-- bounds check will fail
+	 */
+	if (rx_first < rx_last) {
+		populate_ring_entries(ch->ch_na->na_rx_rings, rx_first, rx_last,
+		    entry->nce_ring_entries + entry->nce_tx_rings,
+		    entry->nce_rx_rings);
+	}
 }
 
 SK_NO_INLINE_ATTRIBUTE
 static size_t
 nexus_channel_info_populate(struct kern_nexus *nx,
-    nexus_channel_info_t info, size_t buffer_size)
+    nexus_channel_info *__sized_by(buffer_size) info, size_t buffer_size)
 {
 	struct kern_channel *ch = NULL;
 	size_t info_size;
 	caddr_t scan = NULL;
+	nexus_channel_entry *entry;
 
 	SK_LOCK_ASSERT_HELD();
 
-	info_size = sizeof(*info);
+	info_size = sizeof(nexus_channel_info);
 
 	/* channel list */
 	if (info != NULL) {
@@ -3234,7 +3320,7 @@ nexus_channel_info_populate(struct kern_nexus *nx,
 		/* instance UUID */
 		uuid_copy(info->nci_instance_uuid, nx->nx_uuid);
 		info->nci_channel_entries_count = nx->nx_ch_count;
-		scan = (caddr_t)info->nci_channel_entries;
+		scan = (caddr_t __bidi_indexable)info->nci_channel_entries;
 	}
 	STAILQ_FOREACH(ch, &nx->nx_ch_head, ch_link) {
 		size_t          entry_size;
@@ -3248,8 +3334,10 @@ nexus_channel_info_populate(struct kern_nexus *nx,
 			if (buffer_size < info_size) {
 				return info_size;
 			}
+			entry = (nexus_channel_entry *)(void *)scan;
+			entry->nce_ring_count = ring_count;
 
-			nexus_channel_entry_populate(ch, (void *)scan);
+			nexus_channel_entry_populate(ch, entry);
 			scan += entry_size;
 		}
 	}
@@ -3329,9 +3417,9 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 	struct nexus_mib_filter filter;
 	int error = 0;
 	size_t actual_space;
-	caddr_t buffer = NULL;
+	size_t allocated_space = 0;
+	caddr_t __sized_by(allocated_space) buffer = NULL;
 	size_t buffer_space;
-	size_t allocated_space;
 	int out_error;
 	struct kern_nexus *nx;
 	caddr_t scan;
@@ -3389,8 +3477,8 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		if (buffer_space > SK_SYSCTL_ALLOC_MAX) {
 			buffer_space = SK_SYSCTL_ALLOC_MAX;
 		}
+		buffer = sk_alloc_data(buffer_space, Z_WAITOK, skmem_tag_sysctl_buf);
 		allocated_space = buffer_space;
-		buffer = sk_alloc_data(allocated_space, Z_WAITOK, skmem_tag_sysctl_buf);
 		if (__improbable(buffer == NULL)) {
 			return ENOBUFS;
 		}
@@ -3406,11 +3494,22 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 			continue;
 		}
 
-		size_t size;
+		size_t size = 0;
 		struct kern_nexus_domain_provider *nx_dp = NX_DOM_PROV(nx);
 
-		size = nx_dp->nxdom_prov_nx_mib_get(nx, &filter, scan,
-		    buffer_space, p);
+		/*
+		 * -fbounds-safety: Because scan takes the bounds of buffer
+		 * (which is __sized_by(allocated_space)), at some point scan
+		 * will reach its bounds (because of scan += size). When it
+		 * does, it won't pass the bounds check when scan is passed to
+		 * nxdom_prov_nx_mib_get function. We need to avoid passing scan
+		 * to nxdom_prov_nx_mib_get when it reaches its upper bound,
+		 * i.e. when buffer_space reaches 0 (see buffer_space -= size).
+		 */
+		if (req->oldptr == USER_ADDR_NULL || buffer_space) {
+			size = nx_dp->nxdom_prov_nx_mib_get(nx, &filter, scan,
+			    buffer_space, p);
+		}
 
 		if (scan != NULL) {
 			if (buffer_space < size) {
@@ -3432,7 +3531,7 @@ nexus_mib_get_sysctl SYSCTL_HANDLER_ARGS
 		}
 	}
 	if (buffer != NULL) {
-		sk_free_data(buffer, allocated_space);
+		sk_free_data_sized_by(buffer, allocated_space);
 	}
 
 	return error;
@@ -3464,7 +3563,7 @@ kern_nexus_get_pbufpool_info(const uuid_t nx_uuid,
     struct kern_pbufpool_memory_info *rx_pool_info,
     struct kern_pbufpool_memory_info *tx_pool_info)
 {
-	struct kern_pbufpool *tpp, *rpp;
+	struct kern_pbufpool *__single tpp, *__single rpp;
 	struct kern_nexus *nx;
 	errno_t err = 0;
 

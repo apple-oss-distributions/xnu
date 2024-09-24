@@ -81,7 +81,7 @@ create_stat(int proc_wired_mem, int nthreads)
 	return dst;
 }
 
-T_DECL(exit, "exit(2) time from syscall start to end", T_META_TIMEOUT(TEST_TIMEOUT)) {
+T_DECL(exit, "exit(2) time from syscall start to end", T_META_TIMEOUT(TEST_TIMEOUT), T_META_TAG_VM_NOT_ELIGIBLE) {
 	s = create_stat(test_cases[consumer_i].wired_mem, test_cases[consumer_i].threads);
 
 	begin_ts = malloc(sizeof(uint64_t) * PID_MAX);

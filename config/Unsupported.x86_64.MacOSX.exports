@@ -22,3 +22,6 @@ _KUNCUserNotificationDisplayNotice
 _kalloc:_kalloc_external
 _kfree:_kfree_external
 _text_crypter_create_hook_set
+_mach_memory_entry_page_op
+_mach_memory_entry_range_op
+_vm_region_object_create

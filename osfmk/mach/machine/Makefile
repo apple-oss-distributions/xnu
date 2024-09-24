@@ -12,18 +12,10 @@ DATAFILES = \
 	vm_param.h vm_types.h machine_types.defs \
 	syscall_sw.h sdt.h sdt_isa.h _structs.h
 
-# mach_machine.modulemap additionally includes machine.h from ../.
-# mach_machine.modulemap additionally includes the headers from
-# ../{i386,arm} and ../../arm64.
-MODULEMAPFILES = \
-	mach_machine.modulemap
-
 PRIVATE_DATAFILES = \
 	syscall_sw.h
 
 INSTALL_MI_LIST = ${DATAFILES}
-
-INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
 INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 

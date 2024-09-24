@@ -199,8 +199,8 @@ skip_syscall:
 
 #ifdef CONFIG_IOCOUNT_TRACE
 	if (uthread->uu_iocount) {
-		printf("system call returned with uu_iocount(%d) != 0\n",
-		    uthread->uu_iocount);
+		printf("system call(%d) returned with uu_iocount(%d) != 0\n",
+		    syscode, uthread->uu_iocount);
 	}
 #endif
 #if CONFIG_DTRACE
@@ -392,8 +392,8 @@ skip_syscall:
 
 #ifdef CONFIG_IOCOUNT_TRACE
 	if (uthread->uu_iocount) {
-		printf("system call returned with uu_iocount(%d) != 0\n",
-		    uthread->uu_iocount);
+		printf("system call(%d) returned with uu_iocount(%d) != 0\n",
+		    syscode, uthread->uu_iocount);
 	}
 #endif
 

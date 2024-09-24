@@ -40,7 +40,8 @@ enable_disable_threshold_test_execution(__unused struct test_case *test_case, vo
 }
 
 T_DECL(diag_mem_enable_disable_threshold_test,
-    "This test tests a threshold, disables it and consumes memory to validate the limit is gone")
+    "This test tests a threshold, disables it and consumes memory to validate the limit is gone",
+    T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_mem_threshold_no_limit_cross_test);
 }

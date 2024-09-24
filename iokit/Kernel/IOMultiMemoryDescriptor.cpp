@@ -353,12 +353,6 @@ IOMultiMemoryDescriptor::doMap(vm_map_t           __addressMap,
 		}
 	}while (false);
 
-	if (kIOReturnSuccess == err) {
-#if IOTRACKING
-		IOTrackingAddUser(gIOMapTracking, &mapping->fTracking, mapping->fLength);
-#endif
-	}
-
 	return err;
 }
 

@@ -96,8 +96,8 @@ diag_threshold_test_limit_and_threshold_same(struct test_case *test_case, __unus
 }
 
 T_DECL(diag_threshold_test_limit_and_threshold_same,
-    "Test on which a diag watermark and a threshold is set with same value"
-    )
+    "Test on which a diag watermark and a threshold is set with same value",
+    T_META_TAG_VM_PREFERRED)
 {
 	diag_mem_threshold_set_setup(&diag_threshold_test_limit_and_threshold_same_test);
 }

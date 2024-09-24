@@ -66,7 +66,7 @@
 #include <mach/machine.h>
 #include <mach/vm_map.h>
 #include <mach/machine/vm_param.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_map.h>
 #include <san/kasan.h>
 

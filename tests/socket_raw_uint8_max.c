@@ -1,7 +1,7 @@
 #include <darwintest.h>
 #include <sys/socket.h>
 
-T_DECL(socket_raw_uint8_max, "create socket with borderline proto numbers")
+T_DECL(socket_raw_uint8_max, "create socket with borderline proto numbers", T_META_TAG_VM_PREFERRED)
 {
 	int fd = socket(AF_INET, SOCK_RAW, 256);
 

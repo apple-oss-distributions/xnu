@@ -11,7 +11,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.fd"),
 	T_META_RUN_CONCURRENTLY(true));
 
-T_DECL(fd_guard_monitored, "Test that we can guard fds in kevent")
+T_DECL(fd_guard_monitored, "Test that we can guard fds in kevent", T_META_TAG_VM_PREFERRED)
 {
 	static int pfd[2];
 	static dispatch_source_t ds;

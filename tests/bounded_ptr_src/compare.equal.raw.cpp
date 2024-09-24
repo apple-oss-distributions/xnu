@@ -178,7 +178,7 @@ tests_convert()
 	}
 }
 
-T_DECL(compare_equal_raw, "bounded_ptr.compare.equal.raw") {
+T_DECL(compare_equal_raw, "bounded_ptr.compare.equal.raw", T_META_TAG_VM_PREFERRED) {
 	tests<Derived, Derived>();
 	tests<Derived, Derived const>();
 	tests<Derived, Derived volatile>();

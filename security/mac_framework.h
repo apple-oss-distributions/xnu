@@ -240,7 +240,7 @@ int     mac_mount_check_snapshot_mount(vfs_context_t ctx, struct vnode *rvp,
 #endif
 int     mac_mount_check_snapshot_revert(vfs_context_t ctx, struct mount *mp,
     const char *name) __result_use_check;
-int     mac_mount_check_remount(vfs_context_t ctx, struct mount *mp) __result_use_check;
+int     mac_mount_check_remount(vfs_context_t ctx, struct mount *mp, int flags) __result_use_check;
 int     mac_mount_check_setattr(vfs_context_t ctx, struct mount *mp,
     struct vfs_attr *vfa) __result_use_check;
 int     mac_mount_check_stat(vfs_context_t ctx, struct mount *mp) __result_use_check;
@@ -338,6 +338,8 @@ int     mac_proc_check_setreuid(proc_t curp, kauth_cred_t cred, uid_t ruid, uid_
 int     mac_proc_check_setregid(proc_t curp, kauth_cred_t cred, gid_t rgid, gid_t egid) __result_use_check;
 int     mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid) __result_use_check;
 int     mac_proc_check_signal(proc_t proc1, proc_t proc2,
+    int signum) __result_use_check;
+int     mac_proc_check_delegated_signal(proc_t caller, audit_token_t instigator, audit_token_t target,
     int signum) __result_use_check;
 int     mac_proc_check_syscall_unix(proc_t proc, int scnum) __result_use_check;
 int     mac_proc_check_wait(proc_t proc1, proc_t proc2) __result_use_check;
@@ -487,8 +489,11 @@ int     mac_vnode_check_read(vfs_context_t ctx,
     kauth_cred_t file_cred, struct vnode *vp) __result_use_check;
 int     mac_vnode_check_readdir(vfs_context_t ctx, struct vnode *vp) __result_use_check;
 int     mac_vnode_check_readlink(vfs_context_t ctx, struct vnode *vp) __result_use_check;
-int     mac_vnode_check_rename(vfs_context_t ctx, struct vnode *dvp,
-    struct vnode *vp, struct componentname *cnp, struct vnode *tdvp,
+int     mac_vnode_check_rename(vfs_context_t ctx, struct vnode *fdvp,
+    struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
+    struct vnode *tvp, struct componentname *tcnp) __result_use_check;
+int     mac_vnode_check_rename_swap(vfs_context_t ctx, struct vnode *fdvp,
+    struct vnode *fvp, struct componentname *fcnp, struct vnode *tdvp,
     struct vnode *tvp, struct componentname *tcnp) __result_use_check;
 int     mac_vnode_check_revoke(vfs_context_t ctx, struct vnode *vp) __result_use_check;
 int     mac_vnode_check_searchfs(vfs_context_t ctx, struct vnode *vp,
@@ -563,8 +568,10 @@ void    mac_vnode_notify_link(vfs_context_t ctx, struct vnode *vp,
     struct vnode *dvp, struct componentname *cnp);
 void    mac_vnode_notify_open(vfs_context_t ctx, struct vnode *vp, int acc_flags);
 void    mac_vnode_notify_rename(vfs_context_t ctx, struct vnode *fvp,
+    struct vnode *tdvp, struct componentname *tcnp);
+void    mac_vnode_notify_rename_swap(vfs_context_t ctx, struct vnode *fvp,
     struct vnode *fdvp, struct componentname *fcnp, struct vnode *tvp,
-    struct vnode *tdvp, struct componentname *tcnp, bool swap);
+    struct vnode *tdvp, struct componentname *tcnp);
 void    mac_vnode_notify_setacl(vfs_context_t ctx, struct vnode *vp, struct kauth_acl *acl);
 void    mac_vnode_notify_setattrlist(vfs_context_t ctx, struct vnode *vp, struct attrlist *alist);
 void    mac_vnode_notify_setextattr(vfs_context_t ctx, struct vnode *vp, const char *name, struct uio *uio);

@@ -237,9 +237,16 @@ int     ubc_isinuse_locked(vnode_t, int, int);
 int     ubc_getcdhash(vnode_t, off_t, unsigned char *);
 
 /* code signing */
+typedef enum __attribute__((enum_extensibility(closed), flag_enum)) : uint8_t {
+	CS_BLOB_ADD_ALLOW_MAIN_BINARY = (1 << 0),
+} cs_blob_add_flags_t;
+
 struct cs_blob;
 void    cs_blob_require(struct cs_blob *, vnode_t);
-int     ubc_cs_blob_add(vnode_t, uint32_t, cpu_type_t, cpu_subtype_t, off_t, vm_address_t *, vm_size_t, struct image_params *, int, struct cs_blob **);
+int     ubc_cs_blob_add(
+	vnode_t, uint32_t, cpu_type_t, cpu_subtype_t, off_t,
+	vm_address_t *, vm_size_t, struct image_params *,
+	int, struct cs_blob **, cs_blob_add_flags_t);
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 int     ubc_cs_blob_add_supplement(vnode_t, vnode_t, off_t, vm_address_t *, vm_size_t, struct cs_blob **);
 #endif

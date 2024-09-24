@@ -81,9 +81,9 @@
 #include <mach-o/loader.h>
 
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_pager.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pager_xnu.h>
 #include <vm/vnode_pager.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
@@ -95,11 +95,6 @@
 
 #include "kern_exec_internal.h"
 
-/* XXX should have prototypes in a shared header file */
-extern int      get_map_nentries(vm_map_t);
-
-extern kern_return_t    memory_object_signed(memory_object_control_t control,
-    boolean_t is_signed);
 
 
 /* An empty load_result_t */
@@ -364,7 +359,6 @@ note_all_image_info_section(const struct segment_command_64 *scp,
  * before 16KB-alignment was enforced.
  */
 const int fourk_binary_compatibility_unsafe = TRUE;
-const int fourk_binary_compatibility_allow_wx = FALSE;
 #endif /* __arm64__ */
 
 #if XNU_TARGET_OS_OSX
@@ -582,7 +576,7 @@ load_machfile(
 	    NULL, imgp);
 
 	if (lret != LOAD_SUCCESS) {
-		vm_map_deallocate(map); /* will lose pmap reference too */
+		imgp->ip_free_map = map;
 		return lret;
 	}
 
@@ -633,7 +627,7 @@ load_machfile(
 		} else
 #endif /* __arm64__ */
 		{
-			vm_map_deallocate(map); /* will lose pmap reference too */
+			imgp->ip_free_map = map;
 			return LOAD_BADMACHO;
 		}
 	}
@@ -642,7 +636,7 @@ load_machfile(
 	if (enforce_hard_pagezero && result->is_64bit_addr && (header->cputype == CPU_TYPE_ARM64)) {
 		/* 64 bit ARM binary must have "hard page zero" of 4GB to cover the lower 32 bit address space */
 		if (vm_map_has_hard_pagezero(map, 0x100000000) == FALSE) {
-			vm_map_deallocate(map); /* will lose pmap reference too */
+			imgp->ip_free_map = map;
 			return LOAD_BADMACHO;
 		}
 	}
@@ -678,7 +672,7 @@ load_machfile(
 		 */
 		kret = task_start_halt(task);
 		if (kret != KERN_SUCCESS) {
-			vm_map_deallocate(map); /* will lose pmap reference too */
+			imgp->ip_free_map = map;
 			return LOAD_FAILURE;
 		}
 		proc_transcommit(p, 0);
@@ -1821,22 +1815,7 @@ unprotect_dsmos_segment(
 
 /*
  * map_segment:
- *	Maps a Mach-O segment, taking care of mis-alignment (wrt the system
- *	page size) issues.
- *
- *	The mapping might result in 1, 2 or 3 map entries:
- *      1. for the first page, which could be overlap with the previous
- *         mapping,
- *      2. for the center (if applicable),
- *      3. for the last page, which could overlap with the next mapping.
- *
- *	For each of those map entries, we might have to interpose a
- *	"fourk_pager" to deal with mis-alignment wrt the system page size,
- *	either in the mapping address and/or size or the file offset and/or
- *	size.
- *	The "fourk_pager" itself would be mapped with proper alignment
- *	wrt the system page size and would then be populated with the
- *	information about the intended mapping, with a "4KB" granularity.
+ *	Maps a Mach-O segment.
  */
 static kern_return_t
 map_segment(
@@ -1850,10 +1829,9 @@ map_segment(
 	vm_prot_t               maxprot,
 	load_result_t           *result)
 {
-	vm_map_offset_t cur_offset, cur_start, cur_end;
 	kern_return_t   ret;
 	vm_map_offset_t effective_page_mask;
-	vm_map_kernel_flags_t vmk_flags, cur_vmk_flags;
+	vm_map_kernel_flags_t vmk_flags;
 
 	if (vm_end < vm_start ||
 	    file_end < file_start) {
@@ -1874,181 +1852,63 @@ map_segment(
 	    vm_map_page_aligned(file_end, effective_page_mask)) {
 		/* all page-aligned and map-aligned: proceed */
 	} else {
-#if __arm64__
-		/* use an intermediate "4K" pager */
-		vmk_flags.vmkf_fourk = TRUE;
-#else /* __arm64__ */
-		panic("map_segment: unexpected mis-alignment "
-		    "vm[0x%llx:0x%llx] file[0x%llx:0x%llx]\n",
-		    (uint64_t) vm_start,
-		    (uint64_t) vm_end,
-		    (uint64_t) file_start,
-		    (uint64_t) file_end);
-#endif /* __arm64__ */
+		/*
+		 * There's no more fourk_pager to handle mis-alignments;
+		 * all binaries should be page-aligned and map-aligned
+		 */
+		return LOAD_BADMACHO;
 	}
-
-	cur_offset = 0;
-	cur_start = vm_start;
-	cur_end = vm_start;
-#if __arm64__
-	if (!vm_map_page_aligned(vm_start, effective_page_mask)) {
-		/* one 4K pager for the 1st page */
-		cur_end = vm_map_round_page(cur_start, effective_page_mask);
-		if (cur_end > vm_end) {
-			cur_end = vm_start + (file_end - file_start);
-		}
-		if (control != MEMORY_OBJECT_CONTROL_NULL) {
-			/* no copy-on-read for mapped binaries */
-			vmk_flags.vmkf_no_copy_on_read = 1;
-			ret = vm_map_enter_mem_object_control(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				vmk_flags,
-				control,
-				file_start + cur_offset,
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		} else {
-			ret = vm_map_enter_mem_object(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				vmk_flags,
-				IPC_PORT_NULL,
-				0, /* offset */
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		}
-		if (ret != KERN_SUCCESS) {
-			return LOAD_NOSPACE;
-		}
-		cur_offset += cur_end - cur_start;
-	}
-#endif /* __arm64__ */
-	if (cur_end >= vm_start + (file_end - file_start)) {
-		/* all mapped: done */
-		goto done;
-	}
-	if (vm_map_round_page(cur_end, effective_page_mask) >=
-	    vm_map_trunc_page(vm_start + (file_end - file_start),
-	    effective_page_mask)) {
-		/* no middle */
-	} else {
-		cur_start = cur_end;
-		if ((vm_start & effective_page_mask) !=
-		    (file_start & effective_page_mask)) {
-			/* one 4K pager for the middle */
-			cur_vmk_flags = vmk_flags;
-		} else {
-			/* regular mapping for the middle */
-			cur_vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
-		}
 
 #if !defined(XNU_TARGET_OS_OSX)
-		(void) result;
+	(void) result;
 #else /* !defined(XNU_TARGET_OS_OSX) */
-		/*
-		 * This process doesn't have its new csflags (from
-		 * the image being loaded) yet, so tell VM to override the
-		 * current process's CS_ENFORCEMENT for this mapping.
-		 */
-		if (result->csflags & CS_ENFORCEMENT) {
-			cur_vmk_flags.vmkf_cs_enforcement = TRUE;
-		} else {
-			cur_vmk_flags.vmkf_cs_enforcement = FALSE;
-		}
-		cur_vmk_flags.vmkf_cs_enforcement_override = TRUE;
+	/*
+	 * This process doesn't have its new csflags (from
+	 * the image being loaded) yet, so tell VM to override the
+	 * current process's CS_ENFORCEMENT for this mapping.
+	 */
+	if (result->csflags & CS_ENFORCEMENT) {
+		vmk_flags.vmkf_cs_enforcement = TRUE;
+	} else {
+		vmk_flags.vmkf_cs_enforcement = FALSE;
+	}
+	vmk_flags.vmkf_cs_enforcement_override = TRUE;
 #endif /* !defined(XNU_TARGET_OS_OSX) */
 
-		if (result->is_rosetta && (initprot & VM_PROT_EXECUTE) == VM_PROT_EXECUTE) {
-			cur_vmk_flags.vmkf_translated_allow_execute = TRUE;
-		}
+	if (result->is_rosetta && (initprot & VM_PROT_EXECUTE) == VM_PROT_EXECUTE) {
+		vmk_flags.vmkf_translated_allow_execute = TRUE;
+	}
 
-		cur_end = vm_map_trunc_page(vm_start + (file_end -
-		    file_start),
-		    effective_page_mask);
-		if (control != MEMORY_OBJECT_CONTROL_NULL) {
-			/* no copy-on-read for mapped binaries */
-			cur_vmk_flags.vmkf_no_copy_on_read = 1;
-			ret = vm_map_enter_mem_object_control(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				cur_vmk_flags,
-				control,
-				file_start + cur_offset,
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		} else {
-			ret = vm_map_enter_mem_object(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				cur_vmk_flags,
-				IPC_PORT_NULL,
-				0, /* offset */
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		}
-		if (ret != KERN_SUCCESS) {
-			return LOAD_NOSPACE;
-		}
-		cur_offset += cur_end - cur_start;
+	if (control != MEMORY_OBJECT_CONTROL_NULL) {
+		/* no copy-on-read for mapped binaries */
+		vmk_flags.vmkf_no_copy_on_read = 1;
+		ret = vm_map_enter_mem_object_control(
+			map,
+			&vm_start,
+			file_end - file_start,
+			(mach_vm_offset_t)0,
+			vmk_flags,
+			control,
+			file_start,
+			TRUE, /* copy */
+			initprot, maxprot,
+			VM_INHERIT_DEFAULT);
+	} else {
+		ret = mach_vm_map_kernel(
+			map,
+			&vm_start,
+			file_end - file_start,
+			(mach_vm_offset_t)0,
+			vmk_flags,
+			IPC_PORT_NULL,
+			0, /* offset */
+			TRUE, /* copy */
+			initprot, maxprot,
+			VM_INHERIT_DEFAULT);
 	}
-	if (cur_end >= vm_start + (file_end - file_start)) {
-		/* all mapped: done */
-		goto done;
+	if (ret != KERN_SUCCESS) {
+		return LOAD_NOSPACE;
 	}
-	cur_start = cur_end;
-#if __arm64__
-	if (!vm_map_page_aligned(vm_start + (file_end - file_start),
-	    effective_page_mask)) {
-		/* one 4K pager for the last page */
-		cur_end = vm_start + (file_end - file_start);
-		if (control != MEMORY_OBJECT_CONTROL_NULL) {
-			/* no copy-on-read for mapped binaries */
-			vmk_flags.vmkf_no_copy_on_read = 1;
-			ret = vm_map_enter_mem_object_control(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				vmk_flags,
-				control,
-				file_start + cur_offset,
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		} else {
-			ret = vm_map_enter_mem_object(
-				map,
-				&cur_start,
-				cur_end - cur_start,
-				(mach_vm_offset_t)0,
-				vmk_flags,
-				IPC_PORT_NULL,
-				0, /* offset */
-				TRUE, /* copy */
-				initprot, maxprot,
-				VM_INHERIT_DEFAULT);
-		}
-		if (ret != KERN_SUCCESS) {
-			return LOAD_NOSPACE;
-		}
-		cur_offset += cur_end - cur_start;
-	}
-#endif /* __arm64__ */
-done:
-	assert(cur_end >= vm_start + (file_end - file_start));
 	return LOAD_SUCCESS;
 }
 
@@ -2109,15 +1969,8 @@ load_segment(
 		segment_command_size = sizeof(struct segment_command);
 		single_section_size  = sizeof(struct section);
 #if __arm64__
-		/* 32-bit binary: might need 4K-alignment */
-		if (effective_page_size != FOURK_PAGE_SIZE) {
-			/* not using 4K page size: need fourk_pager */
-			fourk_align = TRUE;
-			verbose = TRUE;
-		} else {
-			/* using 4K page size: no need for re-alignment */
-			fourk_align = FALSE;
-		}
+		/* 32-bit binary or arm64_32 binary: should already be page-aligned */
+		fourk_align = FALSE;
 #endif /* __arm64__ */
 	}
 	if (lcp->cmdsize < segment_command_size) {
@@ -2276,26 +2129,6 @@ load_segment(
 		}
 		ret = vm_map_raise_min_offset(map,
 		    vm_end_aligned);
-#if __arm64__
-		if (ret == 0 &&
-		    vm_end > vm_end_aligned) {
-			/* use fourk_pager to map the rest of pagezero */
-			assert(fourk_align);
-			ret = vm_map_enter_mem_object(
-				map,
-				&vm_end_aligned,
-				vm_end - vm_end_aligned,
-				(mach_vm_offset_t) 0,   /* mask */
-				VM_MAP_KERNEL_FLAGS_FIXED(.vmkf_fourk = true),
-				IPC_PORT_NULL,
-				0,
-				FALSE,  /* copy */
-				(scp->initprot & VM_PROT_ALL),
-				(scp->maxprot & VM_PROT_ALL),
-				VM_INHERIT_DEFAULT);
-		}
-#endif /* __arm64__ */
-
 		if (ret != KERN_SUCCESS) {
 			DEBUG4K_ERROR("LOAD_FAILURE ret 0x%x\n", ret);
 			return LOAD_FAILURE;
@@ -3541,7 +3374,8 @@ load_code_signature(
 	    lcp->datasize,
 	    imgp,
 	    0,
-	    &blob)) {
+	    &blob,
+	    CS_BLOB_ADD_ALLOW_MAIN_BINARY)) {
 		if (addr) {
 			ubc_cs_blob_deallocate(addr, blob_size);
 			addr = 0;

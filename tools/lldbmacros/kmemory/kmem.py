@@ -249,7 +249,7 @@ class _KMemARM64(KMem):
     """
 
     def __init__(self, target):
-        super(_KMemARM64, self).__init__(target)
+        super().__init__(target)
 
         self.arm64_CpuDataEntries = target.chkFindFirstGlobalVariable('CpuDataEntries')
         self.arm64_BootCpuData    = target.chkFindFirstGlobalVariable('percpu_slot_cpu_data')
@@ -288,7 +288,7 @@ class _KMemX86(KMem):
     """
 
     def __init__(self, target):
-        super(_KMemX86, self).__init__(target)
+        super().__init__(target)
 
         self.intel_cpu_data = target.chkFindFirstGlobalVariable('cpu_data_ptr')
 

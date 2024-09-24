@@ -127,13 +127,15 @@ struct ifnet_llreach_info;      /* forward declaration */
 
 extern void ifnet_llreach_ifattach(struct ifnet *, boolean_t);
 extern void ifnet_llreach_ifdetach(struct ifnet *);
-extern struct if_llreach *ifnet_llreach_alloc(struct ifnet *, u_int16_t, void *,
-    unsigned int, u_int32_t);
+extern struct if_llreach *ifnet_llreach_alloc(struct ifnet *, u_int16_t,
+    void *__sized_by(alen),
+    unsigned int alen, u_int32_t);
 extern void ifnet_llreach_free(struct if_llreach *);
 extern int ifnet_llreach_reachable(struct if_llreach *);
 extern int ifnet_llreach_reachable_delta(struct if_llreach *, u_int64_t);
-extern void ifnet_llreach_set_reachable(struct ifnet *, u_int16_t, void *,
-    unsigned int);
+extern void ifnet_llreach_set_reachable(struct ifnet *, u_int16_t,
+    void *__sized_by(alen) addr,
+    unsigned int alen);
 extern u_int64_t ifnet_llreach_up2calexp(struct if_llreach *, u_int64_t);
 extern u_int64_t ifnet_llreach_up2upexp(struct if_llreach *, u_int64_t);
 extern int ifnet_llreach_get_defrouter(struct ifnet *, sa_family_t,

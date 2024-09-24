@@ -61,6 +61,7 @@
 
 #ifdef KERNEL_PRIVATE
 #include <kern/debug.h> /* panic function call */
+#include <machine/trap.h>
 #include <sys/cdefs.h>  /* __improbable in kernelspace */
 #else
 #ifndef __improbable
@@ -496,26 +497,23 @@ __MISMATCH_TAGS_POP
 #ifdef KERNEL_PRIVATE
 #define LIST_CHECK_HEAD(head, field) do {                               \
 	if (__improbable(                                               \
-	      LIST_FIRST((head)) != NULL &&                             \
-	      LIST_FIRST((head))->field.le_prev !=                      \
-	      &LIST_FIRST((head))))                                     \
-	             panic("Bad list head %p first->prev != head @%u",  \
-	                 (head), __LINE__);                             \
+	    LIST_FIRST((head)) != NULL &&                               \
+	    LIST_FIRST((head))->field.le_prev !=                        \
+	    &LIST_FIRST((head))))                                       \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(head));  \
 } while (0)
 
 #define LIST_CHECK_NEXT(elm, field) do {                                \
 	if (__improbable(                                               \
-	      LIST_NEXT((elm), field) != NULL &&                        \
-	      LIST_NEXT((elm), field)->field.le_prev !=                 \
-	      &((elm)->field.le_next)))                                 \
-	             panic("Bad link elm %p next->prev != elm @%u",     \
-	                 (elm), __LINE__);                              \
+	    LIST_NEXT((elm), field) != NULL &&                          \
+	    LIST_NEXT((elm), field)->field.le_prev !=                   \
+	    &((elm)->field.le_next)))                                   \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while (0)
 
 #define LIST_CHECK_PREV(elm, field) do {                                \
 	if (__improbable(*(elm)->field.le_prev != (elm)))               \
-	        panic("Bad link elm %p prev->next != elm @%u",          \
-	            (elm), __LINE__);                                   \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while (0)
 #else
 #define LIST_CHECK_HEAD(head, field)
@@ -627,27 +625,24 @@ __MISMATCH_TAGS_POP
  */
 #ifdef KERNEL_PRIVATE
 #define TAILQ_CHECK_HEAD(head, field) do {                              \
-       if (__improbable(                                                \
-	      TAILQ_FIRST((head)) != NULL &&                            \
-	      TAILQ_FIRST((head))->field.tqe_prev !=                    \
-	      &TAILQ_FIRST((head))))                                    \
-	             panic("Bad tailq head %p first->prev != head @%u", \
-	                 (head), __LINE__);                             \
+	if (__improbable(                                               \
+	    TAILQ_FIRST((head)) != NULL &&                              \
+	    TAILQ_FIRST((head))->field.tqe_prev !=                      \
+	    &TAILQ_FIRST((head))))                                      \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(head));  \
 } while (0)
 
 #define TAILQ_CHECK_NEXT(elm, field) do {                               \
-       if (__improbable(                                                \
-	      TAILQ_NEXT((elm), field) != NULL &&                       \
-	      TAILQ_NEXT((elm), field)->field.tqe_prev !=               \
-	      &((elm)->field.tqe_next)))                                \
-	             panic("Bad tailq elm %p next->prev != elm @%u",    \
-	                 (elm), __LINE__);                              \
+	if (__improbable(                                               \
+	    TAILQ_NEXT((elm), field) != NULL &&                         \
+	    TAILQ_NEXT((elm), field)->field.tqe_prev !=                 \
+	    &((elm)->field.tqe_next)))                                  \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while(0)
 
 #define TAILQ_CHECK_PREV(elm, field) do {                               \
-       if (__improbable(*(elm)->field.tqe_prev != (elm)))               \
-	      panic("Bad tailq elm %p prev->next != elm @%u",           \
-	          (elm), __LINE__);                                     \
+	if (__improbable(*(elm)->field.tqe_prev != (elm)))              \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while(0)
 #else
 #define TAILQ_CHECK_HEAD(head, field)
@@ -840,25 +835,22 @@ __MISMATCH_TAGS_POP
  */
 #ifdef KERNEL_PRIVATE
 #define CIRCLEQ_CHECK_HEAD(head, field) do {                            \
-       if (__improbable(                                                \
-	      CIRCLEQ_FIRST((head)) != ((void*)(head)) &&               \
-	      CIRCLEQ_FIRST((head))->field.cqe_prev != ((void*)(head))))\
-	             panic("Bad circleq head %p first->prev != head @%u", \
-	                 (head), __LINE__);                             \
+	if (__improbable(                                               \
+	    CIRCLEQ_FIRST((head)) != ((void*)(head)) &&                 \
+	    CIRCLEQ_FIRST((head))->field.cqe_prev != ((void*)(head))))  \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(head));  \
 } while(0)
 #define CIRCLEQ_CHECK_NEXT(head, elm, field) do {                       \
-       if (__improbable(                                                \
-	      CIRCLEQ_NEXT((elm), field) != ((void*)(head)) &&          \
-	      CIRCLEQ_NEXT((elm), field)->field.cqe_prev != (elm)))     \
-	             panic("Bad circleq elm %p next->prev != elm @%u",  \
-	                 (elm), __LINE__);                              \
+	if (__improbable(                                               \
+	    CIRCLEQ_NEXT((elm), field) != ((void*)(head)) &&            \
+	    CIRCLEQ_NEXT((elm), field)->field.cqe_prev != (elm)))       \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while(0)
 #define CIRCLEQ_CHECK_PREV(head, elm, field) do {                       \
-       if (__improbable(                                                \
-	      CIRCLEQ_PREV((elm), field) != ((void*)(head)) &&          \
-	      CIRCLEQ_PREV((elm), field)->field.cqe_next != (elm)))     \
-	             panic("Bad circleq elm %p prev->next != elm @%u",  \
-	                 (elm), __LINE__);                              \
+	if (__improbable(                                               \
+	    CIRCLEQ_PREV((elm), field) != ((void*)(head)) &&            \
+	    CIRCLEQ_PREV((elm), field)->field.cqe_next != (elm)))       \
+	        ml_fatal_trap_invalid_list_linkage((uintptr_t)(elm));   \
 } while(0)
 #else
 #define CIRCLEQ_CHECK_HEAD(head, field)
@@ -966,7 +958,7 @@ chkquenext(void *a)
 	struct quehead *element = (struct quehead *)a;
 	if (__improbable(element->qh_link != NULL &&
 	    element->qh_link->qh_rlink != element)) {
-		panic("Bad que elm %p next->prev != elm", a);
+		ml_fatal_trap_invalid_list_linkage((uintptr_t)(a));
 	}
 }
 
@@ -976,7 +968,7 @@ chkqueprev(void *a)
 	struct quehead *element = (struct quehead *)a;
 	if (__improbable(element->qh_rlink != NULL &&
 	    element->qh_rlink->qh_link != element)) {
-		panic("Bad que elm %p prev->next != elm", a);
+		ml_fatal_trap_invalid_list_linkage((uintptr_t)(a));
 	}
 }
 #else /* !KERNEL_PRIVATE */

@@ -747,18 +747,30 @@ again:
 			 */
 			ret = vnode_getattr(vp, &va, ctx);
 
+			if (ret || !VATTR_IS_SUPPORTED(&va, va_parentid)) {
+				ret = ENOENT;
+				goto out;
+			}
+
+			/*
+			 * Ask the file system for the parent vnode.
+			 */
+			if ((ret = VFS_VGET(vp->v_mount, (ino64_t)va.va_parentid, &dvp, ctx))) {
+				goto out;
+			}
+
+			/* No exit from here before switching vp_with_iocount to dvp */
+
 			if (fixhardlink) {
-				if ((ret == 0) && (VATTR_IS_SUPPORTED(&va, va_name))) {
+				if (VATTR_IS_SUPPORTED(&va, va_name)) {
 					str = va.va_name;
-					vnode_update_identity(vp, NULL, str, (unsigned int)strlen(str), 0, VNODE_UPDATE_NAME);
-				} else if (vp->v_name) {
-					str = vp->v_name;
-					ret = 0;
 				} else {
 					ret = ENOENT;
 					goto bad_news;
 				}
 				len = (unsigned int)strlen(str);
+
+				vnode_update_identity(vp, dvp, str, len, 0, VNODE_UPDATE_NAME | VNODE_UPDATE_PARENT);
 
 				/*
 				 * Check that there's enough space.
@@ -779,19 +791,7 @@ again:
 				}
 bad_news:
 				zfree(ZV_NAMEI, va.va_name);
-			}
-			if (ret || !VATTR_IS_SUPPORTED(&va, va_parentid)) {
-				ret = ENOENT;
-				goto out;
-			}
-			/*
-			 * Ask the file system for the parent vnode.
-			 */
-			if ((ret = VFS_VGET(vp->v_mount, (ino64_t)va.va_parentid, &dvp, ctx))) {
-				goto out;
-			}
-
-			if (!fixhardlink && (vp->v_parent != dvp)) {
+			} else if (vp->v_parent != dvp) {
 				vnode_update_identity(vp, dvp, NULL, 0, 0, VNODE_UPDATE_PARENT);
 			}
 
@@ -915,17 +915,30 @@ build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs
 }
 
 /*
- * return NULLVP if vp's parent doesn't
- * exist, or we can't get a valid iocount
- * else return the parent of vp
+ * Combined version of vnode_getparent() and vnode_getname() to acquire both vnode name and parent
+ * without releasing the name cache lock in interim.
  */
-vnode_t
-vnode_getparent(vnode_t vp)
+void
+vnode_getparent_and_name(vnode_t vp, vnode_t *out_pvp, const char **out_name)
 {
 	vnode_t pvp = NULLVP;
+	int     locked = 0;
 	int     pvid;
 
 	NAME_CACHE_LOCK_SHARED();
+	locked = 1;
+
+	if (out_name) {
+		const char *name = NULL;
+		if (vp->v_name) {
+			name = vfs_addname(vp->v_name, (unsigned int)strlen(vp->v_name), 0, 0);
+		}
+		*out_name = name;
+	}
+
+	if (!out_pvp) {
+		goto out;
+	}
 
 	pvp = vp->v_parent;
 
@@ -941,6 +954,7 @@ vnode_getparent(vnode_t vp)
 
 		vnode_hold(pvp);
 		NAME_CACHE_UNLOCK();
+		locked = 0;
 
 		if (vnode_getwithvid(pvp, pvid) != 0) {
 			vnode_drop(pvp);
@@ -948,9 +962,26 @@ vnode_getparent(vnode_t vp)
 		} else {
 			vnode_drop(pvp);
 		}
-	} else {
+	}
+	*out_pvp = pvp;
+
+out:
+	if (locked) {
 		NAME_CACHE_UNLOCK();
 	}
+}
+
+/*
+ * return NULLVP if vp's parent doesn't
+ * exist, or we can't get a valid iocount
+ * else return the parent of vp
+ */
+vnode_t
+vnode_getparent(vnode_t vp)
+{
+	vnode_t pvp = NULLVP;
+	vnode_getparent_and_name(vp, &pvp, NULL);
+
 	return pvp;
 }
 
@@ -1005,13 +1036,7 @@ const char *
 vnode_getname(vnode_t vp)
 {
 	const char *name = NULL;
-
-	NAME_CACHE_LOCK_SHARED();
-
-	if (vp->v_name) {
-		name = vfs_addname(vp->v_name, (unsigned int)strlen(vp->v_name), 0, 0);
-	}
-	NAME_CACHE_UNLOCK();
+	vnode_getparent_and_name(vp, NULL, &name);
 
 	return name;
 }
@@ -1019,7 +1044,9 @@ vnode_getname(vnode_t vp)
 void
 vnode_putname(const char *name)
 {
-	vfs_removename(name);
+	if (name) {
+		vfs_removename(name);
+	}
 }
 
 static const char unknown_vnodename[] = "(unknown vnode name)";
@@ -2495,7 +2522,8 @@ hash_string(const char *cp, int len)
  */
 
 static int
-cache_lookup_fallback(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
+cache_lookup_fallback(struct vnode *dvp, struct vnode **vpp,
+    struct componentname *cnp, int flags)
 {
 	struct namecache *ncp;
 	long namelen = cnp->cn_namelen;
@@ -2566,7 +2594,13 @@ relook:
 			NCHSTAT(ncs_badhits);
 			cache_delete(ncp, 1);
 			NAME_CACHE_UNLOCK();
-			return 0;
+			/*
+			 * Even though we're purging the entry, it
+			 * may be useful to the caller to know that
+			 * we got a neg hit (to, for example, avoid
+			 * an expensive IPC/RPC).
+			 */
+			return (flags & CACHE_LOOKUP_ALLHITS) ? ENOENT : 0;
 		}
 		if (!NAME_CACHE_LOCK_SHARED_TO_EXCLUSIVE()) {
 			NAME_CACHE_LOCK();
@@ -2597,7 +2631,8 @@ relook:
  * fails, a status of zero is returned.
  */
 int
-cache_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
+cache_lookup_ext(struct vnode *dvp, struct vnode **vpp,
+    struct componentname *cnp, int flags)
 {
 	struct namecache *ncp;
 	long namelen = cnp->cn_namelen;
@@ -2708,7 +2743,13 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 
 out_fallback:
 	NC_SMR_STATS(cl_smr_fallback);
-	return cache_lookup_fallback(dvp, vpp, cnp);
+	return cache_lookup_fallback(dvp, vpp, cnp, flags);
+}
+
+int
+cache_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
+{
+	return cache_lookup_ext(dvp, vpp, cnp, 0);
 }
 
 const char *

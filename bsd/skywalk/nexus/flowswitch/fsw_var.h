@@ -87,7 +87,7 @@ extern int fsw_port_unbind(struct nx_flowswitch *fsw, nexus_port_t nx_port);
 extern int fsw_port_na_defunct(struct nx_flowswitch *fsw,
     struct nexus_vp_adapter *vpna);
 extern size_t fsw_mib_get(struct nx_flowswitch *fsw,
-    struct nexus_mib_filter *filter, void *out, size_t len, struct proc *p);
+    struct nexus_mib_filter *filter, void *__sized_by(len)out, size_t len, struct proc *p);
 extern int fsw_attach_vp(struct kern_nexus *nx, struct kern_channel *ch,
     struct chreq *chr, struct nxbind *nxb, struct proc *p,
     struct nexus_vp_adapter **vpna);
@@ -124,7 +124,7 @@ extern int fsw_vp_na_create(struct kern_nexus *nx, struct chreq *chr,
 extern void fsw_vp_channel_error_stats_fold(struct fsw_stats *fs,
     struct __nx_stats_channel_errors *es);
 extern errno_t fsw_vp_na_channel_event(struct nx_flowswitch *fsw,
-    uint32_t nx_port_id, struct __kern_channel_event *event,
+    uint32_t nx_port_id, struct __kern_channel_event *__sized_by(event_len)event,
     uint16_t event_len);
 
 // classq related
@@ -154,16 +154,17 @@ extern void fsw_linger_insert(struct flow_entry *fsw);
 extern void fsw_linger_purge(struct nx_flowswitch *fsw);
 extern void fsw_reap_sched(struct nx_flowswitch *fsw);
 
-extern int fsw_dev_input_netem_dequeue(void *handle, pktsched_pkt_t *pkts,
-    uint32_t n_pkts);
+extern int fsw_dev_input_netem_dequeue(void *handle,
+    pktsched_pkt_t *__counted_by(n_pkts) pkts, uint32_t n_pkts);
 extern void fsw_snoop(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    bool input);
+    struct pktq *pktq, bool input);
 
 extern void fsw_receive(struct nx_flowswitch *fsw, struct pktq *pktq);
 extern void dp_flow_tx_process(struct nx_flowswitch *fsw,
     struct flow_entry *fe, uint32_t flags);
 extern void dp_flow_rx_process(struct nx_flowswitch *fsw,
-    struct flow_entry *fe, uint32_t flags);
+    struct flow_entry *fe, struct pktq *rx_pkts, uint32_t rx_bytes,
+    uint32_t flags);
 
 #if (DEVELOPMENT || DEBUG)
 extern int fsw_rps_set_nthreads(struct nx_flowswitch* fsw, uint32_t n);
@@ -228,12 +229,13 @@ __END_DECLS
 
 __attribute__((always_inline))
 static inline void
-fsw_snoop_and_dequeue(struct flow_entry *fe, struct pktq *target, bool input)
+fsw_snoop_and_dequeue(struct flow_entry *fe, struct pktq *target,
+    struct pktq *source, bool input)
 {
 	if (pktap_total_tap_count != 0) {
-		fsw_snoop(fe->fe_fsw, fe, input);
+		fsw_snoop(fe->fe_fsw, fe, source, input);
 	}
-	KPKTQ_CONCAT(target, input ? &fe->fe_rx_pktq : &fe->fe_tx_pktq);
+	KPKTQ_CONCAT(target, source);
 }
 
 #define FSW_STATS_VAL(x)        STATS_VAL(&fsw->fsw_stats, x)

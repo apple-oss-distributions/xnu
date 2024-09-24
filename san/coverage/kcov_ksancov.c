@@ -39,9 +39,10 @@
 #include <kern/thread.h>
 #include <kern/zalloc.h>
 
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/vm_protos.h>
 #include <vm/pmap.h>
+#include <vm/vm_memory_entry_xnu.h>
 
 #include <mach/mach_vm.h>
 #include <mach/mach_types.h>

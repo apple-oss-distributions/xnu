@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -323,6 +323,7 @@ cpuid_do_was(void)
 	do_cwas(cpuid_info(), TRUE);
 }
 
+
 /* this function is Intel-specific */
 static void
 cpuid_set_cache_info( i386_cpu_info_t * info_p )
@@ -618,10 +619,12 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 
 	/* Get cache and addressing info. */
 	if (info_p->cpuid_max_ext >= 0x80000006) {
-		uint32_t assoc;
 		cpuid_fn(0x80000006, reg);
-		info_p->cpuid_cache_linesize   = bitfield32(reg[ecx], 7, 0);
-		assoc = bitfield32(reg[ecx], 15, 12);
+		info_p->cpuid_cache_linesize = bitfield32(reg[ecx], 7, 0);
+		DBG(" cpuid_cache_linesize: %d\n",
+		    info_p->cpuid_cache_linesize);
+
+		uint32_t assoc = bitfield32(reg[ecx], 15, 12);
 		/*
 		 * L2 associativity is encoded, though in an insufficiently
 		 * descriptive fashion, e.g. 24-way is mapped to 16-way.
@@ -637,7 +640,10 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 			assoc = 0xFFFF;
 		}
 		info_p->cpuid_cache_L2_associativity = assoc;
-		info_p->cpuid_cache_size       = bitfield32(reg[ecx], 31, 16);
+		info_p->cpuid_cache_size = bitfield32(reg[ecx], 31, 16);
+		DBG(" cpuid_cache_size    : %dKiB\n",
+		    info_p->cpuid_cache_size);
+
 		cpuid_fn(0x80000008, reg);
 		info_p->cpuid_address_bits_physical =
 		    bitfield32(reg[eax], 7, 0);
@@ -668,11 +674,11 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	info_p->cpuid_processor_flag = (rdmsr64(MSR_IA32_PLATFORM_ID) >> 50) & 0x7;
 
 	/* Fold extensions into family/model */
-	if (info_p->cpuid_family == 0x0f) {
-		info_p->cpuid_family += info_p->cpuid_extfamily;
-	}
 	if (info_p->cpuid_family == 0x0f || info_p->cpuid_family == 0x06) {
 		info_p->cpuid_model += (info_p->cpuid_extmodel << 4);
+		if (info_p->cpuid_family == 0x0f) {
+			info_p->cpuid_family += info_p->cpuid_extfamily;
+		}
 	}
 
 	if (info_p->cpuid_features & CPUID_FEATURE_HTT) {
@@ -817,9 +823,30 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
 		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
 		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+
+		const uint32_t valid =
+		    info_p->cpuid_xsave_leafp->extended_state[eax];
+		for (unsigned n = 2; n < 8; n++) {
+			if ((valid & (1u << n)) == 0) {
+				continue;
+			}
+			xsp = &info_p->cpuid_xsave_leaf[n];
+			xsp->extended_state[eax] = 0xd;
+			xsp->extended_state[ecx] = n;
+			cpuid(xsp->extended_state);
+			DBG(" XSAVE Sub-leaf%d:\n", n);
+			DBG("  EAX           : 0x%x\n",
+			    xsp->extended_state[eax]);
+			DBG("  EBX           : 0x%x\n",
+			    xsp->extended_state[ebx]);
+			DBG("  ECX           : 0x%x\n",
+			    xsp->extended_state[ecx]);
+			DBG("  EDX           : 0x%x\n",
+			    xsp->extended_state[edx]);
+		}
 	}
 
-	if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE) {
+	if (info_p->cpuid_max_basic >= 7) {
 		/*
 		 * Leaf7 Features:
 		 */
@@ -847,8 +874,6 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  numerator     : 0x%x\n", reg[ebx]);
 		DBG("  denominator   : 0x%x\n", reg[eax]);
 	}
-
-	return;
 }
 
 static uint32_t
@@ -1667,6 +1692,7 @@ cpuid_vmm_detect_pv_interface(i386_vmm_info_t *info_p, const char *signature,
 	}
 
 	assert(info_p);
+
 	/*
 	 * Look for PV interface matching signature
 	 */

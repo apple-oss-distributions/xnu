@@ -58,6 +58,18 @@ SYSCTL_UINT(_kern_skywalk_channel, OID_AUTO, force_defunct,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ch_force_defunct, 0, "");
 #endif /* !DEVELOPMENT && !DEBUG */
 
+/*
+ * -fbounds-safety: Utility macro for the ci_key field of struct ch_init, which
+ * is of type user_addr_t (non-pointer type), which can't be marked as __sized_by.
+ */
+#define USER_ADDR_TO_PTR(chan_init) \
+    __unsafe_forge_bidi_indexable(void *, (chan_init).ci_key, (chan_init).ci_key_len)
+
+#if SK_LOG
+const char *__null_terminated MODE_TAG_TXSYNC = "txsync";
+const char *__null_terminated MODE_TAG_RXSYNC = "rxsync";
+#endif /* SK_LOG */
+
 static int
 chop_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 {
@@ -122,7 +134,7 @@ chop_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 int
 __channel_open(struct proc *p, struct __channel_open_args *uap, int *retval)
 {
-	struct fileproc *fp = NULL;
+	struct fileproc *__single fp = NULL;
 	struct kern_channel *ch = NULL;
 	struct ch_init init;
 	int fd = -1, err = 0;
@@ -233,14 +245,14 @@ __channel_open(struct proc *p, struct __channel_open_args *uap, int *retval)
 
 	if (__improbable((ch = ch_open(&init, p, fd, &err)) == NULL)) {
 		/* in case not processed */
-		key = (void *)init.ci_key;
+		key = USER_ADDR_TO_PTR(init);
 		ASSERT(err != 0);
 		SK_DSC(p, "ch_open nx_port %d err %u",
 		    (int)init.ci_nx_port, err);
 		goto done;
 	}
 	/* in case not processed */
-	key = (void *)init.ci_key;
+	key = USER_ADDR_TO_PTR(init);
 
 	/* update userland with respect to guard ID, etc. */
 	init.ci_guard = guard;
@@ -292,7 +304,7 @@ __channel_get_info(struct proc *p, struct __channel_get_info_args *uap,
     int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct kern_channel *ch = NULL;
 	int err = 0;
 
@@ -303,7 +315,7 @@ __channel_get_info(struct proc *p, struct __channel_get_info_args *uap,
 		SK_DSC(p, "fp_get_ftype err %u", err);
 		return err;
 	}
-	ch = fp_get_data(fp);
+	ch = (struct kern_channel *__single)fp_get_data(fp);
 
 	if (__improbable(uap->cinfo == USER_ADDR_NULL ||
 	    uap->cinfolen < sizeof(struct ch_info))) {
@@ -361,7 +373,7 @@ int
 __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	sk_protect_t protect = NULL;
 	struct nexus_adapter *na;
 	struct __kern_channel_ring *krings, *kring;
@@ -382,7 +394,7 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 		SK_DSC(p, "fp_get_ftype err %u", err);
 		return err;
 	}
-	ch = fp_get_data(fp);
+	ch = (struct kern_channel *__single)fp_get_data(fp);
 
 	lck_mtx_lock(&ch->ch_lock);
 	ASSERT(!(ch->ch_flags & CHANF_KERNEL));
@@ -458,7 +470,7 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 		if (__improbable((sk_verbose & SK_VERB_SYNC) != 0)) {
 			channel_sync_log1((mode == CHANNEL_SYNC_TX) ?
 			    SK_VERB_TX : SK_VERB_RX, (mode == CHANNEL_SYNC_TX) ?
-			    "txsync" : "rxsync", p, na, ch, kring, i);
+			    MODE_TAG_TXSYNC : MODE_TAG_RXSYNC, p, na, ch, kring, i);
 		}
 #endif /* SK_LOG */
 
@@ -539,7 +551,7 @@ __channel_sync(struct proc *p, struct __channel_sync_args *uap, int *retval)
 		if (__improbable((sk_verbose & SK_VERB_SYNC) != 0)) {
 			channel_sync_log2((mode == CHANNEL_SYNC_TX) ?
 			    SK_VERB_TX : SK_VERB_RX, (mode == CHANNEL_SYNC_TX) ?
-			    "txsync" : "rxsync", p, na, kring, i);
+			    MODE_TAG_TXSYNC : MODE_TAG_RXSYNC, p, na, kring, i);
 		}
 #endif /* SK_LOG */
 
@@ -676,7 +688,7 @@ __channel_get_opt(struct proc *p, struct __channel_get_opt_args *uap,
     int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct kern_channel *ch = NULL;
 	struct sockopt sopt;
 	uint32_t optlen;
@@ -689,7 +701,7 @@ __channel_get_opt(struct proc *p, struct __channel_get_opt_args *uap,
 		SK_DSC(p, "fp_get_ftype err %u", err);
 		return err;
 	}
-	ch = fp_get_data(fp);
+	ch = (struct kern_channel *__single)fp_get_data(fp);
 
 	if (uap->aoptlen == USER_ADDR_NULL) {
 		SK_DSC(p, "EINVAL: uap->aoptlen == USER_ADDR_NULL");
@@ -740,7 +752,7 @@ __channel_set_opt(struct proc *p, struct __channel_set_opt_args *uap,
     int *retval)
 {
 #pragma unused(retval)
-	struct fileproc *fp;
+	struct fileproc *__single fp;
 	struct kern_channel *ch = NULL;
 	struct sockopt sopt;
 	int err = 0;
@@ -752,7 +764,7 @@ __channel_set_opt(struct proc *p, struct __channel_set_opt_args *uap,
 		SK_DSC(p, "fp_get_ftype err %u", err);
 		return err;
 	}
-	ch = fp_get_data(fp);
+	ch = (struct kern_channel *__single)fp_get_data(fp);
 
 	bzero(&sopt, sizeof(sopt));
 	sopt.sopt_dir = SOPT_SET;

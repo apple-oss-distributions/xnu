@@ -855,6 +855,9 @@ SYSCTL_PROC(_net_vsock, OID_AUTO, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     (caddr_t)(long)SOCK_STREAM, 0, vsock_pcblist, "S,xvsockpcb",
     "List of active vsock sockets");
+
+SYSCTL_UINT(_net_vsock, OID_AUTO, pcbcount, CTLFLAG_RD | CTLFLAG_LOCKED,
+    (u_int *)&vsockinfo.all_pcb_count, 0, "");
 #endif
 
 /* VSock Protocol */
@@ -915,7 +918,7 @@ vsock_attach(struct socket *so, int proto, struct proc *p)
 }
 
 static int
-vsock_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp, struct proc *p)
+vsock_control(struct socket *so, u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data, struct ifnet *ifp, struct proc *p)
 {
 	#pragma unused(ifp)
 
@@ -1137,7 +1140,6 @@ vsock_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if ((so->so_state & SS_ISCONNECTED) == 0) {
 		// Don't wait for peer's response if non-blocking.
 		if (so->so_state & SS_NBIO) {
-			error = EINPROGRESS;
 			goto done;
 		}
 

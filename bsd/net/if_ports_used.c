@@ -27,7 +27,6 @@
  */
 
 #include <sys/types.h>
-#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <sys/mcache.h>
 #include <sys/malloc.h>
@@ -47,6 +46,7 @@
 #include <net/kpi_interface.h>
 #include <net/if_var.h>
 #include <net/if_ports_used.h>
+#include <net/net_sysctl.h>
 
 #include <netinet/in_pcb.h>
 #include <netinet/ip.h>
@@ -65,11 +65,13 @@
 
 #include <os/log.h>
 
+#include <IOKit/IOBSD.h>
+
 #define ESP_HDR_SIZE 4
 #define PORT_ISAKMP 500
 #define PORT_ISAKMP_NATT 4500   /* rfc3948 */
 
-#define IF_XNAME(ifp) ((ifp) != NULL ? (ifp)->if_xname : "")
+#define IF_XNAME(ifp) ((ifp) != NULL ? (ifp)->if_xname : (const char * __null_terminated)"")
 
 extern bool IOPMCopySleepWakeUUIDKey(char *buffer, size_t buf_len);
 
@@ -145,18 +147,12 @@ static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
     wakeuuid_last_update_time, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, sysctl_wakeuuid_last_update_time, "S,timeval", "");
 
-struct net_port_info_wake_event last_attributed_wake_event;
-int sysctl_last_attributed_wake_event SYSCTL_HANDLER_ARGS;
-static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
-    last_attributed_wake_event, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    0, 0, sysctl_last_attributed_wake_event, "S,net_port_info_wake_event", "");
-
 static bool            last_wake_phy_if_set = false;
 static char            last_wake_phy_if_name[IFNAMSIZ]; /* name + unit */
 static uint32_t        last_wake_phy_if_family;
 static uint32_t        last_wake_phy_if_subfamily;
 static uint32_t        last_wake_phy_if_functional_type;
-
+static bool            last_wake_phy_if_delay_wake_pkt = false;
 
 static bool has_notified_wake_pkt = false;
 static bool has_notified_unattributed_wake = false;
@@ -203,7 +199,52 @@ SYSCTL_QUAD(_net_link_generic_system_port_used, OID_AUTO, npi_search_list_max,
 #define NPE_HASH_VAL(_lport) (ntohs(_lport) & NPE_HASH_MASK)
 #define NPE_HASH_HEAD(_lport) (&net_port_entry_hash_table[NPE_HASH_VAL(_lport)])
 
-static TAILQ_HEAD(net_port_entry_hash_table, net_port_entry) * net_port_entry_hash_table = NULL;
+static TAILQ_HEAD(net_port_entry_hash_table, net_port_entry) * __indexable net_port_entry_hash_table = NULL;
+
+/*
+ * For some types of physical interface we need to delay the notiication of wake packet event
+ * until a user land interface controller confirms the wake was caused by its packet
+ */
+struct net_port_info_wake_pkt_event {
+	uint32_t                npi_wp_code;
+	uint32_t                npi_wp_flags;
+	union {
+		struct net_port_info_wake_event _npi_ev_wake_pkt_attributed;
+		struct net_port_info_una_wake_event _npi_ev_wake_pkt_unattributed;
+	} npi_ev_wake_pkt_;
+};
+
+#define npi_ev_wake_pkt_attributed npi_ev_wake_pkt_._npi_ev_wake_pkt_attributed
+#define npi_ev_wake_pkt_unattributed npi_ev_wake_pkt_._npi_ev_wake_pkt_unattributed
+
+int sysctl_wake_pkt_event_notify SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO, wake_pkt_event_notify,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED | CTLFLAG_ANYBODY, 0, 0,
+    sysctl_wake_pkt_event_notify, "I", "");
+
+/* Bitmap of the interface families to delay the notification of wake packet events */
+static uint32_t npi_wake_packet_event_delay_if_families = 0;
+
+/* How many interfaces families are supported */
+#define NPI_MAX_IF_FAMILY_BITS 32
+
+int sysctl_wake_pkt_event_delay_if_families SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO, wake_pkt_event_delay_if_families,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, 0, 0,
+    sysctl_wake_pkt_event_delay_if_families, "I", "");
+
+
+static struct net_port_info_wake_pkt_event last_wake_pkt_event;
+
+int sysctl_last_attributed_wake_event SYSCTL_HANDLER_ARGS;
+static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
+    last_attributed_wake_event, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_last_attributed_wake_event, "S,net_port_info_wake_event", "");
+
+int sysctl_last_unattributed_wake_event SYSCTL_HANDLER_ARGS;
+static SYSCTL_PROC(_net_link_generic_system_port_used, OID_AUTO,
+    last_unattributed_wake_event, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, sysctl_last_unattributed_wake_event, "S,net_port_info_una_wake_event", "");
 
 /*
  * Initialize IPv4 source address hash table.
@@ -243,30 +284,30 @@ net_port_entry_list_clear(void)
 }
 
 static bool
-get_test_wake_uuid(uuid_string_t wakeuuid_str, size_t len)
+get_test_wake_uuid(uuid_string_t wakeuuid_str)
 {
-	if (__improbable(use_test_wakeuuid)) {
-		if (!uuid_is_null(test_wakeuuid)) {
-			if (wakeuuid_str != NULL && len != 0) {
-				uuid_unparse(test_wakeuuid, wakeuuid_str);
-			}
-			return true;
-		} else {
-			return false;
+	if (!uuid_is_null(test_wakeuuid)) {
+		if (wakeuuid_str != NULL) {
+			uuid_unparse(test_wakeuuid, wakeuuid_str);
 		}
-	} else {
-		return false;
+		return true;
 	}
+
+	return false;
 }
 
 static bool
 is_wakeuuid_set(void)
 {
+	if (__improbable(use_test_wakeuuid) && !uuid_is_null(test_wakeuuid)) {
+		return true;
+	}
+
 	/*
 	 * IOPMCopySleepWakeUUIDKey() tells if SleepWakeUUID is currently set
 	 * That means we are currently in a sleep/wake cycle
 	 */
-	return get_test_wake_uuid(NULL, 0) || IOPMCopySleepWakeUUIDKey(NULL, 0);
+	return IOPMCopySleepWakeUUIDKey(NULL, 0);
 }
 
 void
@@ -280,8 +321,7 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 	uuid_clear(wakeuuid);
 
 	if (__improbable(use_test_wakeuuid)) {
-		wakeuuid_is_set = get_test_wake_uuid(wakeuuid_str,
-		    sizeof(wakeuuid_str));
+		wakeuuid_is_set = get_test_wake_uuid(wakeuuid_str);
 	} else {
 		wakeuuid_is_set = IOPMCopySleepWakeUUIDKey(wakeuuid_str,
 		    sizeof(wakeuuid_str));
@@ -314,6 +354,10 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 
 	lck_mtx_lock(&net_port_entry_head_lock);
 	if (uuid_compare(wakeuuid, current_wakeuuid) != 0) {
+		if (last_wake_phy_if_delay_wake_pkt) {
+			if_ports_used_stats.ifpu_delayed_wake_event_undelivered++;
+		}
+
 		net_port_entry_list_clear();
 		uuid_copy(current_wakeuuid, wakeuuid);
 		microtime(&wakeuuid_last_update_time);
@@ -322,13 +366,14 @@ if_ports_used_update_wakeuuid(struct ifnet *ifp)
 		has_notified_wake_pkt = false;
 		has_notified_unattributed_wake = false;
 
-		memset(&last_attributed_wake_event, 0, sizeof(last_attributed_wake_event));
+		memset(&last_wake_pkt_event, 0, sizeof(last_wake_pkt_event));
 
 		last_wake_phy_if_set = false;
 		memset(&last_wake_phy_if_name, 0, sizeof(last_wake_phy_if_name));
 		last_wake_phy_if_family = IFRTYPE_FAMILY_ANY;
 		last_wake_phy_if_subfamily = IFRTYPE_SUBFAMILY_ANY;
 		last_wake_phy_if_functional_type = IFRTYPE_FUNCTIONAL_UNKNOWN;
+		last_wake_phy_if_delay_wake_pkt = false;
 	}
 	/*
 	 * Record the time last checked
@@ -563,7 +608,7 @@ sysctl_wakeuuid_not_set_last_if SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 
-	return SYSCTL_OUT(req, &wakeuuid_not_set_last_if, strlen(wakeuuid_not_set_last_if) + 1);
+	return SYSCTL_OUT(req, &wakeuuid_not_set_last_if, strbuflen(wakeuuid_not_set_last_if) + 1);
 }
 
 int
@@ -639,8 +684,10 @@ static int
 sysctl_get_ports_used SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp)
-	int *name = (int *)arg1;
-	int namelen = arg2;
+	/*
+	 * 3 is the required number of parameters: ifindex, protocol and flags
+	 */
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 3, name, namelen);
 	int error = 0;
 	int idx;
 	protocol_family_t protocol;
@@ -650,13 +697,6 @@ sysctl_get_ports_used SYSCTL_HANDLER_ARGS
 
 	if (req->newptr != USER_ADDR_NULL) {
 		error = EPERM;
-		goto done;
-	}
-	/*
-	 * 3 is the required number of parameters: ifindex, protocol and flags
-	 */
-	if (namelen != 3) {
-		error = ENOENT;
 		goto done;
 	}
 
@@ -799,8 +839,7 @@ if_ports_used_add_inpcb(const uint32_t ifindex, const struct inpcb *inp)
 	} else {
 		npi.npi_effective_pid = so->last_pid;
 		if (so->last_pid != 0) {
-			strlcpy(npi.npi_effective_pname, npi.npi_owner_pname,
-			    sizeof(npi.npi_effective_pname));
+			strbufcpy(npi.npi_effective_pname, npi.npi_owner_pname);
 		}
 		uuid_copy(npi.npi_effective_uuid, so->last_uuid);
 	}
@@ -881,8 +920,7 @@ if_ports_used_add_flow_entry(const struct flow_entry *fe, const uint32_t ifindex
 	}
 
 	npi.npi_owner_pid = nfi->nfi_owner_pid;
-	strlcpy(npi.npi_owner_pname, nfi->nfi_owner_name,
-	    sizeof(npi.npi_owner_pname));
+	strbufcpy(npi.npi_owner_pname, nfi->nfi_owner_name);
 
 	/*
 	 * Get the proc UUID from the pid as the the proc UUID is not present
@@ -895,13 +933,11 @@ if_ports_used_add_flow_entry(const struct flow_entry *fe, const uint32_t ifindex
 	}
 	if (nfi->nfi_effective_pid != -1) {
 		npi.npi_effective_pid = nfi->nfi_effective_pid;
-		strlcpy(npi.npi_effective_pname, nfi->nfi_effective_name,
-		    sizeof(npi.npi_effective_pname));
+		strbufcpy(npi.npi_effective_pname, nfi->nfi_effective_name);
 		uuid_copy(npi.npi_effective_uuid, fe->fe_eproc_uuid);
 	} else {
 		npi.npi_effective_pid = npi.npi_owner_pid;
-		strlcpy(npi.npi_effective_pname, npi.npi_owner_pname,
-		    sizeof(npi.npi_effective_pname));
+		strbufcpy(npi.npi_effective_pname, npi.npi_owner_pname);
 		uuid_copy(npi.npi_effective_uuid, npi.npi_owner_uuid);
 	}
 
@@ -1051,7 +1087,7 @@ static bool
 net_port_info_find_match(struct net_port_info *in_npi)
 {
 	struct net_port_entry *npe;
-	struct net_port_entry *best_match = NULL;
+	struct net_port_entry * __single best_match = NULL;
 
 	lck_mtx_lock(&net_port_entry_head_lock);
 
@@ -1073,10 +1109,8 @@ net_port_info_find_match(struct net_port_info *in_npi)
 		}
 		in_npi->npi_owner_pid = best_match->npe_npi.npi_owner_pid;
 		in_npi->npi_effective_pid = best_match->npe_npi.npi_effective_pid;
-		strlcpy(in_npi->npi_owner_pname, best_match->npe_npi.npi_owner_pname,
-		    sizeof(in_npi->npi_owner_pname));
-		strlcpy(in_npi->npi_effective_pname, best_match->npe_npi.npi_effective_pname,
-		    sizeof(in_npi->npi_effective_pname));
+		strbufcpy(in_npi->npi_owner_pname, best_match->npe_npi.npi_owner_pname);
+		strbufcpy(in_npi->npi_effective_pname, best_match->npe_npi.npi_effective_pname);
 		uuid_copy(in_npi->npi_owner_uuid, best_match->npe_npi.npi_owner_uuid);
 		uuid_copy(in_npi->npi_effective_uuid, best_match->npe_npi.npi_effective_uuid);
 	}
@@ -1114,7 +1148,7 @@ net_port_info_log_una_wake_event(const char *s, struct net_port_info_una_wake_ev
 	os_log(OS_LOG_DEFAULT, "%s if %s (%u) phy_if %s proto %s local %s:%u foreign %s:%u len: %u datalen: %u cflags: 0x%x proto: %u",
 	    s != NULL ? s : "",
 	    ev->una_wake_pkt_ifname, ev->una_wake_pkt_if_index, ev->una_wake_pkt_phy_ifname,
-	    ev->una_wake_pkt_flags & NPIF_TCP ? "tcp" : ev->una_wake_pkt_flags ? "udp" :
+	    ev->una_wake_pkt_flags & NPIF_TCP ? "tcp" : ev->una_wake_pkt_flags & NPIF_UDP ? "udp" :
 	    ev->una_wake_pkt_flags & NPIF_ESP ? "esp" : "unknown",
 	    lbuf, ntohs(ev->una_wake_pkt_local_port),
 	    fbuf, ntohs(ev->una_wake_pkt_foreign_port),
@@ -1165,6 +1199,19 @@ net_port_info_log_wake_event(const char *s, struct net_port_info_wake_event *ev)
  * 3) If the packet is tunneled or redirected we are going to do the attribution again
  *    and the physical will be different from the interface used the TCP/UDP flow.
  */
+static bool
+is_wake_pkt_event_delay(uint32_t ifrtype)
+{
+	// Prevent overflow of the bitstring
+	if (ifrtype >= NPI_MAX_IF_FAMILY_BITS) {
+		return false;
+	}
+	if (bitstr_test((bitstr_t *)&npi_wake_packet_event_delay_if_families, ifrtype)) {
+		return true;
+	}
+	return false;
+}
+
 static void
 if_set_wake_physical_interface(struct ifnet *ifp)
 {
@@ -1176,6 +1223,67 @@ if_set_wake_physical_interface(struct ifnet *ifp)
 	last_wake_phy_if_family = ifp->if_family;
 	last_wake_phy_if_subfamily = ifp->if_subfamily;
 	last_wake_phy_if_functional_type = if_functional_type(ifp, true);
+	if ((ifp->if_xflags & IFXF_DELAYWAKEPKTEVENT) != 0 || is_wake_pkt_event_delay(last_wake_phy_if_family)) {
+		last_wake_phy_if_delay_wake_pkt = true;
+	}
+}
+
+static void
+deliver_unattributed_wake_packet_event(struct net_port_info_una_wake_event *event_data)
+{
+	struct kev_msg ev_msg = {};
+
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
+	ev_msg.event_code  = KEV_POWER_UNATTRIBUTED_WAKE;
+
+	ev_msg.dv[0].data_ptr = event_data;
+	ev_msg.dv[0].data_length = sizeof(struct net_port_info_una_wake_event);
+
+	int result = kev_post_msg(&ev_msg);
+	if (result != 0) {
+		uuid_string_t wake_uuid_str;
+
+		uuid_unparse(event_data->una_wake_uuid, wake_uuid_str);
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
+		    __func__, result, wake_uuid_str);
+
+		if_ports_used_stats.ifpu_wake_pkt_event_error += 1;
+	}
+#if (DEBUG || DEVELOPMENT)
+	net_port_info_log_una_wake_event("unattributed wake packet event", event_data);
+#endif /* (DEBUG || DEVELOPMENT) */
+}
+
+static void
+deliver_attributed_wake_packet_event(struct net_port_info_wake_event *event_data)
+{
+	struct kev_msg ev_msg = {};
+
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
+	ev_msg.event_code  = KEV_POWER_WAKE_PACKET;
+
+	ev_msg.dv[0].data_ptr = event_data;
+	ev_msg.dv[0].data_length = sizeof(struct net_port_info_wake_event);
+
+	int result = kev_post_msg(&ev_msg);
+	if (result != 0) {
+		uuid_string_t wake_uuid_str;
+
+		uuid_unparse(event_data->wake_uuid, wake_uuid_str);
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
+		    __func__, result, wake_uuid_str);
+
+		if_ports_used_stats.ifpu_wake_pkt_event_error += 1;
+	}
+#if (DEBUG || DEVELOPMENT)
+	net_port_info_log_wake_event("attributed wake packet event", event_data);
+#endif /* (DEBUG || DEVELOPMENT) */
 }
 
 static void
@@ -1183,8 +1291,6 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
     struct net_port_info *npi, uint32_t pkt_total_len, uint32_t pkt_data_len,
     uint16_t pkt_control_flags, uint16_t proto)
 {
-	struct kev_msg ev_msg = {};
-
 	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
 
 	lck_mtx_lock(&net_port_entry_head_lock);
@@ -1201,11 +1307,6 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
 	lck_mtx_unlock(&net_port_entry_head_lock);
 
 	if_ports_used_stats.ifpu_unattributed_wake_event += 1;
-
-	ev_msg.vendor_code = KEV_VENDOR_APPLE;
-	ev_msg.kev_class = KEV_NETWORK_CLASS;
-	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
-	ev_msg.event_code  = KEV_POWER_UNATTRIBUTED_WAKE;
 
 	struct net_port_info_una_wake_event event_data = {};
 	uuid_copy(event_data.una_wake_uuid, current_wakeuuid);
@@ -1229,8 +1330,7 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
 		event_data.una_wake_pkt_if_info.npi_if_subfamily = ifp->if_subfamily;
 		event_data.una_wake_pkt_if_info.npi_if_functional_type = if_functional_type(ifp, true);
 
-		strlcpy(event_data.una_wake_pkt_phy_ifname, last_wake_phy_if_name,
-		    sizeof(event_data.una_wake_pkt_phy_ifname));
+		strbufcpy(event_data.una_wake_pkt_phy_ifname, last_wake_phy_if_name);
 		event_data.una_wake_pkt_phy_if_info.npi_if_family = last_wake_phy_if_family;
 		event_data.una_wake_pkt_phy_if_info.npi_if_subfamily = last_wake_phy_if_subfamily;
 		event_data.una_wake_pkt_phy_if_info.npi_if_functional_type = last_wake_phy_if_functional_type;
@@ -1255,37 +1355,25 @@ if_notify_unattributed_wake_mbuf(struct ifnet *ifp, struct mbuf *m,
 		return;
 	}
 
-	ev_msg.dv[0].data_ptr = &event_data;
-	ev_msg.dv[0].data_length = sizeof(event_data);
+	last_wake_pkt_event.npi_wp_code = KEV_POWER_UNATTRIBUTED_WAKE;
+	memcpy(&last_wake_pkt_event.npi_ev_wake_pkt_unattributed, &event_data, sizeof(last_wake_pkt_event.npi_ev_wake_pkt_unattributed));
 
-	int result = kev_post_msg(&ev_msg);
-	if (result != 0) {
-		uuid_string_t wake_uuid_str;
-
-		uuid_unparse(event_data.una_wake_uuid, wake_uuid_str);
-		os_log_error(OS_LOG_DEFAULT,
-		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
-		    __func__, result, wake_uuid_str);
-
-		if_ports_used_stats.ifpu_unattributed_wake_event_error += 1;
+	if (last_wake_phy_if_delay_wake_pkt) {
+#if (DEBUG || DEVELOPMENT)
+		if (if_ports_used_verbose > 0) {
+			net_port_info_log_una_wake_event("delay unattributed wake packet event", &event_data);
+		}
+#endif /* (DEBUG || DEVELOPMENT) */
+		return;
 	}
 
-#if (DEBUG || DEVELOPMENT)
-	net_port_info_log_una_wake_event("unattributed wake packet event", &event_data);
-#endif /* (DEBUG || DEVELOPMENT) */
+	deliver_unattributed_wake_packet_event(&event_data);
 }
 
 static void
 if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
     uint32_t pkt_total_len, uint32_t pkt_data_len, uint16_t pkt_control_flags)
 {
-	struct kev_msg ev_msg = {};
-
-	ev_msg.vendor_code = KEV_VENDOR_APPLE;
-	ev_msg.kev_class = KEV_NETWORK_CLASS;
-	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
-	ev_msg.event_code  = KEV_POWER_WAKE_PACKET;
-
 	struct net_port_info_wake_event event_data = {};
 
 	uuid_copy(event_data.wake_uuid, current_wakeuuid);
@@ -1294,10 +1382,8 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	event_data.wake_pkt_flags = npi->npi_flags;
 	event_data.wake_pkt_owner_pid = npi->npi_owner_pid;
 	event_data.wake_pkt_effective_pid = npi->npi_effective_pid;
-	strlcpy(event_data.wake_pkt_owner_pname, npi->npi_owner_pname,
-	    sizeof(event_data.wake_pkt_owner_pname));
-	strlcpy(event_data.wake_pkt_effective_pname, npi->npi_effective_pname,
-	    sizeof(event_data.wake_pkt_effective_pname));
+	strbufcpy(event_data.wake_pkt_owner_pname, npi->npi_owner_pname);
+	strbufcpy(event_data.wake_pkt_effective_pname, npi->npi_effective_pname);
 	uuid_copy(event_data.wake_pkt_owner_uuid, npi->npi_owner_uuid);
 	uuid_copy(event_data.wake_pkt_effective_uuid, npi->npi_effective_uuid);
 
@@ -1310,8 +1396,7 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	event_data.wake_pkt_if_info.npi_if_subfamily = ifp->if_subfamily;
 	event_data.wake_pkt_if_info.npi_if_functional_type = if_functional_type(ifp, true);
 
-	strlcpy(event_data.wake_pkt_phy_ifname, last_wake_phy_if_name,
-	    sizeof(event_data.wake_pkt_phy_ifname));
+	strbufcpy(event_data.wake_pkt_phy_ifname, last_wake_phy_if_name);
 	event_data.wake_pkt_phy_if_info.npi_if_family = last_wake_phy_if_family;
 	event_data.wake_pkt_phy_if_info.npi_if_subfamily = last_wake_phy_if_subfamily;
 	event_data.wake_pkt_phy_if_info.npi_if_functional_type = last_wake_phy_if_functional_type;
@@ -1322,9 +1407,6 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	if (npi->npi_flags & NPIF_NOWAKE) {
 		event_data.wake_pkt_control_flags |= NPICF_NOWAKE;
 	}
-
-	ev_msg.dv[0].data_ptr = &event_data;
-	ev_msg.dv[0].data_length = sizeof(event_data);
 
 	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
 
@@ -1341,7 +1423,8 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 	}
 	has_notified_wake_pkt = true;
 
-	memcpy(&last_attributed_wake_event, &event_data, sizeof(last_attributed_wake_event));
+	last_wake_pkt_event.npi_wp_code = KEV_POWER_WAKE_PACKET;
+	memcpy(&last_wake_pkt_event.npi_ev_wake_pkt_attributed, &event_data, sizeof(last_wake_pkt_event.npi_ev_wake_pkt_attributed));
 
 	lck_mtx_unlock(&net_port_entry_head_lock);
 
@@ -1351,20 +1434,16 @@ if_notify_wake_packet(struct ifnet *ifp, struct net_port_info *npi,
 		if_ports_used_stats.ifpu_wake_pkt_event += 1;
 	}
 
-	int result = kev_post_msg(&ev_msg);
-	if (result != 0) {
-		uuid_string_t wake_uuid_str;
-
-		uuid_unparse(event_data.wake_uuid, wake_uuid_str);
-		os_log_error(OS_LOG_DEFAULT,
-		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
-		    __func__, result, wake_uuid_str);
-
-		if_ports_used_stats.ifpu_wake_pkt_event_error += 1;
-	}
+	if (last_wake_phy_if_delay_wake_pkt) {
 #if (DEBUG || DEVELOPMENT)
-	net_port_info_log_wake_event("attributed wake packet event", &event_data);
+		if (if_ports_used_verbose > 0) {
+			net_port_info_log_wake_event("delay attributed wake packet event", &event_data);
+		}
 #endif /* (DEBUG || DEVELOPMENT) */
+		return;
+	}
+
+	deliver_attributed_wake_packet_event(&event_data);
 }
 
 static bool
@@ -1719,8 +1798,6 @@ if_notify_unattributed_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt,
     struct net_port_info *npi, uint32_t pkt_total_len, uint32_t pkt_data_len,
     uint16_t pkt_control_flags, uint16_t proto)
 {
-	struct kev_msg ev_msg = {};
-
 	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
 
 	lck_mtx_lock(&net_port_entry_head_lock);
@@ -1743,11 +1820,6 @@ if_notify_unattributed_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt,
 		    __func__);
 		if_ports_used_stats.ifpu_unattributed_null_recvif += 1;
 	}
-
-	ev_msg.vendor_code = KEV_VENDOR_APPLE;
-	ev_msg.kev_class = KEV_NETWORK_CLASS;
-	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
-	ev_msg.event_code  = KEV_POWER_UNATTRIBUTED_WAKE;
 
 	struct net_port_info_una_wake_event event_data = {};
 	uuid_copy(event_data.una_wake_uuid, current_wakeuuid);
@@ -1776,23 +1848,19 @@ if_notify_unattributed_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt,
 	event_data.una_wake_pkt_control_flags = pkt_control_flags;
 	event_data.una_wake_pkt_proto = proto;
 
-	ev_msg.dv[0].data_ptr = &event_data;
-	ev_msg.dv[0].data_length = sizeof(event_data);
+	last_wake_pkt_event.npi_wp_code = KEV_POWER_UNATTRIBUTED_WAKE;
+	memcpy(&last_wake_pkt_event.npi_ev_wake_pkt_unattributed, &event_data, sizeof(last_wake_pkt_event.npi_ev_wake_pkt_unattributed));
 
-	int result = kev_post_msg(&ev_msg);
-	if (result != 0) {
-		uuid_string_t wake_uuid_str;
-
-		uuid_unparse(event_data.una_wake_uuid, wake_uuid_str);
-		os_log_error(OS_LOG_DEFAULT,
-		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
-		    __func__, result, wake_uuid_str);
-
-		if_ports_used_stats.ifpu_unattributed_wake_event_error += 1;
-	}
+	if (last_wake_phy_if_delay_wake_pkt) {
 #if (DEBUG || DEVELOPMENT)
-	net_port_info_log_una_wake_event("unattributed wake packet event", &event_data);
+		if (if_ports_used_verbose > 0) {
+			net_port_info_log_una_wake_event("delay unattributed wake packet event", &event_data);
+		}
 #endif /* (DEBUG || DEVELOPMENT) */
+		return;
+	}
+
+	deliver_unattributed_wake_packet_event(&event_data);
 }
 
 void
@@ -1874,7 +1942,7 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 		if (npi.npi_flags & NPIF_FRAG) {
 			goto failed;
 		}
-		struct tcphdr *tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+		struct tcphdr * __single tcp = __unsafe_forge_single(struct tcphdr *, pkt->pkt_flow_tcp_hdr);
 		if (tcp == NULL) {
 			os_log(OS_LOG_DEFAULT, "%s: pkt with unassigned TCP header from %s",
 			    __func__, IF_XNAME(ifp));
@@ -1897,7 +1965,7 @@ if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
 		if (npi.npi_flags & NPIF_FRAG) {
 			goto failed;
 		}
-		struct udphdr *uh = (struct udphdr *)pkt->pkt_flow_udp_hdr;
+		struct udphdr * __single uh = __unsafe_forge_single(struct udphdr *, pkt->pkt_flow_udp_hdr);
 		if (uh == NULL) {
 			os_log(OS_LOG_DEFAULT, "%s: pkt with unassigned UDP header from %s",
 			    __func__, IF_XNAME(ifp));
@@ -1963,14 +2031,116 @@ int
 sysctl_last_attributed_wake_event SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	size_t len = sizeof(struct net_port_info_wake_event);
+	struct net_port_info_wake_event net_port_info_wake_event = { 0 };
+	size_t len = sizeof(net_port_info_wake_event);
+	int error;
+
+	lck_mtx_lock(&net_port_entry_head_lock);
+	if (last_wake_pkt_event.npi_wp_code == KEV_POWER_WAKE_PACKET) {
+		memcpy(&net_port_info_wake_event, &last_wake_pkt_event.npi_ev_wake_pkt_attributed, len);
+	}
+	lck_mtx_unlock(&net_port_entry_head_lock);
 
 	if (req->oldptr != 0) {
 		len = MIN(req->oldlen, len);
 	}
-	lck_mtx_lock(&net_port_entry_head_lock);
-	int error = SYSCTL_OUT(req, &last_attributed_wake_event, len);
-	lck_mtx_unlock(&net_port_entry_head_lock);
+	error = SYSCTL_OUT(req, &net_port_info_wake_event, len);
 
 	return error;
+}
+
+int
+sysctl_last_unattributed_wake_event SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	struct net_port_info_una_wake_event net_port_info_una_wake_event = { 0 };
+	size_t len = sizeof(net_port_info_una_wake_event);
+	int error;
+
+	lck_mtx_lock(&net_port_entry_head_lock);
+	if (last_wake_pkt_event.npi_wp_code == KEV_POWER_UNATTRIBUTED_WAKE) {
+		memcpy(&net_port_info_una_wake_event, &last_wake_pkt_event.npi_ev_wake_pkt_unattributed, len);
+	}
+	lck_mtx_unlock(&net_port_entry_head_lock);
+
+	if (req->oldptr != 0) {
+		len = MIN(req->oldlen, len);
+	}
+	error = SYSCTL_OUT(req, &net_port_info_una_wake_event, len);
+
+	return error;
+}
+
+/*
+ * Pass the interface family of the interface that caused the wake
+ */
+int
+sysctl_wake_pkt_event_notify SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	long long val = 0;
+	int error = 0;
+	int changed = 0;
+	uint32_t if_family = 0;
+
+	error = sysctl_io_number(req, val, sizeof(val), &val, &changed);
+	if (error != 0 || req->newptr == 0 || changed == 0) {
+		return error;
+	}
+
+	if (val < 0 || val > UINT32_MAX) {
+		return EINVAL;
+	}
+	if_family = (uint32_t)val;
+
+	if (!IOCurrentTaskHasEntitlement(WAKE_PKT_EVENT_CONTROL_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	os_log(OS_LOG_DEFAULT, "sysctl_wake_pkt_event_notify proc %s:%u val %u last_wake_phy_if_delay_wake_pkt %d last_wake_phy_if_family %u",
+	    proc_best_name(current_proc()), proc_selfpid(),
+	    if_family, last_wake_phy_if_delay_wake_pkt, last_wake_phy_if_family);
+
+	if (last_wake_phy_if_delay_wake_pkt && val == last_wake_phy_if_family) {
+		last_wake_phy_if_delay_wake_pkt = false;
+		if (last_wake_pkt_event.npi_wp_code == KEV_POWER_WAKE_PACKET) {
+			deliver_attributed_wake_packet_event(&last_wake_pkt_event.npi_ev_wake_pkt_attributed);
+		} else {
+			deliver_unattributed_wake_packet_event(&last_wake_pkt_event.npi_ev_wake_pkt_unattributed);
+		}
+	}
+
+	return 0;
+}
+
+int
+sysctl_wake_pkt_event_delay_if_families SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	long long val = npi_wake_packet_event_delay_if_families;
+	int error;
+	int changed = 0;
+	uint32_t if_families = 0;
+
+	error = sysctl_io_number(req, val, sizeof(val), &val, &changed);
+	if (error != 0 || req->newptr == 0 || changed == 0) {
+		return error;
+	}
+	if (val < 0 || val > UINT32_MAX) {
+		return EINVAL;
+	}
+	if_families = (uint32_t)val;
+
+	if (!IOCurrentTaskHasEntitlement(WAKE_PKT_EVENT_CONTROL_ENTITLEMENT)) {
+		return EPERM;
+	}
+
+	os_log(OS_LOG_DEFAULT, "sysctl_wake_pkt_event_delay_if_families proc %s:%u npi_wake_packet_event_delay_if_families 0x%x -> 0x%x",
+	    proc_best_name(current_proc()), proc_selfpid(),
+	    npi_wake_packet_event_delay_if_families, if_families);
+
+	/* The value is the bitmap of the functional types to delay */
+	npi_wake_packet_event_delay_if_families = if_families;
+
+	return 0;
 }

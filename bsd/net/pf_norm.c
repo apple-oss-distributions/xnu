@@ -322,12 +322,12 @@ pf_purge_expired_fragments(void)
 		case AF_INET:
 			DPFPRINTF(("expiring IPv4 %d(0x%llx) from queue.\n",
 			    ntohs(frag->fr_id),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		case AF_INET6:
 			DPFPRINTF(("expiring IPv6 %d(0x%llx) from queue.\n",
 			    ntohl(frag->fr_id6),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		default:
 			VERIFY(0 && "only IPv4 and IPv6 supported");
@@ -346,12 +346,12 @@ pf_purge_expired_fragments(void)
 		case AF_INET:
 			DPFPRINTF(("expiring IPv4 %d(0x%llx) from cache.\n",
 			    ntohs(frag->fr_id),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		case AF_INET6:
 			DPFPRINTF(("expiring IPv6 %d(0x%llx) from cache.\n",
 			    ntohl(frag->fr_id6),
-			    (uint64_t)VM_KERNEL_ADDRPERM(frag)));
+			    (uint64_t)VM_KERNEL_ADDRHASH(frag)));
 			break;
 		default:
 			VERIFY(0 && "only IPv4 and IPv6 supported");
@@ -802,8 +802,8 @@ static __attribute__((noinline)) struct mbuf *
 pf_fragcache(struct mbuf **m0, struct ip *h, struct pf_fragment **frag, int mff,
     int drop, int *nomem)
 {
-	struct mbuf             *m = *m0;
-	struct pf_frcache       *frp, *fra, *cur = NULL;
+	struct mbuf             *__single m = *m0;
+	struct pf_frcache       *__single frp, *__single fra, *__single cur = NULL;
 	int                      ip_len = ntohs(h->ip_len) - (h->ip_hl << 2);
 	u_int16_t                off = ntohs(h->ip_off) << 3;
 	u_int16_t                fr_max = ip_len + off;
@@ -1115,10 +1115,10 @@ struct mbuf *
 pf_reassemble6(struct mbuf **m0, struct pf_fragment **frag,
     struct pf_frent *frent, int mff)
 {
-	struct mbuf *m, *m2;
-	struct pf_frent *frea, *frep, *next;
-	struct ip6_hdr *ip6;
-	struct ip6_frag *ip6f;
+	struct mbuf *__single m, *__single m2;
+	struct pf_frent *__single frea, *__single frep, *__single next;
+	struct ip6_hdr *__single ip6;
+	struct ip6_frag *__single ip6f;
 	int plen, off, fr_max, pktlen;
 	uint32_t uoff, csum, csum_flags;
 
@@ -1440,7 +1440,7 @@ insert:
 	}
 
 	DPFPRINTF(("complete: 0x%llx ip6_plen %d m_pkthdr.len %d\n",
-	    (uint64_t)VM_KERNEL_ADDRPERM(m), ntohs(ip6->ip6_plen),
+	    (uint64_t)VM_KERNEL_ADDRHASH(m), ntohs(ip6->ip6_plen),
 	    m->m_pkthdr.len));
 
 	/* Add the reassembled tag */
@@ -1478,9 +1478,9 @@ static __attribute__((noinline)) struct mbuf *
 pf_frag6cache(struct mbuf **m0, struct ip6_hdr *h, struct ip6_frag *fh,
     struct pf_fragment **frag, int hlen, int mff, int drop, int *nomem)
 {
-	struct mbuf *m = *m0;
+	struct mbuf *__single m = *m0;
 	u_int16_t plen, off, fr_max;
-	struct pf_frcache *frp, *fra, *cur = NULL;
+	struct pf_frcache *__single frp, *__single fra, *__single cur = NULL;
 	int hosed = 0;
 
 	VERIFY(*frag == NULL || !BUFFER_FRAGMENTS(*frag));
@@ -1508,7 +1508,7 @@ pf_frag6cache(struct mbuf **m0, struct ip6_hdr *h, struct ip6_frag *fh,
 	fr_max = off + plen;
 
 	DPFPRINTF(("0x%llx plen %u off %u fr_max %u\n",
-	    (uint64_t)VM_KERNEL_ADDRPERM(m), plen, off, fr_max));
+	    (uint64_t)VM_KERNEL_ADDRHASH(m), plen, off, fr_max));
 
 	/* Create a new range queue for this packet */
 	if (*frag == NULL) {
@@ -1813,18 +1813,18 @@ drop_fragment:
 int
 pf_refragment6(struct ifnet *ifp, pbuf_t **pbufp, struct pf_fragment_tag *ftag)
 {
-	struct mbuf        *m;
+	struct mbuf        *__single m;
 	uint32_t           frag_id;
 	uint16_t           hdrlen, extoff, maxlen, unfragpartlen;
 	uint8_t            proto;
 	int                error, action;
-	uint8_t            *lexthdrsp;
+	uint8_t            *__single lexthdrsp;
 	struct route_in6   ip6route;
-	struct route_in6   *ro;
-	struct sockaddr_in6     *dst;
-	struct ip6_hdr *hdr;
-	struct pf_mtag *mtag;
-	struct m_tag *tag;
+	struct route_in6   *__single ro;
+	struct sockaddr_in6     *__single dst;
+	struct ip6_hdr *__single hdr;
+	struct pf_mtag *__single mtag;
+	struct m_tag *__single tag;
 
 	if (pbufp == NULL || !pbuf_is_valid(*pbufp) || ftag == NULL) {
 		panic("pf_route6: invalid parameters");
@@ -1844,7 +1844,7 @@ pf_refragment6(struct ifnet *ifp, pbuf_t **pbufp, struct pf_fragment_tag *ftag)
 	tag = NULL;
 	mtag->pftag_flags &= ~PF_TAG_REASSEMBLED;
 	ro = &ip6route;
-	bzero((caddr_t)ro, sizeof(*ro));
+	bzero((struct route_in6 *__bidi_indexable)ro, sizeof(*ro));
 	dst = (struct sockaddr_in6 *)&ro->ro_dst;
 	dst->sin6_family = AF_INET6;
 	dst->sin6_len = sizeof(*dst);
@@ -1862,7 +1862,7 @@ pf_refragment6(struct ifnet *ifp, pbuf_t **pbufp, struct pf_fragment_tag *ftag)
 		proto = *lexthdrsp;
 		if (proto == IPPROTO_DSTOPTS) {
 			struct ip6_ext ext;
-			if (!pf_pull_hdr(*pbufp, off, &ext, sizeof(ext), NULL,
+			if (!pf_pull_hdr(*pbufp, off, &ext, sizeof(ext), sizeof(ext), NULL,
 			    NULL, AF_INET6)) {
 				DPFPRINTF(("pkt too short"));
 				action = PF_DROP;
@@ -1905,11 +1905,11 @@ int
 pf_normalize_ip(pbuf_t *pbuf, int dir, struct pfi_kif *kif, u_short *reason,
     struct pf_pdesc *pd)
 {
-	struct mbuf             *m;
-	struct pf_rule          *r;
-	struct pf_frent         *frent;
-	struct pf_fragment      *frag = NULL;
-	struct ip               *h = pbuf->pb_data;
+	struct mbuf             *__single m;
+	struct pf_rule          *__single r;
+	struct pf_frent         *__single frent;
+	struct pf_fragment      *__single frag = NULL;
+	struct ip               *__single h = pbuf->pb_data;
 	int                      mff = (ntohs(h->ip_off) & IP_MF);
 	int                      hlen = h->ip_hl << 2;
 	u_int16_t                fragoff = (ntohs(h->ip_off) & IP_OFFMASK) << 3;
@@ -1917,8 +1917,8 @@ pf_normalize_ip(pbuf_t *pbuf, int dir, struct pfi_kif *kif, u_short *reason,
 	int                      ip_len;
 	int                      ip_off;
 	int                      asd = 0;
-	struct pf_ruleset       *ruleset = NULL;
-	struct ifnet            *ifp = pbuf->pb_ifp;
+	struct pf_ruleset       *__single ruleset = NULL;
+	struct ifnet            *__single ifp = pbuf->pb_ifp;
 	uint64_t                ipid_salt = (uint64_t)pbuf_get_packet_buffer_address(pbuf);
 
 	r = TAILQ_FIRST(pf_main_ruleset.rules[PF_RULESET_SCRUB].active.ptr);
@@ -2236,9 +2236,9 @@ int
 pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
     u_short *reason, struct pf_pdesc *pd)
 {
-	struct mbuf             *m = NULL;
-	struct pf_rule          *r;
-	struct ip6_hdr          *h = pbuf->pb_data;
+	struct mbuf             *__single m = NULL;
+	struct pf_rule          *__single r;
+	struct ip6_hdr          *__single h = pbuf->pb_data;
 	int                      extoff;
 	int                      off;
 	struct ip6_ext           ext;
@@ -2251,13 +2251,13 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 	u_int16_t                fragoff = 0;
 	u_int8_t                 proto;
 	int                      terminal;
-	struct pf_frent         *frent;
-	struct pf_fragment      *pff = NULL;
+	struct pf_frent         *__single frent;
+	struct pf_fragment      *__single pff = NULL;
 	int                      mff = 0, rh_cnt = 0;
 	u_int16_t                fr_max;
 	int                      asd = 0;
-	struct pf_ruleset       *ruleset = NULL;
-	struct ifnet            *ifp = pbuf->pb_ifp;
+	struct pf_ruleset       *__single ruleset = NULL;
+	struct ifnet            *__single ifp = pbuf->pb_ifp;
 
 	r = TAILQ_FIRST(pf_main_ruleset.rules[PF_RULESET_SCRUB].active.ptr);
 	while (r != NULL) {
@@ -2275,11 +2275,11 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 		}
 #endif
 		else if (PF_MISMATCHAW(&r->src.addr,
-		    (struct pf_addr *)(uintptr_t)&h->ip6_src, AF_INET6,
+		    (struct pf_addr *)(void *)&h->ip6_src, AF_INET6,
 		    r->src.neg, kif)) {
 			r = r->skip[PF_SKIP_SRC_ADDR].ptr;
 		} else if (PF_MISMATCHAW(&r->dst.addr,
-		    (struct pf_addr *)(uintptr_t)&h->ip6_dst, AF_INET6,
+		    (struct pf_addr *)(void *)&h->ip6_dst, AF_INET6,
 		    r->dst.neg, NULL)) {
 			r = r->skip[PF_SKIP_DST_ADDR].ptr;
 		} else {
@@ -2315,16 +2315,17 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 	terminal = 0;
 	do {
 		pd->proto = proto;
-		switch (proto) {
-		case IPPROTO_FRAGMENT:
+		if (proto == IPPROTO_FRAGMENT) {
 			goto fragment;
+		}
+		if (!pf_pull_hdr(pbuf, off, &ext, sizeof(ext), sizeof(ext), NULL,
+		    NULL, AF_INET6)) {
+			goto shortpkt;
+		}
+		switch (proto) {
 		case IPPROTO_AH:
 		case IPPROTO_ROUTING:
 		case IPPROTO_DSTOPTS:
-			if (!pf_pull_hdr(pbuf, off, &ext, sizeof(ext), NULL,
-			    NULL, AF_INET6)) {
-				goto shortpkt;
-			}
 			extoff = off;
 			/*
 			 * <jhw@apple.com>
@@ -2332,12 +2333,14 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 			 * Routing header type zero considered harmful.
 			 */
 			if (proto == IPPROTO_ROUTING) {
-				const struct ip6_rthdr *rh =
-				    (const struct ip6_rthdr *)&ext;
+				struct ip6_rthdr rh = {0};
+				if (!pf_pull_hdr(pbuf, off, &rh, sizeof(rh), sizeof(rh), NULL, NULL, AF_INET6)) {
+					goto shortpkt;
+				}
 				if (rh_cnt++) {
 					goto drop;
 				}
-				if (rh->ip6r_type == IPV6_RTHDR_TYPE_0) {
+				if (rh.ip6r_type == IPV6_RTHDR_TYPE_0) {
 					goto drop;
 				}
 			} else if (proto == IPPROTO_AH) {
@@ -2348,15 +2351,11 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 			proto = ext.ip6e_nxt;
 			break;
 		case IPPROTO_HOPOPTS:
-			if (!pf_pull_hdr(pbuf, off, &ext, sizeof(ext), NULL,
-			    NULL, AF_INET6)) {
-				goto shortpkt;
-			}
 			extoff = off;
 			optend = off + (ext.ip6e_len + 1) * 8;
 			ooff = off + sizeof(ext);
 			do {
-				if (!pf_pull_hdr(pbuf, ooff, &opt.ip6o_type,
+				if (!pf_pull_hdr(pbuf, ooff, &opt.ip6o_type, sizeof(opt.ip6o_type),
 				    sizeof(opt.ip6o_type), NULL, NULL,
 				    AF_INET6)) {
 					goto shortpkt;
@@ -2365,7 +2364,7 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 					ooff++;
 					continue;
 				}
-				if (!pf_pull_hdr(pbuf, ooff, &opt, sizeof(opt),
+				if (!pf_pull_hdr(pbuf, ooff, &opt, sizeof(opt), sizeof(opt),
 				    NULL, NULL, AF_INET6)) {
 					goto shortpkt;
 				}
@@ -2379,7 +2378,7 @@ pf_normalize_ip6(pbuf_t *pbuf, int dir, struct pfi_kif *kif,
 						goto drop;
 					}
 					if (!pf_pull_hdr(pbuf, ooff, &jumbo,
-					    sizeof(jumbo), NULL, NULL,
+					    sizeof(jumbo), sizeof(jumbo), NULL, NULL,
 					    AF_INET6)) {
 						goto shortpkt;
 					}
@@ -2436,7 +2435,7 @@ fragment:
 		goto drop;
 	}
 
-	if (!pf_pull_hdr(pbuf, off, &frag, sizeof(frag), NULL, NULL, AF_INET6)) {
+	if (!pf_pull_hdr(pbuf, off, &frag, sizeof(frag), sizeof(frag), NULL, NULL, AF_INET6)) {
 		goto shortpkt;
 	}
 	fragoff = ntohs(frag.ip6f_offlg & IP6F_OFF_MASK);
@@ -2489,7 +2488,7 @@ fragment:
 		frent->fr_ip6f_hlen = off;
 		/* account for 2nd Destination Options header if present */
 		if (pd->proto == IPPROTO_DSTOPTS) {
-			if (!pf_pull_hdr(pbuf, off, &ext, sizeof(ext), NULL,
+			if (!pf_pull_hdr(pbuf, off, &ext, sizeof(ext), sizeof(ext), NULL,
 			    NULL, AF_INET6)) {
 				goto shortpkt;
 			}
@@ -2596,14 +2595,14 @@ pf_normalize_tcp(int dir, struct pfi_kif *kif, pbuf_t *pbuf, int ipoff,
     int off, void *h, struct pf_pdesc *pd)
 {
 #pragma unused(ipoff, h)
-	struct pf_rule  *r, *rm = NULL;
-	struct tcphdr   *th = pd->hdr.tcp;
+	struct pf_rule  *__single r, *__single rm = NULL;
+	struct tcphdr   *__single th = pf_pd_get_hdr_tcp(pd);
 	int              rewrite = 0;
 	int              asd = 0;
 	u_short          reason;
 	u_int8_t         flags;
 	sa_family_t      af = pd->af;
-	struct pf_ruleset *ruleset = NULL;
+	struct pf_ruleset *__single ruleset = NULL;
 	union pf_state_xport sxport, dxport;
 
 	sxport.port = th->th_sport;
@@ -2696,11 +2695,13 @@ pf_normalize_tcp(int dir, struct pfi_kif *kif, pbuf_t *pbuf, int ipoff,
 	/* If flags changed, or reserved data set, then adjust */
 	if (flags != th->th_flags || th->th_x2 != 0) {
 		u_int16_t       ov, nv;
+		// Explicit __bidi_indexable is to avoid a warning false positive (rdar://119193012)
+		uint8_t *__bidi_indexable th_iter = (uint8_t * __bidi_indexable)(struct tcphdr *__bidi_indexable) th;
 
-		ov = *(u_int16_t *)(&th->th_ack + 1);
+		ov = *(u_int16_t *)(void *)(th_iter + offsetof(struct tcphdr, th_ack) + sizeof(th->th_ack));
 		th->th_flags = flags;
 		th->th_x2 = 0;
-		nv = *(u_int16_t *)(&th->th_ack + 1);
+		nv = *(u_int16_t *)(void *)(th_iter + offsetof(struct tcphdr, th_ack) + sizeof(th->th_ack));
 
 		th->th_sum = pf_cksum_fixup(th->th_sum, ov, nv, 0);
 		rewrite = 1;
@@ -2735,7 +2736,7 @@ pf_normalize_tcp(int dir, struct pfi_kif *kif, pbuf_t *pbuf, int ipoff,
 			return PF_DROP;
 		}
 
-		pbuf_copy_back(pbuf, off, sizeof(*th), th);
+		pbuf_copy_back(pbuf, off, sizeof(*th), th, sizeof(*th));
 	}
 
 	return PF_PASS;
@@ -2755,7 +2756,6 @@ pf_normalize_tcp_init(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 #pragma unused(dst)
 	u_int32_t tsval, tsecr;
 	u_int8_t hdr[60];
-	u_int8_t *opt;
 
 	VERIFY(src->scrub == NULL);
 
@@ -2768,13 +2768,13 @@ pf_normalize_tcp_init(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 	switch (pd->af) {
 #if INET
 	case AF_INET: {
-		struct ip *h = pbuf->pb_data;
+		struct ip *__single h = pbuf->pb_data;
 		src->scrub->pfss_ttl = h->ip_ttl;
 		break;
 	}
 #endif /* INET */
 	case AF_INET6: {
-		struct ip6_hdr *h = pbuf->pb_data;
+		struct ip6_hdr *__single h = pbuf->pb_data;
 		src->scrub->pfss_ttl = h->ip6_hlim;
 		break;
 	}
@@ -2791,11 +2791,10 @@ pf_normalize_tcp_init(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 
 
 	if (th->th_off > (sizeof(struct tcphdr) >> 2) && src->scrub &&
-	    pf_pull_hdr(pbuf, off, hdr, th->th_off << 2, NULL, NULL, pd->af)) {
+	    pf_pull_hdr(pbuf, off, hdr, sizeof(hdr), th->th_off << 2, NULL, NULL, pd->af)) {
 		/* Diddle with TCP options */
-		int hlen;
-		opt = hdr + sizeof(struct tcphdr);
-		hlen = (th->th_off << 2) - sizeof(struct tcphdr);
+		int hlen = (th->th_off << 2) - sizeof(struct tcphdr);
+		u_int8_t *opt = hdr + sizeof(struct tcphdr);
 		while (hlen >= TCPOLEN_TIMESTAMP) {
 			switch (*opt) {
 			case TCPOPT_EOL:        /* FALLTHROUGH */
@@ -2869,7 +2868,7 @@ pf_normalize_tcp_stateful(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 #if INET
 	case AF_INET: {
 		if (src->scrub) {
-			struct ip *h = pbuf->pb_data;
+			struct ip *__single h = pbuf->pb_data;
 			if (h->ip_ttl > src->scrub->pfss_ttl) {
 				src->scrub->pfss_ttl = h->ip_ttl;
 			}
@@ -2880,7 +2879,7 @@ pf_normalize_tcp_stateful(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 #endif /* INET */
 	case AF_INET6: {
 		if (src->scrub) {
-			struct ip6_hdr *h = pbuf->pb_data;
+			struct ip6_hdr *__single h = pbuf->pb_data;
 			if (h->ip6_hlim > src->scrub->pfss_ttl) {
 				src->scrub->pfss_ttl = h->ip6_hlim;
 			}
@@ -2893,7 +2892,7 @@ pf_normalize_tcp_stateful(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 	if (th->th_off > (sizeof(struct tcphdr) >> 2) &&
 	    ((src->scrub && (src->scrub->pfss_flags & PFSS_TIMESTAMP)) ||
 	    (dst->scrub && (dst->scrub->pfss_flags & PFSS_TIMESTAMP))) &&
-	    pf_pull_hdr(pbuf, off, hdr, th->th_off << 2, NULL, NULL, pd->af)) {
+	    pf_pull_hdr(pbuf, off, hdr, sizeof(hdr), th->th_off << 2, NULL, NULL, pd->af)) {
 		/* Diddle with TCP options */
 		int hlen;
 		opt = hdr + sizeof(struct tcphdr);
@@ -2969,7 +2968,7 @@ pf_normalize_tcp_stateful(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 				return PF_DROP;
 			}
 			*writeback = optoff + optlen;
-			pbuf_copy_back(pbuf, optoff, optlen, hdr + sizeof(*th));
+			pbuf_copy_back(pbuf, optoff, optlen, hdr + sizeof(*th), sizeof(hdr) - sizeof(*th));
 		}
 	}
 
@@ -3265,7 +3264,7 @@ pf_normalize_tcpopt(struct pf_rule *r, int dir, struct pfi_kif *kif,
 	thoff = th->th_off << 2;
 	cnt = thoff - sizeof(struct tcphdr);
 
-	if (cnt > 0 && !pf_pull_hdr(pbuf, off + sizeof(*th), opts, cnt,
+	if (cnt > 0 && !pf_pull_hdr(pbuf, off + sizeof(*th), opts, sizeof(opts), cnt,
 	    NULL, NULL, af)) {
 		return PF_DROP;
 	}
@@ -3325,7 +3324,7 @@ pf_normalize_tcpopt(struct pf_rule *r, int dir, struct pfi_kif *kif,
 		}
 
 		*rewrptr = 1;
-		pbuf_copy_back(pd->mp, off + sizeof(*th), thoff - sizeof(*th), opts);
+		pbuf_copy_back(pd->mp, off + sizeof(*th), thoff - sizeof(*th), opts, sizeof(opts));
 	}
 
 	return PF_PASS;

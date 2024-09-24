@@ -38,43 +38,51 @@
 #include <vm/pmap.h>
 
 #define EXCLAVES_STACKSHOT_BATCH_SIZE 32
+#define EXCLAVES_STACKSHOT_BUFFER_SIZE (16 * PAGE_SIZE)
 
-#define EXCLAVES_ID_STACKSHOT_SERVER_EP \
-	(exclaves_endpoint_lookup("com.apple.service.Stackshot"))
+#include "exclaves_resource.h"
+
+#define EXCLAVES_ID_STACKSHOT_SERVER_EP              \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.Stackshot"))
 
 static _Atomic bool exclaves_inspection_initialized;
 static stackshot_taker_s tb_client;
-static size_t exclaves_stackshot_buffer_size;
 static uint8_t ** exclaves_stackshot_buffer_pages;
-static uint8_t * exclaves_stackshot_buffer;
+static uint8_t exclaves_stackshot_buffer[EXCLAVES_STACKSHOT_BUFFER_SIZE];
 static integer_t exclaves_collect_priority = MAXPRI_KERNEL;
 static thread_t exclaves_collection_thread;
 static uint64_t scid_list[EXCLAVES_STACKSHOT_BATCH_SIZE];
 static ctid_t ctid_list[EXCLAVES_STACKSHOT_BATCH_SIZE];
 static size_t scid_list_count;
+bool exclaves_stackshot_raw_addresses;
+bool exclaves_stackshot_all_address_spaces;
+exclaves_resource_t * stackshot_sharedmem_resource;
+exclaves_panic_ss_status_t exclaves_panic_ss_status = EXCLAVES_PANIC_STACKSHOT_UNKNOWN;
 
 static void *exclaves_collect_event = NULL;
+
+static uint8_t exclaves_collect_thread_ready = 0;
 
 queue_head_t exclaves_inspection_queue_stackshot;
 queue_head_t exclaves_inspection_queue_kperf;
 
 static LCK_GRP_DECLARE(exclaves_inspection_lck_grp, "exclaves_inspection_lock");
 LCK_MTX_DECLARE(exclaves_collect_mtx, &exclaves_inspection_lck_grp);
-
-void *fake_crash_buffer = NULL;
-uint32_t fake_crash_buffer_length = 0;
-TUNABLE(bool, fake_exclave_crash_report, "fake_exclave_crash_report", true); /* Generate fake exclave crash report */
+// Guards initialization to ensure nothing tries to collect before all threads/allocations/etc. are done
+LCK_MTX_DECLARE(exclaves_collect_init_mtx, &exclaves_inspection_lck_grp);
 
 static void             exclaves_collect_threads_thread(void *arg, wait_result_t __unused wr);
 void                    exclaves_inspection_check_ast(void);
 
 extern kern_return_t
-stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result);
+stackshot_exclaves_process_result(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, bool want_raw_addresses);
 
 extern __attribute__((noinline))
 void kperf_thread_exclaves_ast_handler(thread_t thread, const stackshot_stackshotentry_s * _Nonnull entry);
 
-typedef kern_return_t (*exclaves_inspection_process_fn)(kern_return_t collect_kr, const stackshot_stackshotresult_s *data);
+typedef kern_return_t (*exclaves_inspection_process_fn)(kern_return_t collect_kr, const stackshot_stackshotresult_s *data, bool want_raw_addresses);
+
 
 /* Populate provided buffer with a list of scid values of threads from end of the list. */
 static size_t
@@ -90,7 +98,7 @@ prepare_scid_list_stackshot(queue_t wl, uint64_t *pscid_list, ctid_t *pctid_list
 		if (thread == NULL) {
 			break;
 		}
-		pscid_list[count] = thread->th_exclaves_scheduling_context_id;
+		pscid_list[count] = thread->th_exclaves_ipc_ctx.scid;
 		pctid_list[count] = thread_get_ctid(thread);
 	}
 
@@ -110,7 +118,7 @@ prepare_scid_list_kperf(queue_t wl, uint64_t *pscid_list, ctid_t *pctid_list, ui
 		if (thread == NULL) {
 			break;
 		}
-		pscid_list[count] = thread->th_exclaves_scheduling_context_id;
+		pscid_list[count] = thread->th_exclaves_ipc_ctx.scid;
 		pctid_list[count] = thread_get_ctid(thread);
 	}
 
@@ -185,14 +193,14 @@ clear_kperf_queue(thread_exclaves_inspection_flags_t flag)
 }
 
 static kern_return_t
-process_exclaves_buffer(uint8_t * buffer, size_t output_length, exclaves_inspection_process_fn process_fn)
+process_exclaves_buffer(uint8_t * buffer, size_t output_length, exclaves_inspection_process_fn process_fn, bool want_raw_addresses)
 {
 	__block kern_return_t error = KERN_SUCCESS;
 	tb_error_t tberr = TB_ERROR_SUCCESS;
 
 	if (output_length) {
 		tberr = stackshot_stackshotresult__unmarshal(buffer, output_length, ^(stackshot_stackshotresult_s result){
-			error = process_fn(KERN_SUCCESS, &result);
+			error = process_fn(KERN_SUCCESS, &result, want_raw_addresses);
 			if (error != KERN_SUCCESS) {
 			        exclaves_debug_printf(show_errors, "exclaves stackshot: error processing stackshot result\n");
 			}
@@ -212,7 +220,7 @@ error_exit:
 }
 
 static kern_return_t
-collect_scid_list(exclaves_inspection_process_fn process_fn)
+collect_scid_list(exclaves_inspection_process_fn process_fn, bool want_raw_addresses, bool all_address_spaces)
 {
 	__block kern_return_t kr = KERN_SUCCESS;
 	tb_error_t tberr = 0;
@@ -220,40 +228,37 @@ collect_scid_list(exclaves_inspection_process_fn process_fn)
 
 	exclaves_debug_printf(show_progress, "exclaves stackshot: starting collection, scid_list_count=%zu\n", scid_list_count);
 
-	scid__v_assign_copy(&scids, scid_list, scid_list_count);
+	scid__v_assign_unowned(&scids, scid_list, scid_list_count);
 
-	tberr = stackshot_taker_takestackshot(&tb_client, &scids, true, false, ^(stackshot_outputlength_s output_length) {
-		assert3u(output_length, <=, exclaves_stackshot_buffer_size);
+	tberr = stackshot_taker_takestackshot(&tb_client, &scids, want_raw_addresses, all_address_spaces, ^(stackshot_outputlength_s output_length) {
+		assert3u(output_length, <=, EXCLAVES_STACKSHOT_BUFFER_SIZE);
 
 		size_t remaining = output_length;
 		uint8_t * dst = exclaves_stackshot_buffer;
 		size_t page_index = 0;
-		bool copy_to_fake_buffer = fake_exclave_crash_report && !fake_crash_buffer_length &&
-		(output_length <= PAGE_SIZE * CONCLAVE_CRASH_BUFFER_PAGECOUNT);
-		uint8_t *fake_dst = fake_crash_buffer;
 
-		/* TODO: rdar://115413837 (Map stackshot buffer pages to a continuous range, do not copy) */
-		while (remaining >= PAGE_SIZE) {
-		        memcpy(dst, exclaves_stackshot_buffer_pages[page_index], PAGE_SIZE);
-		        if (copy_to_fake_buffer) {
-		                memcpy(fake_dst, exclaves_stackshot_buffer_pages[page_index], PAGE_SIZE);
-		                fake_dst += PAGE_SIZE;
+		if (exclaves_stackshot_buffer_pages) {
+		        /* TODO: remove exclaves_stackshot_buffer_pages and related code when shmv2 adoption is done */
+		        while (remaining >= PAGE_SIZE) {
+		                memcpy(dst, exclaves_stackshot_buffer_pages[page_index], PAGE_SIZE);
+		                dst += PAGE_SIZE;
+		                page_index++;
+		                remaining -= PAGE_SIZE;
 			}
-		        dst += PAGE_SIZE;
-		        page_index++;
-		        remaining -= PAGE_SIZE;
-		}
-		if (remaining) {
-		        memcpy(dst, exclaves_stackshot_buffer_pages[page_index], remaining);
-		        if (copy_to_fake_buffer) {
-		                memcpy(fake_dst, exclaves_stackshot_buffer_pages[page_index], remaining);
+		        if (remaining) {
+		                memcpy(dst, exclaves_stackshot_buffer_pages[page_index], remaining);
 			}
-		}
-		if (copy_to_fake_buffer) {
-		        fake_crash_buffer_length = (uint32_t)output_length;
+		} else {
+		        /* TODO: Do not copy the data when rdar://119329936 lands */
+		        __block size_t dst_offset = 0;
+		        exclaves_resource_shared_memory_io(stackshot_sharedmem_resource, 0, output_length, ^int (char * buf, size_t chunk_size) {
+				memcpy(exclaves_stackshot_buffer + dst_offset, buf, chunk_size);
+				dst_offset += chunk_size;
+				return 0; // continue looping
+			});
 		}
 
-		kr = process_exclaves_buffer(exclaves_stackshot_buffer, (size_t)output_length, process_fn);
+		kr = process_exclaves_buffer(exclaves_stackshot_buffer, (size_t)output_length, process_fn, want_raw_addresses);
 	});
 
 	if (tberr != TB_ERROR_SUCCESS) {
@@ -268,7 +273,7 @@ error_exit:
 }
 
 static kern_return_t
-complete_kperf_ast(kern_return_t collect_kr, const stackshot_stackshotresult_s *result)
+complete_kperf_ast(kern_return_t collect_kr, const stackshot_stackshotresult_s *result, __unused bool want_raw_addresses)
 {
 	if (collect_kr != KERN_SUCCESS) {
 		return collect_kr;
@@ -294,7 +299,18 @@ static void
 exclaves_collect_threads_thread(void __unused *arg, wait_result_t __unused wr)
 {
 	kern_return_t kr = KERN_SUCCESS;
+
+	kr = exclaves_allocate_ipc_buffer(NULL);
+	if (kr != KERN_SUCCESS) {
+		panic("exclaves stackshot: failed to allocate collect ipcb: %d", kr);
+	}
+
 	os_atomic_store(&current_thread()->th_exclaves_inspection_state, TH_EXCLAVES_INSPECTION_NOINSPECT, relaxed);
+	lck_mtx_lock(&exclaves_collect_init_mtx);
+	exclaves_collect_thread_ready = true;
+	wakeup_all_with_inheritor(&exclaves_collect_thread_ready, THREAD_AWAKENED);
+	lck_mtx_unlock(&exclaves_collect_init_mtx);
+
 	lck_mtx_lock(&exclaves_collect_mtx);
 
 	for (;;) {
@@ -308,7 +324,7 @@ exclaves_collect_threads_thread(void __unused *arg, wait_result_t __unused wr)
 			while (scid_list_count) {
 				lck_mtx_unlock(&exclaves_collect_mtx);
 
-				kr = collect_scid_list(stackshot_exclaves_process_result);
+				kr = collect_scid_list(stackshot_exclaves_process_result, exclaves_stackshot_raw_addresses, exclaves_stackshot_all_address_spaces);
 				lck_mtx_lock(&exclaves_collect_mtx);
 				clear_pending_threads_stackshot(ctid_list, scid_list_count, TH_EXCLAVES_INSPECTION_STACKSHOT);
 				if (kr != KERN_SUCCESS) {
@@ -322,7 +338,7 @@ stackshot_error:
 			if (!queue_empty(&exclaves_inspection_queue_stackshot)) {
 				clear_stackshot_queue(TH_EXCLAVES_INSPECTION_STACKSHOT);
 			}
-			stackshot_exclaves_process_result(kr, NULL);
+			stackshot_exclaves_process_result(kr, NULL, true);
 			wakeup_all_with_inheritor(&exclaves_inspection_queue_stackshot, THREAD_AWAKENED);
 		}
 
@@ -331,7 +347,7 @@ stackshot_error:
 			while (scid_list_count) {
 				lck_mtx_unlock(&exclaves_collect_mtx);
 
-				kr = collect_scid_list(complete_kperf_ast);
+				kr = collect_scid_list(complete_kperf_ast, false, false);
 				lck_mtx_lock(&exclaves_collect_mtx);
 				clear_pending_threads_kperf(ctid_list, scid_list_count, TH_EXCLAVES_INSPECTION_KPERF);
 				if (kr != KERN_SUCCESS) {
@@ -375,16 +391,17 @@ exclaves_inspection_init(void)
 
 	assert(!os_atomic_load(&exclaves_inspection_initialized, relaxed));
 
+	/*
+	 * If there's no stackshot service available, just return.
+	 */
+	if (EXCLAVES_ID_STACKSHOT_SERVER_EP == EXCLAVES_INVALID_ID) {
+		exclaves_requirement_assert(EXCLAVES_R_STACKSHOT,
+		    "stackshot server not found");
+		return KERN_SUCCESS;
+	}
+
 	queue_init(&exclaves_inspection_queue_stackshot);
 	queue_init(&exclaves_inspection_queue_kperf);
-
-	kr = (kernel_thread_start_priority(
-		    exclaves_collect_threads_thread, NULL, exclaves_collect_priority, &exclaves_collection_thread));
-	if (kr != KERN_SUCCESS) {
-		goto error_exit;
-	}
-	thread_set_thread_name(exclaves_collection_thread, "exclaves-stackshot");
-	thread_deallocate(exclaves_collection_thread);
 
 	tb_endpoint = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_STACKSHOT_SERVER_EP, TB_ENDPOINT_OPTIONS_NONE);
 
@@ -394,19 +411,15 @@ exclaves_inspection_init(void)
 		return KERN_FAILURE;
 	}
 
-	if (fake_exclave_crash_report) {
-		fake_crash_buffer = kalloc_data(CONCLAVE_CRASH_BUFFER_PAGECOUNT * PAGE_SIZE, Z_WAITOK);
-	}
-
 	tberr = stackshot_taker_allocsharedbuffer(&tb_client, ^(stackshot_sharedbuffer_s tbresult) {
 		__block size_t page_count = 0;
-		exclaves_stackshot_buffer_size = 0;
+		size_t exclaves_stackshot_buffer_size = 0;
 		u64__v_visit(&tbresult.physaddr, ^(size_t __unused i, const uint64_t __unused item) {
 			page_count++;
 		});
 		if (!page_count) {
-		        exclaves_debug_printf(show_errors, "exclaves stackshot: stackshot_taker_allocsharedbuffer did not return any page addresses\n");
-		        kr = KERN_RESOURCE_SHORTAGE;
+		        // zero page count means that stackshot server is using shared mem v2
+		        // leaving exclaves_stackshot_buffer_pages uninitialized will trigger shmv2 on xnu side
 		        return;
 		}
 
@@ -414,11 +427,7 @@ exclaves_inspection_init(void)
 		        panic("exclaves stackshot: buffer size overflow");
 		        return;
 		}
-		exclaves_stackshot_buffer = kalloc_type(uint8_t, exclaves_stackshot_buffer_size, Z_WAITOK);
-		if (!exclaves_stackshot_buffer) {
-		        panic("exclaves stackshot: cannot allocate buffer for exclaves shared memory");
-		        return;
-		}
+		assert3u(exclaves_stackshot_buffer_size, ==, EXCLAVES_STACKSHOT_BUFFER_SIZE);
 
 		exclaves_stackshot_buffer_pages = kalloc_type(uint8_t*, page_count, Z_WAITOK);
 		if (!exclaves_stackshot_buffer_pages) {
@@ -433,21 +442,44 @@ exclaves_inspection_init(void)
 
 	if (tberr != TB_ERROR_SUCCESS) {
 		exclaves_debug_printf(show_errors, "exclaves stackshot: stackshot_taker_allocsharedbuffer error 0x%x\n", tberr);
-		/*
-		 * Until rdar://115836013 is resolved, this failure must be
-		 * supressed.
-		 */
-		return KERN_SUCCESS;
+		return KERN_FAILURE;
 	}
 
-	// this may be due to invalid call or set from result handler
+	if (!exclaves_stackshot_buffer_pages) {
+		// initialize sharedmemv2 resource
+		const char *v2_seg_name = "com.apple.sharedmem.stackshotserver";
+		kr = exclaves_resource_shared_memory_map(
+			EXCLAVES_DOMAIN_KERNEL, v2_seg_name,
+			EXCLAVES_STACKSHOT_BUFFER_SIZE,
+			EXCLAVES_BUFFER_PERM_READ,
+			&stackshot_sharedmem_resource);
+
+		if (kr != KERN_SUCCESS) {
+			exclaves_debug_printf(show_errors,
+			    "exclaves_inspection_init: Cannot map shared memory segment '%s': failed with %d\n",
+			    v2_seg_name, kr);
+			return kr;
+		}
+	}
+
+	exclaves_debug_printf(show_progress, "exclaves stackshot: exclaves inspection initialized\n");
+
+	kr = (kernel_thread_start_priority(
+		    exclaves_collect_threads_thread, NULL, exclaves_collect_priority, &exclaves_collection_thread));
 	if (kr != KERN_SUCCESS) {
 		goto error_exit;
 	}
+	thread_set_thread_name(exclaves_collection_thread, "exclaves-stackshot");
+	thread_deallocate(exclaves_collection_thread);
 
-	exclaves_debug_printf(show_progress, "exclaves stackshot: exclaves stackshot buffer size: %zu bytes\n", exclaves_stackshot_buffer_size);
+	lck_mtx_lock(&exclaves_collect_init_mtx);
+
+	while (!exclaves_collect_thread_ready) {
+		lck_mtx_sleep_with_inheritor(&exclaves_collect_init_mtx, LCK_SLEEP_DEFAULT, (event_t)&exclaves_collect_thread_ready, exclaves_collection_thread, THREAD_UNINT, TIMEOUT_WAIT_FOREVER);
+	}
 
 	os_atomic_store(&exclaves_inspection_initialized, true, release);
+	lck_mtx_unlock(&exclaves_collect_init_mtx);
 error_exit:
 	return kr;
 }
@@ -503,6 +535,60 @@ exclaves_inspection_check_ast(void)
 		    );
 	}
 	lck_mtx_unlock(&exclaves_collect_mtx);
+}
+
+
+/* this should come from somewhere in EP */
+#define STACKSHOT_PANIC_MAGIC 0xdeadcafebeefbabe
+typedef struct stackshot_panic_magic {
+	uint64_t magic;
+	uint64_t size;
+} stackshot_panic_magic_t;
+_Static_assert(sizeof(stackshot_panic_magic_t) == 16, "panic magic should be 16 bytes");
+
+void
+kdp_read_panic_exclaves_stackshot(struct exclaves_panic_stackshot *eps)
+{
+	assert(debug_mode_active());
+
+	*eps = (struct exclaves_panic_stackshot){ 0 };
+
+	if (!exclaves_inspection_is_initialized()) {
+		return;
+	}
+
+	/* copy the entire potential range of the buffer */
+	if (exclaves_stackshot_buffer_pages) {
+		size_t remaining = EXCLAVES_STACKSHOT_BUFFER_SIZE;
+		uint8_t *dst = exclaves_stackshot_buffer;
+		size_t page_index = 0;
+
+		while (remaining >= PAGE_SIZE) {
+			memcpy(dst, exclaves_stackshot_buffer_pages[page_index], PAGE_SIZE);
+			dst += PAGE_SIZE;
+			page_index++;
+			remaining -= PAGE_SIZE;
+		}
+		if (remaining) {
+			memcpy(dst, exclaves_stackshot_buffer_pages[page_index], remaining);
+		}
+	} else {
+		__block size_t dst_offset = 0;
+		exclaves_resource_shared_memory_io(stackshot_sharedmem_resource, 0, EXCLAVES_STACKSHOT_BUFFER_SIZE, ^int (char * buf, size_t chunk_size) {
+			memcpy(exclaves_stackshot_buffer + dst_offset, buf, chunk_size);
+			dst_offset += chunk_size;
+			return 0; // continue looping
+		});
+	}
+
+	/* check for panic magic value in xnu's copy of the region */
+	stackshot_panic_magic_t *panic_magic = __IGNORE_WCASTALIGN((stackshot_panic_magic_t *)(exclaves_stackshot_buffer + (EXCLAVES_STACKSHOT_BUFFER_SIZE - sizeof(stackshot_panic_magic_t))));
+	if (panic_magic->magic != STACKSHOT_PANIC_MAGIC) {
+		return;
+	}
+
+	eps->stackshot_buffer = exclaves_stackshot_buffer;
+	eps->stackshot_buffer_size = panic_magic->size;
 }
 
 #endif /* CONFIG_EXCLAVES */

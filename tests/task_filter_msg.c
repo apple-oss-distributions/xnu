@@ -16,7 +16,8 @@
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
     T_META_NAMESPACE("xnu.ipc"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
-    T_META_RADAR_COMPONENT_VERSION("IPC"));
+    T_META_RADAR_COMPONENT_VERSION("IPC"),
+    T_META_TAG_VM_PREFERRED);
 
 T_DECL(test_task_filter_msg_flag, "Set the filter msg flag on the task and check if the forked child inherits it",
     T_META_ASROOT(true), T_META_CHECK_LEAKS(false))

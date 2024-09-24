@@ -87,8 +87,8 @@ struct pf_osfp_enlist *
 pf_osfp_fingerprint(struct pf_pdesc *pd, pbuf_t *pbuf, int off,
     const struct tcphdr *tcp)
 {
-	struct ip *ip;
-	struct ip6_hdr *ip6;
+	struct ip *__single ip;
+	struct ip6_hdr *__single ip6;
 	char hdr[60];
 
 	if ((pd->af != PF_INET && pd->af != PF_INET6) ||
@@ -104,22 +104,25 @@ pf_osfp_fingerprint(struct pf_pdesc *pd, pbuf_t *pbuf, int off,
 		ip = (struct ip *)NULL;
 		ip6 = pbuf->pb_data;
 	}
-	if (!pf_pull_hdr(pbuf, off, hdr, tcp->th_off << 2, NULL, NULL,
+	if (!pf_pull_hdr(pbuf, off, hdr, sizeof(hdr), tcp->th_off << 2, NULL, NULL,
 	        pd->af)) {
 		return NULL;
 	}
 
-	return pf_osfp_fingerprint_hdr(ip, ip6, (struct tcphdr *)(void *)hdr);
+	return pf_osfp_fingerprint_hdr(ip, ip6, (struct tcphdr *)(void *)hdr, sizeof(hdr));
 }
 
 struct pf_osfp_enlist *
 pf_osfp_fingerprint_hdr(const struct ip *ip, const struct ip6_hdr *ip6,
-    const struct tcphdr *tcp)
+    const struct tcphdr *__sized_by(tcphdr_max_len)tcp, size_t tcphdr_max_len)
 {
-	struct pf_os_fingerprint fp, *fpresult;
-	int cnt, optlen = 0;
-	const u_int8_t *optp;
+#pragma unused(tcphdr_max_len)
+	struct pf_os_fingerprint fp, *__single fpresult;
 	char srcname[128];
+	uint8_t const *tcphdr = (uint8_t const *__bidi_indexable)tcp;
+	uint8_t const *tcpopt_ptr = tcphdr + sizeof(struct tcphdr);
+	int tcpopt_cnt = (tcp->th_off << 2) + sizeof(struct tcphdr);
+	int optlen = 0;
 
 	if ((tcp->th_flags & (TH_SYN | TH_ACK)) != TH_SYN) {
 		return NULL;
@@ -153,31 +156,28 @@ pf_osfp_fingerprint_hdr(const struct ip *ip, const struct ip6_hdr *ip6,
 	}
 	fp.fp_wsize = ntohs(tcp->th_win);
 
-
-	cnt = (tcp->th_off << 2) - sizeof(*tcp);
-	optp = (const u_int8_t *)((const char *)tcp + sizeof(*tcp));
-	for (; cnt > 0; cnt -= optlen, optp += optlen) {
-		if (*optp == TCPOPT_EOL) {
+	for (; tcpopt_cnt > 0; tcpopt_cnt -= optlen, tcpopt_ptr += optlen) {
+		if (*tcpopt_ptr == TCPOPT_EOL) {
 			break;
 		}
 
 		fp.fp_optcnt++;
-		if (*optp == TCPOPT_NOP) {
+		if (*tcpopt_ptr == TCPOPT_NOP) {
 			fp.fp_tcpopts = (fp.fp_tcpopts << PF_OSFP_TCPOPT_BITS) |
 			    PF_OSFP_TCPOPT_NOP;
 			optlen = 1;
 		} else {
-			if (cnt < 2) {
+			if (tcpopt_cnt < 2) {
 				return NULL;
 			}
-			optlen = optp[1];
-			if (optlen > cnt || optlen < 2) {
+			optlen = tcpopt_ptr[1];
+			if (optlen > tcpopt_cnt || optlen < 2) {
 				return NULL;
 			}
-			switch (*optp) {
+			switch (*tcpopt_ptr) {
 			case TCPOPT_MAXSEG:
 				if (optlen >= TCPOLEN_MAXSEG) {
-					memcpy(&fp.fp_mss, &optp[2],
+					memcpy(&fp.fp_mss, &tcpopt_ptr[2],
 					    sizeof(fp.fp_mss));
 				}
 				fp.fp_tcpopts = (fp.fp_tcpopts <<
@@ -188,7 +188,7 @@ pf_osfp_fingerprint_hdr(const struct ip *ip, const struct ip6_hdr *ip6,
 				break;
 			case TCPOPT_WINDOW:
 				if (optlen >= TCPOLEN_WINDOW) {
-					memcpy(&fp.fp_wscale, &optp[2],
+					memcpy(&fp.fp_wscale, &tcpopt_ptr[2],
 					    sizeof(fp.fp_wscale));
 				}
 				fp.fp_tcpopts = (fp.fp_tcpopts <<
@@ -202,7 +202,7 @@ pf_osfp_fingerprint_hdr(const struct ip *ip, const struct ip6_hdr *ip6,
 			case TCPOPT_TIMESTAMP:
 				if (optlen >= TCPOLEN_TIMESTAMP) {
 					u_int32_t ts;
-					memcpy(&ts, &optp[2], sizeof(ts));
+					memcpy(&ts, &tcpopt_ptr[2], sizeof(ts));
 					if (ts == 0) {
 						fp.fp_flags |= PF_OSFP_TS0;
 					}
@@ -312,8 +312,8 @@ pf_osfp_flush(void)
 int
 pf_osfp_add(struct pf_osfp_ioctl *fpioc)
 {
-	struct pf_os_fingerprint *fp, fpadd;
-	struct pf_osfp_entry *entry, *uentry;
+	struct pf_os_fingerprint *__single fp, fpadd;
+	struct pf_osfp_entry *__single entry, *__single uentry;
 
 	memset(&fpadd, 0, sizeof(fpadd));
 	fpadd.fp_tcpopts = fpioc->fp_tcpopts;

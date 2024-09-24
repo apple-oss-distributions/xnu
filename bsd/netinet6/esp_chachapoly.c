@@ -519,9 +519,11 @@ esp_chachapoly_decrypt(struct mbuf *m, // head of mbuf chain
 }
 
 int
-esp_chachapoly_encrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *out_iv,
-    size_t out_ivlen, uint8_t *output_data, size_t output_data_len)
+esp_chachapoly_encrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(out_ivlen)out_iv, size_t out_ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	uint32_t nonce[ESP_CHACHAPOLY_NONCE_LEN / 4]; // ensure 32bit alignment
 	esp_chachapoly_ctx_t esp_ccp_ctx = NULL;
@@ -610,9 +612,11 @@ esp_chachapoly_encrypt_data(struct secasvar *sav, uint8_t *input_data,
 }
 
 int
-esp_chachapoly_decrypt_data(struct secasvar *sav, uint8_t *input_data,
-    size_t input_data_len, struct newesp *esp_hdr, uint8_t *iv, size_t ivlen,
-    uint8_t *output_data, size_t output_data_len)
+esp_chachapoly_decrypt_data(struct secasvar *sav,
+    uint8_t *__sized_by(input_data_len)input_data, size_t input_data_len,
+    struct newesp *esp_hdr,
+    uint8_t *__sized_by(ivlen)iv, size_t ivlen,
+    uint8_t *__sized_by(output_data_len)output_data, size_t output_data_len)
 {
 	uint32_t nonce[ESP_CHACHAPOLY_NONCE_LEN / 4]; // ensure 32bit alignment
 	esp_chachapoly_ctx_t esp_ccp_ctx = NULL;

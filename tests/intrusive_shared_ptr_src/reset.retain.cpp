@@ -83,7 +83,7 @@ tests()
 	}
 }
 
-T_DECL(reset_retain, "intrusive_shared_ptr.reset.retain") {
+T_DECL(reset_retain, "intrusive_shared_ptr.reset.retain", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

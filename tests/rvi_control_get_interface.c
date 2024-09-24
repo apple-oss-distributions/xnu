@@ -21,7 +21,7 @@ T_GLOBAL_META(
 	T_META_ASROOT_(1)
 	);
 
-T_DECL(rvi_control_get_interface, "getsockopt on RVI control-socket triggering out-of-bounds memory access")
+T_DECL(rvi_control_get_interface, "getsockopt on RVI control-socket triggering out-of-bounds memory access", T_META_TAG_VM_PREFERRED)
 {
 	int fd;
 

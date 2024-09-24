@@ -39,7 +39,7 @@ tests()
 	static_assert(!std::is_convertible_v<test_shared_ptr<T>, bool>);
 }
 
-T_DECL(operator_bool, "intrusive_shared_ptr.operator.bool") {
+T_DECL(operator_bool, "intrusive_shared_ptr.operator.bool", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

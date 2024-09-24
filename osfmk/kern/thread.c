@@ -140,8 +140,8 @@
 #include <ipc/ipc_port.h>
 #include <bank/bank_types.h>
 
-#include <vm/vm_kern.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <sys/kdebug.h>
 #include <sys/bsdtask_info.h>
@@ -632,6 +632,10 @@ thread_terminate_self(void)
 	exclaves_thread_terminate(thread);
 #endif
 
+	if (thread->th_vm_faults_disabled) {
+		panic("Thread %p terminating with vm_faults disabled.", thread);
+	}
+
 	s = splsched();
 	thread_lock(thread);
 
@@ -709,8 +713,8 @@ thread_terminate_self(void)
 	thread_mark_wait_locked(thread, THREAD_UNINT);
 
 #if CONFIG_EXCLAVES
-	assert(thread->th_exclaves_ipc_buffer == NULL);
-	assert(thread->th_exclaves_scheduling_context_id == 0);
+	assert(thread->th_exclaves_ipc_ctx.ipcb == NULL);
+	assert(thread->th_exclaves_ipc_ctx.scid == 0);
 	assert(thread->th_exclaves_intstate == 0);
 	assert(thread->th_exclaves_state == 0);
 #endif
@@ -1492,11 +1496,6 @@ thread_create_internal(
 
 	recount_thread_init(&new_thread->th_recount);
 
-#if defined(CONFIG_SCHED_MULTIQ)
-	/* Cache the task's sched_group */
-	new_thread->sched_group = parent_task->sched_group;
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
-
 	/* Cache the task's map */
 	new_thread->map = parent_task->map;
 
@@ -1867,7 +1866,8 @@ kern_return_t
 thread_create_workq_waiting(
 	task_t              task,
 	thread_continue_t   continuation,
-	thread_t            *new_thread)
+	thread_t            *new_thread,
+	bool                is_permanently_bound)
 {
 	/*
 	 * Create thread, but don't pin control port just yet, in case someone calls
@@ -1875,9 +1875,20 @@ thread_create_workq_waiting(
 	 * which will result in pinned port guard exception. Instead, pin and copyout
 	 * atomically during workq_setup_and_run().
 	 */
-	int options = TH_OPTION_NOSUSP | TH_OPTION_WORKQ;
+	int options = TH_OPTION_WORKQ;
+
+	/*
+	 * Until we add a support for delayed thread creation for permanently
+	 * bound workqueue threads, we do not pass TH_OPTION_NOSUSP for their
+	 * creation.
+	 */
+	if (!is_permanently_bound) {
+		options |= TH_OPTION_NOSUSP;
+	}
+
 	return thread_create_waiting_internal(task, continuation, NULL,
-	           kThreadWaitParkedWorkQueue, options, new_thread);
+	           is_permanently_bound ? kThreadWaitParkedBoundWorkQueue : kThreadWaitParkedWorkQueue,
+	           options, new_thread);
 }
 
 /*
@@ -2306,11 +2317,11 @@ thread_wire_internal(
  */
 kern_return_t
 thread_wire(
-	host_priv_t     host_priv,
-	thread_t        thread,
-	boolean_t       wired)
+	host_priv_t     host_priv __unused,
+	thread_t        thread __unused,
+	boolean_t       wired __unused)
 {
-	return thread_wire_internal(host_priv, thread, wired, NULL);
+	return KERN_NOT_SUPPORTED;
 }
 
 boolean_t
@@ -2494,11 +2505,9 @@ guard_ast(thread_t t)
 	case GUARD_TYPE_FD:
 		fd_guard_ast(t, code, subcode);
 		break;
-#if CONFIG_VNGUARD
 	case GUARD_TYPE_VN:
 		vn_guard_ast(t, code, subcode);
 		break;
-#endif
 	case GUARD_TYPE_VIRT_MEMORY:
 		virt_memory_guard_ast(t, code, subcode);
 		break;

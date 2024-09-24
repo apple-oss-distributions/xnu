@@ -3832,6 +3832,8 @@ posix_cred_create_internal(posix_cred_t pcred, struct au_session audit)
 	};
 	int is_member = 0;
 
+	pcred = posix_cred_get(&model);
+
 	if (pcred->cr_ngroups < 1) {
 		return NOCRED;
 	}

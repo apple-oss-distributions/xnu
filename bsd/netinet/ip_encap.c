@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -131,12 +131,12 @@ void
 encap4_input(struct mbuf *m, int off)
 {
 	int proto;
-	struct ip *ip;
+	struct ip *__single ip;
 	struct sockaddr_in s, d;
 	const struct protosw *psw;
-	struct encaptab *ep, *match;
+	struct encaptab *__single ep, *__single match;
 	int prio, matchprio;
-	void *match_arg = NULL;
+	void *__single match_arg = NULL;
 
 #ifndef __APPLE__
 	va_start(ap, m);
@@ -232,13 +232,13 @@ encap4_input(struct mbuf *m, int off)
 int
 encap6_input(struct mbuf **mp, int *offp, int proto)
 {
-	struct mbuf *m = *mp;
-	struct ip6_hdr *ip6;
+	mbuf_ref_t m = *mp;
+	struct ip6_hdr *__single ip6;
 	struct sockaddr_in6 s, d;
-	const struct ip6protosw *psw;
-	struct encaptab *ep, *match;
+	const struct ip6protosw *__single psw;
+	struct encaptab *__single ep, *__single match;
 	int prio, matchprio;
-	void *match_arg = NULL;
+	void *__single match_arg = NULL;
 
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
@@ -463,18 +463,18 @@ mask_match(const struct encaptab *ep, const struct sockaddr *sp,
 
 	matchlen = 0;
 
-	p = (const u_int8_t *)sp;
-	q = (const u_int8_t *)&ep->srcmask;
-	r = (u_int8_t *)&s;
+	p = SA_BYTES(sp);
+	q = SA_BYTES(&ep->srcmask);
+	r = SA_BYTES(&s);
 	for (i = 0; i < sp->sa_len; i++) {
 		r[i] = p[i] & q[i];
 		/* XXX estimate */
 		matchlen += (q[i] ? 8 : 0);
 	}
 
-	p = (const u_int8_t *)dp;
-	q = (const u_int8_t *)&ep->dstmask;
-	r = (u_int8_t *)&d;
+	p = SA_BYTES(dp);
+	q = SA_BYTES(&ep->dstmask);
+	r = SA_BYTES(&s);
 	for (i = 0; i < dp->sa_len; i++) {
 		r[i] = p[i] & q[i];
 		/* XXX rough estimate */
@@ -520,9 +520,9 @@ encap_fillarg(
 void *
 encap_getarg(struct mbuf *m)
 {
-	struct m_tag    *tag;
-	struct encaptabtag *et;
-	void *p = NULL;
+	struct m_tag *__single tag;
+	struct encaptabtag *__single et;
+	void *__single p = NULL;
 
 	tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_ENCAP);
 	if (tag) {
@@ -555,7 +555,7 @@ m_tag_kalloc_encap(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 
 	tag_container = kalloc_type(struct encaptab_tag_container, wait | M_ZERO);
 	if (tag_container != NULL) {
-		tag =  &tag_container->encaptab_m_tag;
+		tag = &tag_container->encaptab_m_tag;
 
 		assert3p(tag, ==, tag_container);
 
@@ -568,7 +568,7 @@ m_tag_kalloc_encap(u_int32_t id, u_int16_t type, uint16_t len, int wait)
 static void
 m_tag_kfree_encap(struct m_tag *tag)
 {
-	struct encaptab_tag_container *tag_container = (struct encaptab_tag_container *)tag;
+	struct encaptab_tag_container *__single tag_container = (struct encaptab_tag_container *)tag;
 
 	assert3u(tag->m_tag_len, ==, sizeof(struct encaptabtag));
 

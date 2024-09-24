@@ -6,6 +6,7 @@
 #include <sys/stackshot.h>
 #include <kdd.h>
 #include <signal.h>
+#include "test_utils.h"
 
 #define RECURSIONS 25
 #define FIRST_RECURSIVE_FRAME 3
@@ -16,7 +17,8 @@ T_GLOBAL_META(
 		T_META_RADAR_COMPONENT_VERSION("stackshot"),
 		T_META_OWNER("jonathan_w_adams"),
 		T_META_CHECK_LEAKS(false),
-		T_META_ASROOT(true)
+		T_META_ASROOT(true),
+		XNU_T_META_SOC_SPECIFIC
 		);
 
 
@@ -327,7 +329,7 @@ parent_helper_singleproc(int spin)
 	T_LOG("done!");
 }
 
-T_DECL(basic, "test that no-fault stackshot works correctly")
+T_DECL(basic, "test that no-fault stackshot works correctly", T_META_TAG_VM_PREFERRED)
 {
 	char path[PATH_MAX];
 	uint32_t path_size = sizeof(path);
@@ -379,19 +381,19 @@ T_DECL(basic, "test that no-fault stackshot works correctly")
 	T_ASSERT_POSIX_SUCCESS(kill(child_pid, SIGTERM), "killed child");
 }
 
-T_DECL(basic_singleproc, "test that no-fault stackshot works correctly in single process setting")
+T_DECL(basic_singleproc, "test that no-fault stackshot works correctly in single process setting", T_META_TAG_VM_PREFERRED)
 {
 	current_scenario_name = __func__;
 	parent_helper_singleproc(0);
 }
 
-T_DECL(basic_singleproc_spin, "test that no-fault stackshot works correctly in single process setting with spinning")
+T_DECL(basic_singleproc_spin, "test that no-fault stackshot works correctly in single process setting with spinning", T_META_TAG_VM_PREFERRED)
 {
 	current_scenario_name = __func__;
 	parent_helper_singleproc(1);
 }
 
-T_DECL(fault, "test that faulting stackshots work correctly")
+T_DECL(fault, "test that faulting stackshots work correctly", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_queue_t dq = dispatch_queue_create("com.apple.stackshot_fault_accuracy", NULL);
 	dispatch_source_t child_sig_src;
@@ -468,7 +470,7 @@ T_DECL(fault, "test that faulting stackshots work correctly")
 	T_ASSERT_POSIX_SUCCESS(kill(child_pid, SIGTERM), "killed child");
 }
 
-T_DECL(fault_singleproc, "test that faulting stackshots work correctly in a single process setting")
+T_DECL(fault_singleproc, "test that faulting stackshots work correctly in a single process setting", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_semaphore_t child_done_sema = dispatch_semaphore_create(0);
 	dispatch_queue_t dq = dispatch_queue_create("com.apple.stackshot_accuracy.fault_sp", NULL);
@@ -512,7 +514,7 @@ T_DECL(fault_singleproc, "test that faulting stackshots work correctly in a sing
 	T_LOG("done!");
 }
 
-T_DECL(zombie, "test that threads wedged in the kernel can be stackshot'd")
+T_DECL(zombie, "test that threads wedged in the kernel can be stackshot'd", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_queue_t dq = dispatch_queue_create("com.apple.stackshot_accuracy.zombie", NULL);
 	dispatch_semaphore_t child_done_sema = dispatch_semaphore_create(0);

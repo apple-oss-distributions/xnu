@@ -1266,42 +1266,12 @@ thread_group_update_recommendation(struct thread_group *tg, cluster_type_t new_r
 
 #if CONFIG_SCHED_EDGE
 
-int sched_edge_restrict_ut = 1;
-int sched_edge_restrict_bg = 1;
-
+OS_NORETURN
 void
 sched_perfcontrol_thread_group_recommend(__unused void *machine_data, __unused cluster_type_t new_recommendation)
 {
-	struct thread_group *tg = (struct thread_group *)((uintptr_t)machine_data - offsetof(struct thread_group, tg_machine_data));
-	/*
-	 * CLUSTER_TYPE_SMP was used for some debugging support when CLPC dynamic control was turned off.
-	 * In more recent implementations, CLPC simply recommends "P-spill" when dynamic control is turned off. So it should
-	 * never be recommending CLUSTER_TYPE_SMP for thread groups.
-	 */
-	assert(new_recommendation != CLUSTER_TYPE_SMP);
-	/*
-	 * The Edge scheduler expects preferred cluster recommendations for each QoS level within a TG. Until the new CLPC
-	 * routine is being called, fake out the call from the old CLPC interface.
-	 */
-	uint32_t tg_bucket_preferred_cluster[TH_BUCKET_SCHED_MAX] = {0};
-	/*
-	 * For all buckets higher than UT, apply the recommendation to the thread group bucket
-	 */
-	for (sched_bucket_t bucket = TH_BUCKET_FIXPRI; bucket < TH_BUCKET_SHARE_UT; bucket++) {
-		tg_bucket_preferred_cluster[bucket] = (new_recommendation == pset_type_for_id(0)) ? 0 : 1;
-	}
-	/* For UT & BG QoS, set the recommendation only if they havent been restricted via sysctls */
-	if (!sched_edge_restrict_ut) {
-		tg_bucket_preferred_cluster[TH_BUCKET_SHARE_UT] = (new_recommendation == pset_type_for_id(0)) ? 0 : 1;
-	}
-	if (!sched_edge_restrict_bg) {
-		tg_bucket_preferred_cluster[TH_BUCKET_SHARE_BG] = (new_recommendation == pset_type_for_id(0)) ? 0 : 1;
-	}
-	sched_perfcontrol_preferred_cluster_options_t options = 0;
-	if (new_recommendation == CLUSTER_TYPE_P) {
-		options |= SCHED_PERFCONTROL_PREFERRED_CLUSTER_MIGRATE_RUNNING;
-	}
-	sched_edge_tg_preferred_cluster_change(tg, tg_bucket_preferred_cluster, options);
+	panic("sched_perfcontrol_thread_group_recommend() not supported on the Edge scheduler");
+	/* Use sched_perfcontrol_thread_group_preferred_clusters_set() instead */
 }
 
 void

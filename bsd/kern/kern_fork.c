@@ -119,6 +119,7 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 
 #include <mach/mach_types.h>
 #include <kern/coalition.h>
+#include <kern/ipc_kobject.h>
 #include <kern/kern_types.h>
 #include <kern/kalloc.h>
 #include <kern/mach_param.h>
@@ -135,6 +136,7 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #include <vm/vm_map.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <sys/shm_internal.h>   /* for shmfork() */
 #include <mach/task.h>          /* for thread_create() */
@@ -1404,7 +1406,8 @@ uthread_joiner_wake(task_t task, uthread_t uth)
 
 	int flags = UL_UNFAIR_LOCK | ULF_WAKE_ALL | ULF_WAKE_ALLOW_NON_OWNER;
 	(void)ulock_wake(task, flags, bts.ulock_addr, 0);
-	mach_port_deallocate(get_task_ipcspace(task), bts.kport);
+	mach_port_deallocate_kernel(get_task_ipcspace(task), bts.kport,
+	    IKOT_SEMAPHORE);
 }
 
 /*

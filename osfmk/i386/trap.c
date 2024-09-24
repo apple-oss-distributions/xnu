@@ -78,6 +78,7 @@
 
 #include <vm/vm_kern.h>
 #include <vm/vm_fault.h>
+#include <vm/vm_map_xnu.h>
 
 #include <kern/kern_types.h>
 #include <kern/processor.h>
@@ -129,7 +130,7 @@ extern int insn_copyin_count;
 /*
  * Forward declarations
  */
-static void panic_trap(x86_saved_state64_t *saved_state, uint32_t pl, kern_return_t fault_result) __dead2;
+static void panic_trap(x86_saved_state64_t *saved_state, const char *trapreason, uint32_t pl, kern_return_t fault_result) __dead2;
 static void set_recovery_ip(x86_saved_state64_t *saved_state, vm_offset_t ip);
 #if DEVELOPMENT || DEBUG
 static __attribute__((noinline)) void copy_instruction_stream(thread_t thread, uint64_t rip, int trap_code, bool inspect_cacheline);
@@ -552,7 +553,7 @@ KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_hard_traps_desc,
     .handle_breakpoint   = NULL);
 
 static bool
-handle_kernel_breakpoint(x86_saved_state64_t *state)
+handle_kernel_breakpoint(x86_saved_state64_t *state, uint16_t *out_comment)
 {
 	uint16_t comment;
 	const struct kernel_brk_descriptor *desc;
@@ -577,6 +578,9 @@ handle_kernel_breakpoint(x86_saved_state64_t *state)
 		return false;
 	}
 
+	if (out_comment) {
+		*out_comment = comment;
+	}
 	desc = find_brk_descriptor_by_comment(comment);
 
 	if (!desc) {
@@ -612,6 +616,10 @@ kernel_trap(
 	x86_saved_state_t       *state,
 	uintptr_t *lo_spp)
 {
+	char                    trapreason[32];
+	const char              *trapname = NULL;
+	uint16_t                trapcomment = 0;
+
 	x86_saved_state64_t     *saved_state;
 	int                     code;
 	user_addr_t             vaddr;
@@ -766,8 +774,11 @@ kernel_trap(
 		goto common_return;
 
 	case T_INVALID_OPCODE:
-		if (handle_kernel_breakpoint(saved_state)) {
+		if (handle_kernel_breakpoint(saved_state, &trapcomment)) {
 			goto common_return;
+		} else if (trapcomment != 0) {
+			/* augment trap name with trap comment */
+			trapname = tsnprintf(trapreason, sizeof(trapreason), "%s #%#04hx", trap_type[type], trapcomment);
 		}
 		fpUDflt(kern_ip);
 		goto debugger_entry;
@@ -813,6 +824,21 @@ kernel_trap(
 			prot |= VM_PROT_EXECUTE;
 		}
 
+		/**
+		 * vm_fault() can be called with preemption disabled (and indeed this is expected for
+		 * certain copyio() scenarios), but can't safely be called with interrupts disabled
+		 * once the system has gone multi-threaded.  Other than some early-boot situations
+		 * such as startup kext loading, kernel paging operations should never be triggered
+		 * by non-interruptible code in the first place, so a fault from such a context will
+		 * ultimately produce a kernel page fault panic anyway.  In these cases, skip calling
+		 * vm_fault() to avoid masking the real kernel panic with a failed VM locking assertion.
+		 */
+		if (__improbable(!(intr ||
+		    startup_phase < STARTUP_SUB_EARLY_BOOT ||
+		    current_cpu_datap()->cpu_hibernate))) {
+			fault_result = result = KERN_FAILURE;
+			goto FALL_THROUGH;
+		}
 		fault_result = result = vm_fault(map,
 		    vaddr,
 		    prot,
@@ -825,9 +851,7 @@ kernel_trap(
 		/*
 		 * fall through
 		 */
-#if CONFIG_DTRACE
 FALL_THROUGH:
-#endif /* CONFIG_DTRACE */
 
 	case T_GENERAL_PROTECTION:
 		/*
@@ -874,7 +898,12 @@ debugger_entry:
 		panic_fault_address = vaddr;
 	}
 	pal_cli();
-	panic_trap(saved_state, trap_pl, fault_result);
+
+	if (trapname == NULL) {
+		trapname = type < TRAP_TYPES ? trap_type[type] : "Unknown";
+	}
+
+	panic_trap(saved_state, trapname, trap_pl, fault_result);
 	/*
 	 * NO RETURN
 	 */
@@ -895,9 +924,8 @@ set_recovery_ip(x86_saved_state64_t  *saved_state, vm_offset_t ip)
 }
 
 static void
-panic_trap(x86_saved_state64_t *regs, uint32_t pl, kern_return_t fault_result)
+panic_trap(x86_saved_state64_t *regs, const char *trapname, uint32_t pl, kern_return_t fault_result)
 {
-	const char      *trapname = "Unknown";
 	pal_cr_t        cr0, cr2, cr3, cr4;
 	boolean_t       potential_smep_fault = FALSE, potential_kernel_NX_fault = FALSE;
 	boolean_t       potential_smap_fault = FALSE;
@@ -915,10 +943,6 @@ panic_trap(x86_saved_state64_t *regs, uint32_t pl, kern_return_t fault_result)
 	    cpu_number(), regs->isf.trapno, regs->isf.rip);
 	kprintf("cr0 0x%016llx cr2 0x%016llx cr3 0x%016llx cr4 0x%016llx\n",
 	    cr0, cr2, cr3, cr4);
-
-	if (regs->isf.trapno < TRAP_TYPES) {
-		trapname = trap_type[regs->isf.trapno];
-	}
 
 	if ((regs->isf.trapno == T_PAGE_FAULT) && (regs->isf.err == (T_PF_PROT | T_PF_EXECUTE)) && (regs->isf.rip == regs->cr2)) {
 		if (pmap_smep_enabled && (regs->isf.rip < VM_MAX_USER_PAGE_ADDRESS)) {

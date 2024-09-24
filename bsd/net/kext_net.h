@@ -55,7 +55,7 @@ extern void     sflt_initsock(struct socket *so);
 extern void     sflt_termsock(struct socket *so);
 extern errno_t  sflt_attach_internal(struct socket *so, sflt_handle     handle);
 extern void     sflt_notify(struct socket *so, sflt_event_t event, void *param);
-extern int      sflt_ioctl(struct socket *so, u_long cmd, caddr_t data);
+extern int      sflt_ioctl(struct socket *so, u_long cmd, caddr_t __sized_by(IOCPARM_LEN(cmd)) data);
 extern int      sflt_bind(struct socket *so, const struct sockaddr *nam);
 extern int      sflt_listen(struct socket *so);
 extern int      sflt_accept(struct socket *head, struct socket *so,

@@ -367,7 +367,7 @@ nx_netif_dom_init(struct nxdom *nxdom)
 	nx_netif_compat_init(nxdom);
 
 	ASSERT(nxdom_prov_default[nxdom->nxdom_type] != NULL &&
-	    strcmp(nxdom_prov_default[nxdom->nxdom_type]->nxdom_prov_name,
+	    strbufcmp(nxdom_prov_default[nxdom->nxdom_type]->nxdom_prov_name,
 	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0);
 
 	netif_gso_init();
@@ -416,7 +416,7 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 {
 	uint32_t r;
 	struct nexus_adapter *na = nx_port_get_na(nx, NEXUS_PORT_NET_IF_DEV);
-	struct nexus_netif_adapter *nifna = (struct nexus_netif_adapter *)na;
+	struct nexus_netif_adapter *nifna = NIFNA(na);
 
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(nx != NULL);
@@ -430,8 +430,8 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 	/* reset all TX notify callbacks */
 	for (r = 0; r < na_get_nrings(na, NR_TX); r++) {
 		while (!os_atomic_cmpxchg((void * volatile *)&na->na_tx_rings[r].ckr_na_notify,
-		    ptrauth_nop_cast(void *, na->na_tx_rings[r].ckr_na_notify),
-		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop), acq_rel)) {
+		    ptrauth_nop_cast(void *__single, na->na_tx_rings[r].ckr_na_notify),
+		    ptrauth_nop_cast(void *__single, &nx_netif_na_notify_drop), acq_rel)) {
 			;
 		}
 		os_atomic_thread_fence(seq_cst);
@@ -440,16 +440,15 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 		}
 	}
 	if (nifna->nifna_tx_mit != NULL) {
-		skn_free_type_array(tx, struct nx_netif_mit,
-		    na_get_nrings(na, NR_TX), nifna->nifna_tx_mit);
-		nifna->nifna_tx_mit = NULL;
+		skn_free_type_array_counted_by(tx, struct nx_netif_mit,
+		    nifna->nifna_tx_mit_count, nifna->nifna_tx_mit);
 	}
 
 	/* reset all RX notify callbacks */
 	for (r = 0; r < na_get_nrings(na, NR_RX); r++) {
 		while (!os_atomic_cmpxchg((void * volatile *)&na->na_rx_rings[r].ckr_na_notify,
-		    ptrauth_nop_cast(void *, na->na_rx_rings[r].ckr_na_notify),
-		    ptrauth_nop_cast(void *, &nx_netif_na_notify_drop), acq_rel)) {
+		    ptrauth_nop_cast(void *__single, na->na_rx_rings[r].ckr_na_notify),
+		    ptrauth_nop_cast(void *__single, &nx_netif_na_notify_drop), acq_rel)) {
 			;
 		}
 		os_atomic_thread_fence(seq_cst);
@@ -458,9 +457,8 @@ nx_netif_prov_nx_stop(struct kern_nexus *nx)
 		}
 	}
 	if (nifna->nifna_rx_mit != NULL) {
-		skn_free_type_array(rx, struct nx_netif_mit,
-		    na_get_nrings(na, NR_RX), nifna->nifna_rx_mit);
-		nifna->nifna_rx_mit = NULL;
+		skn_free_type_array_counted_by(rx, struct nx_netif_mit,
+		    nifna->nifna_rx_mit_count, nifna->nifna_rx_mit);
 	}
 	return 0;
 }
@@ -469,12 +467,15 @@ static inline void
 nx_netif_compat_adjust_ring_size(struct nxprov_adjusted_params *adj,
     ifnet_t ifp)
 {
+	const char *ifname;
+
+	ifname = __terminated_by_to_indexable(ifp->if_name);
 	if (IFNET_IS_CELLULAR(ifp) && (ifp->if_unit != 0)) {
 		*(adj->adj_rx_slots) = sk_netif_compat_aux_cell_rx_ring_sz;
 		*(adj->adj_tx_slots) = sk_netif_compat_aux_cell_tx_ring_sz;
 	} else if (IFNET_IS_WIFI(ifp)) {
-		if (ifp->if_name[0] == 'a' && ifp->if_name[1] == 'p' &&
-		    ifp->if_name[2] == '\0') {
+		if (ifname[0] == 'a' && ifname[1] == 'p' &&
+		    ifname[2] == '\0') {
 			/* Wi-Fi Access Point */
 			*(adj->adj_rx_slots) = sk_netif_compat_wap_rx_ring_sz;
 			*(adj->adj_tx_slots) = sk_netif_compat_wap_tx_ring_sz;
@@ -521,7 +522,7 @@ nx_netif_prov_params_adjust(const struct kern_nexus_domain_provider *nxdom_prov,
 	 * - reduce the ring size for AWDL interface.
 	 * - reduce the ring size for USB ethernet interface.
 	 */
-	if (strcmp(nxdom_prov->nxdom_prov_name,
+	if (strbufcmp(nxdom_prov->nxdom_prov_name,
 	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0) {
 		/*
 		 * Leave the parameters default if userspace access may be
@@ -607,7 +608,8 @@ nx_netif_prov_mem_new(struct kern_nexus_domain_provider *nxdom_prov,
 	 * regions needed for userspace access. This is per interface.
 	 * NX_USER_CHANNEL_PROV() is systemwide so it can't be used.
 	 */
-	allow_direct = skywalk_netif_direct_allowed(na->na_name);
+	allow_direct = skywalk_netif_direct_allowed(
+		__unsafe_null_terminated_from_indexable(na->na_name));
 
 	/*
 	 * Both ports (host and dev) share the same packet buffer pool;
@@ -827,6 +829,7 @@ nx_netif_prov_nx_ctor(struct kern_nexus *nx)
 {
 	struct nx_netif *n;
 	char name[64];
+	const char *__null_terminated nxadv_name = NULL;
 	int error;
 
 	SK_LOCK_ASSERT_HELD();
@@ -838,8 +841,8 @@ nx_netif_prov_nx_ctor(struct kern_nexus *nx)
 	n = NX_NETIF_PRIVATE(nx);
 	if (NX_USER_CHANNEL_PROV(nx) &&
 	    NX_PROV(nx)->nxprov_params->nxp_nexusadv_size != 0) {
-		(void) snprintf(name, sizeof(name), "netif_%llu", nx->nx_id);
-		error = nx_advisory_alloc(nx, name,
+		nxadv_name = tsnprintf(name, sizeof(name), "netif_%llu", nx->nx_id);
+		error = nx_advisory_alloc(nx, nxadv_name,
 		    &NX_PROV(nx)->nxprov_region_params[SKMEM_REGION_NEXUSADV],
 		    NEXUS_ADVISORY_TYPE_NETIF);
 		if (error != 0) {
@@ -908,7 +911,7 @@ __netif_mib_get_stats(struct kern_nexus *nx, void *out, size_t len)
 {
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
 	struct ifnet *ifp = nif->nif_ifp;
-	struct sk_stats_net_if *sns = out;
+	struct sk_stats_net_if *__single sns = out;
 	size_t actual_space = sizeof(struct sk_stats_net_if);
 
 	if (out != NULL && actual_space <= len) {
@@ -923,7 +926,7 @@ __netif_mib_get_stats(struct kern_nexus *nx, void *out, size_t len)
 }
 
 static size_t
-__netif_mib_get_llinks(struct kern_nexus *nx, void *out, size_t len)
+__netif_mib_get_llinks(struct kern_nexus *nx, void *__sized_by(len) out, size_t len)
 {
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
 	struct nx_llink_info *nli_list = out;
@@ -975,7 +978,7 @@ __netif_mib_get_llinks(struct kern_nexus *nx, void *out, size_t len)
 }
 
 static size_t
-__netif_mib_get_queue_stats(struct kern_nexus *nx, void *out, size_t len)
+__netif_mib_get_queue_stats(struct kern_nexus *nx, void *__sized_by(len) out, size_t len)
 {
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
 	uint8_t *itr = out;
@@ -1041,7 +1044,7 @@ __netif_mib_get_queue_stats(struct kern_nexus *nx, void *out, size_t len)
 
 size_t
 nx_netif_prov_nx_mib_get(struct kern_nexus *nx, struct nexus_mib_filter *filter,
-    void *out, size_t len, struct proc *p)
+    void *__sized_by(len) out, size_t len, struct proc *p)
 {
 #pragma unused(p)
 	size_t ret;
@@ -1341,7 +1344,7 @@ nx_netif_ctl_attach(struct kern_nexus *nx, struct nx_spec_req *nsr,
 	SK_LOCK_ASSERT_HELD();
 
 	ASSERT(NX_DOM(nx)->nxdom_type == NEXUS_TYPE_NET_IF);
-	compat = (strcmp(NX_DOM_PROV(nx)->nxdom_prov_name,
+	compat = (strbufcmp(NX_DOM_PROV(nx)->nxdom_prov_name,
 	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0);
 
 	uuid_clear(nsr->nsr_if_uuid);
@@ -1358,7 +1361,8 @@ nx_netif_ctl_attach(struct kern_nexus *nx, struct nx_spec_req *nsr,
 			err = EINVAL;
 			goto done;
 		}
-	} else if ((ifp = ifunit_ref(nsr->nsr_name)) == NULL) {
+	} else if ((ifp = ifunit_ref(__unsafe_null_terminated_from_indexable(
+		    nsr->nsr_name))) == NULL) {
 		err = ENXIO;
 		goto done;
 	}
@@ -1633,8 +1637,8 @@ nx_netif_ctl(struct kern_nexus *nx, nxcfg_cmd_t nc_cmd, void *data,
     struct proc *p)
 {
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
-	struct nx_spec_req *nsr = data;
-	struct nx_flow_req *nfr = data;
+	struct nx_spec_req *__single nsr = data;
+	struct nx_flow_req *__single nfr = data;
 	int error = 0;
 
 	SK_LOCK_ASSERT_HELD();
@@ -1839,7 +1843,7 @@ nx_netif_na_rxsync(struct __kern_channel_ring *kring, struct proc *p,
 static void
 nx_netif_na_dtor(struct nexus_adapter *na)
 {
-	struct ifnet *ifp;
+	struct ifnet *__single ifp;
 	struct nexus_netif_adapter *nifna = NIFNA(na);
 
 	SK_LOCK_ASSERT_HELD();
@@ -2071,6 +2075,9 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 	struct ifnet *ifp = na->na_ifp;
 	int error = 0;
 	uint32_t r;
+	/* TODO -fbounds-safety: Remove tmp and use __counted_by_or_null */
+	struct nx_netif_mit *mit_tmp;
+	uint32_t nrings;
 
 	ASSERT(na->na_type == NA_NETIF_DEV);
 	ASSERT(!(na->na_flags & NAF_HOST_ONLY));
@@ -2089,15 +2096,16 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Init the mitigation support on all the dev TX rings.
 		 */
 		if (tx_mit) {
-			nifna->nifna_tx_mit =
-			    skn_alloc_type_array(tx_on, struct nx_netif_mit,
-			    na_get_nrings(na, NR_TX), Z_WAITOK,
-			    skmem_tag_netif_mit);
-			if (nifna->nifna_tx_mit == NULL) {
+			nrings = na_get_nrings(na, NR_TX);
+			mit_tmp = skn_alloc_type_array(tx_on, struct nx_netif_mit,
+			    nrings, Z_WAITOK, skmem_tag_netif_mit);
+			if (mit_tmp == NULL) {
 				SK_ERR("TX mitigation allocation failed");
 				error = ENOMEM;
 				goto out;
 			}
+			nifna->nifna_tx_mit = mit_tmp;
+			nifna->nifna_tx_mit_count = nrings;
 		} else {
 			ASSERT(nifna->nifna_tx_mit == NULL);
 		}
@@ -2106,22 +2114,22 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		 * Init the mitigation support on all the dev RX rings.
 		 */
 		if (rx_mit) {
-			nifna->nifna_rx_mit =
-			    skn_alloc_type_array(rx_on, struct nx_netif_mit,
-			    na_get_nrings(na, NR_RX), Z_WAITOK,
-			    skmem_tag_netif_mit);
-			if (nifna->nifna_rx_mit == NULL) {
+			nrings = na_get_nrings(na, NR_RX);
+			mit_tmp = skn_alloc_type_array(rx_on, struct nx_netif_mit,
+			    nrings, Z_WAITOK, skmem_tag_netif_mit);
+			if (mit_tmp == NULL) {
 				SK_ERR("RX mitigation allocation failed");
 				if (nifna->nifna_tx_mit != NULL) {
-					skn_free_type_array(rx_fail,
+					skn_free_type_array_counted_by(rx_fail,
 					    struct nx_netif_mit,
-					    na_get_nrings(na, NR_TX),
+					    nifna->nifna_tx_mit_count,
 					    nifna->nifna_tx_mit);
-					nifna->nifna_tx_mit = NULL;
 				}
 				error = ENOMEM;
 				goto out;
 			}
+			nifna->nifna_rx_mit = mit_tmp;
+			nifna->nifna_rx_mit_count = nrings;
 		} else {
 			ASSERT(nifna->nifna_rx_mit == NULL);
 		}
@@ -2204,9 +2212,8 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 		}
 
 		if (nifna->nifna_tx_mit != NULL) {
-			skn_free_type_array(tx_off, struct nx_netif_mit,
-			    na_get_nrings(na, NR_TX), nifna->nifna_tx_mit);
-			nifna->nifna_tx_mit = NULL;
+			skn_free_type_array_counted_by(tx_off, struct nx_netif_mit,
+			    nifna->nifna_tx_mit_count, nifna->nifna_tx_mit);
 		}
 
 		/* reset all RX notify callbacks */
@@ -2220,9 +2227,8 @@ nx_netif_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 			}
 		}
 		if (nifna->nifna_rx_mit != NULL) {
-			skn_free_type_array(rx_off, struct nx_netif_mit,
-			    na_get_nrings(na, NR_RX), nifna->nifna_rx_mit);
-			nifna->nifna_rx_mit = NULL;
+			skn_free_type_array_counted_by(rx_off, struct nx_netif_mit,
+			    nifna->nifna_rx_mit_count, nifna->nifna_rx_mit);
 		}
 		break;
 
@@ -2238,14 +2244,13 @@ out:
 SK_NO_INLINE_ATTRIBUTE
 static int
 nx_netif_attach(struct kern_nexus *nx, struct ifnet *ifp)
-__attribute__((optnone))
 {
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
 	struct nxprov_params *nxp = NX_PROV(nx)->nxprov_params;
 	struct nexus_netif_adapter *devnifna = NULL;
 	struct nexus_netif_adapter *hostnifna = NULL;
-	struct nexus_adapter *devna = NULL;
-	struct nexus_adapter *hostna = NULL;
+	struct nexus_adapter *__single devna = NULL;
+	struct nexus_adapter *__single hostna = NULL;
 	boolean_t embryonic = FALSE;
 	int retval = 0;
 	uint32_t na_flags;
@@ -2287,8 +2292,7 @@ __attribute__((optnone))
 	devna = &devnifna->nifna_up;
 	devna->na_type = NA_NETIF_DEV;
 	devna->na_free = na_netif_free;
-	(void) strncpy(devna->na_name, ifp->if_xname, sizeof(devna->na_name) - 1);
-	devna->na_name[sizeof(devna->na_name) - 1] = '\0';
+	(void) strlcpy(devna->na_name, ifp->if_xname, sizeof(devna->na_name));
 	uuid_generate_random(devna->na_uuid);
 	if (embryonic) {
 		/*
@@ -2558,7 +2562,7 @@ nx_netif_flags_init(struct nx_netif *nif)
 
 	switch (devna->na_type) {
 	case NA_NETIF_DEV:
-		if (strcmp(ifp->if_name, sk_ll_prefix) == 0) {
+		if (strlcmp(sk_ll_prefix, ifp->if_name, sizeof(sk_ll_prefix)) == 0) {
 			nif->nif_flags |= NETIF_FLAG_LOW_LATENCY;
 			if_set_xflags(ifp, IFXF_LOW_LATENCY);
 		}
@@ -2870,7 +2874,7 @@ nx_netif_reap(struct nexus_netif_adapter *nifna, struct ifnet *ifp,
 void
 nx_netif_llw_detach_notify(void *arg)
 {
-	struct nexus_netif_adapter *nifna = arg;
+	struct nexus_netif_adapter *__single nifna = arg;
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct kern_nexus *nx = nif->nif_nx;
 	struct kern_channel **ch_list = NULL;
@@ -3089,7 +3093,7 @@ nx_netif_na_find(struct kern_nexus *nx, struct kern_channel *ch,
 	boolean_t anon = NX_ANONYMOUS_PROV(nx);
 	ch_endpoint_t ep = chr->cr_endpoint;
 	nexus_port_t nx_port = chr->cr_port;
-	struct nexus_adapter *na = NULL;
+	struct nexus_adapter *__single na = NULL;
 	struct ifnet *ifp;
 	int err = 0;
 
@@ -3338,7 +3342,8 @@ nx_netif_interface_advisory_report(struct kern_nexus *nx,
 	struct kern_nexus *notify_nx;
 	struct __kern_netif_intf_advisory *intf_adv;
 	struct nx_netif *nif = NX_NETIF_PRIVATE(nx);
-	ifnet_t difp = nif->nif_ifp, parent = NULL;
+	ifnet_t difp = nif->nif_ifp;
+	ifnet_t __single parent = NULL;
 
 	/* If we are a delegate, notify the parent instead */
 	if (ifnet_get_delegate_parent(difp, &parent) == 0) {
@@ -3456,7 +3461,8 @@ get_filterable_packets(struct nexus_netif_adapter *nifna,
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct netif_stats *nifs = &nif->nif_stats;
 	struct __kern_packet *pkt = pkt_chain, *next, *fpkt;
-	struct __kern_packet *fpkt_head = NULL, *passthrough_head = NULL;
+	struct __kern_packet *__single fpkt_head = NULL;
+	struct __kern_packet *__single passthrough_head = NULL;
 	struct __kern_packet **fpkt_tailp = &fpkt_head;
 	struct __kern_packet **passthrough_tailp = &passthrough_head;
 	int fcnt = 0, pcnt = 0, dcnt = 0;
@@ -3509,12 +3515,30 @@ netif_receive(struct nexus_netif_adapter *nifna,
 	struct netif_stats *nifs = &nif->nif_stats;
 	int err, dropcnt, dropstat = -1;
 
+	if ((nif->nif_ifp->if_xflags & IFXF_DISABLE_INPUT) != 0) {
+		uint64_t byte_cnt = 0;
+		struct __kern_packet *pkt;
+		struct ifnet *ifp = nif->nif_ifp;
+
+		dropcnt = 0;
+		for (pkt = pkt_chain; pkt != NULL; pkt = pkt->pkt_nextpkt) {
+			dropcnt++;
+			byte_cnt += ((pkt->pkt_pflags & PKT_F_MBUF_DATA) != 0) ?
+			    m_pktlen(pkt->pkt_mbuf) : pkt->pkt_length;
+		}
+		os_atomic_add(&ifp->if_data.ifi_ipackets, dropcnt, relaxed);
+		os_atomic_add(&ifp->if_data.ifi_ibytes, byte_cnt, relaxed);
+
+		dropstat = NETIF_STATS_DROP_INPUT_DISABLED;
+		goto drop;
+	}
+
 	/* update our work timestamp */
 	na->na_work_ts = _net_uptime;
 
 	if (nif->nif_filter_cnt > 0) {
-		struct __kern_packet *fpkt_chain = NULL;
-		struct __kern_packet *passthrough_chain = NULL;
+		struct __kern_packet *__single fpkt_chain = NULL;
+		struct __kern_packet *__single passthrough_chain = NULL;
 
 		get_filterable_packets(nifna, pkt_chain, &fpkt_chain,
 		    &passthrough_chain);
@@ -3527,22 +3551,28 @@ netif_receive(struct nexus_netif_adapter *nifna,
 		} else {
 			return;
 		}
-	} else if (nx_netif_filter_default_drop != 0) {
+	} else if (!NETIF_IS_LOW_LATENCY(nif) && nx_netif_filter_default_drop != 0) {
+		/*
+		 * Default drop is meant for dropping packets on interfaces without
+		 * interface filters attached. It can be skipped for LLW because it
+		 * doesn't have a network stack path.
+		 */
 		DTRACE_SKYWALK2(rx__default__drop, struct nx_netif *, nif,
 		    struct __kern_packet *, pkt_chain);
 		dropstat = NETIF_STATS_FILTER_DROP_DEFAULT;
 		goto drop;
 	}
-	if (nif->nif_flow_cnt > 0) {
-		struct __kern_packet *remain = NULL;
 
-		err = nx_netif_demux(nifna, pkt_chain, &remain,
-		    NETIF_FLOW_SOURCE);
+	if (nif->nif_flow_cnt > 0) {
+		struct __kern_packet *__single remain = NULL;
+
+		err = nx_netif_demux(nifna, pkt_chain, &remain, stats, NETIF_FLOW_SOURCE);
 		if (remain == NULL) {
 			return;
 		}
 		pkt_chain = remain;
 	}
+
 	if (na->na_rx != NULL) {
 		na->na_rx(na, pkt_chain, stats);
 	} else {
@@ -3551,7 +3581,9 @@ netif_receive(struct nexus_netif_adapter *nifna,
 		dropstat = NETIF_STATS_DROP_NO_RX_CB;
 		goto drop;
 	}
+
 	return;
+
 drop:
 	dropcnt = 0;
 	nx_netif_free_packet_chain(pkt_chain, &dropcnt);
@@ -3617,7 +3649,8 @@ SK_NO_INLINE_ATTRIBUTE
 static struct __kern_packet *
 consume_pkts(struct __kern_channel_ring *ring, slot_idx_t end)
 {
-	struct __kern_packet *pkt_chain = NULL, **tailp = &pkt_chain;
+	struct __kern_packet *__single pkt_chain = NULL;
+	struct __kern_packet **tailp = &pkt_chain;
 	slot_idx_t idx = ring->ckr_rhead;
 
 	while (idx != end) {
@@ -3643,7 +3676,7 @@ netif_rx_notify_default(struct __kern_channel_ring *ring, struct proc *p,
 	struct nexus_netif_adapter *nifna;
 	struct nx_netif *nif;
 	struct __kern_packet *pkt_chain;
-	struct nexus_pkt_stats stats;
+	struct nexus_pkt_stats stats = {0};
 	sk_protect_t protect;
 	slot_idx_t ktail;
 	int err = 0;
@@ -3722,7 +3755,7 @@ netif_rx_notify_fast(struct __kern_channel_ring *ring, struct proc *p,
 #pragma unused(p, flags)
 	sk_protect_t protect;
 	struct nexus_adapter *hwna;
-	struct nexus_pkt_stats stats = {};
+	struct nexus_pkt_stats stats = {0};
 	uint32_t i, count;
 	int err = 0;
 
@@ -3925,10 +3958,10 @@ nx_netif_filter_rx_cb(struct nexus_netif_adapter *nifna,
 		return ENOMEM;
 	}
 	if (nif->nif_flow_cnt > 0) {
-		struct __kern_packet *remain = NULL;
+		struct __kern_packet *__single remain = NULL;
 
 		err = nx_netif_demux(nifna, pkt_chain, &remain,
-		    NETIF_FLOW_INJECT);
+		    NULL, NETIF_FLOW_INJECT);
 		if (remain == NULL) {
 			return err;
 		}
@@ -4141,12 +4174,11 @@ netif_no_ring_space_log(const struct nexus_adapter *na,
 {
 	SK_DF(SK_VERB_SYNC | SK_VERB_TX,
 	    "no ring space: na \"%s\" [%u] "
-	    "\"%s\"(kh %u kt %u kl %u | rh %u rt %u)"
-	    "\"%s\"(kh %u kt %u kl %u | rh %u rt %u)",
+	    "\"%s\"(kh %u kt %u | rh %u rt %u)",
 	    na->na_name, ring->ckr_ring_id,
 	    ring->ckr_name, ring->ckr_khead,
-	    ring->ckr_ktail, ring->ckr_klease,
-	    ring->ckr_rhead, ring->ckr_rtail);
+	    ring->ckr_ktail, ring->ckr_rhead,
+	    ring->ckr_rtail);
 }
 #endif /* SK_LOG */
 
@@ -4160,7 +4192,7 @@ netif_ring_tx_refill(const kern_channel_ring_t ring, uint32_t pkt_limit,
 {
 	struct nexus_adapter *hwna;
 	struct ifnet *ifp;
-	struct __kern_packet *head = NULL;
+	struct __kern_packet *__single head = NULL;
 	sk_protect_t protect;
 	errno_t rc = 0;
 	errno_t sync_err = 0;
@@ -4365,7 +4397,7 @@ out:
 	(old) = _avg;                                                   \
 } while (0)
 
-static void
+void
 kern_netif_increment_queue_stats(kern_netif_queue_t queue,
     uint32_t pkt_count, uint32_t byte_count)
 {
@@ -4453,7 +4485,7 @@ kern_netif_queue_rx_enqueue(kern_netif_queue_t queue, kern_packet_t ph_chain,
 	bool flush = ((flags & KERN_NETIF_QUEUE_RX_ENQUEUE_FLAG_FLUSH) != 0);
 	struct pktq *pktq = &q->nq_pktq;
 	struct netif_stats *nifs = &llink->nll_nif->nif_stats;
-	struct nexus_pkt_stats stats;
+	struct nexus_pkt_stats stats = {0};
 	sk_protect_t protect;
 
 	ASSERT((q->nq_flags & NETIF_QUEUE_IS_RX) != 0);
@@ -4485,7 +4517,7 @@ kern_netif_queue_tx_dequeue(kern_netif_queue_t queue, uint32_t pkt_limit,
 	struct netif_llink *llink = q->nq_qset->nqs_llink;
 	struct netif_stats *nifs = &llink->nll_nif->nif_stats;
 	struct nexus_adapter *hwna;
-	struct __kern_packet *pkt_chain = NULL;
+	struct __kern_packet *__single pkt_chain = NULL;
 	uint32_t bytes = 0, pkt_cnt = 0;
 	errno_t rc;
 
@@ -4549,7 +4581,7 @@ kern_nexus_netif_llink_add(struct kern_nexus *nx,
 {
 	errno_t err;
 	struct nx_netif *nif;
-	struct netif_llink *llink;
+	struct netif_llink *__single llink;
 	struct netif_stats *nifs;
 
 	VERIFY(nx != NULL);

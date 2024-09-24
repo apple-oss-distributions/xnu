@@ -87,7 +87,7 @@ proto_register_input(protocol_family_t protocol, proto_input_handler input,
 	struct proto_input_entry *entry;
 	struct dlil_threading_info *inp = dlil_main_input_thread;
 	struct domain *dp;
-	domain_guard_t guard;
+	domain_guard_t __single guard;
 
 	entry = kalloc_type(struct proto_input_entry, Z_WAITOK | Z_ZERO);
 	if (entry == NULL) {

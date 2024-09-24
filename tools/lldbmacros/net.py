@@ -180,12 +180,9 @@ def GetInAddrAsString(ia):
     return out_string
 
 def GetIn6AddrAsString(ia):
-    out_string = ""
-    addr = ia
-
-    addr_format_string = "{0:02x}:{1:02x}:{2:02x}:{3:02x}{4:02x}:{5:02x}:{6:02x}:{7:02x}{8:02x}:{9:02x}:{10:02x}:{11:02x}{12:02x}:{13:02x}:{14:02x}:{15:02x}"
-    out_string += addr_format_string.format(unsigned(addr[0]), unsigned(addr[1]), unsigned(addr[2]), unsigned(addr[3]), unsigned(addr[4]), unsigned(addr[5]), unsigned(addr[6]), unsigned(addr[7]), unsigned(addr[8]), unsigned(addr[9]), unsigned(addr[10]), unsigned(addr[11]), unsigned(addr[12]), unsigned(addr[13]), unsigned(addr[14]), unsigned(addr[15]))
-    return out_string
+    addr_raw_string = ":".join(["{0:02x}{1:02x}".format(unsigned(ia[i]),
+        unsigned(ia[i+1])) for i in range(0, 16, 2)])
+    return inet_ntop(AF_INET6, inet_pton(AF_INET6, addr_raw_string))
 
 def GetSocketAddrAsStringInet(sockaddr):
     sock_in = Cast(sockaddr, 'sockaddr_in *')
@@ -1709,8 +1706,6 @@ def GetMptcpInfo():
 
     out_string += "total mbuf bytes used by MPTCP: "+ str(total_mbuf_bytes) + "\n"
     print(out_string)
-
-    #pcb = 
 
 def GetPcbInfo(pcbi, proto):
     tcp_reassqlen = [0]

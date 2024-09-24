@@ -6,7 +6,7 @@ T_GLOBAL_META(
 	T_META_CHECK_LEAKS(false)
 	);
 
-T_DECL(os_atomic, "Just to make sure things build at all in c++ mode")
+T_DECL(os_atomic, "Just to make sure things build at all in c++ mode", T_META_TAG_VM_PREFERRED)
 {
 	static os_atomic(int) i;
 	static volatile int v_i = 0;

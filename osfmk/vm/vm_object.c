@@ -84,22 +84,24 @@
 #include <kern/misc_protos.h>
 #include <kern/policy_internal.h>
 
+#include <sys/kdebug.h>
 #include <sys/kdebug_triage.h>
 
-#include <vm/memory_object.h>
-#include <vm/vm_compressor_pager.h>
-#include <vm/vm_fault.h>
+#include <vm/memory_object_internal.h>
+#include <vm/vm_compressor_pager_internal.h>
+#include <vm/vm_fault_internal.h>
 #include <vm/vm_map.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_pageout_internal.h>
+#include <vm/vm_protos_internal.h>
 #include <vm/vm_purgeable_internal.h>
+#include <vm/vm_ubc.h>
 
-#include <vm/vm_compressor.h>
+#include <vm/vm_compressor_xnu.h>
 
 #if CONFIG_PHANTOM_CACHE
-#include <vm/vm_phantom_cache.h>
+#include <vm/vm_phantom_cache_internal.h>
 #endif
 
 #if VM_OBJECT_ACCESS_TRACKING
@@ -228,8 +230,8 @@ static void             vm_object_release_pager(
 SECURITY_READ_ONLY_LATE(zone_t) vm_object_zone; /* vm backing store zone */
 
 /*
- *	All wired-down kernel memory belongs to this memory object
- *	memory object (kernel_object) by default to avoid wasting data structures.
+ * Wired-down kernel memory belongs to this memory object (kernel_object)
+ * by default to avoid wasting data structures.
  */
 static struct vm_object                 kernel_object_store VM_PAGE_PACKED_ALIGNED;
 const vm_object_t                       kernel_object_default = &kernel_object_store;
@@ -244,6 +246,7 @@ const vm_object_t                       compressor_object = &compressor_object_s
  */
 static struct vm_object                 retired_pages_object_store VM_PAGE_PACKED_ALIGNED;
 const vm_object_t                       retired_pages_object = &retired_pages_object_store;
+
 
 static struct vm_object                 exclaves_object_store VM_PAGE_PACKED_ALIGNED;
 const vm_object_t                       exclaves_object = &exclaves_object_store;
@@ -273,6 +276,7 @@ static const struct vm_object vm_object_template = {
 	.reusable_page_count = 0,
 	.vo_copy = VM_OBJECT_NULL,
 	.vo_copy_version = 0,
+	.vo_inherit_copy_none = false,
 	.shadow = VM_OBJECT_NULL,
 	.vo_shadow_offset = (vm_object_offset_t) 0,
 	.pager = MEMORY_OBJECT_NULL,
@@ -433,40 +437,18 @@ unsigned int vm_object_reap_count_async = 0;
 
 #if CONFIG_IOSCHED
 /* I/O Re-prioritization request list */
-queue_head_t io_reprioritize_list = QUEUE_HEAD_INITIALIZER(io_reprioritize_list);
-
-LCK_SPIN_DECLARE_ATTR(io_reprioritize_list_lock,
-    &vm_object_lck_grp, &vm_object_lck_attr);
-
-#define IO_REPRIORITIZE_LIST_LOCK()     \
-	        lck_spin_lock_grp(&io_reprioritize_list_lock, &vm_object_lck_grp)
-#define IO_REPRIORITIZE_LIST_UNLOCK()   \
-	        lck_spin_unlock(&io_reprioritize_list_lock)
+struct mpsc_daemon_queue io_reprioritize_q;
 
 ZONE_DEFINE_TYPE(io_reprioritize_req_zone, "io_reprioritize_req",
     struct io_reprioritize_req, ZC_NONE);
 
-/* I/O Re-prioritization thread */
-int io_reprioritize_wakeup = 0;
-static void io_reprioritize_thread(void *param __unused, wait_result_t wr __unused);
-
-#define IO_REPRIO_THREAD_WAKEUP()       thread_wakeup((event_t)&io_reprioritize_wakeup)
-#define IO_REPRIO_THREAD_CONTINUATION()                                 \
-{                                                               \
-	assert_wait(&io_reprioritize_wakeup, THREAD_UNINT);     \
-	thread_block(io_reprioritize_thread);                   \
-}
+/* I/O re-prioritization MPSC callback */
+static void io_reprioritize(mpsc_queue_chain_t elm, mpsc_daemon_queue_t dq);
 
 void vm_page_request_reprioritize(vm_object_t, uint64_t, uint32_t, int);
 void vm_page_handle_prio_inversion(vm_object_t, vm_page_t);
 void vm_decmp_upl_reprioritize(upl_t, int);
 #endif
-
-#if 0
-#undef KERNEL_DEBUG
-#define KERNEL_DEBUG KERNEL_DEBUG_CONSTANT
-#endif
-
 
 void
 vm_object_set_size(
@@ -543,7 +525,7 @@ vm_object_bootstrap(void)
 	    ~(VM_PAGE_PACKED_PTR_ALIGNMENT - 1);
 
 	vm_object_zone = zone_create("vm objects", vm_object_size,
-	    ZC_NOENCRYPT | ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NOTBITAG);
+	    ZC_NOENCRYPT | ZC_ALIGNMENT_REQUIRED | ZC_VM | ZC_NO_TBI_TAG);
 
 	queue_init(&vm_object_cached_list);
 
@@ -581,14 +563,11 @@ void
 vm_io_reprioritize_init(void)
 {
 	kern_return_t   result;
-	thread_t        thread = THREAD_NULL;
 
-	result = kernel_thread_start_priority(io_reprioritize_thread, NULL, 95 /* MAXPRI_KERNEL */, &thread);
-	if (result == KERN_SUCCESS) {
-		thread_set_thread_name(thread, "VM_io_reprioritize_thread");
-		thread_deallocate(thread);
-	} else {
-		panic("Could not create io_reprioritize_thread");
+	result = mpsc_daemon_queue_init_with_thread(&io_reprioritize_q, io_reprioritize, BASEPRI_KERNEL,
+	    "VM_io_reprioritize_thread", MPSC_DAEMON_INIT_NONE);
+	if (result != KERN_SUCCESS) {
+		panic("Unable to start I/O reprioritization thread (%d)", result);
 	}
 }
 #endif
@@ -813,12 +792,10 @@ vm_object_deallocate(
 
 		if (object->pager_created && !object->pager_initialized) {
 			assert(!object->can_persist);
-			vm_object_assert_wait(object,
-			    VM_OBJECT_EVENT_INITIALIZED,
-			    THREAD_UNINT);
-			vm_object_unlock(object);
-
-			thread_block(THREAD_CONTINUE_NULL);
+			vm_object_sleep(object,
+			    VM_OBJECT_EVENT_PAGER_INIT,
+			    THREAD_UNINT,
+			    LCK_SLEEP_UNLOCK);
 			continue;
 		}
 
@@ -978,6 +955,14 @@ vm_object_cache_add(
 	if (object->resident_page_count == 0) {
 		return;
 	}
+	if (object->vo_ledger_tag) {
+		/*
+		 * We can't add an "owned" object to the cache because
+		 * the "vo_owner" and "vo_cache_ts" fields are part of the
+		 * same "union" and can't be used at the same time.
+		 */
+		return;
+	}
 	clock_get_system_nanotime(&sec, &nsec);
 
 	vm_object_cache_lock_spin();
@@ -1015,13 +1000,13 @@ vm_object_cache_evict(
 	clock_sec_t     sec;
 	clock_nsec_t    nsec;
 
-	KERNEL_DEBUG(0x13001ec | DBG_FUNC_START, 0, 0, 0, 0, 0);
+	KDBG_DEBUG(0x13001ec | DBG_FUNC_START);
 	/*
 	 * do a couple of quick checks to see if it's
 	 * worthwhile grabbing the lock
 	 */
 	if (queue_empty(&vm_object_cached_list)) {
-		KERNEL_DEBUG(0x13001ec | DBG_FUNC_END, 0, 0, 0, 0, 0);
+		KDBG_DEBUG(0x13001ec | DBG_FUNC_END);
 		return 0;
 	}
 	clock_get_system_nanotime(&sec, &nsec);
@@ -1031,7 +1016,7 @@ vm_object_cache_evict(
 	 * yet sufficiently aged
 	 */
 	if (sec < vm_object_cache_aging_ts) {
-		KERNEL_DEBUG(0x13001ec | DBG_FUNC_END, 0, 0, 0, 0, 0);
+		KDBG_DEBUG(0x13001ec | DBG_FUNC_END);
 		return 0;
 	}
 	/*
@@ -1042,20 +1027,21 @@ vm_object_cache_evict(
 
 	vm_object_cache_lock_spin();
 
-	for (;;) {
+	for (;;) {  /* loop for as long as we have objects to process */
 		next_obj = (vm_object_t)queue_first(&vm_object_cached_list);
 
+		/* loop to find the next target in the cache_list */
 		while (!queue_end(&vm_object_cached_list, (queue_entry_t)next_obj) && object_cnt++ < max_objects_to_examine) {
 			object = next_obj;
 			next_obj = (vm_object_t)queue_next(&next_obj->cached_list);
 
 			assert(object->purgable == VM_PURGABLE_DENY);
 
-			if (sec < object->vo_cache_ts) {
-				KERNEL_DEBUG(0x130020c, object, object->resident_page_count, object->vo_cache_ts, sec, 0);
+			if (sec < object->vo_cache_ts) { // reached the point in the queue beyond the time we started
+				KDBG_DEBUG(0x130020c, object, object->resident_page_count, object->vo_cache_ts, sec);
 
 				vm_object_cache_aging_ts = object->vo_cache_ts;
-				object = VM_OBJECT_NULL;
+				object = VM_OBJECT_NULL; /* this will cause to break away from the outer loop */
 				break;
 			}
 			if (!vm_object_lock_try_scan(object)) {
@@ -1064,7 +1050,7 @@ vm_object_cache_evict(
 				 * an object to steal pages from, we'll revist in a bit...
 				 * hopefully, the lock will have cleared
 				 */
-				KERNEL_DEBUG(0x13001f8, object, object->resident_page_count, 0, 0, 0);
+				KDBG_DEBUG(0x13001f8, object, object->resident_page_count);
 
 				object = VM_OBJECT_NULL;
 				continue;
@@ -1075,7 +1061,7 @@ vm_object_cache_evict(
 				 * so deal with it... if we don't remove the object from
 				 * the list, we'll never move past it.
 				 */
-				KERNEL_DEBUG(0x13001fc, object, object->resident_page_count, ep_freed, ep_moved, 0);
+				KDBG_DEBUG(0x13001fc, object, object->resident_page_count, ep_freed, ep_moved);
 
 				vm_object_cache_remove_locked(object);
 				vm_object_unlock(object);
@@ -1134,7 +1120,7 @@ vm_object_cache_evict(
 			}
 			ep_array[ep_count++] = p;
 		}
-		KERNEL_DEBUG(0x13001f4 | DBG_FUNC_START, object, object->resident_page_count, ep_freed, ep_moved, 0);
+		KDBG_DEBUG(0x13001f4 | DBG_FUNC_START, object, object->resident_page_count, ep_freed, ep_moved);
 
 		vm_page_lockspin_queues();
 
@@ -1172,18 +1158,18 @@ vm_object_cache_evict(
 		}
 		vm_page_unlock_queues();
 
-		KERNEL_DEBUG(0x13001f4 | DBG_FUNC_END, object, object->resident_page_count, ep_freed, ep_moved, 0);
+		KDBG_DEBUG(0x13001f4 | DBG_FUNC_END, object, object->resident_page_count, ep_freed, ep_moved);
 
 		if (local_free_q) {
 			vm_page_free_list(local_free_q, TRUE);
 			local_free_q = VM_PAGE_NULL;
 		}
 		if (object->vo_cache_pages_to_scan == 0) {
-			KERNEL_DEBUG(0x1300208, object, object->resident_page_count, ep_freed, ep_moved, 0);
+			KDBG_DEBUG(0x1300208, object, object->resident_page_count, ep_freed, ep_moved);
 
 			vm_object_cache_remove(object);
 
-			KERNEL_DEBUG(0x13001fc, object, object->resident_page_count, ep_freed, ep_moved, 0);
+			KDBG_DEBUG(0x13001fc, object, object->resident_page_count, ep_freed, ep_moved);
 		}
 		/*
 		 * done with this object
@@ -1213,7 +1199,7 @@ vm_object_cache_evict(
 	vm_object_cache_pages_moved += ep_moved;
 	vm_object_cache_pages_skipped += ep_skipped;
 
-	KERNEL_DEBUG(0x13001ec | DBG_FUNC_END, ep_freed, 0, 0, 0, 0);
+	KDBG_DEBUG(0x13001ec | DBG_FUNC_END, ep_freed);
 	return ep_freed;
 }
 
@@ -1384,20 +1370,17 @@ vm_object_reap(
 	 * ledgers.  We need to do this before disconnecting the object
 	 * from its pager, to properly account for compressed pages.
 	 */
-	if (object->internal &&
-	    (object->purgable != VM_PURGABLE_DENY ||
-	    object->vo_ledger_tag)) {
+	if (/* object->internal && */
+		(object->purgable != VM_PURGABLE_DENY ||
+		object->vo_ledger_tag)) {
 		int ledger_flags;
 		kern_return_t kr;
 
 		ledger_flags = 0;
-		if (object->vo_no_footprint) {
-			ledger_flags |= VM_LEDGER_FLAG_NO_FOOTPRINT;
-		}
 		assert(!object->alive);
 		assert(object->terminating);
 		kr = vm_object_ownership_change(object,
-		    object->vo_ledger_tag,   /* unchanged */
+		    VM_LEDGER_TAG_NONE,
 		    NULL,                    /* no owner */
 		    ledger_flags,
 		    FALSE);                  /* task_objq not locked */
@@ -1556,25 +1539,31 @@ unsigned int vm_max_batch = 256;
 
 #define BATCH_LIMIT(max)        (vm_max_batch >= max ? max : vm_max_batch)
 
-
-#define VM_OBJ_REAP_FREELIST(_local_free_q, do_disconnect)              \
-	MACRO_BEGIN                                                     \
-	if (_local_free_q) {                                            \
-	        if (do_disconnect) {                                    \
-	                vm_page_t m;                                    \
-	                for (m = _local_free_q;                         \
-	                     m != VM_PAGE_NULL;                         \
-	                     m = m->vmp_snext) {                        \
-	                        if (m->vmp_pmapped) {                   \
-	                                pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m)); \
-	                        }                                       \
-	                }                                               \
-	        }                                                       \
-	        vm_page_free_list(_local_free_q, TRUE);                 \
-	        _local_free_q = VM_PAGE_NULL;                           \
-	}                                                               \
-	MACRO_END
-
+static inline vm_page_t
+vm_object_reap_freelist(vm_page_t local_free_q, bool do_disconnect, bool set_cache_attr)
+{
+	if (local_free_q) {
+		if (do_disconnect) {
+			vm_page_t m;
+			for (m = local_free_q;
+			    m != VM_PAGE_NULL;
+			    m = m->vmp_snext) {
+				if (m->vmp_pmapped) {
+					pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(m));
+				}
+			}
+		}
+		if (set_cache_attr) {
+			const unified_page_list_t pmap_batch_list = {
+				.page_slist = local_free_q,
+				.type = UNIFIED_PAGE_LIST_TYPE_VM_PAGE_LIST,
+			};
+			pmap_batch_set_cache_attributes(&pmap_batch_list, 0);
+		}
+		vm_page_free_list(local_free_q, TRUE);
+	}
+	return VM_PAGE_NULL;
+}
 
 void
 vm_object_reap_pages(
@@ -1585,7 +1574,8 @@ vm_object_reap_pages(
 	vm_page_t       next;
 	vm_page_t       local_free_q = VM_PAGE_NULL;
 	int             loop_count;
-	boolean_t       disconnect_on_release;
+	bool            disconnect_on_release;
+	bool            set_cache_attr_needed;
 	pmap_flush_context      pmap_flush_context_storage;
 
 	if (reap_type == REAP_DATA_FLUSH) {
@@ -1593,7 +1583,7 @@ vm_object_reap_pages(
 		 * We need to disconnect pages from all pmaps before
 		 * releasing them to the free list
 		 */
-		disconnect_on_release = TRUE;
+		disconnect_on_release = true;
 	} else {
 		/*
 		 * Either the caller has already disconnected the pages
@@ -1602,10 +1592,28 @@ vm_object_reap_pages(
 		 * No need to re-disconnect them when we release the pages
 		 * to the free list.
 		 */
-		disconnect_on_release = FALSE;
+		disconnect_on_release = false;
 	}
 
 restart_after_sleep:
+	set_cache_attr_needed = false;
+	if (object->set_cache_attr) {
+		/**
+		 * If the cache attributes need to be reset for the pages to
+		 * be freed, we clear object->set_cache_attr here so that
+		 * our call to vm_page_free_list (which will ultimately call
+		 * vm_page_remove() on each page) won't try to reset the
+		 * cache attributes on each page individually.  Depending on
+		 * the architecture, it may be much faster for us to call
+		 * pmap_batch_set_cache_attributes() instead.  Note that
+		 * this function must restore object->set_cache_attr in any
+		 * case where it is required to drop the object lock, e.g.
+		 * to wait for a busy page.
+		 */
+		object->set_cache_attr = FALSE;
+		set_cache_attr_needed = true;
+	}
+
 	if (vm_page_queue_empty(&object->memq)) {
 		return;
 	}
@@ -1636,8 +1644,8 @@ restart_after_sleep:
 				 * and take a little break to avoid
 				 * hogging the page queue lock too long
 				 */
-				VM_OBJ_REAP_FREELIST(local_free_q,
-				    disconnect_on_release);
+				local_free_q = vm_object_reap_freelist(local_free_q,
+				    disconnect_on_release, set_cache_attr_needed);
 			} else {
 				mutex_pause(0);
 			}
@@ -1652,10 +1660,13 @@ restart_after_sleep:
 				/*
 				 * free the pages reclaimed so far
 				 */
-				VM_OBJ_REAP_FREELIST(local_free_q,
-				    disconnect_on_release);
+				local_free_q = vm_object_reap_freelist(local_free_q,
+				    disconnect_on_release, set_cache_attr_needed);
 
-				PAGE_SLEEP(object, p, THREAD_UNINT);
+				if (set_cache_attr_needed) {
+					object->set_cache_attr = TRUE;
+				}
+				vm_page_sleep(object, p, THREAD_UNINT, LCK_SLEEP_DEFAULT);
 
 				goto restart_after_sleep;
 			}
@@ -1761,9 +1772,12 @@ restart_after_sleep:
 				/*
 				 * free the pages reclaimed so far
 				 */
-				VM_OBJ_REAP_FREELIST(local_free_q,
-				    disconnect_on_release);
+				local_free_q = vm_object_reap_freelist(local_free_q,
+				    disconnect_on_release, set_cache_attr_needed);
 
+				if (set_cache_attr_needed) {
+					object->set_cache_attr = TRUE;
+				}
 				vm_object_paging_wait(object, THREAD_UNINT);
 
 				goto restart_after_sleep;
@@ -1791,8 +1805,11 @@ restart_after_sleep:
 		pmap_flush(&pmap_flush_context_storage);
 	}
 
-	VM_OBJ_REAP_FREELIST(local_free_q,
-	    disconnect_on_release);
+	vm_object_reap_freelist(local_free_q,
+	    disconnect_on_release, set_cache_attr_needed);
+	if (set_cache_attr_needed) {
+		object->set_cache_attr = TRUE;
+	}
 }
 
 
@@ -1844,13 +1861,7 @@ vm_object_reaper_thread(void)
 		 * ceased before we break the association with the pager
 		 * itself.
 		 */
-		while (object->paging_in_progress != 0 ||
-		    object->activity_in_progress != 0) {
-			vm_object_wait(object,
-			    VM_OBJECT_EVENT_PAGING_IN_PROGRESS,
-			    THREAD_UNINT);
-			vm_object_lock(object);
-		}
+		vm_object_paging_wait(object, THREAD_UNINT);
 
 		shadow_object =
 		    object->pageout ? VM_OBJECT_NULL : object->shadow;
@@ -1907,10 +1918,10 @@ vm_object_release_pager(
  *		presence of address map (or other) references
  *		to the vm_object.
  */
-#if MACH_ASSERT
+#if FBDP_DEBUG_OBJECT_NO_PAGER
 extern uint32_t system_inshutdown;
 int fbdp_no_panic = 1;
-#endif /* MACH_ASSERT */
+#endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 kern_return_t
 vm_object_destroy(
 	vm_object_t                                     object,
@@ -1965,9 +1976,7 @@ vm_object_destroy(
 	}
 #endif /* FBDP_DEBUG_OBJECT_NO_PAGER */
 
-	if (reason != VM_OBJECT_DESTROY_UNKNOWN_REASON) {
-		VM_OBJECT_SET_NO_PAGER_REASON(object, reason);
-	}
+	VM_OBJECT_SET_NO_PAGER_REASON(object, reason);
 
 	VM_OBJECT_SET_CAN_PERSIST(object, FALSE);
 	VM_OBJECT_SET_NAMED(object, FALSE);
@@ -2090,9 +2099,12 @@ MACRO_END
 /*
  * Return true if the page at the given offset has been paged out.  Object is
  * locked upon entry and returned locked.
+ *
+ * NB: It is the callers responsibility to ensure that the offset in question
+ * is not in the process of being paged in/out (i.e. not busy or no backing
+ * page)
  */
-
-static boolean_t
+static bool
 page_is_paged_out(
 	vm_object_t             object,
 	vm_object_offset_t      offset)
@@ -2101,12 +2113,12 @@ page_is_paged_out(
 	    object->alive &&
 	    !object->terminating &&
 	    object->pager_ready) {
-		if (VM_COMPRESSOR_PAGER_STATE_GET(object, offset)
+		if (vm_object_compressor_pager_state_get(object, offset)
 		    == VM_EXTERNAL_STATE_EXISTS) {
-			return TRUE;
+			return true;
 		}
 	}
-	return FALSE;
+	return false;
 }
 
 
@@ -2254,7 +2266,7 @@ deactivate_pages_in_object(
 					/*
 					 * COMMENT BLOCK ON WHY THIS SHOULDN'T BE DONE.
 					 *
-					 * Since we are about to do a VM_COMPRESSOR_PAGER_STATE_CLR
+					 * Since we are about to do a vm_object_compressor_pager_state_clr
 					 * below for this page, which drops any existing compressor
 					 * storage of this page (eg side-effect of a CoW operation or
 					 * a collapse operation), it is tempting to think that we should
@@ -2278,7 +2290,7 @@ deactivate_pages_in_object(
 					}
 #endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 #endif /* 0 */
-					VM_COMPRESSOR_PAGER_STATE_CLR(object, offset);
+					vm_object_compressor_pager_state_clr(object, offset);
 
 					if ((flags & DEACTIVATE_REUSABLE) && !m->vmp_reusable) {
 						assert(!(flags & DEACTIVATE_ALL_REUSABLE));
@@ -2346,7 +2358,7 @@ deactivate_pages_in_object(
 				 */
 
 				if ((flags & DEACTIVATE_KILL) && (object->internal)) {
-					VM_COMPRESSOR_PAGER_STATE_CLR(object, offset);
+					vm_object_compressor_pager_state_clr(object, offset);
 
 					if (pmap != PMAP_NULL) {
 						/*
@@ -2730,32 +2742,11 @@ vm_object_zero_preflight(
 		return KERN_INVALID_ADDRESS;
 	}
 
-	return KERN_SUCCESS;
-}
-
-/*
- * This function looks up a page and waits if it is busy or being cleaned.
- * It returns false when the page found is busy and it needs to wait. Caller
- * of this function should restart the operation for the cur_offset when
- * this function returns false.
- */
-static bool
-vm_object_lookup_page_wait_busy(
-	vm_object_t                     object,
-	vm_object_offset_t              cur_offset,
-	vm_page_t                      *page)
-{
-	vm_page_t m;
-
-	m = vm_page_lookup(object, cur_offset);
-	if ((m == VM_PAGE_NULL) ||
-	    (!m->vmp_busy && !m->vmp_cleaning)) {
-		*page = m;
-		return true;
+	if (object->terminating || !object->alive) {
+		return KERN_ABORTED;
 	}
 
-	PAGE_SLEEP(object, m, THREAD_UNINT);
-	return false;
+	return KERN_SUCCESS;
 }
 
 static void
@@ -2789,13 +2780,24 @@ vm_object_zero(
 {
 	kern_return_t ret;
 
+	vm_object_lock_assert_exclusive(object);
 	ret = vm_object_zero_preflight(object, cur_offset, end_offset);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
 
 	while (cur_offset < end_offset) {
-		vm_page_t m;
+		vm_page_t m = vm_page_lookup(object, cur_offset);
+
+		if (m != VM_PAGE_NULL && m->vmp_busy) {
+			vm_page_sleep(object, m, THREAD_UNINT, LCK_SLEEP_DEFAULT);
+			/* Object lock was dropped -- reverify validity */
+			ret = vm_object_zero_preflight(object, cur_offset, end_offset);
+			if (ret != KERN_SUCCESS) {
+				return ret;
+			}
+			continue;
+		}
 
 		/*
 		 * If the compressor has the page then just discard it instead
@@ -2804,18 +2806,9 @@ vm_object_zero(
 		 * cur_offset.
 		 */
 		if (page_is_paged_out(object, cur_offset)) {
-			VM_COMPRESSOR_PAGER_STATE_CLR(object, cur_offset);
-		} else if (vm_object_lookup_page_wait_busy(object, cur_offset, &m)) {
-			vm_object_zero_page(m);
+			vm_object_compressor_pager_state_clr(object, cur_offset);
 		} else {
-			/*
-			 * If we dropped the lock then relookup the cur_offset in the object
-			 */
-			ret = vm_object_zero_preflight(object, cur_offset, end_offset);
-			if (ret != KERN_SUCCESS) {
-				return ret;
-			}
-			continue;
+			vm_object_zero_page(m);
 		}
 		cur_offset += PAGE_SIZE_64;
 		/*
@@ -3172,6 +3165,11 @@ vm_object_copy_slowly(
 	src_offset = vm_object_trunc_page(src_offset);
 	new_object = vm_object_allocate(size);
 	new_offset = 0;
+	if (src_object->copy_strategy == MEMORY_OBJECT_COPY_NONE &&
+	    src_object->vo_inherit_copy_none) {
+		new_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
+		new_object->vo_inherit_copy_none = true;
+	}
 
 	assert(size == trunc_page_64(size));    /* Will the loop terminate? */
 
@@ -3219,7 +3217,7 @@ vm_object_copy_slowly(
 			if (src_object->internal &&
 			    src_object->shadow == VM_OBJECT_NULL &&
 			    (src_object->pager == NULL ||
-			    (VM_COMPRESSOR_PAGER_STATE_GET(src_object,
+			    (vm_object_compressor_pager_state_get(src_object,
 			    src_offset) ==
 			    VM_EXTERNAL_STATE_ABSENT))) {
 				boolean_t can_skip_page;
@@ -3319,11 +3317,11 @@ vm_object_copy_slowly(
 				 */
 				vm_object_lock(new_object);
 				SET_PAGE_DIRTY(new_page, FALSE);
-				PAGE_WAKEUP_DONE(new_page);
+				vm_page_wakeup_done(new_object, new_page);
 				vm_object_unlock(new_object);
 
 				vm_object_lock(result_page_object);
-				PAGE_WAKEUP_DONE(result_page);
+				vm_page_wakeup_done(result_page_object, result_page);
 
 				vm_page_lockspin_queues();
 				if ((result_page->vmp_q_state == VM_PAGE_ON_SPECULATIVE_Q) ||
@@ -3879,7 +3877,7 @@ vm_object_copy_strategically(
 		}
 		wait_result = vm_object_sleep(  src_object,
 		    VM_OBJECT_EVENT_PAGER_READY,
-		    interruptible);
+		    interruptible, LCK_SLEEP_EXCLUSIVE);
 		if (wait_result != THREAD_AWAKENED) {
 			vm_object_unlock(src_object);
 			*dst_object = VM_OBJECT_NULL;
@@ -4234,7 +4232,7 @@ vm_object_memory_object_associate(
 	}
 
 	VM_OBJECT_SET_PAGER_INITIALIZED(object, TRUE);
-	vm_object_wakeup(object, VM_OBJECT_EVENT_INITIALIZED);
+	vm_object_wakeup(object, VM_OBJECT_EVENT_PAGER_INIT);
 
 	vm_object_unlock(object);
 
@@ -4276,8 +4274,8 @@ vm_object_compressor_pager_create(
 		 */
 		while (!object->pager_initialized) {
 			vm_object_sleep(object,
-			    VM_OBJECT_EVENT_INITIALIZED,
-			    THREAD_UNINT);
+			    VM_OBJECT_EVENT_PAGER_INIT,
+			    THREAD_UNINT, LCK_SLEEP_EXCLUSIVE);
 		}
 		vm_object_paging_end(object);
 		return;
@@ -4353,6 +4351,53 @@ vm_object_compressor_pager_create(
 	 *	Release the paging reference
 	 */
 	vm_object_paging_end(object);
+}
+
+vm_external_state_t
+vm_object_compressor_pager_state_get(
+	vm_object_t        object,
+	vm_object_offset_t offset)
+{
+	if (__probable(not_in_kdp)) {
+		vm_object_lock_assert_held(object);
+	}
+	if (object->internal &&
+	    object->pager != NULL &&
+	    !object->terminating &&
+	    object->alive) {
+		return vm_compressor_pager_state_get(object->pager,
+		           offset + object->paging_offset);
+	} else {
+		return VM_EXTERNAL_STATE_UNKNOWN;
+	}
+}
+
+void
+vm_object_compressor_pager_state_clr(
+	vm_object_t        object,
+	vm_object_offset_t offset)
+{
+	unsigned int num_pages_cleared;
+	vm_object_lock_assert_exclusive(object);
+	if (object->internal &&
+	    object->pager != NULL &&
+	    !object->terminating &&
+	    object->alive) {
+		num_pages_cleared = vm_compressor_pager_state_clr(object->pager,
+		    offset + object->paging_offset);
+		if (num_pages_cleared) {
+			vm_compressor_pager_count(object->pager,
+			    -num_pages_cleared,
+			    FALSE, /* shared */
+			    object);
+		}
+		if (num_pages_cleared &&
+		    (object->purgable != VM_PURGABLE_DENY || object->vo_ledger_tag)) {
+			/* less compressed purgeable/tagged pages */
+			assert3u(num_pages_cleared, ==, 1);
+			vm_object_owner_compressed_update(object, -num_pages_cleared);
+		}
+	}
 }
 
 /*
@@ -4500,7 +4545,7 @@ vm_object_do_collapse(
 		} else {
 			pp = vm_page_lookup(object, new_offset);
 			if (pp == VM_PAGE_NULL) {
-				if (VM_COMPRESSOR_PAGER_STATE_GET(object,
+				if (vm_object_compressor_pager_state_get(object,
 				    new_offset)
 				    == VM_EXTERNAL_STATE_EXISTS) {
 					/*
@@ -5053,7 +5098,7 @@ retry:
 			 */
 
 #define EXISTS_IN_OBJECT(obj, off, rc)                  \
-	((VM_COMPRESSOR_PAGER_STATE_GET((obj), (off))   \
+	((vm_object_compressor_pager_state_get((obj), (off))   \
 	  == VM_EXTERNAL_STATE_EXISTS) ||               \
 	 ((rc) && vm_page_lookup((obj), (off)) != VM_PAGE_NULL && (rc)--))
 
@@ -5324,6 +5369,7 @@ vm_object_coalesce(
 
 	if ((prev_object->ref_count > 1) ||
 	    prev_object->pager_created ||
+	    prev_object->phys_contiguous ||
 	    (prev_object->shadow != VM_OBJECT_NULL) ||
 	    (prev_object->vo_copy != VM_OBJECT_NULL) ||
 	    (prev_object->true_share != FALSE) ||
@@ -5488,7 +5534,7 @@ memory_object_create_named(
 		while (!object->pager_ready) {
 			vm_object_sleep(object,
 			    VM_OBJECT_EVENT_PAGER_READY,
-			    THREAD_UNINT);
+			    THREAD_UNINT, LCK_SLEEP_EXCLUSIVE);
 		}
 		*control = object->pager_control;
 		vm_object_unlock(object);
@@ -5674,12 +5720,11 @@ vm_object_purge(vm_object_t object, int flags)
 
 	total_purged_pgcount += pgcount;
 
-	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (MACHDBG_CODE(DBG_MACH_VM, OBJECT_PURGE_ONE)),
+	KDBG_RELEASE(VMDBG_CODE(DBG_VM_PURGEABLE_OBJECT_PURGE_ONE) | DBG_FUNC_NONE,
 	    VM_KERNEL_UNSLIDE_OR_PERM(object),                   /* purged object */
 	    object_page_count,
 	    total_purged_pgcount,
-	    skipped_object,
-	    0);
+	    skipped_object);
 
 	return total_purged_pgcount;
 }
@@ -6617,7 +6662,22 @@ vm_object_cluster_size(vm_object_t object, vm_object_offset_t *start,
 	max_ph_size = round_page(preheat_max_bytes);
 
 #if XNU_TARGET_OS_OSX
-	if (isSSD) {
+	/*
+	 * If we're paging from an SSD, we cut the minimum cluster size in half
+	 * and reduce the maximum size by a factor of 8. We do this because the
+	 * latency to issue an I/O is a couple of orders of magnitude smaller than
+	 * on spinning media, so being overly aggressive on the cluster size (to
+	 * try and reduce cumulative seek penalties) isn't a good trade off over
+	 * the increased memory pressure caused by the larger speculative I/Os.
+	 * However, the latency isn't 0, so a small amount of clustering is still
+	 * a win.
+	 *
+	 * If an explicit cluster size has already been provided, then we're
+	 * receiving a strong hint that the entire range will be needed (e.g.
+	 * wiring, willneed). In these cases, we want to maximize the I/O size
+	 * to minimize the number of I/Os issued.
+	 */
+	if (isSSD && cluster_size <= PAGE_SIZE) {
 		min_ph_size /= 2;
 		max_ph_size /= 8;
 
@@ -6845,9 +6905,9 @@ vm_object_cluster_size(vm_object_t object, vm_object_offset_t *start,
 			}
 			/*
 			 * for external objects or internal objects w/o a pager,
-			 * VM_COMPRESSOR_PAGER_STATE_GET will return VM_EXTERNAL_STATE_UNKNOWN
+			 * vm_object_compressor_pager_state_get will return VM_EXTERNAL_STATE_UNKNOWN
 			 */
-			if (VM_COMPRESSOR_PAGER_STATE_GET(object, offset) == VM_EXTERNAL_STATE_ABSENT) {
+			if (vm_object_compressor_pager_state_get(object, offset) == VM_EXTERNAL_STATE_ABSENT) {
 				break;
 			}
 			if (vm_page_lookup(object, offset) != VM_PAGE_NULL) {
@@ -6872,9 +6932,9 @@ vm_object_cluster_size(vm_object_t object, vm_object_offset_t *start,
 
 			/*
 			 * for external objects or internal objects w/o a pager,
-			 * VM_COMPRESSOR_PAGER_STATE_GET will return VM_EXTERNAL_STATE_UNKNOWN
+			 * vm_object_compressor_pager_state_get will return VM_EXTERNAL_STATE_UNKNOWN
 			 */
-			if (VM_COMPRESSOR_PAGER_STATE_GET(object, offset) == VM_EXTERNAL_STATE_ABSENT) {
+			if (vm_object_compressor_pager_state_get(object, offset) == VM_EXTERNAL_STATE_ABSENT) {
 				break;
 			}
 			if (vm_page_lookup(object, offset) != VM_PAGE_NULL) {
@@ -6944,7 +7004,7 @@ vm_object_page_op(
 		    (ops & UPL_POP_BUSY)) || (ops & UPL_POP_DUMP))) {
 			/* someone else is playing with the page, we will */
 			/* have to wait */
-			PAGE_SLEEP(object, dst_page, THREAD_UNINT);
+			vm_page_sleep(object, dst_page, THREAD_UNINT, LCK_SLEEP_DEFAULT);
 			continue;
 		}
 
@@ -7024,7 +7084,7 @@ vm_object_page_op(
 			}
 			if (ops & UPL_POP_BUSY) {
 				dst_page->vmp_busy = FALSE;
-				PAGE_WAKEUP(dst_page);
+				vm_page_wakeup(object, dst_page);
 			}
 		}
 		if (phys_entry) {
@@ -7064,10 +7124,6 @@ vm_object_range_op(
 	vm_object_offset_t      offset;
 	vm_page_t               dst_page;
 
-	if (offset_end - offset_beg > (uint32_t) -1) {
-		/* range is too big and would overflow "*range" */
-		return KERN_INVALID_ARGUMENT;
-	}
 	if (object->resident_page_count == 0) {
 		if (range) {
 			if (ops & UPL_ROP_PRESENT) {
@@ -7097,7 +7153,7 @@ vm_object_range_op(
 					 * someone else is playing with the
 					 * page, we will have to wait
 					 */
-					PAGE_SLEEP(object, dst_page, THREAD_UNINT);
+					vm_page_sleep(object, dst_page, THREAD_UNINT, LCK_SLEEP_DEFAULT);
 					/*
 					 * need to relook the page up since it's
 					 * state may have changed while we slept
@@ -7332,17 +7388,15 @@ unsigned int vm_object_change_wimg_mode_count = 0;
 void
 vm_object_change_wimg_mode(vm_object_t object, unsigned int wimg_mode)
 {
-	vm_page_t p;
-
 	vm_object_lock_assert_exclusive(object);
 
 	vm_object_paging_only_wait(object, THREAD_UNINT);
 
-	vm_page_queue_iterate(&object->memq, p, vmp_listq) {
-		if (!p->vmp_fictitious) {
-			pmap_set_cache_attributes(VM_PAGE_GET_PHYS_PAGE(p), wimg_mode);
-		}
-	}
+	const unified_page_list_t pmap_batch_list = {
+		.pageq = &object->memq,
+		.type = UNIFIED_PAGE_LIST_TYPE_VM_PAGE_OBJ_Q,
+	};
+	pmap_batch_set_cache_attributes(&pmap_batch_list, wimg_mode);
 	if (wimg_mode == VM_WIMG_USE_DEFAULT) {
 		object->set_cache_attr = FALSE;
 	} else {
@@ -7492,14 +7546,14 @@ vm_object_compressed_freezer_pageout(
 	while ((obj_resident_page_count_snapshot--) && !vm_page_queue_empty(&object->memq) && paged_out_count < dirty_budget) {
 		p = (vm_page_t)vm_page_queue_first(&object->memq);
 
-		KERNEL_DEBUG(0xe0430004 | DBG_FUNC_START, object, local_freed, 0, 0, 0);
+		KDBG_DEBUG(0xe0430004 | DBG_FUNC_START, object, local_freed);
 
 		vm_page_lockspin_queues();
 
 		if (p->vmp_cleaning || p->vmp_fictitious || p->vmp_busy || p->vmp_absent || p->vmp_unusual || VMP_ERROR_GET(p) || VM_PAGE_WIRED(p)) {
 			vm_page_unlock_queues();
 
-			KERNEL_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed, 1, 0, 0);
+			KDBG_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed, 1);
 
 			vm_page_queue_remove(&object->memq, p, vmp_listq);
 			vm_page_queue_enter(&object->memq, p, vmp_listq);
@@ -7530,7 +7584,7 @@ vm_object_compressed_freezer_pageout(
 			vm_page_unlock_queues();
 			VM_PAGE_FREE(p);
 
-			KERNEL_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed, 2, 0, 0);
+			KDBG_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed, 2);
 			continue;
 		}
 
@@ -7584,7 +7638,7 @@ vm_object_compressed_freezer_pageout(
 			}
 			freezer_context_global.freezer_ctx_uncompressed_pages++;
 		}
-		KERNEL_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed, 0, 0, 0);
+		KDBG_DEBUG(0xe0430004 | DBG_FUNC_END, object, local_freed);
 
 		if (local_freed == 0 && c_freezer_should_yield()) {
 			thread_yield_internal(FREEZER_DUTY_CYCLE_OFF_MS);
@@ -7751,6 +7805,7 @@ ReScan:
 
 
 #if CONFIG_IOSCHED
+
 void
 vm_page_request_reprioritize(vm_object_t o, uint64_t blkno, uint32_t len, int prio)
 {
@@ -7776,12 +7831,7 @@ vm_page_request_reprioritize(vm_object_t o, uint64_t blkno, uint32_t len, int pr
 	req->devvp = devvp;
 
 	/* Insert request into the reprioritization list */
-	IO_REPRIORITIZE_LIST_LOCK();
-	queue_enter(&io_reprioritize_list, req, io_reprioritize_req_t, io_reprioritize_list);
-	IO_REPRIORITIZE_LIST_UNLOCK();
-
-	/* Wakeup reprioritize thread */
-	IO_REPRIO_THREAD_WAKEUP();
+	mpsc_daemon_enqueue(&io_reprioritize_q, &req->iorr_elm, MPSC_QUEUE_DISABLE_PREEMPTION);
 
 	return;
 }
@@ -7888,18 +7938,13 @@ vm_decmp_upl_reprioritize(upl_t upl, int prio)
 			req->devvp = devvp;
 
 			/* Insert request into the reprioritization list */
-			IO_REPRIORITIZE_LIST_LOCK();
-			queue_enter(&io_reprioritize_list, req, io_reprioritize_req_t, io_reprioritize_list);
-			IO_REPRIORITIZE_LIST_UNLOCK();
+			mpsc_daemon_enqueue(&io_reprioritize_q, &req->iorr_elm, MPSC_QUEUE_DISABLE_PREEMPTION);
 
 			offset += len;
 		} else {
 			offset += PAGE_SIZE;
 		}
 	}
-
-	/* Wakeup reprioritize thread */
-	IO_REPRIO_THREAD_WAKEUP();
 
 out:
 	kfree_data(io_upl_reprio_info, sizeof(uint64_t) * atop(io_upl_size));
@@ -7936,13 +7981,13 @@ vm_page_handle_prio_inversion(vm_object_t o, vm_page_t m)
 		for (i = 0; i < num_pages; i++) {
 			if (UPL_PAGE_PRESENT(pl, i) && VM_PAGE_GET_PHYS_PAGE(m) == pl[i].phys_addr) {
 				if ((upl->flags & UPL_DECMP_REQ) && upl->decmp_io_upl) {
-					KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),
-					    VM_KERNEL_UNSLIDE_OR_PERM(upl), upl->upl_priority, 0);
+					KDBG((VMDBG_CODE(DBG_VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),
+					    VM_KERNEL_UNSLIDE_OR_PERM(upl), upl->upl_priority);
 					vm_decmp_upl_reprioritize(upl, cur_tier);
 					break;
 				}
-				KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),
-				    upl->upl_reprio_info[i], upl->upl_priority, 0);
+				KDBG((VMDBG_CODE(DBG_VM_PAGE_EXPEDITE)) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(upl->upl_creator), VM_KERNEL_UNSLIDE_OR_PERM(m),
+				    upl->upl_reprio_info[i], upl->upl_priority);
 				if (UPL_REPRIO_INFO_BLKNO(upl, i) != 0 && UPL_REPRIO_INFO_LEN(upl, i) != 0) {
 					vm_page_request_reprioritize(o, UPL_REPRIO_INFO_BLKNO(upl, i), UPL_REPRIO_INFO_LEN(upl, i), cur_tier);
 				}
@@ -7958,47 +8003,245 @@ vm_page_handle_prio_inversion(vm_object_t o, vm_page_t m)
 	return;
 }
 
+void
+kdp_vm_object_sleep_find_owner(
+	event64_t          wait_event,
+	block_hint_t       wait_type,
+	thread_waitinfo_t *waitinfo)
+{
+	assert(wait_type >= kThreadWaitPagerInit && wait_type <= kThreadWaitPageInThrottle);
+	vm_object_wait_reason_t wait_reason = wait_type - kThreadWaitPagerInit;
+	vm_object_t object = (vm_object_t)((uintptr_t)wait_event - wait_reason);
+	waitinfo->context = VM_KERNEL_ADDRPERM(object);
+	/*
+	 * There is currently no non-trivial way to ascertain the thread(s)
+	 * currently operating on this object.
+	 */
+	waitinfo->owner = 0;
+}
+
+
 wait_result_t
-vm_page_sleep(vm_object_t o, vm_page_t m, int interruptible)
+vm_object_sleep(
+	vm_object_t             object,
+	vm_object_wait_reason_t reason,
+	wait_interrupt_t        interruptible,
+	lck_sleep_action_t      action)
+{
+	wait_result_t wr;
+	block_hint_t block_hint;
+	event_t wait_event;
+
+	vm_object_lock_assert_exclusive(object);
+	assert(reason >= 0 && reason <= VM_OBJECT_EVENT_MAX);
+	switch (reason) {
+	case VM_OBJECT_EVENT_PAGER_INIT:
+		block_hint = kThreadWaitPagerInit;
+		break;
+	case VM_OBJECT_EVENT_PAGER_READY:
+		block_hint = kThreadWaitPagerReady;
+		break;
+	case VM_OBJECT_EVENT_PAGING_IN_PROGRESS:
+		block_hint = kThreadWaitPagingActivity;
+		break;
+	case VM_OBJECT_EVENT_MAPPING_IN_PROGRESS:
+		block_hint = kThreadWaitMappingInProgress;
+		break;
+	case VM_OBJECT_EVENT_UNBLOCKED:
+		block_hint = kThreadWaitMemoryBlocked;
+		break;
+	case VM_OBJECT_EVENT_PAGING_ONLY_IN_PROGRESS:
+		block_hint = kThreadWaitPagingInProgress;
+		break;
+	case VM_OBJECT_EVENT_PAGEIN_THROTTLE:
+		block_hint = kThreadWaitPageInThrottle;
+		break;
+	default:
+		panic("Unexpected wait reason %u", reason);
+	}
+	thread_set_pending_block_hint(current_thread(), block_hint);
+
+	KDBG_FILTERED(VMDBG_CODE(DBG_VM_OBJECT_SLEEP) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(object), reason);
+
+	vm_object_set_wanted(object, reason);
+	wait_event = (event_t)((uintptr_t)object + (uintptr_t)reason);
+	wr = lck_rw_sleep(&object->Lock, LCK_SLEEP_PROMOTED_PRI | action, wait_event, interruptible);
+
+	KDBG_FILTERED(VMDBG_CODE(DBG_VM_OBJECT_SLEEP) | DBG_FUNC_END, VM_KERNEL_ADDRHIDE(object), reason, wr);
+	return wr;
+}
+
+
+wait_result_t
+vm_object_paging_wait(vm_object_t object, wait_interrupt_t interruptible)
+{
+	wait_result_t wr = THREAD_NOT_WAITING;
+	vm_object_lock_assert_exclusive(object);
+	while (object->paging_in_progress != 0 ||
+	    object->activity_in_progress != 0) {
+		wr = vm_object_sleep((object),
+		    VM_OBJECT_EVENT_PAGING_IN_PROGRESS,
+		    interruptible,
+		    LCK_SLEEP_EXCLUSIVE);
+		if (wr != THREAD_AWAKENED) {
+			break;
+		}
+	}
+	return wr;
+}
+
+wait_result_t
+vm_object_paging_only_wait(vm_object_t object, wait_interrupt_t interruptible)
+{
+	wait_result_t wr = THREAD_NOT_WAITING;
+	vm_object_lock_assert_exclusive(object);
+	while (object->paging_in_progress != 0) {
+		wr = vm_object_sleep(object,
+		    VM_OBJECT_EVENT_PAGING_ONLY_IN_PROGRESS,
+		    interruptible,
+		    LCK_SLEEP_EXCLUSIVE);
+		if (wr != THREAD_AWAKENED) {
+			break;
+		}
+	}
+	return wr;
+}
+
+wait_result_t
+vm_object_paging_throttle_wait(vm_object_t object, wait_interrupt_t interruptible)
+{
+	wait_result_t wr = THREAD_NOT_WAITING;
+	vm_object_lock_assert_exclusive(object);
+	/*
+	 * TODO: consider raising the throttle limit specifically for
+	 * shared-cache objects, which are expected to be highly contended.
+	 * (rdar://127899888)
+	 */
+	while (object->paging_in_progress >= vm_object_pagein_throttle) {
+		wr = vm_object_sleep(object,
+		    VM_OBJECT_EVENT_PAGEIN_THROTTLE,
+		    interruptible,
+		    LCK_SLEEP_EXCLUSIVE);
+		if (wr != THREAD_AWAKENED) {
+			break;
+		}
+	}
+	return wr;
+}
+
+wait_result_t
+vm_object_mapping_wait(vm_object_t object, wait_interrupt_t interruptible)
+{
+	wait_result_t wr = THREAD_NOT_WAITING;
+	vm_object_lock_assert_exclusive(object);
+	while (object->mapping_in_progress) {
+		wr = vm_object_sleep(object,
+		    VM_OBJECT_EVENT_MAPPING_IN_PROGRESS,
+		    interruptible,
+		    LCK_SLEEP_EXCLUSIVE);
+		if (wr != THREAD_AWAKENED) {
+			break;
+		}
+	}
+	return wr;
+}
+
+void
+vm_object_wakeup(
+	vm_object_t             object,
+	vm_object_wait_reason_t reason)
+{
+	vm_object_lock_assert_exclusive(object);
+	assert(reason >= 0 && reason <= VM_OBJECT_EVENT_MAX);
+
+	if (vm_object_wanted(object, reason)) {
+		thread_wakeup((event_t)((uintptr_t)object + (uintptr_t)reason));
+	}
+	object->all_wanted &= ~(1 << reason);
+}
+
+
+void
+kdp_vm_page_sleep_find_owner(event64_t wait_event, thread_waitinfo_t *waitinfo)
+{
+	vm_page_t m = (vm_page_t)wait_event;
+	waitinfo->context = VM_KERNEL_ADDRPERM(m);
+	/*
+	 * There is not currently a non-trivial way to identify the thread
+	 * holding a page busy.
+	 */
+	waitinfo->owner = 0;
+}
+
+wait_result_t
+vm_page_sleep(vm_object_t object, vm_page_t m, wait_interrupt_t interruptible, lck_sleep_action_t action)
 {
 	wait_result_t ret;
 
-	KERNEL_DEBUG((MACHDBG_CODE(DBG_MACH_VM, VM_PAGE_SLEEP)) | DBG_FUNC_START, o, m, 0, 0, 0);
-
-	if (o->io_tracking && ((m->vmp_busy == TRUE) || (m->vmp_cleaning == TRUE) || VM_PAGE_WIRED(m))) {
+	KDBG_FILTERED((VMDBG_CODE(DBG_VM_PAGE_SLEEP)) | DBG_FUNC_START, VM_KERNEL_ADDRHIDE(object), m->vmp_offset, VM_KERNEL_ADDRHIDE(m));
+#if CONFIG_IOSCHED
+	if (object->io_tracking && ((m->vmp_busy == TRUE) || (m->vmp_cleaning == TRUE) || VM_PAGE_WIRED(m))) {
 		/*
 		 *  Indicates page is busy due to an I/O. Issue a reprioritize request if necessary.
 		 */
-		vm_page_handle_prio_inversion(o, m);
+		vm_page_handle_prio_inversion(object, m);
 	}
+#endif /* CONFIG_IOSCHED */
 	m->vmp_wanted = TRUE;
-	ret = thread_sleep_vm_object(o, m, interruptible);
-	KERNEL_DEBUG((MACHDBG_CODE(DBG_MACH_VM, VM_PAGE_SLEEP)) | DBG_FUNC_END, o, m, 0, 0, 0);
+	thread_set_pending_block_hint(current_thread(), kThreadWaitPageBusy);
+	ret = lck_rw_sleep(&object->Lock, LCK_SLEEP_PROMOTED_PRI | action, (event_t)m, interruptible);
+	KDBG_FILTERED((VMDBG_CODE(DBG_VM_PAGE_SLEEP)) | DBG_FUNC_END, VM_KERNEL_ADDRHIDE(object), m->vmp_offset, VM_KERNEL_ADDRHIDE(m));
 	return ret;
 }
 
-static void
-io_reprioritize_thread(void *param __unused, wait_result_t wr __unused)
+void
+vm_page_wakeup(vm_object_t object, vm_page_t m)
 {
-	io_reprioritize_req_t   req = NULL;
-
-	while (1) {
-		IO_REPRIORITIZE_LIST_LOCK();
-		if (queue_empty(&io_reprioritize_list)) {
-			IO_REPRIORITIZE_LIST_UNLOCK();
-			break;
-		}
-
-		queue_remove_first(&io_reprioritize_list, req, io_reprioritize_req_t, io_reprioritize_list);
-		IO_REPRIORITIZE_LIST_UNLOCK();
-
-		vnode_pager_issue_reprioritize_io(req->devvp, req->blkno, req->len, req->priority);
-		zfree(io_reprioritize_req_zone, req);
+	assert(m);
+	/*
+	 * The page may have been freed from its object before this wakeup is issued
+	 */
+	if (object != VM_OBJECT_NULL) {
+		vm_object_lock_assert_exclusive(object);
 	}
 
-	IO_REPRIO_THREAD_CONTINUATION();
+	KDBG(VMDBG_CODE(DBG_VM_PAGE_WAKEUP) | DBG_FUNC_NONE,
+	    VM_KERNEL_ADDRHIDE(object), VM_KERNEL_ADDRHIDE(m),
+	    m->vmp_wanted);
+	if (m->vmp_wanted) {
+		m->vmp_wanted = false;
+		thread_wakeup((event_t)m);
+	}
 }
-#endif
+
+void
+vm_page_wakeup_done(__assert_only vm_object_t object, vm_page_t m)
+{
+	assert(object);
+	assert(m->vmp_busy);
+	vm_object_lock_assert_exclusive(object);
+
+	KDBG(VMDBG_CODE(DBG_VM_PAGE_WAKEUP_DONE) | DBG_FUNC_NONE,
+	    VM_KERNEL_ADDRHIDE(object), VM_KERNEL_ADDRHIDE(m),
+	    m->vmp_wanted);
+	m->vmp_busy = false;                          \
+
+	if (m->vmp_wanted) {
+		m->vmp_wanted = false;
+		thread_wakeup((event_t)m);
+	}
+}
+
+static void
+io_reprioritize(mpsc_queue_chain_t elm, __assert_only mpsc_daemon_queue_t dq)
+{
+	assert3p(dq, ==, &io_reprioritize_q);
+	io_reprioritize_req_t req = mpsc_queue_element(elm, struct io_reprioritize_req, iorr_elm);
+	vnode_pager_issue_reprioritize_io(req->devvp, req->blkno, req->len, req->priority);
+	zfree(io_reprioritize_req_zone, req);
+}
+
+#endif /* CONFIG_IOSCHED */
 
 #if VM_OBJECT_ACCESS_TRACKING
 void
@@ -8045,12 +8288,64 @@ vm_object_ledger_tag_ledgers(
 	int             *ledger_idx_nonvolatile,
 	int             *ledger_idx_volatile_compressed,
 	int             *ledger_idx_nonvolatile_compressed,
+	int             *ledger_idx_composite,
+	int             *ledger_idx_external_wired,
 	boolean_t       *do_footprint)
 {
 	assert(object->shadow == VM_OBJECT_NULL);
 
+	*ledger_idx_volatile = -1;
+	*ledger_idx_nonvolatile = -1;
+	*ledger_idx_volatile_compressed = -1;
+	*ledger_idx_nonvolatile_compressed = -1;
+	*ledger_idx_composite = -1;
+	*ledger_idx_external_wired = -1;
 	*do_footprint = !object->vo_no_footprint;
 
+	if (!object->internal) {
+		switch (object->vo_ledger_tag) {
+		case VM_LEDGER_TAG_DEFAULT:
+			if (*do_footprint) {
+				*ledger_idx_external_wired = task_ledgers.tagged_footprint;
+			} else {
+				*ledger_idx_external_wired = task_ledgers.tagged_nofootprint;
+			}
+			break;
+		case VM_LEDGER_TAG_NETWORK:
+			*do_footprint = FALSE;
+			*ledger_idx_external_wired = task_ledgers.network_nonvolatile;
+			break;
+		case VM_LEDGER_TAG_MEDIA:
+			if (*do_footprint) {
+				*ledger_idx_external_wired = task_ledgers.media_footprint;
+			} else {
+				*ledger_idx_external_wired = task_ledgers.media_nofootprint;
+			}
+			break;
+		case VM_LEDGER_TAG_GRAPHICS:
+			if (*do_footprint) {
+				*ledger_idx_external_wired = task_ledgers.graphics_footprint;
+			} else {
+				*ledger_idx_external_wired = task_ledgers.graphics_nofootprint;
+			}
+			break;
+		case VM_LEDGER_TAG_NEURAL:
+			*ledger_idx_composite = task_ledgers.neural_nofootprint_total;
+			if (*do_footprint) {
+				*ledger_idx_external_wired = task_ledgers.neural_footprint;
+			} else {
+				*ledger_idx_external_wired = task_ledgers.neural_nofootprint;
+			}
+			break;
+		case VM_LEDGER_TAG_NONE:
+		default:
+			panic("%s: external object %p has unsupported ledger_tag %d",
+			    __FUNCTION__, object, object->vo_ledger_tag);
+		}
+		return;
+	}
+
+	assert(object->internal);
 	switch (object->vo_ledger_tag) {
 	case VM_LEDGER_TAG_NONE:
 		/*
@@ -8129,6 +8424,7 @@ vm_object_ledger_tag_ledgers(
 		 * counts in footprint only when nonvolatile and not marked
 		 * as "no footprint".
 		 */
+		*ledger_idx_composite = task_ledgers.neural_nofootprint_total;
 		*ledger_idx_volatile = task_ledgers.neural_nofootprint;
 		*ledger_idx_volatile_compressed = task_ledgers.neural_nofootprint_compressed;
 		if (*do_footprint) {
@@ -8163,13 +8459,25 @@ vm_object_ownership_change(
 	int             ledger_idx_nonvolatile_compressed;
 	int             ledger_idx;
 	int             ledger_idx_compressed;
+	int             ledger_idx_composite;
+	int             ledger_idx_external_wired;
 	boolean_t       do_footprint, old_no_footprint, new_no_footprint;
 	boolean_t       new_task_objq_locked;
 
 	vm_object_lock_assert_exclusive(object);
 
-	if (!object->internal) {
-		return KERN_INVALID_ARGUMENT;
+	if (new_owner != VM_OBJECT_OWNER_DISOWNED &&
+	    new_owner != TASK_NULL) {
+		if (new_ledger_tag == VM_LEDGER_TAG_NONE &&
+		    object->purgable == VM_PURGABLE_DENY) {
+			/* non-purgeable memory must have a valid non-zero ledger tag */
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (!object->internal
+		    && !memory_object_is_vnode_pager(object->pager)) {
+			/* non-file-backed "external" objects can't be owned */
+			return KERN_INVALID_ARGUMENT;
+		}
 	}
 	if (new_owner == VM_OBJECT_OWNER_UNCHANGED) {
 		/* leave owner unchanged */
@@ -8179,19 +8487,15 @@ vm_object_ownership_change(
 		/* leave ledger_tag unchanged */
 		new_ledger_tag = object->vo_ledger_tag;
 	}
-	if (new_ledger_tag == VM_LEDGER_TAG_NONE &&
-	    object->purgable == VM_PURGABLE_DENY) {
-		/* non-purgeable memory must have a valid non-zero ledger tag */
-		return KERN_INVALID_ARGUMENT;
-	}
 	if (new_ledger_tag < 0 ||
 	    new_ledger_tag > VM_LEDGER_TAG_MAX) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	if (new_ledger_flags & ~VM_LEDGER_FLAGS) {
+	if (new_ledger_flags & ~VM_LEDGER_FLAGS_ALL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	if (object->vo_ledger_tag == VM_LEDGER_TAG_NONE &&
+	if (object->internal &&
+	    object->vo_ledger_tag == VM_LEDGER_TAG_NONE &&
 	    object->purgable == VM_PURGABLE_DENY) {
 		/*
 		 * This VM object is neither ledger-tagged nor purgeable.
@@ -8231,28 +8535,36 @@ vm_object_ownership_change(
 		new_no_footprint = TRUE;
 	}
 #endif /* __arm64__ */
-	assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
+	assert(object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC);
 	assert(object->shadow == VM_OBJECT_NULL);
-	assert(object->vo_copy == VM_OBJECT_NULL);
+	if (object->internal) {
+		assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
+		assert(object->vo_copy == VM_OBJECT_NULL);
+	}
 
 	old_ledger_tag = object->vo_ledger_tag;
 	old_no_footprint = object->vo_no_footprint;
 	old_owner = VM_OBJECT_OWNER(object);
 
-	DTRACE_VM8(object_ownership_change,
-	    vm_object_t, object,
-	    task_t, old_owner,
-	    int, old_ledger_tag,
-	    int, old_no_footprint,
-	    task_t, new_owner,
-	    int, new_ledger_tag,
-	    int, new_no_footprint,
-	    int, VM_OBJECT_ID(object));
+	if (__improbable(vm_debug_events)) {
+		DTRACE_VM8(object_ownership_change,
+		    vm_object_t, object,
+		    task_t, old_owner,
+		    int, old_ledger_tag,
+		    int, old_no_footprint,
+		    task_t, new_owner,
+		    int, new_ledger_tag,
+		    int, new_no_footprint,
+		    int, VM_OBJECT_ID(object));
+	}
 
-	assert(object->internal);
 	resident_count = object->resident_page_count - object->wired_page_count;
 	wired_count = object->wired_page_count;
-	compressed_count = vm_compressor_pager_get_count(object->pager);
+	if (object->internal) {
+		compressed_count = vm_compressor_pager_get_count(object->pager);
+	} else {
+		compressed_count = 0;
+	}
 
 	/*
 	 * Deal with the old owner and/or ledger tag, if needed.
@@ -8271,57 +8583,91 @@ vm_object_ownership_change(
 		    &ledger_idx_nonvolatile,
 		    &ledger_idx_volatile_compressed,
 		    &ledger_idx_nonvolatile_compressed,
+		    &ledger_idx_composite,
+		    &ledger_idx_external_wired,
 		    &do_footprint);
-		if (object->purgable == VM_PURGABLE_VOLATILE ||
-		    object->purgable == VM_PURGABLE_EMPTY) {
-			ledger_idx = ledger_idx_volatile;
-			ledger_idx_compressed = ledger_idx_volatile_compressed;
-		} else {
-			ledger_idx = ledger_idx_nonvolatile;
-			ledger_idx_compressed = ledger_idx_nonvolatile_compressed;
-		}
-		if (resident_count) {
-			/*
-			 * Adjust the appropriate old owners's ledgers by the
-			 * number of resident pages.
-			 */
-			ledger_debit(old_owner->ledger,
-			    ledger_idx,
-			    ptoa_64(resident_count));
-			/* adjust old owner's footprint */
-			if (do_footprint &&
-			    object->purgable != VM_PURGABLE_VOLATILE &&
-			    object->purgable != VM_PURGABLE_EMPTY) {
+		if (object->internal) {
+			if (object->purgable == VM_PURGABLE_VOLATILE ||
+			    object->purgable == VM_PURGABLE_EMPTY) {
+				ledger_idx = ledger_idx_volatile;
+				ledger_idx_compressed = ledger_idx_volatile_compressed;
+			} else {
+				ledger_idx = ledger_idx_nonvolatile;
+				ledger_idx_compressed = ledger_idx_nonvolatile_compressed;
+			}
+			if (resident_count) {
+				/*
+				 * Adjust the appropriate old owners's ledgers by the
+				 * number of resident pages.
+				 */
 				ledger_debit(old_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx,
 				    ptoa_64(resident_count));
+				/* adjust old owner's footprint */
+				if (object->purgable != VM_PURGABLE_VOLATILE &&
+				    object->purgable != VM_PURGABLE_EMPTY) {
+					if (do_footprint) {
+						ledger_debit(old_owner->ledger,
+						    task_ledgers.phys_footprint,
+						    ptoa_64(resident_count));
+					} else if (ledger_idx_composite != -1) {
+						ledger_debit(old_owner->ledger,
+						    ledger_idx_composite,
+						    ptoa_64(resident_count));
+					}
+				}
 			}
-		}
-		if (wired_count) {
-			/* wired pages are always nonvolatile */
-			ledger_debit(old_owner->ledger,
-			    ledger_idx_nonvolatile,
-			    ptoa_64(wired_count));
-			if (do_footprint) {
+			if (wired_count) {
+				/* wired pages are always nonvolatile */
 				ledger_debit(old_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx_nonvolatile,
 				    ptoa_64(wired_count));
+				if (do_footprint) {
+					ledger_debit(old_owner->ledger,
+					    task_ledgers.phys_footprint,
+					    ptoa_64(wired_count));
+				} else if (ledger_idx_composite != -1) {
+					ledger_debit(old_owner->ledger,
+					    ledger_idx_composite,
+					    ptoa_64(wired_count));
+				}
 			}
-		}
-		if (compressed_count) {
-			/*
-			 * Adjust the appropriate old owner's ledgers
-			 * by the number of compressed pages.
-			 */
-			ledger_debit(old_owner->ledger,
-			    ledger_idx_compressed,
-			    ptoa_64(compressed_count));
-			if (do_footprint &&
-			    object->purgable != VM_PURGABLE_VOLATILE &&
-			    object->purgable != VM_PURGABLE_EMPTY) {
+			if (compressed_count) {
+				/*
+				 * Adjust the appropriate old owner's ledgers
+				 * by the number of compressed pages.
+				 */
 				ledger_debit(old_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx_compressed,
 				    ptoa_64(compressed_count));
+				if (object->purgable != VM_PURGABLE_VOLATILE &&
+				    object->purgable != VM_PURGABLE_EMPTY) {
+					if (do_footprint) {
+						ledger_debit(old_owner->ledger,
+						    task_ledgers.phys_footprint,
+						    ptoa_64(compressed_count));
+					} else if (ledger_idx_composite != -1) {
+						ledger_debit(old_owner->ledger,
+						    ledger_idx_composite,
+						    ptoa_64(compressed_count));
+					}
+				}
+			}
+		} else {
+			/* external but owned object: count wired pages */
+			if (wired_count) {
+				ledger_debit(old_owner->ledger,
+				    ledger_idx_external_wired,
+				    ptoa_64(wired_count));
+				if (do_footprint) {
+					ledger_debit(old_owner->ledger,
+					    task_ledgers.phys_footprint,
+					    ptoa_64(wired_count));
+				} else if (ledger_idx_composite != -1) {
+					ledger_debit(old_owner->ledger,
+					    ledger_idx_composite,
+					    ptoa_64(wired_count));
+				}
 			}
 		}
 		if (old_owner != new_owner) {
@@ -8419,57 +8765,91 @@ vm_object_ownership_change(
 		    &ledger_idx_nonvolatile,
 		    &ledger_idx_volatile_compressed,
 		    &ledger_idx_nonvolatile_compressed,
+		    &ledger_idx_composite,
+		    &ledger_idx_external_wired,
 		    &do_footprint);
-		if (object->purgable == VM_PURGABLE_VOLATILE ||
-		    object->purgable == VM_PURGABLE_EMPTY) {
-			ledger_idx = ledger_idx_volatile;
-			ledger_idx_compressed = ledger_idx_volatile_compressed;
-		} else {
-			ledger_idx = ledger_idx_nonvolatile;
-			ledger_idx_compressed = ledger_idx_nonvolatile_compressed;
-		}
-		if (resident_count) {
-			/*
-			 * Adjust the appropriate new owners's ledgers by the
-			 * number of resident pages.
-			 */
-			ledger_credit(new_owner->ledger,
-			    ledger_idx,
-			    ptoa_64(resident_count));
-			/* adjust new owner's footprint */
-			if (do_footprint &&
-			    object->purgable != VM_PURGABLE_VOLATILE &&
-			    object->purgable != VM_PURGABLE_EMPTY) {
+		if (object->internal) {
+			if (object->purgable == VM_PURGABLE_VOLATILE ||
+			    object->purgable == VM_PURGABLE_EMPTY) {
+				ledger_idx = ledger_idx_volatile;
+				ledger_idx_compressed = ledger_idx_volatile_compressed;
+			} else {
+				ledger_idx = ledger_idx_nonvolatile;
+				ledger_idx_compressed = ledger_idx_nonvolatile_compressed;
+			}
+			if (resident_count) {
+				/*
+				 * Adjust the appropriate new owners's ledgers by the
+				 * number of resident pages.
+				 */
 				ledger_credit(new_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx,
 				    ptoa_64(resident_count));
+				/* adjust new owner's footprint */
+				if (object->purgable != VM_PURGABLE_VOLATILE &&
+				    object->purgable != VM_PURGABLE_EMPTY) {
+					if (do_footprint) {
+						ledger_credit(new_owner->ledger,
+						    task_ledgers.phys_footprint,
+						    ptoa_64(resident_count));
+					} else if (ledger_idx_composite != -1) {
+						ledger_credit(new_owner->ledger,
+						    ledger_idx_composite,
+						    ptoa_64(resident_count));
+					}
+				}
 			}
-		}
-		if (wired_count) {
-			/* wired pages are always nonvolatile */
-			ledger_credit(new_owner->ledger,
-			    ledger_idx_nonvolatile,
-			    ptoa_64(wired_count));
-			if (do_footprint) {
+			if (wired_count) {
+				/* wired pages are always nonvolatile */
 				ledger_credit(new_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx_nonvolatile,
 				    ptoa_64(wired_count));
+				if (do_footprint) {
+					ledger_credit(new_owner->ledger,
+					    task_ledgers.phys_footprint,
+					    ptoa_64(wired_count));
+				} else if (ledger_idx_composite != -1) {
+					ledger_credit(new_owner->ledger,
+					    ledger_idx_composite,
+					    ptoa_64(wired_count));
+				}
 			}
-		}
-		if (compressed_count) {
-			/*
-			 * Adjust the new owner's ledgers by the number of
-			 * compressed pages.
-			 */
-			ledger_credit(new_owner->ledger,
-			    ledger_idx_compressed,
-			    ptoa_64(compressed_count));
-			if (do_footprint &&
-			    object->purgable != VM_PURGABLE_VOLATILE &&
-			    object->purgable != VM_PURGABLE_EMPTY) {
+			if (compressed_count) {
+				/*
+				 * Adjust the new owner's ledgers by the number of
+				 * compressed pages.
+				 */
 				ledger_credit(new_owner->ledger,
-				    task_ledgers.phys_footprint,
+				    ledger_idx_compressed,
 				    ptoa_64(compressed_count));
+				if (object->purgable != VM_PURGABLE_VOLATILE &&
+				    object->purgable != VM_PURGABLE_EMPTY) {
+					if (do_footprint) {
+						ledger_credit(new_owner->ledger,
+						    task_ledgers.phys_footprint,
+						    ptoa_64(compressed_count));
+					} else if (ledger_idx_composite != -1) {
+						ledger_credit(new_owner->ledger,
+						    ledger_idx_composite,
+						    ptoa_64(compressed_count));
+					}
+				}
+			}
+		} else {
+			/* external but owned object: count wired pages */
+			if (wired_count) {
+				ledger_credit(new_owner->ledger,
+				    ledger_idx_external_wired,
+				    ptoa_64(wired_count));
+				if (do_footprint) {
+					ledger_credit(new_owner->ledger,
+					    task_ledgers.phys_footprint,
+					    ptoa_64(wired_count));
+				} else if (ledger_idx_composite != -1) {
+					ledger_credit(new_owner->ledger,
+					    ledger_idx_composite,
+					    ptoa_64(wired_count));
+				}
 			}
 		}
 		if (new_owner != old_owner) {
@@ -8588,4 +8968,82 @@ again:
 	task->task_objects_disowned = TRUE;
 
 	task_objq_unlock(task);
+}
+
+void
+vm_object_wired_page_update_ledgers(
+	vm_object_t object,
+	int64_t wired_delta)
+{
+	task_t owner;
+
+	vm_object_lock_assert_exclusive(object);
+	if (wired_delta == 0) {
+		/* no change in number of wired pages */
+		return;
+	}
+	if (object->internal) {
+		/* no extra accounting needed for internal objects */
+		return;
+	}
+	if (!object->vo_ledger_tag) {
+		/* external object but not owned: no extra accounting */
+		return;
+	}
+
+	/*
+	 * For an explicitly-owned external VM object, account for
+	 * wired pages in one of the owner's ledgers.
+	 */
+	owner = VM_OBJECT_OWNER(object);
+	if (owner) {
+		int ledger_idx_volatile;
+		int ledger_idx_nonvolatile;
+		int ledger_idx_volatile_compressed;
+		int ledger_idx_nonvolatile_compressed;
+		int ledger_idx_composite;
+		int ledger_idx_external_wired;
+		boolean_t do_footprint;
+
+		/* ask which ledgers need an update */
+		vm_object_ledger_tag_ledgers(object,
+		    &ledger_idx_volatile,
+		    &ledger_idx_nonvolatile,
+		    &ledger_idx_volatile_compressed,
+		    &ledger_idx_nonvolatile_compressed,
+		    &ledger_idx_composite,
+		    &ledger_idx_external_wired,
+		    &do_footprint);
+		if (wired_delta > 0) {
+			/* more external wired bytes */
+			ledger_credit(owner->ledger,
+			    ledger_idx_external_wired,
+			    ptoa(wired_delta));
+			if (do_footprint) {
+				/* more footprint */
+				ledger_credit(owner->ledger,
+				    task_ledgers.phys_footprint,
+				    ptoa(wired_delta));
+			} else if (ledger_idx_composite != -1) {
+				ledger_credit(owner->ledger,
+				    ledger_idx_composite,
+				    ptoa(wired_delta));
+			}
+		} else {
+			/* less external wired bytes */
+			ledger_debit(owner->ledger,
+			    ledger_idx_external_wired,
+			    ptoa(-wired_delta));
+			if (do_footprint) {
+				/* more footprint */
+				ledger_debit(owner->ledger,
+				    task_ledgers.phys_footprint,
+				    ptoa(-wired_delta));
+			} else if (ledger_idx_composite != -1) {
+				ledger_debit(owner->ledger,
+				    ledger_idx_composite,
+				    ptoa(-wired_delta));
+			}
+		}
+	}
 }

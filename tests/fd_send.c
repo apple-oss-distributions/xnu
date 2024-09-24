@@ -88,7 +88,7 @@ recv_fd(int sock, int *fdp)
 	return 0;
 }
 
-T_DECL(send, "test for 30465592")
+T_DECL(send, "test for 30465592", T_META_TAG_VM_PREFERRED)
 {
 	int pair[2], fd, status;
 	pid_t child;
@@ -113,7 +113,7 @@ T_DECL(send, "test for 30465592")
 	}
 }
 
-T_DECL(send_kill, "test for 30465592")
+T_DECL(send_kill, "test for 30465592", T_META_TAG_VM_PREFERRED)
 {
 	int pair[2], fd, status;
 	pid_t child;
@@ -139,7 +139,7 @@ T_DECL(send_kill, "test for 30465592")
 	}
 }
 
-T_DECL(send_sock, "test for 30465592")
+T_DECL(send_sock, "test for 30465592", T_META_TAG_VM_PREFERRED)
 {
 	int pair[2], fd, status;
 	pid_t child;
@@ -165,7 +165,7 @@ T_DECL(send_sock, "test for 30465592")
 	}
 }
 
-T_DECL(send_stress, "test for 67133384")
+T_DECL(send_stress, "test for 67133384", T_META_TAG_VM_PREFERRED)
 {
 	int fd;
 

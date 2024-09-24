@@ -1520,7 +1520,7 @@ nfsrv_free_netopt(struct radix_node *rn, void *w)
 	uint32_t *cnt = fna->cnt;
 	struct nfs_netopt *nno = (struct nfs_netopt *)rn;
 
-	(*rnh->rnh_deladdr)(rn->rn_key, rn->rn_mask, rnh);
+	(*rnh->rnh_deladdr)(rn_get_key(rn), rn_get_mask(rn), rnh);
 	if (IS_VALID_CRED(nno->no_opt.nxo_cred)) {
 		kauth_cred_unref(&nno->no_opt.nxo_cred);
 	}
@@ -1611,7 +1611,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 			continue;
 		}
 
-		(*rnh->rnh_deladdr)(rn->rn_key, rn->rn_mask, rnh);
+		(*rnh->rnh_deladdr)(rn_get_key(rn), rn_get_mask(rn), rnh);
 		nno = (struct nfs_netopt *)rn;
 		if (IS_VALID_CRED(nno->no_opt.nxo_cred)) {
 			kauth_cred_unref(&nno->no_opt.nxo_cred);

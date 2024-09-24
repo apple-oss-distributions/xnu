@@ -62,7 +62,7 @@ static int fsw_vp_na_special(struct nexus_adapter *,
 static struct nexus_vp_adapter *fsw_vp_na_alloc(zalloc_flags_t);
 static void fsw_vp_na_free(struct nexus_adapter *);
 static int fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
-    struct __kern_channel_event *ev, uint16_t ev_len);
+    struct __kern_channel_event *__sized_by(ev_len)ev, uint16_t ev_len);
 
 static SKMEM_TYPE_DEFINE(na_vp_zone, struct nexus_vp_adapter);
 
@@ -487,7 +487,7 @@ fsw_vp_na_alloc(zalloc_flags_t how)
 static void
 fsw_vp_na_free(struct nexus_adapter *na)
 {
-	struct nexus_vp_adapter *vpna = (struct nexus_vp_adapter *)(void *)na;
+	struct nexus_vp_adapter *__single vpna = (struct nexus_vp_adapter *)(void *)na;
 
 	ASSERT(vpna->vpna_up.na_refcount == 0);
 	SK_DF(SK_VERB_MEM, "vpna 0x%llx FREE", SK_KVA(vpna));
@@ -529,12 +529,12 @@ nx_fsw_free_packet(struct __kern_packet *pkt)
 
 static int
 fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
-    struct __kern_channel_event *ev, uint16_t ev_len)
+    struct __kern_channel_event *__sized_by(ev_len)ev, uint16_t ev_len)
 {
 	int err;
 	char *baddr;
 	kern_packet_t ph;
-	kern_buflet_t buf;
+	kern_buflet_t __single buf;
 	sk_protect_t protect;
 	kern_channel_slot_t slot;
 	struct __kern_packet *vpna_pkt = NULL;
@@ -595,7 +595,7 @@ fsw_vp_na_channel_event_notify(struct nexus_adapter *vpna,
 		sk_sync_unprotect(protect);
 		kr_exit(ring);
 		STATS_INC(fs, FSW_STATS_EV_DROP_KRSPACE);
-		err = ENOSPC;
+		err = ENOBUFS;
 		goto error;
 	}
 	err = kern_channel_slot_attach_packet(ring, slot, ph);
@@ -647,7 +647,7 @@ fsw_find_port_vpna(struct nx_flowswitch *fsw, uint32_t nx_port_id)
 
 errno_t
 fsw_vp_na_channel_event(struct nx_flowswitch *fsw, uint32_t nx_port_id,
-    struct __kern_channel_event *event, uint16_t event_len)
+    struct __kern_channel_event *__sized_by(event_len)event, uint16_t event_len)
 {
 	int err = 0;
 	struct nexus_adapter *fsw_vpna;

@@ -2511,7 +2511,7 @@ not_circular:
 boolean_t
 ipc_importance_send(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option)
+	mach_msg_option64_t     option)
 {
 	mach_msg_header_t *hdr = ikm_header(kmsg);
 	ipc_port_t port = hdr->msgh_remote_port;
@@ -2642,7 +2642,7 @@ portupdate:
 
 #if IMPORTANCE_TRACE
 	if (kdebug_enable) {
-		mach_msg_max_trailer_t *dbgtrailer = ipc_kmsg_get_trailer(kmsg, false);
+		mach_msg_max_trailer_t *dbgtrailer = ipc_kmsg_get_trailer(kmsg);
 		unsigned int sender_pid = dbgtrailer->msgh_audit.val[5];
 		mach_msg_id_t imp_msgh_id = hdr->msgh_id;
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_SEND)) | DBG_FUNC_START,
@@ -3148,13 +3148,13 @@ out_locked:
 void
 ipc_importance_receive(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option)
+	mach_msg_option64_t     option)
 {
 	int impresult = -1;
 
 #if IMPORTANCE_TRACE || LEGACY_IMPORTANCE_DELIVERY
 	task_t task_self = current_task();
-	unsigned int sender_pid = ipc_kmsg_get_trailer(kmsg, false)->msgh_audit.val[5];
+	unsigned int sender_pid = ipc_kmsg_get_trailer(kmsg)->msgh_audit.val[5];
 #endif
 	mach_msg_header_t *hdr = ikm_header(kmsg);
 
@@ -3295,7 +3295,7 @@ ipc_importance_receive(
 void
 ipc_importance_unreceive(
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       __unused option)
+	mach_msg_option64_t     __unused option)
 {
 	/* importance should already be in the voucher and out of the kmsg */
 	assert(IIE_NULL == kmsg->ikm_importance);

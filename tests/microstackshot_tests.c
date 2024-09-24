@@ -141,7 +141,7 @@ query_pmi_params(unsigned int *pmi_counter, uint64_t *pmi_period)
 #define SLEEP_SECS 10
 
 T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",
-		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
+		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 
@@ -277,7 +277,7 @@ T_DECL(pmi_sampling, "attempt to configure microstackshots on PMI",
 
 T_DECL(error_handling,
 		"ensure that error conditions for the telemetry syscall are observed",
-		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
+		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	telemetry_init();
 
@@ -309,7 +309,7 @@ T_DECL(error_handling,
 
 T_DECL(excessive_sampling,
 		"ensure that microstackshots are not being sampled too frequently",
-		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1))
+		T_META_REQUIRES_SYSCTL_EQ("kern.monotonic.supported", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	unsigned int interrupt_sample_rate = 0;
 	size_t sysctl_size = sizeof(interrupt_sample_rate);

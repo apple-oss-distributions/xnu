@@ -20,7 +20,7 @@ T_GLOBAL_META(
  */
 T_DECL(lockf_EOF_77264182,
     "try to stress out lockf requests around OFF_MAX/EOF",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	const char *dir = dt_tmpdir();
 	int fd;

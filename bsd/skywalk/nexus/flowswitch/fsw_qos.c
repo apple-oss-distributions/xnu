@@ -63,26 +63,28 @@ fsw_qos_set_ipv6_tc(struct ip6_hdr *ip6, uint8_t dscp)
 static inline void
 fsw_qos_set_pkt_dscp(struct __kern_packet *pkt, uint8_t dscp)
 {
-	struct ip *ip;
-	struct ip6_hdr *ip6;
+	struct ip *__single ip;
+	struct ip6_hdr *__single ip6;
 
 	if (pkt->pkt_flow->flow_ip_ver == IPVERSION) {
-		ip = (struct ip *)pkt->pkt_flow->flow_ip_hdr;
+		ip = __unsafe_forge_single(struct ip *,
+		    pkt->pkt_flow->flow_ip_hdr);
 		fsw_qos_set_ip_tos(ip, dscp);
 	} else {
 		ASSERT(pkt->pkt_flow->flow_ip_ver == IPV6_VERSION);
-		ip6 = (struct ip6_hdr *)pkt->pkt_flow->flow_ip_hdr;
+		ip6 = __unsafe_forge_single(struct ip6_hdr *,
+		    pkt->pkt_flow->flow_ip_hdr);
 		fsw_qos_set_ipv6_tc(ip6, dscp);
 	}
 
 	if (pkt->pkt_pflags & PKT_F_MBUF_DATA) {
 		if (pkt->pkt_flow->flow_ip_ver == IPVERSION) {
-			ip = (struct ip *)(void *)
-			    (pkt->pkt_mbuf->m_data + pkt->pkt_l2_len);
+			ip = (struct ip *__single)(void *)
+			    (m_mtod_current(pkt->pkt_mbuf) + pkt->pkt_l2_len);
 			fsw_qos_set_ip_tos(ip, dscp);
 		} else {
-			ip6 = (struct ip6_hdr *)(void *)
-			    (pkt->pkt_mbuf->m_data + pkt->pkt_l2_len);
+			ip6 = (struct ip6_hdr *__single)(void *)
+			    (m_mtod_current(pkt->pkt_mbuf) + pkt->pkt_l2_len);
 			fsw_qos_set_ipv6_tc(ip6, dscp);
 		}
 	}

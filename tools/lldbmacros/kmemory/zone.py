@@ -49,7 +49,7 @@ class ZonePageMetadata(MemoryObject):
     MO_KIND = "zone metadata"
 
     def __init__(self, kmem, address):
-        super(ZonePageMetadata, self).__init__(kmem, address)
+        super().__init__(kmem, address)
 
         if not kmem.meta_range.contains(address):
             raise IndexError("{:#x} is not inside the meta range {}".format(
@@ -301,7 +301,7 @@ class ZoneHeapMemoryObject(MemoryObject):
     MO_KIND = "zone heap"
 
     def __init__(self, kmem, address):
-        super(ZoneHeapMemoryObject, self).__init__(kmem, address)
+        super().__init__(kmem, address)
 
         if not kmem.zone_range.contains(address):
             raise IndexError("{:#x} is not inside the zone range {}".format(
@@ -472,7 +472,7 @@ class ZoneWhatisProvider(WhatisProvider):
     """
 
     def __init__(self, kmem):
-        super(ZoneWhatisProvider, self).__init__(kmem)
+        super().__init__(kmem)
 
     def claims(self, address):
         kmem = self.kmem

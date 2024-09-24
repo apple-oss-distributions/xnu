@@ -39,11 +39,18 @@
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
 #include <unistd.h>
+#include <mach/kern_return.h>
+#include <mach/mach.h>
+#include <mach/mach_port.h>
+#include <mach/message.h>
+#include <mach/port.h>
+
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.misc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("misc"));
+	T_META_RADAR_COMPONENT_VERSION("misc"),
+	T_META_RUN_CONCURRENTLY(true));
 
 static dispatch_queue_t exit_queue;
 
@@ -156,7 +163,7 @@ __test_exit_reason_abort()
 	}
 }
 
-T_DECL(test_exit_reason_abort, "tests exit reason for abort()")
+T_DECL(test_exit_reason_abort, "tests exit reason for abort()", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_abort();
@@ -175,6 +182,54 @@ __test_exit_reason_external_signal(int signal)
 		wait_collect_exit_reason(child, signal);
 	} else {
 		pause();
+	}
+}
+
+static void
+__test_exit_reason_delegate_signal(int signal)
+{
+	int ret = 0;
+	audit_token_t instigator = INVALID_AUDIT_TOKEN_VALUE;
+	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+	pid_t child = fork();
+	if (child > 0) {
+		audit_token_for_pid(child, &token);
+		// Send signal to the child with its audit token
+		ret = proc_signal_delegate(instigator, token, signal);
+		T_EXPECT_EQ_INT(ret, 0, "expect proc_signal_delegate return: %d", ret);
+		wait_collect_exit_reason(child, signal);
+		// Send signal to the child with its audit token who has exited by now
+		ret = proc_signal_delegate(instigator, token, signal);
+		T_EXPECT_EQ_INT(ret, ESRCH, "expect no such process return: %d", ret);
+	} else {
+		pause();
+		// This exit should not hit, but we exit abnormally in case something went wrong
+		_exit(-1);
+	}
+}
+
+static void
+__test_exit_reason_delegate_terminate()
+{
+	int ret = 0;
+	audit_token_t instigator = INVALID_AUDIT_TOKEN_VALUE;
+	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+	pid_t child = fork();
+	int sentsignal = 0;
+	if (child > 0) {
+		audit_token_for_pid(child, &token);
+		// Send signal to the child with its audit token
+		ret = proc_terminate_delegate(instigator, token, &sentsignal);
+		T_EXPECT_EQ_INT(ret, 0, "expect proc_terminate_delegate return: %d", ret);
+		T_EXPECT_TRUE(sentsignal == SIGTERM || sentsignal == SIGKILL, "sentsignal retval %d", sentsignal);
+		wait_collect_exit_reason(child, SIGTERM);
+		// Send signal to the child with its audit token who has exited by now
+		ret = proc_terminate_delegate(instigator, token, &sentsignal);
+		T_EXPECT_EQ_INT(ret, ESRCH, "expect no such process return: %d", ret);
+	} else {
+		pause();
+		// This exit should not hit, but we exit abnormally in case something went wrong
+		_exit(-1);
 	}
 }
 
@@ -254,7 +309,19 @@ __test_exit_reason_signal_with_audittoken_fail_bad_signal(int signal)
 	}
 }
 
-T_DECL(proc_signal_with_audittoken_success, "proc_signal_with_audittoken should work")
+T_DECL(proc_signal_delegate_success, "proc_signal_delegate should work", T_META_TAG_VM_PREFERRED)
+{
+	dispatch_test(^{
+		__test_exit_reason_delegate_signal(SIGABRT);
+		__test_exit_reason_delegate_signal(SIGKILL);
+		__test_exit_reason_delegate_signal(SIGSYS);
+		__test_exit_reason_delegate_signal(SIGUSR1);
+		__test_exit_reason_delegate_terminate();
+		T_END;
+	});
+}
+
+T_DECL(proc_signal_with_audittoken_success, "proc_signal_with_audittoken should work", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_signal_with_audittoken(SIGABRT);
@@ -265,7 +332,7 @@ T_DECL(proc_signal_with_audittoken_success, "proc_signal_with_audittoken should 
 	});
 }
 
-T_DECL(proc_signal_with_audittoken_fail_bad_token, "proc_signal_with_audittoken should fail with invalid audit token")
+T_DECL(proc_signal_with_audittoken_fail_bad_token, "proc_signal_with_audittoken should fail with invalid audit token", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_signal_with_audittoken_fail_bad_token(SIGKILL);
@@ -273,7 +340,7 @@ T_DECL(proc_signal_with_audittoken_fail_bad_token, "proc_signal_with_audittoken 
 	});
 }
 
-T_DECL(proc_signal_with_audittoken_fail_null_token, "proc_signal_with_audittoken should fail with a null audit token")
+T_DECL(proc_signal_with_audittoken_fail_null_token, "proc_signal_with_audittoken should fail with a null audit token", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_signal_with_audittoken_fail_null_token(SIGKILL);
@@ -281,7 +348,7 @@ T_DECL(proc_signal_with_audittoken_fail_null_token, "proc_signal_with_audittoken
 	});
 }
 
-T_DECL(proc_signal_with_audittoken_fail_bad_signal, "proc_signal_with_audittoken should fail with invalid signals")
+T_DECL(proc_signal_with_audittoken_fail_bad_signal, "proc_signal_with_audittoken should fail with invalid signals", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_signal_with_audittoken_fail_bad_signal(0);
@@ -290,7 +357,7 @@ T_DECL(proc_signal_with_audittoken_fail_bad_signal, "proc_signal_with_audittoken
 	});
 }
 
-T_DECL(test_exit_reason_external_signal, "tests exit reason for external signals")
+T_DECL(test_exit_reason_external_signal, "tests exit reason for external signals", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_external_signal(SIGABRT);
@@ -328,7 +395,7 @@ __test_exit_reason_pthread_kill_self(int signal)
 	}
 }
 
-T_DECL(test_exit_reason_pthread_kill_self, "tests exit reason for pthread_kill on caller thread")
+T_DECL(test_exit_reason_pthread_kill_self, "tests exit reason for pthread_kill on caller thread", T_META_TAG_VM_PREFERRED)
 {
 	dispatch_test(^{
 		__test_exit_reason_pthread_kill_self(SIGABRT);

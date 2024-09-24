@@ -31,6 +31,7 @@
 
 #include <netinet/tcp_cc.h>
 #include <netinet/tcp_fsm.h>
+#include <netinet/tcp_log.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_sysctls.h>
 #include <netinet/tcp_utils.h>

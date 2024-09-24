@@ -238,7 +238,7 @@ struct runq_stats {
 	uint64_t                last_change_timestamp;
 };
 
-#if defined(CONFIG_SCHED_TIMESHARE_CORE) || defined(CONFIG_SCHED_PROTO)
+#if defined(CONFIG_SCHED_TIMESHARE_CORE)
 
 struct run_queue {
 	int                     highq;                          /* highest runnable queue */
@@ -264,7 +264,7 @@ rq_bitmap_clear(bitmap_t *__header_indexable map, u_int n)
 	bitmap_clear(map, n);
 }
 
-#endif /* defined(CONFIG_SCHED_TIMESHARE_CORE) || defined(CONFIG_SCHED_PROTO) */
+#endif /* defined(CONFIG_SCHED_TIMESHARE_CORE) */
 
 typedef struct {
 	queue_head_t            pri_queue;                      /* runnable RT threads for this priority */
@@ -291,59 +291,8 @@ typedef struct rt_queue *rt_queue_t;
 #define RT_DEADLINE_NONE                UINT64_MAX
 #define RT_DEADLINE_QUANTUM_EXPIRED     (UINT64_MAX - 1)
 
-#if defined(CONFIG_SCHED_GRRR_CORE)
-
-/*
- * We map standard Mach priorities to an abstract scale that more properly
- * indicates how we want processor time allocated under contention.
- */
-typedef uint8_t grrr_proportional_priority_t;
-typedef uint8_t grrr_group_index_t;
-
-#define NUM_GRRR_PROPORTIONAL_PRIORITIES        256
-#define MAX_GRRR_PROPORTIONAL_PRIORITY ((grrr_proportional_priority_t)255)
-
-#if 0
-#define NUM_GRRR_GROUPS 8                                       /* log(256) */
-#endif
-
-#define NUM_GRRR_GROUPS 64                                      /* 256/4 */
-
-struct grrr_group {
-	queue_chain_t                   priority_order;                         /* next greatest weight group */
-	grrr_proportional_priority_t            minpriority;
-	grrr_group_index_t              index;
-
-	queue_head_t                    clients;
-	int                                             count;
-	uint32_t                                weight;
-#if 0
-	uint32_t                                deferred_removal_weight;
-#endif
-	uint32_t                                work;
-	thread_t                                current_client;
-};
-
-struct grrr_run_queue {
-	int                                     count;
-	uint32_t                        last_rescale_tick;
-	struct grrr_group       groups[NUM_GRRR_GROUPS];
-	queue_head_t            sorted_group_list;
-	uint32_t                        weight;
-	grrr_group_t            current_group;
-
-	struct runq_stats   runq_stats;
-};
-
-#endif /* defined(CONFIG_SCHED_GRRR_CORE) */
-
 extern int rt_runq_count(processor_set_t);
 extern uint64_t rt_runq_earliest_deadline(processor_set_t);
-
-#if defined(CONFIG_SCHED_MULTIQ)
-sched_group_t   sched_group_create(void);
-void            sched_group_destroy(sched_group_t sched_group);
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
 
 
 

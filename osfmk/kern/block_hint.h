@@ -51,6 +51,19 @@ typedef enum thread_snapshot_wait_flags {
 	kThreadWaitSleepWithInheritor   = 0x12,
 	kThreadWaitEventlink            = 0x13,
 	kThreadWaitCompressor           = 0x14,
+	kThreadWaitParkedBoundWorkQueue = 0x15,
+	kThreadWaitPageBusy             = 0x16,
+	/*
+	 * The vm_object wait types should be kept in the same order as
+	 * vm_object_wait_reason_t
+	 */
+	kThreadWaitPagerInit            = 0x17,
+	kThreadWaitPagerReady           = 0x18,
+	kThreadWaitPagingActivity       = 0x19,
+	kThreadWaitMappingInProgress    = 0x1a,
+	kThreadWaitMemoryBlocked        = 0x1b,
+	kThreadWaitPagingInProgress     = 0x1c,
+	kThreadWaitPageInThrottle       = 0x1d,
 } __attribute__((packed)) block_hint_t;
 
 _Static_assert(sizeof(block_hint_t) <= sizeof(short),

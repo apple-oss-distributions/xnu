@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -500,7 +500,7 @@ typedef struct i386_cpu_info {
 	uint64_t                cpuid_leaf7_features;
 	uint64_t                cpuid_leaf7_extfeatures;
 	cpuid_tsc_leaf_t        cpuid_tsc_leaf;
-	cpuid_xsave_leaf_t      cpuid_xsave_leaf[2];
+	cpuid_xsave_leaf_t      cpuid_xsave_leaf[8];
 } i386_cpu_info_t;
 
 #if defined(MACH_KERNEL_PRIVATE) && !defined(ASSEMBLER)

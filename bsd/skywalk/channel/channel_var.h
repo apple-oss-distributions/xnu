@@ -127,7 +127,8 @@ struct __kern_slot_desc {
  * to kern_channel_slot_get_context().
  */
 struct slot_ctx {
-	mach_vm_address_t       slot_ctx_arg;   /* per-slot context */
+	/* -fbounds-safety: No one really uses this, so don't annotate it yet */
+	void                    *slot_ctx_arg;   /* per-slot context */
 };
 
 extern lck_attr_t channel_lock_attr;
@@ -279,28 +280,6 @@ struct chreq {
  *
  * For flow switch nexus:
  *
- * The following fields are used to implement lock-free copy of packets
- * from input to output ports in flow switch:
- *
- *	ckr_klease	Buffer after the last one being copied.
- *			A writer in nx_fsw_vp_flush() reserves N buffers
- *			from ckr_klease, advances it, then does the
- *			copy outside the lock.
- *
- *			In RX rings (used for flow switch ports):
- *				ckr_ktail <= ckr_klease < nkr_khead+N-1
- *
- *			In TX rings (used for NIC or host stack ports):
- *				nkr_khead <= ckr_klease < nkr_ktail
- *
- *	ckr_leases	Array of ckr_num_slots where writers can report
- *			completion of their block. CKR_NOSLOT (~0) indicates
- *			that the writer has not finished yet
- *
- *	ckr_lease_idx	Index of next free slot in ckr_leases, to be assigned.
- *
- * The kring is manipulated by txsync/rxsync and generic kring function.
- *
  * Concurrent rxsync or txsync on the same ring are prevented through
  * by na_kr_(try)get() which in turn uses ckr_busy.  This is all we need
  * for NIC rings, and for TX rings attached to the host stack.
@@ -396,9 +375,11 @@ struct __kern_channel_ring {
 	 * than the number of slots for this ring, and so we constrain
 	 * range with [ckr_ksds, ckr_ksds_last] during validations.
 	 */
-	struct __slot_desc *__unsafe_indexable ckr_usds;   /* slot desc array (user) */
-	struct __slot_desc *__unsafe_indexable ckr_ksds;   /* slot desc array (kernel) */
-	struct __slot_desc *__single ckr_ksds_last; /* cache last ksd */
+	struct __slot_desc *__counted_by(ckr_usds_cnt) ckr_usds;   /* slot desc array (user) */
+	slot_idx_t ckr_usds_cnt;
+	struct __slot_desc *__counted_by(ckr_ksds_cnt) ckr_ksds;   /* slot desc array (kernel) */
+	slot_idx_t ckr_ksds_cnt;
+	struct __slot_desc *ckr_ksds_last; /* cache last ksd */
 	struct skmem_cache *ckr_ksds_cache; /* owning skmem_cache for ksd */
 
 	uint32_t        ckr_ring_id;      /* ring ID */
@@ -412,8 +393,8 @@ struct __kern_channel_ring {
 	 * in the context of a sync as we're single-threaded then.
 	 * The memory is owned by the nexus adapter.
 	 */
-	uint64_t        *__unsafe_indexable ckr_scratch;
-
+	uint64_t        *__counted_by(ckr_scratch_cnt)ckr_scratch;
+	slot_idx_t      ckr_scratch_cnt;
 	/*
 	 * [tx]sync callback for this kring.  The default na_kring_create
 	 * callback (na_kr_create) sets the ckr_na_sync callback of each
@@ -441,10 +422,6 @@ struct __kern_channel_ring {
 	/* The following fields are for flow switch support */
 	int (*ckr_save_notify)(struct __kern_channel_ring *kring,
 	    struct proc *, uint32_t flags);
-	uint32_t        *ckr_leases;
-#define CKR_NOSLOT      ((uint32_t)~0)  /* used in nkr_*lease* */
-	slot_idx_t      ckr_klease;
-	slot_idx_t      ckr_lease_idx;
 #endif /* CONFIG_NEXUS_FLOWSWITCH */
 
 	kern_packet_svc_class_t ckr_svc;
@@ -454,8 +431,8 @@ struct __kern_channel_ring {
 	 * are in the ring; the memory is owned by the nexus adapter.
 	 */
 	uint32_t        ckr_slot_ctxs_set; /* number of valid/set contexts */
-	struct slot_ctx *__unsafe_indexable ckr_slot_ctxs; /* (optional) array of slot contexts */
-
+	struct slot_ctx *__counted_by(ckr_slot_ctxs_cnt)ckr_slot_ctxs; /* (optional) array of slot contexts */
+	uint32_t        ckr_slot_ctxs_cnt;
 	void            *ckr_ctx;       /* ring context */
 
 	struct ch_selinfo ckr_si;       /* per-ring wait queue */
@@ -483,7 +460,8 @@ struct __kern_channel_ring {
 	 * store incoming mbufs in a queue that is drained by
 	 * a rxsync.
 	 */
-	struct mbuf     **ckr_tx_pool;
+	struct mbuf     **__counted_by(ckr_tx_pool_count) ckr_tx_pool;
+	uint32_t        ckr_tx_pool_count;
 	struct nx_mbq   ckr_rx_queue;   /* intercepted rx mbufs. */
 #endif /* CONFIG_NEXUS_NETIF */
 
@@ -551,6 +529,9 @@ struct __kern_channel_ring {
 	lck_grp_t       *ckr_slock_group;
 
 	char            ckr_name[64];   /* diagnostic */
+
+	uint64_t        ckr_rx_dequeue_ts; /* last timestamp when userspace dequeued */
+	uint64_t        ckr_rx_enqueue_ts; /* last timestamp when kernel enqueued */
 } __attribute__((__aligned__(CHANNEL_CACHE_ALIGN_MAX)));
 
 #define KR_LOCK(_kr)                    \
@@ -712,16 +693,22 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
 	            (struct __kern_packet *)(void *)(_md);              \
 	        struct __kern_buflet *_kbft;                            \
 	        PKT_GET_FIRST_BUFLET(_p, _p->pkt_bufs_cnt, _kbft);      \
-	        (_addr) = __DECONST(void *, _kbft->buf_addr);           \
-	        (_objaddr) = _kbft->buf_objaddr;                        \
+	        (_addr) = __unsafe_forge_bidi_indexable(void *,         \
+	            __DECONST(void *, _kbft->buf_addr), _kbft->buf_dlim); \
+	        (_objaddr) = __unsafe_forge_bidi_indexable(void *,      \
+	            _kbft->buf_objaddr, _kbft->buf_dlim);               \
 	        (_doff) = _kbft->buf_doff;                              \
 	        (_dlen) = _kbft->buf_dlen;                              \
 	        (_dlim) = _kbft->buf_dlim;                              \
 	        break;                                                  \
 	}                                                               \
 	default:                                                        \
-	        (_addr) = __DECONST(void *, _q->qum_buf[0].buf_addr);   \
-	        (_objaddr) = _q->qum_buf[0].buf_objaddr;                \
+	        (_addr) = __unsafe_forge_bidi_indexable(void *,         \
+	            __DECONST(void *, _q->qum_buf[0].buf_addr),         \
+	            _q->qum_buf[0].buf_dlim);                           \
+	        (_objaddr) = __unsafe_forge_bidi_indexable(void *,      \
+	            _q->qum_buf[0].buf_objaddr,                         \
+	            _q->qum_buf[0].buf_dlim);                           \
 	        (_doff) = _q->qum_buf[0].buf_doff;                      \
 	        (_dlen) = _q->qum_buf[0].buf_dlen;                      \
 	        (_dlim) = _q->qum_buf[0].buf_dlim;                      \
@@ -737,7 +724,8 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
 	struct __kern_packet *_p = (struct __kern_packet *)(void *)(_md); \
 	struct __kern_buflet *_kbft;                                    \
 	PKT_GET_FIRST_BUFLET(_p, _p->pkt_bufs_cnt, _kbft);              \
-	(_addr) = __DECONST(void *, _kbft->buf_addr);                   \
+	(_addr) = __unsafe_forge_bidi_indexable(void *,                 \
+	    __DECONST(void *, _kbft->buf_addr), _kbft->buf_dlim);       \
 	ASSERT((_addr) != NULL);                                        \
 } while (0)
 
@@ -748,7 +736,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  * first buffer's address.
  */
 #define MD_BUFLET_ADDR(_md, _val) do {                                  \
-	void *__unsafe_indexable _addr, *__unsafe_indexable _objaddr;   \
+	void *_addr, *_objaddr;                                         \
 	uint32_t _doff, _dlen, _dlim;                                   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	/* skip past buflet data offset */                              \
@@ -761,7 +749,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  * buffer's address.
  */
 #define MD_BUFLET_ADDR_ABS(_md, _val) do {                              \
-	void *__unsafe_indexable _addr, *__unsafe_indexable _objaddr;   \
+	void *_addr, *_objaddr;                                         \
 	uint32_t _doff, _dlen, _dlim;                                   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	(_val) = (void *)_addr;                                         \
@@ -769,14 +757,14 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
 
 /* similar to MD_BUFLET_ADDR_ABS() but optimized only for packets */
 #define MD_BUFLET_ADDR_ABS_PKT(_md, _val) do {                          \
-	void *__unsafe_indexable _addr;                                 \
+	void *_addr;                                                    \
 	_MD_BUFLET_ADDR_PKT(_md, _addr);                                \
 	(_val) = (void *)_addr;                                         \
 } while (0)
 
 
 #define MD_BUFLET_ADDR_ABS_DLEN(_md, _val, _dlen, _dlim, _doff) do {    \
-	void *__unsafe_indexable _addr, *__unsafe_indexable _objaddr;   \
+	void *_addr, *_objaddr;   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	(_val) = (void *)_addr;                                         \
 } while (0)
@@ -787,7 +775,7 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  * metadata with multiple buflets, this is the first buffer's object address.
  */
 #define MD_BUFLET_OBJADDR(_md, _val) do {                               \
-	void *__unsafe_indexable _addr, *__unsafe_indexable _objaddr;   \
+	void *_addr, *_objaddr;                                         \
 	uint32_t _doff, _dlen, _dlim;                                   \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	(_val) = (void *)_objaddr;                                      \
@@ -799,11 +787,11 @@ KR_SLOT_INDEX(const struct __kern_channel_ring *kr,
  * first buffer's address and data length.
  */
 #define MD_BUFLET_ADDR_DLEN(_md, _val, _dlen) do {                      \
-	void *__unsafe_indexable _addr, *__unsafe_indexable _objaddr;   \
+	void *_addr, *_objaddr;                                         \
 	uint32_t _doff, _dlim;                                          \
 	_MD_BUFLET_ADDROFF(_md, _addr, _objaddr, _doff, _dlen, _dlim);  \
 	/* skip past buflet data offset */                              \
-	(_val) = (void *)((uint8_t *)_addr + _doff);                    \
+    (_val) = (void *)(__unsafe_forge_bidi_indexable(uint8_t *, _addr, _dlim) + _doff); \
 } while (0)
 
 /* kr_space: return available space for enqueue into kring */
@@ -811,15 +799,9 @@ __attribute__((always_inline))
 static inline uint32_t
 kr_available_slots(struct __kern_channel_ring *kr)
 {
-	int busy;
 	uint32_t space;
 
-	busy = (int)(kr->ckr_klease - kr->ckr_khead);
-	if (busy < 0) {
-		busy += kr->ckr_num_slots;
-	}
-	space = kr->ckr_lim - (uint32_t)busy;
-
+	space = kr->ckr_lim - (kr->ckr_num_slots - kr->ckr_khead);
 	return space;
 }
 
@@ -869,7 +851,7 @@ extern void ch_retain(struct kern_channel *);
 extern void ch_retain_locked(struct kern_channel *);
 extern int ch_release(struct kern_channel *);
 extern int ch_release_locked(struct kern_channel *);
-extern void ch_dtor(void *);
+extern void ch_dtor(struct kern_channel *);
 
 extern void csi_init(struct ch_selinfo *, boolean_t, uint64_t);
 extern void csi_destroy(struct ch_selinfo *);

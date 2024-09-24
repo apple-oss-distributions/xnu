@@ -39,12 +39,12 @@
 #include <net/if_mib.h>
 #include <string.h>
 
+// TODO: -fbounds-safety increases the alignment and we have
+//       no control over the alignment. (rdar://118519573)
+#pragma clang diagnostic ignored "-Wcast-align"
 #include "net/net_str_id.h"
 
 #define NET_ID_STR_MAX_LEN 2048
-#define NET_ID_STR_ENTRY_SIZE(__str) \
-	(__builtin_offsetof(struct net_str_id_entry, nsi_string[0]) + \
-	strlen(__str) + 1)
 
 #define FIRST_NET_STR_ID                                1000
 static SLIST_HEAD(, net_str_id_entry)    net_str_id_list = {NULL};
@@ -53,13 +53,6 @@ static LCK_MTX_DECLARE(net_str_id_lock, &net_str_id_grp);
 
 static u_int32_t nsi_kind_next[NSI_MAX_KIND] = { FIRST_NET_STR_ID, FIRST_NET_STR_ID, FIRST_NET_STR_ID };
 static u_int32_t nsi_next_id = FIRST_NET_STR_ID;
-
-extern int sysctl_if_family_ids SYSCTL_HANDLER_ARGS;
-
-SYSCTL_DECL(_net_link_generic_system);
-
-SYSCTL_PROC(_net_link_generic_system, OID_AUTO, if_family_ids, CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
-    0, 0, sysctl_if_family_ids, "S, if_family_id", "Interface Family ID table");
 
 __private_extern__ void
 net_str_id_first_last(u_int32_t *first, u_int32_t *last, u_int32_t kind)
@@ -97,7 +90,7 @@ net_str_id_find_internal(const char *string, u_int32_t *out_id,
 	/* Look for an existing entry */
 	lck_mtx_lock(&net_str_id_lock);
 	SLIST_FOREACH(entry, &net_str_id_list, nsi_next) {
-		if (strcmp(string, entry->nsi_string) == 0) {
+		if (strlcmp(entry->nsi_string, string, entry->nsi_length) == 0) {
 			break;
 		}
 	}
@@ -108,14 +101,16 @@ net_str_id_find_internal(const char *string, u_int32_t *out_id,
 			return ENOENT;
 		}
 
-		entry = zalloc_permanent(NET_ID_STR_ENTRY_SIZE(string),
+		const uint32_t string_length = (uint32_t)strlen(string) + 1;
+		entry = zalloc_permanent(sizeof(*entry) + string_length,
 		    ZALIGN_PTR);
 		if (entry == NULL) {
 			lck_mtx_unlock(&net_str_id_lock);
 			return ENOMEM;
 		}
 
-		strlcpy(entry->nsi_string, string, strlen(string) + 1);
+		strlcpy(entry->nsi_string, string, string_length);
+		entry->nsi_length = string_length;
 		entry->nsi_flags = (1 << kind);
 		entry->nsi_id = nsi_next_id++;
 		nsi_kind_next[kind] = nsi_next_id;
@@ -135,69 +130,4 @@ net_str_id_find_internal(const char *string, u_int32_t *out_id,
 	*out_id = entry->nsi_id;
 
 	return 0;
-}
-
-
-#define ROUNDUP32(a) \
-	((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
-
-int
-sysctl_if_family_ids SYSCTL_HANDLER_ARGS /* XXX bad syntax! */
-{
-#pragma unused(oidp)
-#pragma unused(arg1)
-#pragma unused(arg2)
-	errno_t error = 0;
-	struct net_str_id_entry *entry = NULL;
-	struct if_family_id *iffmid = NULL;
-	size_t iffmid_allocated_size = 0;
-	size_t max_size = 0;
-
-	lck_mtx_lock(&net_str_id_lock);
-	SLIST_FOREACH(entry, &net_str_id_list, nsi_next) {
-		size_t str_size;
-		size_t iffmid_size;
-
-		if ((entry->nsi_flags & (1 << NSI_IF_FAM_ID)) == 0) {
-			continue;
-		}
-
-		str_size = strlen(entry->nsi_string);
-		if (str_size > NET_ID_STR_MAX_LEN) {
-			str_size = NET_ID_STR_MAX_LEN;
-		}
-		str_size += 1; // make room for end-of-string
-		iffmid_size = ROUNDUP32(offsetof(struct net_str_id_entry, nsi_string) + str_size);
-
-		if (iffmid_size > max_size) {
-			if (iffmid) {
-				kfree_data(iffmid, iffmid->iffmid_len);
-			}
-			iffmid = (struct if_family_id *)kalloc_data(iffmid_size,
-			    Z_WAITOK | Z_ZERO);
-			if (iffmid == NULL) {
-				lck_mtx_unlock(&net_str_id_lock);
-				error = ENOMEM;
-				goto done;
-			}
-			iffmid_allocated_size = iffmid_size;
-			max_size = iffmid_size;
-		}
-
-		iffmid->iffmid_len = (uint32_t)iffmid_size;
-		iffmid->iffmid_id = entry->nsi_id;
-		strlcpy(iffmid->iffmid_str, entry->nsi_string, str_size);
-		error = SYSCTL_OUT(req, iffmid, iffmid_size);
-		if (error) {
-			lck_mtx_unlock(&net_str_id_lock);
-			goto done;
-		}
-	}
-	lck_mtx_unlock(&net_str_id_lock);
-
-done:
-	if (iffmid) {
-		kfree_data(iffmid, iffmid_allocated_size);
-	}
-	return error;
 }

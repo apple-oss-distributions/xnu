@@ -136,7 +136,7 @@ tests()
 	}
 }
 
-T_DECL(unsafe_discard_bounds, "bounded_ptr.unsafe_discard_bounds") {
+T_DECL(unsafe_discard_bounds, "bounded_ptr.unsafe_discard_bounds", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

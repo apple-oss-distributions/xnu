@@ -48,7 +48,7 @@
 #if LCK_SPIN_IS_TICKET_LOCK
 typedef lck_ticket_t lck_spin_t;
 #else
-typedef struct {
+typedef struct lck_spin_s {
 	struct hslock   hwlock;
 	unsigned long   type;
 } lck_spin_t;

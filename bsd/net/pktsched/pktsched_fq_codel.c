@@ -32,6 +32,7 @@
 #include <net/ethernet.h>
 #include <net/if_var.h>
 #include <net/if.h>
+#include <net/droptap.h>
 #include <net/classq/classq.h>
 #include <net/classq/classq_fq_codel.h>
 #include <net/pktsched/pktsched_fq_codel.h>
@@ -157,11 +158,21 @@ bitmap_ops_t fq_if_grps_sc_bitmap_ops =
 	.move   = fq_if_grps_sc_bitmap_move,
 };
 
+static uint32_t fq_if_hash_table_size;
+
+extern int serverperfmode; // Temporary to resolve build dependency
+
 void
 pktsched_fq_init(void)
 {
 	PE_parse_boot_argn("ifclassq_enable_pacing", &ifclassq_enable_pacing,
 	    sizeof(ifclassq_enable_pacing));
+
+	if (serverperfmode) {
+		fq_if_hash_table_size = (1 << 16);
+	} else {
+		fq_if_hash_table_size = (1 << 8);
+	}
 
 	// format looks like ifcq_drr_max=8,8,6
 	char buf[(FQ_IF_MAX_CLASSES) * 3];
@@ -171,7 +182,7 @@ pktsched_fq_init(void)
 		return;
 	}
 
-	len = strlen(buf);
+	len = strbuflen(buf, sizeof(buf));
 	for (i = 0; i < len + 1 && pri_index < FQ_IF_MAX_CLASSES; i++) {
 		if (buf[i] != ',' && buf[i] != '\0') {
 			VERIFY(buf[i] >= '0' && buf[i] <= '9');
@@ -184,8 +195,11 @@ pktsched_fq_init(void)
 	}
 }
 
-#define FQ_IF_FLOW_HASH_ID(_flowid_) \
-	(((_flowid_) >> FQ_IF_HASH_TAG_SHIFT) & FQ_IF_HASH_TAG_MASK)
+static uint32_t
+fq_if_flow_hash_id(uint32_t flowid)
+{
+	return flowid & (fq_if_hash_table_size - 1);
+}
 
 #define FQ_IF_CLASSQ_IDLE(_fcl_) \
 	(STAILQ_EMPTY(&(_fcl_)->fcl_new_flows) && \
@@ -349,10 +363,21 @@ fq_if_pacemaker_tcall(thread_call_param_t arg0, thread_call_param_t arg1)
 fq_if_t *
 fq_if_alloc(struct ifclassq *ifq, classq_pkt_type_t ptype)
 {
+	flowq_list_t *fqs_flows;
 	fq_if_t *fqs;
 
 	ASSERT(ifq->ifcq_ifp != NULL);
 	fqs = zalloc_flags(fq_if_zone, Z_WAITOK | Z_ZERO);
+	if (fqs == NULL) {
+		return NULL;
+	}
+	fqs_flows = kalloc_type(flowq_list_t, fq_if_hash_table_size, Z_WAITOK | Z_ZERO);
+	if (fqs_flows == NULL) {
+		zfree(fq_if_zone, fqs);
+		return NULL;
+	}
+	fqs->fqs_flows = fqs_flows;
+	fqs->fqs_flows_count = fq_if_hash_table_size;
 	fqs->fqs_ifq = ifq;
 	fqs->fqs_ptype = ptype;
 
@@ -373,7 +398,7 @@ void
 fq_if_destroy(fq_if_t *fqs)
 {
 	struct ifnet    *ifp = fqs->fqs_ifq->ifcq_ifp;
-	thread_call_t   tcall = fqs->fqs_pacemaker_tcall;
+	thread_call_t   __single tcall = fqs->fqs_pacemaker_tcall;
 
 	VERIFY(ifp != NULL);
 	ASSERT(tcall != NULL);
@@ -393,6 +418,8 @@ fq_if_destroy(fq_if_t *fqs)
 	fq_if_destroy_grps(fqs);
 
 	fqs->fqs_ifq = NULL;
+
+	kfree_type_counted_by(flowq_list_t, fqs->fqs_flows_count, fqs->fqs_flows);
 	zfree(fq_if_zone, fqs);
 }
 
@@ -553,7 +580,8 @@ fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *head,
 		} else {
 			IFCQ_UNLOCK(ifq);
 			*pdrop = TRUE;
-			pktsched_free_pkt(&pkt);
+			pktsched_drop_pkt(&pkt, DROP_REASON_AQM_FULL, __func__,
+			    __LINE__, 0);
 			switch (ret) {
 			case CLASSQEQ_DROP:
 				ret = ENOBUFS;
@@ -851,7 +879,7 @@ fq_if_dequeue_classq_multi_common(struct ifclassq *ifq, mbuf_svc_class_t svc,
 	flowq_dqlist_t fq_dqlist_head;
 	fq_if_classq_t *fq_cl;
 	fq_grp_tailq_t *grp_list, tmp_grp_list;
-	fq_if_group_t *fq_grp = NULL;
+	fq_if_group_t *__single fq_grp = NULL;
 	fq_if_t *fqs;
 	uint64_t now, next_tx_time = FQ_INVALID_TX_TS;
 	int pri = 0, svc_pri = 0;
@@ -1287,8 +1315,8 @@ fq_if_purge(fq_if_t *fqs)
 	VERIFY(TAILQ_EMPTY(&fqs->fqs_empty_list));
 
 	fqs->fqs_large_flow = NULL;
-	for (i = 0; i < FQ_IF_HASH_TABLE_SIZE; i++) {
-		VERIFY(SLIST_EMPTY(&fqs->fqs_flows[i]));
+	for (i = 0; i < fqs->fqs_flows_count; i++) {
+		VERIFY(LIST_EMPTY(&fqs->fqs_flows[i]));
 	}
 
 	IFCQ_LEN(fqs->fqs_ifq) = 0;
@@ -1328,22 +1356,22 @@ fq_if_purge_sc(fq_if_t *fqs, cqrq_purge_sc_t *req)
 	}
 }
 
-static uint16_t
+static uint32_t
 fq_if_calc_quantum(struct ifnet *ifp)
 {
-	uint16_t quantum;
+	uint32_t quantum;
 
 	switch (ifp->if_family) {
 	case IFNET_FAMILY_ETHERNET:
-		VERIFY((ifp->if_mtu + ETHER_HDR_LEN) <= UINT16_MAX);
-		quantum = (uint16_t)ifp->if_mtu + ETHER_HDR_LEN;
+		VERIFY(ifp->if_mtu <= IF_MAXMTU);
+		quantum = ifp->if_mtu + ETHER_HDR_LEN;
 		break;
 
 	case IFNET_FAMILY_CELLULAR:
 	case IFNET_FAMILY_IPSEC:
 	case IFNET_FAMILY_UTUN:
 		VERIFY(ifp->if_mtu <= UINT16_MAX);
-		quantum = (uint16_t)ifp->if_mtu;
+		quantum = ifp->if_mtu;
 		break;
 
 	default:
@@ -1354,7 +1382,7 @@ fq_if_calc_quantum(struct ifnet *ifp)
 	if ((ifp->if_hwassist & IFNET_TSOF) != 0) {
 		VERIFY(ifp->if_tso_v4_mtu <= UINT16_MAX);
 		VERIFY(ifp->if_tso_v6_mtu <= UINT16_MAX);
-		quantum = (uint16_t)MAX(ifp->if_tso_v4_mtu, ifp->if_tso_v6_mtu);
+		quantum = MAX(ifp->if_tso_v4_mtu, ifp->if_tso_v6_mtu);
 		quantum = (quantum != 0) ? quantum : IF_MAXMTU;
 	}
 
@@ -1658,7 +1686,7 @@ fq_if_request_classq(struct ifclassq *ifq, cqrq_t rq, void *arg)
 		fq_if_purge_sc(fqs, (cqrq_purge_sc_t *)arg);
 		break;
 	case CLASSQRQ_EVENT:
-		fq_if_event(fqs, (cqev_t)arg);
+		fq_if_event(fqs, *(cqev_t *)arg);
 		break;
 	case CLASSQRQ_THROTTLE:
 		fq_if_throttle(fqs, (cqrq_throttle_t *)arg);
@@ -1715,23 +1743,23 @@ fq_if_setup_ifclassq(struct ifclassq *ifq, u_int32_t flags,
 }
 
 fq_t *
-fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, u_int32_t flowid,
-    mbuf_svc_class_t svc_class, u_int64_t now, bool create,
+fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, uint32_t flowid,
+    mbuf_svc_class_t svc_class, uint64_t now, bool create,
     fq_tfc_type_t tfc_type)
 {
 	fq_t *fq = NULL;
 	flowq_list_t *fq_list;
 	fq_if_classq_t *fq_cl;
-	u_int8_t fqs_hash_id;
+	uint32_t fqs_hash_id;
 	u_int8_t scidx;
 
 	scidx = fq_if_service_to_priority(fqs, svc_class);
 
-	fqs_hash_id = FQ_IF_FLOW_HASH_ID(flowid);
+	fqs_hash_id = fq_if_flow_hash_id(flowid);
 
 	fq_list = &fqs->fqs_flows[fqs_hash_id];
 
-	SLIST_FOREACH(fq, fq_list, fq_hashlink) {
+	LIST_FOREACH(fq, fq_list, fq_hashlink) {
 		if (fq->fq_flowhash == flowid &&
 		    fq->fq_sc_index == scidx &&
 		    fq->fq_tfc_type == tfc_type &&
@@ -1752,7 +1780,7 @@ fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, u_int32_t flowid,
 			fq->fq_flags = (FQF_FLOWCTL_CAPABLE | FQF_FRESH_FLOW);
 			fq->fq_updatetime = now + FQ_UPDATE_INTERVAL(fq);
 			fq->fq_next_tx_time = FQ_INVALID_TX_TS;
-			SLIST_INSERT_HEAD(fq_list, fq, fq_hashlink);
+			LIST_INSERT_HEAD(fq_list, fq, fq_hashlink);
 			fq_cl->fcl_stat.fcl_flows_cnt++;
 		}
 		KDBG(AQM_KTRACE_STATS_FLOW_ALLOC,
@@ -1776,12 +1804,8 @@ fq_if_hash_pkt(fq_if_t *fqs, fq_if_group_t *fq_grp, u_int32_t flowid,
 void
 fq_if_destroy_flow(fq_if_t *fqs, fq_if_classq_t *fq_cl, fq_t *fq)
 {
-	u_int8_t hash_id;
-
 	ASSERT((fq->fq_flags & FQF_EMPTY_FLOW) == 0);
-	hash_id = FQ_IF_FLOW_HASH_ID(fq->fq_flowhash);
-	SLIST_REMOVE(&fqs->fqs_flows[hash_id], fq, flowq,
-	    fq_hashlink);
+	LIST_REMOVE(fq, fq_hashlink);
 	IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 	if (__improbable(fq->fq_flags & FQF_FLOWCTL_ON)) {
 		fq_if_flow_feedback(fqs, fq, fq_cl);
@@ -1921,8 +1945,8 @@ fq_if_drop_packet(fq_if_t *fqs, uint64_t now)
 	fq_t *fq = fqs->fqs_large_flow;
 	fq_if_classq_t *fq_cl;
 	pktsched_pkt_t pkt;
-	volatile uint32_t *pkt_flags;
-	uint64_t *pkt_timestamp;
+	volatile uint32_t *__single pkt_flags;
+	uint64_t *__single pkt_timestamp;
 
 	if (fq == NULL) {
 		return;
@@ -2524,7 +2548,7 @@ fq_if_purge_grp(fq_if_t *fqs, fq_if_group_t *grp)
 void
 fq_if_destroy_grps(fq_if_t *fqs)
 {
-	fq_if_group_t *grp;
+	fq_if_group_t *__single grp;
 
 	IFCQ_LOCK_ASSERT_HELD(fqs->fqs_ifq);
 

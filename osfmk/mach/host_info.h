@@ -197,6 +197,28 @@ typedef struct host_priority_info       *host_priority_info_t;
 #define HOST_EXTMOD_INFO64      5       /* External modification stats */
 #define HOST_EXPIRED_TASK_INFO  6       /* Statistics for expired tasks */
 
+#if PRIVATE
+struct vm_compressor_q_lens {
+	uint32_t qcc_segments_available;
+	uint32_t qcc_segment_count;
+	uint32_t qcc_age_count;
+	uint32_t qcc_early_swappedin_count, qcc_regular_swappedin_count, qcc_late_swappedin_count;
+	uint32_t qcc_early_swapout_count, qcc_regular_swapout_count, qcc_late_swapout_count;
+	uint32_t qcc_swapio_count;
+	uint32_t qcc_swappedout_count;
+	uint32_t qcc_swappedout_sparse_count;
+	uint32_t qcc_major_count;
+	uint32_t qcc_filling_count;
+	uint32_t qcc_empty_count;
+	uint32_t qcc_bad_count;
+	uint32_t qcc_minor_count;
+}; /* PRIVATE */
+
+typedef struct vm_compressor_q_lens       vm_compressor_q_lens_data_t;
+#define HOST_VM_COMPRESSOR_Q_LENS 7
+#define VM_COMPRESSOR_Q_LENS_COUNT sizeof(struct vm_compressor_q_lens)/sizeof(integer_t)
+#endif
+
 #ifdef XNU_KERNEL_PRIVATE
 void host_statistics_init(void);
 #endif

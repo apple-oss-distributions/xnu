@@ -36,4 +36,18 @@
 #error architecture not supported
 #endif
 
+/*
+ * Used for when `e` failed a linked list safe unlinking check.
+ * On optimized builds, `e`'s value will be in:
+ * - %rax for Intel
+ * - x8 for arm64
+ * - r8 on armv7
+ */
+__attribute__((cold, noreturn, always_inline))
+static inline void
+ml_fatal_trap_invalid_list_linkage(unsigned long e)
+{
+	ml_fatal_trap_with_value(/* XNU_HARD_TRAP_SAFE_UNLINK */ 0xbffd, e);
+}
+
 #endif /* _MACHINE_TRAP_H */

@@ -50,6 +50,7 @@
  *	Thread management routines
  */
 
+#include <sys/kdebug.h>
 #include <mach/mach_types.h>
 #include <mach/kern_return.h>
 #include <mach/thread_act_server.h>
@@ -115,15 +116,26 @@ TUNABLE(bool, tss_should_crash, "tss_should_crash", true);
 static inline boolean_t
 thread_set_state_allowed(thread_t thread, int flavor)
 {
+	task_t target_task = get_threadtask(thread);
+
+#if DEVELOPMENT || DEBUG
+	/* disable the feature if the boot-arg is disabled. */
+	if (!tss_should_crash) {
+		return TRUE;
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	/* hardened binaries must have entitlement - all others ok */
-	if (task_is_hardened_binary(get_threadtask(thread))
-	    && !(thread->options & TH_IN_MACH_EXCEPTION)        /* Allowed for now - rdar://103085786 */
-	    && FLAVOR_MODIFIES_CORE_CPU_REGISTERS(flavor)       /* only care about locking down PC/LR */
+	if (task_is_hardened_binary(target_task)
+	    && !(thread->options & TH_IN_MACH_EXCEPTION)            /* Allowed for now - rdar://103085786 */
+	    && FLAVOR_MODIFIES_CORE_CPU_REGISTERS(flavor) /* only care about locking down PC/LR */
+#if XNU_TARGET_OS_OSX
+	    && !task_opted_out_mach_hardening(target_task)
+#endif /* XNU_TARGET_OS_OSX */
 #if CONFIG_ROSETTA
-	    && !task_is_translated(get_threadtask(thread))      /* Ignore translated tasks */
+	    && !task_is_translated(target_task)  /* Ignore translated tasks */
 #endif /* CONFIG_ROSETTA */
 	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")
-	    && tss_should_crash
 	    ) {
 		/* fatal crash */
 		mach_port_guard_exception(MACH_PORT_NULL, 0, 0, kGUARD_EXC_THREAD_SET_STATE);
@@ -133,12 +145,16 @@ thread_set_state_allowed(thread_t thread, int flavor)
 
 #if __has_feature(ptrauth_calls)
 	/* Do not allow Fatal PAC exception binaries to set Debug state */
-	if (task_is_pac_exception_fatal(get_threadtask(thread))
+	if (task_is_pac_exception_fatal(target_task)
 	    && machine_thread_state_is_debug_flavor(flavor)
+#if XNU_TARGET_OS_OSX
+	    && !task_opted_out_mach_hardening(target_task)
+#endif /* XNU_TARGET_OS_OSX */
 #if CONFIG_ROSETTA
-	    && !task_is_translated(get_threadtask(thread))      /* Ignore translated tasks */
+	    && !task_is_translated(target_task)      /* Ignore translated tasks */
 #endif /* CONFIG_ROSETTA */
-	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")) {
+	    && !IOCurrentTaskHasEntitlement("com.apple.private.thread-set-state")
+	    ) {
 		/* fatal crash */
 		mach_port_guard_exception(MACH_PORT_NULL, 0, 0, kGUARD_EXC_THREAD_SET_STATE);
 		send_thread_set_state_telemetry();
@@ -270,6 +286,10 @@ thread_terminate(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if (thread->state & TH_IDLE) {
+		panic("idle thread calling thread_terminate!");
+	}
+
 	task = get_threadtask(thread);
 
 	/* Kernel threads can't be terminated without their own cooperation */
@@ -396,6 +416,7 @@ kern_return_t
 thread_suspend(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
+	int32_t thread_user_stop_count;
 
 	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -410,8 +431,14 @@ thread_suspend(thread_t thread)
 	} else {
 		result = KERN_TERMINATED;
 	}
+	thread_user_stop_count = thread->user_stop_count;
 
 	thread_mtx_unlock(thread);
+
+	if (result == KERN_SUCCESS) {
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_IPC, MACH_THREAD_SUSPEND) | DBG_FUNC_NONE,
+		    thread->thread_id, thread_user_stop_count);
+	}
 
 	if (thread != current_thread() && result == KERN_SUCCESS) {
 		thread_wait(thread, FALSE);
@@ -424,6 +451,7 @@ kern_return_t
 thread_resume(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
+	int32_t thread_user_stop_count;
 
 	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -442,8 +470,12 @@ thread_resume(thread_t thread)
 	} else {
 		result = KERN_TERMINATED;
 	}
+	thread_user_stop_count = thread->user_stop_count;
 
 	thread_mtx_unlock(thread);
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_IPC, MACH_THREAD_RESUME) | DBG_FUNC_NONE,
+	    thread->thread_id, thread_user_stop_count, result);
 
 	return result;
 }
@@ -1251,6 +1283,15 @@ thread_debug_return_to_user_ast(
 	    thread->priority_floor_count > 0) {
 		panic("Returning to userspace with floor boost set, thread %p sched_flag %u priority_floor_count %d", thread, thread->sched_flags, thread->priority_floor_count);
 	}
+
+	if (thread->th_vm_faults_disabled) {
+		panic("Returning to userspace with vm faults disabled, thread %p", thread);
+	}
+
+#if CONFIG_EXCLAVES
+	assert3u(thread->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
+#endif /* CONFIG_EXCLAVES */
+
 #endif /* MACH_ASSERT */
 }
 

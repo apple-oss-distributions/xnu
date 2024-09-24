@@ -18,6 +18,7 @@ endif
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
 	if_media.h \
+	if_mib.h \
 	route.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
@@ -34,7 +35,6 @@ DATAFILES= $(sort \
 	if_arp.h \
 	if_dl.h \
 	if_llc.h \
-	if_mib.h \
 	if_types.h \
 	if_var.h \
 	if_var_status.h \
@@ -65,7 +65,7 @@ PRIVATE_DATAFILES = $(sort \
 	if_ipsec.h \
 	if_llreach.h \
 	if_media.h \
-	if_mib.h \
+	if_mib_private.h \
 	if_pflog.h \
 	if_ports_used.h \
 	if_ppp.h \
@@ -90,6 +90,7 @@ PRIVATE_DATAFILES = $(sort \
 	pfkeyv2.h \
 	pfvar.h \
 	pktap.h \
+	droptap.h \
 	ppp_defs.h \
 	radix.h \
 	raw_cb.h \
@@ -124,7 +125,8 @@ INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = net
 
-INSTALL_MI_LCL_LIST = $(sort if_private.h if_var_private.h if_vlan_var.h route_private.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort if_ipsec.h if_mib_private.h if_private.h if_var_private.h \
+	if_vlan_var.h necp.h network_agent.h route_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 

@@ -4,6 +4,7 @@ import uuid
 import base64
 import json
 from importlib import reload
+from importlib.util import find_spec
 from functools import wraps
 from ctypes import c_ulonglong as uint64_t
 from ctypes import c_void_p as voidptr_t
@@ -107,6 +108,7 @@ def lldb_type_summary(types_list):
 
 _LLDB_WARNING = (
     "*********************  LLDB found an exception  *********************\n"
+    "{lldb_version}\n\n"
     "  There has been an uncaught exception.\n"
     "  It could be because the debugger was disconnected.\n"
     "\n"
@@ -197,7 +199,7 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
     """
 
     # Print prologue common to all exceptions handling modes.
-    print(stream.VT.DarkRed + _LLDB_WARNING)
+    print(stream.VT.DarkRed + _LLDB_WARNING.format(lldb_version=lldb.SBDebugger.GetVersionString()))
     print(stream.VT.Bold + stream.VT.DarkGreen + type(exc).__name__ +
           stream.VT.Default + ": {}".format(str(exc)) + stream.VT.Reset)
     print()
@@ -213,7 +215,7 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
         print(_format_exc(exc, stream.VT))
 
         print("version:")
-        print(lldb_run_command("version"))
+        print(lldb.SBDebugger.GetVersionString())
         print()
 
     #
@@ -238,10 +240,10 @@ def diagnostic_report(exc, stream, cmd_name, debug_opts, lldb_log_fname=None):
             tb_fname = "/tmp/tb.{:d}.log".format(itime)
             print("  Adding {}".format(tb_fname))
             with open(tb_fname,"w") as f:
-                f.write("{}: {}\n\n".format(type(exc).__name__, str(exc)))
+                f.write(f"{type(exc).__name__}: {str(exc)}\n\n")
                 f.write(_format_exc(exc, NOVT()))
                 f.write("version:\n")
-                f.write(lldb_run_command("version"))
+                f.write(f"{lldb.SBDebugger.GetVersionString()}\n")
             tar.add(tb_fname, "radar/traceback.log")
             os.unlink(tb_fname)
 
@@ -472,11 +474,11 @@ def GetObjectAtIndexFromArray(array_base, index):
     base_address = array_base_val.GetValueAsUnsigned()
     size = array_base_val.GetType().GetPointeeType().GetByteSize()
     obj_address = base_address + (index * size)
-    obj = kern.GetValueFromAddress(obj_address, array_base_val.GetType())
+    obj = kern.GetValueFromAddress(obj_address, array_base_val.GetType().name)
     return Cast(obj, array_base_val.GetType())
 
 
-kern = None
+kern: KernelTarget = None
 
 def GetLLDBThreadForKernelThread(thread_obj):
     """ Get a reference to lldb.SBThread representation for kernel thread.
@@ -691,14 +693,23 @@ def XnuDebugCommand(cmd_args=None):
             Go through all registered tests and run them
         debug:
             Toggle state of debug configuration flag.
-        profile <path_to_profile> <cmd...>:
+        profile:
             Profile an lldb command and write its profile info to a file.
+            usage: xnudebug profile <path_to_profile> <cmd...>
+
+            e.g. `xnudebug profile /tmp/showallstacks_profile.prof showallstacks
+        coverage:
+            Collect coverage for an lldb command and save it to a file.
+            usage: xnudebug coverage <path_to_coverage_file> <cmd ...>
+
+            e.g. `xnudebug coverage /tmp/showallstacks_coverage.cov showallstacks`
+            An HTML report can then be generated via `coverage html --data-file=<path>` 
     """
     global config
     command_args = cmd_args
     if len(command_args) == 0:
         raise ArgumentError("No command specified.")
-    supported_subcommands = ['debug', 'reload', 'test', 'testall', 'flushcache', 'profile']
+    supported_subcommands = ['debug', 'reload', 'test', 'testall', 'flushcache', 'profile', 'coverage']
     subcommand = GetLongestMatchOption(command_args[0], supported_subcommands, True)
 
     if len(subcommand) == 0:
@@ -753,6 +764,8 @@ def XnuDebugCommand(cmd_args=None):
         return None
 
     if subcommand == 'profile':
+        save_path = command_args[1]
+
         import cProfile, pstats, io
 
         pr = cProfile.Profile()
@@ -761,7 +774,7 @@ def XnuDebugCommand(cmd_args=None):
         lldb.debugger.HandleCommand(" ".join(command_args[2:]))
 
         pr.disable()
-        pr.dump_stats(command_args[1])
+        pr.dump_stats(save_path)
 
         print("")
         print("=" * 80)
@@ -775,9 +788,32 @@ def XnuDebugCommand(cmd_args=None):
         print(s.getvalue().rstrip())
         print("")
 
-        print('Profile info saved to "{}"'.format(command_args[1]))
+        print(f"Profile info saved to \"{save_path}\"")
+
+    if subcommand == 'coverage':
+        coverage_module = find_spec('coverage')
+        if not coverage_module:
+            print("Missing 'coverage' module. Please install it for the interpreter currently running.`")
+            return
+        
+        save_path = command_args[1]
+
+        import coverage
+        cov = coverage.Coverage(data_file=save_path)
+        cov.start()
+
+        lldb.debugger.HandleCommand(" ".join(command_args[2:]))
+
+        cov.stop()
+        cov.save()
+
+        print(cov.report())
+        print(f"Coverage info saved to: \"{save_path}\"")
+        
 
     return False
+
+
 
 @lldb_command('showversion')
 def ShowVersion(cmd_args=None):
@@ -860,9 +896,6 @@ def ParseEmbeddedPanicLog(panic_header, cmd_options={}):
         print("\n %s" % warn_str)
         if panic_log_begin_offset == 0:
             return
-
-    if "-E" in cmd_options:
-        ProcessExtensiblePaniclog(panic_header, cmd_options)
 
     if "-S" in cmd_options:
         if panic_header_flags & xnudefines.EMBEDDED_PANIC_STACKSHOT_SUCCEEDED_FLAG:
@@ -1044,7 +1077,7 @@ def ParseUnknownPanicLog(panic_header, cmd_options={}):
     return
 
 
-@lldb_command('paniclog', 'SME:D:')
+@lldb_command('paniclog', 'SMD:')
 def ShowPanicLog(cmd_args=None, cmd_options={}):
     """ Display the paniclog information
         usage: (lldb) paniclog
@@ -1091,8 +1124,19 @@ def ShowPanicLog(cmd_args=None, cmd_options={}):
     # execute it
     return parser(panic_header, cmd_options)
 
-def ProcessExtensiblePaniclog(panic_header, cmd_options):
+@lldb_command('extpaniclog', 'F:')
+def ProcessExtensiblePaniclog(cmd_args=None, cmd_options={}):
+    """ Write the extensible paniclog information to a file
+        usage: (lldb) paniclog
+        options:
+            -F : Output file name
+    """
 
+    if not "-F" in cmd_options:
+        print("Output file name is needed: Use -F")
+        return
+
+    panic_header = kern.globals.panic_info
     process = LazyTarget().GetProcess()
     error = lldb.SBError()
     EXT_PANICLOG_MAX_SIZE = 32 # 32 is the max size of the string in Data ID
@@ -1124,6 +1168,10 @@ def ProcessExtensiblePaniclog(panic_header, cmd_options):
         ext_uuid = str(uuid.UUID(bytes=uuid_bytes))
 
         idx += sizeof('uuid_t')
+        flags_bytes = ext_paniclog_bytes[idx:idx+sizeof('uint32_t')]
+        flags = int.from_bytes(flags_bytes, 'little')
+
+        idx += sizeof('ext_paniclog_flags_t')
         data_id_bytes = ext_paniclog_bytes[idx:idx + EXT_PANICLOG_MAX_SIZE].split(b'\0')[0]
         data_id = data_id_bytes.decode('utf-8')
         data_id_len = len(data_id_bytes)
@@ -1147,9 +1195,9 @@ def ProcessExtensiblePaniclog(panic_header, cmd_options):
     if logs_processed < no_of_logs:
         print("** Warning: Extensible paniclog might be corrupted **")
 
-    with open(cmd_options['-E'], 'w') as out_file:
+    with open(cmd_options['-F'], 'w') as out_file:
         out_file.write(json.dumps(ext_paniclog))
-        print("Wrote extensible paniclog to %s" % cmd_options['-E'])
+        print("Wrote extensible paniclog to %s" % cmd_options['-F'])
 
     return
 
@@ -1170,6 +1218,7 @@ def __lldb_init_module(debugger, internal_dict):
     _xnu_framework_init = True
     debugger.HandleCommand('type summary add --regex --summary-string "${var%s}" -C yes -p -v "char *\[[0-9]*\]"')
     debugger.HandleCommand('type format add --format hex -C yes uintptr_t')
+    debugger.HandleCommand('type format add --format hex -C yes cpumap_t')
     kern = KernelTarget(debugger)
     if not hasattr(lldb.SBValue, 'GetValueAsAddress'):
         warn_str = "WARNING: lldb version is too old. Some commands may break. Please update to latest lldb."

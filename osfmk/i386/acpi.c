@@ -75,6 +75,7 @@
 
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
+#include <vm/vm_kern_xnu.h>
 #endif
 #include <IOKit/IOPlatformExpert.h>
 #include <sys/kdebug.h>

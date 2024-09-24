@@ -93,7 +93,7 @@ _persona_try_adopting(uid_t persona_id)
 }
 
 T_DECL(persona_with_matching_uid_can_be_adopted,
-    "persona with UID matching at-spawn value can be adopted")
+    "persona with UID matching at-spawn value can be adopted", T_META_TAG_VM_PREFERRED)
 {
 	struct kpersona_info info = {
 		.persona_info_version = PERSONA_INFO_V2,
@@ -115,7 +115,7 @@ T_DECL(persona_with_matching_uid_can_be_adopted,
 }
 
 T_DECL(persona_with_mismatched_uid_cannot_be_adopted,
-    "persona with UID that doesn't match at-spawn value cannot be adopted")
+    "persona with UID that doesn't match at-spawn value cannot be adopted", T_META_TAG_VM_PREFERRED)
 {
 	struct kpersona_info info = {
 		.persona_info_version = PERSONA_INFO_V2,
@@ -180,7 +180,7 @@ T_HELPER_DECL(own_persona_can_be_adopted_impl,
 }
 
 T_DECL(own_persona_can_be_adopted,
-    "process spawned into a persona type that prohibits adoption can adopt own persona")
+    "process spawned into a persona type that prohibits adoption can adopt own persona", T_META_TAG_VM_PREFERRED)
 {
 	_run_helper_in_persona("own_persona_can_be_adopted_impl", PERSONA_MANAGED);
 }

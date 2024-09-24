@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -96,7 +96,15 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <kern/zalloc.h>
+
 #include <net/ethernet.h>
+#include <net/if.h>
+
+#include <netinet6/in6_var.h>
+
+#include <net/if_private.h>
+
+#include <netinet6/in6_var.h>
 
 struct ip6asfrag;
 /*
@@ -131,9 +139,10 @@ struct  ip6_moptions {
 	u_char  im6o_multicast_loop;    /* 1 >= hear sends if a member */
 	u_short im6o_num_memberships;   /* no. memberships this socket */
 	u_short im6o_max_memberships;   /* max memberships this socket */
+	u_short im6o_max_filters;       /* max filters this socket */
 	struct  in6_multi **__counted_by(im6o_max_memberships) im6o_membership;
 	/* group memberships */
-	struct  in6_mfilter *__counted_by(im6o_max_memberships) im6o_mfilters;
+	struct  in6_mfilter *__counted_by(im6o_max_filters) im6o_mfilters;
 	/* source filters */
 	void (*im6o_trace)              /* callback fn for tracing refs */
 	(struct ip6_moptions *, int);
@@ -404,7 +413,7 @@ struct ip6aux {
 #define IPV6_UNSPECSRC          0x01    /* allow :: as the source address */
 #define IPV6_FORWARDING         0x02    /* most of IPv6 header exists */
 #define IPV6_MINMTU             0x04    /* use minimum MTU (IPV6_USE_MIN_MTU) */
-#define IPV6_FLAG_NOSRCIFSEL    0x80    /* bypas source address selection */
+#define IPV6_FLAG_NOSRCIFSEL    0x80    /* bypass source address selection */
 #define IPV6_OUTARGS            0x100   /* has ancillary output info */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -450,7 +459,7 @@ struct ip6_out_args {
 #define IP6OAF_DONT_FRAG                0x00001000      /* Don't fragment */
 #define IP6OAF_REDO_QOSMARKING_POLICY   0x00002000      /* Re-evaluate QOS marking policy */
 #define IP6OAF_R_IFDENIED               0x00004000      /* return flag: denied access to interface */
-#define IP6OAF_MANAGEMENT_ALLOWED       0x00004000      /* access to management to interface */
+#define IP6OAF_MANAGEMENT_ALLOWED       0x00008000      /* access to management interfaces */
 	int             ip6oa_sotc;             /* traffic class for Fastlane DSCP mapping */
 	int             ip6oa_netsvctype;
 	int32_t         qos_marking_gencount;
@@ -538,7 +547,7 @@ extern uint32_t ip6_output_getsrcifscope(struct mbuf *);
 extern uint32_t ip6_output_getdstifscope(struct mbuf *);
 
 extern void ip6_freepcbopts(struct ip6_pktopts *);
-extern int ip6_unknown_opt(u_int8_t *, struct mbuf *, size_t);
+extern int ip6_unknown_opt(uint8_t * __counted_by(optplen) optp, size_t optplen, struct mbuf *, size_t);
 extern char *ip6_get_prevhdr(struct mbuf *, int);
 extern int ip6_nexthdr(struct mbuf *, int, int, int *);
 extern int ip6_lasthdr(struct mbuf *, int, int, int *);
@@ -553,8 +562,8 @@ extern struct ip6aux *ip6_addaux(struct mbuf *);
 extern struct ip6aux *ip6_findaux(struct mbuf *);
 extern void ip6_delaux(struct mbuf *);
 
-extern int ip6_process_hopopts(struct mbuf *, u_int8_t *, int, u_int32_t *,
-    u_int32_t *);
+extern int ip6_process_hopopts(struct mbuf *, u_int8_t *__sized_by(hbhlen) opthead, int hbhlen,
+    u_int32_t *, u_int32_t *);
 extern struct mbuf **ip6_savecontrol_v4(struct inpcb *, struct mbuf *,
     struct mbuf **, int *);
 extern int ip6_savecontrol(struct inpcb *, struct mbuf *, struct mbuf **);
@@ -598,8 +607,8 @@ extern int dest6_input(struct mbuf **, int *, int);
 
 extern struct ifaddr * in6_selectsrc_core_ifa(struct sockaddr_in6 *, struct ifnet *, int);
 extern struct in6_addr * in6_selectsrc_core(struct sockaddr_in6 *,
-    uint32_t, struct ifnet *, int,
-    struct in6_addr *, struct ifnet **, int *, struct ifaddr **, struct route_in6 *);
+    uint32_t, struct ifnet *, int, struct in6_addr *,
+    struct ifnet **, int *, struct ifaddr **, struct route_in6 *, boolean_t);
 extern struct in6_addr *in6_selectsrc(struct sockaddr_in6 *,
     struct ip6_pktopts *, struct inpcb *, struct route_in6 *,
     struct ifnet **, struct in6_addr *, unsigned int, int *);
@@ -610,7 +619,7 @@ extern int in6_selectroute(struct sockaddr_in6 *, struct sockaddr_in6 *,
     struct ip6_out_args *);
 extern int ip6_setpktopts(struct mbuf *control, struct ip6_pktopts *opt,
     struct ip6_pktopts *stickyopt, int uproto);
-extern u_int32_t ip6_randomid(void);
-extern u_int32_t ip6_randomflowlabel(void);
+extern uint32_t ip6_randomid(uint64_t);
+extern uint32_t ip6_randomflowlabel(void);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* !_NETINET6_IP6_VAR_H_ */

@@ -96,7 +96,7 @@
 
 #ifdef BSD_KERNEL_PRIVATE
 extern void in6_losing(struct inpcb *);
-extern int in6_pcbbind(struct inpcb *, struct sockaddr *, struct proc *);
+extern int in6_pcbbind(struct inpcb *, struct sockaddr *, struct sockaddr *, struct proc *);
 extern int in6_pcbconnect(struct inpcb *, struct sockaddr *, struct proc *);
 extern void in6_pcbdetach(struct inpcb *);
 extern void in6_pcbdisconnect(struct inpcb *);
@@ -119,7 +119,7 @@ extern int in6_getsockaddr_s(struct socket *, struct sockaddr_in6 *);
 extern int in6_mapped_sockaddr(struct socket *so, struct sockaddr **nam);
 extern int in6_mapped_peeraddr(struct socket *so, struct sockaddr **nam);
 extern uint8_t in6_selecthlim(struct in6pcb *, struct ifnet *);
-extern int in6_pcbsetport(struct in6_addr *, struct inpcb *,
+extern int in6_pcbsetport(struct in6_addr *, struct sockaddr *, struct inpcb *,
     struct proc *, int);
 extern void init_sin6(struct sockaddr_in6 *sin6, struct mbuf *m);
 extern void in6p_route_copyout(struct inpcb *, struct route_in6 *);

@@ -18,7 +18,7 @@ extern char * testpath;
 
 T_DECL(set_max_addr,
     "Description",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if (!defined(TARGET_OS_MAC) && defined(__arm64__) && defined(__LP64__))
 	int result = 0;

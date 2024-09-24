@@ -17,7 +17,8 @@ T_GLOBAL_META(
 
 mach_port_t thread_get_special_reply_port();
 
-T_DECL(port_stash_turnstile, "stashing knote turnstile on port should take a +1")
+T_DECL(port_stash_turnstile, "stashing knote turnstile on port should take a +1",
+    T_META_TAG_VM_PREFERRED)
 {
 	int kq = kqueue();
 	T_ASSERT_GE(kq, 0, "have a valid kqueue");

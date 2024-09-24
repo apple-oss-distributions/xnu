@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2004-2024 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -33,7 +33,6 @@
 
 #if defined(__arm64__)
 
-#define HIBERNATE_HAVE_MACHINE_HEADER 1
 
 // enable the hibernation exception handler on DEBUG and DEVELOPMENT kernels
 #define HIBERNATE_TRAP_HANDLER (DEBUG || DEVELOPMENT)
@@ -80,6 +79,120 @@ struct IOPolledFileExtent {
 	uint64_t    length;
 };
 typedef struct IOPolledFileExtent IOPolledFileExtent;
+
+/**
+ * The following metadata is exclusively used on SPTM-based systems (where the
+ * SPTM will be the source of this information).
+ *
+ * Any metadata that is passed to XNU (by SPTM) at boot with the intent to be
+ * placed unmodified into the hibernation header is considered "protected". This
+ * metadata will be hashed and signed with the SPTM secret key to ensure that
+ * XNU cannot modify this data when entering it into the header. iBoot will then
+ * validate that the metadata has not been modified during a hibernation boot.
+ */
+typedef struct {
+	/**
+	 * Array of physical address ranges/segments that need to be hashed into the
+	 * hibernation image fully uncompressed and signed separately from the rest
+	 * of the image payloads. This data is either needed by iBoot or hibtext
+	 * when starting the hibernation restore process. iBoot will directly load
+	 * these segments into memory and verify the hmac itself. The hash of the
+	 * memory these segments point to is signed using Key0 (warm data key)
+	 * during the hibernation entry process seeing as the data itself could
+	 * change after boot (which is why the HMAC of the hibernation segments is
+	 * not in this protected metadata structure).
+	 */
+	IOHibernateHibSegment hib_segments[NUM_HIBSEGINFO_SEGMENTS];
+
+	/* Start and end of DRAM. */
+	uint64_t dram_base;
+	uint64_t dram_size;
+
+	/**
+	 * Starting physical address of the Device Tree.
+	 *
+	 * Note that this is the address of the "original" device tree,
+	 * which is also the one that will have been restored once
+	 * hibernation exit is complete. In other words, this has nothing
+	 * to do with the "fresh", "new" device tree that iBoot constructs
+	 * during hibernation exit, and that will only be used for
+	 * hibernation exit itself, and, in very small parts, to update
+	 * the IOKit mirror of the device tree.
+	 */
+	uint64_t dt_start_paddr;
+
+	/* Size of the Device Tree in bytes. See dt_start_paddr for what this means. */
+	uint64_t dt_size;
+
+	/**
+	 * The physical address of the entry point of the SPTM hibtext,
+	 * i.e. the part of the SPTM that iBoot hands off to to perform
+	 * hibernation exit.
+	 */
+	uint64_t sptm_entry_phys;
+
+	/**
+	 * The physical page number at which the hibtext starts, to be mapped for
+	 * execution by early hibtext initialization code, as well as the number
+	 * of pages to map.
+	 */
+	uint32_t sptm_phys_page;
+	uint32_t sptm_page_count;
+
+	/**
+	 * Various region start and end addresses that the hibtext needs
+	 * to properly do its job.
+	 */
+	uint64_t sptm_ro_start_phys;
+	uint64_t xnu_ro_start_phys;
+	uint64_t txm_ro_start_phys;
+	uint64_t sptm_ro_start_virt;
+	uint64_t xnu_ro_start_virt;
+	uint64_t txm_ro_start_virt;
+
+	uint64_t sptm_rm_start_phys;
+	uint64_t sptm_rm_end_phys;
+	uint64_t sptm_le_end_phys;
+
+	/**
+	 * The physical address of the consistent debug page, so that the
+	 * hibtext can participate in this method of telling astris
+	 * whether (and how) it panicked.
+	 */
+	uint64_t consistent_debug_page_phys;
+
+	/**
+	 * The hibtext needs to restore the debug headers in the freshly
+	 * loaded SPTM, using these values.
+	 */
+	uint64_t early_debug_consistent_debug_page;
+	uint64_t global_debug_consistent_debug_page;
+
+	/**
+	 * The virtual slide of the SPTM. This is directly the slide that iBoot has
+	 * chosen to be the slide for the SPTM, and will be used directly by iBoot
+	 * to load boot objects at the same place as before upon hibernation exit.
+	 */
+	uint64_t sptm_slide;
+
+	/**
+	 * The CTRR region bounds.
+	 */
+	uint64_t ctrr_a_begin;
+	uint64_t ctrr_a_end;
+	uint64_t ctrr_c_begin;
+	uint64_t ctrr_c_end;
+	uint64_t ctrr_d_begin;
+	uint64_t ctrr_d_end;
+
+	/**
+	 * Physical address of the top of the page to be used as the stack in
+	 * HIBTEXT. The stack is assumed to be a single page in size, so doing
+	 * `hibtext_stack_top - PAGE_SIZE` will get the start of the page to be used
+	 * as the HIBTEXT stack.
+	 */
+	uint64_t hibtext_stack_top;
+} hib_protected_metadata_t;
 
 struct IOHibernateImageHeader {
 	uint64_t    imageSize;
@@ -144,7 +257,15 @@ struct IOHibernateImageHeader {
 	} __attribute__ ((packed));
 	uint64_t    kernVirtSlide __attribute__ ((packed));
 
-	uint32_t    reserved[47];       // make sizeof == 512
+	/**
+	 * The size of the non-arm64 version of this structure must be 512 bytes (to
+	 * fit into a single disk sector). There is no size constraint for the arm64
+	 * version of this structure.
+	 */
+	uint32_t    reserved[45];
+
+	uint64_t    kernelSlide __attribute__ ((packed));      // gVirtBase - gPhysBase (a different kind of "slide")
+
 	uint32_t    booterTime0;
 	uint32_t    booterTime1;
 	uint32_t    booterTime2;
@@ -161,15 +282,84 @@ struct IOHibernateImageHeader {
 	uint32_t    deviceBlockSize;
 
 #if defined(__arm64__)
+	/**
+	 * Some of these fields are only used on PPL or SPTM-based systems while
+	 * others are used on both. The individual fields cannot be compiled in
+	 * based on any XNU-specific defines since this struct is also used by
+	 * projects which do not have the same defines set (e.g., iBoot/SPTM), so
+	 * we're stuck having all fields on all systems even if some of them go
+	 * unused.
+	 */
+
+	/* Both: Offset into the hibernation image of where to find the hibernation segments. */
 	uint32_t    segmentsFileOffset;
-	IOHibernateHibSegInfo hibSegInfo;
+
+	/* Both: HMAC of all of the data written into the image that isn't a part of image1/2. */
 	uint32_t    imageHeaderHMACSize;
 	uint8_t     imageHeaderHMAC[HIBERNATE_HMAC_SIZE];
+
+	/* Both: HMAC of the IOHibernateHandoff data passed from iBoot to XNU. */
 	uint8_t     handoffHMAC[HIBERNATE_HMAC_SIZE];
+
+	/* Both: HMACs of the wired (image1) and non-wired (image2) memory. */
 	uint8_t     image1PagesHMAC[HIBERNATE_HMAC_SIZE];
 	uint8_t     image2PagesHMAC[HIBERNATE_HMAC_SIZE];
+
+	/**
+	 * PPL-only: List of memory regions that iBoot should restore and validate
+	 * before jumping to hibtext. This struct contains both the list of segments
+	 * as well as an HMAC covering the memory contained in all of the segments.
+	 *
+	 * This is not used on SPTM-based systems seeing as the SPTM wants to pass
+	 * the hibernation segments as "protected" metadata which has its own HMAC
+	 * separate from the HMAC covering the contents of the hibernation segments.
+	 */
+	IOHibernateHibSegInfo hibSegInfo;
+
+	/**
+	 * PPL-only: HMAC of the read-only region. The SPTM treats the HMAC of CTRR
+	 * protected memory as "protected" metadata so these fields are unused on
+	 * the SPTM.
+	 */
 	uint8_t     rorgnHMAC[HIBERNATE_HMAC_SIZE];
 	uint8_t     rorgnSHA256[HIBERNATE_SHA256_SIZE];
+
+	/**
+	 * SPTM-only: Metadata generated by the SPTM at cold boot (before XNU boots
+	 * up) that should be copied wholesale into the hibernation header. This
+	 * metadata has its own HMAC generated by the SPTM using the SPTM secret
+	 * key.
+	 */
+	hib_protected_metadata_t protected_metadata;
+
+	/**
+	 * SPTM-only: HMAC of all of the protected metadata in the above structure.
+	 * This is created using SPTM's secret key and will be verified by iBoot.
+	 */
+	uint8_t     protected_metadata_hmac[HIBERNATE_HMAC_SIZE];
+
+	/**
+	 * HMAC of the memory that is protected by the SPTM's Read-Only Region
+	 * (RORGN). This is created using SPTM's secret key and will be verified by
+	 * hibtext.
+	 */
+	uint8_t     sptm_rorgn_hmac[HIBERNATE_HMAC_SIZE];
+
+	/**
+	 * SPTM-only: HMAC of the memory that is protected by the XNU Read-Only
+	 * Region (RORGN). This is created using XNU's secret key and will be
+	 * verified by hibtext.
+	 */
+	uint8_t     xnu_rorgn_hmac[HIBERNATE_HMAC_SIZE];
+
+	/**
+	 * SPTM-only: HMAC of the contents of the hibernation segments. This is
+	 * created using Key0 (the warm data key) and will be verified by iBoot when
+	 * loading the hibernation segments. This is not a part of the protected
+	 * metadata seeing as the contents of the hibernation segments can change
+	 * (even if the bounds of the segments don't).
+	 */
+	uint8_t     hib_segs_hmac[HIBERNATE_HMAC_SIZE];
 #endif /* defined(__arm64__) */
 
 	uint32_t            fileExtentMapSize;
@@ -346,22 +536,6 @@ typedef struct hibernate_statistics_t hibernate_statistics_t;
 
 #ifdef KERNEL
 
-#ifdef __cplusplus
-
-void     IOHibernateSystemInit(IOPMrootDomain * rootDomain);
-
-IOReturn IOHibernateSystemSleep(void);
-IOReturn IOHibernateIOKitSleep(void);
-IOReturn IOHibernateSystemHasSlept(void);
-IOReturn IOHibernateSystemWake(void);
-IOReturn IOHibernateSystemPostWake(bool now);
-uint32_t IOHibernateWasScreenLocked(void);
-void     IOHibernateSetScreenLocked(uint32_t lockState);
-void     IOHibernateSetWakeCapabilities(uint32_t capability);
-void     IOHibernateSystemRestart(void);
-
-#endif /* __cplusplus */
-
 struct hibernate_scratch {
 	uint8_t  *curPage;
 	size_t    curPagePos;
@@ -502,6 +676,9 @@ hibernate_kernel_entrypoint(uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4);
 void
 hibernate_newruntime_map(void * map, vm_size_t map_size,
     uint32_t system_table_offset);
+
+void
+hibernate_rebuild_vm_structs(void);
 
 
 extern uint32_t    gIOHibernateState;

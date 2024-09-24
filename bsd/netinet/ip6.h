@@ -363,5 +363,8 @@ do {                                                                    \
 #define IP6_EXTHDR_GET0(val, typ, m, off, len)                          \
 	M_STRUCT_GET0(val, typ, m, off, len)
 
+#define IP6_EXT_LEN(ext)                                                \
+	 (((ext)->ip6e_len + 1) << 3)
+
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* !_NETINET_IP6_H_ */

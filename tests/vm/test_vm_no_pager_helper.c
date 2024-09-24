@@ -13,6 +13,9 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
+#include <darwintest.h>
+#include <darwintest_utils.h>
+
 #pragma clang diagnostic ignored "-Wformat-nonliteral"
 
 static int verbose = 0;
@@ -42,7 +45,7 @@ typedef struct {
 #define FUNMOUNT_IMAGE_NAME "TestImage.dmg"
 #define FUNMOUNT_IMAGE MAIN_DIR FUNMOUNT_IMAGE_NAME
 #define FUNMOUNT_VOL_NAME "TestImage"
-#define FUNMOUNT_MOUNT_POINT "/Volumes/" FUNMOUNT_VOL_NAME "/"
+#define FUNMOUNT_MOUNT_POINT MAIN_DIR FUNMOUNT_VOL_NAME "/"
 #define FUNMOUNT_FILE_NAME "test.txt"
 #define FUNMOUNT_FILE FUNMOUNT_MOUNT_POINT FUNMOUNT_FILE_NAME
 // Ungraft
@@ -56,6 +59,40 @@ typedef struct {
 #define HOST_VOL_NAME "TestNoPagerHostVol"
 #define GRAFT_VOL_NAME "TestNoPagerGraftVol"
 
+
+/*
+ * No system(3c) on watchOS, so provide our own.
+ * returns -1 if fails to run
+ * returns 0 if process exits normally.
+ * returns +n if process exits due to signal N
+ */
+static int
+alt_system(const char *command)
+{
+	pid_t pid;
+	int status = 0;
+	int signal = 0;
+	int ret;
+	const char *argv[] = {
+		"/bin/sh",
+		"-c",
+		command,
+		NULL
+	};
+
+	if (dt_launch_tool(&pid, (char **)(void *)argv, FALSE, NULL, NULL)) {
+		return -1;
+	}
+
+	ret = dt_waitpid(pid, &status, &signal, 100);
+	if (signal != 0) {
+		return signal;
+	} else if (status != 0) {
+		return status;
+	}
+	return 0;
+}
+
 static int
 my_system(const char* cmd)
 {
@@ -63,7 +100,8 @@ my_system(const char* cmd)
 
 	snprintf(quiet_cmd, sizeof(quiet_cmd), "%s%s", cmd, verbose ? "" : " > /dev/null");
 	PRINTF("Execute: '%s'\n", quiet_cmd);
-	return system(quiet_cmd);
+
+	return alt_system(quiet_cmd);
 }
 
 static int
@@ -107,9 +145,9 @@ execute_and_get_output(char* buf, size_t len, const char* fmt, ...)
 }
 
 static int
-disk_image_attach(const char* image_path)
+disk_image_attach(const char* image_path, const char* mount_point)
 {
-	return exec_cmd("diskimagetool attach %s", image_path);
+	return exec_cmd("diskutil image attach --mountPoint \"%s\" %s", mount_point, image_path);
 }
 
 static int
@@ -215,8 +253,9 @@ read_and_cause_ungraft_crash(char* file_path, __unused char* unused)
 static void
 setup_unmount_image(char* disk_name, size_t len)
 {
-	ASSERT(!exec_cmd("hdiutil create -size 100m -fs apfs -volname %s %s", FUNMOUNT_VOL_NAME, FUNMOUNT_IMAGE), "Disk image creation failed (%s)\n", FUNMOUNT_IMAGE);
-	ASSERT(!disk_image_attach(FUNMOUNT_IMAGE), "Attaching and mounting disk image during creation failed (%s)\n", FUNMOUNT_IMAGE);
+	ASSERT(!exec_cmd("diskutil image create blank --size 10m --volumeName %s %s", FUNMOUNT_VOL_NAME, FUNMOUNT_IMAGE), "Disk image creation failed (%s)\n", FUNMOUNT_IMAGE);
+	ASSERT(!exec_cmd("mkdir -p %s", FUNMOUNT_MOUNT_POINT), "Unable to mkdir mount point");
+	ASSERT(!disk_image_attach(FUNMOUNT_IMAGE, FUNMOUNT_MOUNT_POINT), "Attaching and mounting disk image during creation failed (%s)\n", FUNMOUNT_IMAGE);
 	execute_and_get_output(disk_name, len, "diskutil list | grep %s | awk {'print $7'}", FUNMOUNT_VOL_NAME);
 	ASSERT(strlen(disk_name) != 0, "disk_name is empty");
 	ASSERT(!my_system("echo 'abcdefghijk' > " FUNMOUNT_FILE), "Creating file '%s' failed.\n", FUNMOUNT_FILE);
@@ -229,12 +268,13 @@ forced_unmount_crash_test(void)
 	char device_identifier[128];
 
 	setup_unmount_image(device_identifier, sizeof(device_identifier));
-	ASSERT(!disk_image_attach(FUNMOUNT_IMAGE), "attaching and mounting image '%s' failed\n", FUNMOUNT_IMAGE);
+	ASSERT(!disk_image_attach(FUNMOUNT_IMAGE, FUNMOUNT_MOUNT_POINT), "attaching and mounting image '%s' failed\n", FUNMOUNT_IMAGE);
 	fork_and_crash(read_and_cause_unmount_crash, FUNMOUNT_FILE, device_identifier);
 
 	// Cleanup
 	my_system("rm -f " FUNMOUNT_IMAGE);
 	disk_image_eject(device_identifier);
+	rmdir(FUNMOUNT_MOUNT_POINT);
 }
 
 static void
@@ -246,10 +286,10 @@ create_disk_image(const char* image_path, const char* volume_name, bool use_gpt,
 	char partition_name[32];
 
 	// Create image
-	ASSERT(!exec_cmd("diskimagetool create -size 100m -fs none %s", image_path), "Image creation at `%s` failed\n", image_path);
+	ASSERT(!exec_cmd("diskutil image create blank --size 10m --volumeName %s %s", volume_name, image_path), "Image creation at `%s` failed\n", image_path);
 
 	// Attach
-	ASSERT(!execute_and_get_output(buf, sizeof(buf), "diskimagetool attach -nomount %s", image_path), "Attaching image (nomount) at %s failed\n", image_path);
+	ASSERT(!execute_and_get_output(buf, sizeof(buf), "diskutil image attach --noMount %s | head -1 | awk {'print $1'}", image_path), "Attaching image (nomount) at %s failed\n", image_path);
 	ASSERT(strstr(buf, "/dev/disk"), "Didn't get expected device identifier after attaching. Got: `%s`\n", buf);
 	if ((end_ptr = strchr(buf, '\n'))) {
 		*end_ptr = '\0';
@@ -317,8 +357,8 @@ cleanup_ungraft(char* graft_disk_identifier, char* host_disk_identifier)
 {
 	disk_image_eject(graft_disk_identifier);
 	disk_image_eject(host_disk_identifier);
-	my_system("rm -rf " GRAFT_TMP_MOUNT_POINT);
-	my_system("rm -rf " HOST_MOUNT_POINT);
+	rmdir(GRAFT_TMP_MOUNT_POINT);
+	rmdir(HOST_MOUNT_POINT);
 	my_system("rm -f " HOST_DMG);
 }
 
@@ -358,12 +398,9 @@ main(int argc, char** argv)
 
 	printf("running test %d\n", test_to_run);
 
-	if (argc > 2) {
-		printf("%s", argv[2]);
-	}
-
 	if (argc > 2 && strcmp(argv[2], "-v") == 0) {
 		verbose = 1;
+		printf("Running in verbose mode\n");
 	}
 
 	switch (test_to_run) {

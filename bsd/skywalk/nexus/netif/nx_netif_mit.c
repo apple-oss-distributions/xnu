@@ -158,7 +158,8 @@ nx_netif_mit_init(struct nx_netif *nif, const struct ifnet *ifp,
 #pragma unused(nif)
 	thread_precedence_policy_data_t info;
 	__unused kern_return_t kret;
-	char oid_name[24];
+	char oid_name_buf[24];
+	const char *__null_terminated oid_name = NULL;
 
 	_CASSERT(sizeof(mit_cfg_tbl_native_cellular) <=
 	    sizeof(((struct nx_netif_mit *)0)->mit_tbl));
@@ -174,7 +175,7 @@ nx_netif_mit_init(struct nx_netif *nif, const struct ifnet *ifp,
 			    "skywalk_mit_%s_tx_%u", ifp->if_xname,
 			    kr->ckr_ring_id);
 		}
-		(void) snprintf(oid_name, sizeof(oid_name),
+		oid_name = tsnprintf(oid_name_buf, sizeof(oid_name_buf),
 		    "tx_%u", kr->ckr_ring_id);
 	} else {
 		if (simple) {
@@ -185,7 +186,7 @@ nx_netif_mit_init(struct nx_netif *nif, const struct ifnet *ifp,
 			    "skywalk_mit_%s_rx_%u", ifp->if_xname,
 			    kr->ckr_ring_id);
 		}
-		(void) snprintf(oid_name, sizeof(oid_name),
+		oid_name = tsnprintf(oid_name_buf, sizeof(oid_name_buf),
 		    "rx_%u", kr->ckr_ring_id);
 	}
 
@@ -504,10 +505,11 @@ static void
 nx_netif_mit_thread_func(void *v, wait_result_t w)
 {
 #pragma unused(w)
-	struct nx_netif_mit *mit = v;
+	struct nx_netif_mit *__single mit = v;
 
 	ASSERT(mit->mit_thread == current_thread());
-	thread_set_thread_name(current_thread(), mit->mit_name);
+	thread_set_thread_name(current_thread(),
+	    __unsafe_null_terminated_from_indexable(mit->mit_name));
 
 	MIT_SPIN_LOCK(mit);
 	VERIFY(!(mit->mit_flags & (NETIF_MITF_READY | NETIF_MITF_RUNNING)));
@@ -533,7 +535,7 @@ static void
 nx_netif_mit_s_thread_cont(void *v, wait_result_t wres)
 {
 	struct __kern_channel_ring *kr;
-	struct nx_netif_mit *mit = v;
+	struct nx_netif_mit *__single mit = v;
 	struct netif_stats *nifs;
 	int irq_stat, error;
 
@@ -640,7 +642,7 @@ static void
 nx_netif_mit_thread_cont(void *v, wait_result_t wres)
 {
 	struct __kern_channel_ring *kr;
-	struct nx_netif_mit *mit = v;
+	struct nx_netif_mit *__single mit = v;
 	struct netif_stats *nifs;
 	int irq_stat;
 

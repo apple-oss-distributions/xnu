@@ -41,9 +41,20 @@ struct thread_group;
 #endif
 
 #if CONFIG_THREAD_GROUPS
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * In order to include this header file into test files such as
+ * tests/sched/thread_group_flags.c, use the KERNEL guard to remove includes
+ * which we do not want to compile as part of the userspace tests.
+ */
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if KERNEL
 #include <kern/assert.h>
 #include <kern/queue.h>
 #include <machine/machine_routines.h>
+#endif /* KERNEL */
 
 #define THREAD_GROUP_MAX                (CONFIG_TASK_MAX + 10)
 #define THREAD_GROUP_MAXNAME            (32)
@@ -73,7 +84,12 @@ struct thread_group;
 #define THREAD_GROUP_FLAGS_MANAGED              0x200
 #define THREAD_GROUP_FLAGS_STRICT_TIMERS        0x400
 #define THREAD_GROUP_FLAGS_GAME_MODE            0x800
+#define THREAD_GROUP_FLAGS_CARPLAY_MODE         0x1000
 
+#if defined(XNU_TARGET_OS_XR)
+/* Keep around for backwards compatibility. */
+#define THREAD_GROUP_FLAGS_UXM          0x200
+#endif /* XNU_TARGET_OS_XR */
 
 #define THREAD_GROUP_FLAGS_EXCLUSIVE ( \
     THREAD_GROUP_FLAGS_EFFICIENT |     \
@@ -92,7 +108,8 @@ static_assert(
     THREAD_GROUP_FLAGS_UI_APP |     \
     THREAD_GROUP_FLAGS_MANAGED |    \
     THREAD_GROUP_FLAGS_STRICT_TIMERS | \
-    THREAD_GROUP_FLAGS_GAME_MODE )
+    THREAD_GROUP_FLAGS_GAME_MODE | \
+    THREAD_GROUP_FLAGS_CARPLAY_MODE)
 
 static_assert(
 	(THREAD_GROUP_FLAGS_SHARED & THREAD_GROUP_EXCLUSIVE_FLAGS_MASK) == 0,

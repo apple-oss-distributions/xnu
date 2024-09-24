@@ -132,9 +132,10 @@ struct flow_owner {
 	 * port, so this structure is effectively managing the flow advisory
 	 * indices for a port.
 	 */
-	bitmap_t                *fo_flowadv_bmap;
+	bitmap_t                *__counted_by(fo_num_flowadv_bmaps)fo_flowadv_bmap;
 	uint32_t                fo_flowadv_max;
 	uint32_t                fo_num_flowadv;
+	uint32_t                fo_num_flowadv_bmaps;
 
 	/* for debugging */
 	char                    fo_name[FLOW_PROCESS_NAME_LENGTH];
@@ -244,8 +245,12 @@ struct kern_flow_demux_pattern {
 TAILQ_HEAD(flow_entry_list, flow_entry);
 
 #define FLOW_PROC_FLAG_GSO        0x0001
-typedef void (*flow_action_t)(struct nx_flowswitch *fsw, struct flow_entry *fe,
+typedef void (*flow_tx_action_t)(struct nx_flowswitch *fsw, struct flow_entry *fe,
     uint32_t flags);
+
+#define FLOW_PROC_FLAG_FRAGMENTS  0x0001
+typedef void (*flow_rx_action_t)(struct nx_flowswitch *fsw, struct flow_entry *fe,
+    struct pktq *pkts, uint32_t rx_bytes, uint32_t flags);
 
 struct flow_entry {
 	/**** Common Group ****/
@@ -263,11 +268,20 @@ struct flow_entry {
 	uint8_t                 fe_transport_protocol;
 
 	/**** Rx Group ****/
+	/*
+	 * If multiple threads end up working on the same flow entry, the one
+	 * that reaches rx_flow_batch_packets first will be responsible for
+	 * sending up all the packets from different RX completion queues.
+	 * fe_rx_worker_tid marks its thread ID. Other threads only enqueues their
+	 * packets into fe_rx_pktq but do not call fe_rx_process on the flow entry.
+	 */
 	uint16_t                fe_rx_frag_count;
 	uint32_t                fe_rx_pktq_bytes;
+	decl_lck_mtx_data(, fe_rx_pktq_lock);
 	struct pktq             fe_rx_pktq;
 	TAILQ_ENTRY(flow_entry) fe_rx_link;
-	flow_action_t           fe_rx_process;
+	flow_rx_action_t        fe_rx_process;
+	uint64_t                fe_rx_worker_tid;
 
 	/*
 	 * largest allocated packet size.
@@ -282,7 +296,7 @@ struct flow_entry {
 	uint32_t                fe_tx_frag_id;
 	struct pktq             fe_tx_pktq;
 	TAILQ_ENTRY(flow_entry) fe_tx_link;
-	flow_action_t           fe_tx_process;
+	flow_tx_action_t        fe_tx_process;
 
 	uuid_t                  fe_eproc_uuid __sk_aligned(8);
 	flowadv_idx_t           fe_adv_idx;
@@ -333,8 +347,8 @@ struct flow_entry {
 	int16_t                         fe_child_count;
 #endif // DEVELOPMENT || DEBUG
 	uint8_t                         fe_demux_pattern_count;
-	struct kern_flow_demux_pattern  *fe_demux_patterns;
-	uint8_t                         *fe_demux_pkt_data;
+	struct kern_flow_demux_pattern  *__counted_by(fe_demux_pattern_count)fe_demux_patterns;
+	uint8_t                         *__sized_by_or_null(FLOW_DEMUX_MAX_LEN) fe_demux_pkt_data;
 };
 
 /* valid values for fe_flags */
@@ -579,20 +593,20 @@ struct flow_mgr {
 	size_t   fm_flow_hash_count[FKMASK_IDX_MAX]; /* # of flows with mask */
 	uint16_t fm_flow_hash_masks[FKMASK_IDX_MAX];
 
-	void            *fm_owner_buckets __sized_by(fm_owner_bucket_tot_sz);     /* cache-aligned fob */
-	const size_t    fm_owner_buckets_cnt;  /* total # of fobs */
-	const size_t    fm_owner_bucket_sz;    /* size of each fob */
-	const size_t    fm_owner_bucket_tot_sz; /* allocated size of each fob */
+	void      *__sized_by(fm_owner_bucket_tot_sz) fm_owner_buckets;     /* cache-aligned fob */
+	size_t    fm_owner_buckets_cnt;  /* total # of fobs */
+	size_t    fm_owner_bucket_sz;    /* size of each fob */
+	size_t    fm_owner_bucket_tot_sz; /* allocated size of each fob */
 
-	void            *fm_route_buckets __sized_by(fm_route_bucket_tot_sz);     /* cache-aligned frb */
-	const size_t    fm_route_buckets_cnt;  /* total # of frb */
-	const size_t    fm_route_bucket_sz;    /* size of each frb */
-	const size_t    fm_route_bucket_tot_sz; /* allocated size of each frb */
+	void      *__sized_by(fm_route_bucket_tot_sz) fm_route_buckets;     /* cache-aligned frb */
+	size_t    fm_route_buckets_cnt;  /* total # of frb */
+	size_t    fm_route_bucket_sz;    /* size of each frb */
+	size_t    fm_route_bucket_tot_sz; /* allocated size of each frb */
 
-	void            *fm_route_id_buckets __sized_by(fm_route_id_bucket_tot_sz);    /* cache-aligned frib */
-	const size_t    fm_route_id_buckets_cnt; /* total # of frib */
-	const size_t    fm_route_id_bucket_sz;   /* size of each frib */
-	const size_t    fm_route_id_bucket_tot_sz; /* allocated size of each frib */
+	void      *__sized_by(fm_route_id_bucket_tot_sz) fm_route_id_buckets;    /* cache-aligned frib */
+	size_t    fm_route_id_buckets_cnt; /* total # of frib */
+	size_t    fm_route_id_bucket_sz;   /* size of each frib */
+	size_t    fm_route_id_bucket_tot_sz; /* allocated size of each frib */
 };
 
 /*
@@ -939,7 +953,8 @@ extern void flow_namespace_half_close(netns_token *token);
 extern void flow_namespace_withdraw(netns_token *);
 extern void flow_namespace_destroy(netns_token *);
 
-extern struct flow_owner_bucket *flow_owner_buckets_alloc(size_t, size_t *, size_t *);
+extern struct flow_owner_bucket *__sized_by(*tot_sz)
+flow_owner_buckets_alloc(size_t, size_t *, size_t * tot_sz);
 extern void flow_owner_buckets_free(struct flow_owner_bucket *, size_t);
 extern void flow_owner_bucket_init(struct flow_owner_bucket *);
 extern void flow_owner_bucket_destroy(struct flow_owner_bucket *);
@@ -999,24 +1014,26 @@ extern int flow_pkt_track(struct flow_entry *, struct __kern_packet *, bool);
 extern boolean_t flow_track_tcp_want_abort(struct flow_entry *);
 extern void flow_track_abort_tcp( struct flow_entry *fe,
     struct __kern_packet *in_pkt, struct __kern_packet *rst_pkt);
-extern void flow_track_abort_quic(struct flow_entry *fe, uint8_t *token);
+extern void flow_track_abort_quic(struct flow_entry *fe,
+    uint8_t *__counted_by(QUIC_STATELESS_RESET_TOKEN_SIZE)token);
 
 extern void fsw_host_rx(struct nx_flowswitch *, struct pktq *);
 extern void fsw_host_sendup(struct ifnet *, struct mbuf *, struct mbuf *,
     uint32_t, uint32_t);
 
 extern void flow_rx_agg_tcp(struct nx_flowswitch *fsw, struct flow_entry *fe,
-    uint32_t flags);
+    struct pktq *rx_pkts, uint32_t rx_bytes, uint32_t flags);
 
 extern void flow_route_init(void);
 extern void flow_route_fini(void);
-extern struct flow_route_bucket *flow_route_buckets_alloc(size_t, size_t *, size_t *);
+extern struct flow_route_bucket *__sized_by(*tot_sz)
+flow_route_buckets_alloc(size_t, size_t *, size_t * tot_sz);
 extern void flow_route_buckets_free(struct flow_route_bucket *, size_t);
 extern void flow_route_bucket_init(struct flow_route_bucket *);
 extern void flow_route_bucket_destroy(struct flow_route_bucket *);
 extern void flow_route_bucket_purge_all(struct flow_route_bucket *);
-extern struct flow_route_id_bucket *flow_route_id_buckets_alloc(size_t,
-    size_t *, size_t *);
+extern struct flow_route_id_bucket *__sized_by(*tot_sz)
+flow_route_id_buckets_alloc(size_t, size_t *, size_t * tot_sz);
 extern void flow_route_id_buckets_free(struct flow_route_id_bucket *, size_t);
 extern void flow_route_id_bucket_init(struct flow_route_id_bucket *);
 extern void flow_route_id_bucket_destroy(struct flow_route_id_bucket *);
@@ -1045,8 +1062,8 @@ extern struct flow_stats *flow_stats_alloc(boolean_t cansleep);
 #if SK_LOG
 #define FLOWKEY_DBGBUF_SIZE   256
 #define FLOWENTRY_DBGBUF_SIZE   512
-extern char *fk_as_string(const struct flow_key *fk, char *, size_t);
-extern char *fe_as_string(const struct flow_entry *fe, char *, size_t);
+extern char *fk_as_string(const struct flow_key *fk, char *__counted_by(dsz)dst, size_t dsz);
+extern char *fe_as_string(const struct flow_entry *fe, char *__counted_by(dsz)dst, size_t dsz);
 #endif /* SK_LOG */
 __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */

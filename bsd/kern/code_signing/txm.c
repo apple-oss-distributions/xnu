@@ -27,7 +27,7 @@
 #include <mach/vm_param.h>
 #include <mach/vm_map.h>
 #include <mach/shared_region.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
@@ -44,7 +44,9 @@
 #include <sys/proc.h>
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <sys/sysctl.h>
 #include <uuid/uuid.h>
+#include <IOKit/IOLib.h>
 #include <IOKit/IOBSD.h>
 
 #if CONFIG_SPTM
@@ -177,6 +179,14 @@ txm_parse_return(
 	case kTXMReturnNotFound:
 		return KERN_NOT_FOUND;
 
+	case kTXMReturnNotSupported:
+		return KERN_NOT_SUPPORTED;
+
+#if kTXMKernelAPIVersion >= 6
+	case kTXMReturnTryAgain:
+		return KERN_OPERATION_TIMED_OUT;
+#endif
+
 	default:
 		return KERN_FAILURE;
 	}
@@ -187,19 +197,25 @@ txm_print_return(
 	TXMKernelSelector_t selector,
 	TXMReturn_t txm_ret)
 {
+	/*
+	 * We specifically use IOLog instead of printf since printf is compiled out on
+	 * RELEASE kernels. We want to ensure that errors from TXM are captured within
+	 * sysdiagnoses from the field.
+	 */
+
 	if (txm_ret.returnCode == kTXMSuccess) {
 		return;
 	} else if (txm_ret.returnCode == kTXMReturnTrustCache) {
-		printf("TXM [Error]: TrustCache: selector: %u | 0x%02X | 0x%02X | %u\n",
+		IOLog("TXM [Error]: TrustCache: selector: %u | 0x%02X | 0x%02X | %u\n",
 		    selector, txm_ret.tcRet.component, txm_ret.tcRet.error, txm_ret.tcRet.uniqueError);
 	} else if (txm_ret.returnCode == kTXMReturnCodeSignature) {
-		printf("TXM [Error]: CodeSignature: selector: %u | 0x%02X | 0x%02X | %u\n",
+		IOLog("TXM [Error]: CodeSignature: selector: %u | 0x%02X | 0x%02X | %u\n",
 		    selector, txm_ret.csRet.component, txm_ret.csRet.error, txm_ret.csRet.uniqueError);
 	} else if (txm_ret.returnCode == kTXMReturnCodeErrno) {
-		printf("TXM [Error]: Errno: selector: %u | %d\n",
+		IOLog("TXM [Error]: Errno: selector: %u | %d\n",
 		    selector, txm_ret.errnoRet);
 	} else {
-		printf("TXM [Error]: selector: %u | %u\n",
+		IOLog("TXM [Error]: selector: %u | %u\n",
 		    selector, txm_ret.returnCode);
 	}
 }
@@ -537,6 +553,7 @@ txm_print_logs(void)
 SECURITY_READ_ONLY_LATE(const TXMReadOnlyData_t*) txm_ro_data = NULL;
 SECURITY_READ_ONLY_LATE(const TXMStatistics_t*) txm_stats = NULL;
 SECURITY_READ_ONLY_LATE(const CSConfig_t*) txm_cs_config = NULL;
+SECURITY_READ_ONLY_LATE(CSRestrictedModeState_t*) txm_restricted_mode_state = NULL;
 
 SECURITY_READ_ONLY_LATE(bool*) developer_mode_enabled = NULL;
 static SECURITY_READ_ONLY_LATE(bool) code_signing_enabled = true;
@@ -590,6 +607,11 @@ get_code_signing_info(void)
 
 	/* Set txm_cs_config based on read-only data */
 	txm_cs_config = &txm_ro_data->CSConfiguration;
+
+	/* Only setup when REM is supported on the platform */
+	if (txm_cs_config->systemPolicy->featureSet.restrictedExecutionMode == true) {
+		txm_restricted_mode_state = txm_ro_data->restrictedModeState;
+	}
 }
 
 static void
@@ -609,6 +631,11 @@ set_shared_region_base_address(void)
 void
 code_signing_init(void)
 {
+#if kTXMKernelAPIVersion >= 6
+	printf("libTXM_KernelVersion: %u\n", libTrustedExecutionMonitor_KernelVersion);
+	printf("libTXM_Image4Version: %u\n", libTrustedExecutionMonitor_Image4Version);
+#endif
+
 	/* Setup the thread stacks used by TXM */
 	setup_thread_stacks();
 
@@ -640,13 +667,46 @@ code_signing_init(void)
 void
 txm_enter_lockdown_mode(void)
 {
-#if kTXMKernelAPIVersion >= 3
 	txm_call_t txm_call = {
 		.selector = kTXMKernelSelectorEnterLockdownMode,
 		.failure_fatal = true,
 	};
-
 	txm_kernel_call(&txm_call);
+}
+
+kern_return_t
+txm_secure_channel_shared_page(
+	uint64_t *secure_channel_phys,
+	size_t *secure_channel_size)
+{
+#if kTXMKernelAPIVersion >= 5
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorGetSecureChannelAddr,
+		.num_output_args = 2
+	};
+
+	kern_return_t ret = txm_kernel_call(&txm_call);
+	if (ret == KERN_NOT_SUPPORTED) {
+		return ret;
+	} else if (ret != KERN_SUCCESS) {
+		panic("unexpected failure for TXM secure channel: %d", ret);
+	}
+
+	/* Return the physical address */
+	if (secure_channel_phys != NULL) {
+		*secure_channel_phys = txm_call.return_words[0];
+	}
+
+	/* Return the size */
+	if (secure_channel_size != NULL) {
+		*secure_channel_size = txm_call.return_words[1];
+	}
+
+	return KERN_SUCCESS;
+#else
+	(void)secure_channel_phys;
+	(void)secure_channel_size;
+	return KERN_NOT_SUPPORTED;
 #endif
 }
 
@@ -662,6 +722,59 @@ txm_toggle_developer_mode(bool state)
 	};
 
 	txm_kernel_call(&txm_call, state);
+}
+
+#pragma mark Restricted Execution Mode
+
+kern_return_t
+txm_rem_enable(void)
+{
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorEnableRestrictedMode
+	};
+	return txm_kernel_call(&txm_call);
+}
+
+kern_return_t
+txm_rem_state(void)
+{
+	if (txm_restricted_mode_state == NULL) {
+		return KERN_NOT_SUPPORTED;
+	}
+
+	CSReturn_t cs_ret = restrictedModeStatus(txm_restricted_mode_state);
+	if (cs_ret.error == kCSReturnSuccess) {
+		return KERN_SUCCESS;
+	}
+	return KERN_DENIED;
+}
+
+#pragma mark Device State
+
+void
+txm_update_device_state(void)
+{
+#if kTXMKernelAPIVersion >= 6
+	txm_call_t txm_call = {
+		.selector = kTXMSelectorUpdateDeviceState,
+		.failure_fatal = true
+	};
+	txm_kernel_call(&txm_call);
+#endif
+}
+
+void
+txm_complete_security_boot_mode(
+	__unused uint32_t security_boot_mode)
+{
+#if kTXMKernelAPIVersion >= 6
+	txm_call_t txm_call = {
+		.selector = kTXMSelectorCompleteSecurityBootMode,
+		.num_input_args = 1,
+		.failure_fatal = true
+	};
+	txm_kernel_call(&txm_call, security_boot_mode);
+#endif
 }
 
 #pragma mark Code Signing and Provisioning Profiles
@@ -722,6 +835,25 @@ exit:
 	}
 
 	return ret;
+}
+
+kern_return_t
+txm_trust_provisioning_profile(
+	__unused void *profile_obj,
+	__unused const void *sig_data,
+	__unused size_t sig_size)
+{
+#if kTXMKernelAPIVersion >= 7
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorTrustProvisioningProfile,
+		.num_input_args = 3
+	};
+
+	return txm_kernel_call(&txm_call, profile_obj, sig_data, sig_size);
+#else
+	/* The TXM selector hasn't yet landed */
+	return KERN_SUCCESS;
+#endif
 }
 
 kern_return_t
@@ -1131,6 +1263,21 @@ txm_associate_code_signature(
 		region_size,
 		region_offset);
 
+	while (ret == KERN_OPERATION_TIMED_OUT) {
+		/*
+		 * There is no easy method to sleep in the kernel. This operation has the
+		 * potential to burn CPU cycles, but that is alright since we don't actually
+		 * ever expect to enter this case on legitimately operating systems.
+		 */
+		ret = txm_kernel_call(
+			&txm_call,
+			txm_addr_space,
+			sig_obj,
+			adjusted_region_addr,
+			region_size,
+			region_offset);
+	}
+
 	/*
 	 * If the main region wasn't set on the address space before hand, but this new
 	 * call into TXM was successful and sets the main region, it means this signature
@@ -1298,6 +1445,15 @@ txm_get_trust_level_kdp(
 		*trust_level = txm_trust_level;
 	}
 	return KERN_SUCCESS;
+}
+
+kern_return_t
+txm_get_jit_address_range_kdp(
+	pmap_t pmap,
+	uintptr_t *jit_region_start,
+	uintptr_t *jit_region_end)
+{
+	return pmap_txm_get_jit_address_range_kdp(pmap, jit_region_start, jit_region_end);
 }
 
 kern_return_t
@@ -1573,8 +1729,6 @@ _txm_image4_monitor_trap_supported(
 	switch (selector) {
 #if kTXMImage4APIVersion >= 1
 	case IMAGE4_CS_TRAP_KMOD_SET_RELEASE_TYPE:
-	case IMAGE4_CS_TRAP_KMOD_PIN_ROOT:
-	case IMAGE4_CS_TRAP_KMOD_EVALUATE_TRUST:
 	case IMAGE4_CS_TRAP_NONCE_SET:
 	case IMAGE4_CS_TRAP_NONCE_ROLL:
 	case IMAGE4_CS_TRAP_IMAGE_ACTIVATE:
@@ -1613,10 +1767,9 @@ txm_image4_reclaim_region(
 errno_t
 txm_image4_monitor_trap(
 	image4_cs_trap_t selector,
-	__unused const void *input_data,
-	__unused size_t input_size)
+	const void *input_data,
+	size_t input_size)
 {
-#if kTXMKernelAPIVersion >= 2
 	txm_call_t txm_call = {
 		.selector = kTXMKernelSelectorImage4Dispatch,
 		.num_input_args = 5,
@@ -1642,10 +1795,7 @@ txm_image4_monitor_trap(
 
 	/* Return a generic error */
 	return EPERM;
-#else
-	printf("image4 dispatch: traps not supported: %llu\n", selector);
-	return ENOSYS;
-#endif
 }
+
 
 #endif /* CONFIG_SPTM */

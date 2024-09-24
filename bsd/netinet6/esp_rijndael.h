@@ -67,10 +67,16 @@ int esp_cbc_decrypt_aes(struct mbuf *, size_t, struct secasvar *,
 int
     esp_cbc_encrypt_aes(struct mbuf *, size_t, size_t, struct secasvar *,
     const struct esp_algorithm *, int);
-int esp_aes_cbc_encrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-int esp_aes_cbc_decrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
+int esp_aes_cbc_encrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(out_ivlen), size_t out_ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+int esp_aes_cbc_decrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
 
 
 size_t esp_gcm_schedlen(const struct esp_algorithm *);
@@ -80,8 +86,14 @@ int esp_gcm_encrypt_aes(struct mbuf *, size_t, size_t, struct secasvar *, const 
 int esp_gcm_decrypt_aes(struct mbuf *, size_t, struct secasvar *, const struct esp_algorithm *, int);
 int esp_gcm_encrypt_finalize(struct secasvar *, unsigned char *, size_t);
 int esp_gcm_decrypt_finalize(struct secasvar *, unsigned char *, size_t);
-int esp_aes_gcm_encrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
-int esp_aes_gcm_decrypt_data(struct secasvar *, uint8_t *,
-    size_t, struct newesp *, uint8_t *, size_t, uint8_t *, size_t);
+int esp_aes_gcm_encrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
+int esp_aes_gcm_decrypt_data(struct secasvar *,
+    uint8_t *__sized_by(input_data_len), size_t input_data_len,
+    struct newesp *,
+    uint8_t *__sized_by(ivlen), size_t ivlen,
+    uint8_t *__sized_by(output_data_len), size_t output_data_len);
 #endif /* BSD_KERNEL_PRIVATE */

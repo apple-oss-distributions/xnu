@@ -740,7 +740,7 @@ persona_proc_adopt(
 	old_persona = proc_set_persona_internal(p, persona, derive_fn, &error);
 
 	/* Only Multiuser Mode needs to update the session login name to the persona name */
-#if XNU_TARGET_OS_IOS
+#if XNU_TARGET_OS_IOS || XNU_TARGET_OS_XR
 	uint32_t multiuser_flags = COMM_PAGE_READ(uint32_t, MULTIUSER_CONFIG);
 	/* set the login name of the session */
 	if (multiuser_flags & kIsMultiUserDevice) {

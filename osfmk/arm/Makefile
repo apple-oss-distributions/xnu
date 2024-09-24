@@ -11,6 +11,7 @@ ARM_HEADER_FILES =	\
 		atomic.h \
 		cpu_number.h \
 		cpu_capabilities.h	\
+		cpu_capabilities_public.h	\
 		cpu_x86_64_capabilities.h	\
 		cpuid.h \
 		cpuid_internal.h \
@@ -31,7 +32,9 @@ INSTALL_SF_MD_LCL_LIST = arch.h cpu_capabilities.h
 
 # Headers installed into /usr/include (public and internal SDKs).
 # These are covered by ../../bsd/machine/machine.modulemap.
-INSTALL_MD_LIST = arch.h
+INSTALL_MD_LIST = \
+		arch.h \
+		cpu_capabilities_public.h
 
 # Headers installed into /usr/local/include (internal SDK only).
 # These are covered by ../../bsd/machine/machine_private.modulemap.
@@ -45,6 +48,7 @@ INSTALL_KF_MD_LIST = $(ARM_HEADER_FILES)
 
 # Headers installed into Kernel.framework/PrivateHeaders (internal SDK only).
 INSTALL_KF_MD_LCL_LIST = \
+		cpu_topology.h \
 		dbgwrap.h \
 		machine_kpc.h \
 		pmap_public.h \
@@ -56,6 +60,7 @@ INSTALL_KF_MD_LCL_LIST = \
 # Headers used to compile xnu
 EXPORT_MD_LIST = \
 		caches_internal.h \
+		cpu_topology.h \
 		dbgwrap.h \
 		machine_cpu.h \
 		machine_kpc.h \

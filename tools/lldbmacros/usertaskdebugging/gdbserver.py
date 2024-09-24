@@ -7,7 +7,7 @@ import random
 class GDBServer(object):
     """instance of gdbserver"""
     def __init__(self, backing_instance):
-        super(GDBServer, self).__init__()
+        super().__init__()
         self.process = backing_instance
         self.portnum = random.randint(2000, 8000)
         logging.info("Starting gdb server for localhost:%d" % self.portnum)

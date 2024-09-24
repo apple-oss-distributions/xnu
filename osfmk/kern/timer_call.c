@@ -828,21 +828,27 @@ static uint32_t timer_queue_shutdown_discarded;
 
 void
 timer_queue_shutdown(
-	mpqueue_head_t          *queue)
+	__kdebug_only int target_cpu,
+	mpqueue_head_t          *queue,
+	mpqueue_head_t          *new_queue)
 {
-	timer_call_t            call;
-	mpqueue_head_t          *new_queue;
-	spl_t                   s;
-
-
 	DBG("timer_queue_shutdown(%p)\n", queue);
 
-	s = splclock();
+	__kdebug_only int ntimers_moved = 0, lock_skips = 0, shutdown_discarded = 0;
+
+	spl_t s = splclock();
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_SHUTDOWN | DBG_FUNC_START,
+	    target_cpu,
+	    queue->earliest_soft_deadline, 0,
+	    0, 0);
 
 	while (TRUE) {
 		timer_queue_lock_spin(queue);
 
-		call = qe_queue_first(&queue->head, struct timer_call, tc_qlink);
+		timer_call_t call = qe_queue_first(&queue->head,
+		    struct timer_call, tc_qlink);
 
 		if (call == NULL) {
 			break;
@@ -854,6 +860,7 @@ timer_queue_shutdown(
 			 * Don't change the call_entry queue back-pointer
 			 * but set the async_dequeue field.
 			 */
+			lock_skips++;
 			timer_queue_shutdown_lock_skips++;
 			timer_call_entry_dequeue_async(call);
 #if TIMER_ASSERT
@@ -876,12 +883,13 @@ timer_queue_shutdown(
 
 		if (call_local == FALSE) {
 			/* and queue it on new, discarding LOCAL timers */
-			new_queue = timer_queue_assign(call->tc_pqlink.deadline);
 			timer_queue_lock_spin(new_queue);
 			timer_call_entry_enqueue_deadline(
 				call, new_queue, call->tc_pqlink.deadline);
 			timer_queue_unlock(new_queue);
+			ntimers_moved++;
 		} else {
+			shutdown_discarded++;
 			timer_queue_shutdown_discarded++;
 		}
 
@@ -890,6 +898,11 @@ timer_queue_shutdown(
 	}
 
 	timer_queue_unlock(queue);
+
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    DECR_TIMER_SHUTDOWN | DBG_FUNC_END,
+	    target_cpu, ntimers_moved, lock_skips, shutdown_discarded, 0);
+
 	splx(s);
 }
 
@@ -1104,7 +1117,6 @@ timer_queue_expire(
 	return timer_queue_expire_with_options(queue, deadline, FALSE);
 }
 
-extern int serverperfmode;
 static uint32_t timer_queue_migrate_lock_skips;
 /*
  * timer_queue_migrate() is called by timer_queue_migrate_cpu()
@@ -1768,8 +1780,12 @@ timer_sysctl_set_threshold(void* valp)
 }
 
 int
-timer_sysctl_set(int oid, uint64_t value)
+timer_sysctl_set(__unused int oid, __unused uint64_t value)
 {
+	if (support_bootcpu_shutdown) {
+		return KERN_NOT_SUPPORTED;
+	}
+
 	switch (oid) {
 	case THRESHOLD:
 		timer_call_cpu(

@@ -82,7 +82,7 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 	char *oldp, *newp;
 	const char *fin;
 	struct in6_cga_nodecfg cfg;
-	struct iovec *iov;
+	struct iovec *__single iov;
 	int error;
 	char *buffer;
 	u_int16_t u16;
@@ -144,7 +144,7 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 			oldp += sizeof(u16);
 
 			if (&oldp[iov->iov_len] < fin) {
-				bcopy(iov->iov_base, oldp, iov->iov_len);
+				bcopy(__unsafe_forge_bidi_indexable(void *, iov->iov_base, iov->iov_len), oldp, iov->iov_len);
 			}
 			oldp += iov->iov_len;
 

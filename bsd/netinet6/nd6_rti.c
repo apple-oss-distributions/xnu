@@ -86,7 +86,7 @@ ndrti_free(struct nd_route_info *rti)
 static struct nd_route_info *
 nd6_rti_lookup(struct nd_route_info *rti)
 {
-	struct nd_route_info *tmp_rti = NULL;
+	struct nd_route_info *__single tmp_rti = NULL;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
@@ -102,7 +102,7 @@ nd6_rti_lookup(struct nd_route_info *rti)
 void
 nd6_rtilist_update(struct nd_route_info *new_rti, struct nd_defrouter *dr)
 {
-	struct nd_route_info *rti = NULL;
+	struct nd_route_info *__single rti = NULL;
 
 	lck_mtx_lock(nd6_mutex);
 	VERIFY(new_rti != NULL && dr != NULL);
@@ -137,7 +137,7 @@ nd6_rti_purge(struct nd_route_info *new_rti)
 	VERIFY(new_rti != NULL);
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
-	struct nd_route_info *rti = NULL;
+	struct nd_route_info *__single rti = NULL;
 	nd6_rti_list_wait(__func__);
 
 	if ((rti = nd6_rti_lookup(new_rti)) != NULL) {
@@ -151,6 +151,47 @@ nd6_rti_purge(struct nd_route_info *new_rti)
 		}
 		TAILQ_REMOVE(&nd_rti_list, rti, nd_rti_entry);
 		ndrti_free(rti);
+	}
+	nd6_rti_list_signal_done();
+}
+
+void
+nd6_rti_delreq(struct nd_route_info *rti)
+{
+	VERIFY(rti != NULL);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+
+	struct nd_route_info *__single ret_rti = NULL;
+	nd6_rti_list_wait(__func__);
+
+	if ((ret_rti = nd6_rti_lookup(rti)) != NULL) {
+		struct nd_defrouter *__single dr = NULL;
+		struct nd_defrouter *__single ndr = NULL;
+
+		TAILQ_FOREACH_SAFE(dr, &ret_rti->nd_rti_router_list, dr_entry, ndr) {
+			if (dr->stateflags & NDDRF_INSTALLED) {
+				lck_mtx_unlock(nd6_mutex);
+				defrouter_delreq(dr, ret_rti);
+				lck_mtx_lock(nd6_mutex);
+				break;
+			}
+		}
+	}
+	nd6_rti_list_signal_done();
+}
+
+void
+nd6_rti_select(struct nd_route_info *rti, struct ifnet *ifp)
+{
+	VERIFY(rti != NULL);
+	VERIFY(ifp != NULL);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+
+	struct nd_route_info *__single ret_rti = NULL;
+	nd6_rti_list_wait(__func__);
+
+	if ((ret_rti = nd6_rti_lookup(rti)) != NULL) {
+		defrouter_select(ifp, &ret_rti->nd_rti_router_list);
 	}
 	nd6_rti_list_signal_done();
 }

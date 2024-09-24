@@ -20,7 +20,7 @@
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(posix_spawn_posix_cred, "Check posix_spawnattr for POSIX creds",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attr;
 	int ret;

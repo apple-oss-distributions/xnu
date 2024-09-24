@@ -205,8 +205,10 @@ static int __attribute__ ((noinline)) pid_kqueueinfo(struct kqueue * kq, struct 
 static int proc_terminate_all_rsr(__unused int pid, __unused int flavor, int arg, int32_t *retval);
 static int proc_terminate_all_rsr_filter(proc_t p, __unused void *arg);
 static int proc_terminate_all_rsr_callback(proc_t p, void *arg);
-static int proc_signal_with_audittoken(user_addr_t buffer, int signum, int32_t *retval);
-static int proc_terminate_with_audittoken(user_addr_t buffer, int32_t *retval);
+static int proc_signal_with_audittoken(user_addr_t buffer, size_t buffersize, int signum, int32_t *retval);
+static int proc_terminate_with_audittoken(user_addr_t buffer, size_t buffersize, int32_t *retval);
+static int proc_signal_delegate(user_addr_t buffer, size_t buffersize, int signum, int32_t *retval);
+static int proc_terminate_delegate(user_addr_t buffer, size_t buffersize, int32_t *retval);
 static int fill_vnodeinfo(vnode_t vp, struct vnode_info *vinfo, boolean_t check_fsgetpath);
 static void fill_fileinfo(struct fileproc *fp, proc_t proc, struct proc_fileinfo * finfo);
 static int proc_security_policy(proc_t targetp, int callnum, int flavor, boolean_t check_same_user);
@@ -336,9 +338,13 @@ proc_info_internal(int callnum, int pid, uint32_t flags, uint64_t ext_id, int fl
 	case PROC_INFO_CALL_TERMINATE_RSR:
 		return proc_terminate_all_rsr(pid, flavor, (int)arg, retval);
 	case PROC_INFO_CALL_SIGNAL_AUDITTOKEN:
-		return proc_signal_with_audittoken(buffer, flavor, retval);
+		return proc_signal_with_audittoken(buffer, buffersize, flavor, retval);
 	case PROC_INFO_CALL_TERMINATE_AUDITTOKEN:
-		return proc_terminate_with_audittoken(buffer, retval);
+		return proc_terminate_with_audittoken(buffer, buffersize, retval);
+	case PROC_INFO_CALL_DELEGATE_SIGNAL:
+		return proc_signal_delegate(buffer, buffersize, flavor, retval);
+	case PROC_INFO_CALL_DELEGATE_TERMINATE:
+		return proc_terminate_delegate(buffer, buffersize, retval);
 	default:
 		return EINVAL;
 	}
@@ -1177,9 +1183,11 @@ proc_pidregionpath(proc_t p, uint64_t arg, user_addr_t buffer, __unused uint32_t
 	uintptr_t vnodeaddr = 0;
 	uint32_t vnodeid = 0;
 	vnode_t vp;
+	bool is_map_shared;
 
-	ret = find_region_details(proc_task(p), (vm_map_offset_t) arg,
-	    (uintptr_t *)&vnodeaddr, (uint32_t *)&vnodeid,
+	ret = task_find_region_details(proc_task(p), (vm_map_offset_t) arg,
+	    FIND_REGION_DETAILS_OPTIONS_NONE,
+	    (uintptr_t *)&vnodeaddr, (uint32_t *)&vnodeid, &is_map_shared,
 	    &path.prpo_addr, &path.prpo_regionlength);
 	if (ret == 0) {
 		return EINVAL;
@@ -3473,32 +3481,30 @@ struct proc_terminate_all_rsr_struct {
 	int32_t *ptss_retval;
 };
 
-
+/**
+ * @brief Wrapper for the majority of send signal methods. Validates signal number,
+ * validates the target audit token, validates that current_proc() can send the signal.
+ * Then invokes proc_terminate_with_proc if should_terminate is true, otherwise invokes
+ * psignal with the signal.
+ */
 static int
-proc_signal_with_audittoken(user_addr_t uaudittoken, int signum, int32_t *retval)
+_proc_signal_send(audit_token_t target, int signum, bool should_terminate, int32_t *retval)
 {
 	int error = 0;
 	pid_t pid = 0;
 	proc_t target_proc = PROC_NULL;
-	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
 	kauth_cred_t uc = kauth_cred_get();
 
+	/* defined in bsd/kern/kern_prot.c */
+	extern int get_audit_token_pid(audit_token_t *audit_token);
+
+	/* Check that the signal number is valid */
 	if (!((signum > 0) && (signum < NSIG))) {
 		error = EINVAL;
 		goto out;
 	}
 
-	if (uaudittoken != USER_ADDR_NULL) {
-		error = copyin(uaudittoken, &token, sizeof(audit_token_t));
-		if (error != 0) {
-			goto out;
-		}
-	} else {
-		error = EINVAL;
-		goto out;
-	}
-
-	pid = token.val[5];
+	pid = get_audit_token_pid(&target);
 	if (pid <= 0) {
 		error = EINVAL;
 		goto out;
@@ -3511,8 +3517,16 @@ proc_signal_with_audittoken(user_addr_t uaudittoken, int signum, int32_t *retval
 
 	/* Check the target proc pidversion */
 	int pidversion = proc_pidversion(target_proc);
-	if (pidversion != token.val[7]) {
+	if (pidversion != target.val[7]) {
 		error = ESRCH;
+		goto out;
+	}
+
+	// Determine if the process should be immediately terminated
+	// proc_terminate_with_proc() invokes `cansignal()` internally and sets
+	// retval to the signal that was sent (either SIGTERM or SIGKILL).
+	if (should_terminate) {
+		error = proc_terminate_with_proc(target_proc, retval);
 		goto out;
 	}
 
@@ -3522,14 +3536,95 @@ proc_signal_with_audittoken(user_addr_t uaudittoken, int signum, int32_t *retval
 		goto out;
 	}
 
+	/* Send the signal */
 	psignal(target_proc, signum);
+	*retval = 0;
 out:
 	if (target_proc != PROC_NULL) {
 		proc_rele(target_proc);
 	}
+	return error;
+}
 
-	*retval = 0;
+#define delegateSignalEntitlement "com.apple.private.delegate-signals"
+static int
+proc_signal_delegate(user_addr_t buffer, size_t buffersize, int signum, int32_t *retval)
+{
+	int error = 0;
+	struct proc_delegated_signal_info info = {0};
 
+	/* Enforce current proc is entitled to delegate signals */
+	if (!IOCurrentTaskHasEntitlement(delegateSignalEntitlement)) {
+		return EPERM;
+	}
+
+	if (buffer == USER_ADDR_NULL || buffersize != sizeof(struct proc_delegated_signal_info)) {
+		return EINVAL;
+	}
+
+	error = copyin(buffer, &info, sizeof(struct proc_delegated_signal_info));
+	if (error != 0) {
+		return error;
+	}
+
+#ifdef CONFIG_MACF
+	if ((error = mac_proc_check_delegated_signal(current_proc(), info.instigator, info.target, signum))) {
+		return error;
+	}
+#endif
+
+	/* Final signal checks on current_proc */
+	return _proc_signal_send(info.target, signum, false, retval);
+}
+
+static int
+proc_terminate_delegate(user_addr_t buffer, size_t buffersize, int32_t *retval)
+{
+	int error = 0;
+	struct proc_delegated_signal_info info = {0};
+
+	/* Enforce current proc is entitled to delegate signals */
+	if (!IOCurrentTaskHasEntitlement(delegateSignalEntitlement)) {
+		return EPERM;
+	}
+
+	if (buffer == USER_ADDR_NULL || buffersize != sizeof(struct proc_delegated_signal_info)) {
+		return EINVAL;
+	}
+
+	error = copyin(buffer, &info, sizeof(struct proc_delegated_signal_info));
+	if (error != 0) {
+		return error;
+	}
+
+#ifdef CONFIG_MACF
+	if ((error = mac_proc_check_delegated_signal(current_proc(), info.instigator, info.target, SIGKILL))) {
+		return error;
+	}
+#endif
+
+	/* Final signal checks on current_proc */
+	return _proc_signal_send(info.target, SIGTERM, true, retval);
+}
+
+static int
+proc_signal_with_audittoken(user_addr_t buffer, size_t buffersize, int signum, int32_t *retval)
+{
+	int error = 0;
+	audit_token_t target = INVALID_AUDIT_TOKEN_VALUE;
+
+	if (buffer == USER_ADDR_NULL || buffersize != sizeof(audit_token_t)) {
+		error = EINVAL;
+		goto out;
+	}
+
+	error = copyin(buffer, &target, sizeof(audit_token_t));
+	if (error != 0) {
+		goto out;
+	}
+
+	error = _proc_signal_send(target, signum, false, retval);
+out:
 	return error;
 }
 
@@ -3539,47 +3634,23 @@ out:
  * SIGTERM is sent.
  */
 static int
-proc_terminate_with_audittoken(user_addr_t uaudittoken, int32_t *retval)
+proc_terminate_with_audittoken(user_addr_t buffer, size_t buffersize, int32_t *retval)
 {
 	int error = 0;
-	pid_t pid = 0;
-	proc_t target_proc = PROC_NULL;
-	audit_token_t token = INVALID_AUDIT_TOKEN_VALUE;
+	audit_token_t target = INVALID_AUDIT_TOKEN_VALUE;
 
-	if (uaudittoken != USER_ADDR_NULL) {
-		error = copyin(uaudittoken, &token, sizeof(audit_token_t));
-		if (error != 0) {
-			goto out;
-		}
-	} else {
+	if (buffer == USER_ADDR_NULL || buffersize != sizeof(audit_token_t)) {
 		error = EINVAL;
 		goto out;
 	}
 
-	pid = token.val[5];
-	if (pid <= 0) {
-		error = EINVAL;
+	error = copyin(buffer, &target, sizeof(audit_token_t));
+	if (error != 0) {
 		goto out;
 	}
 
-	if ((target_proc = proc_find(pid)) == PROC_NULL) {
-		error = ESRCH;
-		goto out;
-	}
-
-	/* Check the target proc pidversion */
-	int pidversion = proc_pidversion(target_proc);
-	if (pidversion != token.val[7]) {
-		error = ESRCH;
-		goto out;
-	}
-
-	error = proc_terminate_with_proc(target_proc, retval);
-
+	error = _proc_signal_send(target, SIGTERM, true, retval);
 out:
-	if (target_proc != PROC_NULL) {
-		proc_rele(target_proc);
-	}
 	return error;
 }
 
@@ -3983,7 +4054,7 @@ proc_set_dyld_images(int pid, user_addr_t buffer, uint32_t buffersize, int32_t *
 	task = proc_task(pself);
 	if (task != TASK_NULL) {
 		/* don't need to copyin the buffer. just setting the buffer range in the task struct */
-		if (task_set_dyld_info(task, buffer, buffersize)) {
+		if (task_set_dyld_info(task, buffer, buffersize, false)) {
 			*retval = -1;
 			return EINVAL;
 		}

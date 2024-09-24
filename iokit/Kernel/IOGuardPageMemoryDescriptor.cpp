@@ -29,7 +29,7 @@
 #include <IOKit/IOGuardPageMemoryDescriptor.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <mach/mach_vm.h>
 
 #define super IOGeneralMemoryDescriptor
@@ -61,7 +61,8 @@ IOGuardPageMemoryDescriptor::initWithSize(vm_size_t size)
 		return false;
 	}
 
-	kr = mach_vm_allocate_kernel(kernel_map, &address, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &address, size,
+	    VM_MAP_KERNEL_FLAGS_ANYWHERE(.vm_tag = VM_KERN_MEMORY_IOKIT));
 	if (kr != KERN_SUCCESS) {
 		return false;
 	}

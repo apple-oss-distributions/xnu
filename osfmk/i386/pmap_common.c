@@ -81,6 +81,25 @@ pmap_cache_attributes(ppnum_t pn)
 }
 
 void
+pmap_batch_set_cache_attributes(
+	const unified_page_list_t *page_list,
+	unsigned int cacheattr)
+{
+	unified_page_list_iterator_t iter;
+
+	for (unified_page_list_iterator_init(page_list, &iter);
+	    !unified_page_list_iterator_end(&iter);
+	    unified_page_list_iterator_next(&iter)) {
+		bool is_fictitious = false;
+		const ppnum_t pn = unified_page_list_iterator_page(&iter, &is_fictitious);
+
+		if (__probable(!is_fictitious)) {
+			pmap_set_cache_attributes(pn, cacheattr);
+		}
+	}
+}
+
+void
 pmap_set_cache_attributes(ppnum_t pn, unsigned int cacheattr)
 {
 	unsigned int current, template = 0;

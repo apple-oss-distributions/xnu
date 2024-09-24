@@ -16,7 +16,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 T_DECL(invalid_setaudit_57414044,
     "Verify that auditing a setaudit_addr syscall which has an invalid "
     "at_type field does not panic",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	T_SETUPBEGIN;
 

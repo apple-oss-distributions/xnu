@@ -119,65 +119,6 @@ keydb_newsecashead(void)
 	return p;
 }
 
-#if 0
-void
-keydb_delsecashead(struct secashead *p)
-{
-	kfree_type(struct secashead, p);
-}
-
-
-
-/*
- * secasvar management (reference counted)
- */
-struct secasvar *
-keydb_newsecasvar()
-{
-	struct secasvar *p;
-
-	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
-
-	p = kalloc_type(struct secasvar, Z_WAITOK_ZERO_NOFAIL);
-	p->refcnt = 1;
-
-	return p;
-}
-
-void
-keydb_refsecasvar(p)
-struct secasvar *p;
-{
-	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-
-	p->refcnt++;
-}
-
-void
-keydb_freesecasvar(p)
-struct secasvar *p;
-{
-	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-
-	p->refcnt--;
-	/* negative refcnt will cause panic intentionally */
-	if (p->refcnt <= 0) {
-		keydb_delsecasvar(p);
-	}
-}
-
-static void
-keydb_delsecasvar(p)
-struct secasvar *p;
-{
-	if (p->refcnt) {
-		panic("keydb_delsecasvar called with refcnt != 0");
-	}
-
-	kfree_type(struct secasvar, p);
-}
-#endif
-
 /*
  * secreplay management
  */
@@ -185,6 +126,7 @@ struct secreplay *
 keydb_newsecreplay(u_int8_t wsize)
 {
 	struct secreplay *p;
+	caddr_t tmp_bitmap = NULL;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
@@ -196,13 +138,15 @@ keydb_newsecreplay(u_int8_t wsize)
 	}
 
 	if (wsize != 0) {
-		p->wsize = wsize;
-		p->bitmap = (caddr_t)kalloc_data(wsize, Z_NOWAIT | Z_ZERO);
-		if (!p->bitmap) {
+		tmp_bitmap = (caddr_t)kalloc_data(wsize, Z_NOWAIT | Z_ZERO);
+		if (!tmp_bitmap) {
 			lck_mtx_unlock(sadb_mutex);
-			p->bitmap = (caddr_t)kalloc_data(wsize, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+			tmp_bitmap = (caddr_t)kalloc_data(wsize, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 			lck_mtx_lock(sadb_mutex);
 		}
+
+		p->bitmap = tmp_bitmap;
+		p->wsize = wsize;
 	}
 	return p;
 }
@@ -211,25 +155,7 @@ void
 keydb_delsecreplay(struct secreplay *p)
 {
 	if (p->bitmap) {
-		kfree_data(p->bitmap, p->wsize);
+		kfree_data_sized_by(p->bitmap, p->wsize);
 	}
 	kfree_type(struct secreplay, p);
 }
-
-#if 0
-/*	NOT USED
- * secreg management
- */
-struct secreg *
-keydb_newsecreg()
-{
-	return kalloc_type(struct secreg, Z_WAITOK_ZERO_NOFAIL);
-}
-
-void
-keydb_delsecreg(p)
-struct secreg *p;
-{
-	kfree_type(struct secreg, p);
-}
-#endif

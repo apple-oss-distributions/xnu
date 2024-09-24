@@ -90,9 +90,10 @@ mca_get_availability(void)
 	uint32_t        model =    cpuid_info()->cpuid_model;
 	uint32_t        stepping = cpuid_info()->cpuid_stepping;
 
-	if ((model == CPUID_MODEL_HASWELL && stepping < 3) ||
+	if (family == 6 &&
+	    ((model == CPUID_MODEL_HASWELL && stepping < 3) ||
 	    (model == CPUID_MODEL_HASWELL_ULT && stepping < 1) ||
-	    (model == CPUID_MODEL_CRYSTALWELL && stepping < 1)) {
+	    (model == CPUID_MODEL_CRYSTALWELL && stepping < 1))) {
 		panic("Haswell pre-C0 steppings are not supported");
 	}
 
@@ -144,7 +145,7 @@ mca_cpu_init(void)
 				wrmsr64(IA32_MCi_STATUS(i), 0ULL);
 			}
 			break;
-		case 0x0F:
+		default:
 			/* Enable all banks */
 			for (i = 0; i < mca_error_bank_count; i++) {
 				wrmsr64(IA32_MCi_CTL(i), 0xFFFFFFFFFFFFFFFFULL);

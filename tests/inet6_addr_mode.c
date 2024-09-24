@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -44,7 +44,6 @@ T_GLOBAL_META(
 	T_META_CHECK_LEAKS(false));
 
 static char ifname1[IF_NAMESIZE];
-static int s6 = -1;
 
 /**
 **  stolen from bootp/bootplib/util.c
@@ -179,83 +178,11 @@ done:
 }
 
 static void
-siocll_start(int s, const char * ifname)
-{
-	struct in6_aliasreq     ifra_in6;
-	int                     result;
-
-	bzero(&ifra_in6, sizeof(ifra_in6));
-	strncpy(ifra_in6.ifra_name, ifname, sizeof(ifra_in6.ifra_name));
-	result = ioctl(s, SIOCLL_START, &ifra_in6);
-	T_QUIET;
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCLL_START %s", ifname);
-	return;
-}
-
-static void
-nd_flags_set(int s, const char *if_name,
-    uint32_t set_flags, uint32_t clear_flags)
-{
-	uint32_t                new_flags;
-	struct in6_ndireq       nd;
-	int                     result;
-
-	bzero(&nd, sizeof(nd));
-	strncpy(nd.ifname, if_name, sizeof(nd.ifname));
-	result = ioctl(s, SIOCGIFINFO_IN6, &nd);
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCGIFINFO_IN6(%s)", if_name);
-	new_flags = nd.ndi.flags;
-	if (set_flags) {
-		new_flags |= set_flags;
-	}
-	if (clear_flags) {
-		new_flags &= ~clear_flags;
-	}
-	if (new_flags != nd.ndi.flags) {
-		nd.ndi.flags = new_flags;
-		result = ioctl(s, SIOCSIFINFO_FLAGS, (caddr_t)&nd);
-		T_ASSERT_POSIX_SUCCESS(result,
-		    "SIOCSIFINFO_FLAGS(%s) 0x%x",
-		    if_name, nd.ndi.flags);
-	}
-	return;
-}
-
-static void
-siocprotoattach_in6(int s, const char *name)
-{
-	struct in6_aliasreq ifra;
-	int                 result;
-
-	bzero(&ifra, sizeof(ifra));
-	strncpy(ifra.ifra_name, name, sizeof(ifra.ifra_name));
-	result = ioctl(s, SIOCPROTOATTACH_IN6, &ifra);
-	T_ASSERT_POSIX_SUCCESS(result, "SIOCPROTOATTACH_IN6(%s)", name);
-	return;
-}
-
-
-static void
-start_ipv6(int s, const char *ifname)
-{
-	/* attach IPv6 */
-	siocprotoattach_in6(s, ifname);
-
-	/* disable DAD to avoid 1 second delay (rdar://problem/73270401) */
-	nd_flags_set(s, ifname, 0, ND6_IFF_DAD);
-
-	/* start IPv6LL */
-	siocll_start(s, ifname);
-
-	return;
-}
-
-static void
 cleanup(void)
 {
-	if (s6 != -1) {
+	if (ifname1[0] != '\0') {
 		T_LOG("ifnet_destroy %s", ifname1);
-		(void)ifnet_destroy(s6, ifname1, false);
+		(void)ifnet_destroy(ifname1, false);
 	}
 }
 
@@ -269,16 +196,17 @@ set_sockaddr_in6(struct sockaddr_in6 *sin6_p, const struct in6_addr *addr)
 }
 
 static int
-inet6_difaddr(int s, const char *name, const struct in6_addr *addr)
+inet6_difaddr(const char *name, const struct in6_addr *addr)
 {
 	struct in6_ifreq    ifr;
+	int             s6 = inet6_dgram_socket_get();
 
 	bzero(&ifr, sizeof(ifr));
 	strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
 	if (addr != NULL) {
 		set_sockaddr_in6(&ifr.ifr_ifru.ifru_addr, addr);
 	}
-	return ioctl(s, SIOCDIFADDR_IN6, &ifr);
+	return ioctl(s6, SIOCDIFADDR_IN6, &ifr);
 }
 
 static void
@@ -296,13 +224,14 @@ in6_len2mask(struct in6_addr *mask, int len)
 }
 
 static int
-inet6_aifaddr(int s, const char *name, const struct in6_addr *addr,
+inet6_aifaddr(const char *name, const struct in6_addr *addr,
     const struct in6_addr *dstaddr, int prefix_length,
     int flags,
     u_int32_t valid_lifetime,
     u_int32_t preferred_lifetime)
 {
 	struct in6_aliasreq ifra_in6;
+	int             s6 = inet6_dgram_socket_get();
 
 	bzero(&ifra_in6, sizeof(ifra_in6));
 	strncpy(ifra_in6.ifra_name, name, sizeof(ifra_in6.ifra_name));
@@ -324,7 +253,21 @@ inet6_aifaddr(int s, const char *name, const struct in6_addr *addr,
 		set_sockaddr_in6(&ifra_in6.ifra_prefixmask, &prefixmask);
 	}
 
-	return ioctl(s, SIOCAIFADDR_IN6, &ifra_in6);
+	return ioctl(s6, SIOCAIFADDR_IN6, &ifra_in6);
+}
+
+static void
+create_fake_interface(void)
+{
+	int     error;
+
+	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
+	error = ifnet_create_2(ifname1, sizeof(ifname1));
+	if (error != 0) {
+		ifname1[0] = '\0';
+		T_ASSERT_POSIX_SUCCESS(error, "ifnet_create_2");
+	}
+	T_LOG("created %s", ifname1);
 }
 
 T_DECL(inet6_addr_mode_auto_to_manual, "inet6 address mode-switching (auto -> manual)")
@@ -335,31 +278,24 @@ T_DECL(inet6_addr_mode_auto_to_manual, "inet6 address mode-switching (auto -> ma
 
 	T_ATEND(cleanup);
 
-	s6 = inet6_dgram_socket();
-
-	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
-
-	T_ASSERT_POSIX_SUCCESS(ifnet_create_2(s6, ifname1, sizeof(ifname1)), NULL);
-
-	T_LOG("created %s", ifname1);
-
-	start_ipv6(s6, ifname1);
+	create_fake_interface();
+	ifnet_start_ipv6(ifname1);
 
 	if_index = if_nametoindex(ifname1);
 	T_EXPECT_GT(if_index, 0, NULL);
 	T_ASSERT_EQ(inet6_get_linklocal_address(if_index, &lladdr), 1, NULL);
 
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &lladdr, NULL, 64, 123, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &lladdr, NULL, 64, 123, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Create address as an autoconfed address */
 	T_ASSERT_EQ(inet_pton(AF_INET6, "2001:db8::3", &newaddr), 1, NULL);
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &newaddr, NULL, 64, (IN6_IFF_AUTOCONF | IN6_IFF_TEMPORARY), ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &newaddr, NULL, 64, (IN6_IFF_AUTOCONF | IN6_IFF_TEMPORARY), ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Now mark it as manual */
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &newaddr, NULL, 64, 0, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &newaddr, NULL, 64, 0, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Deleting address should NOT result in panic */
-	T_ASSERT_POSIX_SUCCESS(inet6_difaddr(s6, ifname1, &newaddr), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_difaddr(ifname1, &newaddr), NULL);
 }
 
 T_DECL(inet6_addr_mode_manual_to_auto, "inet6 address mode-switching (manual -> auto)")
@@ -369,30 +305,25 @@ T_DECL(inet6_addr_mode_manual_to_auto, "inet6 address mode-switching (manual -> 
 	unsigned int    if_index;
 
 	T_ATEND(cleanup);
-
-	s6 = inet6_dgram_socket();
-
-	strlcpy(ifname1, FETH_NAME, sizeof(ifname1));
-
-	T_ASSERT_POSIX_SUCCESS(ifnet_create_2(s6, ifname1, sizeof(ifname1)), NULL);
+	create_fake_interface();
 
 	T_LOG("created %s", ifname1);
 
-	start_ipv6(s6, ifname1);
+	ifnet_start_ipv6(ifname1);
 
 	if_index = if_nametoindex(ifname1);
 	T_EXPECT_GT(if_index, 0, NULL);
 	T_ASSERT_EQ(inet6_get_linklocal_address(if_index, &lladdr), 1, NULL);
 
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &lladdr, NULL, 64, 123, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &lladdr, NULL, 64, 123, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Create address as a manual address */
 	T_ASSERT_EQ(inet_pton(AF_INET6, "2001:db8::1", &newaddr), 1, NULL);
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &newaddr, NULL, 64, 0, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &newaddr, NULL, 64, 0, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Now make it autoconfed */
-	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(s6, ifname1, &newaddr, NULL, 64, (IN6_IFF_AUTOCONF | IN6_IFF_TEMPORARY), ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_aifaddr(ifname1, &newaddr, NULL, 64, (IN6_IFF_AUTOCONF | IN6_IFF_TEMPORARY), ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME), NULL);
 
 	/* Deleting address should NOT result in panic */
-	T_ASSERT_POSIX_SUCCESS(inet6_difaddr(s6, ifname1, &newaddr), NULL);
+	T_ASSERT_POSIX_SUCCESS(inet6_difaddr(ifname1, &newaddr), NULL);
 }

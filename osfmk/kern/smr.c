@@ -27,6 +27,7 @@
  */
 
 #include <kern/locks_internal.h>
+#include <kern/lock_ptr.h>
 #include <kern/cpu_data.h>
 #include <kern/machine.h>
 #include <kern/mpsc_queue.h>
@@ -2275,10 +2276,30 @@ smr_hash_array_encode(struct smrq_slist_head *array, uint16_t order)
 
 #pragma mark SMR simple hash tables
 
+__security_const_late
+static struct smrq_slist_head __smrh_empty[2] = {
+	SMRQ_SLIST_INITIALIZER(__smrh_empty[0]),
+	SMRQ_SLIST_INITIALIZER(__smrh_empty[1]),
+};
+
+void
+smr_hash_init_empty(struct smr_hash *smrh)
+{
+	*smrh = (struct smr_hash){
+		.smrh_array = smr_hash_array_encode(__smrh_empty, 63),
+	};
+}
+
+bool
+smr_hash_is_empty_initialized(struct smr_hash *smrh)
+{
+	return smrh->smrh_array == smr_hash_array_encode(__smrh_empty, 63);
+}
+
 void
 smr_hash_init(struct smr_hash *smrh, size_t size)
 {
-	struct smrq_slist_head *array;
+	uintptr_t array;
 	uint16_t shift;
 
 	assert(size);
@@ -2288,19 +2309,25 @@ smr_hash_init(struct smr_hash *smrh, size_t size)
 		assert(size * sizeof(struct smrq_slist_head) <=
 		    KALLOC_SAFE_ALLOC_SIZE);
 	}
-	array = smr_hash_alloc_array(size);
+	array = smr_hash_array_encode(smr_hash_alloc_array(size), 64 - shift);
 
-	*smrh = (struct smr_hash){
-		.smrh_array = smr_hash_array_encode(array, 64 - shift),
-	};
+	if (smr_hash_is_empty_initialized(smrh)) {
+		os_atomic_store(&smrh->smrh_array, array, release);
+	} else {
+		*smrh = (struct smr_hash){
+			.smrh_array = array,
+		};
+	}
 }
 
 void
 smr_hash_destroy(struct smr_hash *smrh)
 {
-	struct smr_hash_array array = smr_hash_array_decode(smrh);
+	if (!smr_hash_is_empty_initialized(smrh)) {
+		struct smr_hash_array array = smr_hash_array_decode(smrh);
 
-	smr_hash_free_array(array.smrh_array, smr_hash_size(array));
+		smr_hash_free_array(array.smrh_array, smr_hash_size(array));
+	}
 	*smrh = (struct smr_hash){ };
 }
 

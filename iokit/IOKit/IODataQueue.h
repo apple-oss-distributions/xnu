@@ -97,7 +97,7 @@ public:
  * @param size The size of the data queue memory region.
  * @result Returns the newly allocated IODataQueue instance.  Zero is returned on failure.
  */
-	static OSPtr<IODataQueue> withCapacity(UInt32 size);
+	static OSPtr<IODataQueue> withCapacity(UInt32 size __xnu_data_size);
 
 /*!
  * @function withEntries
@@ -107,7 +107,7 @@ public:
  * @param entrySize Size of each entry.
  * @result Returns the newly allocated IODataQueue instance.  Zero is returned on failure.
  */
-	static OSPtr<IODataQueue> withEntries(UInt32 numEntries, UInt32 entrySize);
+	static OSPtr<IODataQueue> withEntries(UInt32 numEntries, UInt32 entrySize __xnu_data_size);
 
 /*!
  * @function initWithCapacity

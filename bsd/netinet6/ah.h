@@ -43,8 +43,6 @@
 #ifdef BSD_KERNEL_PRIVATE
 #include <corecrypto/cchmac.h>
 #include <corecrypto/ccsha2.h>
-#include <libkern/crypto/md5.h>
-#include <libkern/crypto/sha1.h>
 #endif /* BSD_KERNEL_PRIVATE */
 
 struct ah {
@@ -68,17 +66,9 @@ struct newah {
 struct secasvar;
 
 struct ah_algorithm_state {
-	union {
-		struct secasvar *sav;
-		const struct ccdigest_info *digest;
-	};
-	union {
-		MD5_CTX md5_ctx;
-		SHA1_CTX sha1_ctx;
-		cchmac_ctx_decl(CCSHA512_STATE_SIZE, CCSHA512_BLOCK_SIZE, hmac_ctx);
-	};
+	const struct ccdigest_info *digest;
+	cchmac_ctx_decl(CCSHA512_STATE_SIZE, CCSHA512_BLOCK_SIZE, hmac_ctx);
 };
-
 
 struct ah_algorithm {
 	int (*sumsiz)(struct secasvar *);
@@ -106,7 +96,7 @@ extern int ah_schedule(const struct ah_algorithm *, struct secasvar *);
 
 extern void ah4_input(struct mbuf *, int);
 extern int ah4_output(struct mbuf *, struct secasvar *);
-extern int ah4_calccksum(struct mbuf *, caddr_t, size_t,
+extern int ah4_calccksum(struct mbuf *, caddr_t __sized_by(len), size_t len,
     const struct ah_algorithm *, struct secasvar *);
 #endif /* BSD_KERNEL_PRIVATE */
 

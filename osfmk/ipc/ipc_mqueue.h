@@ -113,10 +113,10 @@ typedef struct ipc_mqueue {
 		 * - PORT_SYNC_LINK_RCV_THREAD: imq_inheritor_thread_ref
 		 */
 		struct klist            imq_klist;
-		struct knote            *imq_inheritor_knote;
-		struct turnstile        *imq_inheritor_turnstile;
-		thread_t                imq_inheritor_thread_ref;
-		thread_t                imq_srp_owner_thread;
+		struct knote            *XNU_PTRAUTH_SIGNED_PTR("ipc_mqueue.knote") imq_inheritor_knote;
+		struct turnstile        *XNU_PTRAUTH_SIGNED_PTR("ipc_mqueue.turnstile") imq_inheritor_turnstile;
+		thread_t                XNU_PTRAUTH_SIGNED_PTR("ipc_mqueue.thread_ref") imq_inheritor_thread_ref;
+		thread_t                XNU_PTRAUTH_SIGNED_PTR("ipc_mqueue.srp_owner_thread") imq_srp_owner_thread;
 	};
 } *ipc_mqueue_t;
 
@@ -159,14 +159,7 @@ extern kern_return_t ipc_mqueue_add_locked(
 extern mach_msg_return_t ipc_mqueue_send_locked(
 	ipc_mqueue_t            mqueue,
 	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
-	mach_msg_timeout_t      timeout_val);
-
-/* check for queue send queue full of a port */
-extern mach_msg_return_t ipc_mqueue_preflight_send(
-	ipc_mqueue_t            mqueue,
-	ipc_kmsg_t              kmsg,
-	mach_msg_option_t       option,
+	mach_msg_option64_t     option,
 	mach_msg_timeout_t      timeout_val);
 
 /* Set a [send-possible] override on the mqueue */
@@ -177,19 +170,14 @@ extern void ipc_mqueue_override_send_locked(
 /* Receive a message from a message queue */
 extern void ipc_mqueue_receive(
 	waitq_t                 waitq,
-	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_size,
-	mach_msg_size_t         max_aux_size,
 	mach_msg_timeout_t      timeout_val,
 	int                     interruptible,
+	thread_t                thread,
 	bool                    has_continuation);
 
 /* Receive a message from a message queue using a specified thread */
 extern wait_result_t ipc_mqueue_receive_on_thread_and_unlock(
 	waitq_t                 waitq,
-	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_size,
-	mach_msg_size_t         max_aux_size,
 	mach_msg_timeout_t      rcv_timeout,
 	int                     interruptible,
 	thread_t                thread);
@@ -203,8 +191,6 @@ extern void ipc_mqueue_receive_continue(
 extern void ipc_mqueue_select_on_thread_locked(
 	ipc_mqueue_t            port_mq,
 	mach_msg_option64_t     option64,
-	mach_msg_size_t         max_size,
-	mach_msg_size_t         max_aux_size,
 	thread_t                thread);
 
 /* Peek into a messaqe queue to see if there are messages */

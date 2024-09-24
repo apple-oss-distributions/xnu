@@ -71,7 +71,6 @@ options		MEASURE_BW	# interface bandwidth measurement # <measure_bw>
 options		DUMMYNET	# dummynet support		# <dummynet>
 options		TRAFFIC_MGT	# traffic management support		# <traffic_mgt>
 options		MULTICAST	# Internet Protocol Class-D	$
-options		TCPDEBUG	# TCP debug			# <tcpdebug>
 options		IFNET_INPUT_SANITY_CHK	# allow dlil/ifnet input sanity check # <ifnet_input_chk>
 options		MULTIPATH	# Multipath domain		# <multipath>
 options		MPTCP		# Multipath TCP			# <mptcp>
@@ -672,13 +671,8 @@ options	  CONFIG_VC_PROGRESS_WHITE		# <vc_progress_white>
 #
 # Timeshare scheduler implementations
 #
-options		CONFIG_SCHED_TRADITIONAL	# <config_sched_traditional>
-options		CONFIG_SCHED_PROTO		# <config_sched_proto>
-options		CONFIG_SCHED_GRRR		# <config_sched_grrr>
-options		CONFIG_SCHED_GRRR_CORE		# <config_sched_grrr>
-options		CONFIG_SCHED_MULTIQ		# <config_sched_multiq>
-options		CONFIG_SCHED_TIMESHARE_CORE	# <config_sched_traditional,config_sched_multiq>
-options		CONFIG_CLUTCH			# <config_clutch>
+options		CONFIG_SCHED_TIMESHARE_CORE	# <config_sched_timeshare_core>
+options		CONFIG_CLUTCH				# <config_clutch>
 options 	CONFIG_SCHED_AUTO_JOIN		# <config_sched_auto_join>
 options 	CONFIG_SCHED_RT_ALLOW		# <config_sched_rt_allow>
 
@@ -689,9 +683,6 @@ options		CONFIG_SCHED_DEFERRED_AST	# <config_sched_deferred_ast>
 
 options		CONFIG_PREADOPT_TG			# <config_preadopt_tg>
 options		CONFIG_PREADOPT_TG_DEBUG	# <config_preadopt_tg_debug>
-
-# Enable allocation of contiguous physical memory through vm_map_enter_cpm()
-options		VM_CPM				# <vm_cpm>
 
 # This is overridden by the board configuration's HAS_FAST_CNTVCT.
 options	    CONFIG_SKIP_PRECISE_USER_KERNEL_TIME    # <config_skip_precise_user_kernel_time>
@@ -798,3 +789,6 @@ options		CONFIG_EXT_PANICLOG		# <config_ext_paniclog>
 
 # support for collecting statistics on task suspension
 options		CONFIG_TASK_SUSPEND_STATS	# <config_task_suspend_stats>
+
+# Support for non-fatal Branch Target Identification exception reporting and logging
+options		CONFIG_BTI_TELEMETRY   # <config_bti_telemetry>

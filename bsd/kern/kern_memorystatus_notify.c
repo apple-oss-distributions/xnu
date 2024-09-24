@@ -64,8 +64,9 @@
 #include <sys/wait.h>
 #include <sys/tree.h>
 #include <sys/priv.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 #include <vm/vm_protos.h>
+#include <vm/vm_purgeable_xnu.h>
 #include <mach/machine/sdt.h>
 #include <libkern/section_keywords.h>
 #include <stdatomic.h>
@@ -180,16 +181,15 @@ extern uint64_t memorystatus_available_pages_critical;
 
 #endif /* CONFIG_JETSAM */
 
-extern lck_mtx_t memorystatus_jetsam_fg_band_lock;
 uint32_t memorystatus_jetsam_fg_band_waiters = 0;
+uint32_t memorystatus_jetsam_bg_band_waiters = 0;
 static uint64_t memorystatus_jetsam_fg_band_timestamp_ns = 0; /* nanosec */
-static uint64_t memorystatus_jetsam_fg_band_delay_ns = 5ull * 1000 * 1000 * 1000; /* nanosec */
-
-extern boolean_t(*volatile consider_buffer_cache_collect)(int);
+static uint64_t memorystatus_jetsam_bg_band_timestamp_ns = 0; /* nanosec */
+static uint64_t memorystatus_jetsam_notification_delay_ns = 5ull * 1000 * 1000 * 1000; /* nanosec */
 
 #if DEVELOPMENT || DEBUG
-SYSCTL_QUAD(_kern, OID_AUTO, memorystatus_jetsam_fg_band_delay_ns, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &memorystatus_jetsam_fg_band_delay_ns, "");
+SYSCTL_QUAD(_kern, OID_AUTO, memorystatus_jetsam_notification_delay_ns, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &memorystatus_jetsam_notification_delay_ns, "");
 #endif
 
 static int
@@ -1274,7 +1274,7 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 
 done_scanning:
 	if (kn_max) {
-		VM_DEBUG_CONSTANT_EVENT(vm_pressure_event, VM_PRESSURE_EVENT, DBG_FUNC_NONE, proc_getpid(knote_get_kq(kn_max)->kq_p), resident_max, 0, 0);
+		VM_DEBUG_CONSTANT_EVENT(vm_pressure_event, DBG_VM_PRESSURE_EVENT, DBG_FUNC_NONE, proc_getpid(knote_get_kq(kn_max)->kq_p), resident_max, 0, 0);
 		VM_PRESSURE_DEBUG(1, "[vm_pressure] sending event to pid %d with %llu resident\n", proc_getpid(knote_get_kq(kn_max)->kq_p), resident_max);
 	}
 
@@ -1721,39 +1721,81 @@ convert_internal_pressure_level_to_dispatch_level(vm_pressure_level_t internal_p
 }
 
 /*
- * Notify any kexts that are waiting for notification that jetsam
- * is approaching the foreground bands. They should use this notification
- * to free cached memory.
+ * Issue a wakeup to any threads listening for jetsam pressure via
+ * `mach_vm_pressure_level_monitor`. Subscribers should respond to these
+ * notifications by freeing cached memory.
  */
 void
-memorystatus_issue_fg_band_notify(void)
+memorystatus_broadcast_jetsam_pressure(vm_pressure_level_t pressure_level)
 {
 	uint64_t now;
+	uint32_t *waiters = NULL;
+	uint64_t *last_notification_ns = NULL;
 
-	lck_mtx_lock(&memorystatus_jetsam_fg_band_lock);
+	switch (pressure_level) {
+	case kVMPressureForegroundJetsam:
+		waiters = &memorystatus_jetsam_fg_band_waiters;
+		last_notification_ns = &memorystatus_jetsam_fg_band_timestamp_ns;
+		break;
+	case kVMPressureBackgroundJetsam:
+		waiters = &memorystatus_jetsam_bg_band_waiters;
+		last_notification_ns = &memorystatus_jetsam_bg_band_timestamp_ns;
+		break;
+	default:
+		panic("Unexpected non-jetsam pressure level %d", pressure_level);
+	}
+
+	lck_mtx_lock(&memorystatus_jetsam_broadcast_lock);
 	absolutetime_to_nanoseconds(mach_absolute_time(), &now);
-	if (now - memorystatus_jetsam_fg_band_timestamp_ns < memorystatus_jetsam_fg_band_delay_ns) {
-		lck_mtx_unlock(&memorystatus_jetsam_fg_band_lock);
+
+	if (now - *last_notification_ns < memorystatus_jetsam_notification_delay_ns) {
+		lck_mtx_unlock(&memorystatus_jetsam_broadcast_lock);
 		return;
 	}
 
-	if (memorystatus_jetsam_fg_band_waiters > 0) {
-		thread_wakeup(&memorystatus_jetsam_fg_band_waiters);
-		memorystatus_jetsam_fg_band_waiters = 0;
-		memorystatus_jetsam_fg_band_timestamp_ns = now;
+	if (*waiters > 0) {
+		memorystatus_log("memorystatus: issuing %s jetsam pressure notification to %d waiters",
+		    pressure_level == kVMPressureForegroundJetsam ?
+		    "foreground" : "background", *waiters);
+		thread_wakeup((event_t)waiters);
+		*waiters = 0;
+		*last_notification_ns = now;
 	}
-	lck_mtx_unlock(&memorystatus_jetsam_fg_band_lock);
-
-	/* Notify the buffer cache, file systems, etc. to jetison everything they can. */
-	if (consider_buffer_cache_collect != NULL) {
-		(void)(*consider_buffer_cache_collect)(1);
-	}
+	lck_mtx_unlock(&memorystatus_jetsam_broadcast_lock);
 }
-
 
 /*
  * Memorystatus notification debugging support
  */
+
+#if DEVELOPMENT || DEBUG
+
+static int
+sysctl_memorystatus_broadcast_jetsam_pressure SYSCTL_HANDLER_ARGS
+{
+	int error = 0;
+	vm_pressure_level_t pressure_level;
+
+	error = SYSCTL_IN(req, &pressure_level, sizeof(pressure_level));
+	if (error) {
+		return error;
+	}
+
+	if (pressure_level == kVMPressureForegroundJetsam ||
+	    pressure_level == kVMPressureBackgroundJetsam) {
+		memorystatus_broadcast_jetsam_pressure(pressure_level);
+	} else {
+		return EINVAL;
+	}
+
+	return SYSCTL_OUT(req, &pressure_level, sizeof(pressure_level));
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, memorystatus_broadcast_jetsam_pressure,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MASKED | CTLFLAG_LOCKED,
+    0, 0, &sysctl_memorystatus_broadcast_jetsam_pressure, "I", "");
+
+#endif /* DEVELOPMENT || DEBUG */
 
 static int
 sysctl_memorystatus_vm_pressure_level SYSCTL_HANDLER_ARGS
@@ -1963,9 +2005,9 @@ sysctl_memorystatus_vm_pressure_send SYSCTL_HANDLER_ARGS
 		// printf("memorystatus_vm_pressure_send: using default notification [0x%x]\n", fflags);
 	}
 
-	/* wake up everybody waiting for kVMPressureJetsam */
+	/* wake up everybody waiting for kVMPressureForegroundJetsam */
 	if (fflags == NOTE_MEMORYSTATUS_JETSAM_FG_BAND) {
-		memorystatus_issue_fg_band_notify();
+		memorystatus_broadcast_jetsam_pressure(kVMPressureForegroundJetsam);
 		return error;
 	}
 

@@ -44,5 +44,6 @@
 #define kPMSleepWakeDebugTrig           14
 #define kPMSetDisplayPowerOn            15
 #define kPMSetDisplayState              16
+#define kPMRequestIdleSleepRevert       17
 
-#define kNumPMMethods                   17
+#define kNumPMMethods                   18

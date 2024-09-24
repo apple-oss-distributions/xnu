@@ -35,7 +35,7 @@
 #include <mach/vm_types.h>
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>
-#include <vm/vm_page.h>
+#include <vm/vm_page_internal.h>
 #include <vm/pmap.h>
 
 #include <machine/atomic.h>
@@ -367,10 +367,14 @@ typedef struct {
 } ptov_table_entry;
 
 #define PTOV_TABLE_SIZE 8
+
 SECURITY_READ_ONLY_LATE(static ptov_table_entry)        ptov_table[PTOV_TABLE_SIZE];
 SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
 
+#define ARM64_PAGE_UNGUARDED (0)
+#define ARM64_PAGE_GUARDED   (1)
 
+/* "physical to kernel virtual" - given a physical address, return the corresponding physical aperture address */
 vm_map_address_t
 phystokv(pmap_paddr_t pa)
 {
@@ -971,7 +975,6 @@ update_or_defer_tte(tt_entry_t *ttep, tt_entry_t entry, pmap_paddr_t pa, vm_map_
 	}
 }
 
-
 /*
  * arm_vm_page_granular_helper updates protections at the L3 level.  It will (if
  * neccessary) allocate a page for the L3 table and update the corresponding L2
@@ -982,11 +985,14 @@ update_or_defer_tte(tt_entry_t *ttep, tt_entry_t entry, pmap_paddr_t pa, vm_map_
  *
  * unsigned granule: 0 => force to page granule, or a combination of
  * ARM64_GRANULE_* flags declared above.
+ * 
+ * unsigned int guarded => flag indicating whether this range should be
+ * considered an ARM "guarded" page. This enables BTI enforcement for a region.
  */
 
 static void
 arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va, pmap_paddr_t pa_offset,
-    int pte_prot_APX, int pte_prot_XN, unsigned granule,
+    int pte_prot_APX, int pte_prot_XN, unsigned granule, __unused unsigned int guarded,
     tt_entry_t **deferred_ttep_pair, tt_entry_t *deferred_tte_pair)
 {
 	if (va & ARM_TT_L2_OFFMASK) { /* ragged edge hanging over a ARM_TT_L2_SIZE  boundary */
@@ -1065,6 +1071,15 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
 					 * which violates the requirement of the hint bit.*/
 					assert(!kva_active || (ppte[i] == ARM_PTE_TYPE_FAULT));
 				}
+
+#if BTI_ENFORCED
+				/*
+				 * Set the 'guarded page' flag to enable ARM BTI enforcement.
+				 */
+				if (guarded) {
+					ptmp |= ARM_PTE_GP;
+				}
+#endif /* BTI_ENFORCED */
 				/*
 				 * Do not change the contiguous bit on an active mapping.  Even in a single-threaded
 				 * environment, it's possible for prefetch to produce a TLB conflict by trying to pull in
@@ -1092,7 +1107,7 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
 static void
 arm_vm_page_granular_prot(vm_offset_t start, unsigned long size, pmap_paddr_t pa_offset,
     int tte_prot_XN, int pte_prot_APX, int pte_prot_XN,
-    unsigned granule)
+    unsigned granule, unsigned int guarded)
 {
 	tt_entry_t *deferred_ttep_pair[2] = {NULL};
 	tt_entry_t deferred_tte_pair[2] = {0};
@@ -1107,12 +1122,12 @@ arm_vm_page_granular_prot(vm_offset_t start, unsigned long size, pmap_paddr_t pa
 		align_start = _end;
 	}
 
-	arm_vm_page_granular_helper(start, align_start, start, pa_offset, pte_prot_APX, pte_prot_XN, granule, deferred_ttep_pair, deferred_tte_pair);
+	arm_vm_page_granular_helper(start, align_start, start, pa_offset, pte_prot_APX, pte_prot_XN, granule, guarded, deferred_ttep_pair, deferred_tte_pair);
 
 	while ((_end - align_start) >= ARM_TT_L2_SIZE) {
 		if (!(granule & ARM64_GRANULE_ALLOW_BLOCK)) {
 			arm_vm_page_granular_helper(align_start, align_start + ARM_TT_L2_SIZE, align_start + 1, pa_offset,
-			    pte_prot_APX, pte_prot_XN, granule, deferred_ttep_pair, deferred_tte_pair);
+			    pte_prot_APX, pte_prot_XN, granule, guarded, deferred_ttep_pair, deferred_tte_pair);
 		} else {
 			pmap_paddr_t pa = align_start - gVirtBase + gPhysBase - pa_offset;
 			assert((pa & ARM_TT_L2_OFFMASK) == 0);
@@ -1142,7 +1157,7 @@ arm_vm_page_granular_prot(vm_offset_t start, unsigned long size, pmap_paddr_t pa
 	}
 
 	if (align_start < _end) {
-		arm_vm_page_granular_helper(align_start, _end, _end, pa_offset, pte_prot_APX, pte_prot_XN, granule, deferred_ttep_pair, deferred_tte_pair);
+		arm_vm_page_granular_helper(align_start, _end, _end, pa_offset, pte_prot_APX, pte_prot_XN, granule, guarded, deferred_ttep_pair, deferred_tte_pair);
 	}
 
 	if (deferred_ttep_pair[0] != NULL) {
@@ -1168,19 +1183,19 @@ arm_vm_page_granular_prot(vm_offset_t start, unsigned long size, pmap_paddr_t pa
 static inline void
 arm_vm_page_granular_RNX(vm_offset_t start, unsigned long size, unsigned granule)
 {
-	arm_vm_page_granular_prot(start, size, 0, 1, AP_RONA, 1, granule);
+	arm_vm_page_granular_prot(start, size, 0, 1, AP_RONA, 1, granule, ARM64_PAGE_UNGUARDED);
 }
 
 static inline void
-arm_vm_page_granular_ROX(vm_offset_t start, unsigned long size, unsigned granule)
+arm_vm_page_granular_ROX(vm_offset_t start, unsigned long size, unsigned granule, unsigned int guarded)
 {
-	arm_vm_page_granular_prot(start, size, 0, 0, AP_RONA, 0, granule);
+	arm_vm_page_granular_prot(start, size, 0, 0, AP_RONA, 0, granule, guarded);
 }
 
 static inline void
 arm_vm_page_granular_RWNX(vm_offset_t start, unsigned long size, unsigned granule)
 {
-	arm_vm_page_granular_prot(start, size, 0, 1, AP_RWNA, 1, granule);
+	arm_vm_page_granular_prot(start, size, 0, 1, AP_RWNA, 1, granule, ARM64_PAGE_UNGUARDED);
 }
 
 // Populate seg...AuxKC and fixup AuxKC permissions
@@ -1226,7 +1241,15 @@ arm_vm_auxkc_init(void)
 		arm_vm_page_granular_RNX(segHIGHESTRXAuxKC, segLOWEST - segHIGHESTRXAuxKC, 0);
 	}
 	if (segLOWESTRXAuxKC < segHIGHESTRXAuxKC) {
-		arm_vm_page_granular_ROX(segLOWESTRXAuxKC, segHIGHESTRXAuxKC - segLOWESTRXAuxKC, 0); // Refined in OSKext::readPrelinkedExtensions
+		/* 
+		 * We cannot mark auxKC text as guarded because doing so would enforce
+		 * BTI on oblivious third-party kexts and break ABI compatibility. 
+		 * Doing this defeats the purpose of BTI (branches to these pages are 
+		 * unchecked!) but given both the relative rarity and the diversity of
+		 * third-party kexts, we expect that this is likely impractical to
+		 * exploit in practice.
+		 */
+		arm_vm_page_granular_ROX(segLOWESTRXAuxKC, segHIGHESTRXAuxKC - segLOWESTRXAuxKC, 0, ARM64_PAGE_UNGUARDED); // Refined in OSKext::readPrelinkedExtensions
 	}
 	if (segLOWESTROAuxKC < segLOWESTRXAuxKC) {
 		arm_vm_page_granular_RNX(segLOWESTROAuxKC, segLOWESTRXAuxKC - segLOWESTROAuxKC, 0);
@@ -1378,7 +1401,7 @@ noAuxKC:
 	arm_vm_page_granular_RWNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // Refined in OSKext::readPrelinkedExtensions
 
 	/* Map coalesced kext TEXT_EXEC segment RX (could be empty) */
-	arm_vm_page_granular_ROX(segPLKTEXTEXECB, segSizePLKTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // Refined in OSKext::readPrelinkedExtensions
+	arm_vm_page_granular_ROX(segPLKTEXTEXECB, segSizePLKTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED); // Refined in OSKext::readPrelinkedExtensions
 
 	/* if new segments not present, set space between PRELINK_TEXT and xnu TEXT to RWNX
 	 * otherwise we no longer expect any space between the coalesced kext read only segments and xnu rosegments
@@ -1415,11 +1438,11 @@ noAuxKC:
 	 */
 	arm_vm_page_granular_RWNX(segDATACONSTB, segSizeDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
 
-	arm_vm_page_granular_ROX(segTEXTEXECB, segSizeTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+	arm_vm_page_granular_ROX(segTEXTEXECB, segSizeTEXTEXEC, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED);
 
 #if XNU_MONITOR
-	arm_vm_page_granular_ROX(segPPLTEXTB, segSizePPLTEXT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
-	arm_vm_page_granular_ROX(segPPLTRAMPB, segSizePPLTRAMP, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+	arm_vm_page_granular_ROX(segPPLTEXTB, segSizePPLTEXT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_UNGUARDED);
+	arm_vm_page_granular_ROX(segPPLTRAMPB, segSizePPLTRAMP, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_UNGUARDED);
 	arm_vm_page_granular_RNX(segPPLDATACONSTB, segSizePPLDATACONST, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
 #endif
 
@@ -1436,11 +1459,11 @@ noAuxKC:
 	arm_vm_page_granular_RNX((vm_offset_t)&intstack_high_guard, PAGE_MAX_SIZE, 0);
 	arm_vm_page_granular_RNX((vm_offset_t)&excepstack_high_guard, PAGE_MAX_SIZE, 0);
 
-	arm_vm_page_granular_ROX(segKLDB, segSizeKLD, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+	arm_vm_page_granular_ROX(segKLDB, segSizeKLD, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED);
 	arm_vm_page_granular_RNX(segKLDDATAB, segSizeKLDDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
 	arm_vm_page_granular_RWNX(segLINKB, segSizeLINK, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
 	arm_vm_page_granular_RWNX(segPLKLINKEDITB, segSizePLKLINKEDIT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // Coalesced kext LINKEDIT segment
-	arm_vm_page_granular_ROX(segLASTB, segSizeLAST, ARM64_GRANULE_ALLOW_BLOCK); // __LAST may be empty, but we cannot assume this
+	arm_vm_page_granular_ROX(segLASTB, segSizeLAST, ARM64_GRANULE_ALLOW_BLOCK, ARM64_PAGE_GUARDED); // __LAST may be empty, but we cannot assume this
 	if (segLASTDATACONSTB) {
 		arm_vm_page_granular_RWNX(segLASTDATACONSTB, segSizeLASTDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // __LASTDATA_CONST may be empty, but we cannot assume this
 	}
@@ -1514,11 +1537,13 @@ arm_vm_physmap_slide(ptov_table_entry *temp_ptov_table, vm_map_address_t orig_va
 	assert((temp_ptov_table[ptov_index].va & ARM_PGMASK) == 0);
 	temp_ptov_table[ptov_index].len = round_page(len);
 	pa_offset = temp_ptov_table[ptov_index].va - orig_va;
-	arm_vm_page_granular_prot(temp_ptov_table[ptov_index].va, temp_ptov_table[ptov_index].len, pa_offset, 1, pte_prot_APX, 1, granule);
+	arm_vm_page_granular_prot(temp_ptov_table[ptov_index].va, temp_ptov_table[ptov_index].len, pa_offset, 1, pte_prot_APX, 1, granule, ARM64_PAGE_UNGUARDED);
 	++ptov_index;
 }
 
 #if XNU_MONITOR
+
+
 
 SECURITY_READ_ONLY_LATE(static boolean_t) keep_linkedit = FALSE;
 
@@ -1579,6 +1604,8 @@ arm_vm_physmap_init(boot_args *args)
 	// Remainder of physical memory
 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
 	    real_avail_end - args->topOfKernelData, AP_RWNA, 0);
+
+
 
 	assert((temp_ptov_table[ptov_index - 1].va + temp_ptov_table[ptov_index - 1].len) <= physmap_end);
 
@@ -1886,6 +1913,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	static_memory_end = physmap_base + mem_size;
 #endif // ARM_LARGE_MEMORY
 	physmap_end = physmap_base + real_phys_size;
+
+
 #else
 #if defined(ARM_LARGE_MEMORY)
 	/* For large memory systems with no PPL such as virtual machines */

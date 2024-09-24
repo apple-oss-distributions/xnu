@@ -191,10 +191,8 @@ fsw_ip_frag_mgr_create(struct nx_flowswitch *fsw, struct ifnet *ifp,
 	struct fsw_ip_frag_mgr *mgr;
 
 	ASSERT(ifp != NULL);
-
 	mgr = sk_alloc_type(struct fsw_ip_frag_mgr, Z_WAITOK | Z_NOFAIL,
 	    skmem_tag_fsw_frag_mgr);
-
 	mgr->ipfm_q.ipfq_next = mgr->ipfm_q.ipfq_prev = &mgr->ipfm_q;
 	lck_mtx_init(&mgr->ipfm_lock, &fsw_ipfm_lock_group, &fsw_ipfm_lock_attr);
 
@@ -232,7 +230,7 @@ fsw_ip_frag_mgr_create(struct nx_flowswitch *fsw, struct ifnet *ifp,
 void
 fsw_ip_frag_mgr_destroy(struct fsw_ip_frag_mgr *mgr)
 {
-	thread_call_t tcall;
+	thread_call_t __single tcall;
 
 	lck_mtx_lock(&mgr->ipfm_lock);
 	if ((tcall = mgr->ipfm_timeout_tcall) != NULL) {
@@ -280,10 +278,13 @@ fsw_ip_frag_reass_v4(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt,
 	struct ipf_key key;
 	uint16_t unfragpartlen, offflag, fragoff, fragpartlen, fragflag;
 	int err;
+	uint8_t *src;
 
 	STATS_INC(mgr->ipfm_stats, FSW_STATS_RX_FRAG_V4);
 
-	bcopy((void *)&ip4->ip_src, (void *)key.ipfk_addr, IPFK_LEN_V4);
+	src = (uint8_t *)(struct ip *__bidi_indexable)ip4 +
+	    offsetof(struct ip, ip_src);
+	bcopy(src, (void *)key.ipfk_addr, IPFK_LEN_V4);
 	key.ipfk_len = IPFK_LEN_V4;
 	key.ipfk_ident = (uint32_t)ip4->ip_id;
 
@@ -301,7 +302,8 @@ fsw_ip_frag_reass_v4(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt,
 	 */
 	if (*pkt != NULL) {
 		struct __kern_packet *p = *pkt;
-		struct ip *iph = (struct ip *)p->pkt_flow_ip_hdr;
+		struct ip *__single iph = __unsafe_forge_single(struct ip *,
+		    (struct ip *)p->pkt_flow_ip_hdr);
 
 		p->pkt_flow_ulen = ntohs(iph->ip_len) -
 		    p->pkt_flow_ip_hlen - p->pkt_flow->flow_l4._l4_hlen;
@@ -341,6 +343,7 @@ fsw_ip_frag_reass_v6(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt,
 	ptrdiff_t ip6f_ptroff = (uintptr_t)ip6f - (uintptr_t)ip6;
 	uint16_t ip6f_off, fragoff, fragpartlen, unfragpartlen, fragflag;
 	int err;
+	uint8_t *src;
 
 	STATS_INC(mgr->ipfm_stats, FSW_STATS_RX_FRAG_V6);
 
@@ -367,7 +370,9 @@ fsw_ip_frag_reass_v6(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt,
 	 */
 	ASSERT((ip6f->ip6f_offlg & ~IP6F_RESERVED_MASK) != 0);
 
-	bcopy((void *)&ip6->ip6_src, (void *)key.ipfk_addr, IPFK_LEN_V6);
+	src = (uint8_t *)(struct ip6_hdr *__bidi_indexable)ip6 +
+	    offsetof(struct ip6_hdr, ip6_src);
+	bcopy(src, (void *)key.ipfk_addr, IPFK_LEN_V6);
 	key.ipfk_len = IPFK_LEN_V6;
 	key.ipfk_ident = ip6f->ip6f_ident;
 
@@ -379,7 +384,8 @@ fsw_ip_frag_reass_v6(struct fsw_ip_frag_mgr *mgr, struct __kern_packet **pkt,
 	 */
 	if (*pkt != NULL) {
 		struct __kern_packet *p = *pkt;
-		struct ip6_hdr *ip6h = (struct ip6_hdr *)p->pkt_flow_ip_hdr;
+		struct ip6_hdr *__single ip6h = __unsafe_forge_single(struct ip6_hdr *,
+		    (struct ip6_hdr *)p->pkt_flow_ip_hdr);
 
 		p->pkt_flow_ulen = ntohs(ip6h->ip6_plen) -
 		    p->pkt_flow->flow_l4._l4_hlen;
@@ -391,7 +397,8 @@ static struct mbuf *
 ipf_pkt2mbuf(struct fsw_ip_frag_mgr *mgr, struct __kern_packet *pkt)
 {
 	unsigned int one = 1;
-	struct mbuf *m = NULL;
+	struct mbuf *__single m = NULL;
+	struct mbuf *pkt_mbuf = pkt->pkt_mbuf;
 	uint8_t *buf;
 	struct ip6_hdr *ip6;
 	uint32_t l3t_len;
@@ -407,8 +414,14 @@ ipf_pkt2mbuf(struct fsw_ip_frag_mgr *mgr, struct __kern_packet *pkt)
 	ASSERT(l3t_len <= mbuf_maxlen(m));
 
 	if (pkt->pkt_pflags & PKT_F_MBUF_DATA) {
-		bcopy(m_mtod_current(pkt->pkt_mbuf) + pkt->pkt_l2_len,
-		    m_mtod_current(m), l3t_len);
+		if ((pkt_mbuf->m_len < l3t_len) &&
+		    (pkt_mbuf = m_pullup(pkt->pkt_mbuf, l3t_len)) == NULL) {
+			return NULL;
+		} else {
+			pkt->pkt_mbuf = pkt_mbuf;
+			bcopy(m_mtod_current(pkt->pkt_mbuf) + pkt->pkt_l2_len,
+			    m_mtod_current(m), l3t_len);
+		}
 	} else {
 		MD_BUFLET_ADDR_ABS(pkt, buf);
 		buf += (pkt->pkt_headroom + pkt->pkt_l2_len);
@@ -851,7 +864,7 @@ static void
 ipfq_timeout(thread_call_param_t arg0, thread_call_param_t arg1)
 {
 #pragma unused(arg1)
-	struct fsw_ip_frag_mgr *mgr = arg0;
+	struct fsw_ip_frag_mgr *__single mgr = arg0;
 	struct ipfq *q;
 	uint64_t now, elapsed;
 	uint32_t n_freed = 0;
@@ -894,7 +907,7 @@ static void
 ipfq_sched_timeout(struct fsw_ip_frag_mgr *mgr, boolean_t in_tcall)
 {
 	uint32_t delay = MAX(1, ipfm_timeout_tcall_ival);       /* seconds */
-	thread_call_t tcall = mgr->ipfm_timeout_tcall;
+	thread_call_t __single tcall = mgr->ipfm_timeout_tcall;
 	uint64_t now = mach_absolute_time();
 	uint64_t ival, deadline = now;
 
@@ -913,7 +926,7 @@ static int
 ipfq_drain_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg2)
-	struct fsw_ip_frag_mgr *mgr = arg1;
+	struct fsw_ip_frag_mgr *__single mgr = arg1;
 
 	SKOID_PROC_CALL_GUARD;
 

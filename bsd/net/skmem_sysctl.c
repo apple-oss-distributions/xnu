@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,7 +32,7 @@ __private_extern__ void
 skmem_sysctl_init(void)
 {
 	// TCP values
-	skmem_sysctl *sysctls = skmem_get_sysctls_obj(NULL);
+	skmem_sysctl *__single sysctls = skmem_get_sysctls_obj(NULL);
 	if (sysctls) {
 		sysctls->version = SKMEM_SYSCTL_VERSION;
 #define X(type, field, default_value) \

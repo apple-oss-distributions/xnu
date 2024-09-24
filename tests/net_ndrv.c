@@ -129,7 +129,7 @@ ndrv_socket_multicast_add_remove(const char * ifname)
 
 T_DECL(ndrv_socket_multicast_add_remove,
     "ndrv socket multicast add remove",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	ndrv_socket_multicast_add_remove("lo0");
 }

@@ -81,6 +81,7 @@
 #include <i386/misc_protos.h>
 #include <x86_64/lowglobals.h>
 #include <i386/pal_routines.h>
+#include <vm/vm_page_internal.h>
 
 #include <mach-o/loader.h>
 #include <libkern/kernel_mach_header.h>

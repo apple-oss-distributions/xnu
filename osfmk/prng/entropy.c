@@ -197,9 +197,10 @@ entropy_analysis_store(entropy_sample_t sample)
 
 __startup_func
 void
-entropy_init(void)
+entropy_init(size_t seed_size, uint8_t *seed)
 {
 	SHA512_Init(&entropy_data.sha512_ctx);
+	SHA512_Update(&entropy_data.sha512_ctx, seed, seed_size);
 
 	lck_grp_init(&entropy_data.lock_group, "entropy-data", LCK_GRP_ATTR_NULL);
 	lck_mtx_init(&entropy_data.mutex, &entropy_data.lock_group, LCK_ATTR_NULL);
@@ -224,7 +225,7 @@ entropy_collect(void)
 
 	uint32_t sample_count = os_atomic_load(&e->sample_count, relaxed);
 
-	assert(sample_count <= ENTROPY_MAX_SAMPLE_COUNT);
+	assert3u(sample_count, <=, ENTROPY_MAX_SAMPLE_COUNT);
 
 	// If the buffer is full, we return early without collecting
 	// entropy.
@@ -275,7 +276,7 @@ entropy_collect(void)
 uint32_t
 entropy_filter(uint32_t sample_count, entropy_sample_t *samples, __assert_only uint32_t filter_count, bitmap_t *filter)
 {
-	assert(filter_count >= BITMAP_LEN(sample_count));
+	assert3u(filter_count, >=, BITMAP_LEN(sample_count));
 
 	bitmap_zero(filter, sample_count);
 
@@ -441,7 +442,7 @@ entropy_health_test(uint32_t sample_count, entropy_sample_t *samples, __assert_o
 {
 	health_test_result_t result = health_test_success;
 
-	assert(filter_count >= BITMAP_LEN(sample_count));
+	assert3u(filter_count, >=, BITMAP_LEN(sample_count));
 
 	for (uint32_t i = 0; i < sample_count; i += 1) {
 		// We use the filter to determine if a given sample "counts"
@@ -496,13 +497,13 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 		// for consumption.
 		uint32_t cpu_sample_count = os_atomic_load(&e->sample_count, acquire);
 
-		assert(cpu_sample_count <= ENTROPY_MAX_SAMPLE_COUNT);
+		assert3u(cpu_sample_count, <=, ENTROPY_MAX_SAMPLE_COUNT);
 
 		// We'll calculate how many samples that we would filter out
 		// and only add that many to the total_sample_count. The bitmap
 		// is not used during this operation.
 		uint32_t filtered_sample_count = entropy_filter(cpu_sample_count, e->samples, ENTROPY_MAX_FILTER_COUNT, entropy_data.filter);
-		assert(filtered_sample_count <= cpu_sample_count);
+		assert3u(filtered_sample_count, <=, cpu_sample_count);
 
 		entropy_filter_total_sample_count += cpu_sample_count;
 		entropy_filter_accepted_sample_count += filtered_sample_count;
@@ -583,7 +584,7 @@ entropy_provide(size_t *entropy_size, void *entropy, __unused void *arg)
 	// We need the combined size of our inputs to equal the
 	// internal SHA512 block size. This will force an additional
 	// compression to provide backtracking resistance.
-	assert(sizeof(label) + *entropy_size == SHA512_BLOCK_LENGTH);
+	assert3u(sizeof(label) + *entropy_size, ==, SHA512_BLOCK_LENGTH);
 	SHA512_Update(&entropy_data.sha512_ctx, label, sizeof(label));
 	SHA512_Update(&entropy_data.sha512_ctx, entropy, *entropy_size);
 

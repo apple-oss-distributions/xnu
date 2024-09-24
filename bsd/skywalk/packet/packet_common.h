@@ -405,7 +405,7 @@ __packet_set_expiry_action(const uint64_t ph, packet_expiry_action_t pea)
 __attribute__((always_inline))
 static inline errno_t
 __packet_opt_get_token(const struct __packet_opt *po,
-    void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token,
+    void *__sized_by(*len)token,
     uint16_t *len, uint8_t *type)
 {
 	uint16_t tlen = po->__po_token_len;
@@ -419,6 +419,11 @@ __packet_opt_get_token(const struct __packet_opt *po,
 	ASSERT(tlen <= PKT_OPT_MAX_TOKEN_SIZE);
 	_CASSERT((__builtin_offsetof(struct __packet_opt, __po_token) % 8) == 0);
 	bcopy(po->__po_token, token, tlen);
+	/*
+	 * -fbounds-safety: Updating *len should be fine because at this point
+	 * we know tlen is less than or equal to *len (check the first if
+	 * statement in this function)
+	 */
 	*len = tlen;
 	*type = ttype;
 	return 0;
@@ -427,7 +432,7 @@ __packet_opt_get_token(const struct __packet_opt *po,
 __attribute__((always_inline))
 static inline errno_t
 __packet_get_token(const uint64_t ph,
-    void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token, uint16_t *len)
+    void *__sized_by(*len)token, uint16_t *len)
 {
 #ifdef KERNEL
 	struct __packet_opt *po = PKT_ADDR(ph)->pkt_com_opt;
@@ -499,7 +504,7 @@ __packet_set_tx_timestamp(const uint64_t ph, const uint64_t ts)
 __attribute__((always_inline))
 static inline errno_t
 __packet_set_token(const uint64_t ph,
-    const void *__sized_by(PKT_OPT_MAX_TOKEN_SIZE)token, const uint16_t len)
+    const void *__sized_by(len)token, const uint16_t len)
 {
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
 #ifdef KERNEL
@@ -524,11 +529,13 @@ __packet_get_packetid(const uint64_t ph, packet_id_t *pktid)
 	uint8_t type;
 	errno_t err;
 
+
 	PKT_TYPE_ASSERT(ph, NEXUS_META_TYPE_PACKET);
 	if ((PKT_ADDR(ph)->pkt_pflags & PKT_F_OPT_TOKEN) == 0) {
 		return ENOENT;
 	}
-	err = __packet_opt_get_token(po, pktid, &len, &type);
+	err = __packet_opt_get_token(po, (packet_id_t * __header_indexable)pktid,
+	    &len, &type);
 	if ((err == 0) && ((type != PKT_OPT_TOKEN_TYPE_PACKET_ID) ||
 	    (len != sizeof(packet_id_t)))) {
 		err = ENOENT;
@@ -1017,6 +1024,28 @@ __packet_get_data_length(const uint64_t ph)
 	return QUM_ADDR(ph)->qum_len;
 }
 
+#ifdef KERNEL
+/*
+ * This handles truncated packets used in compat Tx and Rx classification.
+ */
+__attribute__((always_inline))
+static inline uint32_t
+__packet_get_real_data_length(const struct __kern_packet *pkt)
+{
+	uint32_t pkt_len;
+
+	if (pkt->pkt_pflags & PKT_F_TRUNCATED) {
+		struct __kern_buflet *bft;
+
+		bft = kern_packet_get_next_buflet(SK_PKT2PH(pkt), NULL);
+		pkt_len = kern_buflet_get_data_length(bft);
+	} else {
+		pkt_len = pkt->pkt_length;
+	}
+	return pkt_len;
+}
+#endif /* KERNEL */
+
 __attribute__((always_inline))
 static inline uint16_t
 __packet_get_buflet_count(const uint64_t ph)
@@ -1122,7 +1151,11 @@ __packet_add_buflet(const uint64_t ph, const void *bprev0, const void *bnew0)
 }
 
 __attribute__((always_inline))
-static inline void *
+#ifdef KERNEL
+static inline struct __kern_buflet *
+#else
+static inline struct __user_buflet *
+#endif
 __packet_get_next_buflet(const uint64_t ph, const void *bprev0)
 {
 #ifdef KERNEL
@@ -1766,11 +1799,13 @@ __packet_cksum(const void *data, uint32_t len, uint32_t sum0)
 	return os_cpu_in_cksum(data, len, sum0);
 }
 
-extern uint32_t os_cpu_copy_in_cksum(const void *, void *, uint32_t, uint32_t);
+extern uint32_t os_cpu_copy_in_cksum(const void *__sized_by(len), void *__sized_by(len),
+    uint32_t len, uint32_t);
 
 __attribute__((always_inline))
 static inline uint32_t
-__packet_copy_and_sum(const void *src, void *dst, uint32_t len, uint32_t sum0)
+__packet_copy_and_sum(const void *__sized_by(len) src, void *__sized_by(len) dst,
+    uint32_t len, uint32_t sum0)
 {
 	return os_cpu_copy_in_cksum(src, dst, len, sum0);
 }
@@ -1799,10 +1834,11 @@ __packet_fix_hdr_sum(uint8_t *__sized_by(4)field, uint16_t *csum, uint32_t new)
 }
 
 __attribute__((always_inline))
-static inline void *
+static inline void *__header_indexable
 __buflet_get_data_address(const void *buf)
 {
-	return __unsafe_forge_single(void *, (void *)(BLT_ADDR(buf)->buf_addr));
+	return __unsafe_forge_bidi_indexable(void *, (void *)(BLT_ADDR(buf)->buf_addr),
+	           BLT_ADDR(buf)->buf_dlim);
 }
 
 #ifdef KERNEL

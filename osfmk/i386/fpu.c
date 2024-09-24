@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,10 +95,10 @@ extern void             fp_load(
 static void configure_mxcsr_capability_mask(x86_ext_thread_state_t *fps);
 static xstate_t thread_xstate(thread_t);
 
-x86_ext_thread_state_t  initial_fp_state __attribute((aligned(64)));
-x86_ext_thread_state_t  default_avx512_state __attribute((aligned(64)));
-x86_ext_thread_state_t  default_avx_state __attribute((aligned(64)));
-x86_ext_thread_state_t  default_fx_state __attribute((aligned(64)));
+static x86_ext_thread_state_t  initial_fp_state __attribute((aligned(64)));
+static x86_ext_thread_state_t  default_avx512_state __attribute((aligned(64)));
+static x86_ext_thread_state_t  default_avx_state __attribute((aligned(64)));
+static x86_ext_thread_state_t  default_fx_state __attribute((aligned(64)));
 
 /* Global MXCSR capability bitmask */
 static unsigned int mxcsr_capability_mask;
@@ -155,11 +155,51 @@ SECURITY_READ_ONLY_LATE(zone_t) ifps_zone[] = {
 	[AVX]    = NULL,
 	[AVX512] = NULL
 };
-static const uint32_t fp_state_size[] = {
-	[FP]     = sizeof(struct x86_fx_thread_state),
-	[AVX]    = sizeof(struct x86_avx_thread_state),
-	[AVX512] = sizeof(struct x86_avx512_thread_state)
+
+#define AVX512_OFFSET   offsetof(struct x86_avx512_thread_state, x_Opmask)
+
+SECURITY_READ_ONLY_LATE(uint32_t) fp_avx512_offset = AVX512_OFFSET;
+
+static uint32_t
+fp_state_size(xstate_t state)
+{
+	switch (state) {
+	case FP:
+		return sizeof(struct x86_fx_thread_state);
+	case AVX:
+		return sizeof(struct x86_avx_thread_state);
+	case AVX512:
+		switch (fp_avx512_offset) {
+		case AVX512_OFFSET:
+			return sizeof(struct x86_avx512_thread_state);
+		default:
+			panic("avx512 offset %d", fp_avx512_offset);
+		}
+	default:
+		panic("bad state %d", state);
+	}
+}
+
+struct fp_avx512 {
+	uint64_t *x_Opmask;
+	reg256_t *x_ZMM_Hi256;
+	reg512_t *x_Hi16_ZMM;
 };
+
+static struct fp_avx512
+fp_avx512_get(struct x86_avx512_thread_state *iavx)
+{
+	switch (fp_avx512_offset) {
+	case AVX512_OFFSET:
+		return (struct fp_avx512) {
+			       .x_Opmask = iavx->x_Opmask,
+			       .x_ZMM_Hi256 = iavx->x_ZMM_Hi256,
+			       .x_Hi16_ZMM = iavx->x_Hi16_ZMM,
+		};
+	default:
+		panic("bad offset");
+	}
+}
 
 static const char *const xstate_name[] = {
 	[UNDEFINED] = "UNDEFINED",
@@ -170,6 +210,7 @@ static const char *const xstate_name[] = {
 
 #define fpu_ZMM_capable (fpu_capability == AVX512)
 #define fpu_YMM_capable (fpu_capability == AVX || fpu_capability == AVX512)
+
 /*
  * On-demand AVX512 support
  * ------------------------
@@ -274,45 +315,56 @@ typedef struct { uint8_t byte[64]; } zmm_t;
 static void
 DBG_AVX512_STATE(struct x86_avx512_thread_state *sp)
 {
-	int     i, j;
-	xmm_t *xmm  = (xmm_t *) &sp->fp.fx_XMM_reg;
-	xmm_t *ymmh = (xmm_t *) &sp->x_YMM_Hi128;
-	ymm_t *zmmh = (ymm_t *) &sp->x_ZMM_Hi256;
-	zmm_t *zmm  = (zmm_t *) &sp->x_Hi16_ZMM;
-	opmask_t *k = (opmask_t *) &sp->x_Opmask;
+	const xmm_t *xmm  = (const xmm_t *) &sp->fp.fx_XMM_reg;
+	const xmm_t *ymmh = (const xmm_t *) &sp->x_YMM_Hi128;
 
-	kprintf("x_YMM_Hi128: %lu\n", offsetof(struct x86_avx512_thread_state, x_YMM_Hi128));
-	kprintf("x_Opmask:    %lu\n", offsetof(struct x86_avx512_thread_state, x_Opmask));
-	kprintf("x_ZMM_Hi256: %lu\n", offsetof(struct x86_avx512_thread_state, x_ZMM_Hi256));
-	kprintf("x_Hi16_ZMM:  %lu\n", offsetof(struct x86_avx512_thread_state, x_Hi16_ZMM));
+	const struct fp_avx512 p = fp_avx512_get(sp);
+	const ymm_t *zmmh = (const ymm_t *) &p.x_ZMM_Hi256;
+	const zmm_t *zmm  = (const zmm_t *) &p.x_Hi16_ZMM;
+	const opmask_t *k = (const opmask_t *) &p.x_Opmask;
+
+	switch (fp_avx512_offset) {
+	case AVX512_OFFSET:
+		kprintf("x_YMM_Hi128: %lu\n",
+		    offsetof(struct x86_avx512_thread_state, x_YMM_Hi128));
+		kprintf("x_Opmask:    %lu\n",
+		    offsetof(struct x86_avx512_thread_state, x_Opmask));
+		kprintf("x_ZMM_Hi256: %lu\n",
+		    offsetof(struct x86_avx512_thread_state, x_ZMM_Hi256));
+		kprintf("x_Hi16_ZMM:  %lu\n",
+		    offsetof(struct x86_avx512_thread_state, x_Hi16_ZMM));
+		break;
+	default:
+		break;
+	}
 
 	kprintf("XCR0:   0x%016llx\n", xgetbv(XCR0));
 	kprintf("XINUSE: 0x%016llx\n", xgetbv(1));
 
 	/* Print all ZMM registers */
-	for (i = 0; i < 16; i++) {
+	for (int i = 0; i < 16; i++) {
 		kprintf("zmm%d:\t0x", i);
-		for (j = 0; j < 16; j++) {
+		for (int j = 0; j < 16; j++) {
 			kprintf("%02x", xmm[i].byte[j]);
 		}
-		for (j = 0; j < 16; j++) {
+		for (int j = 0; j < 16; j++) {
 			kprintf("%02x", ymmh[i].byte[j]);
 		}
-		for (j = 0; j < 32; j++) {
+		for (int j = 0; j < 32; j++) {
 			kprintf("%02x", zmmh[i].byte[j]);
 		}
 		kprintf("\n");
 	}
-	for (i = 0; i < 16; i++) {
+	for (int i = 0; i < 16; i++) {
 		kprintf("zmm%d:\t0x", 16 + i);
-		for (j = 0; j < 64; j++) {
+		for (int j = 0; j < 64; j++) {
 			kprintf("%02x", zmm[i].byte[j]);
 		}
 		kprintf("\n");
 	}
-	for (i = 0; i < 8; i++) {
+	for (int i = 0; i < 8; i++) {
 		kprintf("k%d:\t0x", i);
-		for (j = 0; j < 8; j++) {
+		for (int j = 0; j < 8; j++) {
 			kprintf("%02x", k[i].byte[j]);
 		}
 		kprintf("\n");
@@ -326,7 +378,6 @@ DBG_AVX512_STATE(struct x86_avx512_thread_state *sp)
 static void
 DBG_AVX512_STATE(__unused struct x86_avx512_thread_state *sp)
 {
-	return;
 }
 #endif /* DEBUG_AVX512 */
 
@@ -369,9 +420,10 @@ configure_mxcsr_capability_mask(x86_ext_thread_state_t *fps)
 	bzero(&fps->fx.fx_XMM_reg[0][0], sizeof(fps->fx.fx_XMM_reg));
 	bzero(fps->avx.x_YMM_Hi128, sizeof(fps->avx.x_YMM_Hi128));
 	if (fpu_ZMM_capable) {
-		bzero(fps->avx512.x_ZMM_Hi256, sizeof(fps->avx512.x_ZMM_Hi256));
-		bzero(fps->avx512.x_Hi16_ZMM, sizeof(fps->avx512.x_Hi16_ZMM));
-		bzero(fps->avx512.x_Opmask, sizeof(fps->avx512.x_Opmask));
+		const struct fp_avx512 p = fp_avx512_get(&fps->avx512);
+		bzero(p.x_ZMM_Hi256, sizeof(fps->avx512.x_ZMM_Hi256));
+		bzero(p.x_Hi16_ZMM, sizeof(fps->avx512.x_Hi16_ZMM));
+		bzero(p.x_Opmask, sizeof(fps->avx512.x_Opmask));
 	}
 
 	fps->fx.fp_valid = TRUE;
@@ -463,7 +515,7 @@ init_fpu(void)
 				cpuid_set_info();
 			}
 			/* Verify that now selected state can be accommodated */
-			assert(xs0p->extended_state[ebx] == fp_state_size[AVX512]);
+			assert(xs0p->extended_state[ebx] == fp_state_size(AVX512));
 			/*
 			 * AVX set until AVX512 is used.
 			 * See comment above about on-demand AVX512 support.
@@ -482,14 +534,14 @@ init_fpu(void)
 				cpuid_set_info();
 			}
 			/* Verify that now selected state can be accommodated */
-			assert(xs0p->extended_state[ebx] == fp_state_size[AVX]);
+			assert(xs0p->extended_state[ebx] == fp_state_size(AVX));
 		}
 	}
 
 	if (cpu_number() == master_cpu) {
 		kprintf("fpu_state: %s, state_size: %d\n",
 		    xstate_name[fpu_capability],
-		    fp_state_size[fpu_capability]);
+		    fp_state_size(fpu_capability));
 	}
 
 	fpinit();
@@ -639,14 +691,14 @@ fpu_module_init(void)
 	 * 16 bytes to each element.
 	 */
 	ifps_zone[fpu_default] = zone_create("x86 fpsave state",
-	    fp_state_size[fpu_default], ZC_ALIGNMENT_REQUIRED | ZC_ZFREE_CLEARMEM);
+	    fp_state_size(fpu_default), ZC_ALIGNMENT_REQUIRED | ZC_ZFREE_CLEARMEM);
 
 	/*
 	 * If AVX512 is supported, create a separate savearea zone.
 	 */
-	if (fpu_capability == AVX512) {
+	if (fpu_ZMM_capable) {
 		ifps_zone[AVX512] = zone_create("x86 avx512 save state",
-		    fp_state_size[AVX512], ZC_ALIGNMENT_REQUIRED | ZC_ZFREE_CLEARMEM);
+		    fp_state_size(AVX512), ZC_ALIGNMENT_REQUIRED | ZC_ZFREE_CLEARMEM);
 	}
 
 	/* Determine MXCSR reserved bits and configure initial FPU state*/
@@ -839,7 +891,7 @@ Retry:
 
 		state->fpu_mxcsr &= mxcsr_capability_mask;
 
-		__nochk_bcopy((char *)&state->fpu_fcw, (char *)ifps, fp_state_size[FP]);
+		__nochk_bcopy((char *)&state->fpu_fcw, (char *)ifps, fp_state_size(FP));
 
 		switch (thr_xstate) {
 		case UNDEFINED_FULL:
@@ -900,20 +952,22 @@ Retry:
 			iavx->_xh.xstate_bv = AVX512_XMASK;
 			iavx->_xh.xcomp_bv  = 0;
 
+			const struct fp_avx512 p = fp_avx512_get(iavx);
+
 			/*
 			 * See the block comment at the top of the function for a description of why we're clearing
 			 * xstate_bv bits.
 			 */
 			switch (f) {
 			case x86_AVX512_STATE32:
-				__nochk_bcopy(&xs.s32->fpu_k0, iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG));
-				__nochk_bcopy(&xs.s32->fpu_zmmh0, iavx->x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG));
+				__nochk_bcopy(&xs.s32->fpu_k0, p.x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG));
+				__nochk_bcopy(&xs.s32->fpu_zmmh0, p.x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG));
 
-				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
+				if (fpu_allzeroes((uint64_t *)(void *)p.x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
 					iavx->_xh.xstate_bv &= ~XFEM_OPMASK;
 				}
 
-				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
+				if (fpu_allzeroes((uint64_t *)(void *)p.x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
 					iavx->_xh.xstate_bv &= ~(XFEM_ZMM_HI256 | XFEM_HI16_ZMM);
 				}
 				__nochk_bcopy(&xs.s32->fpu_ymmh0, iavx->x_YMM_Hi128, 8 * sizeof(_STRUCT_XMM_REG));
@@ -930,20 +984,20 @@ Retry:
 				}
 				break;
 			case x86_AVX512_STATE64:
-				__nochk_bcopy(&xs.s64->fpu_k0, iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG));
-				__nochk_bcopy(&xs.s64->fpu_zmm16, iavx->x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG));
-				__nochk_bcopy(&xs.s64->fpu_zmmh0, iavx->x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG));
+				__nochk_bcopy(&xs.s64->fpu_k0, p.x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG));
+				__nochk_bcopy(&xs.s64->fpu_zmm16, p.x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG));
+				__nochk_bcopy(&xs.s64->fpu_zmmh0, p.x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG));
 				/*
 				 * Note that it is valid to have XFEM_ZMM_OPMASK set but XFEM_YMM cleared.  In that case,
 				 * the upper bits of the YMMs would be cleared and would result in a clean-upper
 				 * state, allowing SSE instruction to avoid false dependencies.
 				 */
-				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
+				if (fpu_allzeroes((uint64_t *)(void *)p.x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
 					iavx->_xh.xstate_bv &= ~XFEM_OPMASK;
 				}
 
-				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG)) == TRUE &&
-				    fpu_allzeroes((uint64_t *)(void *)iavx->x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
+				if (fpu_allzeroes((uint64_t *)(void *)p.x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG)) == TRUE &&
+				    fpu_allzeroes((uint64_t *)(void *)p.x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
 					iavx->_xh.xstate_bv &= ~(XFEM_ZMM_HI256 | XFEM_HI16_ZMM);
 				}
 
@@ -1032,7 +1086,7 @@ fpu_get_fxstate(
 		 */
 
 		__nochk_bcopy((char *)&initial_fp_state, (char *)&state->fpu_fcw,
-		    fp_state_size[FP]);
+		    fp_state_size(FP));
 
 		simple_unlock(&pcb->lock);
 
@@ -1054,7 +1108,7 @@ fpu_get_fxstate(
 		(void)ml_set_interrupts_enabled(intr);
 	}
 	if (ifps->fp_valid) {
-		__nochk_bcopy((char *)ifps, (char *)&state->fpu_fcw, fp_state_size[FP]);
+		__nochk_bcopy((char *)ifps, (char *)&state->fpu_fcw, fp_state_size(FP));
 		switch (thr_xstate) {
 		case UNDEFINED_FULL:
 		case FP_FULL:
@@ -1085,10 +1139,13 @@ fpu_get_fxstate(
 				x86_avx512_state32_t *s32;
 				x86_avx512_state64_t *s64;
 			} xs = { .ts = tstate };
+
+			const struct fp_avx512 p = fp_avx512_get(iavx);
+
 			switch (f) {
 			case x86_AVX512_STATE32:
-				__nochk_bcopy(iavx->x_Opmask, &xs.s32->fpu_k0, 8 * sizeof(_STRUCT_OPMASK_REG));
-				__nochk_bcopy(iavx->x_ZMM_Hi256, &xs.s32->fpu_zmmh0, 8 * sizeof(_STRUCT_YMM_REG));
+				__nochk_bcopy(p.x_Opmask, &xs.s32->fpu_k0, 8 * sizeof(_STRUCT_OPMASK_REG));
+				__nochk_bcopy(p.x_ZMM_Hi256, &xs.s32->fpu_zmmh0, 8 * sizeof(_STRUCT_YMM_REG));
 				__nochk_bcopy(iavx->x_YMM_Hi128, &xs.s32->fpu_ymmh0, 8 * sizeof(_STRUCT_XMM_REG));
 				DBG_AVX512_STATE(iavx);
 				break;
@@ -1096,9 +1153,9 @@ fpu_get_fxstate(
 				__nochk_bcopy(iavx->x_YMM_Hi128, &xs.s32->fpu_ymmh0, 8 * sizeof(_STRUCT_XMM_REG));
 				break;
 			case x86_AVX512_STATE64:
-				__nochk_bcopy(iavx->x_Opmask, &xs.s64->fpu_k0, 8 * sizeof(_STRUCT_OPMASK_REG));
-				__nochk_bcopy(iavx->x_Hi16_ZMM, &xs.s64->fpu_zmm16, 16 * sizeof(_STRUCT_ZMM_REG));
-				__nochk_bcopy(iavx->x_ZMM_Hi256, &xs.s64->fpu_zmmh0, 16 * sizeof(_STRUCT_YMM_REG));
+				__nochk_bcopy(p.x_Opmask, &xs.s64->fpu_k0, 8 * sizeof(_STRUCT_OPMASK_REG));
+				__nochk_bcopy(p.x_Hi16_ZMM, &xs.s64->fpu_zmm16, 16 * sizeof(_STRUCT_ZMM_REG));
+				__nochk_bcopy(p.x_ZMM_Hi256, &xs.s64->fpu_zmmh0, 16 * sizeof(_STRUCT_YMM_REG));
 				__nochk_bcopy(iavx->x_YMM_Hi128, &xs.s64->fpu_ymmh0, 16 * sizeof(_STRUCT_XMM_REG));
 				DBG_AVX512_STATE(iavx);
 				break;
@@ -1170,7 +1227,7 @@ fpu_dup_fxstate(
 			child->machine.xstate = xstate;
 			__nochk_bcopy((char *)(ppcb->ifps),
 			    (char *)(child->machine.ifps),
-			    fp_state_size[xstate]);
+			    fp_state_size(xstate));
 
 			/* Mark the new fp saved state as non-live. */
 			/* Temporarily disabled: radar 4647827
@@ -1255,7 +1312,7 @@ fpnoextflt(void)
 	if (pcb->ifps == 0 && !get_interrupt_level()) {
 		ifps = fp_state_alloc(xstate);
 		__nochk_bcopy((char *)&initial_fp_state, (char *)ifps,
-		    fp_state_size[xstate]);
+		    fp_state_size(xstate));
 		if (!thread_is_64bit_addr(thr_act)) {
 			ifps->fp_save_layout = fpu_YMM_capable ? XSAVE32 : FXSAVE32;
 		} else {
@@ -1535,7 +1592,7 @@ fpu_savearea_promote_avx512(thread_t thread)
 
 	/* Allocate an AVX512 savearea and copy AVX state into it */
 	if (pcb->xstate != AVX512) {
-		__nochk_bcopy(ifps, ifps512, fp_state_size[AVX]);
+		__nochk_bcopy(ifps, ifps512, fp_state_size(AVX));
 		pcb->ifps = ifps512;
 		pcb->xstate = AVX512;
 		ifps512 = NULL;
@@ -1647,7 +1704,7 @@ fpUDflt(user_addr_t rip)
 	/*
 	 * Fail if this machine doesn't support AVX512
 	 */
-	if (fpu_capability != AVX512) {
+	if (!fpu_ZMM_capable) {
 		return 1;
 	}
 
@@ -1685,7 +1742,7 @@ ml_fpu_avx_enabled(void)
 boolean_t
 ml_fpu_avx512_enabled(void)
 {
-	return fpu_capability == AVX512;
+	return fpu_ZMM_capable;
 }
 
 static xstate_t

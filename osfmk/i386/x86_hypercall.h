@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -30,6 +30,7 @@
 #define _I386_X86_HYPERCALL_H_
 
 #include <kern/hvg_hypercall.h>
+#include <i386/cpuid.h>
 
 /*
  * Apple Hypercall Calling Convention (x64)
@@ -82,11 +83,12 @@ typedef struct hvg_hcall_output_regs {
 
 #define HVG_HCALL_CODE(code) ('A' << 24 | (code & 0xFFFFFF))
 
-
 /*
  * Caller is responsible for checking the existence of Apple Hypercall
  * before invoking Apple hypercalls.
  */
+
+#if defined(MACH_KERNEL_PRIVATE)
 
 #define HVG_HCALL_RETURN(rax) {\
 	__asm__ __volatile__ goto (\
@@ -102,7 +104,7 @@ error:\
 	return (hvg_hcall_return_t)rax;\
 }
 
-static inline hvg_hcall_return_t
+static hvg_hcall_return_t
 hvg_hypercall6(uint64_t code, uint64_t rdi, uint64_t rsi, uint64_t rdx, uint64_t rcx, uint64_t r8, uint64_t r9,
     hvg_hcall_output_regs_t *output)
 {
@@ -188,5 +190,5 @@ kvmcompat_hypercall2(unsigned long code, unsigned long a0, unsigned long a1)
 	);
 	return retval;
 }
-
+#endif /* MACH_KERNEL_PRIVATE */
 #endif /* _I386_X86_HYPERCALL_H_ */

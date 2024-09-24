@@ -197,14 +197,9 @@ recount_get_snap(processor_t processor)
 	return &processor->pr_recount.rpr_snap;
 }
 
-static struct recount_snap *
-recount_get_interrupt_snap(processor_t processor)
-{
-	return &processor->pr_recount.rpr_interrupt_snap;
-}
-
 // A simple sequence lock implementation.
 
+OS_ALWAYS_INLINE
 static void
 _seqlock_shared_lock_slowpath(const uint32_t *lck, uint32_t gen)
 {
@@ -216,6 +211,7 @@ _seqlock_shared_lock_slowpath(const uint32_t *lck, uint32_t gen)
 	enable_preemption();
 }
 
+OS_ALWAYS_INLINE
 static uintptr_t
 _seqlock_shared_lock(const uint32_t *lck)
 {
@@ -226,12 +222,14 @@ _seqlock_shared_lock(const uint32_t *lck)
 	return gen;
 }
 
+OS_ALWAYS_INLINE
 static bool
 _seqlock_shared_try_unlock(const uint32_t *lck, uintptr_t on_enter)
 {
 	return os_atomic_load(lck, acquire) == on_enter;
 }
 
+OS_ALWAYS_INLINE
 static void
 _seqlock_excl_lock_relaxed(uint32_t *lck)
 {
@@ -239,12 +237,14 @@ _seqlock_excl_lock_relaxed(uint32_t *lck)
 	assert3u((new & 1), ==, 1);
 }
 
+OS_ALWAYS_INLINE
 static void
 _seqlock_excl_commit(void)
 {
 	os_atomic_thread_fence(release);
 }
 
+OS_ALWAYS_INLINE
 static void
 _seqlock_excl_unlock_relaxed(uint32_t *lck)
 {
@@ -252,6 +252,7 @@ _seqlock_excl_unlock_relaxed(uint32_t *lck)
 	assert3u((new & 1), ==, 0);
 }
 
+OS_ALWAYS_INLINE
 static struct recount_track *
 recount_update_start(struct recount_track *tracks, recount_topo_t topo,
     processor_t processor)
@@ -697,7 +698,7 @@ uint64_t
 recount_current_thread_interrupt_time_mach(void)
 {
 	thread_t thread = current_thread();
-	return thread->th_recount.rth_interrupt_time_mach;
+	return thread->th_recount.rth_interrupt_duration_mach;
 }
 
 void
@@ -868,17 +869,17 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	const bool was_idle = (thread->options & TH_OPT_IDLE_THREAD) != 0;
 
 	struct recount_track *wi_tracks_array = NULL;
-	if (!was_idle) {
+	if (__probable(!was_idle)) {
 		wi_tracks_array = work_interval_get_recount_tracks(
 			thread->th_work_interval);
 	}
-	bool absorb_work_interval = wi_tracks_array != NULL;
+	const bool absorb_work_interval = wi_tracks_array != NULL;
 
 	struct recount_track *th_track = recount_update_start(
 		thread->th_recount.rth_lifetime, recount_thread_plan.rpl_topo,
 		processor);
 	struct recount_track *wi_track = NULL;
-	if (absorb_work_interval) {
+	if (__improbable(absorb_work_interval)) {
 		wi_track = recount_update_start(wi_tracks_array,
 		    recount_work_interval_plan.rpl_topo, processor);
 	}
@@ -890,8 +891,8 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 	recount_update_commit();
 
 	recount_usage_add_snap(&th_track->rt_usage, level, to_add);
-	if (!was_idle) {
-		if (absorb_work_interval) {
+	if (__probable(!was_idle)) {
+		if (__improbable(absorb_work_interval)) {
 			recount_usage_add_snap(&wi_track->rt_usage, level, to_add);
 		}
 		recount_usage_add_snap(&tk_track->rt_usage, level, to_add);
@@ -900,7 +901,7 @@ recount_absorb_snap(struct recount_snap *to_add, thread_t thread, task_t task,
 
 	recount_update_commit();
 	recount_update_end(th_track);
-	if (!was_idle) {
+	if (__probable(!was_idle)) {
 		if (absorb_work_interval) {
 			recount_update_end(wi_track);
 		}
@@ -913,8 +914,6 @@ void
 recount_switch_thread(struct recount_snap *cur, struct thread *off_thread,
     struct task *off_task)
 {
-	assert(ml_get_interrupts_enabled() == FALSE);
-
 	if (__improbable(!_recount_started)) {
 		return;
 	}
@@ -939,7 +938,6 @@ recount_add_energy(struct thread *off_thread, struct task *off_task,
     uint64_t energy_nj)
 {
 #if RECOUNT_ENERGY
-	assert(ml_get_interrupts_enabled() == FALSE);
 	if (__improbable(!_recount_started)) {
 		return;
 	}
@@ -1064,6 +1062,7 @@ recount_assert_level(thread_t __unused thread,
 ///
 /// - Returns: The value of Mach time that was sampled inside this function.
 PRECISE_TIME_FATAL_FUNC
+OS_ALWAYS_INLINE
 static uint64_t
 recount_transition(recount_level_t from, recount_level_t to)
 {
@@ -1115,8 +1114,13 @@ void
 recount_enter_interrupt(void)
 {
 	processor_t processor = current_processor();
-	struct recount_snap *last = recount_get_interrupt_snap(processor);
-	recount_snapshot_speculative(last);
+#if MACH_ASSERT
+	if (processor->pr_recount.rpr_last_interrupt_enter_time_mach != 0) {
+		panic("recount: unbalanced interrupt enter/leave, started at %llu",
+		    processor->pr_recount.rpr_last_interrupt_enter_time_mach);
+	}
+#endif // MACH_ASSERT
+	processor->pr_recount.rpr_last_interrupt_enter_time_mach = recount_timestamp_speculative();
 }
 
 void
@@ -1124,13 +1128,14 @@ recount_leave_interrupt(void)
 {
 	processor_t processor = current_processor();
 	thread_t thread = processor->active_thread;
-	struct recount_snap *last = recount_get_snap(processor);
-	uint64_t last_time = last->rsn_time_mach;
-	recount_snapshot_speculative(last);
-	processor->pr_recount.rpr_interrupt_time_mach +=
-	    last->rsn_time_mach - last_time;
-	thread->th_recount.rth_interrupt_time_mach +=
-	    last->rsn_time_mach - last_time;
+	uint64_t now = recount_timestamp_speculative();
+	uint64_t since = now - processor->pr_recount.rpr_last_interrupt_enter_time_mach;
+	processor->pr_recount.rpr_interrupt_duration_mach += since;
+	thread->th_recount.rth_interrupt_duration_mach += since;
+	processor->pr_recount.rpr_last_interrupt_leave_time_mach = now;
+#if MACH_ASSERT
+	processor->pr_recount.rpr_last_interrupt_enter_time_mach = 0;
+#endif // MACH_ASSERT
 }
 
 #if __x86_64__
@@ -1252,10 +1257,10 @@ recount_processor_usage(struct recount_processor *pr,
 }
 
 uint64_t
-recount_current_processor_interrupt_time_mach(void)
+recount_current_processor_interrupt_duration_mach(void)
 {
 	assert(!preemption_enabled());
-	return current_processor()->pr_recount.rpr_interrupt_time_mach;
+	return current_processor()->pr_recount.rpr_interrupt_duration_mach;
 }
 
 bool

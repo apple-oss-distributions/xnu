@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -62,7 +62,7 @@ extern  reset_handler_data_t    ResetHandlerData;
 /* Put the static check for cpumap_t here as it's defined in <kern/processor.h> */
 static_assert(sizeof(cpumap_t) * CHAR_BIT >= MAX_CPUS, "cpumap_t bitvector is too small for current MAX_CPUS value");
 
-#define CPUWINDOWS_BASE_MASK            0xFFFFFFFFFFE00000UL
+#define CPUWINDOWS_BASE_MASK            0xFFFFFFFFFFD00000UL
 #define CPUWINDOWS_BASE                 (VM_MAX_KERNEL_ADDRESS & CPUWINDOWS_BASE_MASK)
 #define CPUWINDOWS_TOP                  (CPUWINDOWS_BASE + (MAX_CPUS * CPUWINDOWS_MAX * ARM_PGBYTES))
 
@@ -105,9 +105,34 @@ typedef struct {
 	uint64_t instr_ex_cnt;
 } cpu_stat_t;
 
+__options_closed_decl(cpu_flags_t, uint16_t, {
+	SleepState      = 0x0800,
+	/* For the boot processor, StartedState means 'interrupts initialized' - it is already running */
+	StartedState    = 0x1000,
+	/* For the boot processor, InitState means 'cpu_data fully initialized' - it is already running */
+	InitState       = 0x2000,
+});
+
+__options_closed_decl(cpu_signal_t, unsigned int, {
+	SIGPnop         = 0x00000000U,     /* Send IPI with no service */
+	/* 0x1U unused */
+	/* 0x2U unused */
+	SIGPxcall       = 0x00000004U,     /* Call a function on a processor */
+	SIGPast         = 0x00000008U,     /* Request AST check */
+	SIGPdebug       = 0x00000010U,     /* Request Debug call */
+	SIGPLWFlush     = 0x00000020U,     /* Request LWFlush call */
+	SIGPLWClean     = 0x00000040U,     /* Request LWClean call */
+	/* 0x80U unused */
+	SIGPkppet       = 0x00000100U,     /* Request kperf PET handler */
+	SIGPxcallImm    = 0x00000200U,     /* Send a cross-call, fail if already pending */
+	SIGPTimerLocal  = 0x00000400U,     /* Update the decrementer via timer_queue_expire_local */
+
+	SIGPdisabled    = 0x80000000U,     /* Signal disabled */
+});
+
 typedef struct cpu_data {
-	short                           cpu_number;
-	unsigned short                  cpu_flags;
+	unsigned short                  cpu_number;
+	_Atomic cpu_flags_t             cpu_flags;
 	int                             cpu_type;
 	int                             cpu_subtype;
 	int                             cpu_threadtype;
@@ -115,12 +140,13 @@ typedef struct cpu_data {
 	void *                          XNU_PTRAUTH_SIGNED_PTR("cpu_data.istackptr") istackptr;
 	vm_offset_t                     intstack_top;
 #if __arm64__
+	void *                          XNU_PTRAUTH_SIGNED_PTR("cpu_data.excepstackptr") excepstackptr;
 	vm_offset_t                     excepstack_top;
 #endif
 	thread_t                        cpu_active_thread;
 	vm_offset_t                     cpu_active_stack;
 	cpu_id_t                        cpu_id;
-	unsigned volatile int           cpu_signal;
+	volatile cpu_signal_t           cpu_signal;
 	ast_t                           cpu_pending_ast;
 	cache_dispatch_t                cpu_cache_dispatch;
 
@@ -186,6 +212,7 @@ typedef struct cpu_data {
 #if     __arm64__
 	vm_offset_t                     coresight_base[CORESIGHT_REGIONS];
 #endif
+
 
 	/* CCC ARMv8 registers */
 	uint64_t                        cpu_regmap_paddr;
@@ -255,13 +282,14 @@ typedef struct cpu_data {
 	uint64_t                        cpu_tpidr_el0;
 #endif
 
-} cpu_data_t;
+#ifdef APPLEEVEREST
+	/* PAs used to apply pio locks in early boot. */
+	uint64_t cpu_reg_paddr;
+	uint64_t acc_reg_paddr;
+	uint64_t cpm_reg_paddr;
+#endif
 
-/*
- * cpu_flags
- */
-#define SleepState                      0x0800
-#define StartedState                    0x1000
+} cpu_data_t;
 
 extern  cpu_data_entry_t                CpuDataEntries[MAX_CPUS];
 PERCPU_DECL(cpu_data_t, cpu_data);
@@ -283,8 +311,7 @@ extern cpu_data_t      *cpu_datap(int cpu);
 extern cpu_data_t      *cpu_data_alloc(boolean_t is_boot);
 extern void             cpu_stack_alloc(cpu_data_t*);
 extern void             cpu_data_init(cpu_data_t *cpu_data_ptr);
-extern void             cpu_data_free(cpu_data_t *cpu_data_ptr);
-extern kern_return_t    cpu_data_register(cpu_data_t *cpu_data_ptr);
+extern void             cpu_data_register(cpu_data_t *cpu_data_ptr);
 extern cpu_data_t      *processor_to_cpu_datap( processor_t processor);
 
 #if __arm64__

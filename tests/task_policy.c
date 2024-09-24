@@ -18,7 +18,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 #if defined(UNENTITLED)
 
-T_DECL(task_policy_set_task_name, "task_policy_set with task name (not entitled)")
+T_DECL(task_policy_set_task_name, "task_policy_set with task name (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -38,7 +38,7 @@ T_DECL(task_policy_set_task_name, "task_policy_set with task name (not entitled)
 	    KERN_INVALID_ARGUMENT, NULL);
 }
 
-T_DECL(task_policy_set_task, "task_policy_set with task (not entitled)")
+T_DECL(task_policy_set_task, "task_policy_set with task (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -52,7 +52,7 @@ T_DECL(task_policy_set_task, "task_policy_set with task (not entitled)")
 	    NULL);
 }
 
-T_DECL(task_policy_set_inspect, "task_policy_set with task inspect (not entitled)")
+T_DECL(task_policy_set_inspect, "task_policy_set with task inspect (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -73,7 +73,7 @@ T_DECL(task_policy_set_inspect, "task_policy_set with task inspect (not entitled
 	    KERN_INVALID_ARGUMENT, NULL);
 }
 
-T_DECL(task_policy_set_foreign_task, "task_policy_set for foreign task (not entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task, "task_policy_set for foreign task (not entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -103,7 +103,7 @@ T_DECL(task_policy_set_foreign_task, "task_policy_set for foreign task (not enti
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_set_foreign_task_name, "task_policy_set for foreign task name (not entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task_name, "task_policy_set for foreign task name (not entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -133,7 +133,7 @@ T_DECL(task_policy_set_foreign_task_name, "task_policy_set for foreign task name
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_set_foreign_task_inspect, "task_policy_set for foreign task inspect (not entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task_inspect, "task_policy_set for foreign task inspect (not entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -163,7 +163,7 @@ T_DECL(task_policy_set_foreign_task_inspect, "task_policy_set for foreign task i
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_name, "task_policy_get with task name (not entitled)")
+T_DECL(task_policy_get_name, "task_policy_get with task name (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	task_name_t task_name = TASK_NAME_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -183,7 +183,7 @@ T_DECL(task_policy_get_name, "task_policy_get with task name (not entitled)")
 	    KERN_INVALID_ARGUMENT, NULL);
 }
 
-T_DECL(task_policy_get_task, "task_policy_get with task (not entitled)")
+T_DECL(task_policy_get_task, "task_policy_get with task (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
 	mach_msg_type_number_t count = TASK_CATEGORY_POLICY_COUNT;
@@ -197,7 +197,7 @@ T_DECL(task_policy_get_task, "task_policy_get with task (not entitled)")
 	    NULL);
 }
 
-T_DECL(task_policy_get_inspect, "task_policy_get with task inspect (not entitled)")
+T_DECL(task_policy_get_inspect, "task_policy_get with task inspect (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	task_inspect_t task_inspect = TASK_INSPECT_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -217,7 +217,7 @@ T_DECL(task_policy_get_inspect, "task_policy_get with task inspect (not entitled
 	    NULL);
 }
 
-T_DECL(task_policy_get_foreign_task_inspect, "task_policy_get for foreign task inspect (not entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_foreign_task_inspect, "task_policy_get for foreign task inspect (not entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_inspect_t task_inspect = TASK_INSPECT_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -247,7 +247,7 @@ T_DECL(task_policy_get_foreign_task_inspect, "task_policy_get for foreign task i
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_foreign_task, "task_policy_get for foreign task (not entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_foreign_task, "task_policy_get for foreign task (not entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_t task = TASK_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -277,7 +277,7 @@ T_DECL(task_policy_get_foreign_task, "task_policy_get for foreign task (not enti
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_foreign_task_name, "task_policy_get for foreign task name (not entitled)")
+T_DECL(task_policy_get_foreign_task_name, "task_policy_get for foreign task name (not entitled)", T_META_TAG_VM_PREFERRED)
 {
 	task_name_t task_name = TASK_NAME_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -309,7 +309,7 @@ T_DECL(task_policy_get_foreign_task_name, "task_policy_get for foreign task name
 
 #else /* ENTITLED */
 
-T_DECL(task_policy_set_task_name_entitled, "task_policy_set with task name (entitled)", T_META_ASROOT(true), T_META_ASROOT(true))
+T_DECL(task_policy_set_task_name_entitled, "task_policy_set with task name (entitled)", T_META_ASROOT(true), T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -329,7 +329,7 @@ T_DECL(task_policy_set_task_name_entitled, "task_policy_set with task name (enti
 	    NULL);
 }
 
-T_DECL(task_policy_set_task_entitled, "task_policy_set with task (entitled)")
+T_DECL(task_policy_set_task_entitled, "task_policy_set with task (entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -343,7 +343,7 @@ T_DECL(task_policy_set_task_entitled, "task_policy_set with task (entitled)")
 	    NULL);
 }
 
-T_DECL(task_policy_set_inspect_entitled, "task_policy_set with task inspect (entitled)")
+T_DECL(task_policy_set_inspect_entitled, "task_policy_set with task inspect (entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -363,7 +363,7 @@ T_DECL(task_policy_set_inspect_entitled, "task_policy_set with task inspect (ent
 	    NULL);
 }
 
-T_DECL(task_policy_set_foreign_task_entitled, "task_policy_set for foreign task (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task_entitled, "task_policy_set for foreign task (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -393,7 +393,7 @@ T_DECL(task_policy_set_foreign_task_entitled, "task_policy_set for foreign task 
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_set_foreign_task_name_entitled, "task_policy_set for foreign task name (entitled)", T_META_ASROOT(true), T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task_name_entitled, "task_policy_set for foreign task name (entitled)", T_META_ASROOT(true), T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -423,7 +423,7 @@ T_DECL(task_policy_set_foreign_task_name_entitled, "task_policy_set for foreign 
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_set_foreign_task_inspect_entitled, "task_policy_set for foreign task inspect (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_set_foreign_task_inspect_entitled, "task_policy_set for foreign task inspect (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	struct task_qos_policy qosinfo = {
 		.task_latency_qos_tier = LATENCY_QOS_TIER_0,
@@ -453,7 +453,7 @@ T_DECL(task_policy_set_foreign_task_inspect_entitled, "task_policy_set for forei
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_name_entitled, "task_policy_get with task name (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_name_entitled, "task_policy_get with task name (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_name_t task_name = TASK_NAME_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -473,7 +473,7 @@ T_DECL(task_policy_get_name_entitled, "task_policy_get with task name (entitled)
 	    NULL);
 }
 
-T_DECL(task_policy_get_task_entitled, "task_policy_get with task (entitled)")
+T_DECL(task_policy_get_task_entitled, "task_policy_get with task (entitled)", T_META_TAG_VM_PREFERRED)
 {
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
 	mach_msg_type_number_t count = TASK_CATEGORY_POLICY_COUNT;
@@ -487,7 +487,7 @@ T_DECL(task_policy_get_task_entitled, "task_policy_get with task (entitled)")
 	    NULL);
 }
 
-T_DECL(task_policy_get_inspect_entitled, "task_policy_get with task inspect (entitled)")
+T_DECL(task_policy_get_inspect_entitled, "task_policy_get with task inspect (entitled)", T_META_TAG_VM_PREFERRED)
 {
 	task_inspect_t task_inspect = TASK_INSPECT_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -507,7 +507,7 @@ T_DECL(task_policy_get_inspect_entitled, "task_policy_get with task inspect (ent
 	    NULL);
 }
 
-T_DECL(task_policy_get_foreign_task_inspect_entitled, "task_policy_get for foreign task inspect (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_foreign_task_inspect_entitled, "task_policy_get for foreign task inspect (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_inspect_t task_inspect = TASK_INSPECT_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -537,7 +537,7 @@ T_DECL(task_policy_get_foreign_task_inspect_entitled, "task_policy_get for forei
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_foreign_task_entitled, "task_policy_get for foreign task (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_foreign_task_entitled, "task_policy_get for foreign task (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_t task = TASK_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];
@@ -567,7 +567,7 @@ T_DECL(task_policy_get_foreign_task_entitled, "task_policy_get for foreign task 
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "killing sleep");
 }
 
-T_DECL(task_policy_get_foreign_task_name_entitled, "task_policy_get for foreign task name (entitled)", T_META_ASROOT(true))
+T_DECL(task_policy_get_foreign_task_name_entitled, "task_policy_get for foreign task name (entitled)", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	task_name_t task_name = TASK_NAME_NULL;
 	struct task_category_policy role[TASK_CATEGORY_POLICY_COUNT];

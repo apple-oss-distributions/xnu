@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -81,6 +81,7 @@
 #include <kern/locks.h>
 #include <kern/zalloc.h>
 #include <netinet/in_stat.h>
+#include <net/if_ports_used.h>
 #endif /* BSD_KERNEL_PRIVATE */
 #if !KERNEL
 #include <TargetConditionals.h>
@@ -139,12 +140,20 @@ struct inp_stat {
 	u_int64_t       txbytes;
 };
 
+typedef enum {
+	stats_functional_type_none       = 0,
+	stats_functional_type_cell       = 1,
+	stats_functional_type_wifi       = 2,
+	stats_functional_type_wired      = 3,
+	stats_functional_type_bluetooth = 4
+} stats_functional_type;
+
 struct inp_necp_attributes {
-	char *inp_domain;
-	char *inp_account;
-	char *inp_domain_owner;
-	char *inp_tracker_domain;
-	char *inp_domain_context;
+	char *inp_domain __null_terminated;
+	char *inp_account __null_terminated;
+	char *inp_domain_owner __null_terminated;
+	char *inp_tracker_domain __null_terminated;
+	char *inp_domain_context __null_terminated;
 };
 
 /*
@@ -237,15 +246,15 @@ struct inpcb {
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
 	necp_client_flow_cb necp_cb;
-	uint8_t *inp_resolver_signature;
 	size_t inp_resolver_signature_length;
+	uint8_t *inp_resolver_signature __sized_by(inp_resolver_signature_length);
 #endif
 #if SKYWALK
 	netns_token inp_netns_token;    /* shared namespace state */
 	/* optional IPv4 wildcard namespace reservation for an IPv6 socket */
 	netns_token inp_wildcard_netns_token;
 #endif /* SKYWALK */
-	u_char *inp_keepalive_data;     /* for keepalive offload */
+	u_char *__sized_by(inp_keepalive_datalen) inp_keepalive_data;     /* for keepalive offload */
 	uint8_t inp_keepalive_datalen; /* keepalive data length */
 	uint8_t inp_keepalive_type;    /* type of application */
 	uint16_t inp_keepalive_interval; /* keepalive interval */
@@ -254,10 +263,12 @@ struct inpcb {
 	struct inp_stat *inp_cstat;     /* cellular data */
 	struct inp_stat *inp_wstat;     /* Wi-Fi data */
 	struct inp_stat *inp_Wstat;     /* Wired data */
+	struct inp_stat *inp_btstat;    /* Bluetooth data */
 	uint8_t inp_stat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
 	uint8_t inp_cstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
 	uint8_t inp_wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
 	uint8_t inp_Wstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
+	uint8_t inp_btstat_store[sizeof(struct inp_stat) + sizeof(u_int64_t)];
 	activity_bitmap_t inp_nw_activity;
 	uint64_t inp_start_timestamp;
 	uint64_t inp_connect_timestamp;
@@ -266,16 +277,33 @@ struct inpcb {
 	char inp_e_proc_name[MAXCOMLEN + 1];
 };
 
-#define INP_ADD_STAT(_inp, _cnt_cellular, _cnt_wifi, _cnt_wired, _a, _n) \
-do {                                                                    \
+#define IFNET_COUNT_TYPE(_ifp)                                      \
+	IFNET_IS_CELLULAR(_ifp) ? stats_functional_type_cell:           \
+	IFNET_IS_WIFI(_ifp) ?     stats_functional_type_wifi:           \
+	IFNET_IS_WIRED(_ifp) ?    stats_functional_type_wired:          \
+	IFNET_IS_COMPANION_LINK_BLUETOOTH(_ifp)? stats_functional_type_bluetooth: stats_functional_type_none;
+
+#define INP_ADD_STAT(_inp, _stats_functional_type, _a, _n)          \
+do {                                                                \
 	locked_add_64(&((_inp)->inp_stat->_a), (_n));                   \
-	if (_cnt_cellular)                                              \
-	        locked_add_64(&((_inp)->inp_cstat->_a), (_n));          \
-	if (_cnt_wifi)                                                  \
-	        locked_add_64(&((_inp)->inp_wstat->_a), (_n));          \
-	if (_cnt_wired)                                                 \
-	        locked_add_64(&((_inp)->inp_Wstat->_a), (_n));          \
+    switch(_stats_functional_type) {                                \
+	        case stats_functional_type_cell:                            \
+	            locked_add_64(&((_inp)->inp_cstat->_a), (_n));          \
+	            break;                                                  \
+	        case stats_functional_type_wifi:                            \
+	            locked_add_64(&((_inp)->inp_wstat->_a), (_n));          \
+	            break;                                                  \
+	        case stats_functional_type_wired:                           \
+	            locked_add_64(&((_inp)->inp_Wstat->_a), (_n));          \
+	            break;                                                  \
+	        case stats_functional_type_bluetooth:                       \
+	            locked_add_64(&((_inp)->inp_btstat->_a), (_n));         \
+	            break;                                                  \
+	        default:                                                    \
+	            break;                                                  \
+	};                                                              \
 } while (0);
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -617,13 +645,15 @@ struct inpcbinfo {
 	 * Per-protocol hash of pcbs, hashed by local and foreign
 	 * addresses and port numbers.
 	 */
-	struct inpcbhead        *ipi_hashbase;
+	struct inpcbhead        *__counted_by(ipi_hashbase_count) ipi_hashbase;
+	size_t                  ipi_hashbase_count;
 	u_long                  ipi_hashmask;
 
 	/*
 	 * Per-protocol hash of pcbs, hashed by only local port number.
 	 */
-	struct inpcbporthead    *ipi_porthashbase;
+	struct inpcbporthead    *__counted_by(ipi_porthashbase_count) ipi_porthashbase;
+	size_t                  ipi_porthashbase_count;
 	u_long                  ipi_porthashmask;
 
 	/*
@@ -666,6 +696,8 @@ struct inpcbinfo {
 /* A process that can access the INTCOPROC interface can also access the MANAGEMENT interface */
 #define INP_MANAGEMENT_ALLOWED(_inp) \
 	(((_inp)->inp_flags2 & (INP2_MANAGEMENT_ALLOWED | INP2_INTCOPROC_ALLOWED)) ? true : false)
+#define INP_ULTRA_CONSTRAINED_ALLOWED(_inp) \
+    (((_inp)->inp_flags2 & INP2_ULTRA_CONSTRAINED_ALLOWED) ? true : false)
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -757,6 +789,8 @@ struct inpcbinfo {
 #define INP2_MANAGEMENT_CHECKED 0x00020000 /* Checked entitlements for a management interface */
 #define INP2_BIND_IN_PROGRESS   0x00040000 /* A bind call is in progress */
 #define INP2_LAST_ROUTE_LOCAL   0x00080000 /* Last used route was local */
+#define INP2_ULTRA_CONSTRAINED_ALLOWED 0x00100000 /* Allow communication over ultra-constrained interfaces */
+#define INP2_ULTRA_CONSTRAINED_CHECKED 0x00200000 /* Checked entitlements for ultra-constrained interfaces */
 
 /*
  * Flags passed to in_pcblookup*() functions.
@@ -807,13 +841,13 @@ extern void inpcb_timer_sched(struct inpcbinfo *, u_int32_t type);
 extern void in_losing(struct inpcb *);
 extern void in_rtchange(struct inpcb *, int);
 extern int in_pcballoc(struct socket *, struct inpcbinfo *, struct proc *);
-extern int in_pcbbind(struct inpcb *, struct sockaddr *, struct proc *);
+extern int in_pcbbind(struct inpcb *, struct sockaddr *, struct sockaddr *, struct proc *);
 extern int in_pcbconnect(struct inpcb *, struct sockaddr *, struct proc *,
     unsigned int, struct ifnet **);
 extern void in_pcbdetach(struct inpcb *);
 extern void in_pcbdispose(struct inpcb *);
 extern void in_pcbdisconnect(struct inpcb *);
-extern int in_pcbinshash(struct inpcb *, int);
+extern int in_pcbinshash(struct inpcb *, struct sockaddr *, int);
 extern int in_pcbladdr(struct inpcb *, struct sockaddr *, struct in_addr *,
     unsigned int, struct ifnet **, int);
 extern struct inpcb *in_pcblookup_local(struct inpcbinfo *, struct in_addr,
@@ -839,8 +873,8 @@ extern void inpcb_to_xinpcb64(struct inpcb *, struct xinpcb64 *);
 
 extern int get_pcblist_n(short, struct sysctl_req *, struct inpcbinfo *);
 
-extern void inpcb_get_ports_used(ifnet_t, int, u_int32_t, bitstr_t *,
-    struct inpcbinfo *);
+extern void inpcb_get_ports_used(ifnet_t, int, u_int32_t,
+    bitstr_t *__counted_by(bitstr_size(IP_PORTRANGE_SIZE)), struct inpcbinfo *);
 #define INPCB_OPPORTUNISTIC_THROTTLEON  0x0001
 #define INPCB_OPPORTUNISTIC_SETCMD      0x0002
 extern uint32_t inpcb_count_opportunistic(unsigned int, struct inpcbinfo *,
@@ -849,6 +883,7 @@ extern uint32_t inpcb_find_anypcb_byaddr(struct ifaddr *, struct inpcbinfo *);
 extern void inp_route_copyout(struct inpcb *, struct route *);
 extern void inp_route_copyin(struct inpcb *, struct route *);
 extern int inp_bindif(struct inpcb *, unsigned int, struct ifnet **);
+extern int inp_bindtodevice(struct inpcb *, const char *);
 extern void inp_set_nocellular(struct inpcb *);
 extern void inp_clear_nocellular(struct inpcb *);
 extern void inp_set_noexpensive(struct inpcb *);
@@ -862,6 +897,7 @@ extern void inp_clear_intcoproc_allowed(struct inpcb *);
 extern void inp_set_management_allowed(struct inpcb *);
 extern boolean_t inp_get_management_allowed(struct inpcb *);
 extern void inp_clear_management_allowed(struct inpcb *);
+extern void inp_set_ultra_constrained_allowed(struct inpcb *);
 #if NECP
 extern void inp_update_necp_policy(struct inpcb *, struct sockaddr *, struct sockaddr *, u_int);
 extern void inp_set_want_app_policy(struct inpcb *);
@@ -888,7 +924,6 @@ extern int32_t inp_get_sndbytes_allunsent(struct socket *, u_int32_t);
 extern void inp_decr_sndbytes_allunsent(struct socket *, u_int32_t);
 extern void inp_set_activity_bitmap(struct inpcb *inp);
 extern void inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *b);
-extern void inp_clear_activity_bitmap(struct inpcb *inpb);
 extern void inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep);
 extern void inp_copy_last_owner(struct socket *so, struct socket *head);
 #if SKYWALK
@@ -902,6 +937,7 @@ extern int inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit);
 extern int inp_recover_companion_link(struct inpcbinfo *pcbinfo);
 extern void in_management_interface_check(void);
 extern void in_pcb_check_management_entitled(struct inpcb *inp);
-extern char *inp_snprintf_tuple(struct inpcb *, char *, size_t);
+extern void in_pcb_check_ultra_constrained_entitled(struct inpcb *inp);
+extern char *inp_snprintf_tuple(struct inpcb *, char *__sized_by(buflen) buf, size_t buflen);
 #endif /* KERNEL_PRIVATE */
 #endif /* !_NETINET_IN_PCB_H_ */

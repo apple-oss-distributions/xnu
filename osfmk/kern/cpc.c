@@ -105,6 +105,8 @@ cpc_change_security(bool enforce_security)
 #if CONFIG_CPU_COUNTERS
 #if __arm64__
 	cpc_set_event_policy(enforce_security ? CPC_EVPOL_RESTRICT_TO_KNOWN : CPC_EVPOL_DEFAULT);
+	extern bool kpc_allows_counting_system;
+	kpc_allows_counting_system = !enforce_security;
 #else // __arm64__
 #pragma unused(enforce_security)
 	// Intel has no event policy or other security features.

@@ -33,6 +33,7 @@
 #include <kdp/output_stages/output_stages.h>
 #include <kdp/kdp_core.h>
 #include <kdp/processor_core.h>
+#include <vm/vm_kern_xnu.h>
 
 struct buffer_stage_data {
 	size_t total_buffer_size;

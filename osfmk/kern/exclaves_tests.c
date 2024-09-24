@@ -33,27 +33,31 @@
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 
-#include <mach/exclaves_l4.h>
-
-#include <Tightbeam/tightbeam.h>
-#include <Tightbeam/tightbeam_private.h>
-#include "kern/exclaves.tightbeam.h"
 #include "exclaves_debug.h"
+#include "exclaves_resource.h"
 
 /* External & generated headers */
 #include <xrt_hosted_types/types.h>
 #include <xnuproxy/messages.h>
+
 #include "exclaves_resource.h"
+#include "exclaves_xnuproxy.h"
 
 #if __has_include(<Tightbeam/tightbeam.h>)
 
-#define EXCLAVES_ID_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloExclave"))
+#include <Tightbeam/tightbeam.h>
+#include <Tightbeam/tightbeam_private.h>
+#include "kern/exclaves.tightbeam.h"
+
+#define EXCLAVES_ID_HELLO_EXCLAVE_EP                 \
+    (exclaves_service_lookup(EXCLAVES_DOMAIN_KERNEL, \
+    "com.apple.service.ExclavesCHelloServer"))
 
 static int
 exclaves_hello_exclave_test(__unused int64_t in, int64_t *out)
 {
-	kern_return_t kr = KERN_SUCCESS;
+	tb_error_t tb_result;
+	exclaveschelloserver_tests_s client;
 
 	if (exclaves_get_status() != EXCLAVES_STATUS_AVAILABLE) {
 		exclaves_debug_printf(show_test_output,
@@ -64,98 +68,30 @@ exclaves_hello_exclave_test(__unused int64_t in, int64_t *out)
 
 	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
 
-	Exclaves_L4_IpcBuffer_t *ipcb;
-	kr = exclaves_allocate_ipc_buffer((void**)&ipcb);
-	assert(kr == KERN_SUCCESS);
-	assert(ipcb != NULL);
+	tb_endpoint_t ep = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
+	    EXCLAVES_ID_HELLO_EXCLAVE_EP, TB_ENDPOINT_OPTIONS_NONE);
 
-	exclaves_tag_t tag = Exclaves_L4_MessageTag(0, 0, 0x1338ul,
-	    Exclaves_L4_False);
+	tb_result = exclaveschelloserver_tests__init(&client, ep);
+	assert3u(tb_result, ==, TB_ERROR_SUCCESS);
 
-	exclaves_debug_printf(show_test_output,
-	    "exclaves: exclaves_endpoint_call() sending tag 0x%llx, "
-	    "label 0x%lx\n", tag, Exclaves_L4_MessageTag_Label(tag));
-
-	exclaves_error_t error;
-	kr = exclaves_endpoint_call(IPC_PORT_NULL, EXCLAVES_ID_HELLO_EXCLAVE_EP,
-	    &tag, &error);
-	assert(kr == KERN_SUCCESS);
-
-	exclaves_debug_printf(show_test_output,
-	    "exclaves: exclaves_endpoint_call() returned tag 0x%llx, "
-	    "label 0x%lx, error 0x%llx\n", tag, Exclaves_L4_MessageTag_Label(tag),
-	    error);
-
-	assert(error == Exclaves_L4_Success);
-	assert(Exclaves_L4_MessageTag_Mrs(tag) == 0);
-	assert((uint16_t)Exclaves_L4_MessageTag_Label(tag) == (uint16_t)0x1339ul);
-
-	kr = exclaves_free_ipc_buffer();
-	assert(kr == KERN_SUCCESS);
+	tb_result = exclaveschelloserver_tests_default_hello(&client, ^(uint64_t result) {
+		assert3u(tb_result, ==, TB_ERROR_SUCCESS);
+		assert3u((uint16_t)(result), ==, 0x1338);
+	});
 
 	exclaves_debug_printf(show_test_output, "%s: SUCCESS\n", __func__);
 	*out = 1;
 
-	return 0;
+	return KERN_SUCCESS;
 }
 SYSCTL_TEST_REGISTER(exclaves_hello_exclave_test, exclaves_hello_exclave_test);
 
 static int
 exclaves_panic_exclave_test(__unused int64_t in, int64_t *out)
 {
-	kern_return_t kr = KERN_SUCCESS;
+	tb_error_t tb_result;
+	exclaveschelloserver_tests_s client;
 
-	if (exclaves_get_status() != EXCLAVES_STATUS_AVAILABLE) {
-		exclaves_debug_printf(show_test_output,
-		    "%s: SKIPPED: Exclaves not available\n", __func__);
-		*out = -1;
-		return 0;
-	}
-
-	printf("%s: STARTING\n", __func__);
-
-	Exclaves_L4_IpcBuffer_t *ipcb;
-	kr = exclaves_allocate_ipc_buffer((void**)&ipcb);
-	assert(kr == KERN_SUCCESS);
-	assert(ipcb != NULL);
-
-	// 0x9 tag will panic the HELLO C Exclave example
-	exclaves_tag_t tag = Exclaves_L4_MessageTag(0, 0, 0x9ul,
-	    Exclaves_L4_False);
-
-	printf("exclaves: exclaves_endpoint_call() sending tag 0x%llx, "
-	    "label 0x%lx\n", tag, Exclaves_L4_MessageTag_Label(tag));
-
-	exclaves_error_t error;
-	kr = exclaves_endpoint_call(IPC_PORT_NULL, EXCLAVES_ID_HELLO_EXCLAVE_EP,
-	    &tag, &error);
-
-	/* Should never reach here */
-	assert(kr == KERN_SUCCESS);
-
-	printf("exclaves: exclaves_endpoint_call() returned tag 0x%llx, "
-	    "label 0x%lx, error 0x%llx\n", tag, Exclaves_L4_MessageTag_Label(tag),
-	    error);
-
-	assert(error == Exclaves_L4_Success);
-
-	kr = exclaves_free_ipc_buffer();
-	assert(kr == KERN_SUCCESS);
-
-	/* This should not be reachable. Hence, failed. */
-	printf("%s: FAILED\n", __func__);
-	*out = 1;
-
-	return 0;
-}
-SYSCTL_TEST_REGISTER(exclaves_panic_exclave_test, exclaves_panic_exclave_test);
-
-#define EXCLAVES_ID_SWIFT_HELLO_EXCLAVE_EP \
-    (exclaves_endpoint_lookup("com.apple.service.HelloTightbeam"))
-
-static int
-exclaves_hello_tightbeam_test(__unused int64_t in, int64_t *out)
-{
 	if (exclaves_get_status() != EXCLAVES_STATUS_AVAILABLE) {
 		exclaves_debug_printf(show_test_output,
 		    "%s: SKIPPED: Exclaves not available\n", __func__);
@@ -164,86 +100,22 @@ exclaves_hello_tightbeam_test(__unused int64_t in, int64_t *out)
 	}
 
 	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
-	tb_endpoint_t ep = tb_endpoint_create_with_value(
-		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_SWIFT_HELLO_EXCLAVE_EP, 0);
 
-	tb_client_connection_t client =
-	    tb_client_connection_create_with_endpoint(ep);
+	tb_endpoint_t ep = tb_endpoint_create_with_value(TB_TRANSPORT_TYPE_XNU,
+	    EXCLAVES_ID_HELLO_EXCLAVE_EP, TB_ENDPOINT_OPTIONS_NONE);
 
-	tb_client_connection_activate(client);
+	tb_result = exclaveschelloserver_tests__init(&client, ep);
+	assert3u(tb_result, ==, TB_ERROR_SUCCESS);
 
-	tb_message_t message = NULL;
-	tb_transport_message_buffer_t tpt_buf = NULL;
+	tb_result = exclaveschelloserver_tests_panic_exclave_example(&client);
 
-	message = kalloc_type(struct tb_message_s, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	tpt_buf = kalloc_type(struct tb_transport_message_buffer_s,
-	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	/* This should not be reachable. Hence, failed. */
+	exclaves_debug_printf(show_test_output, "%s: FAILED\n", __func__);
+	*out = -1;
 
-	const char *hello_tb = "Hello!";
-	const char *hello = hello_tb;
-	const char *goodbye = "Goodbye!";
-
-	tb_error_t err = TB_ERROR_SUCCESS;
-	err = tb_client_connection_message_construct(client, message,
-	    tpt_buf, strlen(hello), 0);
-	if (err != TB_ERROR_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "%s: FAILURE -- Failed to construct message\n", __func__);
-		*out = 0;
-		goto out;
-	}
-	exclaves_debug_printf(show_test_output,
-	    "%s: Tightbeam constructing message: ", __func__);
-	for (const char *c = hello; *c; c++) {
-		exclaves_debug_printf(show_test_output, "%c", (uint8_t)*c);
-		tb_message_encode_u8(message, (uint8_t)*c);
-	}
-	printf("\n");
-	tb_message_complete(message);
-	exclaves_debug_printf(show_test_output,
-	    "%s: Tightbeam message completed\n", __func__);
-
-	tb_message_t response = NULL;
-
-	err = tb_connection_send_query(client, message, &response,
-	    TB_CONNECTION_WAIT_FOR_REPLY);
-	if (err != TB_ERROR_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "%s: FAILURE -- Failed to send message\n", __func__);
-		goto out;
-	}
-	exclaves_debug_printf(show_test_output,
-	    "%s: Tightbeam message send success, reply: ", __func__);
-
-	bool mismatch = false;
-	uint8_t val = 0;
-	for (const char *c = goodbye; *c; c++) {
-		tb_message_decode_u8(response, &val);
-		printf("%c", val);
-		if (val != (uint8_t)*c) {
-			mismatch = true;
-		}
-	}
-	exclaves_debug_printf(show_test_output, "\n");
-	if (mismatch) {
-		exclaves_debug_printf(show_errors,
-		    "%s: FAILURE -- Mismatched reply message\n", __func__);
-		*out = 0;
-		goto out;
-	}
-	tb_client_connection_message_destruct(client, message);
-
-	exclaves_debug_printf(show_test_output, "%s: SUCCESS\n", __func__);
-	*out = 1;
-
-out:
-	kfree_type(struct tb_message_s, message);
-	kfree_type(struct tb_transport_message_buffer_s, tpt_buf);
-	return 0;
+	return KERN_SUCCESS;
 }
-
-SYSCTL_TEST_REGISTER(exclaves_hello_tightbeam_test,
-    exclaves_hello_tightbeam_test);
+SYSCTL_TEST_REGISTER(exclaves_panic_exclave_test, exclaves_panic_exclave_test);
 
 #endif /* __has_include(<Tightbeam/tightbeam.h>) */
 
@@ -253,13 +125,14 @@ exclaves_sensor_kpi_test(int64_t in, int64_t *out)
 #pragma unused(in)
 #define SENSOR_TEST(x) \
     if (!(x)) { \
-	        printf("%s: FAILURE -- %s:%d\n", __func__, __FILE__, __LINE__); \
+	        exclaves_debug_printf(show_errors, \
+	            "%s: FAILURE -- %s:%d\n", __func__, __FILE__, __LINE__); \
 	success = false; \
 	goto out; \
     }
 
 	bool success = true;
-	printf("%s: STARTING\n", __func__);
+	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
 
 	exclaves_sensor_type_t sensors[] = {
 		EXCLAVES_SENSOR_CAM,
@@ -334,10 +207,11 @@ exclaves_sensor_kpi_test(int64_t in, int64_t *out)
 #undef SENSOR_TEST
 out:
 	if (success) {
-		printf("%s: SUCCESS\n", __func__);
+		exclaves_debug_printf(show_test_output,
+		    "%s: SUCCESS\n", __func__);
 		*out = 1;
 	} else {
-		printf("%s: FAILED\n", __func__);
+		exclaves_debug_printf(show_errors, "%s: FAILED\n", __func__);
 		*out = 0;
 	}
 	return 0;
@@ -357,9 +231,10 @@ exclaves_check_mem_usage_test(__unused int64_t in, int64_t *out)
 
 	exclaves_debug_printf(show_test_output, "%s: STARTING\n", __func__);
 
-	kern_return_t r = exclaves_xnu_proxy_check_mem_usage();
+	kern_return_t r = exclaves_xnuproxy_pmm_usage();
 	if (r == KERN_FAILURE) {
-		printf("Exclave Check Memory Usage failed: Kernel Failure\n");
+		exclaves_debug_printf(show_errors,
+		    "Exclave Check Memory Usage failed: Kernel Failure\n");
 		return 0;
 	}
 

@@ -841,7 +841,7 @@ T_HELPER_DECL(server_kevent_id,
 #define TEST_MULTIHOP(server_name, client_name, name) \
 	T_DECL(server_kevent_id_##name, \
 	                "Event delivery using a kevent_id", \
-	                T_META_ASROOT(YES)) \
+	                T_META_ASROOT(YES), T_META_TAG_VM_NOT_ELIGIBLE) \
 	{ \
 	        run_client_server(server_name, client_name); \
 	}
@@ -849,7 +849,8 @@ T_HELPER_DECL(server_kevent_id,
 #define TEST_MULTIHOP_SPIN(server_name, client_name, name) \
 	T_DECL(server_kevent_id_##name, \
 	                "Event delivery using a kevent_id", \
-	                T_META_ASROOT(YES), T_META_ENABLED(FALSE)) \
+	                T_META_ASROOT(YES), T_META_ENABLED(FALSE), \
+	                                T_META_TAG_VM_NOT_ELIGIBLE) \
 	{ \
 	        spin_for_ever = true; \
 	        run_client_server(server_name, client_name); \

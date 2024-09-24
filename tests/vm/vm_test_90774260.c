@@ -143,7 +143,7 @@ test_90774260(void)
 //	getchar();
 }
 
-T_DECL(vm_test_90774260, "Test MAP_MEM_VM_COPY security")
+T_DECL(vm_test_90774260, "Test MAP_MEM_VM_COPY security", T_META_TAG_VM_PREFERRED)
 {
 	test_90774260();
 }

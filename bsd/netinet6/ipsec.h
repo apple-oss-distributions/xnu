@@ -381,7 +381,7 @@ extern int ipsec_copy_policy(struct inpcbpolicy *, struct inpcbpolicy *);
 extern u_int ipsec_get_reqlevel(struct ipsecrequest *);
 
 extern int ipsec4_set_policy(struct inpcb *inp, int optname,
-    caddr_t request, size_t len, int priv);
+    caddr_t __sized_by(len)request, size_t len, int priv);
 extern int ipsec4_delete_pcbpolicy(struct inpcb *);
 extern int ipsec4_in_reject_so(struct mbuf *, struct socket *);
 extern int ipsec4_in_reject(struct mbuf *, struct inpcb *);
@@ -417,12 +417,40 @@ extern struct socket *ipsec_getsocket(struct mbuf *);
 extern int ipsec_incr_history_count(struct mbuf *, int, u_int32_t);
 extern u_int32_t ipsec_get_history_count(struct mbuf *);
 extern void ipsec_monitor_sleep_wake(void);
+extern void ipsec_get_local_ports(void);
 extern void ipsec_init(void);
 
 extern void ipsec_register_m_tag(void);
 
 extern int ipsec4_interface_kpipe_output(ifnet_t, kern_packet_t, kern_packet_t);
 extern int ipsec6_interface_kpipe_output(ifnet_t, kern_packet_t, kern_packet_t);
+
+extern void ipsec_fill_ip6_sockaddr_4_6_with_ifscope(union sockaddr_in_4_6 *sin46,
+    struct in6_addr *ip6, u_int16_t port, uint32_t ifscope);
+extern void ipsec_fill_ip6_sockaddr_4_6(union sockaddr_in_4_6 *sin46,
+    struct in6_addr *ip6, u_int16_t port);
+extern void ipsec_fill_ip_sockaddr_4_6(union sockaddr_in_4_6 *sin46,
+    struct in_addr ip, u_int16_t port);
+
+__attribute__((always_inline))
+static inline uint8_t *__header_bidi_indexable
+ipsec_kern_buflet_to_buffer(kern_buflet_t buflet)
+{
+	uint8_t *__single buf = NULL;
+	uint32_t buf_lim = 0;
+
+	VERIFY(buflet != NULL);
+
+	buf_lim = kern_buflet_get_data_limit(buflet);
+	VERIFY(buf_lim > 0);
+
+	buf = kern_buflet_get_data_address(buflet);
+	VERIFY(buf != NULL);
+
+	return __unsafe_forge_bidi_indexable(uint8_t *,
+	           buf, buf_lim);
+}
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifndef KERNEL

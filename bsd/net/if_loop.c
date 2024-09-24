@@ -222,7 +222,7 @@ lo_framer(struct ifnet *ifp, struct mbuf **m, const struct sockaddr *dest,
 	}
 
 	header = mtod(*m, struct loopback_header *);
-	bcopy(frame_type, &header->protocol, sizeof(u_int32_t));
+	bcopy(dlil_frame_type(frame_type), &header->protocol, sizeof(u_int32_t));
 	return 0;
 }
 
@@ -394,7 +394,7 @@ lo_start(struct ifnet *ifp)
 	bzero(&s, sizeof(s));
 
 	for (;;) {
-		struct mbuf *m = NULL, *m_tail = NULL;
+		mbuf_ref_t m = NULL, m_tail = NULL;
 		u_int32_t cnt, len = 0;
 
 		if (lo_sched_model == IFNET_SCHED_MODEL_NORMAL) {
@@ -433,7 +433,7 @@ lo_pre_output(struct ifnet *ifp, protocol_family_t protocol_family,
     char *dst_addr)
 {
 #pragma unused(ifp, dst, dst_addr)
-	struct rtentry *rt = route;
+	rtentry_ref_t rt = route;
 
 	VERIFY((*m)->m_flags & M_PKTHDR);
 
@@ -452,7 +452,7 @@ lo_pre_output(struct ifnet *ifp, protocol_family_t protocol_family,
 		}
 	}
 
-	bcopy(&protocol_family, frame_type, sizeof(protocol_family));
+	bcopy(&protocol_family, dlil_frame_type(frame_type), sizeof(protocol_family));
 
 	return 0;
 }
@@ -514,7 +514,7 @@ lo_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 
 	switch (cmd) {
 	case SIOCSIFADDR: {             /* struct ifaddr pointer */
-		struct ifaddr *ifa = data;
+		ifaddr_ref_t ifa = data;
 
 		ifnet_set_flags(ifp, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);
 		IFA_LOCK_SPIN(ifa);
@@ -528,7 +528,7 @@ lo_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 
 	case SIOCADDMULTI:              /* struct ifreq */
 	case SIOCDELMULTI: {            /* struct ifreq */
-		struct ifreq *ifr = data;
+		struct ifreq * __single ifr = data;
 
 		if (ifr == NULL) {
 			error = EAFNOSUPPORT;           /* XXX */
@@ -550,7 +550,7 @@ lo_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 	}
 
 	case SIOCSIFMTU: {              /* struct ifreq */
-		struct ifreq *ifr = data;
+		struct ifreq * __single ifr = data;
 
 		bcopy(&ifr->ifr_mtu, &ifp->if_mtu, sizeof(int));
 		break;

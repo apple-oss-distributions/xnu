@@ -32,7 +32,7 @@ getPortNameCount(void)
 	return portNameCount;
 }
 
-T_DECL(testIOConnectMapMemoryPortLeak45265408, "Test mapping memory (rdar://45265408)")
+T_DECL(testIOConnectMapMemoryPortLeak45265408, "Test mapping memory (rdar://45265408)", T_META_TAG_VM_PREFERRED)
 {
 	io_service_t service = IO_OBJECT_NULL;
 	io_connect_t connect = IO_OBJECT_NULL;

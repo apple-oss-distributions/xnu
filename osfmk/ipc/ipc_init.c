@@ -86,8 +86,8 @@
 #include <kern/misc_protos.h>
 #include <kern/sync_sema.h>
 #include <kern/ux_handler.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
 
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>

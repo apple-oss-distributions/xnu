@@ -5,7 +5,7 @@
 
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
-T_DECL(socket_poll_close_25786011, "Tests an invalid poll call to a socket and then calling close.", T_META_LTEPHASE(LTE_POSTINIT))
+T_DECL(socket_poll_close_25786011, "Tests an invalid poll call to a socket and then calling close.", T_META_LTEPHASE(LTE_POSTINIT), T_META_TAG_VM_PREFERRED)
 {
 	int my_socket, ret;
 

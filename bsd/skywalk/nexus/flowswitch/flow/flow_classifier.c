@@ -37,7 +37,7 @@
 	if (__improbable(t)) {                  \
 	        SK_ERR("%d: skip " #t, __LINE__); \
 	        SK_ERR("%s %s", if_name(ifp), sk_dump("buf", \
-	            pkt_buf + pkt->pkt_headroom, pkt->pkt_length, \
+	            pkt_buf + pkt->pkt_headroom, __packet_get_real_data_length(pkt), \
 	            MIN(128, bdlen), NULL, 0)); \
 	        error = ENOTSUP;                \
 	        goto done;                      \
@@ -85,8 +85,8 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 #pragma unused(ifp)
 	/* these begin at the same offset in the packet, hence the unions */
 	union {
-		volatile struct ip *_iph;
-		volatile struct ip6_hdr *_ip6;
+		volatile struct ip *__indexable _iph;
+		volatile struct ip6_hdr *__indexable _ip6;
 	} _l3;
 #define iph _l3._iph
 #define ip6 _l3._ip6
@@ -178,8 +178,12 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	 */
 	uint8_t *pkt_buf, *l3_hdr;
 	uint32_t bdlen, bdlim, bdoff;
+	uint32_t pkt_buf_size;
+	uint8_t *__sized_by(pkt_buf_size) pkt_buf_cpy;
 
 	MD_BUFLET_ADDR_ABS_DLEN(pkt, pkt_buf, bdlen, bdlim, bdoff);
+	pkt_buf_cpy = pkt_buf;
+	pkt_buf_size = bdlim;
 	cls_len = bdlim - bdoff;
 	cls_len -= pkt->pkt_l2_len;
 	cls_len = (uint16_t)MIN(cls_len, pkt_len);
@@ -187,7 +191,9 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 
 	/* takes care of ip6 assignment too */
 	l3_hdr = pkt_buf + pkt->pkt_headroom + pkt->pkt_l2_len;
-	iph = (volatile struct ip *)(void *)l3_hdr;
+	pkt_buf_cpy = l3_hdr;
+	pkt_buf_size = cls_len;
+	iph = (volatile struct ip *__indexable)(void *)pkt_buf_cpy;
 
 	VERIFY(af != AF_UNSPEC);
 
@@ -219,11 +225,16 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 			sk_copy64_8(__DECONST(uint64_t *, &iph->ip_src),
 			    (uint64_t *)(void *)&pkt->pkt_flow_ipv4_src);
 		} else if (IS_P2ALIGNED(&iph->ip_src, 4)) {
-			sk_copy32_8(__DECONST(uint32_t *, &iph->ip_src),
-			    (uint32_t *)(void *)&pkt->pkt_flow_ipv4_src);
+			uint32_t *src;
+			uint32_t *dst;
+
+			src = (uint32_t *)(void *)(__DEVOLATILE(char *, iph) +
+			    offsetof(struct ip, ip_src));
+			dst = (uint32_t *__indexable)(&pkt->pkt_flow_ipv4_addrs);
+			sk_copy32_8(src, dst);
 		} else {
-			bcopy(__DECONST(void *, &iph->ip_src),
-			    (void *)&pkt->pkt_flow_ipv4_addrs,
+			bcopy(__DECONST(struct __flow_l3_ipv4_addrs *__single, &iph->ip_src),
+			    (struct __flow_l3_ipv4_addrs *__single) &pkt->pkt_flow_ipv4_addrs,
 			    sizeof(struct __flow_l3_ipv4_addrs));
 		}
 
@@ -252,15 +263,30 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 		CL_SKIP_ON(pkt_len < l3tlen);
 		CL_SKIP_ON((ip6->ip6_vfc & IPV6_VERSION_MASK) != IPV6_VERSION);
 
+		struct ipv6addrs {
+			struct in6_addr src;
+			struct in6_addr dst;
+		};
+
 		if (__probable(IS_P2ALIGNED(&ip6->ip6_src, 8))) {
-			sk_copy64_32(__DECONST(uint64_t *, &ip6->ip6_src),
-			    (uint64_t *)(void *)&pkt->pkt_flow_ipv6_src);
+			uint64_t *src;
+			uint64_t *dst;
+
+			src = (uint64_t *)(void *)(__DEVOLATILE(char *, ip6) +
+			    offsetof(struct ip6_hdr, ip6_src));
+			dst = (uint64_t *__indexable)(void *)(&pkt->pkt_flow_ipv6_addrs);
+			sk_copy64_32(src, dst);
 		} else if (IS_P2ALIGNED(&ip6->ip6_src, 4)) {
-			sk_copy32_32(__DECONST(uint32_t *, &ip6->ip6_src),
-			    (uint32_t *)(void *)&pkt->pkt_flow_ipv6_src);
+			uint32_t *src;
+			uint32_t *dst;
+
+			src = (uint32_t *)(void *)(__DEVOLATILE(char *, ip6) +
+			    offsetof(struct ip6_hdr, ip6_src));
+			dst = (uint32_t *__indexable)(&pkt->pkt_flow_ipv6_addrs);
+			sk_copy32_32(src, dst);
 		} else {
-			bcopy(__DECONST(void *, &ip6->ip6_src),
-			    (void *)&pkt->pkt_flow_ipv6_addrs,
+			bcopy(__DECONST(struct __flow_l3_ipv6_addrs *__single, &ip6->ip6_src),
+			    (struct __flow_l3_ipv6_addrs *__single) &pkt->pkt_flow_ipv6_addrs,
 			    sizeof(struct __flow_l3_ipv6_addrs));
 		}
 
@@ -305,22 +331,22 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	}
 
 	/**************** L4 header (TCP/UDP) *****************/
-
-	/* this takes care of UDP header as well (see l4 union var) */
-	tcph = __DECONST(volatile struct tcphdr *,
-	    (volatile uint8_t *)iph + l3hlen);
 	ulen = (l3tlen - l3hlen);
 	if (__probable(pkt->pkt_flow_ip_proto == IPPROTO_TCP)) {
-		CL_SKIP_ON((cls_len < l3hlen + sizeof(*tcph)) ||
-		    (ulen < sizeof(*tcph)));
+		CL_SKIP_ON((cls_len < l3hlen + sizeof(struct tcphdr)) ||
+		    (ulen < sizeof(struct tcphdr)));
+		tcph = __DECONST(volatile struct tcphdr *,
+		    (volatile uint8_t *)iph + l3hlen);
 		l4hlen = (uint8_t)(tcph->th_off << 2);
 		CL_SKIP_ON(l4hlen < sizeof(*tcph));
 		CL_SKIP_ON(l4hlen > ulen);
 		pkt->pkt_flow_tcp_hlen = l4hlen;
 		pkt->pkt_flow_tcp_hdr = (mach_vm_address_t)tcph;
 	} else {
-		CL_SKIP_ON((cls_len < l3hlen + sizeof(*udph)) ||
-		    (ulen < sizeof(*udph)));
+		CL_SKIP_ON((cls_len < l3hlen + sizeof(struct udphdr)) ||
+		    (ulen < sizeof(struct udphdr)));
+		udph = __DECONST(volatile struct udphdr *,
+		    (volatile uint8_t *)iph + l3hlen);
 		l4hlen = sizeof(*udph);
 		CL_SKIP_ON(l4hlen > ulen);
 		pkt->pkt_flow_udp_hlen = l4hlen;
@@ -339,21 +365,34 @@ flow_pkt_classify(struct __kern_packet *pkt, struct ifnet *ifp, sa_family_t af,
 	}
 
 	if (__probable(IS_P2ALIGNED(&tcph->th_sport, 4))) {
+		uint32_t *src;
+		uint32_t *dst;
+
 		if (__probable(pkt->pkt_flow_ip_proto == IPPROTO_TCP)) {
-			sk_copy32_16(__DECONST(uint32_t *, &tcph->th_sport),
-			    (uint32_t *)(void *)&pkt->pkt_flow_tcp_src);
+			src = __unsafe_forge_bidi_indexable(uint32_t *,
+			    __DECONST(uint32_t *, &tcph->th_sport),
+			    sizeof(uint32_t) * 4);
+			dst = __unsafe_forge_bidi_indexable(uint32_t *,
+			    (uint32_t *)(void *)&pkt->pkt_flow_tcp_src,
+			    sizeof(uint32_t) * 4);
+			sk_copy32_16(src, dst);
 		} else {
-			sk_copy32_8(__DECONST(uint32_t *, &udph->uh_sport),
-			    (uint32_t *)(void *)&pkt->pkt_flow_udp_src);
+			src = __unsafe_forge_bidi_indexable(uint32_t *,
+			    __DECONST(uint32_t *, &udph->uh_sport),
+			    sizeof(uint32_t) * 2);
+			dst = __unsafe_forge_bidi_indexable(uint32_t *,
+			    (uint32_t *)(void *) &pkt->pkt_flow_udp_src,
+			    sizeof(uint32_t) * 2);
+			sk_copy32_8(src, dst);
 		}
 	} else {
 		if (__probable(pkt->pkt_flow_ip_proto == IPPROTO_TCP)) {
-			bcopy(__DECONST(void *, &tcph->th_sport),
-			    (void *)&pkt->pkt_flow_tcp,
+			bcopy(__DECONST(struct __flow_l4_tcp *__single, tcph),
+			    (struct __flow_l4_tcp *__single) &pkt->pkt_flow_tcp,
 			    sizeof(struct __flow_l4_tcp));
 		} else {
-			bcopy(__DECONST(void *, &udph->uh_sport),
-			    (void *)&pkt->pkt_flow_udp,
+			bcopy(__DECONST(struct __flow_l4_udp *__single, udph),
+			    (struct __flow_l4_udp *__single) &pkt->pkt_flow_udp,
 			    sizeof(struct __flow_l4_udp));
 		}
 	}

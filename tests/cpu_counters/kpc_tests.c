@@ -301,7 +301,7 @@ check_tally(unsigned int ncpus, unsigned int nctrs, struct tally *tallies)
 T_DECL(kpc_cpu_direct_configurable,
     "test that configurable counters return monotonically increasing values",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_BOOTARGS_SET("enable_skstb=1"))
+    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	skip_if_unsupported();
 
@@ -346,7 +346,7 @@ T_DECL(kpc_cpu_direct_configurable,
 
 T_DECL(kpc_thread_direct_instrs_cycles,
     "test that fixed thread counters return monotonically increasing values",
-    XNU_T_META_SOC_SPECIFIC)
+    XNU_T_META_SOC_SPECIFIC, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int err;
 	uint32_t ctrs_cnt;
@@ -418,7 +418,7 @@ struct cpu {
 T_DECL(kpc_pmi_configurable,
     "test that PMIs don't interfere with sampling counters in kperf",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_BOOTARGS_SET("enable_skstb=1"))
+    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	skip_if_unsupported();
 
@@ -686,7 +686,7 @@ T_DECL(kpc_pmi_configurable,
 
 T_DECL(kpc_pmu_config, "ensure PMU can be configured",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_ENABLED(IS_ARM64))
+    T_META_ENABLED(IS_ARM64), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	T_SETUPBEGIN;
 	int ret = kpc_force_all_ctrs_set(1);
@@ -704,7 +704,7 @@ T_DECL(kpc_pmu_config, "ensure PMU can be configured",
 
 T_DECL(pmi_pc_capture, "ensure PC capture works for PMCs 5, 6, and 7",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_REQUIRES_SYSCTL_EQ("kpc.pc_capture_supported", 1))
+    T_META_REQUIRES_SYSCTL_EQ("kpc.pc_capture_supported", 1), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	start_controlling_ktrace();
 	struct machine mch = {};

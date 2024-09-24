@@ -89,6 +89,7 @@
 #include <kern/cpu_data.h>
 #include <kern/machine.h>
 #include <kern/iotrace.h>
+#include <kern/kern_stackshot.h>
 #include <i386/postcode.h>
 #include <i386/mp_desc.h>
 #include <i386/misc_protos.h>
@@ -116,7 +117,7 @@
 #include <kdp/kdp_core.h>
 #include <kdp/kdp_common.h>
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <vm/vm_kern.h>
 
 #include <IOKit/IOBSD.h>
@@ -201,14 +202,6 @@ boolean_t coprocessor_paniclog_flush = FALSE;
 
 struct kcdata_descriptor kc_panic_data;
 static boolean_t begun_panic_stackshot = FALSE;
-extern kern_return_t    do_panic_stackshot(void *);
-
-extern void                    kdp_snapshot_preflight(int pid, void * tracebuf,
-    uint32_t tracebuf_size, uint64_t flags,
-    kcdata_descriptor_t data_p,
-    uint64_t since_timestamp, uint32_t pagetable_mask);
-extern int              kdp_stack_snapshot_bytes_traced(void);
-extern int              kdp_stack_snapshot_bytes_uncompressed(void);
 
 vm_offset_t panic_stackshot_buf = 0;
 size_t panic_stackshot_buf_len = 0;
@@ -701,7 +694,7 @@ RecordPanicStackshot()
 		return;
 	}
 
-	if (stackshot_active()) {
+	if (panic_stackshot_active()) {
 		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_NESTED;
 		panic_info->mph_other_log_offset = PE_get_offset_into_panic_region(debug_buf_ptr);
 		kdb_printf("Panicked during stackshot, skipping panic stackshot\n");
@@ -846,7 +839,7 @@ RecordPanicStackshot()
 
 void
 SavePanicInfo(
-	__unused const char *message, void *panic_data, uint64_t panic_options)
+	__unused const char *message, void *panic_data, uint64_t panic_options, __unused const char* panic_initiator)
 {
 	void *stackptr  = NULL;
 	thread_t thread_to_trace = (thread_t) panic_data;
@@ -893,8 +886,16 @@ SavePanicInfo(
 		panic_i386_backtrace(stackptr, ((panic_double_fault_cpu == cn) ? 80 : 48), debugger_msg, FALSE, NULL);
 	}
 
-	if (panic_options & DEBUGGER_OPTION_COPROC_INITIATED_PANIC) {
-		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC;
+	if (panic_options & DEBUGGER_OPTION_COMPANION_PROC_INITIATED_PANIC) {
+		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_COMPANION_PROC_INITIATED_PANIC;
+	}
+
+	if (panic_options & DEBUGGER_OPTION_INTEGRATED_COPROC_INITIATED_PANIC) {
+		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_INTEGRATED_COPROC_INITIATED_PANIC;
+	}
+
+	if (panic_options & DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC) {
+		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_USERSPACE_INITIATED_PANIC;
 	}
 
 #if MACH_KDP

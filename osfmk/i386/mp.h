@@ -78,6 +78,9 @@
 #include <mach/vm_types.h>
 #include <kern/simple_lock.h>
 #include <kern/assert.h>
+#ifdef XNU_KERNEL_PRIVATE
+#include <vm/vm_kern_xnu.h>
+#endif
 
 __BEGIN_DECLS
 
@@ -112,7 +115,7 @@ extern  volatile boolean_t pmap_tlb_flush_timeout;
 
 extern  uint64_t  LastDebuggerEntryAllowance;
 
-extern  void      mp_kdp_enter(boolean_t proceed_on_failure);
+extern  void      mp_kdp_enter(boolean_t proceed_on_failure, bool is_stackshot);
 extern  void      mp_kdp_exit(void);
 extern  boolean_t mp_kdp_all_cpus_halted(void);
 

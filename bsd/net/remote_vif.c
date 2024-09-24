@@ -109,7 +109,7 @@ static errno_t          rvi_register_control(void);
 static errno_t          rvi_ctl_connect(kern_ctl_ref, struct sockaddr_ctl *, void **);
 static errno_t          rvi_ctl_send(kern_ctl_ref, uint32_t, void *, mbuf_t, int);
 static errno_t          rvi_ctl_disconnect(kern_ctl_ref, uint32_t, void *);
-static errno_t          rvi_ctl_getopt(kern_ctl_ref, uint32_t, void *, int, void *, size_t *);
+static errno_t          rvi_ctl_getopt(kern_ctl_ref, uint32_t, void *, int, void *__sized_by(*len), size_t *len);
 
 int
 rvi_init()
@@ -212,7 +212,7 @@ done:
 static void
 rvi_detach(ifnet_t ifp)
 {
-	struct rvi_client_t *client;
+	struct rvi_client_t *__single client;
 
 	rvi_lock_exclusive(&rvi_mtx);
 
@@ -229,7 +229,7 @@ rvi_detach(ifnet_t ifp)
 static void
 rvi_insert_client(struct rvi_client_t *client)
 {
-	struct rvi_client_t *itr = NULL;
+	struct rvi_client_t *__single itr = NULL;
 	uint32_t ph = 0;
 
 	rvi_lock_exclusive(&rvi_mtx);
@@ -260,7 +260,7 @@ rvi_insert_client(struct rvi_client_t *client)
 static void
 rvi_remove_client(uint32_t unit)
 {
-	struct rvi_client_t *client = NULL;
+	struct rvi_client_t *__single client = NULL;
 
 	rvi_lock_shared(&rvi_mtx);
 
@@ -308,7 +308,7 @@ rvi_ctl_connect(kern_ctl_ref kctlref, struct sockaddr_ctl *sac, void **unitinfo)
 {
 #pragma unused(kctlref)
 	errno_t err = 0;
-	struct rvi_client_t *client = NULL;
+	struct rvi_client_t *__single client = NULL;
 
 	client = kalloc_type(struct rvi_client_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
@@ -339,13 +339,13 @@ rvi_ctl_disconnect(kern_ctl_ref kctlref, uint32_t unit, void *unitinfo)
 
 static errno_t
 rvi_ctl_getopt(kern_ctl_ref kctlref, uint32_t unit, void *unitinfo,
-    int opt, void *data, size_t *len)
+    int opt, void *__sized_by(*len) data, size_t *len)
 {
 #pragma unused(kctlref)
 #pragma unused(unit)
 	errno_t err = 0;
 	int n;
-	struct rvi_client_t *client = (struct rvi_client_t *)unitinfo;
+	struct rvi_client_t *__single client = (struct rvi_client_t *)unitinfo;
 
 	rvi_lock_shared(&rvi_mtx);
 
@@ -387,7 +387,7 @@ rvi_ctl_send(kern_ctl_ref kctlref, uint32_t unit, void *unitinfo, mbuf_t m, int 
 #pragma unused(unit)
 #pragma unused(flags)
 	errno_t err = 0;
-	struct rvi_client_t *client = (struct rvi_client_t *)unitinfo;
+	struct rvi_client_t *__single client = (struct rvi_client_t *)unitinfo;
 	struct pktap_header pktap_hdr;
 	uint32_t hdr_length;
 
@@ -466,7 +466,7 @@ rvi_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
 static errno_t
 rvi_set_bpf_tap(ifnet_t ifp, uint32_t dlt, bpf_tap_mode mode)
 {
-	struct rvi_client_t *client;
+	struct rvi_client_t *__single client;
 
 	rvi_lock_shared(&rvi_mtx);
 

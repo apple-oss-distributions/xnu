@@ -75,7 +75,7 @@ static struct netif_flowtable_ops netif_ipv6_ula_ops = {
 
 static int
 netif_flow_get_buf_pkt(struct __kern_packet *pkt, size_t minlen,
-    uint8_t **buf, uint32_t *len)
+    uint8_t *__sized_by(*len) *buf, uint32_t *len)
 {
 	uint8_t *baddr;
 
@@ -92,7 +92,7 @@ netif_flow_get_buf_pkt(struct __kern_packet *pkt, size_t minlen,
 
 static int
 netif_flow_get_buf_mbuf(struct mbuf *m, size_t minlen,
-    uint8_t **buf, uint32_t *len)
+    uint8_t *__sized_by(*len) *buf, uint32_t *len)
 {
 	/*
 	 * XXX
@@ -100,17 +100,17 @@ netif_flow_get_buf_mbuf(struct mbuf *m, size_t minlen,
 	 * This does not impact the current use case (ethertype
 	 * demux).
 	 */
-	if (mbuf_len(m) < minlen) {
+	if (m->m_len < minlen) {
 		return EINVAL;
 	}
-	*buf = mbuf_data(m);
-	*len = m_pktlen(m);
+	*buf = (uint8_t *)m_mtod_current(m);
+	*len = m->m_len;
 	return 0;
 }
 
 static int
 netif_flow_get_buf(struct __kern_packet *pkt, size_t minlen,
-    uint8_t **buf, uint32_t *len)
+    uint8_t *__sized_by(*len) *buf, uint32_t *len)
 {
 	ASSERT((pkt->pkt_pflags & PKT_F_PKT_DATA) == 0);
 	if ((pkt->pkt_pflags & PKT_F_MBUF_DATA) != 0) {
@@ -129,7 +129,7 @@ netif_flow_ethertype_info(struct __kern_packet *pkt,
 	uint32_t len;
 	uint16_t etype;
 	uint16_t tag;
-	uint8_t *buf;
+	uint8_t *__sized_by(len) buf;
 	int err;
 
 	err = netif_flow_get_buf(pkt, sizeof(ether_header_t), &buf,
@@ -209,7 +209,7 @@ netif_flow_ipv6_ula_info(struct __kern_packet *pkt,
 {
 	ether_header_t *eh;
 	uint32_t len;
-	uint8_t *buf;
+	uint8_t *__sized_by(len) buf;
 	struct ip6_hdr *ip6h;
 	void *laddr, *raddr;
 	uint16_t etype;
@@ -256,7 +256,7 @@ static int
 netif_flow_list_lookup(struct netif_flowtable *ft, struct __kern_packet *pkt,
     uint32_t flags, struct netif_flow **f)
 {
-	struct netif_list_flowtable *lft = ft->ft_internal;
+	struct netif_list_flowtable *__single lft = ft->ft_internal;
 	struct netif_flowtable_ops *fops = ft->ft_ops;
 	struct netif_flow *nf;
 	struct netif_flow_desc fd;
@@ -287,7 +287,7 @@ done:
 static int
 netif_flow_list_insert(struct netif_flowtable *ft, struct netif_flow *f)
 {
-	struct netif_list_flowtable *lft = ft->ft_internal;
+	struct netif_list_flowtable *__single lft = ft->ft_internal;
 	struct netif_flow *nf;
 
 	SLIST_FOREACH(nf, &lft->lft_flow_list, nf_table_link) {
@@ -306,7 +306,7 @@ netif_flow_list_insert(struct netif_flowtable *ft, struct netif_flow *f)
 static void
 netif_flow_list_remove(struct netif_flowtable *ft, struct netif_flow *f)
 {
-	struct netif_list_flowtable *lft = ft->ft_internal;
+	struct netif_list_flowtable *__single lft = ft->ft_internal;
 
 	SLIST_REMOVE(&lft->lft_flow_list, f, netif_flow, nf_table_link);
 }
@@ -333,7 +333,7 @@ netif_flow_list_table_alloc(struct netif_flowtable_ops *ops)
 static void
 netif_flow_list_table_free(struct netif_flowtable *ft)
 {
-	struct netif_list_flowtable *lft;
+	struct netif_list_flowtable *__single lft;
 
 	ASSERT(ft->ft_ops != NULL);
 	ft->ft_ops = NULL;
@@ -390,7 +390,7 @@ nx_netif_validate_macaddr(struct nx_netif *nif, struct __kern_packet *pkt,
 	boolean_t valid = FALSE, outbound, mbcast;
 	ether_header_t *eh;
 	uint32_t len;
-	uint8_t *buf;
+	uint8_t *__sized_by(len) buf;
 
 	/*
 	 * No need to hold any lock for the checks below because we are not
@@ -515,7 +515,7 @@ nx_netif_flow_classify(struct nx_netif *nif, struct __kern_packet *pkt,
     uint32_t flags)
 {
 	struct netif_stats *nifs = &nif->nif_stats;
-	struct netif_flow *f = NULL;
+	struct netif_flow *__single f = NULL;
 	struct netif_flowtable *ft;
 	int err;
 
@@ -568,11 +568,13 @@ flow_classify(struct nx_netif *nif, struct __kern_packet *pkt, uint32_t flags)
 errno_t
 nx_netif_demux(struct nexus_netif_adapter *nifna,
     struct __kern_packet *pkt_chain, struct __kern_packet **remain,
-    uint32_t flags)
+    struct nexus_pkt_stats *stats, uint32_t flags)
 {
 	struct __kern_packet *pkt = pkt_chain, *next;
-	struct __kern_packet *head = NULL, **tailp = &head;
-	struct __kern_packet *rhead = NULL, **rtailp = &rhead;
+	struct __kern_packet *__single head = NULL;
+	struct __kern_packet **tailp = &head;
+	struct __kern_packet *__single rhead = NULL;
+	struct __kern_packet **rtailp = &rhead;
 	struct netif_flow *nf, *prev_nf = NULL;
 	struct nx_netif *nif = nifna->nifna_netif;
 	struct netif_stats *nifs = &nif->nif_stats;
@@ -655,6 +657,12 @@ nx_netif_demux(struct nexus_netif_adapter *nifna,
 			nx_netif_free_packet_chain(rhead, NULL);
 		}
 	}
+
+	if (stats != NULL) {
+		stats->nps_pkts += delivered;
+		stats->nps_bytes += bytes;
+	}
+
 	STATS_ADD(nifs, NETIF_STATS_VP_FLOW_FOUND, delivered);
 	STATS_ADD(nifs, NETIF_STATS_VP_FLOW_NOT_FOUND, r);
 	DTRACE_SKYWALK5(demux__delivered, struct nx_netif *,

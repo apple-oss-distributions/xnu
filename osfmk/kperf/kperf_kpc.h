@@ -33,8 +33,6 @@
 
 #include <kern/kpc.h> /* KPC_MAX_COUNTERS */
 
-void kperf_kpc_thread_ast(thread_t thread);
-
 /* KPC sample data */
 struct kpcdata {
 	int      curcpu;

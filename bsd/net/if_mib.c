@@ -60,12 +60,12 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/socket.h>
-#include <sys/sysctl.h>
 #include <sys/systm.h>
 
 #include <net/if.h>
 #include <net/if_mib.h>
 #include <net/if_var.h>
+#include <net/net_sysctl.h>
 
 #include <os/log.h>
 
@@ -97,9 +97,6 @@ SYSCTL_DECL(_net_link_generic);
 SYSCTL_NODE(_net_link_generic, IFMIB_SYSTEM, system, CTLFLAG_RD | CTLFLAG_LOCKED, 0,
     "Variables global to all interfaces");
 
-SYSCTL_INT(_net_link_generic_system, IFMIB_IFCOUNT, ifcount, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &if_index, 0, "Number of configured interfaces");
-
 static int sysctl_ifdata SYSCTL_HANDLER_ARGS;
 SYSCTL_NODE(_net_link_generic, IFMIB_IFDATA, ifdata, CTLFLAG_RD | CTLFLAG_LOCKED,
     sysctl_ifdata, "Interface table");
@@ -108,10 +105,9 @@ static int sysctl_ifalldata SYSCTL_HANDLER_ARGS;
 SYSCTL_NODE(_net_link_generic, IFMIB_IFALLDATA, ifalldata, CTLFLAG_RD | CTLFLAG_LOCKED,
     sysctl_ifalldata, "Interface table");
 
-static int make_ifmibdata(struct ifnet *, int *, struct sysctl_req *);
-
+static int make_ifmibdata(struct ifnet *, int *__counted_by(2), struct sysctl_req *);
 int
-make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
+make_ifmibdata(struct ifnet *ifp, int *__counted_by(2) name, struct sysctl_req *req)
 {
 	struct ifmibdata        ifmd;
 	int error = 0;
@@ -218,14 +214,9 @@ int
 sysctl_ifdata SYSCTL_HANDLER_ARGS /* XXX bad syntax! */
 {
 #pragma unused(oidp)
-	int *name = (int *)arg1;
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 2, name, namelen);
 	int error = 0;
-	u_int namelen = arg2;
 	struct ifnet *ifp;
-
-	if (namelen != 2) {
-		return EINVAL;
-	}
 
 	ifnet_head_lock_shared();
 	if (name[0] <= 0 || name[0] > if_index ||
@@ -249,14 +240,9 @@ int
 sysctl_ifalldata SYSCTL_HANDLER_ARGS /* XXX bad syntax! */
 {
 #pragma unused(oidp)
-	int *name = (int *)arg1;
+	DECLARE_SYSCTL_HANDLER_ARG_ARRAY(int, 2, name, namelen);
 	int error = 0;
-	u_int namelen = arg2;
 	struct ifnet *ifp;
-
-	if (namelen != 2) {
-		return EINVAL;
-	}
 
 	ifnet_head_lock_shared();
 	TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
@@ -272,3 +258,21 @@ sysctl_ifalldata SYSCTL_HANDLER_ARGS /* XXX bad syntax! */
 	ifnet_head_done();
 	return error;
 }
+
+static int
+sysctl_ifindex SYSCTL_HANDLER_ARGS
+{
+	int error, val = if_index;
+
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	return 0;
+}
+
+SYSCTL_PROC( _net_link_generic_system, IFMIB_IFCOUNT, ifcount,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    NULL, 0, sysctl_ifindex, "Number of configured interfaces",
+    "");

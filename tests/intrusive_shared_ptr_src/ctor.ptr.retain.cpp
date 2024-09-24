@@ -30,7 +30,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_ptr_retain, "intrusive_shared_ptr.ctor.ptr.retain") {
+T_DECL(ctor_ptr_retain, "intrusive_shared_ptr.ctor.ptr.retain", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 }

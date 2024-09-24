@@ -1760,7 +1760,7 @@ setup_socket_policy(int socket_fd)
 	    buf, sizeof(buf)), "tcp server listen failed");
 }
 
-T_DECL(sadb_x_get_60822136, "security policy reference count overflow")
+T_DECL(sadb_x_get_60822136, "security policy reference count overflow", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_X_GET_OVERFLOW_60822136;
 
@@ -1772,7 +1772,7 @@ T_DECL(sadb_x_get_60822136, "security policy reference count overflow")
 	dispatch_main();
 }
 
-T_DECL(sadb_x_spd_enable_60822924, "security policy reference count overflow")
+T_DECL(sadb_x_spd_enable_60822924, "security policy reference count overflow", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_X_SPDENABLE_OVERFLOW_60822924;
 
@@ -1784,7 +1784,7 @@ T_DECL(sadb_x_spd_enable_60822924, "security policy reference count overflow")
 	dispatch_main();
 }
 
-T_DECL(sadb_x_spd_disable_60822956, "security policy reference count overflow")
+T_DECL(sadb_x_spd_disable_60822956, "security policy reference count overflow", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_X_SPDDISABLE_OVERFLOW_60822956;
 
@@ -1796,7 +1796,7 @@ T_DECL(sadb_x_spd_disable_60822956, "security policy reference count overflow")
 	dispatch_main();
 }
 
-T_DECL(sadb_update_60679513, "security association use after free")
+T_DECL(sadb_update_60679513, "security association use after free", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_UPDATE_USE_AFTER_FREE_60679513;
 
@@ -1808,7 +1808,7 @@ T_DECL(sadb_update_60679513, "security association use after free")
 	dispatch_main();
 }
 
-T_DECL(sadb_dump_60768729, "security association sa dump heap overflow", T_META_ENABLED(false))
+T_DECL(sadb_dump_60768729, "security association sa dump heap overflow", T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_DUMP_HEAP_OVERFLOW_60768729;
 
@@ -1822,7 +1822,7 @@ T_DECL(sadb_dump_60768729, "security association sa dump heap overflow", T_META_
 }
 
 // Disabled due to rdar://92910783
-T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow", T_META_ENABLED(false))
+T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap overflow", T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_POLICY_DUMP_HEAP_OVERFLOW_60769680;
 
@@ -1835,7 +1835,7 @@ T_DECL(sadb_policy_dump_60769680, "security association sa policy dump heap over
 	dispatch_main();
 }
 
-T_DECL(sadb_get_sastat_oob_60769680, "security association get sa stat oob read")
+T_DECL(sadb_get_sastat_oob_60769680, "security association get sa stat oob read", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_GETSASTAT_OOB_READ_60822823;
 
@@ -1848,7 +1848,7 @@ T_DECL(sadb_get_sastat_oob_60769680, "security association get sa stat oob read"
 	dispatch_main();
 }
 
-T_DECL(sadb_get_sastat_success, "security association get sa stat")
+T_DECL(sadb_get_sastat_success, "security association get sa stat", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_GETSASTAT_OOB_READ_SUCCESS;
 
@@ -1861,7 +1861,7 @@ T_DECL(sadb_get_sastat_success, "security association get sa stat")
 	dispatch_main();
 }
 
-T_DECL(sadb_key_migrate_address_ipv4, "security association migrate address ipv4")
+T_DECL(sadb_key_migrate_address_ipv4, "security association migrate address ipv4", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_EXT_MIGRATE_ADDRESS_IPv4;
 
@@ -1874,7 +1874,7 @@ T_DECL(sadb_key_migrate_address_ipv4, "security association migrate address ipv4
 	dispatch_main();
 }
 
-T_DECL(sadb_key_migrate_address_ipv6, "security association migrate address ipv6")
+T_DECL(sadb_key_migrate_address_ipv6, "security association migrate address ipv6", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6;
 
@@ -1887,7 +1887,7 @@ T_DECL(sadb_key_migrate_address_ipv6, "security association migrate address ipv6
 	dispatch_main();
 }
 
-T_DECL(sadb_key_migrate_bad_address, "security association migrate bad address")
+T_DECL(sadb_key_migrate_bad_address, "security association migrate bad address", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_EXT_MIGRATE_BAD_ADDRESS;
 
@@ -1900,7 +1900,7 @@ T_DECL(sadb_key_migrate_bad_address, "security association migrate bad address")
 	dispatch_main();
 }
 
-T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child")
+T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_TCP_INPUT_IPSEC_COPY_POLICY;
 
@@ -1915,7 +1915,7 @@ T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child")
 	T_PASS("listener policy copied to child");
 }
 
-T_DECL(sadb_x_spd_add_78944570, "security policy add failure")
+T_DECL(sadb_x_spd_add_78944570, "security policy add failure", T_META_TAG_VM_PREFERRED)
 {
 	test_id = TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570;
 

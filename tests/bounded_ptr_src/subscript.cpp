@@ -237,7 +237,7 @@ tests()
 	}
 }
 
-T_DECL(subscript, "bounded_ptr.subscript") {
+T_DECL(subscript, "bounded_ptr.subscript", T_META_TAG_VM_PREFERRED) {
 	tests<T, T>();
 	tests<T, T const>();
 	tests<T, T volatile>();

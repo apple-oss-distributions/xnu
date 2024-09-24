@@ -56,9 +56,6 @@ static SECURITY_READ_ONLY_LATE(uint32_t) ctsid_nonce;
 ZONE_DEFINE_ID(ZONE_ID_TURNSTILE, "turnstiles", struct turnstile,
     ZC_ZFREE_CLEARMEM);
 
-static struct mpsc_daemon_queue turnstile_deallocate_queue;
-#define TURNSTILES_CHUNK (THREAD_CHUNK)
-
 /* Global table for turnstile promote policy for all type of turnstiles */
 static const turnstile_promote_policy_t turnstile_promote_policy[TURNSTILE_TOTAL_TYPES] = {
 	[TURNSTILE_NONE]          = TURNSTILE_PROMOTE_NONE,
@@ -757,29 +754,6 @@ turnstile_htable_lookup(
 }
 
 /*
- * Name: turnstile_deallocate_queue_invoke
- *
- * Description: invoke function for the asynchronous turnstile deallocation
- *              queue
- *
- * Arg1: &turnstile_deallocate_queue
- * Arg2: a pointer to the turnstile ts_deallocate_link member of a tunrstile to
- *       destroy.
- *
- * Returns: None.
- */
-static void
-turnstile_deallocate_queue_invoke(mpsc_queue_chain_t e,
-    __assert_only mpsc_daemon_queue_t dq)
-{
-	struct turnstile *ts;
-
-	ts = mpsc_queue_element(e, struct turnstile, ts_deallocate_link);
-	assert(dq == &turnstile_deallocate_queue);
-	turnstile_destroy(ts);
-}
-
-/*
  * Name: turnstiles_init
  *
  * Description: Initialize turnstile sub system.
@@ -793,9 +767,6 @@ turnstiles_init(void)
 {
 	ctsid_nonce = (uint32_t)early_random() & CTSID_MASK;
 	turnstiles_hashtable_init();
-
-	thread_deallocate_daemon_register_queue(&turnstile_deallocate_queue,
-	    turnstile_deallocate_queue_invoke);
 
 #if DEVELOPMENT || DEBUG
 	/* Initialize turnstile test primitive */
@@ -885,30 +856,6 @@ turnstile_deallocate(struct turnstile *turnstile)
 	    &turnstile_refgrp) == 0)) {
 		assert(SLIST_EMPTY(&turnstile->ts_free_turnstiles));
 		turnstile_destroy(turnstile);
-	}
-}
-
-/*
- * Name: turnstile_deallocate_safe
- *
- * Description: Drop a reference on the turnstile safely without triggering zfree.
- *
- * Arg1: turnstile
- *
- * Returns: None.
- */
-void
-turnstile_deallocate_safe(struct turnstile *turnstile)
-{
-	if (turnstile == TURNSTILE_NULL) {
-		return;
-	}
-
-	if (__improbable(os_ref_release_raw(&turnstile->ts_refcount,
-	    &turnstile_refgrp) == 0)) {
-		assert(SLIST_EMPTY(&turnstile->ts_free_turnstiles));
-		mpsc_daemon_enqueue(&turnstile_deallocate_queue,
-		    &turnstile->ts_deallocate_link, MPSC_QUEUE_DISABLE_PREEMPTION);
 	}
 }
 
@@ -2909,7 +2856,7 @@ turnstile_cleanup(void)
 	if (inheritor_flags & TURNSTILE_INHERITOR_THREAD) {
 		thread_deallocate_safe(old_inheritor);
 	} else if (inheritor_flags & TURNSTILE_INHERITOR_TURNSTILE) {
-		turnstile_deallocate_safe((struct turnstile *)old_inheritor);
+		turnstile_deallocate((struct turnstile *)old_inheritor);
 	} else if (inheritor_flags & TURNSTILE_INHERITOR_WORKQ) {
 		workq_deallocate_safe((struct workqueue *)old_inheritor);
 	} else {
@@ -3143,6 +3090,7 @@ thread_update_waiting_turnstile_priority_chain(
 	struct turnstile *waiting_turnstile = TURNSTILE_NULL;
 	uint32_t turnstile_gencount;
 	boolean_t first_update = !total_hop;
+	uint32_t ticket;
 
 	*in_thread = THREAD_NULL;
 
@@ -3173,36 +3121,41 @@ thread_update_waiting_turnstile_priority_chain(
 		return;
 	}
 
-	/* take a reference on thread, turnstile and snapshot of gencount */
-	turnstile_gencount = turnstile_get_gencount(waiting_turnstile);
-	turnstile_reference(waiting_turnstile);
-	thread_reference(thread);
-
-	/* drop the thread lock and acquire the turnstile lock */
-	thread_unlock(thread);
-	waitq_lock(&waiting_turnstile->ts_waitq);
-	thread_lock(thread);
-
-	/* Check if the gencount matches and thread is still waiting on same turnstile */
-	if (turnstile_gencount != turnstile_get_gencount(waiting_turnstile) ||
-	    waiting_turnstile != thread_get_waiting_turnstile(thread)) {
-		turnstile_stats_update(total_hop + 1, TSU_NO_PRI_CHANGE_NEEDED |
-		    TSU_THREAD_ARG | tsu_flags, thread);
-		/* No updates required, bail out */
-		thread_unlock(thread);
-		waitq_unlock(&waiting_turnstile->ts_waitq);
-		thread_deallocate_safe(thread);
-		turnstile_deallocate_safe(waiting_turnstile);
-		return;
-	}
-
 	/*
-	 * The thread is waiting on the waiting_turnstile and we have thread lock,
-	 * we can drop the thread and turnstile reference since its on waitq and
-	 * it could not be removed from the waitq without the thread lock.
+	 * Do not take turnstile reference here because
+	 * 1. The ticket lock guarantees that waiting_turnstile will not be reused by other threads
+	 * 2. We are holding other turnstile lock, and doing turnstile free when we dereference it can cause deadlock
+	 * 3. Performance optimization
 	 */
-	thread_deallocate_safe(thread);
-	turnstile_deallocate_safe(waiting_turnstile);
+	if (!waitq_lock_reserve(&waiting_turnstile->ts_waitq, &ticket)) {
+		/* take a reference on thread and snapshot of gencount */
+		turnstile_gencount = turnstile_get_gencount(waiting_turnstile);
+		thread_reference(thread);
+
+		/* drop the thread lock and wait for turnstile ticket */
+		thread_unlock(thread);
+		waitq_lock_wait(&waiting_turnstile->ts_waitq, ticket);
+		thread_lock(thread);
+
+		/* Check if the gencount matches and thread is still waiting on same turnstile */
+		if (turnstile_gencount != turnstile_get_gencount(waiting_turnstile) ||
+		    waiting_turnstile != thread_get_waiting_turnstile(thread)) {
+			turnstile_stats_update(total_hop + 1, TSU_NO_PRI_CHANGE_NEEDED |
+			    TSU_THREAD_ARG | tsu_flags, thread);
+			/* No updates required, bail out */
+			thread_unlock(thread);
+			waitq_unlock(&waiting_turnstile->ts_waitq);
+			thread_deallocate_safe(thread);
+			return;
+		}
+
+		/*
+		 * The thread is waiting on the waiting_turnstile and we have thread lock,
+		 * we can drop the thread reference since it is on waitq and
+		 * it could not be removed from the waitq without the thread lock.
+		 */
+		thread_deallocate_safe(thread);
+	}
 
 	/* adjust thread's position on turnstile waitq */
 	needs_update = turnstile_update_thread_promotion_locked(waiting_turnstile, thread);

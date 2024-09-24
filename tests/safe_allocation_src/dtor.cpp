@@ -41,7 +41,7 @@ tests()
 	}
 }
 
-T_DECL(dtor, "safe_allocation.dtor") {
+T_DECL(dtor, "safe_allocation.dtor", T_META_TAG_VM_PREFERRED) {
 	tests<TriviallyDestructible>();
 	tests<TriviallyDestructible const>();
 

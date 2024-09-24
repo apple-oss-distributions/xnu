@@ -48,6 +48,18 @@
 
 #if __AMP__
 
+/* Configuration shared with the Edge scheduler */
+
+/*
+ * We see performance gains from doing immediate IPIs to P-cores to run
+ * P-eligible threads and lesser P-E migrations from using deferred IPIs
+ * for spill.
+ */
+int sched_amp_spill_deferred_ipi = 1;
+int sched_amp_pcores_preempt_immediate_ipi = 1;
+
+#if !CONFIG_SCHED_EDGE
+
 /* Exported globals */
 processor_set_t ecore_set = NULL;
 processor_set_t pcore_set = NULL;
@@ -68,14 +80,6 @@ sched_amp_init(void)
 int sched_amp_spill_count = 3;
 int sched_amp_idle_steal = 1;
 int sched_amp_spill_steal = 1;
-
-/*
- * We see performance gains from doing immediate IPIs to P-cores to run
- * P-eligible threads and lesser P-E migrations from using deferred IPIs
- * for spill.
- */
-int sched_amp_spill_deferred_ipi = 1;
-int sched_amp_pcores_preempt_immediate_ipi = 1;
 
 /*
  * sched_perfcontrol_inherit_recommendation_from_tg changes amp
@@ -489,5 +493,5 @@ sched_amp_choose_node(thread_t thread)
 	pset_node_t node = (recommended_pset_type(thread) == PSET_AMP_P) ? pcore_node : ecore_node;
 	return ((node != NULL) && (node->pset_map != 0)) ? node : &pset_node0;
 }
-
+#endif /* !CONFIG_SCHED_EDGE */
 #endif /* __AMP__ */

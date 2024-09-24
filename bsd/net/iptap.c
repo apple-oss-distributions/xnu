@@ -91,7 +91,7 @@ errno_t iptap_add_proto(ifnet_t, protocol_family_t, const struct ifnet_demux_des
     u_int32_t);
 errno_t iptap_del_proto(ifnet_t, protocol_family_t);
 errno_t iptap_getdrvspec(ifnet_t, struct ifdrv64 *);
-errno_t iptap_ioctl(ifnet_t, unsigned long, void *);
+errno_t iptap_ioctl(ifnet_t, unsigned long cmd, void *__sized_by(IOCPARM_LEN(cmd)));
 void iptap_detach(ifnet_t);
 errno_t iptap_tap_callback(ifnet_t, u_int32_t, bpf_tap_mode );
 int iptap_clone_create(struct if_clone *, u_int32_t, void *);
@@ -170,7 +170,7 @@ iptap_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 #pragma unused(params)
 
 	int error = 0;
-	struct iptap_softc *iptap = NULL;
+	struct iptap_softc *__single iptap = NULL;
 	struct ifnet_init_eparams if_init;
 
 	iptap = kalloc_type(struct iptap_softc, Z_WAITOK_ZERO_NOFAIL);
@@ -184,7 +184,7 @@ iptap_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	if_init.ver = IFNET_INIT_CURRENT_VERSION;
 	if_init.len = sizeof(if_init);
 	if_init.flags = IFNET_INIT_LEGACY;
-	if_init.name = ifc->ifc_name;
+	if_init.name = __unsafe_null_terminated_from_indexable(ifc->ifc_name);
 	if_init.unit = unit;
 	if_init.type = IFT_OTHER;
 	if_init.family = IFNET_FAMILY_LOOPBACK;
@@ -256,7 +256,7 @@ iptap_clone_destroy(struct ifnet *ifp)
 __private_extern__ errno_t
 iptap_tap_callback(ifnet_t ifp, u_int32_t dlt, bpf_tap_mode direction)
 {
-	struct iptap_softc *iptap;
+	struct iptap_softc *__single iptap;
 
 	iptap = ifp->if_softc;
 	if (iptap == NULL) {
@@ -344,7 +344,7 @@ __private_extern__ errno_t
 iptap_getdrvspec(ifnet_t ifp, struct ifdrv64 *ifd)
 {
 	errno_t error = 0;
-	struct iptap_softc *iptap;
+	struct iptap_softc *__single iptap;
 
 	iptap = ifp->if_softc;
 	if (iptap == NULL) {
@@ -380,7 +380,7 @@ done:
 }
 
 __private_extern__ errno_t
-iptap_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
+iptap_ioctl(ifnet_t ifp, unsigned long cmd, void *__sized_by(IOCPARM_LEN(cmd)) data)
 {
 	errno_t error = 0;
 
@@ -423,7 +423,7 @@ done:
 __private_extern__ void
 iptap_detach(ifnet_t ifp)
 {
-	struct iptap_softc *iptap = NULL;
+	struct iptap_softc *__single iptap = NULL;
 
 	iptap_lock_exclusive();
 
@@ -561,8 +561,8 @@ iptap_ipf_detach(void *arg)
 __private_extern__ void
 iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 {
-	struct iptap_softc *iptap;
-	void (*bpf_tap_func)(ifnet_t, u_int32_t, mbuf_t, void *, size_t ) =
+	struct iptap_softc *__single iptap;
+	void (*bpf_tap_func)(ifnet_t, u_int32_t, mbuf_t, void *, size_t) =
 	    outgoing ? bpf_tap_out : bpf_tap_in;
 	uint32_t src_scope_id = 0;
 	uint32_t dst_scope_id = 0;
@@ -601,7 +601,7 @@ iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 			/* Verify the structure is packed */
 			_CASSERT(sizeof(hdr_buffer) == sizeof(struct pktap_header) + sizeof(u_int32_t));
 
-			bzero(hdr, sizeof(hdr_buffer));
+			bzero(&hdr_buffer, sizeof(hdr_buffer));
 			hdr->pth_length = sizeof(struct pktap_header);
 			hdr->pth_type_next = PTH_TYPE_PACKET;
 			hdr->pth_dlt = DLT_NULL;
@@ -621,7 +621,8 @@ iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 
 			hdr->pth_svc = so_svc2tc(m->m_pkthdr.pkt_svc);
 
-			bpf_tap_func(iptap->iptap_ifp, DLT_PKTAP, m, hdr, hdr_size);
+			bpf_tap_func(iptap->iptap_ifp, DLT_PKTAP, m, &hdr_buffer,
+			    hdr_size);
 		}
 	}
 

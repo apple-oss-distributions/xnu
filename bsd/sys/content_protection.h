@@ -50,6 +50,9 @@
 #define PROTECTION_CLASS_F  6
 #define PROTECTION_CLASS_CX 7
 
+#define PROTECTION_CLASS_MIN  PROTECTION_CLASS_A
+#define PROTECTION_CLASS_MAX  PROTECTION_CLASS_CX
+
 /*
  * This forces open_dprotected_np to behave as though the file were created with
  * the traditional open(2) semantics.

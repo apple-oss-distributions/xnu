@@ -59,6 +59,9 @@ acts on the target of
 if it is a symbolic link.  With this option,
 .Fn removexattr
 will act on the link itself.
+.It Dv XATTR_NOFOLLOW_ANY
+do not follow any symbolic links encountered during pathname resolution. An
+error is returned if a symlink is encountered before the last component of path.
 .It Dv XATTR_SHOWCOMPRESSION
 .Fn removexattr
 and 
@@ -102,6 +105,9 @@ is invalid.
 must be valid UTF-8
 .Fa options
 must make sense.
+.It Bq Er EINVAL
+XATTR_NOFOLLOW or XATTR_NOFOLLOW_ANY option was passed in
+.Fn fremovexattr .
 .It Bq Er ENOTDIR
 A component of the
 .Fa path 's
@@ -126,6 +132,9 @@ or permission to remove the attribute is denied.
 .It Bq Er ELOOP
 Too many symbolic links were encountered in
 .Fa path .
+.It Bq Er ELOOP
+If XATTR_NOFOLLOW_ANY option was passed and a symbolic link was encountered in
+translating the pathname.
 .It Bq Er EFAULT
 .Fa path
 or

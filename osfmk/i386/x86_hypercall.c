@@ -33,7 +33,7 @@
 #include <i386/cpuid.h>
 #include <os/log.h>
 #include <vm/pmap.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <x86_64/lowglobals.h>
 
 bool

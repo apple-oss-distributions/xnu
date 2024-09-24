@@ -64,7 +64,7 @@ OS_ASSUME_PTR_ABI_SINGLE_BEGIN
  * structure of function pointers and registers that structure with the kernel
  * at boot.
  */
-#define IMAGE4_DLXK_VERSION (0u)
+#define IMAGE4_DLXK_VERSION (2u)
 
 #pragma mark KPI
 /*!

@@ -38,6 +38,7 @@
 #define __VM_PURGEABLE_INTERNAL__
 
 #include <kern/queue.h>
+#include <vm/vm_purgeable_xnu.h>
 
 enum purgeable_q_type {
 	PURGEABLE_Q_TYPE_OBSOLETE,
@@ -98,10 +99,6 @@ void vm_purgeable_token_delete_last(purgeable_q_t queue);
  */
 void vm_purgeable_q_advance_all(void);
 
-/* the object purger. purges the next eligible object from memory. */
-/* returns TRUE if an object was purged, otherwise FALSE. */
-boolean_t vm_purgeable_object_purge_one(int force_purge_below_group, int flags);
-
 /* purge all volatile objects now */
 void vm_purgeable_object_purge_all(void);
 
@@ -111,15 +108,6 @@ void vm_purgeable_object_add(vm_object_t object, purgeable_q_t queue, int group)
 /* look for object. If found, remove from purgeable queue. */
 purgeable_q_t vm_purgeable_object_remove(vm_object_t object);
 
-/* statistics for purgable objects in all queues */
-void vm_purgeable_stats(vm_purgeable_info_t info, task_t target_task);
-
-#if DEVELOPMENT || DEBUG
-/* statistics for purgeable object usage in all queues for a task */
-kern_return_t vm_purgeable_account(task_t task, pvm_account_info_t acnt_info);
-#endif /* DEVELOPMENT || DEBUG */
-
-uint64_t vm_purgeable_purge_task_owned(task_t task);
 void vm_purgeable_nonvolatile_enqueue(vm_object_t object, task_t task);
 void vm_purgeable_nonvolatile_dequeue(vm_object_t object);
 void vm_purgeable_accounting(vm_object_t        object,
@@ -128,15 +116,5 @@ void vm_object_owner_compressed_update(vm_object_t      object,
     int              delta);
 
 #define PURGEABLE_LOOP_MAX 64
-
-#define TOKEN_ADD               0x40    /* 0x100 */
-#define TOKEN_DELETE            0x41    /* 0x104 */
-#define TOKEN_RIPEN             0x42    /* 0x108 */
-#define OBJECT_ADD              0x48    /* 0x120 */
-#define OBJECT_REMOVE           0x49    /* 0x124 */
-#define OBJECT_PURGE            0x4a    /* 0x128 */
-#define OBJECT_PURGE_ALL        0x4b    /* 0x12c */
-#define OBJECT_PURGE_ONE        0x4c    /* 0x12d */
-#define OBJECT_PURGE_LOOP       0x4e    /* 0x12e */
 
 #endif /* __VM_PURGEABLE_INTERNAL__ */

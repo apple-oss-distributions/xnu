@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -101,6 +101,7 @@
 #include <sys/vm.h>
 #include <sys/sysctl.h>
 #include <sys/filedesc.h>
+#include <sys/fcntl.h>
 #include <sys/event.h>
 #include <sys/kdebug.h>
 #include <sys/kauth.h>
@@ -142,6 +143,8 @@
 #endif
 
 #include <vm/vm_protos.h>       /* vnode_pager_vrele() */
+#include <vm/vm_ubc.h>
+#include <vm/memory_object_xnu.h>
 
 #if CONFIG_MACF
 #include <security/mac_framework.h>
@@ -173,17 +176,6 @@ int     vttoif_tab[9] = {
 	0, S_IFREG, S_IFDIR, S_IFBLK, S_IFCHR, S_IFLNK,
 	S_IFSOCK, S_IFIFO, S_IFMT,
 };
-
-/* XXX These should be in a BSD accessible Mach header, but aren't. */
-extern void             memory_object_mark_used(
-	memory_object_control_t         control);
-
-extern void             memory_object_mark_unused(
-	memory_object_control_t         control,
-	boolean_t                       rage);
-
-extern void             memory_object_mark_io_tracking(
-	memory_object_control_t         control);
 
 extern int paniclog_append_noflush(const char *format, ...);
 
@@ -1501,7 +1493,7 @@ verify_incoming_rootfs(vnode_t *incoming_rootvnodep, vfs_context_t ctx,
 	}
 
 	if ((flags & VFSSR_VIRTUALDEV_PROHIBITED) != 0) {
-		if (mp->mnt_flag & MNTK_VIRTUALDEV) {
+		if (mp->mnt_kern_flag & MNTK_VIRTUALDEV) {
 			error = ENODEV;
 		}
 		if (error) {
@@ -3130,13 +3122,16 @@ vclean(vnode_t vp, int flags)
 	}
 #endif
 
-	vm_object_destroy_reason_t reason = VM_OBJECT_DESTROY_UNKNOWN_REASON;
+	vm_object_destroy_reason_t reason = VM_OBJECT_DESTROY_RECLAIM;
 	bool forced_unmount = vnode_mount(vp) != NULL && (vnode_mount(vp)->mnt_lflag & MNT_LFORCE) != 0;
 	bool ungraft_heuristic = flags & REVOKEALL;
+	bool unmount = vnode_mount(vp) != NULL && (vnode_mount(vp)->mnt_lflag & MNT_LUNMOUNT) != 0;
 	if (forced_unmount) {
 		reason = VM_OBJECT_DESTROY_FORCED_UNMOUNT;
 	} else if (ungraft_heuristic) {
 		reason = VM_OBJECT_DESTROY_UNGRAFT;
+	} else if (unmount) {
+		reason = VM_OBJECT_DESTROY_UNMOUNT;
 	}
 
 	/*
@@ -3381,13 +3376,13 @@ vgone(vnode_t vp, int flags)
 }
 
 /*
- * Lookup a vnode by device number.
+ * internal helper function only!
+ * vend an _iocounted_ vnode via output argument, or return an error if unable.
  */
-int
-check_mountedon(dev_t dev, enum vtype type, int  *errorp)
+static int
+get_vp_from_dev(dev_t dev, enum vtype type, vnode_t *outvp)
 {
 	vnode_t vp;
-	int rc = 0;
 	int vid;
 
 loop:
@@ -3399,26 +3394,124 @@ loop:
 		vid = vp->v_id;
 		vnode_hold(vp);
 		SPECHASH_UNLOCK();
+
+		/* acquire iocount */
 		if (vnode_getwithvid(vp, vid)) {
 			vnode_drop(vp);
 			goto loop;
 		}
 		vnode_drop(vp);
-		vnode_lock_spin(vp);
-		if ((vp->v_usecount > 0) || (vp->v_iocount > 1)) {
-			vnode_unlock(vp);
-			if ((*errorp = vfs_mountedon(vp)) != 0) {
-				rc = 1;
-			}
-		} else {
-			vnode_unlock(vp);
-		}
-		vnode_put(vp);
-		return rc;
+
+		/* Vend iocounted vnode */
+		*outvp = vp;
+		return 0;
 	}
+
+	/* vnode not found, error out */
 	SPECHASH_UNLOCK();
-	return 0;
+	return ENOENT;
 }
+
+
+
+/*
+ * Lookup a vnode by device number.
+ */
+int
+check_mountedon(dev_t dev, enum vtype type, int *errorp)
+{
+	vnode_t vp = NULLVP;
+	int rc = 0;
+
+	rc = get_vp_from_dev(dev, type, &vp);
+	if (rc) {
+		/* if no vnode found, it cannot be mounted on */
+		return 0;
+	}
+
+	/* otherwise, examine it */
+	vnode_lock_spin(vp);
+	/* note: exclude the iocount we JUST got (e.g. >1, not >0) */
+	if ((vp->v_usecount > 0) || (vp->v_iocount > 1)) {
+		vnode_unlock(vp);
+		if ((*errorp = vfs_mountedon(vp)) != 0) {
+			rc = 1;
+		}
+	} else {
+		vnode_unlock(vp);
+	}
+	/* release iocount! */
+	vnode_put(vp);
+
+	return rc;
+}
+
+extern dev_t chrtoblk(dev_t d);
+
+/*
+ * Examine the supplied vnode's dev_t and find its counterpart
+ * (e.g.  VCHR => VDEV) to compare against.
+ */
+static int
+vnode_cmp_paired_dev(vnode_t vp, vnode_t bdev_vp, enum vtype in_type,
+    enum vtype out_type)
+{
+	if (!vp || !bdev_vp) {
+		return EINVAL;
+	}
+	/* Verify iocounts */
+	if (vnode_iocount(vp) <= 0 ||
+	    vnode_iocount(bdev_vp) <= 0) {
+		return EINVAL;
+	}
+
+	/* check for basic matches */
+	if (vnode_vtype(vp) != in_type) {
+		return EINVAL;
+	}
+	if (vnode_vtype(bdev_vp) != out_type) {
+		return EINVAL;
+	}
+
+	dev_t dev = vnode_specrdev(vp);
+	dev_t blk_devt = vnode_specrdev(bdev_vp);
+
+	if (in_type == VCHR) {
+		if (out_type != VBLK) {
+			return EINVAL;
+		}
+		dev_t bdev = chrtoblk(dev);
+		if (bdev == NODEV) {
+			return EINVAL;
+		} else if (bdev == blk_devt) {
+			return 0;
+		}
+		//fall through
+	}
+	/*
+	 * else case:
+	 *
+	 * in_type == VBLK? => VCHR?
+	 * not implemented...
+	 * exercise to the reader: this can be built by
+	 * taking the device's major, and iterating the `chrtoblktab`
+	 * array to look for a value that matches.
+	 */
+	return EINVAL;
+}
+/*
+ * Vnode compare: does the supplied vnode's CHR device, match the dev_t
+ * of the accompanying `blk_vp` ?
+ * NOTE: vnodes MUST be iocounted BEFORE calling this!
+ */
+
+int
+vnode_cmp_chrtoblk(vnode_t vp, vnode_t blk_vp)
+{
+	return vnode_cmp_paired_dev(vp, blk_vp, VCHR, VBLK);
+}
+
+
 
 /*
  * Calculate the total number of references to a special device.
@@ -4042,7 +4135,7 @@ restart:
 	if (vp->v_specflags & SI_ALIASED) {
 		for (vq = *vp->v_hashchain; vq; vq = vq->v_specnext) {
 			if (vq->v_rdev != vp->v_rdev ||
-			    vq->v_type != vp->v_type) {
+			    vq->v_type != vp->v_type || vq == vp) {
 				continue;
 			}
 			if (vq->v_specflags & SI_MOUNTING) {
@@ -4362,7 +4455,8 @@ vfs_init_io_attributes(vnode_t devvp, mount_t mp)
 	 * as a reasonable approximation, only use the lowest bit of the mask
 	 * to generate a disk unit number
 	 */
-	mp->mnt_devbsdunit = num_trailing_0(mp->mnt_throttle_mask);
+	mp->mnt_devbsdunit = mp->mnt_throttle_mask ?
+	    num_trailing_0(mp->mnt_throttle_mask) : (LOWPRI_MAX_NUM_DEV - 1);
 
 	if (devvp == rootvp) {
 		rootunit = mp->mnt_devbsdunit;
@@ -4622,9 +4716,9 @@ vfs_event_signal(fsid_t *fsid, u_int32_t event, intptr_t data)
 		if (mp) {
 			mount_lock_spin(mp);
 			if (data) {
-				mp->mnt_kern_flag &= ~MNT_LNOTRESP;     // Now responding
+				mp->mnt_lflag &= ~MNT_LNOTRESP;     // Now responding
 			} else {
-				mp->mnt_kern_flag |= MNT_LNOTRESP;      // Not responding
+				mp->mnt_lflag |= MNT_LNOTRESP;      // Not responding
 			}
 			mount_unlock(mp);
 		}
@@ -6237,7 +6331,7 @@ vnode_getwithref(vnode_t vp)
 	return vget_internal(vp, 0, 0);
 }
 
-__private_extern__ int
+int
 vnode_getwithref_noblock(vnode_t vp)
 {
 	return vget_internal(vp, 0, VNODE_NOBLOCK);
@@ -7124,7 +7218,8 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 		 * + all read-only files OK, except:
 		 *      + dyld_shared_cache_arm64*
 		 *      + Camera
-		 *	+ mediaserverd
+		 *      + mediaserverd
+		 *      + cameracaptured
 		 */
 		if (vnode_vtype(vp) == VREG) {
 			memory_object_mark_eligible_for_secluded(
@@ -7571,6 +7666,10 @@ vnode_lookupat(const char *path, int flags, vnode_t *vpp, vfs_context_t ctx,
 	NDINIT(ndp, LOOKUP, OP_LOOKUP, ndflags, UIO_SYSSPACE,
 	    CAST_USER_ADDR_T(path), ctx);
 
+	if (flags & VNODE_LOOKUP_NOFOLLOW_ANY) {
+		ndp->ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	if (start_dvp && (path[0] != '/')) {
 		ndp->ni_dvp = start_dvp;
 		ndp->ni_cnd.cn_flags |= USEDVP;
@@ -7618,6 +7717,10 @@ vnode_open(const char *path, int fmode, int cmode, int flags, vnode_t *vpp, vfs_
 		ndflags = NOFOLLOW;
 	} else {
 		ndflags = FOLLOW;
+	}
+
+	if (lflags & VNODE_LOOKUP_NOFOLLOW_ANY) {
+		fmode |= O_NOFOLLOW_ANY;
 	}
 
 	if (lflags & VNODE_LOOKUP_NOCROSSMOUNT) {
@@ -8251,15 +8354,13 @@ vn_authorize_renamex_with_paths(struct vnode *fdvp, struct vnode *fvp, struct co
 
 	/***** <MACF> *****/
 #if CONFIG_MACF
-	error = mac_vnode_check_rename(ctx, fdvp, fvp, fcnp, tdvp, tvp, tcnp);
+	if (swap) {
+		error = mac_vnode_check_rename_swap(ctx, fdvp, fvp, fcnp, tdvp, tvp, tcnp);
+	} else {
+		error = mac_vnode_check_rename(ctx, fdvp, fvp, fcnp, tdvp, tvp, tcnp);
+	}
 	if (error) {
 		goto out;
-	}
-	if (swap) {
-		error = mac_vnode_check_rename(ctx, tdvp, tvp, tcnp, fdvp, fvp, fcnp);
-		if (error) {
-			goto out;
-		}
 	}
 #endif
 	/***** </MACF> *****/
@@ -13055,3 +13156,20 @@ vnode_revokelease(vnode_t vp, bool locked)
 }
 
 #endif /* CONFIG_FILE_LEASES */
+
+errno_t
+vnode_rdadvise(vnode_t vp, off_t offset, int len, vfs_context_t ctx)
+{
+	struct radvisory ra_struct;
+
+	assert(vp);
+
+	if (offset < 0 || len < 0) {
+		return EINVAL;
+	}
+
+	ra_struct.ra_offset = offset;
+	ra_struct.ra_count = len;
+
+	return VNOP_IOCTL(vp, F_RDADVISE, (caddr_t)&ra_struct, 0, ctx);
+}

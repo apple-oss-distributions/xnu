@@ -26,7 +26,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_default, "bounded_ptr.ctor.default") {
+T_DECL(ctor_default, "bounded_ptr.ctor.default", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 	tests<T volatile>();

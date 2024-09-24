@@ -21,7 +21,7 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(posix_spawn_file_actions_add_fileportdup2_np,
     "Check posix_spawnattr for posix_spawn_file_actions_add_fileportdup2_np",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	posix_spawnattr_t attr;
 	posix_spawn_file_actions_t fact;

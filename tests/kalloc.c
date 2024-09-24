@@ -22,14 +22,14 @@ run_sysctl_test(const char *t, int64_t value)
 }
 
 T_DECL(kalloc_type, "kalloc_type_test",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc_type", 260), "test succeeded");
 }
 
 T_DECL(kalloc, "kalloc_test",
     T_META_NAMESPACE("xnu.vm"),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 	T_EXPECT_EQ(1ll, run_sysctl_test("kalloc", 0), "test succeeded");
 }

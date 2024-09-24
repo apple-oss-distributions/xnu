@@ -40,6 +40,7 @@
 #include <kern/task.h>
 
 #include <vm/vm_map.h>
+#include <vm/vm_kern_xnu.h>
 
 /*
  * This function requires the sprlock to be held
@@ -213,7 +214,9 @@ dtrace_ptss_allocate_page(struct proc* p)
 	 * If on embedded, remap the scratch space as writable at another
 	 * virtual address
 	 */
-	kr = mach_vm_remap_kernel(map, &write_addr, size, 0, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE, map, addr, FALSE, &cur_protection, &max_protection, VM_INHERIT_DEFAULT);
+	kr = mach_vm_remap(map, &write_addr, size, 0,
+	    VM_FLAGS_ANYWHERE, map, addr, FALSE,
+	    &cur_protection, &max_protection, VM_INHERIT_DEFAULT);
 	if (kr != KERN_SUCCESS || !(max_protection & VM_PROT_WRITE)) {
 		goto err;
 	}

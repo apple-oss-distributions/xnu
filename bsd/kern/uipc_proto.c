@@ -92,7 +92,7 @@ static struct protosw localsw[] = {
 	},
 	{
 		.pr_type =      SOCK_DGRAM,
-		.pr_flags =     PR_ATOMIC | PR_ADDR | PR_RIGHTS,
+		.pr_flags =     PR_ATOMIC | PR_WANTRCVD | PR_ADDR | PR_RIGHTS,
 		.pr_ctloutput = uipc_ctloutput,
 		.pr_usrreqs =   &uipc_usrreqs,
 		.pr_lock =      unp_lock,

@@ -161,7 +161,7 @@ def IterateKqueueKnotes(kq):
 kqueue_summary_fmt = '{ptr: <#020x} {o.kq_p: <#020x} {dyn_id: <#020x} {servicer: <#20x} {owner: <#20x} {o.kq_count: <6d} {st_str: <10s}'
 
 def GetServicer(req):
-    if req.tr_state in [3, 4]: # [ BINDING , BOUND ]
+    if req.tr_state in [4, 5]: # [ BINDING , BOUND ]
         return int(req.tr_thread)
     return 0
 

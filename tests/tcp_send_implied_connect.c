@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,6 +36,8 @@
 #include <darwintest.h>
 #include <string.h>
 #include <unistd.h>
+
+T_GLOBAL_META(T_META_NAMESPACE("xnu.net"));
 
 #define MAX_IPv6_STR_LEN        64
 
@@ -220,7 +222,7 @@ tcp_send_implied_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to, int exp
 }
 
 
-T_DECL(tcp_send_implied_connect_ipv4_loopback, "TCP send implied connect with a IPv4 loopback address")
+T_DECL(tcp_send_implied_connect_ipv4_loopback, "TCP send implied connect with a IPv4 loopback address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in sin = {};
@@ -236,7 +238,7 @@ T_DECL(tcp_send_implied_connect_ipv4_loopback, "TCP send implied connect with a 
 }
 
 
-T_DECL(tcp_send_implied_connect_ipv4_multicast, "TCP send implied connect with an IPv4 multicast address")
+T_DECL(tcp_send_implied_connect_ipv4_multicast, "TCP send implied connect with an IPv4 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in sin = {};
@@ -251,7 +253,7 @@ T_DECL(tcp_send_implied_connect_ipv4_multicast, "TCP send implied connect with a
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4__broadcast, "TCP send implied connect with the IPv4 broadcast address")
+T_DECL(tcp_send_implied_connect_ipv4_broadcast, "TCP send implied connect with the IPv4 broadcast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in sin = {};
@@ -266,7 +268,7 @@ T_DECL(tcp_send_implied_connect_ipv4__broadcast, "TCP send implied connect with 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_null, "TCP send implied connect with the null IPv4 address")
+T_DECL(tcp_send_implied_connect_ipv4_null, "TCP send implied connect with the null IPv4 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in sin = {};
@@ -281,7 +283,7 @@ T_DECL(tcp_send_implied_connect_ipv4_null, "TCP send implied connect with the nu
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv6_loopback, "TCP send implied connect with the IPv6 loopback address")
+T_DECL(tcp_send_implied_connect_ipv6_loopback, "TCP send implied connect with the IPv6 loopback address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -296,7 +298,7 @@ T_DECL(tcp_send_implied_connect_ipv6_loopback, "TCP send implied connect with th
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv6_multicast, "TCP send implied connect with a IPv6 multicast address")
+T_DECL(tcp_send_implied_connect_ipv6_multicast, "TCP send implied connect with a IPv6 multicast address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -312,7 +314,7 @@ T_DECL(tcp_send_implied_connect_ipv6_multicast, "TCP send implied connect with a
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_null_ipv6, "TCP send implied connect with the IPv6 null address")
+T_DECL(tcp_send_implied_connect_null_ipv6, "TCP send implied connect with the IPv6 null address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -327,7 +329,23 @@ T_DECL(tcp_send_implied_connect_null_ipv6, "TCP send implied connect with the IP
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_multicast_mapped_ipv6, "TCP send implied connect with IPv4 multicast mapped IPv6 address")
+// panics without rdar://124092232
+T_DECL(tcp_send_implied_connect_ipv4_loopback_via_ipv6_rdar_124092232, "TCP send implied v6 connect with IPv4 loopback", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in sin = {0};
+
+	init_sin_address(&sin);
+	T_ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_send_implied_connect_v6(s, &sin, EAFNOSUPPORT), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_send_implied_connect_ipv4_multicast_mapped_ipv6, "TCP send implied connect with IPv4 multicast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -342,7 +360,7 @@ T_DECL(tcp_send_implied_connect_ipv4_multicast_mapped_ipv6, "TCP send implied co
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_broadcast_mapped_ipv6, "TCP send implied connect with IPv4 broadcast mapped IPv6 address")
+T_DECL(tcp_send_implied_connect_ipv4_broadcast_mapped_ipv6, "TCP send implied connect with IPv4 broadcast mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -357,7 +375,7 @@ T_DECL(tcp_send_implied_connect_ipv4_broadcast_mapped_ipv6, "TCP send implied co
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_null_mapped_ipv6, "TCP send implied connect with IPv4 null mapped IPv6 address")
+T_DECL(tcp_send_implied_connect_ipv4_null_mapped_ipv6, "TCP send implied connect with IPv4 null mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -372,7 +390,7 @@ T_DECL(tcp_send_implied_connect_ipv4_null_mapped_ipv6, "TCP send implied connect
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_multicast_compatible_ipv6, "TCP send implied connect with IPv4 multicast compatible IPv6 address")
+T_DECL(tcp_send_implied_connect_ipv4_multicast_compatible_ipv6, "TCP send implied connect with IPv4 multicast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -387,7 +405,7 @@ T_DECL(tcp_send_implied_connect_ipv4_multicast_compatible_ipv6, "TCP send implie
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_broadcast_compatible_ipv6, "TCP send implied connect with IPv4 broadcast compatible IPv6 address")
+T_DECL(tcp_send_implied_connect_ipv4_broadcast_compatible_ipv6, "TCP send implied connect with IPv4 broadcast compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};
@@ -402,7 +420,7 @@ T_DECL(tcp_send_implied_connect_ipv4_broadcast_compatible_ipv6, "TCP send implie
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
-T_DECL(tcp_send_implied_connect_ipv4_null_compatible_ipv6, "TCP send implied connect with IPv4 null compatible IPv6 address")
+T_DECL(tcp_send_implied_connect_ipv4_null_compatible_ipv6, "TCP send implied connect with IPv4 null compatible IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
 	struct sockaddr_in6 sin6 = {};

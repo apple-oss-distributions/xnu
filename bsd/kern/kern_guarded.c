@@ -42,6 +42,7 @@
 #include <sys/syscall.h>
 #include <sys/kauth.h>
 #include <sys/kdebug.h>
+#include <sys/reason.h>
 #include <stdbool.h>
 #include <vm/vm_protos.h>
 #include <libkern/section_keywords.h>
@@ -66,8 +67,7 @@ extern int writev_uio(struct proc *p, int fd, user_addr_t user_iovp,
 extern int write_internal(struct proc *p, int fd, user_addr_t buf,
     user_size_t nbyte, off_t offset, int flags, guardid_t *puguard,
     user_ssize_t *retval);
-extern int exit_with_guard_exception(void *p, mach_exception_data_type_t code,
-    mach_exception_data_type_t subcode);
+
 /*
  * Experimental guarded file descriptor support.
  */
@@ -232,11 +232,19 @@ fd_guard_ast(
 	 * deliver it synchronously and then kill the process, else kill the process
 	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
 	 */
+
+	int flags = PX_DEBUG_NO_HONOR;
+	exception_info_t info = {
+		.os_reason = OS_REASON_GUARD,
+		.exception_type = EXC_GUARD,
+		.mx_code = code,
+		.mx_subcode = subcode,
+	};
+
 	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-		psignal(current_proc(), SIGKILL);
-	} else {
-		exit_with_guard_exception(current_proc(), code, subcode);
+		flags |= PX_PSIGNAL;
 	}
+	exit_with_mach_exception(current_proc(), info, flags);
 }
 
 /*
@@ -1306,8 +1314,23 @@ vng_guard_violation(const struct vng_info *vgi,
 	return retval;
 }
 
+#endif /* CONFIG_MACF && CONFIG_VNGUARD */
+
+/* KPI used by APFS Kext to generate fault when someone tries to change permissions on some files */
+void
+generate_file_permissions_guard_exception(unsigned int code_target, int64_t subcode)
+{
+	mach_exception_code_t code = 0;
+	EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VN);
+	EXC_GUARD_ENCODE_FLAVOR(code, VNG_PERMISSIONS);
+	EXC_GUARD_ENCODE_TARGET(code, code_target);
+
+	thread_t t = current_thread();
+	thread_guard_violation(t, code, subcode, FALSE);
+}
+
 /*
- * A fatal vnode guard was tripped on this thread.
+ * A vnode guard was tripped on this thread.
  *
  * (Invoked before returning to userland from the syscall handler.)
  */
@@ -1315,18 +1338,57 @@ void
 vn_guard_ast(thread_t __unused t,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode)
 {
-	const bool fatal = true;
+	unsigned int flavor = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
+	const bool fatal = (flavor == VNG_PERMISSIONS) ? false : true;
+
 	/*
-	 * Check if anyone has registered for Synchronous EXC_GUARD, if yes then,
-	 * deliver it synchronously and then kill the process, else kill the process
-	 * and deliver the exception via EXC_CORPSE_NOTIFY. Always kill the process if we are not in dev mode.
+	 * All the VN guard except VNG_PERMISSIONS are experimental and
+	 * are only turned on when CONFIG_VNGUARD is set.
 	 */
+	bool early_bailout = (flavor == VNG_PERMISSIONS) ? false : true;
+
+#if CONFIG_MACF && CONFIG_VNGUARD
+	early_bailout = false;
+#endif /* CONFIG_MACF && CONFIG_VNGUARD */
+
+	if (early_bailout) {
+		return;
+	}
+
+	/*
+	 * Deliver exception Synchronously if anyone has registered for Sync EXC_GUARD.
+	 * If Sync exception delivery succeeds, then kill process if the exception
+	 * is fatal.
+	 *
+	 * If Sync exception delivery fails, then deliver the exception via EXC_CORPSE_NOTIFY,
+	 * the exception would have a corpse for a FATAL one and a corpse-fork for a NON-Fatal
+	 * exception.
+	 */
+
+	int flags = PX_DEBUG_NO_HONOR;
+	exception_info_t info = {
+		.os_reason = OS_REASON_GUARD,
+		.exception_type = EXC_GUARD,
+		.mx_code = code,
+		.mx_subcode = subcode,
+	};
+
 	if (task_exception_notify(EXC_GUARD, code, subcode, fatal) == KERN_SUCCESS) {
-		psignal(current_proc(), SIGKILL);
+		if (fatal) {
+			flags |= PX_PSIGNAL;
+		}
 	} else {
-		exit_with_guard_exception(current_proc(), code, subcode);
+		if (!fatal) {
+			task_violated_guard(code, subcode, NULL, FALSE); /* not fatal */
+		}
+	}
+
+	if (fatal) {
+		exit_with_mach_exception(current_proc(), info, flags);
 	}
 }
+
+#if CONFIG_MACF && CONFIG_VNGUARD
 
 /*
  * vnode callbacks

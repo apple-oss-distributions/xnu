@@ -212,7 +212,7 @@ struct cuckoo_hashtable {
 	decl_lck_rw_data(, _resize_lock);
 	decl_lck_mtx_data(, _lock);
 
-	struct _bucket  *_buckets;
+	struct _bucket  *__counted_by(_n_buckets) _buckets;
 
 	int (*_obj_cmp)(struct cuckoo_node *node, void *key);
 	void (*_obj_retain)(struct cuckoo_node *);
@@ -416,10 +416,10 @@ cuckoo_hashtable_create(struct cuckoo_hashtable_params *p)
 	lck_mtx_init(&h->_lock, &cht_lock_group, &cht_lock_attr);
 
 	h->_n_entries = 0;
+	h->_buckets = buckets;
 	h->_n_buckets = n_buckets;
 	h->_capacity = h->_rcapacity = h->_n_buckets * _CHT_BUCKET_SLOTS;
 	h->_bitmask = n_buckets - 1;
-	h->_buckets = buckets;
 	lck_rw_init(&h->_resize_lock, &cht_lock_group, &cht_lock_attr);
 	h->_busy = false;
 	h->_resize_waiters = 0;
@@ -449,7 +449,7 @@ cuckoo_hashtable_free(struct cuckoo_hashtable *h)
 		for (i = 0; i < h->_n_buckets; i++) {
 			lck_mtx_destroy(&h->_buckets[i]._lock, &cht_lock_group);
 		}
-		sk_free_type_array(struct _bucket, h->_n_buckets, h->_buckets);
+		sk_free_type_array_counted_by(struct _bucket, h->_n_buckets, h->_buckets);
 	}
 	sk_free_type(struct cuckoo_hashtable, h);
 }
@@ -610,7 +610,7 @@ struct _bfs_node {
  */
 static int
 cuckoo_move(struct cuckoo_hashtable *h, struct cuckoo_node *node,
-    uint32_t hash, struct _bfs_node *queue, uint8_t leaf_node_idx,
+    uint32_t hash, struct _bfs_node queue[_CHT_BFS_QUEUE_LEN], uint8_t leaf_node_idx,
     uint8_t leaf_slot)
 {
 	struct _bfs_node *prev_node, *curr_node;
@@ -768,7 +768,7 @@ skip:
 		    "head %d tail %d (%d/%d, load factor %d%%)", head, tail,
 		    h->_n_entries, h->_capacity,
 		    cuckoo_hashtable_load_factor(h));
-		ret = ENOSPC;
+		ret = ENOMEM;
 	} else {
 		cht_warn("failed: cuckoo probe path invalidated "
 		    " (%d/%d, load factor %d%%)", h->_n_entries, h->_capacity,
@@ -848,7 +848,6 @@ cuckoo_resize(struct cuckoo_hashtable *h, enum cuckoo_resize_ops option)
 
 	uint32_t curr_capacity = h->_n_buckets * _CHT_BUCKET_SLOTS;
 	uint32_t curr_load = (100 * h->_n_entries) / curr_capacity;
-	uint32_t curr_buckets = h->_n_buckets;
 	uint32_t new_capacity;
 	__block size_t add_called = 0;
 
@@ -900,12 +899,12 @@ cuckoo_resize(struct cuckoo_hashtable *h, enum cuckoo_resize_ops option)
 	for (uint32_t i = 0; i < h->_n_buckets; i++) {
 		lck_mtx_destroy(&h->_buckets[i]._lock, &cht_lock_group);
 	}
-	h->_n_buckets = tmp_h->_n_buckets;
-	h->_capacity = h->_n_buckets * _CHT_BUCKET_SLOTS;
+	h->_capacity = tmp_h->_n_buckets * _CHT_BUCKET_SLOTS;
 	h->_bitmask = tmp_h->_bitmask;
-	sk_free_type_array(struct _bucket, curr_buckets, h->_buckets);
+	sk_free_type_array_counted_by(struct _bucket, h->_n_buckets, h->_buckets);
 
 	h->_buckets = tmp_h->_buckets;
+	h->_n_buckets = tmp_h->_n_buckets;
 	lck_rw_destroy(&tmp_h->_resize_lock, &cht_lock_group);
 	lck_mtx_destroy(&tmp_h->_lock, &cht_lock_group);
 	sk_free_type(struct cuckoo_hashtable, tmp_h);
@@ -951,7 +950,7 @@ cuckoo_hashtable_add_with_hash(struct cuckoo_hashtable *h,
 	ASSERT(cuckoo_node_next(node) == NULL);
 
 	ret = cuckoo_add_no_expand(h, node, hash);
-	if (ret == ENOSPC) {
+	if (ret == ENOMEM) {
 		do {
 			ret = cuckoo_resize(h, _CHT_RESIZE_EXPAND);
 			if (ret != 0 && ret != EAGAIN) {
@@ -960,7 +959,7 @@ cuckoo_hashtable_add_with_hash(struct cuckoo_hashtable *h,
 			// this could still fail, when other threads added
 			// enough objs that another resize is needed
 			ret = cuckoo_add_no_expand(h, node, hash);
-		} while (ret == ENOSPC);
+		} while (ret == ENOMEM);
 	}
 
 	return ret;

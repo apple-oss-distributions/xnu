@@ -68,7 +68,6 @@ static unsigned int boot_cpu;
 // array index is a cpu_id (so some elements may be NULL)
 static processor_t *machProcessors;
 
-bool cluster_power_supported = false;
 static uint64_t cpu_power_state_mask;
 static uint64_t all_clusters_mask;
 static uint64_t online_clusters_mask;
@@ -169,29 +168,6 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 
 	ml_set_max_cpus(topology_info->max_cpu_id + 1);
 
-#if XNU_CLUSTER_POWER_DOWN
-	cluster_power_supported = true;
-	/*
-	 * If a boot-arg is set that allows threads to be bound
-	 * to a cpu or cluster, cluster_power_supported must
-	 * default to false.
-	 */
-#ifdef CONFIG_XNUPOST
-	uint64_t kernel_post = 0;
-	PE_parse_boot_argn("kernPOST", &kernel_post, sizeof(kernel_post));
-	if (kernel_post != 0) {
-		cluster_power_supported = false;
-	}
-#endif
-	if (PE_parse_boot_argn("enable_skstb", NULL, 0)) {
-		cluster_power_supported = false;
-	}
-	if (PE_parse_boot_argn("enable_skstsct", NULL, 0)) {
-		cluster_power_supported = false;
-	}
-#endif
-	PE_parse_boot_argn("cluster_power", &cluster_power_supported, sizeof(cluster_power_supported));
-
 	matching = IOService::serviceMatching("IOPMGR");
 	gPMGR = OSDynamicCast(IOPMGR,
 	    IOService::waitForMatchingService(matching, UINT64_MAX));
@@ -228,11 +204,32 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 			panic("ml_processor_register failed: %d", result);
 		}
 		register_aic_handlers(cpu_info, ipi_handler, pmi_handler);
+	}
 
-		if (processor_start(machProcessors[cpu_id]) != KERN_SUCCESS) {
-			panic("processor_start failed");
+#if USE_APPLEARMSMP
+	/*
+	 * Now that all of the processors are registered with the kernel,
+	 * it's safe to boot them all up.
+	 *
+	 * These phases are separated to ensure all the psets and their
+	 * relationships are initialized before other processors start
+	 * traversing those linkages.
+	 *
+	 * The boot cpu must be 'booted' first to finish initializing its IPI
+	 * handler before other processors could start sending it IPIs.
+	 */
+
+	processor_boot(machProcessors[boot_cpu]);
+
+	for (unsigned int cpu = 0; cpu < topology_info->num_cpus; cpu++) {
+		const ml_topology_cpu *cpu_info = &topology_info->cpus[cpu];
+		const unsigned int cpu_id = cpu_info->cpu_id;
+		if (cpu_id != boot_cpu) {
+			processor_boot(machProcessors[cpu_id]);
 		}
 	}
+#endif /* USE_APPLEARMSMP */
+
 	ml_cpu_init_completed();
 	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
 }
@@ -261,23 +258,33 @@ target_to_cpu_id(cpu_id_t in)
 	return (unsigned int)(uintptr_t)in;
 }
 
-// Release a secondary CPU from reset.  Runs from a different CPU (obviously).
-kern_return_t
-PE_cpu_start(cpu_id_t target,
-    vm_offset_t /*start_paddr*/, vm_offset_t /*arg_paddr*/)
+/*
+ * This is IOKit KPI, but not used by anyone today.
+ */
+kern_return_t __abortlike
+PE_cpu_start_from_kext(cpu_id_t target,
+    __unused vm_offset_t start_paddr, __unused vm_offset_t arg_paddr)
+{
+	panic("PE_cpu_start_from_kext unimplemented");
+}
+
+
+// Release a CPU from reset.  Runs from a different CPU (obviously).
+void
+PE_cpu_start_internal(cpu_id_t target,
+    __unused vm_offset_t start_paddr, __unused vm_offset_t arg_paddr)
 {
 	unsigned int cpu_id = target_to_cpu_id(target);
 
-	if (cpu_id != boot_cpu) {
+	assert(cpu_id != cpu_number()); /* we can't be already on the CPU to be started */
+
 #if APPLEVIRTUALPLATFORM
-		/* When running virtualized, the reset vector address must be passed to PMGR explicitly */
-		extern unsigned int LowResetVectorBase;
-		gPMGR->enableCPUCore(cpu_id, ml_vtophys((vm_offset_t)&LowResetVectorBase));
-#else
-		gPMGR->enableCPUCore(cpu_id, 0);
-#endif
-	}
-	return KERN_SUCCESS;
+	/* When running virtualized, the reset vector address must be passed to PMGR explicitly */
+	extern vm_offset_t reset_vector_vaddr;
+	gPMGR->enableCPUCore(cpu_id, ml_vtophys(reset_vector_vaddr));
+#else /* APPLEVIRTUALPLATFORM */
+	gPMGR->enableCPUCore(cpu_id, 0);
+#endif /* APPLEVIRTUALPLATFORM */
 }
 
 // Initialize a CPU when it first comes up.  Runs on the target CPU.
@@ -293,19 +300,32 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 
 	ml_broadcast_cpu_event(CPU_BOOTED, cpu_id);
 
-	// Send myself an IPI to clear SIGPdisabled.  Hang here if IPIs are broken.
-	// (Probably only works on the boot CPU.)
+	assert_ml_cpu_signal_is_enabled(false);
+
+	/* Send myself the first IPI to clear SIGPdisabled. */
 	PE_cpu_signal(target, target);
-	while (ml_get_interrupts_enabled() && !ml_cpu_signal_is_enabled()) {
-		OSMemoryBarrier();
+
+	if (ml_get_interrupts_enabled()) {
+		/*
+		 * Only the boot CPU during processor_boot reaches here with
+		 * interrupts enabled. Other CPUs enable interrupts in
+		 * processor_cpu_reinit.
+		 */
+		assert(bootb);
+		assert3u(cpu_id, ==, boot_cpu);
+		ml_wait_for_cpu_signal_to_enable();
+		assert_ml_cpu_signal_is_enabled(true);
+		ml_cpu_up();
 	}
 }
 
-void
+/*
+ * This is IOKit KPI, but not used by anyone today.
+ */
+void __abortlike
 PE_cpu_halt(cpu_id_t target)
 {
-	unsigned int cpu_id = target_to_cpu_id(target);
-	processor_exit(machProcessors[cpu_id]);
+	panic("PE_cpu_halt unimplemented");
 }
 
 void
@@ -378,10 +398,12 @@ bool
 PE_cpu_down(cpu_id_t target)
 {
 	unsigned int cpu_id = target_to_cpu_id(target);
-	assert(cpu_id != boot_cpu);
+	if (ml_is_quiescing()) {
+		assert(cpu_id != boot_cpu);
+	}
 	gPMGR->disableCPUCore(cpu_id);
 	ml_broadcast_cpu_event(CPU_DOWN, cpu_id);
-	return cluster_power_supported && is_cluster_powering_down(cpu_id);
+	return topology_info->cluster_power_down && is_cluster_powering_down(cpu_id);
 }
 
 void
@@ -393,8 +415,15 @@ PE_handle_ext_interrupt(void)
 void
 PE_cpu_power_disable(int cpu_id)
 {
+	assert(bit_test(cpu_power_state_mask, cpu_id));
+
+	if (cpu_id == boot_cpu && ml_is_quiescing()) {
+		return;
+	}
+
 	bit_clear(cpu_power_state_mask, cpu_id);
-	if (!cluster_power_supported || cpu_id == boot_cpu) {
+
+	if (!topology_info->cluster_power_down) {
 		return;
 	}
 
@@ -415,7 +444,7 @@ PE_cpu_power_disable(int cpu_id)
 bool
 PE_cpu_power_check_kdp(int cpu_id)
 {
-	if (!cluster_power_supported) {
+	if (!topology_info || !topology_info->cluster_power_down) {
 		return true;
 	}
 
@@ -426,8 +455,15 @@ PE_cpu_power_check_kdp(int cpu_id)
 void
 PE_cpu_power_enable(int cpu_id)
 {
+	assert(!bit_test(cpu_power_state_mask, cpu_id));
+
+	if (cpu_id == boot_cpu && ml_is_quiescing()) {
+		return;
+	}
+
 	bit_set(cpu_power_state_mask, cpu_id);
-	if (!cluster_power_supported || cpu_id == boot_cpu) {
+
+	if (!topology_info->cluster_power_down) {
 		return;
 	}
 
@@ -472,7 +508,7 @@ IOCPUSleepKernel(void)
 	for (i = 0; i < topology_info->num_cpus; i++) {
 		unsigned int cpu_id = topology_info->cpus[i].cpu_id;
 		if (cpu_id != boot_cpu) {
-			processor_exit(machProcessors[cpu_id]);
+			processor_sleep(machProcessors[cpu_id]);
 		}
 	}
 
@@ -485,7 +521,7 @@ IOCPUSleepKernel(void)
 	 * Now sleep the boot CPU, including calling the kQueueQuiesce actions.
 	 * The system sleeps here.
 	 */
-	processor_exit(machProcessors[boot_cpu]);
+	processor_sleep(machProcessors[boot_cpu]);
 
 	/*
 	 * The system is now coming back from sleep on the boot CPU.
@@ -494,12 +530,6 @@ IOCPUSleepKernel(void)
 	 * The reconfig engine is programmed to power up all clusters on S2R resume.
 	 */
 	online_clusters_mask = all_clusters_mask;
-
-	/*
-	 * processor_start() never gets called for the boot CPU, so it needs to
-	 * be explicitly marked as online here.
-	 */
-	PE_cpu_power_enable(boot_cpu);
 
 	ml_set_is_quiescing(false);
 
@@ -512,7 +542,7 @@ IOCPUSleepKernel(void)
 	for (i = 0; i < topology_info->num_cpus; i++) {
 		unsigned int cpu_id = topology_info->cpus[i].cpu_id;
 		if (cpu_id != boot_cpu) {
-			processor_start(machProcessors[cpu_id]);
+			processor_wake(machProcessors[cpu_id]);
 		}
 	}
 

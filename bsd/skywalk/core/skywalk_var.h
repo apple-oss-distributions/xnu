@@ -503,13 +503,15 @@ extern boolean_t skywalk_check_platform_binary(proc_t);
 extern boolean_t skywalk_netif_direct_allowed(const char *);
 extern boolean_t skywalk_netif_direct_enabled(void);
 extern void sk_gen_guard_id(boolean_t, const uuid_t, guardid_t *);
-extern const char *sk_uuid_unparse(const uuid_t, uuid_string_t);
+extern char *__counted_by(sizeof(uuid_string_t)) sk_uuid_unparse(const uuid_t, uuid_string_t);
 #if SK_LOG
-extern const char *sk_dump(const char *label, const void *__sized_by(len)obj,
-    int len, int dumplen, char *__counted_by(lim)dst, int lim);
+extern const char *__counted_by(lim) sk_dump(const char *label,
+    const void *__sized_by(len) obj, int len, int dumplen,
+    char *__counted_by(lim) dst, int lim);
 extern const char *sk_proc_name_address(struct proc *);
 extern int sk_proc_pid(struct proc *);
-extern const char *sk_sa_ntop(struct sockaddr *, char *, size_t);
+extern const char *sk_sa_ntop(struct sockaddr *, char *__counted_by(addr_strlen),
+    size_t addr_strlen);
 extern const char *sk_memstatus2str(uint32_t);
 #endif /* SK_LOG */
 
@@ -544,7 +546,7 @@ enum skywalk_kill_reason {
 #define SKYWALK_KILL_REASON_RX_SYNC             0x8000000000000000ULL
 
 /* for convenience */
-extern char *proc_name_address(void *p);
+extern const char *proc_name_address(void *p);
 
 /*
  * skoid is the glue that holds the Skywalk struct model and sysctl properties

@@ -38,9 +38,9 @@
 #include <kern/thread.h>
 #include <sys/errno.h>
 #include <sys/vm.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_xnu.h>
 #include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_pageout_xnu.h>
 
 #ifdef CONFIG_EXCLAVES
 #include <kern/exclaves.tightbeam.h>
@@ -549,7 +549,7 @@ __attribute__((noinline))
 void
 kperf_thread_exclaves_ast_handler(thread_t thread, const stackshot_stackshotentry_s * _Nonnull entry)
 {
-	assert3u(entry->scid, ==, thread->th_exclaves_scheduling_context_id);
+	assert3u(entry->scid, ==, thread->th_exclaves_ipc_ctx.scid);
 	uint32_t ast = thread->kperf_exclaves_ast;
 
 	BUF_INFO(PERF_AST_EXCLAVES | DBG_FUNC_START, thread, ast);
@@ -561,13 +561,13 @@ kperf_thread_exclaves_ast_handler(thread_t thread, const stackshot_stackshotentr
 
 	BUF_DATA(PERF_GEN_EVENT | DBG_FUNC_START, SAMPLER_EXSTACK, actionid);
 	if (entry->ipcstack.has_value) {
-		stackshot_ipcstackentry__v_visit(&entry->ipcstack.value, ^(size_t __unused i, const stackshot_ipcstackentry_s * _Nonnull __unused ipcstack) {
+		stackshottypes_ipcstackentry__v_visit(&entry->ipcstack.value, ^(size_t __unused i, const stackshottypes_ipcstackentry_s * _Nonnull __unused ipcstack) {
 			ipcstack_count += 1;
 		});
 
-		BUF_DATA(PERF_CS_EXSTACKHDR, ipcstack_count);
+		BUF_DATA(PERF_CS_EXSTACKHDR, ipcstack_count, thread->thread_id, entry->scid);
 
-		stackshot_ipcstackentry__v_visit(&entry->ipcstack.value, ^(size_t __unused j, const stackshot_ipcstackentry_s * _Nonnull ipcstack) {
+		stackshottypes_ipcstackentry__v_visit(&entry->ipcstack.value, ^(size_t __unused j, const stackshottypes_ipcstackentry_s * _Nonnull ipcstack) {
 			kperf_excallstack_log(ipcstack);
 		});
 	}

@@ -101,6 +101,7 @@ int PE_stub_poll_input(unsigned int options, char *c);
 boolean_t PE_panic_debugging_enabled(void);
 
 void PE_mark_hwaccess(uint64_t thread);
+void PE_mark_hwaccess_data(uint8_t type, uint8_t size, uint64_t paddr);
 
 #if XNU_KERNEL_PRIVATE
 /*
@@ -151,6 +152,9 @@ extern int32_t gPESerialBaud;
 extern uint8_t gPlatformECID[8];
 
 extern uint32_t gPlatformMemoryID;
+#if defined(XNU_TARGET_OS_XR)
+extern uint32_t gPlatformChipRole;
+#endif /* not XNU_TARGET_OS_XR */
 
 unsigned int PE_init_taproot(vm_offset_t *taddr);
 
@@ -351,12 +355,10 @@ extern boolean_t PE_parse_boot_argn(
 
 extern boolean_t PE_boot_arg_uint64_eq(const char *arg_string, uint64_t value);
 
-#if XNU_KERNEL_PRIVATE
 extern boolean_t PE_parse_boot_arg_str(
 	const char *arg_string,
 	char *      arg_ptr,
 	int         size);
-#endif /* XNU_KERNEL_PRIVATE */
 
 extern boolean_t PE_get_default(
 	const char      *property_name,
@@ -379,10 +381,25 @@ enum {
 extern boolean_t PE_get_hotkey(
 	unsigned char   key);
 
+#if XNU_KERNEL_PRIVATE
+extern kern_return_t __abortlike
+PE_cpu_start_from_kext(
+	cpu_id_t target,
+	vm_offset_t start_paddr,
+	vm_offset_t arg_paddr);
+
+extern void PE_cpu_start_internal(
+	cpu_id_t target,
+	vm_offset_t start_paddr,
+	vm_offset_t arg_paddr);
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if !XNU_KERNEL_PRIVATE
 extern kern_return_t PE_cpu_start(
 	cpu_id_t target,
 	vm_offset_t start_paddr,
 	vm_offset_t arg_paddr);
+#endif /* !XNU_KERNEL_PRIVATE */
 
 extern void PE_cpu_halt(
 	cpu_id_t target);

@@ -606,7 +606,7 @@ class X86_64RegisterSet(object):
 
 
 
-def IterateQueue(queue_head, element_ptr_type, element_field_name):
+def IterateQueue(queue_head: lldb.SBValue, element_ptr_type: lldb.SBType, element_field_name: str):
     """ iterate over a queue in kernel of type queue_head_t. refer to osfmk/kern/queue.h
         params:
             queue_head         - lldb.SBValue : Value object for queue_head.
@@ -621,9 +621,9 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name):
         queue_head_addr = queue_head.GetValueAsUnsigned()
     else:
         queue_head_addr = queue_head.GetAddress().GetLoadAddress(osplugin_target_obj)
-    cur_elt = queue_head.GetChildMemberWithName('next')
+    cur_elt: lldb.SBValue = queue_head.GetChildMemberWithName('next')
     while True:
-        if not cur_elt.IsValid() or cur_elt.GetValueAsUnsigned() == 0 or cur_elt.GetValueAsUnsigned() == queue_head_addr:
+        if not (cur_elt.IsValid() and cur_elt.error.success) or cur_elt.GetValueAsUnsigned() == 0 or cur_elt.GetValueAsUnsigned() == queue_head_addr:
             break
         elt = cur_elt.Cast(element_ptr_type)
         yield elt
@@ -670,7 +670,27 @@ class OperatingSystemPlugIn(object):
             osplugin_target_obj = self._target
             self.current_session_id = GetUniqueSessionID(self.process)
             self.version = self._target.FindGlobalVariables('version', 1).GetValueAtIndex(0)
-            self.kasan_tbi = self._target.FindGlobalVariables('kasan_tbi_enabled', 1).GetValueAtIndex(0)
+
+            # Configure explicit pointer stripping
+            is_tagged = self._target.FindFirstGlobalVariable('kasan_tbi_enabled').GetValueAsUnsigned()
+
+            if is_tagged:
+
+                def strip_ptr(ptr):
+                    if ptr != 0:
+                        ptr |= (0xFF << 56)
+                    return ptr
+                self._strip_ptr = strip_ptr
+
+                def strip_thread_sbval(th):
+                    addr = th.GetValueAsAddress()
+                    return self.version.CreateValueFromExpression(str(addr), '(struct thread *)' + str(addr))
+                self._strip_thread_sbval = strip_thread_sbval
+
+            else:
+                self._strip_ptr = lambda ptr: ptr
+                self._strip_thread_sbval = lambda val: val
+
             self.kernel_stack_size = self._target.FindGlobalVariables('kernel_stack_size', 1).GetValueAtIndex(0).GetValueAsUnsigned()
             self.kernel_context_size = 0
             self.connected_over_kdp = False
@@ -716,13 +736,9 @@ class OperatingSystemPlugIn(object):
                 print("Instantiating threads completely from saved state in memory.")
 
     def create_thread(self, tid, context):
-        def strip_tbi(v):
-            if self.kasan_tbi and v != 0:
-                v |= (0xFF << 56)
-            return v
 
         # Strip TBI explicitly in case create_thread() is called externally.
-        context = strip_tbi(context)
+        context = self._strip_ptr(context)
 
         # tid == deadbeef means its a custom thread which kernel does not know of.
         if tid == 0xdeadbeef :
@@ -746,7 +762,7 @@ class OperatingSystemPlugIn(object):
             print("FATAL ERROR: Creating thread from memory 0x%x with tid in mem=%d when requested tid = %d " % (context, thread_id, tid))
             return None
 
-        wait_queue = strip_tbi(th.GetChildMemberWithName('wait_queue').GetValueAsUnsigned())
+        wait_queue = self._strip_ptr(th.GetChildMemberWithName('wait_queue').GetValueAsUnsigned())
         thread_obj = { 'tid'   : thread_id,
                        'ptr'   : th.GetValueAsUnsigned(),
                        'name'  : hex(th.GetValueAsUnsigned()).rstrip('L'),
@@ -768,7 +784,7 @@ class OperatingSystemPlugIn(object):
         if self.connected_over_kdp :
             kdp = self._target.FindGlobalVariables('kdp',1).GetValueAtIndex(0)
             kdp_state = kdp.GetChildMemberWithName('saved_state')
-            kdp_thread = self._strip_thread_tbi(kdp.GetChildMemberWithName('kdp_thread'))
+            kdp_thread = self._strip_thread_sbval(kdp.GetChildMemberWithName('kdp_thread'))
             if kdp_thread and kdp_thread.GetValueAsUnsigned() != 0:
                 self.kdp_thread = kdp_thread
                 self.kdp_state = kdp_state
@@ -792,8 +808,8 @@ class OperatingSystemPlugIn(object):
         self.processors = []
         try:
             processor_list_val = PluginValue(self._target.FindGlobalVariables('processor_list',1).GetValueAtIndex(0))
-            while processor_list_val.IsValid() and processor_list_val.GetValueAsUnsigned() !=0 :
-                th = self._strip_thread_tbi(processor_list_val.GetChildMemberWithName('active_thread'))
+            while processor_list_val.IsValid() and processor_list_val.error.success and processor_list_val.GetValueAsUnsigned() !=0:
+                th = self._strip_thread_sbval(processor_list_val.GetChildMemberWithName('active_thread'))
                 th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
                 cpu_id = processor_list_val.GetChildMemberWithName('cpu_id').GetValueAsUnsigned()
                 self.processors.append({'active_thread': th.GetValueAsUnsigned(), 'cpu_id': cpu_id})
@@ -818,7 +834,7 @@ class OperatingSystemPlugIn(object):
             thread_type = self._target.FindFirstType('thread')
             thread_ptr_type = thread_type.GetPointerType()
             for th in IterateQueue(thread_q_head, thread_ptr_type, 'threads'):
-                th = self._strip_thread_tbi(th)
+                th = self._strip_thread_sbval(th)
                 th_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
                 self.create_thread(th_id, th.GetValueAsUnsigned())
                 nth = self.thread_cache[th_id]
@@ -889,9 +905,3 @@ class OperatingSystemPlugIn(object):
         print("FATAL ERROR: Failed to get register state for thread id 0x%x " % tid)
         print(thobj)
         return regs.GetPackedRegisterState()
-
-    def _strip_thread_tbi(self, th):
-        if not self.kasan_tbi:
-            return th
-        addr = th.GetValueAsAddress()
-        return self.version.CreateValueFromExpression(str(addr), '(struct thread *)' + str(addr))

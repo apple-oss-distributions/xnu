@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -146,13 +146,28 @@ out:
 	return list;
 }
 
+/**
+ * Return back page(s) used as the stack in HIBTEXT.
+ *
+ * @param first_page Output parameter representing the first page being used as
+ *                   a stack in HIBTEXT.
+ * @param page_count Output parameter representing the number of pages being
+ *                   used as a stack in HIBTEXT.
+ */
 void
 pal_hib_get_stack_pages(vm_offset_t *first_page, vm_offset_t *page_count)
 {
+#if CONFIG_SPTM
+	/* The SPTM determines which stack to use during HIBTEXT. */
+	*first_page = atop_64(SPTMArgs->hib_metadata->protected_metadata.hibtext_stack_top) - 1;
+	*page_count = 1;
+#else
+	/* On non-SPTM systems, use the XNU interrupt stack as the HIBTEXT stack. */
 	vm_offset_t stack_end = BootCpuData.intstack_top;
 	vm_offset_t stack_begin = stack_end - INTSTACK_SIZE;
 	*first_page = atop_64(kvtophys(stack_begin));
 	*page_count = atop_64(round_page(stack_end) - trunc_page(stack_begin));
+#endif /* CONFIG_SPTM */
 }
 
 // mark pages not to be saved, but available for scratch usage during restore
@@ -165,8 +180,10 @@ hibernate_page_list_setall_machine(hibernate_page_list_t * page_list,
 	vm_offset_t stack_first_page, stack_page_count;
 	pal_hib_get_stack_pages(&stack_first_page, &stack_page_count);
 
+#if XNU_MONITOR
 	extern pmap_paddr_t pmap_stacks_start_pa, pmap_stacks_end_pa;
 	vm_offset_t pmap_stack_page_count = atop_64(pmap_stacks_end_pa - pmap_stacks_start_pa);
+#endif /* XNU_MONITOR */
 
 	if (!preflight) {
 		// mark the stack as unavailable for clobbering during restore;
@@ -176,6 +193,7 @@ hibernate_page_list_setall_machine(hibernate_page_list_t * page_list,
 		    stack_first_page, stack_page_count,
 		    kIOHibernatePageStateWiredSave);
 
+#if XNU_MONITOR
 		// Mark the PPL stack as not needing to be saved. Any PPL memory that is
 		// excluded from the image will need to be explicitly checked for in
 		// pmap_check_ppl_hashed_flag_all(). That function ensures that all
@@ -184,9 +202,13 @@ hibernate_page_list_setall_machine(hibernate_page_list_t * page_list,
 		hibernate_set_page_state(page_list, page_list_wired,
 		    atop_64(pmap_stacks_start_pa), pmap_stack_page_count,
 		    kIOHibernatePageStateFree);
+#endif /* XNU_MONITOR */
 	}
+
 	*pagesOut += stack_page_count;
+#if XNU_MONITOR
 	*pagesOut -= pmap_stack_page_count;
+#endif /* XNU_MONITOR */
 }
 
 // mark pages not to be saved and not for scratch usage during restore
@@ -204,6 +226,26 @@ hibernate_page_list_set_volatile(hibernate_page_list_t * page_list,
 	    page, count,
 	    kIOHibernatePageStateFree);
 	*pagesOut -= count;
+
+#if CONFIG_SPTM
+	/**
+	 * On SPTM-based systems, parts of the CTRR-protected regions will be
+	 * loaded from disk by iBoot instead of being loaded from the hibernation
+	 * image for security reasons. Because those regions are being loaded from
+	 * disk, they don't need to be saved into the hibernation image, so update
+	 * the bitmaps to reflect this.
+	 */
+	assertf(SPTMArgs->hib_metadata->iboot_loaded_ranges != NULL,
+	    "SPTM didn't setup iboot_loaded_ranges pointer in the hibernation metadata.");
+
+	for (size_t i = 0; i < SPTMArgs->hib_metadata->num_iboot_loaded_ranges; ++i) {
+		const hib_phys_range_t *range = &SPTMArgs->hib_metadata->iboot_loaded_ranges[i];
+		hibernate_set_page_state(page_list, page_list_wired,
+		    range->first_page, range->page_count,
+		    kIOHibernatePageStateFree);
+		*pagesOut -= range->page_count;
+	}
+#endif /* CONFIG_SPTM */
 }
 
 kern_return_t
@@ -232,7 +274,7 @@ hibernate_vm_unlock(void)
 	if (kIOHibernateStateHibernating == gIOHibernateState) {
 		hibernate_vm_unlock_queues();
 	}
-	ml_set_is_quiescing(TRUE);
+	assert(ml_is_quiescing());
 }
 
 // processor_doshutdown() calls hibernate_vm_lock() and hibernate_vm_unlock() on sleep with interrupts disabled.

@@ -17,7 +17,7 @@
 
 static pid_t vnoder_pid = -1;
 static uint32_t maxvnodes = 0;
-T_GLOBAL_META(T_META_NAMESPACE("xnu.vfs"));
+T_GLOBAL_META(T_META_NAMESPACE("xnu.vfs"), T_META_TAG_VM_PREFERRED);
 
 #if TARGET_OS_IOS
 

@@ -86,27 +86,28 @@
 #include <kern/misc_protos.h>
 #include <kern/policy_internal.h>
 
-#include <vm/vm_compressor.h>
-#include <vm/vm_compressor_pager.h>
-#include <vm/vm_fault.h>
-#include <vm/vm_map.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_compressor_internal.h>
+#include <vm/vm_compressor_pager_internal.h>
+#include <vm/vm_fault_internal.h>
+#include <vm/vm_map_internal.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_kern_xnu.h>
 #include <vm/pmap.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_protos.h>
+#include <vm/vm_pageout_internal.h>
+#include <vm/vm_protos_internal.h>
 #include <vm/vm_external.h>
 #include <vm/memory_object.h>
 #include <vm/vm_purgeable_internal.h>   /* Needed by some vm_page.h macros */
 #include <vm/vm_shared_region.h>
+#include <vm/vm_page_internal.h>
 
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
+#include <sys/kdebug.h>
+#include <sys/kdebug_triage.h>
 #include <sys/reason.h>
 #include <sys/signalvar.h>
-
-#include <sys/kdebug_triage.h>
 
 #include <san/kasan.h>
 #include <libkern/coreanalytics/coreanalytics.h>
@@ -117,7 +118,16 @@
 
 int vm_protect_privileged_from_untrusted = 1;
 
-unsigned int    vm_object_pagein_throttle = 16;
+/*
+ * Enforce a maximum number of concurrent PageIns per vm-object to prevent
+ * high-I/O-volume tasks from saturating storage and starving the rest of the
+ * system.
+ *
+ * TODO: This throttling mechanism may be more naturally done by the pager,
+ * filesystem, or storage layers, which will have better information about how
+ * much concurrency the backing store can reasonably support.
+ */
+TUNABLE(uint16_t, vm_object_pagein_throttle, "vm_object_pagein_throttle", 16);
 
 /*
  * We apply a hard throttle to the demand zero rate of tasks that we believe are running out of control which
@@ -154,6 +164,40 @@ NEED_TO_HARD_THROTTLE_THIS_TASK(void)
 	       proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO) >= THROTTLE_LEVEL_THROTTLED);
 }
 
+
+/*
+ * XXX: For now, vm faults cannot be recursively disabled. If the need for
+ * nested code that disables faults arises, the implementation can be modified
+ * to track a disabled-count.
+ */
+
+OS_ALWAYS_INLINE
+void
+vm_fault_disable(void)
+{
+	thread_t t = current_thread();
+	assert(!t->th_vm_faults_disabled);
+	t->th_vm_faults_disabled = true;
+	act_set_debug_assert();
+}
+
+OS_ALWAYS_INLINE
+void
+vm_fault_enable(void)
+{
+	thread_t t = current_thread();
+	assert(t->th_vm_faults_disabled);
+	t->th_vm_faults_disabled = false;
+}
+
+OS_ALWAYS_INLINE
+bool
+vm_fault_get_disabled(void)
+{
+	thread_t t = current_thread();
+	return t->th_vm_faults_disabled;
+}
+
 #define HARD_THROTTLE_DELAY     10000   /* 10000 us == 10 ms */
 #define SOFT_THROTTLE_DELAY     200     /* 200 us == .2 ms */
 
@@ -181,15 +225,15 @@ static kern_return_t vm_fault_wire_fast(
 	ppnum_t         *physpage_p);
 
 static kern_return_t vm_fault_internal(
-	vm_map_t        map,
-	vm_map_offset_t vaddr,
-	vm_prot_t       caller_prot,
-	boolean_t       change_wiring,
-	vm_tag_t        wire_tag,
-	int             interruptible,
-	pmap_t          pmap,
-	vm_map_offset_t pmap_addr,
-	ppnum_t         *physpage_p);
+	vm_map_t               map,
+	vm_map_offset_t        vaddr,
+	vm_prot_t              caller_prot,
+	boolean_t              change_wiring,
+	vm_tag_t               wire_tag,
+	pmap_t                 pmap,
+	vm_map_offset_t        pmap_addr,
+	ppnum_t                *physpage_p,
+	vm_object_fault_info_t fault_info);
 
 static void vm_fault_copy_cleanup(
 	vm_page_t       page,
@@ -221,10 +265,6 @@ uint64_t vm_cs_defer_to_csm_not = 0;
 #endif /* CODE_SIGNING_MONITOR */
 
 void vm_pre_fault(vm_map_offset_t, vm_prot_t);
-
-extern char *kdp_compressor_decompressed_page;
-extern addr64_t kdp_compressor_decompressed_page_paddr;
-extern ppnum_t  kdp_compressor_decompressed_page_ppnum;
 
 struct vmrtfr {
 	int vmrtfr_maxi;
@@ -811,7 +851,7 @@ vm_fault_check(vm_object_t object, vm_page_t m, vm_page_t first_m, wait_interrup
 			}
 			vm_fault_cleanup(object, first_m);
 
-			VM_DEBUG_EVENT(vmf_check_zfdelay, VMF_CHECK_ZFDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
+			VM_DEBUG_EVENT(vmf_check_zfdelay, DBG_VM_FAULT_CHECK_ZFDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
 
 			__VM_FAULT_THROTTLE_FOR_PAGEOUT_SCAN__(throttle_delay);
 
@@ -1012,7 +1052,7 @@ vm_fault_page(
 	vm_fault_return_t       error;
 	int                     my_fault;
 	uint32_t                try_failed_count;
-	int                     interruptible; /* how may fault be interrupted? */
+	wait_interrupt_t        interruptible; /* how may fault be interrupted? */
 	int                     external_state = VM_EXTERNAL_STATE_UNKNOWN;
 	memory_object_t         pager;
 	vm_fault_return_t       retval;
@@ -1032,17 +1072,17 @@ vm_fault_page(
  * into a copy object in order to avoid a redundant page out operation.
  */
 #define MUST_ASK_PAGER(o, f, s)                                 \
-	((s = VM_COMPRESSOR_PAGER_STATE_GET((o), (f))) != VM_EXTERNAL_STATE_ABSENT)
+	((s = vm_object_compressor_pager_state_get((o), (f))) != VM_EXTERNAL_STATE_ABSENT)
 
 #define PAGED_OUT(o, f) \
-	(VM_COMPRESSOR_PAGER_STATE_GET((o), (f)) == VM_EXTERNAL_STATE_EXISTS)
+	(vm_object_compressor_pager_state_get((o), (f)) == VM_EXTERNAL_STATE_EXISTS)
 
 /*
  *	Recovery actions
  */
 #define RELEASE_PAGE(m)                                 \
 	MACRO_BEGIN                                     \
-	PAGE_WAKEUP_DONE(m);                            \
+	vm_page_wakeup_done(VM_PAGE_OBJECT(m), m);                            \
 	if ( !VM_PAGE_PAGEABLE(m)) {                    \
 	        vm_page_lockspin_queues();              \
 	        if (clear_absent_on_error && m->vmp_absent) {\
@@ -1161,7 +1201,7 @@ vm_fault_page(
 			while (object->blocked_access) {
 				vm_object_sleep(object,
 				    VM_OBJECT_EVENT_UNBLOCKED,
-				    THREAD_UNINT);
+				    THREAD_UNINT, LCK_SLEEP_EXCLUSIVE);
 			}
 			vm_fault_page_blocked_access++;
 			vm_object_paging_begin(object);
@@ -1196,7 +1236,7 @@ vm_fault_page(
 #if TRACEFAULTPAGE
 				dbgTrace(0xBEEF0005, (unsigned int) m, (unsigned int) 0);       /* (TEST/DEBUG) */
 #endif
-				wait_result = PAGE_SLEEP(object, m, interruptible);
+				wait_result = vm_page_sleep(object, m, interruptible, LCK_SLEEP_DEFAULT);
 
 				if (wait_result != THREAD_AWAKENED) {
 					vm_fault_cleanup(object, first_m);
@@ -1430,12 +1470,8 @@ vm_fault_page(
 				m = vm_page_lookup(object, vm_object_trunc_page(offset));
 
 				if (m != VM_PAGE_NULL && m->vmp_cleaning) {
-					PAGE_ASSERT_WAIT(m, interruptible);
-
-					vm_object_unlock(object);
-					wait_result = thread_block(THREAD_CONTINUE_NULL);
+					wait_result = vm_page_sleep(object, m, interruptible, LCK_SLEEP_UNLOCK);
 					vm_object_deallocate(object);
-
 					goto backoff;
 				} else {
 					vm_object_unlock(object);
@@ -1584,12 +1620,7 @@ vm_fault_page(
 				assert(object->ref_count > 0);
 
 				if (!object->pager_ready) {
-					wait_result = vm_object_assert_wait(object, VM_OBJECT_EVENT_PAGER_READY, interruptible);
-
-					vm_object_unlock(object);
-					if (wait_result == THREAD_WAITING) {
-						wait_result = thread_block(THREAD_CONTINUE_NULL);
-					}
+					wait_result = vm_object_sleep(object, VM_OBJECT_EVENT_PAGER_READY, interruptible, LCK_SLEEP_UNLOCK);
 					vm_object_deallocate(object);
 
 					goto backoff;
@@ -1624,12 +1655,9 @@ vm_fault_page(
 				assert(object->ref_count > 0);
 
 				if (object->paging_in_progress >= vm_object_pagein_throttle) {
-					vm_object_assert_wait(object, VM_OBJECT_EVENT_PAGING_ONLY_IN_PROGRESS, interruptible);
-
+					wait_result = vm_object_paging_throttle_wait(object, interruptible);
 					vm_object_unlock(object);
-					wait_result = thread_block(THREAD_CONTINUE_NULL);
 					vm_object_deallocate(object);
-
 					goto backoff;
 				} else {
 					vm_object_unlock(object);
@@ -1692,7 +1720,7 @@ vm_fault_page(
 					 */
 					if (my_fault_type == DBG_COMPRESSOR_FAULT) {
 						if ((throttle_delay = vm_page_throttled(TRUE))) {
-							VM_DEBUG_EVENT(vmf_compressordelay, VMF_COMPRESSORDELAY, DBG_FUNC_NONE, throttle_delay, 0, 1, 0);
+							VM_DEBUG_EVENT(vmf_compressordelay, DBG_VM_FAULT_COMPRESSORDELAY, DBG_FUNC_NONE, throttle_delay, 0, 1, 0);
 							__VM_FAULT_THROTTLE_FOR_PAGEOUT_SCAN__(throttle_delay);
 						}
 					}
@@ -1774,7 +1802,7 @@ vm_fault_page(
 					    "vm_compressor_pager_get()\n",
 					    rc);
 				}
-				PAGE_WAKEUP_DONE(m);
+				vm_page_wakeup_done(object, m);
 
 				rc = KERN_SUCCESS;
 				goto data_requested;
@@ -1804,8 +1832,11 @@ vm_fault_page(
 
 				static const enum vm_subsys_error_codes object_destroy_errors[VM_OBJECT_DESTROY_MAX + 1] = {
 					[VM_OBJECT_DESTROY_UNKNOWN_REASON] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER,
+					[VM_OBJECT_DESTROY_UNMOUNT] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_UNMOUNT,
 					[VM_OBJECT_DESTROY_FORCED_UNMOUNT] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_FORCED_UNMOUNT,
 					[VM_OBJECT_DESTROY_UNGRAFT] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_UNGRAFT,
+					[VM_OBJECT_DESTROY_PAGER] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_DEALLOC_PAGER,
+					[VM_OBJECT_DESTROY_RECLAIM] = KDBG_TRIAGE_VM_OBJECT_NO_PAGER_RECLAIM,
 				};
 				enum vm_subsys_error_codes kdbg_code = object_destroy_errors[(vm_object_destroy_reason_t)object->no_pager_reason];
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, kdbg_code), 0 /* arg */);
@@ -1963,6 +1994,8 @@ data_requested:
 				 * store (different memory object).
 				 */
 phys_contig_object:
+				assert(object->copy_strategy == MEMORY_OBJECT_COPY_NONE);
+				assert(object == first_object);
 				goto done;
 			}
 			/*
@@ -2319,10 +2352,7 @@ dont_look_for_page:
 				copy_m = vm_page_lookup(copy_object, copy_offset);
 
 				if (copy_m != VM_PAGE_NULL && copy_m->vmp_busy) {
-					PAGE_ASSERT_WAIT(copy_m, interruptible);
-
-					vm_object_unlock(copy_object);
-					wait_result = thread_block(THREAD_CONTINUE_NULL);
+					wait_result = vm_page_sleep(copy_object, copy_m, interruptible, LCK_SLEEP_UNLOCK);
 					vm_object_deallocate(copy_object);
 
 					goto backoff;
@@ -2386,7 +2416,7 @@ dont_look_for_page:
 			 * option.  Else, we use the copy.
 			 */
 			if ((!copy_object->pager_ready)
-			    || VM_COMPRESSOR_PAGER_STATE_GET(copy_object, copy_offset) == VM_EXTERNAL_STATE_ABSENT
+			    || vm_object_compressor_pager_state_get(copy_object, copy_offset) == VM_EXTERNAL_STATE_ABSENT
 			    ) {
 				vm_page_lockspin_queues();
 				assert(!m->vmp_cleaning);
@@ -2394,7 +2424,7 @@ dont_look_for_page:
 				vm_page_unlock_queues();
 
 				SET_PAGE_DIRTY(copy_m, TRUE);
-				PAGE_WAKEUP_DONE(copy_m);
+				vm_page_wakeup_done(copy_object, copy_m);
 			} else {
 				assert(copy_m->vmp_busy == TRUE);
 				assert(!m->vmp_cleaning);
@@ -2446,7 +2476,7 @@ dont_look_for_page:
 			 * in the object tree, we must restart
 			 * any faults that are waiting here.
 			 * [Note that this is an expansion of
-			 * PAGE_WAKEUP that uses the THREAD_RESTART
+			 * vm_page_wakeup() that uses the THREAD_RESTART
 			 * wait result].  Can't turn off the page's
 			 * busy bit because we're not done with it.
 			 */
@@ -2549,7 +2579,7 @@ static TUNABLE(bool, panic_on_cs_killed, "panic_on_cs_killed",
 
 extern int proc_selfpid(void);
 extern char *proc_name_address(struct proc *p);
-extern char *proc_best_name(struct proc *);
+extern const char *proc_best_name(struct proc *);
 unsigned long cs_enter_tainted_rejected = 0;
 unsigned long cs_enter_tainted_accepted = 0;
 
@@ -3650,7 +3680,7 @@ vm_fault_pmap_enter_with_object_lock(
 		 * Otherwise, we have to do it now. */
 		assert(m->vmp_busy);
 		if (!was_busy) {
-			PAGE_WAKEUP_DONE(m);
+			vm_page_wakeup_done(object, m);
 		}
 		vm_pmap_enter_blocked++;
 	}
@@ -3668,7 +3698,7 @@ vm_fault_pmap_enter_with_object_lock(
 			}
 
 			if (!was_busy) {
-				PAGE_WAKEUP_DONE(m);
+				vm_page_wakeup_done(object, m);
 			}
 		}
 		vm_object_lock_assert_exclusive(object);
@@ -3677,7 +3707,7 @@ vm_fault_pmap_enter_with_object_lock(
 		vm_page_unlock_queues();
 		os_atomic_dec(&compressor_ro_uncompressed, relaxed);
 
-		VM_COMPRESSOR_PAGER_STATE_CLR(VM_PAGE_OBJECT(m), m->vmp_offset);
+		vm_object_compressor_pager_state_clr(VM_PAGE_OBJECT(m), m->vmp_offset);
 	}
 #else /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 #pragma unused(object_lock_type)
@@ -3758,10 +3788,18 @@ vm_fault_enter_prepare(
 		 */
 
 		/* This had better not be a JIT page. */
-		if (!pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
-			*prot &= ~VM_PROT_WRITE;
+		if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
+			/*
+			 * This pmap enforces extra constraints for this set of
+			 * protections, so we can't modify them.
+			 */
+			if (!cs_bypass) {
+				panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x !cs_bypass",
+				    __FUNCTION__, pmap, (uint64_t)vaddr,
+				    *prot, fault_info->pmap_options);
+			}
 		} else {
-			assert(cs_bypass);
+			*prot &= ~VM_PROT_WRITE;
 		}
 	}
 	if (m->vmp_pmapped == FALSE) {
@@ -3825,7 +3863,17 @@ vm_fault_enter_prepare(
 			 * to make an already writeable page executable.
 			 */
 			if (!cs_bypass) {
-				assert(!pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot));
+				if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, *prot)) {
+					/*
+					 * This pmap enforces extra constraints
+					 * for this set of protections, so we
+					 * can't change the protections.
+					 */
+					panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+					    __FUNCTION__, pmap,
+					    (uint64_t)vaddr, *prot,
+					    fault_info->pmap_options);
+				}
 				*prot &= ~VM_PROT_EXECUTE;
 			}
 		}
@@ -3959,10 +4007,13 @@ vm_fault_external(
 	pmap_t          caller_pmap,
 	vm_map_offset_t caller_pmap_addr)
 {
+	struct vm_object_fault_info fault_info = {
+		.interruptible = interruptible
+	};
 	return vm_fault_internal(map, vaddr, fault_type, change_wiring,
 	           change_wiring ? vm_tag_bt() : VM_KERN_MEMORY_NONE,
-	           interruptible, caller_pmap, caller_pmap_addr,
-	           NULL);
+	           caller_pmap, caller_pmap_addr,
+	           NULL, &fault_info);
 }
 
 kern_return_t
@@ -3976,9 +4027,12 @@ vm_fault(
 	pmap_t          caller_pmap,
 	vm_map_offset_t caller_pmap_addr)
 {
+	struct vm_object_fault_info fault_info = {
+		.interruptible = interruptible
+	};
 	return vm_fault_internal(map, vaddr, fault_type, change_wiring, wire_tag,
-	           interruptible, caller_pmap, caller_pmap_addr,
-	           NULL);
+	           caller_pmap, caller_pmap_addr,
+	           NULL, &fault_info);
 }
 
 static boolean_t
@@ -4099,7 +4153,7 @@ vm_fault_complete(
 	 */
 	if (m->vmp_busy) {
 		vm_object_lock_assert_exclusive(m_object);
-		PAGE_WAKEUP_DONE(m);
+		vm_page_wakeup_done(m_object, m);
 	}
 
 	if (need_retry == FALSE && !m_object->internal && (fault_type & VM_PROT_WRITE)) {
@@ -4145,15 +4199,15 @@ int vm_fault_resilient_media_inject_error3 = 0;
 
 kern_return_t
 vm_fault_internal(
-	vm_map_t        map,
-	vm_map_offset_t vaddr,
-	vm_prot_t       caller_prot,
-	boolean_t       change_wiring,
-	vm_tag_t        wire_tag,               /* if wiring must pass tag != VM_KERN_MEMORY_NONE */
-	int             interruptible,
-	pmap_t          caller_pmap,
-	vm_map_offset_t caller_pmap_addr,
-	ppnum_t         *physpage_p)
+	vm_map_t               map,
+	vm_map_offset_t        vaddr,
+	vm_prot_t              caller_prot,
+	boolean_t              change_wiring,
+	vm_tag_t               wire_tag,               /* if wiring must pass tag != VM_KERN_MEMORY_NONE */
+	pmap_t                 caller_pmap,
+	vm_map_offset_t        caller_pmap_addr,
+	ppnum_t                *physpage_p,
+	vm_object_fault_info_t fault_info)
 {
 	vm_map_version_t        version;        /* Map version for verificiation */
 	boolean_t               wired;          /* Should mapping be wired down? */
@@ -4181,7 +4235,6 @@ vm_fault_internal(
 	bool                    object_locks_dropped = FALSE;
 	vm_prot_t               fault_type;
 	vm_prot_t               original_fault_type;
-	struct vm_object_fault_info fault_info = {};
 	bool                    need_collapse = FALSE;
 	boolean_t               need_retry = FALSE;
 	boolean_t               *need_retry_ptr = NULL;
@@ -4263,14 +4316,14 @@ vm_fault_internal(
 	}
 
 	KDBG_RELEASE(
-		(MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_START,
+		(VMDBG_CODE(DBG_VM_FAULT_INTERNAL)) | DBG_FUNC_START,
 		((uint64_t)trace_vaddr >> 32),
 		trace_vaddr,
 		(map == kernel_map));
 
 	if (get_preemption_level() != 0) {
 		KDBG_RELEASE(
-			(MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_END,
+			(VMDBG_CODE(DBG_VM_FAULT_INTERNAL)) | DBG_FUNC_END,
 			((uint64_t)trace_vaddr >> 32),
 			trace_vaddr,
 			KERN_FAILURE);
@@ -4280,14 +4333,29 @@ vm_fault_internal(
 	}
 
 	thread_t cthread = current_thread();
-	bool      rtfault = (cthread->sched_mode == TH_MODE_REALTIME);
+
+	if (cthread->th_vm_faults_disabled) {
+		KDBG_RELEASE(
+			(MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_END,
+			((uint64_t)trace_vaddr >> 32),
+			trace_vaddr,
+			KERN_FAILURE);
+		ktriage_record(thread_tid(cthread),
+		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+		    KDBG_TRIAGE_RESERVED,
+		    KDBG_TRIAGE_VM_FAULTS_DISABLED),
+		    0 /* arg */);
+		return KERN_FAILURE;
+	}
+
+	bool     rtfault = (cthread->sched_mode == TH_MODE_REALTIME);
 	uint64_t fstart = 0;
 
 	if (rtfault) {
 		fstart = mach_continuous_time();
 	}
 
-	interruptible_state = thread_interrupt_level(interruptible);
+	interruptible_state = thread_interrupt_level(fault_info->interruptible);
 
 	fault_type = (change_wiring ? VM_PROT_NONE : caller_prot);
 
@@ -4350,7 +4418,7 @@ RetryFault:
 	    (fault_type | (need_copy ? VM_PROT_COPY : 0)),
 	    object_lock_type, &version,
 	    &object, &offset, &prot, &wired,
-	    &fault_info,
+	    fault_info,
 	    &real_map,
 	    &object_is_contended);
 	object_is_contended = false; /* avoid unsafe optimization */
@@ -4373,11 +4441,10 @@ RetryFault:
 
 
 	pmap = real_map->pmap;
-	fault_info.interruptible = interruptible;
-	fault_info.stealth = FALSE;
-	fault_info.io_sync = FALSE;
-	fault_info.mark_zf_absent = FALSE;
-	fault_info.batch_pmap_op = FALSE;
+	fault_info->stealth = FALSE;
+	fault_info->io_sync = FALSE;
+	fault_info->mark_zf_absent = FALSE;
+	fault_info->batch_pmap_op = FALSE;
 
 	if (resilient_media_retry) {
 		/*
@@ -4391,7 +4458,7 @@ RetryFault:
 		if ((object != VM_OBJECT_NULL &&
 		    object == resilient_media_object &&
 		    offset == resilient_media_offset &&
-		    fault_info.resilient_media)
+		    fault_info->resilient_media)
 #if MACH_ASSERT
 		    && (vm_fault_resilient_media_inject_error1_rate == 0 ||
 		    (++vm_fault_resilient_media_inject_error1 % vm_fault_resilient_media_inject_error1_rate) != 0)
@@ -4407,7 +4474,7 @@ RetryFault:
 			vm_fault_resilient_media_proceed++;
 		} else {
 			/* not recovering: reset state and retry fault */
-//                     printf("RESILIENT_MEDIA %s:%d no recovery resilient %d object %p/%p offset 0x%llx/0x%llx\n", __FUNCTION__, __LINE__, fault_info.resilient_media, object, resilient_media_object, offset, resilient_media_offset);
+//                     printf("RESILIENT_MEDIA %s:%d no recovery resilient %d object %p/%p offset 0x%llx/0x%llx\n", __FUNCTION__, __LINE__, fault_info->resilient_media, object, resilient_media_object, offset, resilient_media_offset);
 			vm_object_unlock(object);
 			if (real_map != map) {
 				vm_map_unlock(real_map);
@@ -4556,7 +4623,7 @@ RetryFault:
 				wait_result_t   result;
 
 				/*
-				 * in order to do the PAGE_ASSERT_WAIT, we must
+				 * in order to vm_page_sleep(), we must
 				 * have object that 'm' belongs to locked exclusively
 				 */
 				if (object != cur_object) {
@@ -4617,7 +4684,7 @@ RetryFault:
 						vm_pageout_throttle_up(m);
 						vm_page_unlock_queues();
 
-						PAGE_WAKEUP_DONE(m);
+						vm_page_wakeup_done(m_object, m);
 						goto reclaimed_from_pageout;
 					}
 					vm_page_unlock_queues();
@@ -4631,13 +4698,7 @@ RetryFault:
 					vm_map_unlock(real_map);
 				}
 
-				result = PAGE_ASSERT_WAIT(m, interruptible);
-
-				vm_object_unlock(cur_object);
-
-				if (result == THREAD_WAITING) {
-					result = thread_block(THREAD_CONTINUE_NULL);
-				}
+				result = vm_page_sleep(cur_object, m, fault_info->interruptible, LCK_SLEEP_UNLOCK);
 				if (result == THREAD_AWAKENED || result == THREAD_RESTART) {
 					goto RetryFault;
 				}
@@ -4771,14 +4832,14 @@ upgrade_lock_and_retry:
 					m->vmp_unmodified_ro = false;
 					vm_page_unlock_queues();
 					os_atomic_dec(&compressor_ro_uncompressed, relaxed);
-					VM_COMPRESSOR_PAGER_STATE_CLR(cur_object, m->vmp_offset);
+					vm_object_compressor_pager_state_clr(cur_object, m->vmp_offset);
 				}
 #endif /* CONFIG_TRACK_UNMODIFIED_ANON_PAGES */
 				goto FastPmapEnter;
 			}
 
 			if (!need_copy &&
-			    !fault_info.no_copy_on_read &&
+			    !fault_info->no_copy_on_read &&
 			    cur_object != object &&
 			    !cur_object->internal &&
 			    !cur_object->pager_trusted &&
@@ -4827,9 +4888,7 @@ upgrade_lock_and_retry:
 			}
 
 			if (!(fault_type & VM_PROT_WRITE) && !need_copy) {
-				if (!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
-					prot &= ~VM_PROT_WRITE;
-				} else {
+				if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
 					/*
 					 * For a protection that the pmap cares
 					 * about, we must hand over the full
@@ -4839,7 +4898,14 @@ upgrade_lock_and_retry:
 					 * set, as this can force us to pass
 					 * RWX.
 					 */
-					assert(fault_info.cs_bypass);
+					if (!fault_info->cs_bypass) {
+						panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+						    __FUNCTION__, pmap,
+						    (uint64_t)vaddr, prot,
+						    fault_info->pmap_options);
+					}
+				} else {
+					prot &= ~VM_PROT_WRITE;
 				}
 
 				if (object != cur_object) {
@@ -4919,7 +4985,7 @@ FastPmapEnter:
 					    wired,
 					    change_wiring,
 					    wire_tag,
-					    &fault_info,
+					    fault_info,
 					    need_retry_ptr,
 					    &type_of_fault,
 					    &object_lock_type);
@@ -4934,7 +5000,7 @@ FastPmapEnter:
 					    wired,
 					    change_wiring,
 					    wire_tag,
-					    &fault_info,
+					    fault_info,
 					    need_retry_ptr,
 					    &type_of_fault,
 					    &object_lock_type);
@@ -4948,7 +5014,7 @@ FastPmapEnter:
 					m,
 					offset,
 					trace_real_vaddr,
-					&fault_info,
+					fault_info,
 					caller_prot,
 					real_vaddr,
 					vm_fault_type_for_tracing(need_copy_on_read, type_of_fault),
@@ -5108,7 +5174,7 @@ FastPmapEnter:
 			if (cur_m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(cur_m);
 				VM_PAGE_CONSUME_CLUSTERED(cur_m);
-				vm_fault_is_sequential(cur_object, cur_offset, fault_info.behavior);
+				vm_fault_is_sequential(cur_object, cur_offset, fault_info->behavior);
 			}
 			need_collapse = TRUE;
 
@@ -5516,10 +5582,25 @@ FastPmapEnter:
 					 * pushing this page to a copy object
 					 * or making a shadow object.
 					 */
-					if (!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
-						prot &= ~VM_PROT_WRITE;
+					if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+						/*
+						 * This pmap enforces extra
+						 * constraints for this set of
+						 * protections, so we can't
+						 * change the protections.
+						 * We would expect code-signing
+						 * to be bypassed in this case.
+						 */
+						if (!fault_info->cs_bypass) {
+							panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+							    __FUNCTION__,
+							    pmap,
+							    (uint64_t)vaddr,
+							    prot,
+							    fault_info->pmap_options);
+						}
 					} else {
-						assert(fault_info.cs_bypass);
+						prot &= ~VM_PROT_WRITE;
 					}
 				}
 				assertf(!((fault_type & VM_PROT_WRITE) && object->vo_copy),
@@ -5575,7 +5656,7 @@ FastPmapEnter:
 					    fault_phys_offset,
 					    change_wiring,
 					    enter_fault_type,
-					    &fault_info,
+					    fault_info,
 					    &type_of_fault,
 					    &page_needs_data_sync);
 					if (kr != KERN_SUCCESS) {
@@ -5626,17 +5707,18 @@ FastPmapEnter:
 							 * The write access will fault again and we'll
 							 * resolve the copy-on-write then.
 							 */
-							if (!pmap_has_prot_policy(pmap,
-							    fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE,
+							if (pmap_has_prot_policy(pmap,
+							    fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE,
 							    prot)) {
-								/* the pmap layer is OK with changing the PTE's prot */
-								prot &= ~VM_PROT_WRITE;
-							} else {
 								/* we should not do CoW on pmap_has_prot_policy mappings */
-								panic("map %p va 0x%llx obj %p,%u saved %p,%u: unexpected CoW",
+								panic("%s: map %p va 0x%llx obj %p,%u saved %p,%u: unexpected CoW",
+								    __FUNCTION__,
 								    map, (uint64_t)vaddr,
 								    object, object->vo_copy_version,
 								    saved_copy_object, saved_copy_version);
+							} else {
+								/* the pmap layer is OK with changing the PTE's prot */
+								prot &= ~VM_PROT_WRITE;
 							}
 						}
 					}
@@ -5650,16 +5732,16 @@ FastPmapEnter:
 					} else {
 						need_retry_ptr = NULL;
 					}
-					if (fault_info.fi_xnu_user_debug &&
+					if (fault_info->fi_xnu_user_debug &&
 					    !object->code_signed) {
-						fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
+						fault_info->pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
 					}
 					if (object_is_contended) {
 						panic("object_is_contended");
 						kr = vm_fault_pmap_enter(destination_pmap, destination_pmap_vaddr,
 						    fault_page_size, fault_phys_offset,
 						    m, &prot, caller_prot, enter_fault_type, wired,
-						    fault_info.pmap_options, need_retry_ptr);
+						    fault_info->pmap_options, need_retry_ptr);
 						vm_object_lock(object);
 						assertf(!((prot & VM_PROT_WRITE) && object->vo_copy),
 						    "prot 0x%x object %p copy %p\n",
@@ -5668,7 +5750,7 @@ FastPmapEnter:
 						kr = vm_fault_pmap_enter_with_object_lock(object, destination_pmap, destination_pmap_vaddr,
 						    fault_page_size, fault_phys_offset,
 						    m, &prot, caller_prot, enter_fault_type, wired,
-						    fault_info.pmap_options, need_retry_ptr, &object_lock_type);
+						    fault_info->pmap_options, need_retry_ptr, &object_lock_type);
 					}
 				}
 zero_fill_cleanup:
@@ -5682,7 +5764,7 @@ zero_fill_cleanup:
 					}
 					vm_page_unlock_queues();
 				}
-				vm_fault_enqueue_page(object, m, wired, change_wiring, wire_tag, fault_info.no_cache, &type_of_fault, kr);
+				vm_fault_enqueue_page(object, m, wired, change_wiring, wire_tag, fault_info->no_cache, &type_of_fault, kr);
 
 				if (__improbable(rtfault &&
 				    !m->vmp_realtime &&
@@ -5702,7 +5784,7 @@ zero_fill_cleanup:
 					m,
 					offset,
 					trace_real_vaddr,
-					&fault_info,
+					fault_info,
 					caller_prot,
 					real_vaddr,
 					type_of_fault,
@@ -5863,7 +5945,7 @@ handle_copy_delay:
 	    &prot, &result_page, &top_page,
 	    &type_of_fault,
 	    &error_code, map->no_zero_fill,
-	    &fault_info);
+	    fault_info);
 
 	/*
 	 * if kr != VM_FAULT_SUCCESS, then the paging reference
@@ -5882,7 +5964,7 @@ handle_copy_delay:
 	if (kr != VM_FAULT_SUCCESS &&
 	    kr != VM_FAULT_SUCCESS_NO_VM_PAGE) {
 		if (kr == VM_FAULT_MEMORY_ERROR &&
-		    fault_info.resilient_media) {
+		    fault_info->resilient_media) {
 			assertf(object->internal, "object %p", object);
 			/*
 			 * This fault failed but the mapping was
@@ -5958,7 +6040,7 @@ handle_copy_delay:
 	 */
 #define RELEASE_PAGE(m)                                 \
 	MACRO_BEGIN                                     \
-	PAGE_WAKEUP_DONE(m);                            \
+	vm_page_wakeup_done(VM_PAGE_OBJECT(m), m);                            \
 	if ( !VM_PAGE_PAGEABLE(m)) {                    \
 	        vm_page_lockspin_queues();              \
 	        if ( !VM_PAGE_PAGEABLE(m))              \
@@ -6029,7 +6111,7 @@ handle_copy_delay:
 		    OBJECT_LOCK_EXCLUSIVE, &version,
 		    &retry_object, &retry_offset, &retry_prot,
 		    &wired,
-		    &fault_info,
+		    fault_info,
 		    &real_map,
 		    NULL);
 		pmap = real_map->pmap;
@@ -6044,7 +6126,7 @@ handle_copy_delay:
 				 * retake the lock so that
 				 * we can drop the paging reference
 				 * in vm_fault_cleanup and do the
-				 * PAGE_WAKEUP_DONE in RELEASE_PAGE
+				 * vm_page_wakeup_done() in RELEASE_PAGE
 				 */
 				vm_object_lock(m_object);
 
@@ -6083,7 +6165,7 @@ handle_copy_delay:
 				 * retake the lock so that
 				 * we can drop the paging reference
 				 * in vm_fault_cleanup and do the
-				 * PAGE_WAKEUP_DONE in RELEASE_PAGE
+				 * vm_page_wakeup_done() in RELEASE_PAGE
 				 */
 				vm_object_lock(m_object);
 
@@ -6108,7 +6190,7 @@ handle_copy_delay:
 		 * Check whether the protection has changed or the object
 		 * has been copied while we left the map unlocked.
 		 */
-		if (pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, retry_prot)) {
+		if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, retry_prot)) {
 			/* If the pmap layer cares, pass the full set. */
 			prot = retry_prot;
 		} else {
@@ -6136,12 +6218,24 @@ handle_copy_delay:
 		 * The copy object changed while the top-level object
 		 * was unlocked, so take away write permission.
 		 */
-		assert(!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot));
+		if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+			/*
+			 * This pmap enforces extra constraints for this set
+			 * of protections, so we can't change the protections.
+			 * This mapping should have been setup to avoid
+			 * copy-on-write since that requires removing write
+			 * access.
+			 */
+			panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x m%p obj %p copyobj %p",
+			    __FUNCTION__, pmap, (uint64_t)vaddr, prot,
+			    fault_info->pmap_options,
+			    m, m_object, m_object->vo_copy);
+		}
 		prot &= ~VM_PROT_WRITE;
 	}
 
 	if (!need_copy &&
-	    !fault_info.no_copy_on_read &&
+	    !fault_info->no_copy_on_read &&
 	    m != VM_PAGE_NULL &&
 	    VM_PAGE_OBJECT(m) != object &&
 	    !VM_PAGE_OBJECT(m)->pager_trusted &&
@@ -6228,7 +6322,7 @@ handle_copy_delay:
 			    wired,
 			    change_wiring,
 			    wire_tag,
-			    &fault_info,
+			    fault_info,
 			    NULL,
 			    &type_of_fault,
 			    &object_lock_type);
@@ -6243,7 +6337,7 @@ handle_copy_delay:
 			    wired,
 			    change_wiring,
 			    wire_tag,
-			    &fault_info,
+			    fault_info,
 			    NULL,
 			    &type_of_fault,
 			    &object_lock_type);
@@ -6261,10 +6355,10 @@ handle_copy_delay:
 				event_code = (MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_ADDR_EXTERNAL));
 			}
 
-			KDBG_RELEASE(event_code | DBG_FUNC_NONE, trace_real_vaddr, (fault_info.user_tag << 16) | (caller_prot << 8) | vm_fault_type_for_tracing(need_copy_on_read, type_of_fault), m->vmp_offset, get_current_unique_pid());
+			KDBG_RELEASE(event_code | DBG_FUNC_NONE, trace_real_vaddr, (fault_info->user_tag << 16) | (caller_prot << 8) | vm_fault_type_for_tracing(need_copy_on_read, type_of_fault), m->vmp_offset, get_current_unique_pid());
 			KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_SLOW), get_current_unique_pid());
 
-			DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info.user_tag);
+			DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info->user_tag);
 		}
 		if (kr != KERN_SUCCESS) {
 			/* abort this page fault */
@@ -6272,7 +6366,7 @@ handle_copy_delay:
 			if (real_map != map) {
 				vm_map_unlock(real_map);
 			}
-			PAGE_WAKEUP_DONE(m);
+			vm_page_wakeup_done(m_object, m);
 			vm_fault_cleanup(m_object, top_page);
 			vm_object_deallocate(object);
 			goto done;
@@ -6432,7 +6526,7 @@ cleanup:
 			written_on_pager = m_object->pager;
 			written_on_offset = m_object->paging_offset + m->vmp_offset;
 		}
-		PAGE_WAKEUP_DONE(m);
+		vm_page_wakeup_done(m_object, m);
 
 		vm_fault_cleanup(m_object, top_page);
 	} else {
@@ -6469,11 +6563,11 @@ done:
 			if ((throttle_delay = vm_page_throttled(TRUE))) {
 				if (vm_debug_events) {
 					if (type_of_fault == DBG_COMPRESSOR_FAULT) {
-						VM_DEBUG_EVENT(vmf_compressordelay, VMF_COMPRESSORDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
+						VM_DEBUG_EVENT(vmf_compressordelay, DBG_VM_FAULT_COMPRESSORDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
 					} else if (type_of_fault == DBG_COW_FAULT) {
-						VM_DEBUG_EVENT(vmf_cowdelay, VMF_COWDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
+						VM_DEBUG_EVENT(vmf_cowdelay, DBG_VM_FAULT_COWDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
 					} else {
-						VM_DEBUG_EVENT(vmf_zfdelay, VMF_ZFDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
+						VM_DEBUG_EVENT(vmf_zfdelay, DBG_VM_FAULT_ZFDELAY, DBG_FUNC_NONE, throttle_delay, 0, 0, 0);
 					}
 				}
 				__VM_FAULT_THROTTLE_FOR_PAGEOUT_SCAN__(throttle_delay);
@@ -6496,7 +6590,7 @@ done:
 	}
 
 	KDBG_RELEASE(
-		(MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_END,
+		(VMDBG_CODE(DBG_VM_FAULT_INTERNAL)) | DBG_FUNC_END,
 		((uint64_t)trace_vaddr >> 32),
 		trace_vaddr,
 		kr,
@@ -6559,14 +6653,19 @@ vm_fault_wire(
 		    pmap_addr + (va - entry->vme_start),
 		    physpage_p);
 		if (rc != KERN_SUCCESS) {
+			struct vm_object_fault_info fault_info = {
+				.interruptible = (pmap == kernel_pmap) ? THREAD_UNINT : THREAD_ABORTSAFE,
+				.behavior = VM_BEHAVIOR_SEQUENTIAL,
+			};
+			if (os_sub_overflow(end_addr, va, &fault_info.cluster_size)) {
+				fault_info.cluster_size = UPL_SIZE_MAX;
+			}
 			rc = vm_fault_internal(map, va, prot, TRUE, wire_tag,
-			    ((pmap == kernel_pmap)
-			    ? THREAD_UNINT
-			    : THREAD_ABORTSAFE),
 			    pmap,
 			    (pmap_addr +
 			    (va - entry->vme_start)),
-			    physpage_p);
+			    physpage_p,
+			    &fault_info);
 			DTRACE_VM2(softlock, int, 1, (uint64_t *), NULL);
 		}
 
@@ -6664,7 +6763,7 @@ vm_fault_unwire(
 			/* cap cluster size at maximum UPL size */
 			upl_size_t cluster_size;
 			if (os_sub_overflow(end_addr, va, &cluster_size)) {
-				cluster_size = 0 - (upl_size_t)PAGE_SIZE;
+				cluster_size = UPL_SIZE_MAX;
 			}
 			fault_info.cluster_size = cluster_size;
 
@@ -6749,7 +6848,7 @@ vm_fault_unwire(
 					entry->zero_wired_pages = FALSE;
 				}
 
-				PAGE_WAKEUP_DONE(result_page);
+				vm_page_wakeup_done(result_object, result_page);
 			}
 			vm_fault_cleanup(result_object, top_page);
 		}
@@ -6835,7 +6934,7 @@ vm_fault_wire_fast(
 
 #undef  RELEASE_PAGE
 #define RELEASE_PAGE(m) {                               \
-	PAGE_WAKEUP_DONE(m);                            \
+	vm_page_wakeup_done(VM_PAGE_OBJECT(m), m);                            \
 	vm_page_lockspin_queues();                      \
 	vm_page_unwire(m, TRUE);                        \
 	vm_page_unlock_queues();                        \
@@ -6961,6 +7060,10 @@ vm_fault_wire_fast(
 		fault_info.pmap_options |= PMAP_OPTIONS_XNU_USER_DEBUG;
 	}
 
+	if (entry->translated_allow_execute) {
+		fault_info.pmap_options |= PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE;
+	}
+
 	fault_page_size = MIN(VM_MAP_PAGE_SIZE(map), PAGE_SIZE);
 	fault_phys_offset = offset - vm_object_trunc_page(offset);
 
@@ -6968,8 +7071,7 @@ vm_fault_wire_fast(
 	 *	Put this page into the physical map.
 	 */
 	type_of_fault = DBG_CACHE_HIT_FAULT;
-	assertf(VM_PAGE_OBJECT(m) == object, "m=%p object=%p", m, object);
-	assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
+	assert3p(VM_PAGE_OBJECT(m), ==, object);
 	kr = vm_fault_enter(m,
 	    pmap,
 	    pmap_addr,
@@ -6989,6 +7091,7 @@ vm_fault_wire_fast(
 		GIVE_UP;
 	}
 
+
 done:
 	/*
 	 *	Unlock everything, and return
@@ -6997,7 +7100,7 @@ done:
 	if (physpage_p) {
 		/* for vm_map_wire_and_extract() */
 		if (kr == KERN_SUCCESS) {
-			assert(object == VM_PAGE_OBJECT(m));
+			assert3p(object, ==, VM_PAGE_OBJECT(m));
 			*physpage_p = VM_PAGE_GET_PHYS_PAGE(m);
 			if (prot & VM_PROT_WRITE) {
 				vm_object_lock_assert_exclusive(object);
@@ -7008,7 +7111,10 @@ done:
 		}
 	}
 
-	PAGE_WAKEUP_DONE(m);
+	if (m->vmp_busy) {
+		vm_page_wakeup_done(object, m);
+	}
+
 	UNLOCK_AND_DEALLOCATE;
 
 	return kr;
@@ -7028,7 +7134,7 @@ vm_fault_copy_cleanup(
 	vm_object_t     object = VM_PAGE_OBJECT(page);
 
 	vm_object_lock(object);
-	PAGE_WAKEUP_DONE(page);
+	vm_page_wakeup_done(object, page);
 	if (!VM_PAGE_PAGEABLE(page)) {
 		vm_page_lockspin_queues();
 		if (!VM_PAGE_PAGEABLE(page)) {
@@ -7222,7 +7328,7 @@ RetryDestinationFault:;
 		vm_page_lockspin_queues();
 		vm_page_wire(dst_page, VM_KERN_MEMORY_OSFMK, TRUE);
 		vm_page_unlock_queues();
-		PAGE_WAKEUP_DONE(dst_page);
+		vm_page_wakeup_done(dst_object, dst_page);
 		vm_object_unlock(dst_object);
 
 		if (dst_top_page != VM_PAGE_NULL) {
@@ -7504,7 +7610,7 @@ vm_fault_classify_init(void)
 #endif  /* VM_FAULT_CLASSIFY */
 
 vm_offset_t
-kdp_lightweight_fault(vm_map_t map, vm_offset_t cur_target_addr)
+kdp_lightweight_fault(vm_map_t map, vm_offset_t cur_target_addr, bool multi_cpu)
 {
 	vm_map_entry_t  entry;
 	vm_object_t     object;
@@ -7515,6 +7621,13 @@ kdp_lightweight_fault(vm_map_t map, vm_offset_t cur_target_addr)
 	int             my_fault_type = VM_PROT_READ;
 	kern_return_t   kr;
 	int effective_page_mask, effective_page_size;
+	int             my_cpu_no = cpu_number();
+	ppnum_t         decomp_ppnum;
+	addr64_t        decomp_paddr;
+
+	if (multi_cpu) {
+		compressor_flags |= C_KDP_MULTICPU;
+	}
 
 	if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT) {
 		effective_page_mask = VM_MAP_PAGE_MASK(map);
@@ -7596,14 +7709,24 @@ kdp_lightweight_fault(vm_map_t map, vm_offset_t cur_target_addr)
 
 		compressor_external_state = VM_EXTERNAL_STATE_UNKNOWN;
 
+		if (multi_cpu) {
+			assert(vm_compressor_kdp_state.kc_decompressed_pages_ppnum != NULL);
+			assert(vm_compressor_kdp_state.kc_decompressed_pages_paddr != NULL);
+			decomp_ppnum = vm_compressor_kdp_state.kc_decompressed_pages_ppnum[my_cpu_no];
+			decomp_paddr = vm_compressor_kdp_state.kc_decompressed_pages_paddr[my_cpu_no];
+		} else {
+			decomp_ppnum = vm_compressor_kdp_state.kc_panic_decompressed_page_ppnum;
+			decomp_paddr = vm_compressor_kdp_state.kc_panic_decompressed_page_paddr;
+		}
+
 		if (object->pager_created && MUST_ASK_PAGER(object, object_offset, compressor_external_state)) {
 			if (compressor_external_state == VM_EXTERNAL_STATE_EXISTS) {
 				kr = vm_compressor_pager_get(object->pager,
 				    vm_object_trunc_page(object_offset + object->paging_offset),
-				    kdp_compressor_decompressed_page_ppnum, &my_fault_type,
+				    decomp_ppnum, &my_fault_type,
 				    compressor_flags, &compressed_count_delta);
 				if (kr == KERN_SUCCESS) {
-					return kdp_compressor_decompressed_page_paddr;
+					return decomp_paddr;
 				} else {
 					return 0;
 				}
@@ -7822,7 +7945,7 @@ vm_page_map_and_validate_cs(
 	vm_object_lock_assert_exclusive(object);
 
 	if (!busy_page) {
-		PAGE_WAKEUP_DONE(page);
+		vm_page_wakeup_done(object, page);
 	}
 	if (need_unmap) {
 		/* unmap the map from the kernel address space */
@@ -8249,7 +8372,9 @@ vmtc_revalidate_lookup(
 	uint8_t                object_lock_type = OBJECT_LOCK_EXCLUSIVE;
 	vm_map_version_t       version;
 	boolean_t              wired;
-	struct vm_object_fault_info fault_info = {};
+	struct vm_object_fault_info fault_info = {
+		.interruptible = THREAD_UNINT
+	};
 	vm_map_t               real_map = NULL;
 	vm_prot_t              prot;
 	vm_object_t            shadow;
@@ -8296,8 +8421,7 @@ restart:
 			 * If this page is busy, we need to wait for it.
 			 */
 			if (page->vmp_busy) {
-				PAGE_SLEEP(object, page, TRUE);
-				vm_object_unlock(object);
+				vm_page_sleep(object, page, THREAD_INTERRUPTIBLE, LCK_SLEEP_UNLOCK);
 				goto restart;
 			}
 			break;

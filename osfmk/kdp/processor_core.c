@@ -422,8 +422,12 @@ coredump_save_summary(uint64_t core_segment_count, uint64_t core_byte_count,
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/* secure coredumps may not contain any thread state. */
-	if (core_context->core_type != SECURE_COREDUMP && (!thread_count || !thread_state_size)) {
+	/*
+	 * secure coredumps and coprocessor coredumps aren't required to contain any thread state,
+	 * because it's reconstructed during the lldb session
+	 */
+	if (core_context->core_type != SECURE_COREDUMP && core_context->core_type != COPROCESSOR_COREDUMP
+	    && (!thread_count || !thread_state_size)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -1103,8 +1107,11 @@ kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_
 
 	assert(last_file_offset != NULL);
 
+
 	*last_file_offset = first_file_offset;
 	cur_ret = kern_coredump_routine(core_outvars, kernel_helper, *last_file_offset, &prev_core_length, &header_update_failed, XNU_COREDUMP, details_flags);
+
+
 	if (cur_ret != KERN_SUCCESS) {
 		// As long as we didn't fail while updating the header for the raw file, we should be able to try
 		// to capture other corefiles.
@@ -1169,6 +1176,12 @@ kern_register_coredump_helper(int kern_coredump_config_vers, const kern_coredump
     cpu_type_t cpu_type, cpu_subtype_t cpu_subtype)
 {
 #pragma unused(kern_coredump_config_vers, kc_callbacks, refcon, core_description, is64bit, mh_magic, cpu_type, cpu_subtype)
+	return KERN_NOT_SUPPORTED;
+}
+
+kern_return_t
+kern_register_sk_coredump_helper(__unused kern_coredump_callback_config *sk_callbacks, __unused void *refcon)
+{
 	return KERN_NOT_SUPPORTED;
 }
 

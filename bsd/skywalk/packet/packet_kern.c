@@ -494,13 +494,13 @@ kern_packet_set_expiry_action(const kern_packet_t ph, packet_expiry_action_t pea
 }
 
 errno_t
-kern_packet_get_token(const kern_packet_t ph, void *token, uint16_t *len)
+kern_packet_get_token(const kern_packet_t ph, void *__sized_by(*len)token, uint16_t *len)
 {
 	return __packet_get_token(ph, token, len);
 }
 
 errno_t
-kern_packet_set_token(const kern_packet_t ph, const void *token,
+kern_packet_set_token(const kern_packet_t ph, const void *__sized_by(len)token,
     const uint16_t len)
 {
 	return __packet_set_token(ph, token, len);
@@ -564,8 +564,8 @@ kern_inet_checksum(const void *data, uint32_t len, uint32_t sum0)
 }
 
 uint32_t
-kern_copy_and_inet_checksum(const void *src, void *dst, uint32_t len,
-    uint32_t sum0)
+kern_copy_and_inet_checksum(const void *__sized_by(len) src, void *__sized_by(len) dst,
+    uint32_t len, uint32_t sum0)
 {
 	uint32_t sum = __packet_copy_and_sum(src, dst, len, sum0);
 	return __packet_fold_sum_final(sum);
@@ -680,9 +680,19 @@ kern_packet_clone_internal(const kern_packet_t ph1, kern_packet_t *ph2,
 			 */
 			PKT_GET_FIRST_BUFLET(p1, p1->pkt_bufs_cnt, p1_buf);
 			PKT_GET_FIRST_BUFLET(p2, p2->pkt_bufs_cnt, p2_buf);
-			saddr = (void *)p1_buf->buf_addr;
-			daddr = (void *)p2_buf->buf_addr;
+			/*
+			 * -fbounds-safety: buf_addr is of type
+			 * mach_vm_address_t, and it's much easier to forge it
+			 * here than chagne the type to a pointer in
+			 * struct __buflet. Both saddr and daddr are only used
+			 * for bcopy with copy_len as length, so the size of the
+			 * forge is copy_len.
+			 */
 			copy_len = MIN(p1_buf->buf_dlen, p1_buf->buf_dlim);
+			saddr = __unsafe_forge_bidi_indexable(void *,
+			    p1_buf->buf_addr, copy_len);
+			daddr = __unsafe_forge_bidi_indexable(void *,
+			    p2_buf->buf_addr, copy_len);
 			if (copy_len != 0) {
 				bcopy(saddr, daddr, copy_len);
 			}
@@ -925,7 +935,8 @@ kern_packet_trace_event(const kern_packet_t ph, uint32_t event)
 }
 
 errno_t
-kern_packet_copy_bytes(kern_packet_t pkt, size_t off, size_t len, void* out_data)
+kern_packet_copy_bytes(kern_packet_t pkt, size_t off, size_t len,
+    void *__sized_by(len)out_data)
 {
 	kern_buflet_t buflet = NULL;
 	size_t count;

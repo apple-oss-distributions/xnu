@@ -45,7 +45,7 @@ extern int ether_family_init(void);
 errno_t ether_demux(ifnet_t interface, mbuf_t packet, char* header,
     protocol_family_t *protocol);
 errno_t ether_add_proto(ifnet_t interface, protocol_family_t protocol,
-    const struct ifnet_demux_desc *demux_list, u_int32_t demux_count);
+    const struct ifnet_demux_desc *demux_list __counted_by(demux_count), u_int32_t demux_count);
 errno_t ether_del_proto(ifnet_t interface, protocol_family_t protocol);
 #if KPI_INTERFACE_EMBEDDED
 errno_t ether_frameout(ifnet_t interface, mbuf_t *packet,

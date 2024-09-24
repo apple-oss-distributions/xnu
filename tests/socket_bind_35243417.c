@@ -94,14 +94,16 @@ loop_done:
 T_DECL(socket_bind_35243417,
     "bind IPv6 only UDP socket, then bind IPv6 socket.",
     T_META_ASROOT(false),
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false),
+    T_META_TAG_VM_PREFERRED)
 {
 	alloc_and_bind_ports(1, 65534, 10);
 }
 
 T_DECL(socket_bind_35243417_root,
     "bind IPv6 only UDP socket, then bind IPv6 socket.",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	alloc_and_bind_ports(1, 65534, 10);
 }

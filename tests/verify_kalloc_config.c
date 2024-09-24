@@ -70,7 +70,7 @@ run_test(void)
 
 T_DECL( verify_kalloc_config,
     "verifies that the kalloc zones are configured correctly",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	run_test();
 }

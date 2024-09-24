@@ -87,6 +87,66 @@ OS_ENUM(exclaves_status, uint8_t,
 
 #define MAX_CONCLAVE_RESOURCE_NUM 50
 
+/*
+ * Having the ability to relax certain exclaves requirements is useful for
+ * development.
+ * These requirements are optional only in the sense that the system can boot
+ * without them and userspace can run.
+ * The system isn't considered fully functional if any of these requirements are
+ * not working.
+ * By default and on RELEASE if any of these requirements fail it will cause a
+ * panic or failure.
+ * Requirements can be relaxed via a boot-arg/tunable:
+ *     "exclaves_relaxed_requirements"
+ * The current value can read via a sysctl:
+ *     "kern.exclaves_relaxed_requirements"
+ */
+OS_CLOSED_OPTIONS(exclaves_requirement, uint64_t,
+
+
+    /*
+     * Exclaves stackshot support.
+     * Also includes other "inspection" functionality like exclaves kperf
+     * data and related.
+     */
+    EXCLAVES_R_STACKSHOT    = 0x04,
+
+    /* Exclaves logging.
+     * Without this, no exclaves logs will be available.
+     */
+    EXCLAVES_R_LOG_SERVER   = 0x08,
+
+    /*
+     * Exclaves indicator controller.
+     * Other than supporting the various exclaves_sensor APIs, EIC is also
+     * necessary to allow the use of Audio Buffer/Audio Memory resources.
+     */
+    EXCLAVES_R_EIC          = 0x10,
+
+    /*
+     * Conclave support.
+     * If this requirement is relaxed it allows tasks to attach to conclaves
+     * even though there is no corresponding conclave manager available.
+     */
+    EXCLAVES_R_CONCLAVE     = 0x20,
+
+    /*
+     * ExclaveKit initialization.
+     * If relaxed and exclavekit initialization fails, continue on without
+     * panicking. All conclave related functionality will fail.
+     */
+    EXCLAVES_R_EXCLAVEKIT   = 0x40,
+
+    /*
+     * Conclave resource support.
+     * If this requirement is relaxed it allows tasks access to kernel domain
+     * resources when not actually attched to a conclave (see
+     * EXCLAVES_R_CONCLAVE above).
+     */
+    EXCLAVES_R_CONCLAVE_RESOURCES = 0x80,
+
+    );
+
 #if !defined(KERNEL)
 
 /*!
@@ -631,7 +691,9 @@ exclaves_endpoint_call(ipc_port_t port, exclaves_id_t endpoint_id,
  * @function exclaves_allocate_ipc_buffer
  *
  * @abstract
- * If necessary, allocate per-thread exclaves IPC buffer.
+ * Increment the current thread's IPC buffer usecount. If the usecount was 0
+ * pre-increment, allocate a new per-thread exclaves IPC buffer and
+ * scheduling context.
  *
  * @param ipc_buffer
  * Out parameter filled in with address of IPC buffer. Can be NULL.
@@ -646,7 +708,9 @@ exclaves_allocate_ipc_buffer(void **ipc_buffer);
  * @function exclaves_free_ipc_buffer
  *
  * @abstract
- * If necessary, free per-thread exclaves IPC buffer.
+ * Decrement the current thread's IPC buffer usecount. If the usecount is 0
+ * post-decrement, free the per-thread exclaves IPC buffer and scheduling
+ * context. Asserts if the usecount pre-decrement was 0.
  *
  * @result
  * KERN_SUCCESS or mach error code.
@@ -658,7 +722,8 @@ exclaves_free_ipc_buffer(void);
  * @function exclaves_get_ipc_buffer
  *
  * @abstract
- * Return per-thread exclaves IPC buffer.
+ * Return per-thread exclaves IPC buffer. Does not increment the current
+ * thread's IPC buffer use count.
  *
  * @result
  * If allocated, pointer to per-thread exclaves IPC buffer, NULL otherwise.
@@ -845,11 +910,22 @@ exclaves_thread_terminate(thread_t thread);
 extern bool
 exclaves_booted(void);
 
-extern exclaves_id_t
-exclaves_endpoint_lookup(const char *name);
-
 extern size_t
 exclaves_ipc_buffer_count(void);
+
+OS_ENUM(exclaves_clock_type, uint8_t,
+    EXCLAVES_CLOCK_ABSOLUTE = 0,
+    EXCLAVES_CLOCK_CONTINUOUS = 1,
+    );
+
+extern void
+exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset);
+
+typedef struct {
+	void *ipcb;
+	unsigned long scid;
+	uint64_t usecnt;
+} exclaves_ctx_t;
 
 #endif /* defined(MACH_KERNEL_PRIVATE) */
 
@@ -864,7 +940,7 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
     EXCLAVES_CTL_OP_NAMED_BUFFER_COPYOUT = 4,
     EXCLAVES_CTL_OP_BOOT = 5,
     EXCLAVES_CTL_OP_LAUNCH_CONCLAVE = 6,
-    EXCLAVES_CTL_OP_LOOKUP_RESOURCES = 7,
+    EXCLAVES_CTL_OP_LOOKUP_SERVICES = 7,
     EXCLAVES_CTL_OP_AUDIO_BUFFER_CREATE = 8,
     EXCLAVES_CTL_OP_AUDIO_BUFFER_COPYOUT = 9,
     EXCLAVES_CTL_OP_SENSOR_CREATE = 10,
@@ -889,12 +965,12 @@ OS_ENUM(exclaves_ctl_op, uint8_t,
  * @brief
  * User representation of exclave resource
  */
-struct exclaves_resource_user {
+typedef struct exclaves_resource_user {
 	char                  r_name[MAXCONCLAVENAME];
 	uint64_t              r_type;
 	exclaves_id_t         r_id;
 	mach_port_name_t      r_port;
-};
+} exclaves_resouce_user_t;
 
 #if !defined(KERNEL)
 
@@ -943,6 +1019,67 @@ exclaves_get_status(void);
  */
 exclaves_boot_stage_t
 exclaves_get_boot_stage(void);
+
+/*!
+ * @function exclaves_boot_supported
+ *
+ * @abstract
+ * Determine if exclaves are supported. This is a basic check essentially equal
+ * to checking whether the current kernel was compiled with CONFIG_EXCLAVES and
+ * whether or not SPTM has disabled cL4.
+ *
+ * @result
+ * True if supported, false otherwise.
+ */
+bool
+exclaves_boot_supported(void);
+
+/*!
+ * @function exclaves_boot_wait
+ *
+ * @abstract
+ * Wait until the specified boot stage has been reached.
+ *
+ * @result
+ * KERN_SUCCESS when the boot stage has been reached, KERN_NOT_SUPPORTED if
+ * exclaves are not supported.
+ */
+/* BEGIN IGNORE CODESTYLE */
+kern_return_t
+exclaves_boot_wait(exclaves_boot_stage_t);
+/* END IGNORE CODESTYLE */
+
+/*
+ * Identifies exclaves privilege checks.
+ */
+__options_closed_decl(exclaves_priv_t, unsigned int, {
+	EXCLAVES_PRIV_CONCLAVE_HOST  = 0x1,  /* Can host conclaves. */
+	EXCLAVES_PRIV_CONCLAVE_SPAWN = 0x2,  /* Can spawn conclaves. */
+	EXCLAVES_PRIV_KERNEL_DOMAIN  = 0x4,  /* Access to kernel resources. */
+	EXCLAVES_PRIV_BOOT           = 0x8,  /* Can boot exclaves. */
+});
+
+/*
+ * Check to see if the specified task has a privilege.
+ */
+extern bool
+exclaves_has_priv(task_t task, exclaves_priv_t priv);
+
+/*
+ * Check to see if the specified vnode has a privilege.
+ * Vnode argument is untyped as it's not available to osfmk.
+ */
+extern bool
+exclaves_has_priv_vnode(void *vnode, int64_t off, exclaves_priv_t priv);
+
+/* Return index of last xnu frame before secure world. Valid frame index is
+ * always in range <0, nframes-1>. When frame is not found, return nframes
+ * value. */
+uint32_t exclaves_stack_offset(const uintptr_t *out_addr, size_t nframes,
+    bool slid_addresses);
+
+/* Check whether Exclave inspection got initialized */
+extern bool exclaves_inspection_is_initialized(void);
 
 #endif /* defined(XNU_KERNEL_PRIVATE) */
 

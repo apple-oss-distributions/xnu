@@ -121,8 +121,8 @@ typedef struct vnode_resolve *vnode_resolve_t;
 #define IOCOUNT_TRACE_VGET          0
 #define IOCOUNT_TRACE_VPUT          1
 #define IOCOUNT_TRACE_MAX_TYPES     2
-#define IOCOUNT_TRACE_MAX_IDX       16
-#define IOCOUNT_TRACE_MAX_FRAMES    10
+#define IOCOUNT_TRACE_MAX_IDX       32
+#define IOCOUNT_TRACE_MAX_FRAMES    16
 
 struct vnode_iocount_trace {
 	int idx;
@@ -454,10 +454,6 @@ void    vprint(const char *label, struct vnode *vp);
 
 
 __private_extern__ int set_package_extensions_table(user_addr_t data, int nentries, int maxwidth);
-int     vn_rdwr_64(enum uio_rw rw, struct vnode *vp, uint64_t base,
-    int64_t len, off_t offset, enum uio_seg segflg,
-    int ioflg, kauth_cred_t cred, int64_t *aresid,
-    struct proc *p);
 #if CONFIG_MACF
 int     vn_setlabel(struct vnode *vp, struct label *intlabel,
     vfs_context_t context);
@@ -696,6 +692,8 @@ int vnode_breaklease(vnode_t vp, uint32_t oflags, vfs_context_t ctx);
 void vnode_breakdirlease(vnode_t vp, bool need_parent, uint32_t oflags);
 void vnode_revokelease(vnode_t vp, bool locked);
 #endif /* CONFIG_FILE_LEASES */
+
+bool vfs_context_allow_fs_blksize_nocache_write(vfs_context_t);
 
 #define VFS_SMR_DECLARE                         \
 	extern smr_t vfs_smr

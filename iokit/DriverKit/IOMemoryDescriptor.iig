@@ -64,6 +64,7 @@ enum {
 	kIOMemoryMapCacheModeInhibit      = 0x00000100,
 	kIOMemoryMapCacheModeCopyback     = 0x00000200,
 	kIOMemoryMapCacheModeWriteThrough = 0x00000400,
+	kIOMemoryMapCacheModeRealTime     = 0x00000800,
 };
 
 struct IOAddressSegment {

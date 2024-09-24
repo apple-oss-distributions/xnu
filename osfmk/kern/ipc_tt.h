@@ -171,6 +171,10 @@ extern task_inspect_t convert_port_to_task_inspect_mig(
 extern task_read_t convert_port_to_task_read(
 	ipc_port_t      port);
 
+/* Convert from a port to a task read - skip eval */
+extern task_read_t convert_port_to_task_read_no_eval(
+	ipc_port_t      port);
+
 /* Convert from a port to a task read */
 extern task_read_t convert_port_to_task_read_mig(
 	ipc_port_t      port);
@@ -206,6 +210,10 @@ extern task_t port_name_to_task_external(
 
 extern task_read_t port_name_to_task_read(
 	mach_port_name_t name);
+
+extern task_read_t port_name_to_task_read_and_send_right(
+	mach_port_name_t name,
+	ipc_port_t *kportp);
 
 extern task_read_t port_name_to_task_read_no_eval(
 	mach_port_name_t name);
@@ -282,8 +290,24 @@ extern kern_return_t thread_get_kernel_special_reply_port(void);
 
 extern void thread_dealloc_kernel_special_reply_port(thread_t thread);
 
-extern boolean_t set_exception_behavior_allowed(const ipc_port_t new_port, int new_behavior,
-    const task_t excepting_task, const exception_mask_t mask, const char *level);
+extern kern_return_t
+set_exception_ports_validation(
+	task_t                  task,
+	exception_mask_t        exception_mask,
+	ipc_port_t              new_port,
+	exception_behavior_t    new_behavior,
+	thread_state_flavor_t   new_flavor,
+	bool hardened_exception
+	);
+
+extern kern_return_t
+thread_set_exception_ports_internal(
+	thread_t  thread,
+	exception_mask_t        exception_mask,
+	ipc_port_t              new_port,
+	exception_behavior_t    new_behavior,
+	thread_state_flavor_t   new_flavor,
+	boolean_t                               hardened);
 
 #if MACH_KERNEL_PRIVATE
 extern void ipc_thread_port_unpin(

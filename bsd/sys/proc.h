@@ -280,8 +280,12 @@ extern int proc_isinferior(int pid1, int pid2);
  */
 void proc_name(int pid, char * buf, int size);
 /* returns the 32-byte name if it exists, otherwise returns the 16-byte name */
+#ifdef XNU_KERNEL_PRIVATE
+extern const char *proc_best_name(proc_t p);
+#else
 extern char *proc_best_name(proc_t p);
-/* This routine is simillar to proc_name except it returns for current process */
+#endif
+/* this routine is similar to proc_name except it returns for current process */
 void proc_selfname(char * buf, int size);
 
 /* find a process with a given pid. This comes with a reference which needs to be dropped by proc_rele */
@@ -459,9 +463,6 @@ bool proc_use_alternative_symlink_ea(proc_t p);
 /* return true if rsr is set for process */
 bool proc_is_rsr(proc_t p);
 
-/* return true if process is allowed to do sub 16K nocache writes, aligned to the filesystem blocksize */
-bool proc_allow_nocache_write_fs_blksize(proc_t p);
-
 /*
  * Return true if the process disallows read or write access for files that
  * it opens with O_EVTONLY.
@@ -515,7 +516,6 @@ extern int proc_selfexecutableargs(uint8_t *buf, size_t *buflen);
 extern off_t proc_getexecutableoffset(proc_t p);
 extern vnode_t proc_getexecutablevnode(proc_t); /* Returned with iocount, use vnode_put() to drop */
 extern vnode_t proc_getexecutablevnode_noblock(proc_t); /* Returned with iocount, use vnode_put() to drop */
-extern int networking_memstatus_callout(proc_t p, uint32_t);
 
 /* System call filtering for BSD syscalls, mach traps and kobject routines. */
 #define SYSCALL_MASK_UNIX 0
@@ -536,6 +536,7 @@ typedef struct syscall_filter_callbacks * syscall_filter_cbs_t;
 extern int proc_set_syscall_filter_callbacks(syscall_filter_cbs_t callback);
 extern int proc_set_syscall_filter_index(int which, int num, int index);
 extern size_t proc_get_syscall_filter_mask_size(int which);
+extern unsigned char *proc_get_syscall_filter_mask(proc_t p, int which);
 extern int proc_set_syscall_filter_mask(proc_t p, int which, unsigned char *maskptr, size_t masklen);
 
 extern int proc_set_filter_message_flag(proc_t p, boolean_t flag);

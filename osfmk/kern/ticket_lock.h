@@ -115,7 +115,7 @@ __BEGIN_DECLS
  * and burning the low bit of the cticket/nticket
  * for the "invalidation" feature.
  */
-typedef union {
+typedef union hw_lck_ticket_s {
 	struct {
 		uint8_t         lck_type;
 		uint8_t         lck_valid  : 1;
@@ -139,7 +139,7 @@ typedef union {
  * A higher level construct than hw_lck_ticket_t in 2 words
  * like other kernel locks, which admits thread ownership information.
  */
-typedef struct {
+typedef struct lck_ticket_s {
 	uint32_t                __lck_ticket_unused : 24;
 	uint32_t                lck_ticket_type     :  8;
 	uint32_t                lck_ticket_padding;

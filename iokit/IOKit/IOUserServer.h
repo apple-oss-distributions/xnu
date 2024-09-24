@@ -228,8 +228,8 @@ public:
 	void                   setTaskLoadTag(OSKext *kext);
 	void                   setDriverKitUUID(OSKext *kext);
 	void                   setDriverKitStatistics(OSKext *kext);
-	void                   setCheckInToken(IOUserServerCheckInToken *token);
-	void                   systemPower(bool powerOff);
+	IOReturn               setCheckInToken(IOUserServerCheckInToken *token);
+	void                   systemPower(bool powerOff, bool hibernate);
 	void                               systemHalt(int howto);
 	static void            powerSourceChanged(bool acAttached);
 	bool                   checkPMReady();
@@ -255,7 +255,7 @@ public:
 	IOReturn               copyInObjects(IORPCMessageMach * mach, IORPCMessage * message,
 	    size_t size, bool copyObjects, bool consumePorts);
 
-	IOReturn               consumeObjects(IORPCMessage * message, size_t messageSize);
+	IOReturn               consumeObjects(IORPCMessageMach *mach, IORPCMessage * message, size_t messageSize);
 
 	IOReturn               objectInstantiate(OSObject * obj, IORPC rpc, IORPCMessage * message);
 	IOReturn               kernelDispatch(OSObject * obj, IORPC rpc);
@@ -322,7 +322,7 @@ public:
 	/*
 	 * Mark launch as completed.
 	 */
-	void complete();
+	IOReturn complete();
 
 	const OSSymbol * copyServerName() const;
 	OSNumber * copyServerTag() const;

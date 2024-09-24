@@ -542,8 +542,8 @@ bstp_pdu_flags(struct bstp_port *bp)
 	return flags;
 }
 
-struct mbuf *
-bstp_input(struct bstp_port *bp, __unused struct ifnet *ifp, struct mbuf *m)
+void
+bstp_input(struct bstp_port *bp, struct mbuf *m)
 {
 	struct bstp_state *bs = bp->bp_bs;
 	struct ether_header *eh;
@@ -552,7 +552,7 @@ bstp_input(struct bstp_port *bp, __unused struct ifnet *ifp, struct mbuf *m)
 
 	if (bp->bp_active == 0) {
 		m_freem(m);
-		return NULL;
+		return;
 	}
 
 	BSTP_LOCK(bs);
@@ -625,7 +625,7 @@ out:
 	if (m) {
 		m_freem(m);
 	}
-	return NULL;
+	return;
 }
 
 static void

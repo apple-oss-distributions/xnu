@@ -125,6 +125,7 @@
 
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
+#include <vm/memory_object_xnu.h>
 
 #include <libkern/OSAtomic.h>
 #include <os/atomic_private.h>
@@ -217,6 +218,8 @@ struct fd_vn_data * fg_vn_data_alloc(void);
 
 /* Max retry limit for rename due to vnode recycling. */
 #define MAX_RENAME_ERECYCLE_RETRIES 1024
+
+#define MAX_LINK_ENOENT_RETRIES 1024
 
 static int rmdirat_internal(vfs_context_t, int, user_addr_t, enum uio_seg,
     int unlink_flags);
@@ -516,16 +519,31 @@ read_graft_metadata_vp(vnode_t graft_vp, vfs_context_t vctx, size_t size, void *
 /*
  * Convert a single graft file descriptor into a vnode, get its size (saving it to `size`),
  * and read it into `buf`.
+ * If `path_prefix` is non-NULL, verify that the file path has that prefix.
  */
 static int
-graft_secureboot_read_fd(int fd, vfs_context_t vctx, size_t *size, void *buf)
+graft_secureboot_read_fd(int fd, vfs_context_t vctx, const char *path_prefix, size_t *size, void *buf)
 {
 	vnode_t metadata_vp = NULLVP;
+	char *path = NULL;
 	int error;
 
 	// Convert this graft fd to a vnode.
 	if ((error = vnode_getfromfd(vctx, fd, &metadata_vp)) != 0) {
 		goto out;
+	}
+
+	// Verify that the vnode path starts with `path_prefix` if it was passed.
+	if (path_prefix) {
+		int len = MAXPATHLEN;
+		path = zalloc(ZV_NAMEI);
+		if ((error = vn_getpath(metadata_vp, path, &len))) {
+			goto out;
+		}
+		if (strncmp(path, path_prefix, strlen(path_prefix))) {
+			error = EINVAL;
+			goto out;
+		}
 	}
 
 	// Get (and validate) size information.
@@ -539,6 +557,9 @@ graft_secureboot_read_fd(int fd, vfs_context_t vctx, size_t *size, void *buf)
 	}
 
 out:
+	if (path) {
+		zfree(ZV_NAMEI, path);
+	}
 	if (metadata_vp) {
 		vnode_put(metadata_vp);
 		metadata_vp = NULLVP;
@@ -547,19 +568,35 @@ out:
 	return error;
 }
 
+#if XNU_TARGET_OS_OSX
+#if defined(__arm64e__)
+#define MOBILE_ASSET_DATA_VAULT_PATH "/System/Library/AssetsV2/manifests/"
+#else /* x86_64 */
+#define MOBILE_ASSET_DATA_VAULT_PATH "/System/Library/AssetsV2/"
+#endif /* x86_64 */
+#else /* !XNU_TARGET_OS_OSX */
+#define MOBILE_ASSET_DATA_VAULT_PATH "/private/var/MobileAsset/AssetsV2/manifests/"
+#endif /* !XNU_TARGET_OS_OSX */
+
 /*
  * Read graft file descriptors into buffers of size MAX_GRAFT_METADATA_SIZE
  * provided in `gfs`, saving the size of data read in `gfs`.
  */
 static int
-graft_secureboot_read_metadata(secure_boot_cryptex_args_t *sbc_args, vfs_context_t vctx,
-    fsioc_graft_fs_t *gfs)
+graft_secureboot_read_metadata(uint32_t graft_type, secure_boot_cryptex_args_t *sbc_args,
+    vfs_context_t vctx, fsioc_graft_fs_t *gfs)
 {
+	const char *manifest_path_prefix = NULL;
 	int error;
+
+	// For Mobile Asset, make sure that the manifest comes from a data vault.
+	if (graft_type == GRAFTDMG_CRYPTEX_MOBILE_ASSET) {
+		manifest_path_prefix = MOBILE_ASSET_DATA_VAULT_PATH;
+	}
 
 	// Read the authentic manifest.
 	if ((error = graft_secureboot_read_fd(sbc_args->sbc_authentic_manifest_fd, vctx,
-	    &gfs->authentic_manifest_size, gfs->authentic_manifest))) {
+	    manifest_path_prefix, &gfs->authentic_manifest_size, gfs->authentic_manifest))) {
 		return error;
 	}
 
@@ -568,7 +605,7 @@ graft_secureboot_read_metadata(secure_boot_cryptex_args_t *sbc_args, vfs_context
 
 	// Read the payload.
 	if ((error = graft_secureboot_read_fd(sbc_args->sbc_payload_fd, vctx,
-	    &gfs->payload_size, gfs->payload))) {
+	    NULL, &gfs->payload_size, gfs->payload))) {
 		return error;
 	}
 
@@ -597,6 +634,9 @@ graft_secureboot_cryptex(uint32_t graft_type, secure_boot_cryptex_args_t *sbc_ar
 	} else if (mounton_vp && mounton_vp->v_type != VDIR) {
 		// We cannot graft upon non-directories.
 		return ENOTDIR;
+	} else if (cryptex_vp->v_mount->mnt_kern_flag & MNTK_VIRTUALDEV) {
+		// We do not allow grafts inside disk images.
+		return ENODEV;
 	} else if (sbc_args->sbc_authentic_manifest_fd < 0 ||
 	    sbc_args->sbc_payload_fd < 0) {
 		// We cannot graft without a manifest and payload.
@@ -623,7 +663,7 @@ graft_secureboot_cryptex(uint32_t graft_type, secure_boot_cryptex_args_t *sbc_ar
 
 	// Read our fd's into our buffers.
 	// (Note that this will set the buffer size fields in `gfs`.)
-	error = graft_secureboot_read_metadata(sbc_args, vctx, &gfs);
+	error = graft_secureboot_read_metadata(graft_type, sbc_args, vctx, &gfs);
 	if (error) {
 		goto out;
 	}
@@ -813,6 +853,8 @@ vfs_notify_mount(vnode_t pdvp)
  */
 boolean_t root_fs_upgrade_try = FALSE;
 
+#define MAX_NESTED_UNION_MOUNTS  10
+
 int
 __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int32_t *retval)
 {
@@ -904,12 +946,40 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 
 	AUDIT_ARG(fflags, flags);
 
-#if !CONFIG_UNION_MOUNTS
 	if (flags & MNT_UNION) {
+#if CONFIG_UNION_MOUNTS
+		mount_t mp = vp->v_mount;
+		int nested_union_mounts = 0;
+
+		name_cache_lock_shared();
+
+		/* Walk up the vnodecovered chain and check for nested union mounts. */
+		mp = (mp->mnt_vnodecovered ? mp->mnt_vnodecovered->v_mount : NULL);
+		while (mp) {
+			if (!(mp->mnt_flag & MNT_UNION)) {
+				break;
+			}
+			mp = (mp->mnt_vnodecovered ? mp->mnt_vnodecovered->v_mount : NULL);
+
+			/*
+			 * Limit the max nested unon mounts to prevent stack exhaustion
+			 * when calling lookup_traverse_union().
+			 */
+			if (++nested_union_mounts >= MAX_NESTED_UNION_MOUNTS) {
+				error = ELOOP;
+				break;
+			}
+		}
+
+		name_cache_unlock();
+		if (error) {
+			goto out;
+		}
+#else
 		error = EPERM;
 		goto out;
+#endif /* CONFIG_UNION_MOUNTS */
 	}
-#endif
 
 	if ((vp->v_flag & VROOT) &&
 	    (vp->v_mount->mnt_flag & MNT_ROOTFS)) {
@@ -1100,7 +1170,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 			goto out1;
 		}
 #if CONFIG_MACF
-		error = mac_mount_check_remount(ctx, mp);
+		error = mac_mount_check_remount(ctx, mp, flags);
 		if (error != 0) {
 			goto out1;
 		}
@@ -1349,17 +1419,16 @@ update:
 				goto out1;
 			}
 
-			strlcpy(mp->mnt_vfsstat.f_mntfromname, nd.ni_cnd.cn_pnbuf, MAXPATHLEN);
 			devvp = nd.ni_vp;
-
-			nameidone(&nd);
 
 			if (devvp->v_type != VBLK) {
 				error = ENOTBLK;
+				nameidone(&nd);
 				goto out2;
 			}
 			if (major(devvp->v_rdev) >= nblkdev) {
 				error = ENXIO;
+				nameidone(&nd);
 				goto out2;
 			}
 			/*
@@ -1373,9 +1442,13 @@ update:
 					accessmode |= KAUTH_VNODE_WRITE_DATA;
 				}
 				if ((error = vnode_authorize(devvp, NULL, accessmode, ctx)) != 0) {
+					nameidone(&nd);
 					goto out2;
 				}
 			}
+
+			strlcpy(mp->mnt_vfsstat.f_mntfromname, nd.ni_cnd.cn_pnbuf, MAXPATHLEN);
+			nameidone(&nd);
 		}
 		/* On first mount, preflight and open device */
 		if (devpath && ((flags & MNT_UPDATE) == 0)) {
@@ -2131,7 +2204,7 @@ mount_begin_update(mount_t mp, vfs_context_t ctx, int flags)
 		goto out;
 	}
 #if CONFIG_MACF
-	error = mac_mount_check_remount(ctx, mp);
+	error = mac_mount_check_remount(ctx, mp, flags);
 	if (error != 0) {
 		goto out;
 	}
@@ -2638,7 +2711,7 @@ safedounmount(struct mount *mp, int flags, vfs_context_t ctx)
 	 * If the file system is not responding and MNT_NOBLOCK
 	 * is set and not a forced unmount then return EBUSY.
 	 */
-	if ((mp->mnt_kern_flag & MNT_LNOTRESP) &&
+	if ((mp->mnt_lflag & MNT_LNOTRESP) &&
 	    (flags & MNT_NOBLOCK) && ((flags & MNT_FORCE) == 0)) {
 		error = EBUSY;
 		goto out;
@@ -4712,7 +4785,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			    !strncmp(v_name, "launchd", len) ||
 			    !strncmp(v_name, "Camera", len) ||
 			    !strncmp(v_name, "SpringBoard", len) ||
-			    !strncmp(v_name, "backboardd", len)) {
+			    !strncmp(v_name, "backboardd", len) ||
+			    !strncmp(v_name, "cameracaptured", len)) {
 				/*
 				 * This file matters when launching Camera:
 				 * do not store its contents in the secluded
@@ -4720,7 +4794,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				 */
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
-			} else if (!strncmp(v_name, "mediaserverd", len)) {
+			} else if (!strncmp(v_name, "audiomxd", len) ||
+			    !strncmp(v_name, "mediaplaybackd", len)) {
 				memory_object_mark_eligible_for_secluded(moc,
 				    FALSE);
 				memory_object_mark_for_realtime(moc,
@@ -5559,11 +5634,15 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 	char  *no_firmlink_path = NULL;
 	int truncated = 0;
 	int truncated_no_firmlink_path = 0;
-
-	vp = dvp = lvp = NULLVP;
+	bool do_retry;
+	int num_retries = 0;
 
 	/* look up the object we are linking to */
 	follow = (flag & AT_SYMLINK_FOLLOW) ? FOLLOW : NOFOLLOW;
+
+retry:
+	do_retry = false;
+	vp = dvp = lvp = NULLVP;
 	NDINIT(&nd, LOOKUP, OP_LOOKUP, AUDITVNPATH1 | follow,
 	    segflg, path, ctx);
 
@@ -5648,6 +5727,9 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 	/* and finally make the link */
 	error = VNOP_LINK(vp, dvp, &nd.ni_cnd, ctx);
 	if (error) {
+		if (error == ENOENT && num_retries < MAX_LINK_ENOENT_RETRIES) {
+			do_retry = true;
+		}
 		goto out2;
 	}
 
@@ -5741,6 +5823,7 @@ out2:
 	nameidone(&nd);
 	if (target_path != NULL) {
 		RELEASE_PATH(target_path);
+		target_path = NULL;
 	}
 	if (no_firmlink_path != NULL) {
 		RELEASE_PATH(no_firmlink_path);
@@ -5754,6 +5837,11 @@ out:
 		vnode_put(dvp);
 	}
 	vnode_put(vp);
+
+	if (do_retry) {
+		goto retry;
+	}
+
 	return error;
 }
 
@@ -8554,7 +8642,7 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
     user_addr_t dst, uint32_t flags, vfs_context_t ctx)
 {
 	vnode_t tvp, tdvp;
-	struct nameidata tond;
+	struct nameidata *tondp = NULL;
 	int error;
 	int follow;
 	boolean_t free_src_acl;
@@ -8563,8 +8651,11 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 	kauth_action_t action;
 	struct componentname *cnp;
 	uint32_t defaulted = 0;
-	struct vnode_attr va;
-	struct vnode_attr nva;
+	struct {
+		struct vnode_attr va[2];
+	} *va2p = NULL;
+	struct vnode_attr *vap = NULL;
+	struct vnode_attr *nvap = NULL;
 	uint32_t vnop_flags;
 
 	v_type = vnode_vtype(fvp);
@@ -8588,15 +8679,21 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 	AUDIT_ARG(fd2, dst_dirfd);
 	AUDIT_ARG(value32, flags);
 
+	tondp = kalloc_type(struct nameidata, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	follow = (flags & CLONE_NOFOLLOW) ? NOFOLLOW : FOLLOW;
-	NDINIT(&tond, CREATE, OP_LINK, follow | WANTPARENT | AUDITVNPATH2,
+	NDINIT(tondp, CREATE, OP_LINK, follow | WANTPARENT | AUDITVNPATH2,
 	    UIO_USERSPACE, dst, ctx);
-	if ((error = nameiat(&tond, dst_dirfd))) {
+	if (flags & CLONE_NOFOLLOW_ANY) {
+		tondp->ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
+	if ((error = nameiat(tondp, dst_dirfd))) {
+		kfree_type(struct nameidata, tondp);
 		return error;
 	}
-	cnp = &tond.ni_cnd;
-	tdvp = tond.ni_dvp;
-	tvp = tond.ni_vp;
+	cnp = &tondp->ni_cnd;
+	tdvp = tondp->ni_dvp;
+	tvp = tondp->ni_vp;
 
 	free_src_acl = FALSE;
 	attr_cleanup = FALSE;
@@ -8628,6 +8725,10 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 		goto out;
 	}
 
+	va2p = kalloc_type(typeof(*va2p), Z_WAITOK | Z_NOFAIL);
+	vap = &va2p->va[0];
+	nvap = &va2p->va[1];
+
 	/*
 	 * certain attributes may need to be changed from the source, we ask for
 	 * those here with the exception of source file's ACLs unless the CLONE_ACL
@@ -8635,31 +8736,31 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 	 * directory's ACLs unless the the CLONE_ACL flag is specified then it
 	 * will inherit the source file's ACLs instead.
 	 */
-	VATTR_INIT(&va);
-	VATTR_WANTED(&va, va_uid);
-	VATTR_WANTED(&va, va_gid);
-	VATTR_WANTED(&va, va_mode);
-	VATTR_WANTED(&va, va_flags);
+	VATTR_INIT(vap);
+	VATTR_WANTED(vap, va_uid);
+	VATTR_WANTED(vap, va_gid);
+	VATTR_WANTED(vap, va_mode);
+	VATTR_WANTED(vap, va_flags);
 	if (flags & CLONE_ACL) {
-		VATTR_WANTED(&va, va_acl);
+		VATTR_WANTED(vap, va_acl);
 	}
 
-	if ((error = vnode_getattr(fvp, &va, ctx)) != 0) {
+	if ((error = vnode_getattr(fvp, vap, ctx)) != 0) {
 		goto out;
 	}
 
-	VATTR_INIT(&nva);
-	VATTR_SET(&nva, va_type, v_type);
-	if (VATTR_IS_SUPPORTED(&va, va_acl) && va.va_acl != NULL) {
-		VATTR_SET(&nva, va_acl, va.va_acl);
+	VATTR_INIT(nvap);
+	VATTR_SET(nvap, va_type, v_type);
+	if (VATTR_IS_SUPPORTED(vap, va_acl) && vap->va_acl != NULL) {
+		VATTR_SET(nvap, va_acl, vap->va_acl);
 		free_src_acl = TRUE;
 	}
 
 	/* Handle ACL inheritance, initialize vap. */
 	if (v_type == VLNK) {
-		error = vnode_authattr_new(tdvp, &nva, 0, ctx);
+		error = vnode_authattr_new(tdvp, nvap, 0, ctx);
 	} else {
-		error = vn_attribute_prepare(tdvp, &nva, &defaulted, ctx);
+		error = vn_attribute_prepare(tdvp, nvap, &defaulted, ctx);
 		if (error) {
 			goto out;
 		}
@@ -8675,30 +8776,30 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 	 * from source as well.
 	 */
 	if (!(flags & CLONE_NOOWNERCOPY) && vfs_context_issuser(ctx)) {
-		if (VATTR_IS_SUPPORTED(&va, va_uid)) {
-			VATTR_SET(&nva, va_uid, va.va_uid);
+		if (VATTR_IS_SUPPORTED(vap, va_uid)) {
+			VATTR_SET(nvap, va_uid, vap->va_uid);
 		}
-		if (VATTR_IS_SUPPORTED(&va, va_gid)) {
-			VATTR_SET(&nva, va_gid, va.va_gid);
+		if (VATTR_IS_SUPPORTED(vap, va_gid)) {
+			VATTR_SET(nvap, va_gid, vap->va_gid);
 		}
 	} else {
 		vnop_flags |= VNODE_CLONEFILE_NOOWNERCOPY;
 	}
 
-	if (VATTR_IS_SUPPORTED(&va, va_mode)) {
-		VATTR_SET(&nva, va_mode, va.va_mode);
+	if (VATTR_IS_SUPPORTED(vap, va_mode)) {
+		VATTR_SET(nvap, va_mode, vap->va_mode);
 	}
-	if (VATTR_IS_SUPPORTED(&va, va_flags)) {
-		VATTR_SET(&nva, va_flags,
-		    ((va.va_flags & ~(UF_DATAVAULT | SF_RESTRICTED)) | /* Turn off from source */
-		    (nva.va_flags & (UF_DATAVAULT | SF_RESTRICTED))));
+	if (VATTR_IS_SUPPORTED(vap, va_flags)) {
+		VATTR_SET(nvap, va_flags,
+		    ((vap->va_flags & ~(UF_DATAVAULT | SF_RESTRICTED)) | /* Turn off from source */
+		    (nvap->va_flags & (UF_DATAVAULT | SF_RESTRICTED))));
 	}
 
 #if CONFIG_FILE_LEASES
 	vnode_breakdirlease(tdvp, false, O_WRONLY);
 #endif
 
-	error = VNOP_CLONEFILE(fvp, tdvp, &tvp, cnp, &nva, vnop_flags, ctx);
+	error = VNOP_CLONEFILE(fvp, tdvp, &tvp, cnp, nvap, vnop_flags, ctx);
 
 	if (!error && tvp) {
 		int     update_flags = 0;
@@ -8710,8 +8811,8 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 		 * If some of the requested attributes weren't handled by the
 		 * VNOP, use our fallback code.
 		 */
-		if (!VATTR_ALL_SUPPORTED(&nva)) {
-			(void)vnode_setattr_fallback(tvp, &nva, ctx);
+		if (!VATTR_ALL_SUPPORTED(nvap)) {
+			(void)vnode_setattr_fallback(tvp, nvap, ctx);
 		}
 
 #if CONFIG_MACF
@@ -8766,12 +8867,16 @@ clonefile_internal(vnode_t fvp, boolean_t data_read_authorised, int dst_dirfd,
 
 out:
 	if (attr_cleanup) {
-		vn_attribute_cleanup(&nva, defaulted);
+		vn_attribute_cleanup(nvap, defaulted);
 	}
-	if (free_src_acl && va.va_acl) {
-		kauth_acl_free(va.va_acl);
+	if (free_src_acl && vap->va_acl) {
+		kauth_acl_free(vap->va_acl);
 	}
-	nameidone(&tond);
+	if (va2p) {
+		kfree_type(typeof(*va2p), va2p);
+	}
+	nameidone(tondp);
+	kfree_type(struct nameidata, tondp);
 	if (tvp) {
 		vnode_put(tvp);
 	}
@@ -8788,27 +8893,36 @@ clonefileat(__unused proc_t p, struct clonefileat_args *uap,
     __unused int32_t *retval)
 {
 	vnode_t fvp;
-	struct nameidata fromnd;
+	struct nameidata *ndp = NULL;
 	int follow;
 	int error;
 	vfs_context_t ctx = vfs_context_current();
 
 	/* Check that the flags are valid. */
-	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL)) {
+	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL |
+	    CLONE_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 
 	AUDIT_ARG(fd, uap->src_dirfd);
 
+	ndp = kalloc_type(struct nameidata, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
 	follow = (uap->flags & CLONE_NOFOLLOW) ? NOFOLLOW : FOLLOW;
-	NDINIT(&fromnd, LOOKUP, OP_COPYFILE, follow | AUDITVNPATH1,
+	NDINIT(ndp, LOOKUP, OP_COPYFILE, follow | AUDITVNPATH1,
 	    UIO_USERSPACE, uap->src, ctx);
-	if ((error = nameiat(&fromnd, uap->src_dirfd))) {
+	if (uap->flags & CLONE_NOFOLLOW_ANY) {
+		ndp->ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
+	if ((error = nameiat(ndp, uap->src_dirfd))) {
+		kfree_type(struct nameidata, ndp);
 		return error;
 	}
 
-	fvp = fromnd.ni_vp;
-	nameidone(&fromnd);
+	fvp = ndp->ni_vp;
+	nameidone(ndp);
+	kfree_type(struct nameidata, ndp);
 
 	error = clonefile_internal(fvp, FALSE, uap->dst_dirfd, uap->dst,
 	    uap->flags, ctx);
@@ -8827,7 +8941,8 @@ fclonefileat(__unused proc_t p, struct fclonefileat_args *uap,
 	vfs_context_t ctx = vfs_context_current();
 
 	/* Check that the flags are valid. */
-	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL)) {
+	if (uap->flags & ~(CLONE_NOFOLLOW | CLONE_NOOWNERCOPY | CLONE_ACL |
+	    CLONE_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 
@@ -9189,8 +9304,11 @@ continue_lookup:
 	}
 	/*
 	 * Check for cross-device rename.
+	 * For rename on mountpoint, we want to also check the source and its parent
+	 * belong to the same mountpoint.
 	 */
 	if ((fvp->v_mount != tdvp->v_mount) ||
+	    (fvp->v_mount != fdvp->v_mount) ||
 	    (tvp && (fvp->v_mount != tvp->v_mount))) {
 		error = EXDEV;
 		goto out1;
@@ -12019,27 +12137,25 @@ log_materialization_prevented(vnode_t vp, uint64_t op)
 	}
 
 #if DEVELOPMENT
-	char *path = NULL;
-	int   len;
+	struct vnode_attr *vap = kalloc_type(struct vnode_attr, Z_WAITOK);
 
-	path = get_pathbuff();
-	len = MAXPATHLEN;
-	if (path) {
-		vn_getpath(vp, path, &len);
+	VATTR_INIT(vap);
+	VATTR_WANTED(vap, va_fsid);
+	VATTR_WANTED(vap, va_fileid);
+	if (vnode_getattr(vp, vap, vfs_context_current()) == 0) {
+		os_log_debug(OS_LOG_DEFAULT,
+		    "NSPACE process %s (pid %d) is decorated as no-materialization (op %lld; %s) fsid 0x%08x/%u fileid=%llu",
+		    p_name, proc_selfpid(), op, vntype,
+		    vap->va_fsid, vap->va_fsid, vap->va_fileid);
+	} else
+#endif
+	{
+		os_log_debug(OS_LOG_DEFAULT,
+		    "NSPACE process %s (pid %d) is decorated as no-materialization (op %lld; %s)",
+		    p_name, proc_selfpid(), op, vntype);
 	}
-
-	os_log_debug(OS_LOG_DEFAULT,
-	    "NSPACE process %s (pid %d) is decorated as no-materialization (op %lld; %s) path: %s",
-	    p_name, proc_selfpid(),
-	    op, vntype, path ? path : "<unknown-path>");
-	if (path) {
-		release_pathbuff(path);
-	}
-#else
-	os_log_debug(OS_LOG_DEFAULT,
-	    "NSPACE process %s (pid %d) is decorated as no-materialization (op %lld; %s)",
-	    p_name, proc_selfpid(),
-	    op, vntype);
+#if DEVELOPMENT
+	kfree_type(struct vnode_attr, vap);
 #endif
 }
 #endif /* CONFIG_DATALESS_FILES */
@@ -12880,6 +12996,11 @@ unlock:
 		case FSIOC_GRAFT_FS:
 		case FSIOC_UNGRAFT_FS:
 		case FSIOC_AUTH_FS:
+		case F_SPECULATIVE_READ:
+		case F_ATTRIBUTION_TAG:
+		case F_TRANSFEREXTENTS:
+		case F_ASSERT_BG_ACCESS:
+		case F_RELEASE_BG_ACCESS:
 			error = EINVAL;
 			goto outdrop;
 		}
@@ -13045,6 +13166,10 @@ getxattr(proc_t p, struct getxattr_args *uap, user_ssize_t *retval)
 
 	nameiflags = (uap->options & XATTR_NOFOLLOW) ? 0 : FOLLOW;
 	NDINIT(&nd, LOOKUP, OP_GETXATTR, nameiflags, spacetype, uap->path, ctx);
+	if (uap->options & XATTR_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	if ((error = namei(&nd))) {
 		return error;
 	}
@@ -13123,7 +13248,8 @@ fgetxattr(proc_t p, struct fgetxattr_args *uap, user_ssize_t *retval)
 	int error;
 	UIO_STACKBUF(uio_buf, 1);
 
-	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT)) {
+	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT |
+	    XATTR_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 
@@ -13223,6 +13349,10 @@ setxattr(proc_t p, struct setxattr_args *uap, int *retval)
 	nameiflags |= WANTPARENT;
 #endif
 	NDINIT(&sactx->nd, LOOKUP, OP_SETXATTR, nameiflags, spacetype, uap->path, ctx);
+	if (uap->options & XATTR_NOFOLLOW_ANY) {
+		sactx->nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	if ((error = namei(&sactx->nd))) {
 		goto out;
 	}
@@ -13267,7 +13397,8 @@ fsetxattr(proc_t p, struct fsetxattr_args *uap, int *retval)
 	int error;
 	UIO_STACKBUF(uio_buf, 1);
 
-	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT)) {
+	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT |
+	    XATTR_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 
@@ -13352,6 +13483,10 @@ removexattr(proc_t p, struct removexattr_args *uap, int *retval)
 	nameiflags |= WANTPARENT;
 #endif
 	NDINIT(&nd, LOOKUP, OP_REMOVEXATTR, nameiflags, spacetype, uap->path, ctx);
+	if (uap->options & XATTR_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	if ((error = namei(&nd))) {
 		return error;
 	}
@@ -13390,7 +13525,8 @@ fremovexattr(__unused proc_t p, struct fremovexattr_args *uap, int *retval)
 	vfs_context_t ctx = vfs_context_current();
 #endif
 
-	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT)) {
+	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT |
+	    XATTR_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 
@@ -13450,6 +13586,10 @@ listxattr(proc_t p, struct listxattr_args *uap, user_ssize_t *retval)
 
 	nameiflags = (uap->options & XATTR_NOFOLLOW) ? 0 : FOLLOW;
 	NDINIT(&nd, LOOKUP, OP_LISTXATTR, nameiflags, spacetype, uap->path, ctx);
+	if (uap->options & XATTR_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	if ((error = namei(&nd))) {
 		return error;
 	}
@@ -13486,7 +13626,8 @@ flistxattr(proc_t p, struct flistxattr_args *uap, user_ssize_t *retval)
 	int error;
 	UIO_STACKBUF(uio_buf, 1);
 
-	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT)) {
+	if (uap->options & (XATTR_NOFOLLOW | XATTR_NOSECURITY | XATTR_NODEFAULT |
+	    XATTR_NOFOLLOW_ANY)) {
 		return EINVAL;
 	}
 

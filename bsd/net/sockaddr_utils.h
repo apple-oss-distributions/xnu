@@ -267,7 +267,7 @@ __STC_DEFINE_SELF_CONVERTERS(struct, sockaddr);
 __STC_DEFINE_OBJECT_CONVERTERS(struct, sockaddr, struct, sockaddr_storage);
 __STC_DEFINE_OBJECT_CONVERTERS(struct, sockaddr, union, sockaddr_in_4_6);
 __STC_DEFINE_OBJECT_CONVERTERS(struct, sockaddr, union, necp_sockaddr_union);
-__STC_DEFINE_BYTE_TO_OBJ_CNVS(struct, sockaddr, sizeof(struct sockaddr), 255);
+__STC_DEFINE_BYTE_TO_OBJ_CNVS(struct, sockaddr, 2, 255);
 
 __STC_DEFINE_SELF_CONVERTERS(struct, sockaddr_storage);
 __STC_DEFINE_BYTE_TO_OBJ_CNVS(struct, sockaddr_storage,
@@ -395,6 +395,15 @@ __SA_UTILS_DEFINE_VARIABLE_SIZE_SUBTYPE(struct, sockaddr_dl)
 #define SDL(s)                         __SA_UTILS_CONV_TO_SOCKADDR_DL((s))
 #define __DECONST_SDL(s)               __SA_UTILS_DECONST_AND_CONV_TO_SOCKADDR_DL((s))
 
+#if defined(LLADDR)
+#undef LLADDR
+#endif /* defined(LLADDR) */
+#define LLADDR(s) ((caddr_t)(__SA_UTILS_CONV_TO_BYTES((s)) + __offsetof(struct sockaddr_dl, sdl_data) + (s)->sdl_nlen))
+
+#if defined(CONST_LLADDR)
+#undef CONST_LLADDR
+#endif /* defined(CONST_LLADDR) */
+#define CONST_LLADDR(s) ((const uint8_t *)LLADDR((s)))
 
 /*************************************************************************************************
  * Strict replacement for `struct sockaddr_in *'

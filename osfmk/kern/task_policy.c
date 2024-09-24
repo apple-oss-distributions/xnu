@@ -169,7 +169,7 @@ typedef struct proc *   proc_t;
 int                     proc_pid(struct proc *proc);
 extern int              proc_selfpid(void);
 extern char *           proc_name_address(void *p);
-extern char *           proc_best_name(proc_t proc);
+extern const char *     proc_best_name(proc_t proc);
 
 extern int proc_pidpathinfo_internal(proc_t p, uint64_t arg,
     char *buffer, uint32_t buffersize,
@@ -805,10 +805,11 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 {
 	/*
 	 * Step 1:
-	 *  Gather requested policy
+	 *  Gather requested policy and effective coalition state
 	 */
 
 	struct task_requested_policy requested = task->requested_policy;
+	bool coalition_is_bg = task_get_effective_jetsam_coalition_policy(task, TASK_POLICY_DARWIN_BG);
 
 	/*
 	 * Step 2:
@@ -818,6 +819,9 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	 */
 
 	struct task_effective_policy next = {};
+
+	/* Capture properties from coalition */
+	next.tep_coalition_bg = coalition_is_bg;
 
 	/* Update task role */
 	next.tep_role = requested.trp_role;
@@ -909,6 +913,11 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	 */
 	if (requested.trp_int_darwinbg || requested.trp_ext_darwinbg ||
 	    next.tep_role == TASK_DARWINBG_APPLICATION) {
+		wants_watchersbg = wants_all_sockets_bg = wants_darwinbg = true;
+		adaptive_bg_only = false;
+	}
+
+	if (next.tep_coalition_bg) {
 		wants_watchersbg = wants_all_sockets_bg = wants_darwinbg = true;
 		adaptive_bg_only = false;
 	}
@@ -1072,6 +1081,7 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 	case TASK_APPTYPE_APP_TAL:
 	case TASK_APPTYPE_APP_DEFAULT:
 		if (requested.trp_ext_darwinbg == 1 ||
+		    next.tep_coalition_bg ||
 		    (next.tep_sup_active == 1 &&
 		    (task_policy_suppression_flags & TASK_POLICY_SUPPRESSION_NONDONOR)) ||
 		    next.tep_role == TASK_DARWINBG_APPLICATION) {
@@ -1311,6 +1321,9 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 		if (task_set_game_mode_locked(task, false)) {
 			pend_token->tpt_update_game_mode = 1;
 		}
+		if (task_set_carplay_mode_locked(task, false)) {
+			pend_token->tpt_update_carplay_mode = 1;
+		}
 	}
 }
 
@@ -1357,31 +1370,49 @@ task_policy_update_coalition_focal_tasks(task_t            task,
 	return sfi_transition;
 }
 
-#if CONFIG_SCHED_SFI
-
-/* coalition object is locked */
-static void
-task_sfi_reevaluate_cb(coalition_t coal, void *ctx, task_t task)
+/*
+ * Called with coalition locked to push updates from coalition policy
+ * into its member tasks
+ */
+void
+coalition_policy_update_task(task_t task, coalition_pend_token_t coal_pend_token)
 {
-	thread_t thread;
+	/*
+	 * Push a task policy update incorporating the new state
+	 * of the coalition, but because we have the coalition locked,
+	 * we can't do task_policy_update_complete_unlocked in this function.
+	 *
+	 * Instead, we stash the pend token on the task, and ask the coalition
+	 * to come around later after the lock is dropped to do the follow-up.
+	 */
 
-	/* unused for now */
-	(void)coal;
+	task_pend_token_t task_pend_token = &task->pended_coalition_changes;
 
-	/* skip the task we're re-evaluating on behalf of: it's already updated */
-	if (task == (task_t)ctx) {
-		return;
-	}
+	assert(task_pend_token->tpt_value == 0);
 
 	task_lock(task);
 
-	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		sfi_reevaluate(thread);
-	}
+	task_policy_update_locked(task, task_pend_token);
 
 	task_unlock(task);
+
+	if (task_pend_token->tpt_update_timers) {
+		/*
+		 * ml_timer_evaluate can be batched, so defer it to happen
+		 * once at the coalition level
+		 */
+		coal_pend_token->cpt_update_timers = 1;
+		task_pend_token->tpt_update_timers = 0;
+	}
+
+	if (task_pend_token->tpt_value != 0) {
+		/*
+		 * We need to come look at this task after unlocking
+		 * the coalition to do pended work.
+		 */
+		coal_pend_token->cpt_update_j_coal_tasks = 1;
+	}
 }
-#endif /* CONFIG_SCHED_SFI */
 
 /*
  * Called with task unlocked to do things that can't be done while holding the task lock
@@ -1414,7 +1445,24 @@ task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token)
 	/* use the resource coalition for SFI re-evaluation */
 	if (pend_token->tpt_update_coal_sfi) {
 		coalition_for_each_task(task->coalition[COALITION_TYPE_RESOURCE],
-		    (void *)task, task_sfi_reevaluate_cb);
+		    ^ bool (task_t each_task) {
+			thread_t thread;
+
+			/* skip the task we're re-evaluating on behalf of: it's already updated */
+			if (each_task == task) {
+			        return false;
+			}
+
+			task_lock(each_task);
+
+			queue_iterate(&each_task->threads, thread, thread_t, task_threads) {
+			        sfi_reevaluate(thread);
+			}
+
+			task_unlock(each_task);
+
+			return false;
+		});
 	}
 #endif /* CONFIG_SCHED_SFI */
 
@@ -1427,6 +1475,9 @@ task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token)
 	}
 	if (pend_token->tpt_update_game_mode) {
 		task_coalition_thread_group_game_mode_update(task);
+	}
+	if (pend_token->tpt_update_carplay_mode) {
+		task_coalition_thread_group_carplay_mode_update(task);
 	}
 #endif /* CONFIG_THREAD_GROUPS */
 }

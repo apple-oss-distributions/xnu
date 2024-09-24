@@ -69,6 +69,10 @@
     rsrini, 09/14/14
 */
 
+#if KERNEL
+#include <machine/asm.h>
+#endif /* KERNEL */
+
 #define PAGES_SIZE_IN_KBYTES    16
 #define MZV_MAGIC               17185      // magic value used to identify MZV page encoding
 
@@ -131,6 +135,7 @@ _WKdm_decompress_16k:
 	*/
 
 #if KERNEL
+	ARM64_PROLOG
 	sub		rax, sp, #96
 	sub		sp, sp, #96
 	st1.4s	{v0,v1,v2},[rax],#48

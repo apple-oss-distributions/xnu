@@ -31,7 +31,7 @@ class TaskNode(object):
 class IIINode(object):
     """docstring for IIINode"""
     def __init__(self, elem, parentNode):
-        super(IIINode, self).__init__()
+        super().__init__()
         self.elem = elem
         self.children = []
         self.parent = parentNode

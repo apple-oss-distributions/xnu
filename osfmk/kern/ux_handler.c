@@ -280,3 +280,20 @@ catch_mach_exception_raise_backtrace(
 {
 	return KERN_INVALID_ARGUMENT;
 }
+
+kern_return_t
+catch_mach_exception_raise_state_identity_protected(
+	__unused mach_port_t               exception_port,
+	__unused uint64_t                  thread_id,
+	__unused mach_port_t               task_id_token,
+	__unused exception_type_t          exception,
+	__unused mach_exception_data_t     code,
+	__unused mach_msg_type_number_t    codeCnt,
+	__unused int                      *flavor,
+	__unused thread_state_t            old_state,
+	__unused mach_msg_type_number_t    old_stateCnt,
+	__unused thread_state_t            new_state,
+	__unused mach_msg_type_number_t   *new_stateCnt)
+{
+	return KERN_INVALID_ARGUMENT;
+}

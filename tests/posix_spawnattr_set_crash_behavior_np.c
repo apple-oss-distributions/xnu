@@ -113,90 +113,103 @@ _do_set_crash_behavior_test(char *child_mode, int signal, uint32_t flags, bool e
 T_DECL(set_crash_behavior_panic_on_crash_with_crash,
     "set_crash_behavior_panic_on_crash_with_crash",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("crash", 0, POSIX_SPAWN_PANIC_ON_CRASH, true);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_with_exit,
     "set_crash_behavior_panic_on_crash_with_exit",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("exit", 0, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_with_success,
     "set_crash_behavior_panic_on_crash_with_success",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("success", 0, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_nonzero_with_crash,
     "set_crash_behavior_panic_on_nonzero_with_crash",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("crash", 0, POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_nonzero_with_exit,
     "set_crash_behavior_panic_on_nonzero_with_exit",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("exit", 0, POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT, true);
 }
 
 T_DECL(set_crash_behavior_panic_on_nonzero_with_success,
     "set_crash_behavior_panic_on_nonzero_with_success",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("success", 0, POSIX_SPAWN_PANIC_ON_NON_ZERO_EXIT, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_cancelled,
     "set_crash_behavior_panic_on_crash_cancelled",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("wait", SIGUSR1, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_sigterm,
     "set_crash_behavior_panic_on_crash_sigterm",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("spin", SIGTERM, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_sigkill,
     "set_crash_behavior_panic_on_crash_sigkill",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("spin", SIGKILL, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_terminate_with_reason,
     "set_crash_behavior_panic_on_crash_terminate_with_reason",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("reason", 0, POSIX_SPAWN_PANIC_ON_CRASH, true);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_terminate_with_reason_signal,
     "set_crash_behavior_panic_on_crash_terminate_with_reason_signal",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("reason_signal", 0, POSIX_SPAWN_PANIC_ON_CRASH, true);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_proc_terminate_clean,
     "set_crash_behavior_panic_on_crash_proc_terminate_clean",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("clean", 0, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }
 
 T_DECL(set_crash_behavior_panic_on_crash_proc_terminate_dirty,
     "set_crash_behavior_panic_on_crash_proc_terminate_dirty",
     T_META_SYSCTL_INT(SYSCTL_CRASH_BEHAVIOR_TEST_MODE),
-    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1)) {
+    T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
+    T_META_TAG_VM_PREFERRED) {
 	_do_set_crash_behavior_test("dirty", 0, POSIX_SPAWN_PANIC_ON_CRASH, false);
 }

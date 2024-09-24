@@ -1,0 +1,120 @@
+#
+# Mach Operating System
+# Copyright (c) 1986 Carnegie-Mellon University
+# Copyright 2001-2023 Apple Inc.
+#
+# All rights reserved.  The CMU software License Agreement
+# specifies the terms and conditions for use and redistribution.
+#
+######################################################################
+#
+#  Master Apple configuration file (see the master machine independent
+#  configuration file for a description of the file format).
+#
+######################################################################
+#
+#  Standard Apple OS Configurations:
+#  -------- ----- -- ---------------
+#
+#  KERNEL_BASE =    [ arm64 medium msgb_large config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot ]
+#  KERNEL_RELEASE = [ KERNEL_BASE ARM_EXTRAS_BASE config_sptm ]
+#  KERNEL_DEV =     [ KERNEL_BASE ARM_EXTRAS_BASE config_sptm development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits config_ext_paniclog ]
+#  KERNEL_DEV_PPL = [ KERNEL_BASE ARM_EXTRAS_BASE_PPL config_pmap_ppl development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits config_ext_paniclog ]
+#  KERNEL_DEBUG =   [ KERNEL_BASE ARM_EXTRAS_BASE_PPL config_sptm debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits config_ext_paniclog ]
+#  KERNEL_SPTM =    [ KERNEL_BASE SPTM_EXTRAS_BASE config_sptm development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
+#  BSD_BASE =       [ mach_bsd sysv_sem sysv_msg sysv_shm config_netboot config_imageboot psynch config_proc_uuid_policy config_coredump pgo config_personas ]
+#  BSD_RELEASE =    [ BSD_BASE ]
+#  BSD_DEV =        [ BSD_BASE config_vnguard ]
+#  BSD_DEBUG =      [ BSD_BASE config_vnguard ]
+#  FILESYS_BASE =   [ devfs fdesc fifo fs_compression config_protect config_mnt_rootsnap config_rosv_startup config_mount_vm config_mount_prebootrecovery config_basesystemroot config_fse quota namedstreams config_imgsrc_access config_triggers config_ext_resolver config_searchfs config_volfs config_appledouble nullfs config_mnt_suid config_firmlinks config_dataless_files config_union_mounts config_file_leases ]
+#  FILESYS_RELEASE= [ FILESYS_BASE ]
+#  FILESYS_DEV =    [ FILESYS_BASE config_iocount_trace ]
+#  FILESYS_DEBUG =  [ FILESYS_BASE config_iocount_trace ]
+#  NFS =            [ nfsserver ]
+#  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
+#  SKYWALK_RELEASE = [ SKYWALK_BASE ]
+#  SKYWALK_DEV =    [ SKYWALK_BASE ]
+#  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
+#  NETWORKING =     [ inet bpfilter dummynet traffic_mgt sendfile ah_all_crypto bond vlan gif stf ifnet_input_chk config_mbuf_jumbo if_bridge MULTIPATH if_fake if_redirect remote_vif ]
+#  NETWORKING_RELEASE = [ NETWORKING ]
+#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless kctl_test ]
+#  NETWORKING_DEBUG = [ NETWORKING_DEV ]
+#  VPN =            [ ipsec flow_divert necp content_filter ]
+#  PF =             [ pf pflog ]
+#  MULTIPATH =      [ multipath mptcp ]
+#if SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED
+#  HIBERNATION =    [ ]
+#else /*!(SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED)*/
+#  HIBERNATION =    [ ]
+#endif /*SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED*/
+#  IOKIT_BASE =     [ iokit iokitcpp no_kernel_hid config_sleep iokitstats HIBERNATION ]
+#  IOKIT_RELEASE =  [ IOKIT_BASE ]
+#  IOKIT_DEV =      [ IOKIT_BASE iotracking ]
+#  IOKIT_DEBUG =    [ IOKIT_BASE iotracking ]
+#  LIBKERN_BASE =   [ libkerncpp config_blocks config_kec_fips crypto_sha2 config_img4 ]
+#  LIBKERN_RELEASE =[ LIBKERN_BASE zlib ]
+#  LIBKERN_DEV =    [ LIBKERN_BASE zlib iotracking ]
+#  LIBKERN_DEBUG =  [ LIBKERN_BASE zlib iotracking ]
+#if SOC_IS_VIRTUALIZED
+#  CPU_COUNTERS_BASE = [ ]
+#else /*!SOC_IS_VIRTUALIZED*/
+#  CPU_COUNTERS_BASE = [ config_cpu_counters config_pervasive_cpi config_pervasive_energy ]
+#endif /*SOC_IS_VIRTUALIZED*/
+#  PERF_DBG_BASE =  [ config_dtrace mach_kdp config_serial_kdp kdp_interactive_debugging config_kdp_coredump_encryption CPU_COUNTERS_BASE kperf ]
+#  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
+#  PERF_DBG_DEV =   [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
+#  PERF_DBG_DEBUG = [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
+#if SOC_IS_VIRTUALIZED
+#  PARAVIRT_BASE =  [ config_pv_ticket ]
+#else
+#  PARAVIRT_BASE =  [ ]
+#endif /*SOC_IS_VIRTUALIZED*/
+#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_arm_pfz config_user_notification phys_write_acct config_service_port_info config_voucher_deprecated PARAVIRT_BASE config_ledger_interval_max ]
+#  MACH_RELEASE =   [ MACH_BASE ]
+#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace config_task_suspend_stats ]
+#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug config_task_suspend_stats ]
+#  SCHED_BASE =     [ config_sched_timeshare_core config_sched_deferred_ast config_clutch config_sched_sfi config_sched_auto_join config_preadopt_tg ]
+#  SCHED_RELEASE =  [ SCHED_BASE ]
+#  SCHED_DEV =      [ SCHED_BASE ]
+#  SCHED_DEBUG =    [ SCHED_BASE ]
+#  VM_BASE =        [ vm_pressure_events memorystatus config_code_decryption encrypted_swap config_deferred_reclaim ]
+#  VM_RELEASE =     [ VM_BASE ]
+#  VM_DEV =         [ VM_BASE dynamic_codesigning ]
+#  VM_DEBUG =       [ VM_BASE dynamic_codesigning ]
+#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tagging kernel_tbi ]
+#  SECURITY_BASE  =   [ config_macf config_audit kernel_integrity config_csr config_csr_from_dt config_setuid config_kas_info config_secure_bsd_root config_arcade config_supplemental_signatures second_static_trust_cache reslide_shared_cache ]
+#  SECURITY_RELEASE = [ SECURITY_BASE config_bti_telemetry ]
+#  SECURITY_DEV   =   [ SECURITY_BASE config_bti_telemetry ]
+#  SECURITY_DEBUG =   [ SECURITY_BASE config_bti_telemetry ]
+#  BASE =           [ PF VPN NFS ]
+#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE    PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
+#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
+#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG      PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
+#  KASAN =          [ BASE KERNEL_DEV_PPL BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEBUG   LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
+#  SPTM =           [ BASE KERNEL_SPTM    BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
+#
+######################################################################
+#
+machine		"arm64"						# <arm64>
+
+makeoptions	OSFMK_MACHINE = "arm64"				# <mach>
+
+options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
+options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
+options		ALTERNATE_DEBUGGER	# <alternate_debugger>
+
+options   CONFIG_VNODES=1024		# <xsmall>
+
+options   CONFIG_FREEZE_SUSPENDED_MIN=4		# <xsmall>
+
+options	  CONFIG_MACH_APPROXIMATE_TIME
+
+options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
+
+options CONFIG_MACF_LAZY_VNODE_LABELS   # Turn on labels, don't preallocate
+
+options CONFIG_HYPERVISOR_PUBLIC   # unrestricted entitlement for hypervisor
+
+options   CONFIG_RESLIDE_SHARED_CACHE		# <reslide_shared_cache>
+options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+options   CONFIG_KERNEL_TAGGING		# <kernel_tagging>

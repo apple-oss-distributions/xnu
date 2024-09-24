@@ -27,7 +27,7 @@
  */
 
 #include <kern/backtrace.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 
 RB_GENERATE(rb_head, vm_map_store, entry, rb_node_compare);
 
@@ -635,7 +635,7 @@ update_first_free_rb(vm_map_t map, vm_map_entry_t entry, bool new_entry_creation
 		/*
 		 * Holes can be used to track ranges all the way up to MACH_VM_MAX_ADDRESS or more (e.g. kernel map).
 		 */
-		vm_map_offset_t max_valid_offset = (map->max_offset > MACH_VM_MAX_ADDRESS) ? map->max_offset : MACH_VM_MAX_ADDRESS;
+		vm_map_offset_t max_valid_offset = MAX(map->max_offset, (vm_map_offset_t)MACH_VM_MAX_ADDRESS);
 
 		/*
 		 * Clipping an entry will not result in the creation/deletion/modification of

@@ -93,9 +93,6 @@
 #if XNU_MONITOR
 #include <arm/pmap/pmap_data.h>
 #endif /* XNU_MONITOR */
-#if defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3
-#include <arm64/amcc_rorgn.h>
-#endif /* defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3 */
 /*
  * genassym.c is used to produce an
  * assembly file which, intermingled with unuseful assembly code,
@@ -141,6 +138,11 @@ main(int     argc,
 #endif /* defined(HAS_APPLE_PAC) */
 #if CONFIG_XNUPOST
 	DECLARE("TH_EXPECTED_FAULT_HANDLER", offsetof(struct thread, machine.expected_fault_handler));
+#if __has_feature(ptrauth_calls)
+	DECLARE("TH_EXPECTED_FAULT_HANDLER_DIVERSIFIER", ptrauth_function_pointer_type_discriminator(expected_fault_handler_t));
+#endif /* ptrauth_calls */
+	DECLARE("TH_EXPECTED_FAULT_PC", offsetof(struct thread, machine.expected_fault_pc));
+	DECLARE("TH_EXPECTED_FAULT_ADDR", offsetof(struct thread, machine.expected_fault_addr));
 #endif /* CONFIG_XNUPOST */
 
 	DECLARE("TH_ARM_MACHINE_FLAGS", offsetof(struct thread, machine.arm_machine_flags));
@@ -150,12 +152,18 @@ main(int     argc,
 #if __has_feature(ptrauth_calls)
 	DECLARE("TH_UPCB_DIVERSIFIER", ptrauth_string_discriminator("machine_thread.upcb"));
 #endif
+#if HAS_ARM_FEAT_SME
+	DECLARE("ACT_UMATRIX_HDR", offsetof(struct thread, machine.umatrix_hdr));
+#endif /* HAS_ARM_FEAT_SME */
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
 #if SCHED_HYGIENE_DEBUG
 	DECLARE("SCHED_HYGIENE_MARKER", SCHED_HYGIENE_MARKER);
 #endif
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+	DECLARE("HAVE_MACHINE_THREAD_MATRIX_STATE", 1);
+#endif
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));
 
@@ -267,6 +275,12 @@ main(int     argc,
 
 	DECLARE("NS64_KERNEL_FPCR", offsetof(arm_kernel_context_t, ns.fpcr));
 
+#if HAS_ARM_FEAT_SME
+	DECLARE("SME_SVCR", offsetof(arm_sme_saved_state_t, svcr));
+	DECLARE("SME_SVL_B", offsetof(arm_sme_saved_state_t, svl_b));
+	DECLARE("SME_Z_P_ZA", offsetof(arm_sme_saved_state_t, context.__z_p_za));
+	DECLARE("ARM_SME_SAVED_STATE", ARM_SME_SAVED_STATE);
+#endif /* HAS_ARM_FEAT_SME */
 
 
 	DECLARE("PGBYTES", ARM_PGBYTES);
@@ -284,8 +298,12 @@ main(int     argc,
 	DECLARE("CPU_ISTACKPTR", offsetof(cpu_data_t, istackptr));
 #if __has_feature(ptrauth_calls)
 	DECLARE("CPU_ISTACKPTR_DIVERSIFIER", ptrauth_string_discriminator("cpu_data.istackptr"));
-#endif
+#endif /* ptrauth_calls */
 	DECLARE("CPU_INTSTACK_TOP", offsetof(cpu_data_t, intstack_top));
+	DECLARE("CPU_EXCEPSTACKPTR", offsetof(cpu_data_t, excepstackptr));
+#if __has_feature(ptrauth_calls)
+	DECLARE("CPU_EXCEPSTACKPTR_DIVERSIFIER", ptrauth_string_discriminator("cpu_data.excepstackptr"));
+#endif /* ptrauth_calls */
 	DECLARE("CPU_EXCEPSTACK_TOP", offsetof(cpu_data_t, excepstack_top));
 #if __ARM_KERNEL_PROTECT__
 	DECLARE("CPU_EXC_VECTORS", offsetof(cpu_data_t, cpu_exc_vectors));
@@ -300,6 +318,12 @@ main(int     argc,
 	DECLARE("CPU_PHYS_ID", offsetof(cpu_data_t, cpu_phys_id));
 	DECLARE("CPU_TPIDR_EL0", offsetof(cpu_data_t, cpu_tpidr_el0));
 
+#ifdef APPLEEVEREST
+	DECLARE("PER_CPU_MASTER", offsetof(cpu_data_t, cluster_master));
+	DECLARE("PER_CPU_CPU_REG_PADDR", offsetof(cpu_data_t, cpu_reg_paddr));
+	DECLARE("PER_CPU_ACC_REG_PADDR", offsetof(cpu_data_t, acc_reg_paddr));
+	DECLARE("PER_CPU_CPM_REG_PADDR", offsetof(cpu_data_t, cpm_reg_paddr));
+#endif
 
 	DECLARE("RTCLOCKDataSize", sizeof(rtclock_data_t));
 
@@ -370,13 +394,11 @@ main(int     argc,
 	DECLARE("SPTM_CPU_BOOT_COLD", SPTM_CPU_BOOT_COLD);
 	DECLARE("SPTM_CPU_BOOT_SECONDARY", SPTM_CPU_BOOT_SECONDARY);
 	DECLARE("SPTM_CPU_BOOT_WARM", SPTM_CPU_BOOT_WARM);
+	DECLARE("SPTM_CPU_BOOT_HIB", SPTM_CPU_BOOT_HIB);
 	DECLARE("SPTM_CPU_PANIC", SPTM_CPU_PANIC);
+	DECLARE("SPTM_TRACE_SIZE_SHIFT", SPTM_TRACE_SIZE_SHIFT);
 #endif
 
-#if defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3
-	DECLARE("CTXR_XN_DISALLOW_ALL", CTXR_XN_DISALLOW_ALL);
-	DECLARE("CTXR_XN_KERNEL", CTXR_XN_KERNEL);
-#endif /* defined(KERNEL_INTEGRITY_CTRR) && KERNEL_CTRR_VERSION >= 3 */
 
 	return 0;
 }

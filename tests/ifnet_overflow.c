@@ -34,7 +34,7 @@ create_interfaces(const char *prefix, int num)
 
 T_DECL(test_ifnet_overflow,
     "Verify that we don't crash when we create many interfaces",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false), T_META_TAG_VM_PREFERRED)
 {
 #if 1
 	T_SKIP("Not stable yet");

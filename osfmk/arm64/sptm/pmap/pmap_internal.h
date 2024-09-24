@@ -33,8 +33,7 @@
  * This file will automatically include all of the other internal arm/pmap/
  * headers so .c files will only need to include this one header.
  */
-#ifndef _ARM_PMAP_PMAP_INTERNAL_H_
-#define _ARM_PMAP_PMAP_INTERNAL_H_
+#pragma once
 
 #include <stdint.h>
 
@@ -64,7 +63,6 @@
  * Global variables exported to the rest of the internal pmap implementation.
  */
 extern lck_grp_t pmap_lck_grp;
-extern bool hib_entry_pmap_lockdown;
 extern pmap_paddr_t avail_start;
 extern pmap_paddr_t avail_end;
 extern uint32_t pmap_max_asids;
@@ -91,7 +89,6 @@ extern void pmap_tte_deallocate(
 #if defined(PVH_FLAG_EXEC)
 extern void pmap_set_ptov_ap(unsigned int, unsigned int, boolean_t);
 #endif /* defined(PVH_FLAG_EXEC) */
-
 
 extern pmap_t current_pmap(void);
 extern void pmap_tt_ledger_credit(pmap_t, vm_size_t);
@@ -124,17 +121,6 @@ extern void qsort(void *a, size_t n, size_t es, cmpfunc_t cmp);
  *
  * TODO: rdar://70538514 (PMAP Cleanup: re-evaluate whether inline functions should actually be inline)
  */
-
-/**
- * Macro used to ensure that pmap data structures aren't modified during
- * hibernation image copying.
- */
-#if HIBERNATION
-#define ASSERT_NOT_HIBERNATING() (assertf(!hib_entry_pmap_lockdown, \
-	"Attempted to modify PMAP data structures after hibernation image copying has begun."))
-#else
-#define ASSERT_NOT_HIBERNATING()
-#endif /* HIBERNATION */
 
 /* Helper macro for rounding an address up to a correctly aligned value. */
 #define PMAP_ALIGN(addr, align) ((addr) + ((align) - 1) & ~((align) - 1))
@@ -369,67 +355,3 @@ pmap_unlock(pmap_t pmap, pmap_lock_mode_t mode)
 		panic("%s: Unknown pmap_lock_mode. pmap=%p, mode=%d", __func__, pmap, mode);
 	}
 }
-
-/*
- * Disable interrupts and return previous state.
- *
- * The PPL has its own interrupt state facility separately from
- * ml_set_interrupts_enable(), since that function is not part of the
- * PPL, and so doing things like manipulating untrusted data and
- * taking ASTs.
- *
- * @return The previous interrupt state, to be restored with
- *         pmap_interrupts_restore().
- */
-static inline uint64_t __attribute__((warn_unused_result)) __used
-pmap_interrupts_disable(void)
-{
-	uint64_t state = __builtin_arm_rsr64("DAIF");
-
-	/* Ensure that debug exceptions are masked. */
-	assert((state & DAIF_DEBUGF) == DAIF_DEBUGF);
-
-	if ((state & DAIF_ALL) != DAIF_ALL) {
-		__builtin_arm_wsr64("DAIFSet", DAIFSC_ALL);
-	}
-
-	return state;
-}
-
-/*
- * Restore previous interrupt state.
- *
- * @param state The previous interrupt state to restore.
- */
-static inline void __used
-pmap_interrupts_restore(uint64_t state)
-{
-	// no unknown bits?
-	assert((state & ~DAIF_ALL) == 0);
-
-	/* Assert that previous state had debug exceptions masked. */
-	assert((state & DAIF_DEBUGF) == DAIF_DEBUGF);
-
-	if (state != DAIF_ALL) {
-		__builtin_arm_wsr64("DAIF", state);
-	}
-}
-
-/*
- * Query interrupt state.
- *
- * ml_get_interrupts_enabled() is safe enough at the time of writing
- * this comment, but because it is not considered part of the PPL, so
- * could change without notice, and because it presently only checks
- * DAIF_IRQ, we have our own version.
- *
- * @return true if interrupts are enable (not fully disabled).
- */
-
-static inline bool __attribute__((warn_unused_result)) __used
-pmap_interrupts_enabled(void)
-{
-	return (__builtin_arm_rsr64("DAIF") & DAIF_ALL) != DAIF_ALL;
-}
-
-#endif /* _ARM_PMAP_PMAP_INTERNAL_H_ */

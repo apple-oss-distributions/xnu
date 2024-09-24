@@ -99,7 +99,7 @@ tests()
 	}
 }
 
-T_DECL(ctor_move, "safe_allocation.ctor.move") {
+T_DECL(ctor_move, "safe_allocation.ctor.move", T_META_TAG_VM_PREFERRED) {
 	tests<T>();
 	tests<T const>();
 }

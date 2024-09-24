@@ -29,7 +29,7 @@
 #include <mach_kdp.h>
 #include <mach/vm_param.h>
 #include <arm64/lowglobals.h>
-#include <vm/vm_object.h>
+#include <vm/vm_object_xnu.h>
 #include <vm/vm_page.h>
 
 /*

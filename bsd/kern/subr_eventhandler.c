@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -62,6 +62,7 @@
 #include <sys/eventhandler.h>
 #include <sys/sysctl.h>
 #include <sys/mcache.h> /* for VERIFY() */
+#include <os/log.h>
 
 int evh_debug = 0;
 
@@ -104,6 +105,7 @@ eventhandler_lists_ctxt_init(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt)
 void
 eventhandler_init(void)
 {
+	evhlog(debug, "%s: init", __func__);
 	eventhandler_lists_ctxt_init(&evthdlr_lists_ctxt_glb);
 }
 
@@ -129,6 +131,8 @@ eventhandler_register_internal(
 	VERIFY(evthdlr_lists_ctxt->eventhandler_lists_initted); /* eventhandler registered too early */
 	VERIFY(epn != NULL); /* cannot register NULL event */
 
+	evhlog(debug, "%s: registering event_type=%s\n", __func__, name);
+
 	/* lock the eventhandler lists */
 	lck_mtx_lock_spin(&evthdlr_lists_ctxt->eventhandler_mutex);
 
@@ -141,7 +145,7 @@ eventhandler_register_internal(
 		if (list == NULL) {
 			lck_mtx_convert_spin(&evthdlr_lists_ctxt->eventhandler_mutex);
 			new_list = kalloc_type(struct eventhandler_list, Z_WAITOK_ZERO);
-			evhlog((LOG_DEBUG, "%s: creating list \"%s\"", __func__, name));
+			evhlog2(debug, "%s: creating list \"%s\"", __func__, name);
 			list = new_list;
 			list->el_flags = 0;
 			list->el_runcount = 0;
@@ -161,8 +165,8 @@ eventhandler_register_internal(
 	    ("%s: handler for %s registered with dead priority", __func__, name));
 
 	/* sort it into the list */
-	evhlog((LOG_DEBUG, "%s: adding item %p (function %p to \"%s\"", __func__, (void *)VM_KERNEL_ADDRPERM(epn),
-	    (void *)VM_KERNEL_UNSLIDE(((struct eventhandler_entry_generic *)epn)->func), name));
+	evhlog2(debug, "%s: adding item %p (function %p to \"%s\"", __func__, (void *)VM_KERNEL_ADDRPERM(epn),
+	    (void *)VM_KERNEL_UNSLIDE(((struct eventhandler_entry_generic *)epn)->func), name);
 	EHL_LOCK(list);
 	TAILQ_FOREACH(ep, &list->el_entries, ee_link) {
 		if (ep->ee_priority != EHE_DEAD_PRIORITY &&
@@ -203,8 +207,8 @@ eventhandler_deregister(struct eventhandler_list *list, eventhandler_tag tag)
 	if (ep != NULL) {
 		/* remove just this entry */
 		if (list->el_runcount == 0) {
-			evhlog((LOG_DEBUG, "%s: removing item %p from \"%s\"", __func__, (void *)VM_KERNEL_ADDRPERM(ep),
-			    list->el_name));
+			evhlog2(debug, "%s: removing item %p from \"%s\"", __func__, (void *)VM_KERNEL_ADDRPERM(ep),
+			    list->el_name);
 			/*
 			 * We may have purged the list because of certain events.
 			 * Make sure that is not the case when a specific entry
@@ -216,15 +220,15 @@ eventhandler_deregister(struct eventhandler_list *list, eventhandler_tag tag)
 			EHL_LOCK_CONVERT(list);
 			kfree_type(struct eventhandler_entry, ep);
 		} else {
-			evhlog((LOG_DEBUG, "%s: marking item %p from \"%s\" as dead", __func__,
-			    (void *)VM_KERNEL_ADDRPERM(ep), list->el_name));
+			evhlog2(debug, "%s: marking item %p from \"%s\" as dead", __func__,
+			    (void *)VM_KERNEL_ADDRPERM(ep), list->el_name);
 			ep->ee_priority = EHE_DEAD_PRIORITY;
 		}
 	} else {
 		/* remove entire list */
 		if (list->el_runcount == 0) {
-			evhlog((LOG_DEBUG, "%s: removing all items from \"%s\"", __func__,
-			    list->el_name));
+			evhlog2(debug, "%s: removing all items from \"%s\"", __func__,
+			    list->el_name);
 			EHL_LOCK_CONVERT(list);
 			while (!TAILQ_EMPTY(&list->el_entries)) {
 				ep = TAILQ_FIRST(&list->el_entries);
@@ -232,8 +236,8 @@ eventhandler_deregister(struct eventhandler_list *list, eventhandler_tag tag)
 				kfree_type(struct eventhandler_entry, ep);
 			}
 		} else {
-			evhlog((LOG_DEBUG, "%s: marking all items from \"%s\" as dead",
-			    __func__, list->el_name));
+			evhlog2(debug, "%s: marking all items from \"%s\" as dead",
+			    __func__, list->el_name);
 			TAILQ_FOREACH(ep, &list->el_entries, ee_link)
 			ep->ee_priority = EHE_DEAD_PRIORITY;
 		}
@@ -303,7 +307,7 @@ eventhandler_prune_list(struct eventhandler_list *list)
 
 	int pruned = 0;
 
-	evhlog((LOG_DEBUG, "%s: pruning list \"%s\"", __func__, list->el_name));
+	evhlog2(debug, "%s: pruning list \"%s\"", __func__, list->el_name);
 	EHL_LOCK_ASSERT(list, LCK_MTX_ASSERT_OWNED);
 	TAILQ_FOREACH_SAFE(ep, &list->el_entries, ee_link, en) {
 		if (ep->ee_priority == EHE_DEAD_PRIORITY) {

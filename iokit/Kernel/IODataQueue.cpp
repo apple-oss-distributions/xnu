@@ -33,6 +33,7 @@
 #include <IOKit/IODataQueue.h>
 
 #undef DISABLE_DATAQUEUE_WARNING
+#include <vm/vm_kern_xnu.h>
 
 #include <IOKit/IODataQueueShared.h>
 #include <IOKit/IOLib.h>
@@ -276,7 +277,8 @@ IODataQueue::sendDataAvailableNotification()
 
 	msgh = &((IODataQueueInternal *) notifyMsg)->msg;
 	if (msgh->msgh_remote_port) {
-		kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size, MACH_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
+		kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size,
+		    MACH64_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
 		switch (kr) {
 		case MACH_SEND_TIMED_OUT: // Notification already sent
 		case MACH_MSG_SUCCESS:

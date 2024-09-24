@@ -65,6 +65,7 @@ fcntl(int fd, int cmd, ...)
 	case F_ADDFILESIGS_FOR_DYLD_SIM:
 	case F_ADDFILESIGS_RETURN:
 	case F_ADDFILESIGS_INFO:
+	case F_ADDSIGS_MAIN_BINARY:
 	case F_ADDFILESUPPL:
 	case F_FINDSIGS:
 	case F_TRANSCODEKEY:

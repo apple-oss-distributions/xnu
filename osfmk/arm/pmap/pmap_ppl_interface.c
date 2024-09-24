@@ -38,9 +38,9 @@
  */
 #include <kern/ledger.h>
 
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pageout.h>
+#include <vm/vm_object_xnu.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_pageout_xnu.h>
 
 #include <arm/pmap/pmap_internal.h>
 

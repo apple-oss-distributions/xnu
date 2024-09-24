@@ -11,7 +11,8 @@ T_GLOBAL_META(T_META_NAMESPACE("xnu.rm"),
 T_DECL(pthread_setugid_np_81523076,
     "Make sure pthread_setugid_np() isn't sticky to workqueue threads",
     T_META_CHECK_LEAKS(false),
-    T_META_ASROOT(true))
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED)
 {
 	int rc;
 

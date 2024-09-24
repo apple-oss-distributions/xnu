@@ -186,10 +186,7 @@ struct ipc_port {
 #define IP_KOBJECT_NSREQUEST_ARMED      ((struct ipc_port *)1)
 	struct ipc_port                *ip_nsrequest;
 	ipc_port_request_table_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_request") ip_requests;
-	union {
-		struct ipc_kmsg *XNU_PTRAUTH_SIGNED_PTR("ipc_port.premsg") ip_premsg;
-		struct turnstile       *ip_send_turnstile;
-	};
+	struct turnstile               *ip_send_turnstile;
 	mach_vm_address_t               ip_context;
 
 #if DEVELOPMENT || DEBUG
@@ -226,18 +223,16 @@ ip_in_pset(ipc_port_t port)
 #define ip_reply_context        ip_messages.imq_context
 #define ip_klist                ip_messages.imq_klist
 
-#define port_send_turnstile(port)                            \
-	(IP_PREALLOC(port) ? TURNSTILE_NULL : (port)->ip_send_turnstile)
+#define port_send_turnstile(port) \
+	((port)->ip_send_turnstile)
 
-#define set_port_send_turnstile(port, value)                 \
-MACRO_BEGIN                                                  \
-if (!IP_PREALLOC(port)) {                                     \
-	(port)->ip_send_turnstile = (value);           \
-}                                                         \
+#define set_port_send_turnstile(port, value) \
+MACRO_BEGIN                                  \
+	(port)->ip_send_turnstile = (value); \
 MACRO_END
 
-#define port_send_turnstile_address(port)                    \
-	(IP_PREALLOC(port) ? NULL : &((port)->ip_send_turnstile))
+#define port_send_turnstile_address(port)    \
+	(&((port)->ip_send_turnstile))
 
 #define port_rcv_turnstile_address(port)   (&(port)->ip_waitq.waitq_ts)
 
@@ -348,27 +343,28 @@ extern void __ipc_right_delta_overflow_panic(
  *   Same as PORT_ENFORCE_REPLY_PORT_SEMANTICS above, but does not allow for provisional reply ports.
  *   Once provisional reply ports no longer exist, this will be removed as "rigidness/strictness" will be irrelavant.
  *
- * PORT_ID_PROTECTED_OPT_OUT
- *   Port is opted out from identity protected enforcement for mach exceptions.
+ * PORT_MARK_EXCEPTION_PORT
+ *   Port is used as a mach exception port. It has an immovable receive right and can be used in the
+ *   hardened exception flow provided by `task_register_hardened_exception_handler`
  */
 #define PORT_MARK_REPLY_PORT              0x01
 #define PORT_ENFORCE_REPLY_PORT_SEMANTICS 0x02
 #define PORT_MARK_PROVISIONAL_REPLY_PORT  0x03
 #define PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS  0x04
-#define PORT_ID_PROTECTED_OPT_OUT                 0x05
+#define PORT_MARK_EXCEPTION_PORT        0x05
 
 /* ip_reply_port_semantics can be read without a lock as it is never unset after port creation. */
 #define ip_is_reply_port(port)                          (((port)->ip_reply_port_semantics) == PORT_MARK_REPLY_PORT)
 #define ip_require_reply_port_semantics(port)           (((port)->ip_reply_port_semantics) == PORT_ENFORCE_REPLY_PORT_SEMANTICS)
 #define ip_is_provisional_reply_port(port)              (((port)->ip_reply_port_semantics) == PORT_MARK_PROVISIONAL_REPLY_PORT)
 #define ip_require_rigid_reply_port_semantics(port)     (((port)->ip_reply_port_semantics) == PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS)
-#define ip_is_id_prot_opted_out(port)                   (((port)->ip_reply_port_semantics) == PORT_ID_PROTECTED_OPT_OUT)
+#define ip_is_exception_port(port)                      (((port)->ip_reply_port_semantics) == PORT_MARK_EXCEPTION_PORT)
 
 #define ip_mark_reply_port(port)                        ((port)->ip_reply_port_semantics = PORT_MARK_REPLY_PORT)
 #define ip_enforce_reply_port_semantics(port)           ((port)->ip_reply_port_semantics = PORT_ENFORCE_REPLY_PORT_SEMANTICS)
 #define ip_mark_provisional_reply_port(port)            ((port)->ip_reply_port_semantics = PORT_MARK_PROVISIONAL_REPLY_PORT)
 #define ip_enforce_rigid_reply_port_semantics(port)     ((port)->ip_reply_port_semantics = PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS)
-#define ip_mark_id_prot_opt_out(port)                   ((port)->ip_reply_port_semantics = PORT_ID_PROTECTED_OPT_OUT)
+#define ip_mark_exception_port(port)                   ((port)->ip_reply_port_semantics = PORT_MARK_EXCEPTION_PORT)
 
 #define ip_is_immovable_send(port)      ((port)->ip_immovable_send)
 #define ip_is_pinned(port)              ((port)->ip_pinned)
@@ -390,23 +386,6 @@ extern bool ip_violates_reply_port_semantics(ipc_port_t dest_port, ipc_port_t re
 #define RRP_3P_VIOLATOR                  5
 
 /* Bits reserved in IO_BITS_PORT_INFO are defined here */
-
-/*
- * JMM - Preallocation flag
- * This flag indicates that there is a message buffer preallocated for this
- * port and we should use that when sending (from the kernel) rather than
- * allocate a new one.  This avoids deadlocks during notification message
- * sends by critical system threads (which may be needed to free memory and
- * therefore cannot be blocked waiting for memory themselves).
- */
-#define IP_BIT_PREALLOC         0x00008000      /* preallocated mesg */
-#define IP_PREALLOC(port)       (io_bits(ip_to_object(port)) & IP_BIT_PREALLOC)
-
-#define IP_SET_PREALLOC(port, kmsg)                                     \
-MACRO_BEGIN                                                             \
-	io_bits_or(ip_to_object(port), IP_BIT_PREALLOC);                \
-	(port)->ip_premsg = (kmsg);                                     \
-MACRO_END
 
 /*
  * This flag indicates that the port has opted into message filtering based
@@ -630,7 +609,7 @@ extern boolean_t ipc_port_request_sparm(
 	ipc_port_t                port,
 	mach_port_name_t          name,
 	ipc_port_request_index_t  index,
-	mach_msg_option_t         option,
+	mach_msg_option64_t       option,
 	mach_msg_priority_t       priority);
 
 /* Make a no-senders request */
@@ -657,8 +636,8 @@ __options_decl(ipc_port_init_flags_t, uint32_t, {
 	IPC_PORT_INIT_REPLY                             = 0x00000040,
 	IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS           = 0x00000080,
 	IPC_PORT_INIT_PROVISIONAL_REPLY                 = 0x00000100,
-	IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT        = 0x00000200,
 	IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS     = 0x00000400,
+	IPC_PORT_INIT_EXCEPTION_PORT                    = 0x00000800,
 });
 
 /* Initialize a newly-allocated port */
@@ -894,7 +873,7 @@ extern ipc_port_t ipc_port_make_send_any(
  *
  * @returns
  * - IP_NULL            if @c port was not a message queue port
- *                      (IKOT_NONE, or IKOT_TIMER), or @c port was IP_NULL.
+ *                      (IKOT_NONE), or @c port was IP_NULL.
  * - IP_DEAD            if @c port was dead.
  * - @c port            if @c port was valid, in which case
  *                      a naked send right was made.
@@ -956,7 +935,7 @@ extern ipc_port_t ipc_port_copy_send_any(
  *
  * @returns
  * - IP_NULL            if @c port was not a message queue port
- *                      (IKOT_NONE, or IKOT_TIMER), or @c port was IP_NULL.
+ *                      (IKOT_NONE), or @c port was IP_NULL.
  * - IP_DEAD            if @c port was dead.
  * - @c port            if @c port was valid, in which case
  *                      a naked send right was made.
@@ -980,8 +959,13 @@ extern void ipc_port_thread_group_unblocked(void);
 
 extern void ipc_port_release_send_and_unlock(
 	ipc_port_t      port);
-#endif /* MACH_KERNEL_PRIVATE */
 
+extern kern_return_t mach_port_deallocate_kernel(
+	ipc_space_t             space,
+	mach_port_name_t        name,
+	natural_t               kotype);
+
+#endif /* MACH_KERNEL_PRIVATE */
 #if KERNEL_PRIVATE
 
 /* Release a (valid) naked send right */

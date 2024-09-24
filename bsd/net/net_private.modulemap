@@ -1,4 +1,9 @@
 module DarwinPrivate.net [system] {
+  module if_ipsec {
+    header "net/if_ipsec.h"
+    export *
+  }
+
   module if {
     header "net/if_private.h"
     export *
@@ -11,6 +16,13 @@ module DarwinPrivate.net [system] {
   }
 
   #endif
+  module if_mib {
+    #ifndef XNU_PLATFORM_MacOSX
+    header "net/if_mib.h"
+    #endif
+    header "net/if_mib_private.h"
+    export *
+  }
   module if_var {
     header "net/if_var_private.h"
     export *
@@ -18,6 +30,16 @@ module DarwinPrivate.net [system] {
 
   module if_vlan_var {
     header "net/if_vlan_var.h"
+    export *
+  }
+
+  module necp {
+    header "net/necp.h"
+    export *
+  }
+
+  module network_agent {
+    header "net/network_agent.h"
     export *
   }
 

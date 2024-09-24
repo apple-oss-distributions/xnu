@@ -34,13 +34,12 @@
 #include <net/bloom_filter.h>
 #include <os/base.h>
 
-#define kNetBloomFilterBitsPerTableElement (sizeof(uint32_t) * 8)
-
 size_t
 net_bloom_filter_get_size(uint32_t num_bits)
 {
 	if (num_bits == 0) {
-		return sizeof(struct net_bloom_filter);
+		// 0 bits is not valid
+		return 0;
 	}
 
 	uint32_t num_elements = howmany(num_bits, kNetBloomFilterBitsPerTableElement);
@@ -76,7 +75,7 @@ net_bloom_filter_destroy(struct net_bloom_filter *filter)
 static inline void
 net_bloom_filter_insert_using_function(struct net_bloom_filter *filter,
     net_flowhash_fn_t *function,
-    const void *buffer,
+    const void * __sized_by(length)buffer,
     uint32_t length)
 {
 	u_int32_t hash = (function(buffer, length, 0) % filter->b_table_num_bits);
@@ -87,7 +86,7 @@ net_bloom_filter_insert_using_function(struct net_bloom_filter *filter,
 
 void
 net_bloom_filter_insert(struct net_bloom_filter *filter,
-    const void *buffer,
+    const void * __sized_by(length)buffer,
     uint32_t length)
 {
 	net_bloom_filter_insert_using_function(filter, &net_flowhash_jhash, buffer, length);
@@ -98,7 +97,7 @@ net_bloom_filter_insert(struct net_bloom_filter *filter,
 static inline bool
 net_bloom_filter_contains_using_function(struct net_bloom_filter *filter,
     net_flowhash_fn_t *function,
-    const void *buffer,
+    const void * __sized_by(length)buffer,
     uint32_t length)
 {
 	u_int32_t hash = (function(buffer, length, 0) % filter->b_table_num_bits);
@@ -109,7 +108,7 @@ net_bloom_filter_contains_using_function(struct net_bloom_filter *filter,
 
 bool
 net_bloom_filter_contains(struct net_bloom_filter *filter,
-    const void *buffer,
+    const void * __sized_by(length)buffer,
     uint32_t length)
 {
 	return net_bloom_filter_contains_using_function(filter, &net_flowhash_jhash, buffer, length) &&

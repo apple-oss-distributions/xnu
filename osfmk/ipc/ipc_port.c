@@ -496,7 +496,7 @@ ipc_port_request_sparm(
 	ipc_port_t                      port,
 	__assert_only mach_port_name_t  name,
 	ipc_port_request_index_t        index,
-	mach_msg_option_t               option,
+	mach_msg_option64_t             option,
 	mach_msg_priority_t             priority)
 {
 	if (index != IE_REQ_NONE) {
@@ -717,12 +717,6 @@ ipc_port_clear_receiver(
 	mqueue->imq_seqno = 0;
 	port->ip_context = port->ip_guarded = port->ip_strict_guard = 0;
 
-	/*
-	 * clear the immovable bit so the port can move back to anyone listening
-	 * for the port destroy notification.
-	 */
-	port->ip_immovable_receive = 0;
-
 	if (should_destroy) {
 		/*
 		 * Mark the port and mqueue invalid, preventing further send/receive
@@ -742,6 +736,12 @@ ipc_port_clear_receiver(
 
 		reap_messages = ipc_mqueue_destroy_locked(mqueue, free_l);
 	} else {
+		/*
+		 * clear the immovable bit so the port can move back to anyone
+		 * listening for the port destroy notification.
+		 */
+		port->ip_immovable_receive = 0;
+
 		/* port transtions to IN-LIMBO state */
 		port->ip_receiver_name = MACH_PORT_NULL;
 		port->ip_destination = IP_NULL;
@@ -763,7 +763,7 @@ ipc_port_init_validate_flags(ipc_port_init_flags_t flags)
 {
 	uint32_t at_most_one_flags = flags & (IPC_PORT_ENFORCE_REPLY_PORT_SEMANTICS |
 	    IPC_PORT_ENFORCE_RIGID_REPLY_PORT_SEMANTICS |
-	    IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT |
+	    IPC_PORT_INIT_EXCEPTION_PORT |
 	    IPC_PORT_INIT_PROVISIONAL_REPLY);
 
 	if (at_most_one_flags & (at_most_one_flags - 1)) {
@@ -830,8 +830,8 @@ ipc_port_init(
 		ip_mark_provisional_reply_port(port);
 	}
 
-	if (flags & IPC_PORT_INIT_PROVISIONAL_ID_PROT_OPTOUT) {
-		ip_mark_id_prot_opt_out(port);
+	if (flags & IPC_PORT_INIT_EXCEPTION_PORT) {
+		ip_mark_exception_port(port);
 		port->ip_immovable_receive = true;
 	}
 
@@ -1775,7 +1775,7 @@ retry_alloc:
  *		ref becomes zero, deallocate the turnstile.
  *
  *	Conditions:
- *		The space might be locked, use safe deallocate.
+ *		The space might be locked
  */
 void
 ipc_port_send_turnstile_complete(ipc_port_t port)
@@ -1795,7 +1795,7 @@ ipc_port_send_turnstile_complete(ipc_port_t port)
 	turnstile_cleanup();
 
 	if (turnstile != TURNSTILE_NULL) {
-		turnstile_deallocate_safe(turnstile);
+		turnstile_deallocate(turnstile);
 		turnstile = TURNSTILE_NULL;
 	}
 }
@@ -2134,11 +2134,11 @@ not_special:
 	} else if (ts) {
 		/* Call turnstile cleanup after dropping the interlock */
 		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_NOT_HELD);
-		turnstile_deallocate_safe(ts);
+		turnstile_deallocate(ts);
 	}
 
 	if (port_stashed_turnstile) {
-		turnstile_deallocate_safe(port_stashed_turnstile);
+		turnstile_deallocate(port_stashed_turnstile);
 	}
 
 	/* Release the ref on the dest port and its turnstile */
@@ -2193,7 +2193,7 @@ ipc_port_adjust_sync_link_state_locked(
 		break;
 	case PORT_SYNC_LINK_WORKLOOP_STASH:
 		/* deallocate the turnstile reference for the inheritor */
-		turnstile_deallocate_safe(port->ip_messages.imq_inheritor_turnstile);
+		turnstile_deallocate(port->ip_messages.imq_inheritor_turnstile);
 		break;
 	}
 
@@ -2453,7 +2453,7 @@ ipc_port_send_turnstile_recompute_push_locked(
 	if (send_turnstile) {
 		turnstile_update_inheritor_complete(send_turnstile,
 		    TURNSTILE_INTERLOCK_NOT_HELD);
-		turnstile_deallocate_safe(send_turnstile);
+		turnstile_deallocate(send_turnstile);
 	}
 }
 
@@ -2835,18 +2835,12 @@ ipc_port_make_send_mqueue(
 	ipc_port_t      port)
 {
 	ipc_port_t sright = port;
-	ipc_kobject_type_t kotype;
 
 	if (IP_VALID(port)) {
-		kotype = ip_kotype(port);
-
 		ip_mq_lock(port);
 		if (__improbable(!ip_active(port))) {
 			sright = IP_DEAD;
-		} else if (kotype == IKOT_NONE) {
-			ipc_port_make_send_any_locked(port);
-		} else if (kotype == IKOT_TIMER) {
-			ipc_kobject_mktimer_require_locked(port);
+		} else if (ip_kotype(port) == IKOT_NONE) {
 			ipc_port_make_send_any_locked(port);
 		} else {
 			sright = IP_NULL;
@@ -2890,18 +2884,12 @@ ipc_port_copy_send_mqueue(
 	ipc_port_t      port)
 {
 	ipc_port_t sright = port;
-	ipc_kobject_type_t kotype;
 
 	if (IP_VALID(port)) {
-		kotype = ip_kotype(port);
-
 		ip_mq_lock(port);
 		if (__improbable(!ip_active(port))) {
 			sright = IP_DEAD;
-		} else if (kotype == IKOT_NONE) {
-			ipc_port_copy_send_any_locked(port);
-		} else if (kotype == IKOT_TIMER) {
-			ipc_kobject_mktimer_require_locked(port);
+		} else if (ip_kotype(port) == IKOT_NONE) {
 			ipc_port_copy_send_any_locked(port);
 		} else {
 			sright = IP_NULL;
@@ -3266,23 +3254,6 @@ ipc_port_finalize(
 	if (requests) {
 		port->ip_requests = NULL;
 		ipc_port_request_table_free_noclear(requests);
-	}
-
-	/*
-	 * (81997111) now it is safe to deallocate the prealloc message.
-	 * Keep the IP_BIT_PREALLOC bit, it has to be sticky as the turnstile
-	 * code looks at it without holding locks.
-	 */
-	if (IP_PREALLOC(port)) {
-		ipc_kmsg_t kmsg = port->ip_premsg;
-
-		if (kmsg == IKM_NULL || ikm_prealloc_inuse_port(kmsg)) {
-			panic("port(%p, %p): prealloc message in an invalid state",
-			    port, kmsg);
-		}
-
-		port->ip_premsg = IKM_NULL;
-		ipc_kmsg_free(kmsg);
 	}
 
 	waitq_deinit(&port->ip_waitq);

@@ -107,26 +107,6 @@ struct netif_flowtable_ops {
 };
 
 SLIST_HEAD(netif_flow_head, netif_flow);
-struct nexus_netif_adapter {
-	/*
-	 * This is an overlay structure on nexus_adapter;
-	 * make sure it contains 'up' as the first member.
-	 */
-	struct nexus_adapter      nifna_up;
-	struct nx_netif           *nifna_netif;
-
-	struct nx_netif_mit       *nifna_tx_mit;
-	struct nx_netif_mit       *nifna_rx_mit;
-
-	/*
-	 * XXX For filter or vpna only
-	 */
-	union {
-		struct netif_filter     *nifna_filter;
-		struct netif_flow       *nifna_flow;
-	};
-	uint16_t                  nifna_gencnt;
-};
 
 struct netif_queue {
 	decl_lck_mtx_data(, nq_lock);
@@ -166,12 +146,13 @@ struct netif_qset {
 	uint16_t                   nqs_flags;
 	uint8_t                    nqs_num_rx_queues;
 	uint8_t                    nqs_num_tx_queues;
+	uint8_t                    nqs_num_queues;
 	/*
 	 * nq_queues will be organized as:
 	 * nq_queues[0..nq_num_rx_queues-1] will hold RX queues.
 	 * nq_queues[nq_num_rx_queues..nq_num_tx_queues-1] will hold TX queues.
 	 */
-	struct netif_queue         nqs_driver_queues[0]
+	struct netif_queue         nqs_driver_queues[__counted_by(nqs_num_queues)]
 	__attribute__((aligned(sizeof(uint64_t))));
 };
 
@@ -221,7 +202,7 @@ struct netif_agent_flow {
 	union sockaddr_in_4_6   naf_saddr;
 };
 
-#define NIFNA(_na)       ((struct nexus_netif_adapter *)(_na))
+#define NIFNA(_na)       (__container_of((_na), struct nexus_netif_adapter, nifna_up))
 
 /* nif_flags */
 /*
@@ -480,6 +461,29 @@ struct nx_netif_mit {
 #define MIT_SPIN_UNLOCK(_mit)                   \
 	lck_spin_unlock(&(_mit)->mit_lock)
 
+struct nexus_netif_adapter {
+	/*
+	 * This is an overlay structure on nexus_adapter;
+	 * make sure it contains 'up' as the first member.
+	 */
+	struct nexus_adapter      nifna_up;
+	struct nx_netif           *nifna_netif;
+
+	struct nx_netif_mit       *__counted_by(nifna_tx_mit_count) nifna_tx_mit;
+	struct nx_netif_mit       *__counted_by(nifna_rx_mit_count) nifna_rx_mit;
+
+	/*
+	 * XXX For filter or vpna only
+	 */
+	union {
+		struct netif_filter     *nifna_filter;
+		struct netif_flow       *nifna_flow;
+	};
+	uint16_t                  nifna_gencnt;
+	uint32_t                  nifna_tx_mit_count;
+	uint32_t                  nifna_rx_mit_count;
+};
+
 extern kern_allocation_name_t skmem_tag_netif_filter;
 extern kern_allocation_name_t skmem_tag_netif_flow;
 extern kern_allocation_name_t skmem_tag_netif_agent_flow;
@@ -524,7 +528,7 @@ extern void nx_netif_prov_nx_dtor(struct kern_nexus *);
 extern int nx_netif_prov_nx_mem_info(struct kern_nexus *,
     struct kern_pbufpool **, struct kern_pbufpool **);
 extern size_t nx_netif_prov_nx_mib_get(struct kern_nexus *nx,
-    struct nexus_mib_filter *, void *, size_t, struct proc *);
+    struct nexus_mib_filter *, void *__sized_by(len), size_t len, struct proc *);
 extern int nx_netif_prov_nx_stop(struct kern_nexus *);
 
 extern void nx_netif_reap(struct nexus_netif_adapter *, struct ifnet *,
@@ -634,7 +638,8 @@ extern uint32_t nx_netif_filter_default_drop;
 #define NETIF_FLOW_OUTBOUND     0x0004 /* Assumes inbound if flag is missing */
 
 extern errno_t nx_netif_demux(struct nexus_netif_adapter *,
-    struct __kern_packet *, struct __kern_packet **, uint32_t);
+    struct __kern_packet *, struct __kern_packet **, struct nexus_pkt_stats *,
+    uint32_t);
 extern errno_t nx_netif_flow_add(struct nx_netif *, nexus_port_t,
     struct netif_flow_desc *, void *, errno_t (*)(void *, void *, uint32_t),
     struct netif_flow **);

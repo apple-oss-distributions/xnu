@@ -68,21 +68,7 @@
 #define PKTAP_FILTER_PARAM_IF_TYPE      1
 #define PKTAP_FILTER_PARAM_IF_NAME      2
 
-#ifdef BSD_KERNEL_PRIVATE
 struct pktap_filter {
-	uint32_t        filter_op;
-	uint32_t        filter_param;
-	union {
-		uint32_t        _filter_if_type;
-		char            _filter_if_name[PKTAP_IFXNAMESIZE];
-	} param_;
-	size_t          filter_ifname_prefix_len;
-};
-
-struct x_pktap_filter {
-#else
-struct pktap_filter {
-#endif /* BSD_KERNEL_PRIVATE */
 	uint32_t        filter_op;
 	uint32_t        filter_param;
 	union {
@@ -135,6 +121,7 @@ struct pktap_header {
  */
 #define PTH_TYPE_NONE   0               /* No more data following */
 #define PTH_TYPE_PACKET 1               /* Actual captured packet data */
+#define PTH_TYPE_DROP   2               /* Dropped packet capture */
 
 /*
  * Size of buffer that can contain any pktap header
@@ -229,6 +216,8 @@ struct pktap_buffer_v2_hdr_extra {
 #define PTH_FLAG_V2_HDR         0x00080000 /* Version 2 of pktap */
 #define PTH_FLAG_WAKE_PKT       0x00100000 /* Packet caused system to ake from sleep */
 
+#include <net/droptap.h>
+
 #ifdef BSD_KERNEL_PRIVATE
 
 #include <net/bpf.h>
@@ -251,10 +240,12 @@ extern void pktap_v2_finalize_proc_info(struct pktap_v2_hdr *);
 #if SKYWALK
 #include <skywalk/os_skywalk.h>
 extern void pktap_input_packet(struct ifnet *, protocol_family_t, uint32_t,
-    pid_t, const char *, pid_t, const char *, kern_packet_t, const void *, size_t,
+    pid_t, const char *, pid_t, const char *, kern_packet_t,
+    const void *__sized_by(header_len) header, size_t header_len,
     uint8_t, uint32_t, uint32_t);
 extern void pktap_output_packet(struct ifnet *, protocol_family_t, uint32_t,
-    pid_t, const char *, pid_t, const char *, kern_packet_t, const void *, size_t,
+    pid_t, const char *, pid_t, const char *, kern_packet_t,
+    const void *__sized_by(header_len) header, size_t header_len,
     uint8_t, uint32_t, uint32_t);
 #endif /* SKYWALK */
 extern void convert_to_pktap_header_to_v2(struct bpf_packet *bpf_pkt, bool truncate);

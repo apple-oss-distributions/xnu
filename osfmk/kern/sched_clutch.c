@@ -26,6 +26,8 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#if !SCHED_TEST_HARNESS
+
 #include <mach/mach_types.h>
 #include <mach/machine.h>
 #include <machine/machine_routines.h>
@@ -38,7 +40,6 @@
 #include <kern/processor.h>
 #include <kern/queue.h>
 #include <kern/sched.h>
-#include <kern/sched_prim.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/sched_clutch.h>
@@ -46,11 +47,35 @@
 #include <kern/sched_clutch.h>
 #include <sys/kdebug.h>
 
+#endif /* !SCHED_TEST_HARNESS */
+
+#include <kern/sched_prim.h>
+
 #if CONFIG_SCHED_EDGE
 #include <kern/sched_amp_common.h>
 #endif /* CONFIG_SCHED_EDGE */
 
 #if CONFIG_SCHED_CLUTCH
+
+#define SCHED_CLUTCH_DBG_THREAD_SELECT_PACKED_VERSION 1
+typedef union {
+	struct __attribute__((packed)) {
+		unsigned int version                            : 4;
+		unsigned int traverse_mode                      : 3;
+		unsigned int cluster_id                         : 6;
+		unsigned int selection_was_edf                  : 1;
+		unsigned int selection_was_cluster_bound        : 1;
+		unsigned int selection_opened_starvation_avoidance_window  : 1;
+		unsigned int selection_opened_warp_window       : 1;
+		unsigned int starvation_avoidance_window_close  : 12;
+		unsigned int warp_window_close                  : 12;
+		unsigned int reserved                           : 23;  /* For future usage */
+	} trace_data;
+	uint64_t scdts_trace_data_packed;
+} sched_clutch_dbg_thread_select_packed_t;
+
+static_assert(TH_BUCKET_SCHED_MAX == 6, "Ensure layout of sched_clutch_dbg_thread_select_packed can fit root bucket bitmasks");
+static_assert(sizeof(sched_clutch_dbg_thread_select_packed_t) <= sizeof(uint64_t), "Ensure sched_clutch_dbg_thread_select_packed_t can fit in one tracepoint argument");
 
 /* Forward declarations of static routines */
 
@@ -66,8 +91,13 @@ __enum_decl(sched_clutch_highest_root_bucket_type_t, uint32_t, {
 	SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY   = 1,
 	SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL            = 2,
 });
-
-static sched_clutch_root_bucket_t sched_clutch_root_highest_root_bucket(sched_clutch_root_t, uint64_t, sched_clutch_highest_root_bucket_type_t);
+__enum_decl(sched_clutch_traverse_mode_t, uint32_t, {
+	SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY   = 0,
+	SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT = 1,
+	SCHED_CLUTCH_TRAVERSE_CHECK_PREEMPT           = 2,
+});
+static_assert(SCHED_CLUTCH_TRAVERSE_CHECK_PREEMPT < (1 << 3), "Ensure traverse mode can be encoded within 3 bits of sched_clutch_dbg_thread_select_packed_t");
+static sched_clutch_root_bucket_t sched_clutch_root_highest_root_bucket(sched_clutch_root_t, uint64_t, sched_clutch_highest_root_bucket_type_t, sched_clutch_root_bucket_t, thread_t, bool *, sched_clutch_traverse_mode_t, sched_clutch_dbg_thread_select_packed_t *);
 
 #if CONFIG_SCHED_EDGE
 /* Support for foreign threads on AMP platforms */
@@ -77,7 +107,8 @@ static thread_t sched_clutch_root_highest_foreign_thread_remove(sched_clutch_roo
 
 /* Root bucket level hierarchy management */
 static uint64_t sched_clutch_root_bucket_deadline_calculate(sched_clutch_root_bucket_t, uint64_t);
-static void sched_clutch_root_bucket_deadline_update(sched_clutch_root_bucket_t, sched_clutch_root_t, uint64_t);
+static void sched_clutch_root_bucket_deadline_update(sched_clutch_root_bucket_t, sched_clutch_root_t, uint64_t, bool);
+static int sched_clutch_root_highest_runnable_qos(sched_clutch_root_t, sched_clutch_highest_root_bucket_type_t);
 
 /* Options for clutch bucket ordering in the runq */
 __options_decl(sched_clutch_bucket_options_t, uint32_t, {
@@ -114,14 +145,21 @@ static uint32_t sched_clutch_run_bucket_decr(sched_clutch_t, sched_bucket_t);
 /* Clutch membership management */
 static boolean_t sched_clutch_thread_insert(sched_clutch_root_t, thread_t, integer_t);
 static void sched_clutch_thread_remove(sched_clutch_root_t, thread_t, uint64_t, sched_clutch_bucket_options_t);
-static thread_t sched_clutch_thread_highest_remove(sched_clutch_root_t);
+static thread_t sched_clutch_hierarchy_thread_highest(sched_clutch_root_t, processor_t, thread_t, sched_clutch_traverse_mode_t);
 
 /* Clutch properties updates */
 static uint32_t sched_clutch_root_urgency(sched_clutch_root_t);
 static uint32_t sched_clutch_root_count_sum(sched_clutch_root_t);
 static int sched_clutch_root_priority(sched_clutch_root_t);
-static sched_clutch_bucket_t sched_clutch_root_bucket_highest_clutch_bucket(sched_clutch_root_bucket_t);
+static sched_clutch_bucket_t sched_clutch_root_bucket_highest_clutch_bucket(sched_clutch_root_t, sched_clutch_root_bucket_t, processor_t _Nullable processor, thread_t _Nullable prev_thread, bool *_Nullable chose_prev_thread);
+
+/* Clutch thread properties */
 static boolean_t sched_thread_sched_pri_promoted(thread_t);
+static inline sched_clutch_bucket_t sched_clutch_bucket_for_thread(sched_clutch_root_t, thread_t);
+static inline sched_clutch_bucket_group_t sched_clutch_bucket_group_for_thread(thread_t);
+
+/* General utilities */
+static inline bool sched_clutch_pri_greater_than_tiebreak(int, int, bool);
 
 #if CONFIG_SCHED_EDGE
 /* System based routines */
@@ -365,13 +403,13 @@ sched_clutch_root_init(
 	root_clutch->scr_pset = pset;
 #if CONFIG_SCHED_EDGE
 	root_clutch->scr_cluster_id = pset->pset_cluster_id;
+	for (cluster_shared_rsrc_type_t shared_rsrc_type = CLUSTER_SHARED_RSRC_TYPE_MIN; shared_rsrc_type < CLUSTER_SHARED_RSRC_TYPE_COUNT; shared_rsrc_type++) {
+		root_clutch->scr_shared_rsrc_load_runnable[shared_rsrc_type] = 0;
+	}
 #else /* CONFIG_SCHED_EDGE */
 	root_clutch->scr_cluster_id = 0;
 #endif /* CONFIG_SCHED_EDGE */
 
-	for (cluster_shared_rsrc_type_t shared_rsrc_type = CLUSTER_SHARED_RSRC_TYPE_MIN; shared_rsrc_type < CLUSTER_SHARED_RSRC_TYPE_COUNT; shared_rsrc_type++) {
-		root_clutch->scr_shared_rsrc_load_runnable[shared_rsrc_type] = 0;
-	}
 	/* Initialize the queue which maintains all runnable clutch_buckets for timesharing purposes */
 	queue_init(&root_clutch->scr_clutch_buckets);
 
@@ -545,8 +583,8 @@ sched_clutch_root_bucket_init(
 		sched_clutch_bucket_runq_init(&root_bucket->scrb_clutch_buckets);
 	}
 	priority_queue_entry_init(&root_bucket->scrb_pqlink);
-	root_bucket->scrb_pqlink.deadline = SCHED_CLUTCH_INVALID_TIME_64;
-	root_bucket->scrb_warped_deadline = 0;
+	root_bucket->scrb_pqlink.deadline = 0;
+	root_bucket->scrb_warped_deadline = SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED;
 	root_bucket->scrb_warp_remaining = sched_clutch_root_bucket_warp[root_bucket->scrb_bucket];
 	root_bucket->scrb_starvation_avoidance = false;
 	root_bucket->scrb_starvation_ts = 0;
@@ -576,42 +614,196 @@ sched_clutch_root_bucket_init(
  * sched_clutch_root_unbound_select_aboveui()
  *
  * Routine to determine if the above UI unbounded bucket should be selected for execution.
+ *
+ * Writes the highest unbound (timeshare FG vs. above UI) bucket, its priority, and whether
+ * it is an above UI bucket into the pointer parameters.
  */
-static bool
+static void
 sched_clutch_root_unbound_select_aboveui(
-	sched_clutch_root_t root_clutch)
+	sched_clutch_root_t root_clutch,
+	sched_clutch_root_bucket_t *highest_bucket,
+	int *highest_pri,
+	bool *highest_is_aboveui,
+	sched_clutch_root_bucket_t _Nullable prev_bucket,
+	thread_t _Nullable prev_thread)
 {
+	/* First determine the highest Clutch bucket */
+	sched_clutch_root_bucket_t higher_root_bucket = NULL;
+	sched_clutch_bucket_t higher_clutch_bucket = NULL;
+	int higher_bucket_sched_pri = -1;
+	bool higher_is_aboveui = false;
+	/* Consider unbound Above UI */
 	if (bitmap_test(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_FIXPRI)) {
-		sched_clutch_root_bucket_t root_bucket_aboveui = &root_clutch->scr_unbound_buckets[TH_BUCKET_FIXPRI];
+		higher_root_bucket = &root_clutch->scr_unbound_buckets[TH_BUCKET_FIXPRI];
+		higher_clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(root_clutch, higher_root_bucket, NULL, NULL, NULL);
+		higher_bucket_sched_pri = priority_queue_max_sched_pri(&higher_clutch_bucket->scb_clutchpri_prioq);
+		higher_is_aboveui = true;
+	}
+	/* Consider unbound Timeshare FG */
+	if (bitmap_test(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SHARE_FG)) {
 		sched_clutch_root_bucket_t root_bucket_sharefg = &root_clutch->scr_unbound_buckets[TH_BUCKET_SHARE_FG];
-		if (!bitmap_test(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SHARE_FG)) {
-			/* If the timeshare FG bucket is not runnable, pick the aboveUI bucket for scheduling */
-			return true;
-		}
-		sched_clutch_bucket_t clutch_bucket_aboveui = sched_clutch_root_bucket_highest_clutch_bucket(root_bucket_aboveui);
-		sched_clutch_bucket_t clutch_bucket_sharefg = sched_clutch_root_bucket_highest_clutch_bucket(root_bucket_sharefg);
-		if (clutch_bucket_aboveui->scb_priority >= clutch_bucket_sharefg->scb_priority) {
-			return true;
+		sched_clutch_bucket_t clutch_bucket_sharefg = sched_clutch_root_bucket_highest_clutch_bucket(root_clutch, root_bucket_sharefg, NULL, NULL, NULL);
+		/* Strict greater-than because unbound timeshare FG root bucket loses all priority ties at this level */
+		if (higher_root_bucket == NULL || clutch_bucket_sharefg->scb_priority > higher_clutch_bucket->scb_priority) {
+			higher_root_bucket = root_bucket_sharefg;
+			higher_clutch_bucket = clutch_bucket_sharefg;
+			higher_bucket_sched_pri = priority_queue_max_sched_pri(&higher_clutch_bucket->scb_clutchpri_prioq);
+			higher_is_aboveui = false;
 		}
 	}
-	return false;
+	/* Consider the previous thread */
+	if (prev_thread != NULL) {
+		assert(prev_bucket->scrb_bound == false);
+		sched_clutch_bucket_group_t prev_clutch_bucket_group = sched_clutch_bucket_group_for_thread(prev_thread);
+		int prev_clutch_bucket_pri = prev_thread->sched_pri + (int)(os_atomic_load(&prev_clutch_bucket_group->scbg_interactivity_data.scct_count, relaxed));
+		sched_clutch_bucket_t prev_clutch_bucket = sched_clutch_bucket_for_thread(root_clutch, prev_thread);
+		bool prev_bucket_should_win_ties = prev_bucket->scrb_bucket == TH_BUCKET_FIXPRI && higher_is_aboveui == false;
+		if (higher_clutch_bucket == NULL ||
+		    sched_clutch_pri_greater_than_tiebreak(prev_clutch_bucket_pri, higher_clutch_bucket->scb_priority, prev_bucket_should_win_ties)) {
+			higher_root_bucket = prev_bucket;
+			higher_clutch_bucket = prev_clutch_bucket;
+			higher_bucket_sched_pri = prev_thread->sched_pri;
+			higher_is_aboveui = prev_bucket->scrb_bucket == TH_BUCKET_FIXPRI;
+		}
+	}
+	/* Compare highest priority in the highest unbound Clutch bucket to highest priority seen from the bound buckets */
+	if (higher_root_bucket != NULL) {
+		bool unbound_should_win_ties = higher_is_aboveui == true && *highest_is_aboveui == false;
+		if (sched_clutch_pri_greater_than_tiebreak(higher_bucket_sched_pri, *highest_pri, unbound_should_win_ties)) {
+			*highest_pri = higher_bucket_sched_pri;
+			*highest_bucket = higher_root_bucket;
+			*highest_is_aboveui = higher_is_aboveui;
+		}
+	}
 }
 
 /*
  * sched_clutch_root_bound_select_aboveui()
  *
  * Routine to determine if the above UI bounded bucket should be selected for execution.
+ *
+ * Writes the highest bound (timeshare FG vs. above UI) bucket, its priority, and whether
+ * it is an above UI bucket into the pointer parameters.
  */
-static bool
+static void
 sched_clutch_root_bound_select_aboveui(
-	sched_clutch_root_t root_clutch)
+	sched_clutch_root_t root_clutch,
+	sched_clutch_root_bucket_t *highest_bucket,
+	int *highest_pri,
+	bool *highest_is_aboveui,
+	sched_clutch_root_bucket_t _Nullable prev_bucket,
+	thread_t _Nullable prev_thread)
 {
+	/* Consider bound Above UI */
 	sched_clutch_root_bucket_t root_bucket_aboveui = &root_clutch->scr_bound_buckets[TH_BUCKET_FIXPRI];
-	sched_clutch_root_bucket_t root_bucket_sharefg = &root_clutch->scr_bound_buckets[TH_BUCKET_SHARE_FG];
-	if (root_bucket_aboveui->scrb_bound_thread_runq.count == 0) {
-		return false;
+	if (bitmap_test(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_FIXPRI) &&
+	    sched_clutch_pri_greater_than_tiebreak(root_bucket_aboveui->scrb_bound_thread_runq.highq, *highest_pri, *highest_is_aboveui == false)) {
+		*highest_pri = root_bucket_aboveui->scrb_bound_thread_runq.highq;
+		*highest_bucket = root_bucket_aboveui;
+		*highest_is_aboveui = true;
 	}
-	return root_bucket_aboveui->scrb_bound_thread_runq.highq >= root_bucket_sharefg->scrb_bound_thread_runq.highq;
+	/* Consider bound Timeshare FG */
+	sched_clutch_root_bucket_t root_bucket_sharefg = &root_clutch->scr_bound_buckets[TH_BUCKET_SHARE_FG];
+	if (bitmap_test(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_SHARE_FG) &&
+	    sched_clutch_pri_greater_than_tiebreak(root_bucket_sharefg->scrb_bound_thread_runq.highq, *highest_pri, false)) {
+		*highest_pri = root_bucket_sharefg->scrb_bound_thread_runq.highq;
+		*highest_bucket = root_bucket_sharefg;
+		*highest_is_aboveui = false;
+	}
+	/* Consider the previous thread */
+	if (prev_thread != NULL) {
+		assert(prev_bucket->scrb_bound == true);
+		bool prev_bucket_should_win_ties = prev_bucket->scrb_bucket == TH_BUCKET_FIXPRI && *highest_is_aboveui == false;
+		if (sched_clutch_pri_greater_than_tiebreak(prev_thread->sched_pri, *highest_pri, prev_bucket_should_win_ties)) {
+			*highest_pri = prev_thread->sched_pri;
+			*highest_bucket = prev_bucket;
+			*highest_is_aboveui = prev_bucket->scrb_bucket == TH_BUCKET_FIXPRI;
+		}
+	}
+}
+
+/*
+ * sched_clutch_root_highest_runnable_qos()
+ *
+ * Returns the index of the highest-QoS root bucket which is currently runnable.
+ */
+static int
+sched_clutch_root_highest_runnable_qos(
+	sched_clutch_root_t root_clutch,
+	sched_clutch_highest_root_bucket_type_t type)
+{
+	int highest_unbound_bucket = bitmap_lsb_first(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
+	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY) {
+		return highest_unbound_bucket;
+	}
+	assert(type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL);
+	int highest_bound_bucket = bitmap_lsb_first(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
+	if (highest_bound_bucket == -1) {
+		return highest_unbound_bucket;
+	}
+	if (highest_unbound_bucket == -1) {
+		return highest_bound_bucket;
+	}
+	/* Both bound and unbound buckets are runnable, return the higher QoS */
+	return MIN(highest_bound_bucket, highest_unbound_bucket);
+}
+
+/*
+ * sched_clutch_root_highest_aboveui_root_bucket()
+ *
+ * Routine to determine if an above UI root bucket should be selected for execution.
+ *
+ * Returns the root bucket if we should run an above UI bucket or NULL otherwise.
+ */
+static sched_clutch_root_bucket_t
+sched_clutch_root_highest_aboveui_root_bucket(
+	sched_clutch_root_t root_clutch,
+	sched_clutch_highest_root_bucket_type_t type,
+	sched_clutch_root_bucket_t _Nullable prev_bucket,
+	thread_t _Nullable prev_thread,
+	bool *chose_prev_thread)
+{
+	assert((prev_thread == NULL && prev_bucket == NULL) || (prev_thread != NULL && prev_bucket != NULL));
+	assert((type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL) || (prev_bucket == NULL));
+
+	sched_clutch_root_bucket_t highest_bucket = NULL;
+	int highest_pri = -1;
+	bool highest_is_aboveui = false;
+
+	/* Forward previous thread to the correct comparison logic, based on boundness */
+	sched_clutch_root_bucket_t bound_prev_bucket = NULL, unbound_prev_bucket = NULL;
+	thread_t bound_prev_thread = NULL, unbound_prev_thread = NULL;
+	if (prev_thread != NULL) {
+		if (prev_bucket->scrb_bound) {
+			bound_prev_bucket = prev_bucket;
+			bound_prev_thread = prev_thread;
+		} else {
+			unbound_prev_bucket = prev_bucket;
+			unbound_prev_thread = prev_thread;
+		}
+	}
+
+	/* Consider bound Above UI vs. Timeshare FG first, so those buckets will win ties against the corresponding unbound buckets */
+	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL) {
+		sched_clutch_root_bound_select_aboveui(root_clutch, &highest_bucket, &highest_pri, &highest_is_aboveui, bound_prev_bucket, bound_prev_thread);
+	}
+
+	/* Consider unbound Above UI vs. Timeshare FG */
+	sched_clutch_root_unbound_select_aboveui(root_clutch, &highest_bucket, &highest_pri, &highest_is_aboveui, unbound_prev_bucket, unbound_prev_thread);
+	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY) {
+		return highest_is_aboveui ? highest_bucket : NULL;
+	}
+	assert(type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL);
+
+	/* Determine whether we already know to continue running the previous thread */
+	if (prev_thread != NULL &&
+	    bitmap_test(highest_bucket->scrb_bound ? root_clutch->scr_bound_runnable_bitmap : root_clutch->scr_unbound_runnable_bitmap, highest_bucket->scrb_bucket) == false) {
+		/* Highest bucket we saw is empty, so the previous thread must have been the highest */
+		assert(highest_bucket == prev_bucket);
+		*chose_prev_thread = true;
+	}
+
+	return highest_is_aboveui ? highest_bucket : NULL;
 }
 
 /*
@@ -628,51 +820,37 @@ static sched_clutch_root_bucket_t
 sched_clutch_root_highest_root_bucket(
 	sched_clutch_root_t root_clutch,
 	uint64_t timestamp,
-	sched_clutch_highest_root_bucket_type_t type)
+	sched_clutch_highest_root_bucket_type_t type,
+	sched_clutch_root_bucket_t _Nullable prev_bucket,
+	thread_t _Nullable prev_thread,
+	bool *chose_prev_thread,
+	sched_clutch_traverse_mode_t mode,
+	sched_clutch_dbg_thread_select_packed_t *debug_info)
 {
+	assert((prev_thread == NULL && prev_bucket == NULL) || (prev_thread != NULL && prev_bucket != NULL));
+	assert(type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL || (prev_thread == NULL));
+	assert(prev_thread == NULL || (mode != SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY));
 	sched_clutch_hierarchy_locked_assert(root_clutch);
-	int highest_runnable_bucket = -1;
-	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY) {
-		highest_runnable_bucket = bitmap_lsb_first(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
-	} else {
-		int highest_unbound_runnable_bucket = bitmap_lsb_first(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
-		int highest_bound_runnable_bucket = bitmap_lsb_first(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
-		highest_runnable_bucket = (highest_bound_runnable_bucket != -1) ? ((highest_unbound_runnable_bucket != -1) ? MIN(highest_bound_runnable_bucket, highest_unbound_runnable_bucket) : highest_bound_runnable_bucket) : highest_unbound_runnable_bucket;
-	}
 
+	int highest_runnable_bucket = sched_clutch_root_highest_runnable_qos(root_clutch, type);
 	if (highest_runnable_bucket == -1) {
-		return NULL;
+		/*
+		 * The Clutch hierarchy has no runnable threads. We can continue running
+		 * whatever was running previously.
+		 */
+		assert(sched_clutch_root_count(root_clutch) == 0 || type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY);
+		*chose_prev_thread = true;
+		if (prev_thread != NULL) {
+			debug_info->trace_data.selection_was_edf = true;
+		}
+		return prev_bucket;
 	}
 
-	/* Above UI root bucket selection (see comment above for more details on this special case handling) */
-	bool unbound_aboveui = sched_clutch_root_unbound_select_aboveui(root_clutch);
-	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY) {
-		if (unbound_aboveui) {
-			return &root_clutch->scr_unbound_buckets[TH_BUCKET_FIXPRI];
-		}
-		/* Fall through to selecting a timeshare root bucket */
-	} else {
-		bool bound_aboveui = sched_clutch_root_bound_select_aboveui(root_clutch);
-		sched_clutch_root_bucket_t unbound_aboveui_root_bucket = &root_clutch->scr_unbound_buckets[TH_BUCKET_FIXPRI];
-		sched_clutch_root_bucket_t bound_aboveui_root_bucket = &root_clutch->scr_bound_buckets[TH_BUCKET_FIXPRI];
-
-		if (unbound_aboveui && bound_aboveui) {
-			/*
-			 * In this scenario both the bounded and unbounded above UI buckets are runnable; choose based on the
-			 * highest runnable priority in both the buckets.
-			 * */
-			int bound_aboveui_pri = root_clutch->scr_bound_buckets[TH_BUCKET_FIXPRI].scrb_bound_thread_runq.highq;
-			sched_clutch_bucket_t clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(unbound_aboveui_root_bucket);
-			int unbound_aboveui_pri = priority_queue_max_sched_pri(&clutch_bucket->scb_clutchpri_prioq);
-			return (bound_aboveui_pri >= unbound_aboveui_pri) ? bound_aboveui_root_bucket : unbound_aboveui_root_bucket;
-		}
-		if (unbound_aboveui) {
-			return unbound_aboveui_root_bucket;
-		}
-		if (bound_aboveui) {
-			return bound_aboveui_root_bucket;
-		}
-		/* Fall through to selecting a timeshare root bucket */
+	/* Consider Above UI threads, in comparison to Timeshare FG threads */
+	sched_clutch_root_bucket_t highest_aboveui_bucket = sched_clutch_root_highest_aboveui_root_bucket(root_clutch, type, prev_bucket, prev_thread, chose_prev_thread);
+	if (highest_aboveui_bucket != NULL) {
+		debug_info->trace_data.selection_was_edf = true;
+		return highest_aboveui_bucket;
 	}
 
 	/*
@@ -683,14 +861,17 @@ sched_clutch_root_highest_root_bucket(
 	 */
 
 	/* Find the earliest deadline bucket */
-	sched_clutch_root_bucket_t edf_bucket = NULL;
-	sched_clutch_root_bucket_t warp_bucket = NULL;
-	int warp_bucket_index = -1;
+	sched_clutch_root_bucket_t edf_bucket;
+	bool edf_bucket_enqueued_normally;
 
 evaluate_root_buckets:
+	edf_bucket = NULL;
+	edf_bucket_enqueued_normally = true;
+
 	if (type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY) {
 		edf_bucket = priority_queue_min(&root_clutch->scr_unbound_root_buckets, struct sched_clutch_root_bucket, scrb_pqlink);
 	} else {
+		assert(type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL);
 		sched_clutch_root_bucket_t unbound_bucket = priority_queue_min(&root_clutch->scr_unbound_root_buckets, struct sched_clutch_root_bucket, scrb_pqlink);
 		sched_clutch_root_bucket_t bound_bucket = priority_queue_min(&root_clutch->scr_bound_root_buckets, struct sched_clutch_root_bucket, scrb_pqlink);
 		if (bound_bucket && unbound_bucket) {
@@ -700,6 +881,35 @@ evaluate_root_buckets:
 			edf_bucket = (bound_bucket) ? bound_bucket : unbound_bucket;
 		}
 	}
+	if (edf_bucket == NULL) {
+		/* The timeshare portion of the runqueue is empty */
+		assert(type == SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL);
+		assert(prev_thread != NULL);
+		*chose_prev_thread = true;
+		if (prev_thread != NULL) {
+			debug_info->trace_data.selection_was_edf = true;
+		}
+		return prev_bucket;
+	}
+	if (prev_bucket != NULL && prev_bucket->scrb_pqlink.deadline < edf_bucket->scrb_pqlink.deadline) {
+		/* The previous thread's root bucket has the earliest deadline and is not currently enqueued */
+		edf_bucket = prev_bucket;
+		edf_bucket_enqueued_normally = false;
+	}
+
+	if (edf_bucket->scrb_starvation_avoidance) {
+		/* Check if the EDF bucket is in an expired starvation avoidance window */
+		uint64_t starvation_window = sched_clutch_thread_quantum[edf_bucket->scrb_bucket];
+		if (timestamp >= (edf_bucket->scrb_starvation_ts + starvation_window)) {
+			/* Starvation avoidance window is over; update deadline and re-evaluate EDF */
+			edf_bucket->scrb_starvation_avoidance = false;
+			edf_bucket->scrb_starvation_ts = 0;
+			sched_clutch_root_bucket_deadline_update(edf_bucket, root_clutch, timestamp, edf_bucket_enqueued_normally);
+			bit_set(debug_info->trace_data.starvation_avoidance_window_close, edf_bucket->scrb_bound * TH_BUCKET_SCHED_MAX + edf_bucket->scrb_bucket);
+			goto evaluate_root_buckets;
+		}
+	}
+
 	/*
 	 * Check if any of the buckets have warp available. The implementation only allows root buckets to warp ahead of
 	 * buckets of the same type (i.e. bound/unbound). The reason for doing that is because warping is a concept that
@@ -707,47 +917,49 @@ evaluate_root_buckets:
 	 * QoS root bucket.
 	 */
 	bitmap_t *warp_available_bitmap = (edf_bucket->scrb_bound) ? (root_clutch->scr_bound_warp_available) : (root_clutch->scr_unbound_warp_available);
-	warp_bucket_index = bitmap_lsb_first(warp_available_bitmap, TH_BUCKET_SCHED_MAX);
+	int warp_bucket_index = bitmap_lsb_first(warp_available_bitmap, TH_BUCKET_SCHED_MAX);
 
-	if ((warp_bucket_index == -1) || (warp_bucket_index >= edf_bucket->scrb_bucket)) {
+	/* Allow the prev_bucket to use its warp as well */
+	bool prev_bucket_warping = (prev_bucket != NULL) && (prev_bucket->scrb_bound == edf_bucket->scrb_bound) &&
+	    prev_bucket->scrb_bucket < edf_bucket->scrb_bucket && (prev_bucket->scrb_warp_remaining > 0) &&
+	    (warp_bucket_index == -1 || prev_bucket->scrb_bucket < warp_bucket_index);
+
+	bool non_edf_bucket_can_warp = (warp_bucket_index != -1 && warp_bucket_index < edf_bucket->scrb_bucket) || prev_bucket_warping;
+
+	if (non_edf_bucket_can_warp == false) {
 		/* No higher buckets have warp left; best choice is the EDF based bucket */
-		if (edf_bucket->scrb_starvation_avoidance) {
-			/*
-			 * Indicates that the earliest deadline bucket is in starvation avoidance mode. Check to see if the
-			 * starvation avoidance window is still open and return this bucket if it is.
-			 *
-			 * The starvation avoidance window is calculated based on the quantum of threads at that bucket and
-			 * the number of CPUs in the cluster. The idea is to basically provide one quantum worth of starvation
-			 * avoidance across all CPUs.
-			 */
-			uint64_t starvation_window = sched_clutch_thread_quantum[edf_bucket->scrb_bucket] / pset_available_cpu_count(root_clutch->scr_pset);
-			if (timestamp < (edf_bucket->scrb_starvation_ts + starvation_window)) {
-				return edf_bucket;
-			} else {
-				/* Starvation avoidance window is over; update deadline and re-evaluate EDF */
-				edf_bucket->scrb_starvation_avoidance = false;
-				edf_bucket->scrb_starvation_ts = 0;
-				sched_clutch_root_bucket_deadline_update(edf_bucket, root_clutch, timestamp);
-			}
-			goto evaluate_root_buckets;
-		}
+		debug_info->trace_data.selection_was_edf = true;
 
-		/* Looks like the EDF bucket is not in starvation avoidance mode; check if it should be */
-		if (highest_runnable_bucket < edf_bucket->scrb_bucket) {
-			/* Since a higher bucket is runnable, it indicates that the EDF bucket should be in starvation avoidance */
-			edf_bucket->scrb_starvation_avoidance = true;
-			edf_bucket->scrb_starvation_ts = timestamp;
-		} else {
-			/* EDF bucket is being selected in the natural order; update deadline and reset warp */
-			sched_clutch_root_bucket_deadline_update(edf_bucket, root_clutch, timestamp);
-			edf_bucket->scrb_warp_remaining = sched_clutch_root_bucket_warp[edf_bucket->scrb_bucket];
-			edf_bucket->scrb_warped_deadline = SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED;
-			if (edf_bucket->scrb_bound) {
-				bitmap_set(root_clutch->scr_bound_warp_available, edf_bucket->scrb_bucket);
+		bool should_update_edf_starvation_state = edf_bucket == prev_bucket || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT;
+		if (edf_bucket->scrb_starvation_avoidance == false && should_update_edf_starvation_state) {
+			/* Looks like the EDF bucket is not in starvation avoidance mode; check if it should be */
+			if (highest_runnable_bucket < edf_bucket->scrb_bucket || (prev_bucket != NULL && prev_bucket->scrb_bucket < edf_bucket->scrb_bucket)) {
+				/*
+				 * Since a higher bucket is runnable, it indicates that the EDF bucket should be in starvation avoidance.
+				 *
+				 * The starvation avoidance window is allocated as a single quantum for the starved bucket, enforced
+				 * simultaneously across all CPUs in the cluster. The idea is to grant the starved bucket roughly one
+				 * quantum per core, each time the bucket reaches the earliest deadline position. Note that this
+				 * cadence is driven by the difference between the starved bucket's and highest-runnable bucket's WCELs.
+				 */
+				edf_bucket->scrb_starvation_avoidance = true;
+				edf_bucket->scrb_starvation_ts = timestamp;
+				debug_info->trace_data.selection_opened_starvation_avoidance_window = true;
 			} else {
-				bitmap_set(root_clutch->scr_unbound_warp_available, edf_bucket->scrb_bucket);
+				/* EDF bucket is being selected in the natural order; update deadline and reset warp */
+				sched_clutch_root_bucket_deadline_update(edf_bucket, root_clutch, timestamp, edf_bucket_enqueued_normally);
+				edf_bucket->scrb_warp_remaining = sched_clutch_root_bucket_warp[edf_bucket->scrb_bucket];
+				edf_bucket->scrb_warped_deadline = SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED;
+				if (edf_bucket_enqueued_normally) {
+					if (edf_bucket->scrb_bound) {
+						bitmap_set(root_clutch->scr_bound_warp_available, edf_bucket->scrb_bucket);
+					} else {
+						bitmap_set(root_clutch->scr_unbound_warp_available, edf_bucket->scrb_bucket);
+					}
+				}
 			}
 		}
+		*chose_prev_thread = !edf_bucket_enqueued_normally;
 		return edf_bucket;
 	}
 
@@ -755,29 +967,53 @@ evaluate_root_buckets:
 	 * Looks like there is a root bucket which is higher in the natural priority
 	 * order than edf_bucket and might have some warp remaining.
 	 */
-	warp_bucket = (edf_bucket->scrb_bound) ? &root_clutch->scr_bound_buckets[warp_bucket_index] : &root_clutch->scr_unbound_buckets[warp_bucket_index];
+	assert(prev_bucket_warping || warp_bucket_index >= 0);
+	sched_clutch_root_bucket_t warp_bucket = NULL;
+	if (prev_bucket_warping) {
+		assert(warp_bucket_index == -1 || prev_bucket->scrb_bucket < warp_bucket_index);
+		warp_bucket = prev_bucket;
+	} else {
+		warp_bucket = (edf_bucket->scrb_bound) ? &root_clutch->scr_bound_buckets[warp_bucket_index] : &root_clutch->scr_unbound_buckets[warp_bucket_index];
+	}
+
+	bool warp_is_being_utilized = warp_bucket == prev_bucket || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT;
+
 	if (warp_bucket->scrb_warped_deadline == SCHED_CLUTCH_ROOT_BUCKET_WARP_UNUSED) {
-		/* Root bucket has not used any of its warp; set a deadline to expire its warp and return it */
-		warp_bucket->scrb_warped_deadline = timestamp + warp_bucket->scrb_warp_remaining;
-		sched_clutch_root_bucket_deadline_update(warp_bucket, root_clutch, timestamp);
+		if (warp_is_being_utilized) {
+			/* Root bucket has not used any of its warp; set a deadline to expire its warp and return it */
+			warp_bucket->scrb_warped_deadline = timestamp + warp_bucket->scrb_warp_remaining;
+			sched_clutch_root_bucket_deadline_update(warp_bucket, root_clutch, timestamp, !prev_bucket_warping);
+			debug_info->trace_data.selection_opened_warp_window = true;
+		}
+		*chose_prev_thread = prev_bucket_warping;
+		debug_info->trace_data.selection_was_edf = false;
+		assert(warp_bucket != edf_bucket);
 		return warp_bucket;
 	}
 	if (warp_bucket->scrb_warped_deadline > timestamp) {
 		/* Root bucket already has a warp window open with some warp remaining */
-		sched_clutch_root_bucket_deadline_update(warp_bucket, root_clutch, timestamp);
+		if (warp_is_being_utilized) {
+			sched_clutch_root_bucket_deadline_update(warp_bucket, root_clutch, timestamp, !prev_bucket_warping);
+		}
+		*chose_prev_thread = prev_bucket_warping;
+		debug_info->trace_data.selection_was_edf = false;
 		return warp_bucket;
 	}
 
-	/* For this bucket, warp window was opened sometime in the past but has now
-	 * expired. Mark the bucket as not avilable for warp anymore and re-run the
+	/*
+	 * For this bucket, warp window was opened sometime in the past but has now
+	 * expired. Mark the bucket as not available for warp anymore and re-run the
 	 * warp bucket selection logic.
 	 */
 	warp_bucket->scrb_warp_remaining = 0;
-	if (warp_bucket->scrb_bound) {
-		bitmap_clear(root_clutch->scr_bound_warp_available, warp_bucket->scrb_bucket);
-	} else {
-		bitmap_clear(root_clutch->scr_unbound_warp_available, warp_bucket->scrb_bucket);
+	if (!prev_bucket_warping) {
+		if (warp_bucket->scrb_bound) {
+			bitmap_clear(root_clutch->scr_bound_warp_available, warp_bucket->scrb_bucket);
+		} else {
+			bitmap_clear(root_clutch->scr_unbound_warp_available, warp_bucket->scrb_bucket);
+		}
 	}
+	bit_set(debug_info->trace_data.warp_window_close, warp_bucket->scrb_bound * TH_BUCKET_SCHED_MAX + warp_bucket->scrb_bucket);
 	goto evaluate_root_buckets;
 }
 
@@ -811,7 +1047,8 @@ static void
 sched_clutch_root_bucket_deadline_update(
 	sched_clutch_root_bucket_t root_bucket,
 	sched_clutch_root_t root_clutch,
-	uint64_t timestamp)
+	uint64_t timestamp,
+	bool bucket_is_enqueued)
 {
 	if (root_bucket->scrb_bucket == TH_BUCKET_FIXPRI) {
 		/* The algorithm never uses the deadlines for scheduling TH_BUCKET_FIXPRI bucket */
@@ -825,8 +1062,10 @@ sched_clutch_root_bucket_deadline_update(
 	}
 	if (old_deadline != new_deadline) {
 		root_bucket->scrb_pqlink.deadline = new_deadline;
-		struct priority_queue_deadline_min *prioq = (root_bucket->scrb_bound) ? &root_clutch->scr_bound_root_buckets : &root_clutch->scr_unbound_root_buckets;
-		priority_queue_entry_increased(prioq, &root_bucket->scrb_pqlink);
+		if (bucket_is_enqueued) {
+			struct priority_queue_deadline_min *prioq = (root_bucket->scrb_bound) ? &root_clutch->scr_bound_root_buckets : &root_clutch->scr_unbound_root_buckets;
+			priority_queue_entry_increased(prioq, &root_bucket->scrb_pqlink);
+		}
 	}
 }
 
@@ -945,33 +1184,38 @@ sched_clutch_root_pri_update(
 	int16_t root_bound_pri = NOPRI;
 	int16_t root_unbound_pri = NOPRI;
 
+	/* Consider bound root buckets */
 	if (bitmap_lsb_first(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_SCHED_MAX) == -1) {
 		goto root_pri_update_unbound;
 	}
-	sched_clutch_root_bucket_t root_bucket_bound = NULL;
-	if (sched_clutch_root_bound_select_aboveui(root_clutch)) {
-		root_bucket_bound = &root_clutch->scr_bound_buckets[TH_BUCKET_FIXPRI];
-	} else {
+	sched_clutch_root_bucket_t highest_bound_root_bucket = NULL;
+	__unused int highest_bound_root_bucket_pri = -1;
+	bool highest_bound_root_bucket_is_fixpri = false;
+	sched_clutch_root_bound_select_aboveui(root_clutch, &highest_bound_root_bucket, &highest_bound_root_bucket_pri, &highest_bound_root_bucket_is_fixpri, NULL, NULL);
+	if (highest_bound_root_bucket_is_fixpri == false) {
 		int root_bucket_index = bitmap_lsb_next(root_clutch->scr_bound_runnable_bitmap, TH_BUCKET_SCHED_MAX, TH_BUCKET_FIXPRI);
 		assert(root_bucket_index != -1);
-		root_bucket_bound = &root_clutch->scr_bound_buckets[root_bucket_index];
+		highest_bound_root_bucket = &root_clutch->scr_bound_buckets[root_bucket_index];
 	}
-	root_bound_pri = root_bucket_bound->scrb_bound_thread_runq.highq;
+	root_bound_pri = highest_bound_root_bucket->scrb_bound_thread_runq.highq;
 
 root_pri_update_unbound:
+	/* Consider unbound root buckets */
 	if (bitmap_lsb_first(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX) == -1) {
 		goto root_pri_update_complete;
 	}
-	sched_clutch_root_bucket_t root_bucket_unbound = NULL;
-	if (sched_clutch_root_unbound_select_aboveui(root_clutch)) {
-		root_bucket_unbound = &root_clutch->scr_unbound_buckets[TH_BUCKET_FIXPRI];
-	} else {
+	sched_clutch_root_bucket_t highest_unbound_root_bucket = NULL;
+	__unused int highest_unbound_root_bucket_pri = -1;
+	bool highest_unbound_root_bucket_is_fixpri = false;
+	sched_clutch_root_unbound_select_aboveui(root_clutch, &highest_unbound_root_bucket, &highest_unbound_root_bucket_pri, &highest_unbound_root_bucket_is_fixpri, NULL, NULL);
+	if (highest_unbound_root_bucket_is_fixpri == false) {
 		int root_bucket_index = bitmap_lsb_next(root_clutch->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX, TH_BUCKET_FIXPRI);
 		assert(root_bucket_index != -1);
-		root_bucket_unbound = &root_clutch->scr_unbound_buckets[root_bucket_index];
+		highest_unbound_root_bucket = &root_clutch->scr_unbound_buckets[root_bucket_index];
 	}
+
 	/* For the selected root bucket, find the highest priority clutch bucket */
-	sched_clutch_bucket_t clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(root_bucket_unbound);
+	sched_clutch_bucket_t clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(root_clutch, highest_unbound_root_bucket, NULL, NULL, NULL);
 	root_unbound_pri = priority_queue_max_sched_pri(&clutch_bucket->scb_clutchpri_prioq);
 
 root_pri_update_complete:
@@ -1049,10 +1293,10 @@ sched_clutch_root_urgency_dec(
 
 /* Priority boost range for interactivity */
 #define SCHED_CLUTCH_BUCKET_GROUP_INTERACTIVE_PRI_DEFAULT     (8)
-uint8_t sched_clutch_bucket_group_interactive_pri = SCHED_CLUTCH_BUCKET_GROUP_INTERACTIVE_PRI_DEFAULT;
+static uint8_t sched_clutch_bucket_group_interactive_pri = SCHED_CLUTCH_BUCKET_GROUP_INTERACTIVE_PRI_DEFAULT;
 
 /* window to scale the cpu usage and blocked values (currently 500ms). Its the threshold of used+blocked */
-uint64_t sched_clutch_bucket_group_adjust_threshold = 0;
+static uint64_t sched_clutch_bucket_group_adjust_threshold = 0;
 #define SCHED_CLUTCH_BUCKET_GROUP_ADJUST_THRESHOLD_USECS      (500000)
 
 /* The ratio to scale the cpu/blocked time per window */
@@ -1074,8 +1318,9 @@ uint64_t sched_clutch_bucket_group_adjust_threshold = 0;
  * by the sched_clutch_bucket_group_pending_delta_us values below.
  *
  * The values chosen here are very close to the WCEL values for each sched bucket.
- * These values are multiplied by the load average of the relevant root bucket to
- * provide an estimate of the actual clutch bucket load.
+ * Theses values are added into the pending interval used to determine how
+ * frequently we will ageout the CPU usage, ensuring a reasonable limit on the
+ * frequency.
  */
 static uint32_t sched_clutch_bucket_group_pending_delta_us[TH_BUCKET_SCHED_MAX] = {
 	SCHED_CLUTCH_INVALID_TIME_32,           /* FIXPRI */
@@ -1481,12 +1726,33 @@ sched_clutch_bucket_pri_calculate(
  */
 static sched_clutch_bucket_t
 sched_clutch_root_bucket_highest_clutch_bucket(
-	sched_clutch_root_bucket_t root_bucket)
+	sched_clutch_root_t root_clutch,
+	sched_clutch_root_bucket_t root_bucket,
+	processor_t _Nullable processor,
+	thread_t _Nullable prev_thread,
+	bool *_Nullable chose_prev_thread)
 {
 	if (sched_clutch_bucket_runq_empty(&root_bucket->scrb_clutch_buckets)) {
+		if (prev_thread != NULL) {
+			*chose_prev_thread = true;
+			return sched_clutch_bucket_for_thread(root_clutch, prev_thread);
+		}
 		return NULL;
 	}
-	return sched_clutch_bucket_runq_peek(&root_bucket->scrb_clutch_buckets);
+	sched_clutch_bucket_t clutch_bucket = sched_clutch_bucket_runq_peek(&root_bucket->scrb_clutch_buckets);
+	/* Consider the Clutch bucket of the previous thread */
+	if (prev_thread != NULL) {
+		assert(chose_prev_thread != NULL);
+		sched_clutch_bucket_group_t prev_clutch_bucket_group = sched_clutch_bucket_group_for_thread(prev_thread);
+		int prev_clutch_bucket_pri = prev_thread->sched_pri + (int)(os_atomic_load(&prev_clutch_bucket_group->scbg_interactivity_data.scct_count, relaxed));
+		sched_clutch_bucket_t prev_clutch_bucket = sched_clutch_bucket_for_thread(root_clutch, prev_thread);
+		if (prev_clutch_bucket != clutch_bucket &&
+		    sched_clutch_pri_greater_than_tiebreak(prev_clutch_bucket_pri, clutch_bucket->scb_priority, processor->first_timeslice)) {
+			*chose_prev_thread = true;
+			return prev_clutch_bucket;
+		}
+	}
+	return clutch_bucket;
 }
 
 /*
@@ -2056,9 +2322,18 @@ sched_edge_thread_shared_rsrc_type(thread_t thread)
 static thread_t
 sched_clutch_thread_bound_lookup(
 	__unused sched_clutch_root_t root_clutch,
-	sched_clutch_root_bucket_t root_bucket)
+	sched_clutch_root_bucket_t root_bucket,
+	processor_t processor,
+	thread_t _Nullable prev_thread)
 {
-	return run_queue_peek(&root_bucket->scrb_bound_thread_runq);
+	assert(root_bucket->scrb_bound == true);
+	thread_t bound_thread = run_queue_peek(&root_bucket->scrb_bound_thread_runq);
+	if ((prev_thread != NULL) &&
+	    (bound_thread == NULL || sched_clutch_pri_greater_than_tiebreak(prev_thread->sched_pri, bound_thread->sched_pri, processor->first_timeslice))) {
+		return prev_thread;
+	}
+	assert(bound_thread != THREAD_NULL);
+	return bound_thread;
 }
 
 /*
@@ -2140,7 +2415,12 @@ sched_clutch_bucket_group_pending_ageout(
 
 		/* Calculate the time the clutch bucket group has been pending */
 		uint64_t pending_delta = timestamp - old_pending_ts;
-		uint64_t interactivity_delta = sched_clutch_bucket_group_pending_delta[clutch_bucket_group->scbg_bucket] * bucket_load;
+		/*
+		 * Other buckets should get a chance to run first before artificially boosting
+		 * this clutch bucket group's interactivity score, at least when the entire root
+		 * bucket is getting a large enough share of CPU.
+		 */
+		uint64_t interactivity_delta = sched_clutch_bucket_group_pending_delta[clutch_bucket_group->scbg_bucket] + (bucket_load * sched_clutch_thread_quantum[clutch_bucket_group->scbg_bucket]);
 		if (pending_delta < interactivity_delta) {
 		        os_atomic_rmw_loop_give_up();
 		}
@@ -2151,41 +2431,29 @@ sched_clutch_bucket_group_pending_ageout(
 	return cpu_usage_shift;
 }
 
-static uint8_t
-sched_clutch_bucket_group_interactivity_score_calculate(
-	sched_clutch_bucket_group_t clutch_bucket_group,
-	uint64_t timestamp)
+static boolean_t
+sched_edge_thread_should_be_inserted_as_bound(
+	sched_clutch_root_t root_clutch,
+	thread_t thread)
 {
-	if (clutch_bucket_group->scbg_bucket == TH_BUCKET_FIXPRI) {
-		/*
-		 * Since the root bucket selection algorithm for Above UI looks at clutch bucket
-		 * priorities, make sure all AboveUI buckets are marked interactive.
-		 */
-		assert(clutch_bucket_group->scbg_interactivity_data.scct_count == (2 * sched_clutch_bucket_group_interactive_pri));
-		return (uint8_t)clutch_bucket_group->scbg_interactivity_data.scct_count;
+	/*
+	 * Check if the thread is bound and is being enqueued in its desired bound cluster.
+	 * One scenario where a bound thread might not be getting enqueued in the bound cluster
+	 * hierarchy would be if the thread is "soft" bound and the bound cluster is
+	 * de-recommended. In that case, the thread should be treated as an unbound
+	 * thread.
+	 */
+	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread) && (sched_edge_thread_bound_cluster_id(thread) == root_clutch->scr_cluster_id)) {
+		return TRUE;
 	}
-	/* Check if the clutch bucket group CPU usage needs to be aged out due to pending time */
-	uint8_t pending_intervals = sched_clutch_bucket_group_pending_ageout(clutch_bucket_group, timestamp);
-	/* Adjust CPU stats based on the calculated shift and to make sure only recent behavior is used */
-	sched_clutch_bucket_group_cpu_adjust(clutch_bucket_group, pending_intervals);
-	uint8_t interactivity_score = sched_clutch_interactivity_from_cpu_data(clutch_bucket_group);
-	sched_clutch_counter_time_t old_interactivity_data;
-	sched_clutch_counter_time_t new_interactivity_data;
-
-	bool score_updated = os_atomic_rmw_loop(&clutch_bucket_group->scbg_interactivity_data.scct_packed, old_interactivity_data.scct_packed, new_interactivity_data.scct_packed, relaxed, {
-		if (old_interactivity_data.scct_timestamp >= timestamp) {
-		        os_atomic_rmw_loop_give_up();
-		}
-		new_interactivity_data.scct_timestamp = timestamp;
-		if (old_interactivity_data.scct_timestamp != 0) {
-		        new_interactivity_data.scct_count = interactivity_score;
-		}
-	});
-	if (score_updated) {
-		return (uint8_t)new_interactivity_data.scct_count;
-	} else {
-		return (uint8_t)old_interactivity_data.scct_count;
+	/*
+	 * Use bound runqueue for shared resource threads. See "cluster shared resource
+	 * threads load balancing" section for details.
+	 */
+	if (sched_edge_thread_shared_rsrc_type(thread) != CLUSTER_SHARED_RSRC_TYPE_NONE) {
+		return TRUE;
 	}
+	return FALSE;
 }
 
 #else /* CONFIG_SCHED_EDGE */
@@ -2235,7 +2503,12 @@ sched_clutch_bucket_group_pending_ageout(
 		return 0;
 	}
 	uint64_t pending_delta = timestamp - old_pending_ts;
-	uint64_t interactivity_delta = sched_clutch_bucket_group_pending_delta[clutch_bucket_group->scbg_bucket] * bucket_load;
+	/*
+	 * Other buckets should get a chance to run first before artificially boosting
+	 * this clutch bucket group's interactivity score, at least when the entire root
+	 * bucket is getting a large enough share of CPU.
+	 */
+	uint64_t interactivity_delta = sched_clutch_bucket_group_pending_delta[clutch_bucket_group->scbg_bucket] + (bucket_load * sched_clutch_thread_quantum[clutch_bucket_group->scbg_bucket]);
 	if (pending_delta < interactivity_delta) {
 		return 0;
 	}
@@ -2244,12 +2517,13 @@ sched_clutch_bucket_group_pending_ageout(
 	return cpu_usage_shift;
 }
 
+#endif /* CONFIG_SCHED_EDGE */
+
 static uint8_t
 sched_clutch_bucket_group_interactivity_score_calculate(
 	sched_clutch_bucket_group_t clutch_bucket_group,
 	uint64_t timestamp)
 {
-	sched_clutch_hierarchy_locked_assert(&pset0.pset_clutch_root);
 	if (clutch_bucket_group->scbg_bucket == TH_BUCKET_FIXPRI) {
 		/*
 		 * Since the root bucket selection algorithm for Above UI looks at clutch bucket
@@ -2263,16 +2537,30 @@ sched_clutch_bucket_group_interactivity_score_calculate(
 	/* Adjust CPU stats based on the calculated shift and to make sure only recent behavior is used */
 	sched_clutch_bucket_group_cpu_adjust(clutch_bucket_group, pending_intervals);
 	uint8_t interactivity_score = sched_clutch_interactivity_from_cpu_data(clutch_bucket_group);
+	/* Write back any interactivity score update */
+#if CONFIG_SCHED_EDGE
+	sched_clutch_counter_time_t old_interactivity_data;
+	sched_clutch_counter_time_t new_interactivity_data;
+	os_atomic_rmw_loop(&clutch_bucket_group->scbg_interactivity_data.scct_packed, old_interactivity_data.scct_packed, new_interactivity_data.scct_packed, relaxed, {
+		new_interactivity_data.scct_count = old_interactivity_data.scct_count;
+		if (old_interactivity_data.scct_timestamp >= timestamp) {
+		        os_atomic_rmw_loop_give_up();
+		}
+		new_interactivity_data.scct_timestamp = timestamp;
+		if (old_interactivity_data.scct_timestamp != 0) {
+		        new_interactivity_data.scct_count = interactivity_score;
+		}
+	});
+	return (uint8_t)new_interactivity_data.scct_count;
+#else /* !CONFIG_SCHED_EDGE */
+	sched_clutch_hierarchy_locked_assert(&pset0.pset_clutch_root);
 	if (timestamp > clutch_bucket_group->scbg_interactivity_data.scct_timestamp) {
 		clutch_bucket_group->scbg_interactivity_data.scct_count = interactivity_score;
 		clutch_bucket_group->scbg_interactivity_data.scct_timestamp = timestamp;
-		return interactivity_score;
-	} else {
-		return (uint8_t)clutch_bucket_group->scbg_interactivity_data.scct_count;
 	}
+	return (uint8_t)clutch_bucket_group->scbg_interactivity_data.scct_count;
+#endif /* !CONFIG_SCHED_EDGE */
 }
-
-#endif /* CONFIG_SCHED_EDGE */
 
 /*
  * Clutch Bucket Group Run Count and Blocked Time Accounting
@@ -2331,6 +2619,28 @@ sched_clutch_bucket_group_run_count_dec(
 	return (uint32_t)new_blocked_data.scct_count;
 }
 
+static inline sched_clutch_bucket_t
+sched_clutch_bucket_for_thread(
+	sched_clutch_root_t root_clutch,
+	thread_t thread)
+{
+	sched_clutch_t clutch = sched_clutch_for_thread(thread);
+	assert(thread->thread_group == clutch->sc_tg);
+
+	sched_clutch_bucket_group_t clutch_bucket_group = &(clutch->sc_clutch_groups[thread->th_sched_bucket]);
+	sched_clutch_bucket_t clutch_bucket = &(clutch_bucket_group->scbg_clutch_buckets[root_clutch->scr_cluster_id]);
+	assert((clutch_bucket->scb_root == NULL) || (clutch_bucket->scb_root == root_clutch));
+
+	return clutch_bucket;
+}
+
+static inline sched_clutch_bucket_group_t
+sched_clutch_bucket_group_for_thread(thread_t prev_thread)
+{
+	sched_clutch_t clutch = sched_clutch_for_thread_group(prev_thread->thread_group);
+	return &clutch->sc_clutch_groups[prev_thread->th_sched_bucket];
+}
+
 /*
  * sched_clutch_thread_insert()
  *
@@ -2350,31 +2660,20 @@ sched_clutch_thread_insert(
 #if CONFIG_SCHED_EDGE
 	sched_edge_cluster_cumulative_count_incr(root_clutch, thread->th_sched_bucket);
 	sched_edge_shared_rsrc_runnable_load_incr(root_clutch, thread);
-	/*
-	 * Check if the thread is bound and is being enqueued in its desired bound cluster.
-	 * One scenario where a bound thread might not be getting enqueued in the bound cluster
-	 * hierarchy would be if the thread is "soft" bound and the bound cluster is
-	 * de-recommended. In that case, the thread should be treated as an unbound
-	 * thread.
-	 */
-	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread) && (sched_edge_thread_bound_cluster_id(thread) == root_clutch->scr_cluster_id)) {
-		return sched_edge_bound_thread_insert(root_clutch, thread, options);
-	}
-	/*
-	 * Use bound runqueue for shared resource threads. See "cluster shared resource
-	 * threads load balancing" section for details.
-	 */
-	if (sched_edge_thread_shared_rsrc_type(thread) != CLUSTER_SHARED_RSRC_TYPE_NONE) {
-		return sched_edge_bound_thread_insert(root_clutch, thread, options);
-	}
 
+	if (sched_edge_thread_should_be_inserted_as_bound(root_clutch, thread)) {
+		/*
+		 * Includes threads bound to this specific cluster as well as all
+		 * shared resource threads.
+		 */
+		return sched_edge_bound_thread_insert(root_clutch, thread, options);
+	}
 #endif /* CONFIG_SCHED_EDGE */
-	sched_clutch_t clutch = sched_clutch_for_thread(thread);
-	assert(thread->thread_group == clutch->sc_tg);
 
 	uint64_t current_timestamp = mach_absolute_time();
-	sched_clutch_bucket_group_t clutch_bucket_group = &(clutch->sc_clutch_groups[thread->th_sched_bucket]);
-	sched_clutch_bucket_t clutch_bucket = &(clutch_bucket_group->scbg_clutch_buckets[root_clutch->scr_cluster_id]);
+	sched_clutch_t clutch = sched_clutch_for_thread(thread);
+	assert(thread->thread_group == clutch->sc_tg);
+	sched_clutch_bucket_t clutch_bucket = sched_clutch_bucket_for_thread(root_clutch, thread);
 	assert((clutch_bucket->scb_root == NULL) || (clutch_bucket->scb_root == root_clutch));
 
 	/*
@@ -2498,49 +2797,116 @@ sched_clutch_thread_remove(
 static thread_t
 sched_clutch_thread_unbound_lookup(
 	sched_clutch_root_t root_clutch,
-	sched_clutch_root_bucket_t root_bucket)
+	sched_clutch_root_bucket_t root_bucket,
+	processor_t _Nullable processor,
+	thread_t _Nullable prev_thread)
 {
+	assert(processor != NULL || prev_thread == NULL);
+	assert(root_bucket->scrb_bound == false);
 	sched_clutch_hierarchy_locked_assert(root_clutch);
 
 	/* Find the highest priority clutch bucket in this root bucket */
-	sched_clutch_bucket_t clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(root_bucket);
+	bool chose_prev_thread = false;
+	sched_clutch_bucket_t clutch_bucket = sched_clutch_root_bucket_highest_clutch_bucket(root_clutch, root_bucket, processor, prev_thread, &chose_prev_thread);
 	assert(clutch_bucket != NULL);
+
+	if (chose_prev_thread) {
+		/* We have determined that prev_thread is the highest thread, based on the Clutch bucket level policy */
+		assert(processor != NULL && prev_thread != NULL);
+		return prev_thread;
+	}
 
 	/* Find the highest priority runnable thread in this clutch bucket */
 	thread_t thread = priority_queue_max(&clutch_bucket->scb_thread_runq, struct thread, th_clutch_runq_link);
-	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_CLUTCH_THREAD_SELECT) | DBG_FUNC_NONE,
-	    thread_tid(thread), thread_group_get_id(clutch_bucket->scb_group->scbg_clutch->sc_tg), clutch_bucket->scb_bucket, 0, 0);
+	assert(thread != NULL);
+
+	/* Consider the previous thread */
+	if (prev_thread != NULL &&
+	    sched_clutch_bucket_for_thread(root_clutch, prev_thread) == clutch_bucket &&
+	    sched_clutch_pri_greater_than_tiebreak(prev_thread->sched_pri, thread->sched_pri, processor->first_timeslice)) {
+		thread = prev_thread;
+	}
+
 	return thread;
 }
 
+static sched_clutch_root_bucket_t
+sched_clutch_root_bucket_for_thread(
+	sched_clutch_root_t root_clutch,
+	thread_t prev_thread)
+{
+#if CONFIG_SCHED_EDGE
+	if (sched_edge_thread_should_be_inserted_as_bound(root_clutch, prev_thread)) {
+		return &root_clutch->scr_bound_buckets[prev_thread->th_sched_bucket];
+	}
+#endif /* CONFIG_SCHED_EDGE */
+	return &root_clutch->scr_unbound_buckets[prev_thread->th_sched_bucket];
+}
+
 /*
- * sched_clutch_thread_highest_remove()
+ * sched_clutch_hierarchy_thread_highest()
  *
- * Routine to find and remove the highest priority thread
- * from the sched clutch hierarchy. The algorithm looks at the
- * hierarchy for the most eligible runnable thread and calls
- * sched_clutch_thread_remove(). Always called with the
- * pset lock held.
+ * Routine to traverse the Clutch hierarchy and return the highest thread which
+ * should be selected to run next, optionally comparing against the previously
+ * running thread. Removes the highest thread with sched_clutch_thread_remove()
+ * depending on the traverse mode and whether it is the previously running thread.
+ * Always called with the pset lock held.
  */
 static thread_t
-sched_clutch_thread_highest_remove(
-	sched_clutch_root_t root_clutch)
+sched_clutch_hierarchy_thread_highest(
+	sched_clutch_root_t root_clutch,
+	processor_t processor,
+	thread_t _Nullable prev_thread,
+	sched_clutch_traverse_mode_t mode)
 {
+	assert(mode != SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY || prev_thread == NULL);
 	sched_clutch_hierarchy_locked_assert(root_clutch);
+
+	thread_t highest_thread = NULL;
 	uint64_t current_timestamp = mach_absolute_time();
-
-	sched_clutch_root_bucket_t root_bucket = sched_clutch_root_highest_root_bucket(root_clutch, current_timestamp, SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL);
+	bool chose_prev_thread = false;
+	sched_clutch_dbg_thread_select_packed_t debug_info = {0};
+	sched_clutch_root_bucket_t prev_root_bucket = prev_thread != NULL ? sched_clutch_root_bucket_for_thread(root_clutch, prev_thread) : NULL;
+	sched_clutch_root_bucket_t root_bucket = sched_clutch_root_highest_root_bucket(root_clutch, current_timestamp, SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_ALL, prev_root_bucket, prev_thread, &chose_prev_thread, mode, &debug_info);
+	if (chose_prev_thread) {
+		/* We disambiguated that we want to keep running the previous thread */
+		highest_thread = processor->active_thread;
+		goto done_selecting_thread;
+	}
 	if (root_bucket == NULL) {
-		return THREAD_NULL;
+		/* The Clutch hierarchy has no runnable threads, including the previous thread */
+		assert(sched_clutch_root_count(root_clutch) == 0);
+		assert(prev_thread == NULL);
+		return NULL;
+	}
+	if (root_bucket != prev_root_bucket) {
+		/* We have ruled out continuing to run the previous thread, based on the root bucket level policy */
+		prev_thread = NULL;
+		assert((mode == SCHED_CLUTCH_TRAVERSE_CHECK_PREEMPT) || (prev_root_bucket == NULL) ||
+		    (prev_root_bucket->scrb_bucket >= root_bucket->scrb_bucket) || (root_bucket->scrb_starvation_avoidance) ||
+		    (prev_root_bucket->scrb_bound != root_bucket->scrb_bound) ||
+		    (root_bucket->scrb_warp_remaining > 0 && root_bucket->scrb_warped_deadline > current_timestamp && prev_root_bucket->scrb_warp_remaining == 0));
 	}
 
-	thread_t highest_thread = THREAD_NULL;
 	if (root_bucket->scrb_bound) {
-		highest_thread = sched_clutch_thread_bound_lookup(root_clutch, root_bucket);
+		highest_thread = sched_clutch_thread_bound_lookup(root_clutch, root_bucket, processor, prev_thread);
 	} else {
-		highest_thread = sched_clutch_thread_unbound_lookup(root_clutch, root_bucket);
+		highest_thread = sched_clutch_thread_unbound_lookup(root_clutch, root_bucket, processor, prev_thread);
 	}
-	sched_clutch_thread_remove(root_clutch, highest_thread, current_timestamp, SCHED_CLUTCH_BUCKET_OPTIONS_SAMEPRI_RR);
+
+	if (mode == SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY ||
+	    (mode == SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT && highest_thread != processor->active_thread)) {
+		assert(mode != SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY || highest_thread != processor->active_thread);
+		sched_clutch_thread_remove(root_clutch, highest_thread, current_timestamp, SCHED_CLUTCH_BUCKET_OPTIONS_SAMEPRI_RR);
+	}
+
+done_selecting_thread:
+	debug_info.trace_data.version = SCHED_CLUTCH_DBG_THREAD_SELECT_PACKED_VERSION;
+	debug_info.trace_data.traverse_mode = mode;
+	debug_info.trace_data.cluster_id = root_clutch->scr_cluster_id;
+	debug_info.trace_data.selection_was_cluster_bound = root_bucket->scrb_bound;
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_CLUTCH_THREAD_SELECT) | DBG_FUNC_NONE,
+	    thread_tid(highest_thread), thread_group_get_id(highest_thread->thread_group), root_bucket->scrb_bucket, debug_info.scdts_trace_data_packed, 0);
 	return highest_thread;
 }
 
@@ -2663,11 +3029,15 @@ sched_clutch_thread_pri_shift(
 static void
 sched_clutch_init(void);
 
+#if !SCHED_TEST_HARNESS
+
 static thread_t
 sched_clutch_steal_thread(processor_set_t pset);
 
 static void
 sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context);
+
+#endif /* !SCHED_TEST_HARNESS */
 
 static boolean_t
 sched_clutch_processor_enqueue(processor_t processor, thread_t thread,
@@ -2688,8 +3058,12 @@ sched_clutch_runq_count(processor_t processor);
 static boolean_t
 sched_clutch_processor_queue_empty(processor_t processor);
 
+#if !SCHED_TEST_HARNESS
+
 static uint64_t
 sched_clutch_runq_stats_count_sum(processor_t processor);
+
+#endif /* !SCHED_TEST_HARNESS */
 
 static int
 sched_clutch_processor_bound_count(processor_t processor);
@@ -2701,19 +3075,23 @@ static void
 sched_clutch_processor_init(processor_t processor);
 
 static thread_t
-sched_clutch_choose_thread(processor_t processor, int priority, ast_t reason);
+sched_clutch_processor_highest_thread(processor_t processor, sched_clutch_traverse_mode_t mode);
+
+static thread_t
+sched_clutch_choose_thread(processor_t processor, int priority, thread_t prev_thread, ast_t reason);
+
+#if !SCHED_TEST_HARNESS
 
 static void
 sched_clutch_processor_queue_shutdown(processor_t processor);
+
+#endif /* !SCHED_TEST_HARNESS */
 
 static sched_mode_t
 sched_clutch_initial_thread_sched_mode(task_t parent_task);
 
 static uint32_t
 sched_clutch_initial_quantum_size(thread_t thread);
-
-static bool
-sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason);
 
 static uint32_t
 sched_clutch_run_incr(thread_t thread);
@@ -2724,8 +3102,12 @@ sched_clutch_run_decr(thread_t thread);
 static void
 sched_clutch_update_thread_bucket(thread_t thread);
 
+#if !SCHED_TEST_HARNESS
+
 static void
 sched_clutch_thread_group_recommendation_change(struct thread_group *tg, cluster_type_t new_recommendation);
+
+#endif /* !SCHED_TEST_HARNESS */
 
 const struct sched_dispatch_table sched_clutch_dispatch = {
 	.sched_name                                     = "clutch",
@@ -2733,15 +3115,8 @@ const struct sched_dispatch_table sched_clutch_dispatch = {
 	.timebase_init                                  = sched_timeshare_timebase_init,
 	.processor_init                                 = sched_clutch_processor_init,
 	.pset_init                                      = sched_clutch_pset_init,
-	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
 	.choose_thread                                  = sched_clutch_choose_thread,
-	.steal_thread_enabled                           = sched_steal_thread_enabled,
-	.steal_thread                                   = sched_clutch_steal_thread,
-	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
-	.choose_node                                    = sched_choose_node,
-	.choose_processor                               = choose_processor,
 	.processor_enqueue                              = sched_clutch_processor_enqueue,
-	.processor_queue_shutdown                       = sched_clutch_processor_queue_shutdown,
 	.processor_queue_remove                         = sched_clutch_processor_queue_remove,
 	.processor_queue_empty                          = sched_clutch_processor_queue_empty,
 	.priority_is_urgent                             = priority_is_urgent,
@@ -2749,38 +3124,44 @@ const struct sched_dispatch_table sched_clutch_dispatch = {
 	.processor_queue_has_priority                   = sched_clutch_processor_queue_has_priority,
 	.initial_quantum_size                           = sched_clutch_initial_quantum_size,
 	.initial_thread_sched_mode                      = sched_clutch_initial_thread_sched_mode,
+	.processor_runq_count                           = sched_clutch_runq_count,
+	.processor_bound_count                          = sched_clutch_processor_bound_count,
+	.multiple_psets_enabled                         = TRUE,
+	.avoid_processor_enabled                        = FALSE,
+	.thread_avoid_processor                         = NULL,
+	.update_thread_bucket                           = sched_clutch_update_thread_bucket,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
+#if !SCHED_TEST_HARNESS
+	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
+	.steal_thread_enabled                           = sched_steal_thread_enabled,
+	.steal_thread                                   = sched_clutch_steal_thread,
+	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
+	.choose_node                                    = sched_choose_node,
+	.choose_processor                               = choose_processor,
+	.processor_queue_shutdown                       = sched_clutch_processor_queue_shutdown,
 	.can_update_priority                            = can_update_priority,
 	.update_priority                                = update_priority,
 	.lightweight_update_priority                    = lightweight_update_priority,
 	.quantum_expire                                 = sched_default_quantum_expire,
-	.processor_runq_count                           = sched_clutch_runq_count,
 	.processor_runq_stats_count_sum                 = sched_clutch_runq_stats_count_sum,
-	.processor_bound_count                          = sched_clutch_processor_bound_count,
 	.thread_update_scan                             = sched_clutch_thread_update_scan,
-	.multiple_psets_enabled                         = TRUE,
-	.sched_groups_enabled                           = FALSE,
-	.avoid_processor_enabled                        = TRUE,
-	.thread_avoid_processor                         = sched_clutch_thread_avoid_processor,
 	.processor_balance                              = sched_SMT_balance,
-
 	.rt_runq                                        = sched_rtlocal_runq,
 	.rt_init                                        = sched_rtlocal_init,
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
 	.rt_steal_thread                                = sched_rtlocal_steal_thread,
-
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
 	.ipi_policy                                     = sched_ipi_policy,
 	.thread_should_yield                            = sched_thread_should_yield,
 	.run_count_incr                                 = sched_clutch_run_incr,
 	.run_count_decr                                 = sched_clutch_run_decr,
-	.update_thread_bucket                           = sched_clutch_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
 	.thread_group_recommendation_change             = sched_clutch_thread_group_recommendation_change,
-	.cpu_init_completed                             = NULL,
-	.thread_eligible_for_pset                       = NULL,
+#endif /* !SCHED_TEST_HARNESS */
 };
 
 __attribute__((always_inline))
@@ -2859,42 +3240,90 @@ sched_clutch_init(void)
 	sched_clutch_tunables_init();
 }
 
+static inline bool
+sched_clutch_pri_greater_than_tiebreak(int pri_one, int pri_two, bool one_wins_ties)
+{
+	if (one_wins_ties) {
+		return pri_one >= pri_two;
+	} else {
+		return pri_one > pri_two;
+	}
+}
+
+/*
+ * sched_clutch_processor_highest_thread()
+ *
+ * Routine to determine the highest thread on the entire cluster runqueue which
+ * should be selected to run next, optionally comparing against the previously
+ * running thread. Removes the highest thread from the runqueue, depending on the
+ * traverse mode and whether the highest thread is the previously running thread.
+ *
+ * Always called with the pset lock held. Assumes that processor->active_thread
+ * may be locked and modified by another processor.
+ */
+static thread_t
+sched_clutch_processor_highest_thread(
+	processor_t      processor,
+	sched_clutch_traverse_mode_t mode)
+{
+	sched_clutch_root_t root_clutch = sched_clutch_processor_root_clutch(processor);
+	int clutch_pri = sched_clutch_root_priority(root_clutch);
+	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
+	int bound_pri = bound_runq->highq;
+
+	bool has_prev_thread = mode == SCHED_CLUTCH_TRAVERSE_CHECK_PREEMPT || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT;
+	thread_t prev_thread = has_prev_thread ? processor->active_thread : NULL;
+
+	if (bound_runq->count == 0 && root_clutch->scr_thr_count == 0) {
+		/* The runqueue is totally empty */
+		assert(bound_pri < MINPRI && clutch_pri < MINPRI);
+		return prev_thread;
+	}
+
+	if (has_prev_thread) {
+		if (prev_thread->sched_pri >= BASEPRI_RTQUEUES) {
+			/* The previous thread is real-time and thus guaranteed higher than the non-RT runqueue */
+			return prev_thread;
+		}
+		/* Allow the previous thread to influence the priority comparison of Clutch hierarchy vs. processor-bound runqueue */
+		if (prev_thread->bound_processor != NULL) {
+			bound_pri = MAX(bound_pri, prev_thread->sched_pri);
+		} else {
+			clutch_pri = MAX(clutch_pri, prev_thread->sched_pri);
+		}
+	}
+
+	bool prev_thread_is_not_processor_bound = has_prev_thread && (prev_thread->bound_processor == NULL);
+	bool prev_thread_is_processor_bound = has_prev_thread && (prev_thread->bound_processor != NULL);
+	thread_t next_thread = prev_thread;
+	if (clutch_pri > bound_pri) {
+		if (root_clutch->scr_thr_count == 0) {
+			goto found_thread;
+		}
+		next_thread = sched_clutch_hierarchy_thread_highest(root_clutch, processor, prev_thread_is_not_processor_bound ? prev_thread : NULL, mode);
+	} else {
+		if (bound_runq->count == 0 ||
+		    (prev_thread_is_processor_bound && sched_clutch_pri_greater_than_tiebreak(prev_thread->sched_pri, bound_runq->highq, processor->first_timeslice))) {
+			goto found_thread;
+		}
+		next_thread = (mode == SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT || mode == SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY) ?
+		    run_queue_dequeue(bound_runq, SCHED_HEADQ) : run_queue_peek(bound_runq);
+		assert(mode == SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY || next_thread != prev_thread);
+	}
+found_thread:
+	assert(next_thread != NULL);
+	return next_thread;
+}
+
 static thread_t
 sched_clutch_choose_thread(
 	processor_t      processor,
-	int              priority,
+	__unused int              priority,
+	thread_t _Nullable        prev_thread,
 	__unused ast_t            reason)
 {
-	int clutch_pri = sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor));
-	uint32_t clutch_count = sched_clutch_root_count(sched_clutch_processor_root_clutch(processor));
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-	boolean_t choose_from_boundq = false;
-
-	if (bound_runq->highq < priority &&
-	    clutch_pri < priority) {
-		return THREAD_NULL;
-	}
-
-	if (bound_runq->count && clutch_count) {
-		if (bound_runq->highq >= clutch_pri) {
-			choose_from_boundq = true;
-		}
-	} else if (bound_runq->count) {
-		choose_from_boundq = true;
-	} else if (clutch_count) {
-		choose_from_boundq = false;
-	} else {
-		return THREAD_NULL;
-	}
-
-	thread_t thread = THREAD_NULL;
-	if (choose_from_boundq == false) {
-		sched_clutch_root_t pset_clutch_root = sched_clutch_processor_root_clutch(processor);
-		thread = sched_clutch_thread_highest_remove(pset_clutch_root);
-	} else {
-		thread = run_queue_dequeue(bound_runq, SCHED_HEADQ);
-	}
-	return thread;
+	assert(prev_thread == NULL || prev_thread == processor->active_thread);
+	return sched_clutch_processor_highest_thread(processor, prev_thread != NULL ? SCHED_CLUTCH_TRAVERSE_REMOVE_CONSIDER_CURRENT : SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY);
 }
 
 static boolean_t
@@ -2926,55 +3355,30 @@ sched_clutch_processor_queue_empty(processor_t processor)
 static ast_t
 sched_clutch_processor_csw_check(processor_t processor)
 {
-	boolean_t       has_higher;
-	int             pri;
-
-	if (sched_clutch_thread_avoid_processor(processor, current_thread(), AST_NONE)) {
-		return AST_PREEMPT | AST_URGENT;
-	}
-
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-	int clutch_pri = sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor));
-
 	assert(processor->active_thread != NULL);
-
-	pri = MAX(clutch_pri, bound_runq->highq);
-
-	if (processor->first_timeslice) {
-		has_higher = (pri > processor->current_pri);
-	} else {
-		has_higher = (pri >= processor->current_pri);
-	}
-
-	if (has_higher) {
-		if (sched_clutch_root_urgency(sched_clutch_processor_root_clutch(processor)) > 0) {
+	thread_t runqueue_thread = sched_clutch_processor_highest_thread(processor, SCHED_CLUTCH_TRAVERSE_CHECK_PREEMPT);
+	if (runqueue_thread != processor->active_thread) {
+		/* Found a better thread to run */
+		if (sched_clutch_root_urgency(sched_clutch_processor_root_clutch(processor)) > 0 ||
+		    sched_clutch_bound_runq(processor)->urgency > 0) {
 			return AST_PREEMPT | AST_URGENT;
 		}
-
-		if (bound_runq->urgency > 0) {
-			return AST_PREEMPT | AST_URGENT;
-		}
-
 		return AST_PREEMPT;
 	}
-
 	return AST_NONE;
 }
 
 static boolean_t
-sched_clutch_processor_queue_has_priority(processor_t    processor,
-    int            priority,
-    boolean_t      gte)
+sched_clutch_processor_queue_has_priority(
+	__unused processor_t    processor,
+	__unused int            priority,
+	__unused boolean_t      gte)
 {
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-
-	int qpri = MAX(sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor)), bound_runq->highq);
-
-	if (gte) {
-		return qpri >= priority;
-	} else {
-		return qpri > priority;
-	}
+	/*
+	 * Never short-circuit the Clutch runqueue by returning FALSE here. Instead,
+	 * thread_select() should always go through sched_clutch_choose_thread().
+	 */
+	return TRUE;
 }
 
 static int
@@ -2982,6 +3386,8 @@ sched_clutch_runq_count(processor_t processor)
 {
 	return (int)sched_clutch_root_count(sched_clutch_processor_root_clutch(processor)) + sched_clutch_bound_runq(processor)->count;
 }
+
+#if !SCHED_TEST_HARNESS
 
 static uint64_t
 sched_clutch_runq_stats_count_sum(processor_t processor)
@@ -2994,11 +3400,16 @@ sched_clutch_runq_stats_count_sum(processor_t processor)
 		return bound_sum;
 	}
 }
+
+#endif /* !SCHED_TEST_HARNESS */
+
 static int
 sched_clutch_processor_bound_count(processor_t processor)
 {
 	return sched_clutch_bound_runq(processor)->count;
 }
+
+#if !SCHED_TEST_HARNESS
 
 static void
 sched_clutch_processor_queue_shutdown(processor_t processor)
@@ -3016,7 +3427,7 @@ sched_clutch_processor_queue_shutdown(processor_t processor)
 
 	queue_init(&tqueue);
 	while (sched_clutch_root_count(pset_clutch_root) > 0) {
-		thread = sched_clutch_thread_highest_remove(pset_clutch_root);
+		thread = sched_clutch_hierarchy_thread_highest(pset_clutch_root, processor, NULL, SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY);
 		enqueue_tail(&tqueue, &thread->runq_links);
 	}
 
@@ -3029,6 +3440,8 @@ sched_clutch_processor_queue_shutdown(processor_t processor)
 		thread_unlock(thread);
 	}
 }
+
+#endif /* !SCHED_TEST_HARNESS */
 
 static boolean_t
 sched_clutch_processor_queue_remove(
@@ -3064,6 +3477,8 @@ sched_clutch_processor_queue_remove(
 
 	return processor != PROCESSOR_NULL;
 }
+
+#if !SCHED_TEST_HARNESS
 
 static thread_t
 sched_clutch_steal_thread(__unused processor_set_t pset)
@@ -3162,25 +3577,6 @@ sched_clutch_thread_update_scan(sched_update_scan_context_t scan_context)
 	} while (restart_needed);
 }
 
-extern int sched_allow_rt_smt;
-
-/* Return true if this thread should not continue running on this processor */
-static bool
-sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread, __unused ast_t reason)
-{
-	if (processor->processor_primary != processor) {
-		/*
-		 * This is a secondary SMT processor.  If the primary is running
-		 * a realtime thread, only allow realtime threads on the secondary.
-		 */
-		if ((processor->processor_primary->current_pri >= BASEPRI_RTQUEUES) && ((thread->sched_pri < BASEPRI_RTQUEUES) || !sched_allow_rt_smt)) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
 /*
  * For the clutch scheduler, the run counts are maintained in the clutch
  * buckets (i.e thread group scheduling structure).
@@ -3220,6 +3616,8 @@ sched_thread_sched_pri_promoted(thread_t thread)
 	       (thread->kern_promotion_schedpri != 0);
 }
 
+#endif /* !SCHED_TEST_HARNESS */
+
 /*
  * Routine to update the scheduling bucket for the thread.
  *
@@ -3234,6 +3632,8 @@ sched_thread_sched_pri_promoted(thread_t thread)
  * timeshare bucket. The reason for to do that is because it is
  * extremely hard to define the scheduling properties of such threads
  * and they typically lead to performance issues.
+ *
+ * Called with the thread lock held and the thread held off the runqueue.
  */
 
 void
@@ -3261,6 +3661,8 @@ sched_clutch_update_thread_bucket(thread_t thread)
 	}
 }
 
+#if !SCHED_TEST_HARNESS
+
 static void
 sched_clutch_thread_group_recommendation_change(__unused struct thread_group *tg, __unused cluster_type_t new_recommendation)
 {
@@ -3268,6 +3670,8 @@ sched_clutch_thread_group_recommendation_change(__unused struct thread_group *tg
 	 * threads between cluster types independently from the Edge scheduler.
 	 */
 }
+
+#endif /* !SCHED_TEST_HARNESS */
 
 #if CONFIG_SCHED_EDGE
 
@@ -3282,17 +3686,8 @@ sched_edge_pset_init(processor_set_t pset);
 static thread_t
 sched_edge_processor_idle(processor_set_t pset);
 
-static ast_t
-sched_edge_processor_csw_check(processor_t processor);
-
-static boolean_t
-sched_edge_processor_queue_has_priority(processor_t processor, int priority, boolean_t gte);
-
 static boolean_t
 sched_edge_processor_queue_empty(processor_t processor);
-
-static thread_t
-sched_edge_choose_thread(processor_t processor, int priority, ast_t reason);
 
 static void
 sched_edge_processor_queue_shutdown(processor_t processor);
@@ -3340,7 +3735,7 @@ const struct sched_dispatch_table sched_edge_dispatch = {
 	.processor_init                                 = sched_clutch_processor_init,
 	.pset_init                                      = sched_edge_pset_init,
 	.maintenance_continuation                       = sched_timeshare_maintenance_continue,
-	.choose_thread                                  = sched_edge_choose_thread,
+	.choose_thread                                  = sched_clutch_choose_thread,
 	.steal_thread_enabled                           = sched_edge_steal_thread_enabled,
 	.steal_thread                                   = sched_edge_processor_idle,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
@@ -3351,8 +3746,8 @@ const struct sched_dispatch_table sched_edge_dispatch = {
 	.processor_queue_remove                         = sched_clutch_processor_queue_remove,
 	.processor_queue_empty                          = sched_edge_processor_queue_empty,
 	.priority_is_urgent                             = priority_is_urgent,
-	.processor_csw_check                            = sched_edge_processor_csw_check,
-	.processor_queue_has_priority                   = sched_edge_processor_queue_has_priority,
+	.processor_csw_check                            = sched_clutch_processor_csw_check,
+	.processor_queue_has_priority                   = sched_clutch_processor_queue_has_priority,
 	.initial_quantum_size                           = sched_clutch_initial_quantum_size,
 	.initial_thread_sched_mode                      = sched_clutch_initial_thread_sched_mode,
 	.can_update_priority                            = can_update_priority,
@@ -3364,7 +3759,6 @@ const struct sched_dispatch_table sched_edge_dispatch = {
 	.processor_bound_count                          = sched_clutch_processor_bound_count,
 	.thread_update_scan                             = sched_clutch_thread_update_scan,
 	.multiple_psets_enabled                         = TRUE,
-	.sched_groups_enabled                           = FALSE,
 	.avoid_processor_enabled                        = TRUE,
 	.thread_avoid_processor                         = sched_edge_thread_avoid_processor,
 	.processor_balance                              = sched_edge_balance,
@@ -3525,35 +3919,6 @@ sched_edge_pset_init(processor_set_t pset)
 	bitmap_set(sched_edge_available_pset_bitmask, pset_cluster_id);
 }
 
-static thread_t
-sched_edge_choose_thread(
-	processor_t      processor,
-	int              priority,
-	__unused ast_t            reason)
-{
-	int clutch_pri = sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor));
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-	boolean_t choose_from_boundq = false;
-
-	if ((bound_runq->highq < priority) &&
-	    (clutch_pri < priority)) {
-		return THREAD_NULL;
-	}
-
-	if (bound_runq->highq >= clutch_pri) {
-		choose_from_boundq = true;
-	}
-
-	thread_t thread = THREAD_NULL;
-	if (choose_from_boundq == false) {
-		sched_clutch_root_t pset_clutch_root = sched_clutch_processor_root_clutch(processor);
-		thread = sched_clutch_thread_highest_remove(pset_clutch_root);
-	} else {
-		thread = run_queue_dequeue(bound_runq, SCHED_HEADQ);
-	}
-	return thread;
-}
-
 static boolean_t
 sched_edge_processor_queue_empty(processor_t processor)
 {
@@ -3614,55 +3979,6 @@ sched_edge_thread_should_yield(processor_t processor, __unused thread_t thread)
 	return false;
 }
 
-static ast_t
-sched_edge_processor_csw_check(processor_t processor)
-{
-	boolean_t       has_higher;
-	int             pri;
-
-	int clutch_pri = sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor));
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-
-	assert(processor->active_thread != NULL);
-
-	pri = MAX(clutch_pri, bound_runq->highq);
-
-	if (processor->first_timeslice) {
-		has_higher = (pri > processor->current_pri);
-	} else {
-		has_higher = (pri >= processor->current_pri);
-	}
-
-	if (has_higher) {
-		if (sched_clutch_root_urgency(sched_clutch_processor_root_clutch(processor)) > 0) {
-			return AST_PREEMPT | AST_URGENT;
-		}
-
-		if (bound_runq->urgency > 0) {
-			return AST_PREEMPT | AST_URGENT;
-		}
-
-		return AST_PREEMPT;
-	}
-
-	return AST_NONE;
-}
-
-static boolean_t
-sched_edge_processor_queue_has_priority(processor_t    processor,
-    int            priority,
-    boolean_t      gte)
-{
-	run_queue_t bound_runq = sched_clutch_bound_runq(processor);
-
-	int qpri = MAX(sched_clutch_root_priority(sched_clutch_processor_root_clutch(processor)), bound_runq->highq);
-	if (gte) {
-		return qpri >= priority;
-	} else {
-		return qpri > priority;
-	}
-}
-
 static void
 sched_edge_processor_queue_shutdown(processor_t processor)
 {
@@ -3681,7 +3997,7 @@ sched_edge_processor_queue_shutdown(processor_t processor)
 
 	queue_init(&tqueue);
 	while (sched_clutch_root_count(pset_clutch_root) > 0) {
-		thread = sched_clutch_thread_highest_remove(pset_clutch_root);
+		thread = sched_clutch_hierarchy_thread_highest(pset_clutch_root, processor, NULL, SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY);
 		enqueue_tail(&tqueue, &thread->runq_links);
 	}
 	pset_unlock(pset);
@@ -3914,29 +4230,49 @@ sched_edge_foreign_running_thread_available(processor_set_t pset)
 	return false;
 }
 
+/*
+ * sched_edge_steal_possible()
+ *
+ * Determines whether we can and should steal a thread from
+ * the candidate_pset to run it on the idle_pset. When returning
+ * true, the function also writes the scheduling bucket that we
+ * should steal from into the bucket_for_steal out parameter.
+ *
+ * Always called with the pset lock for candidate_pset held.
+ */
 static bool
-sched_edge_steal_possible(processor_set_t idle_pset, processor_set_t candidate_pset)
+sched_edge_steal_possible(processor_set_t idle_pset, processor_set_t candidate_pset, sched_bucket_t *bucket_for_steal)
 {
-	int highest_runnable_bucket = bitmap_lsb_first(candidate_pset->pset_clutch_root.scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX);
+	sched_clutch_root_t candidate_clutch_root = &candidate_pset->pset_clutch_root;
+
+	int highest_runnable_bucket = sched_clutch_root_highest_runnable_qos(candidate_clutch_root, SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY);
 	if (highest_runnable_bucket == -1) {
-		/* Candidate cluster runq is empty */
+		/* Candidate cluster runq is empty of unbound threads */
 		return false;
 	}
 
-	if (idle_pset->pset_cluster_type == candidate_pset->pset_cluster_type) {
+	if (idle_pset->pset_type == candidate_pset->pset_type) {
 		/* Always allow stealing from homogeneous clusters */
+		*bucket_for_steal = (sched_bucket_t)highest_runnable_bucket;
 		return true;
-	} else {
-		/* Use the load metrics for highest runnable bucket since that would be stolen next */
-		int32_t candidate_load = sched_edge_cluster_load_metric(candidate_pset, (sched_bucket_t)highest_runnable_bucket);
-		return candidate_load > 0;
 	}
+
+	for (int unbound_qos = highest_runnable_bucket; unbound_qos >= 0; unbound_qos = bitmap_lsb_next(candidate_clutch_root->scr_unbound_runnable_bitmap, TH_BUCKET_SCHED_MAX, unbound_qos)) {
+		uint32_t candidate_runq_depth = os_atomic_load(&candidate_pset->pset_runnable_depth[unbound_qos], relaxed);
+		if (candidate_runq_depth > pset_available_cpu_count(candidate_pset)) {
+			/* Candidate cluster has excess load at this QoS (and at least one unbound thread we can steal!) */
+			*bucket_for_steal = (sched_bucket_t)unbound_qos;
+			return true;
+		}
+	}
+	/* None of the unbound root buckets are overloaded */
+	return false;
 }
 
 static thread_t
 sched_edge_steal_thread(processor_set_t pset, uint64_t candidate_pset_bitmap)
 {
-	thread_t thread = THREAD_NULL;
+	thread_t stolen_thread = THREAD_NULL;
 
 	/*
 	 * Edge Scheduler Optimization
@@ -3956,20 +4292,30 @@ sched_edge_steal_thread(processor_set_t pset, uint64_t candidate_pset_bitmap)
 			continue;
 		}
 		pset_lock(steal_from_pset);
-		if (sched_edge_steal_possible(pset, steal_from_pset)) {
+		sched_bucket_t bucket_for_steal;
+		if (sched_edge_steal_possible(pset, steal_from_pset, &bucket_for_steal)) {
 			uint64_t current_timestamp = mach_absolute_time();
-			sched_clutch_root_bucket_t root_bucket = sched_clutch_root_highest_root_bucket(&steal_from_pset->pset_clutch_root, current_timestamp, SCHED_CLUTCH_HIGHEST_ROOT_BUCKET_UNBOUND_ONLY);
-			thread = sched_clutch_thread_unbound_lookup(&steal_from_pset->pset_clutch_root, root_bucket);
-			sched_clutch_thread_remove(&steal_from_pset->pset_clutch_root, thread, current_timestamp, SCHED_CLUTCH_BUCKET_OPTIONS_SAMEPRI_RR);
-			KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_STEAL) | DBG_FUNC_NONE, thread_tid(thread), pset->pset_cluster_id, steal_from_pset->pset_cluster_id, 0);
+			sched_clutch_root_t clutch_root_for_steal = &steal_from_pset->pset_clutch_root;
+			stolen_thread = sched_clutch_thread_unbound_lookup(clutch_root_for_steal, &clutch_root_for_steal->scr_unbound_buckets[bucket_for_steal], NULL, NULL);
+			sched_clutch_thread_remove(clutch_root_for_steal, stolen_thread, current_timestamp, SCHED_CLUTCH_BUCKET_OPTIONS_SAMEPRI_RR);
+
+			sched_clutch_dbg_thread_select_packed_t debug_info = {0};
+			debug_info.trace_data.version = SCHED_CLUTCH_DBG_THREAD_SELECT_PACKED_VERSION;
+			debug_info.trace_data.traverse_mode = SCHED_CLUTCH_TRAVERSE_REMOVE_HIERARCHY_ONLY;
+			debug_info.trace_data.cluster_id = steal_from_pset->pset_cluster_id;
+			debug_info.trace_data.selection_was_cluster_bound = false;
+			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_CLUTCH_THREAD_SELECT) | DBG_FUNC_NONE,
+			    thread_tid(stolen_thread), thread_group_get_id(stolen_thread->thread_group), bucket_for_steal, debug_info.scdts_trace_data_packed, 0);
+			KDBG(MACHDBG_CODE(DBG_MACH_SCHED_CLUTCH, MACH_SCHED_EDGE_STEAL) | DBG_FUNC_NONE, thread_tid(stolen_thread), pset->pset_cluster_id, steal_from_pset->pset_cluster_id, 0);
+
 			sched_update_pset_load_average(steal_from_pset, current_timestamp);
 		}
 		pset_unlock(steal_from_pset);
-		if (thread != THREAD_NULL) {
+		if (stolen_thread != THREAD_NULL) {
 			break;
 		}
 	}
-	return thread;
+	return stolen_thread;
 }
 
 /*
@@ -4059,12 +4405,20 @@ sched_edge_shared_rsrc_migrate_possible(thread_t thread, processor_set_t preferr
 static bool
 sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t reason)
 {
+	if (thread->bound_processor == processor) {
+		/* Thread is bound here */
+		return false;
+	}
+
 	processor_set_t preferred_pset = pset_array[sched_edge_thread_preferred_cluster(thread)];
+
+	/* Evaluate shared resource policies */
 	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_RR)) {
 		return sched_edge_shared_rsrc_migrate_possible(thread, preferred_pset, processor->processor_set);
 	}
 	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST)) {
-		if (processor->processor_set->pset_type != preferred_pset->pset_type) {
+		if (processor->processor_set->pset_type != preferred_pset->pset_type &&
+		    pset_type_is_recommended(preferred_pset)) {
 			return true;
 		}
 		return sched_edge_shared_rsrc_migrate_possible(thread, preferred_pset, processor->processor_set);
@@ -4076,7 +4430,8 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 	 * threads expiring their quantum on the non-preferred cluster type and explicitly
 	 * rebalancing to the preferred cluster runqueue.
 	 */
-	if (processor->processor_set->pset_type != preferred_pset->pset_type) {
+	if ((processor->processor_set->pset_type != preferred_pset->pset_type) &&
+	    pset_type_is_recommended(preferred_pset)) {
 		return true;
 	}
 	/* If the preferred pset for the thread is now idle, try and migrate thread to that cluster */
@@ -4428,14 +4783,14 @@ sched_edge_amp_rebalance_pset(processor_set_t preferred_pset, thread_t thread)
  * resultant pset lock is held.
  */
 static processor_set_t
-sched_edge_migrate_candidate(_Nullable processor_set_t preferred_pset, thread_t thread, processor_set_t locked_pset, bool switch_pset_locks)
+sched_edge_migrate_candidate(processor_set_t _Nullable preferred_pset, thread_t thread, processor_set_t locked_pset, bool switch_pset_locks)
 {
 	processor_set_t selected_pset = preferred_pset;
 	cluster_shared_rsrc_type_t shared_rsrc_type = sched_edge_thread_shared_rsrc_type(thread);
 	bool shared_rsrc_thread = (shared_rsrc_type != CLUSTER_SHARED_RSRC_TYPE_NONE);
 
 	if (SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)) {
-		/* For bound threads always recommend the cluster its bound to */
+		/* For bound threads always recommend the cluster it's bound to */
 		selected_pset = pset_array[sched_edge_thread_bound_cluster_id(thread)];
 		if (selected_pset != NULL) {
 			locked_pset = sched_edge_switch_pset_lock(selected_pset, locked_pset, switch_pset_locks);
@@ -4921,7 +5276,7 @@ sched_edge_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sche
 	switch (event) {
 	case SCHED_IPI_EVENT_SPILL:
 		/* For Spill event, use deferred IPIs if sched_amp_spill_deferred_ipi set */
-		if (deferred_ipi_supported) {
+		if (deferred_ipi_supported && sched_amp_spill_deferred_ipi) {
 			return sched_ipi_deferred_policy(pset, dst, thread, event);
 		}
 		break;
@@ -4971,6 +5326,7 @@ sched_edge_qos_max_parallelism(int qos, uint64_t options)
 	uint32_t pcpu_count = ml_get_cpu_number_type(CLUSTER_TYPE_P, false, false);
 	uint32_t ecluster_count = ml_get_cluster_number_type(CLUSTER_TYPE_E);
 	uint32_t pcluster_count = ml_get_cluster_number_type(CLUSTER_TYPE_P);
+
 
 	if (options & QOS_PARALLELISM_REALTIME) {
 		/* For realtime threads on AMP, we would want them

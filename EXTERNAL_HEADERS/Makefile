@@ -17,9 +17,6 @@ INSTINC_SUBDIRS_X86_64 =	\
 INSTINC_SUBDIRS_X86_64H =	\
 	architecture
 
-INSTINC_SUBDIRS_ARM =	\
-	architecture
-
 INSTINC_SUBDIRS_ARM64 =	\
 	architecture
 

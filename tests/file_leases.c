@@ -22,7 +22,8 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vfs.lease"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("vfs"),
-	T_META_CHECK_LEAKS(false));
+	T_META_CHECK_LEAKS(false),
+	T_META_TAG_VM_PREFERRED);
 
 #define TEST_LEASE_DIR  "lease_dir"
 #define TEST_LEASE_FILE "lease_file"

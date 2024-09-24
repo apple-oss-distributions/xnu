@@ -31,9 +31,20 @@
 #include <mach/kern_return.h>
 #include <mach/exclaves.h>
 
+#include <stdbool.h>
+#include <stdint.h>
+
 __BEGIN_DECLS
 
 extern kern_return_t
 exclaves_call_upcall_handler(exclaves_id_t upcall_id);
+
+extern kern_return_t
+exclaves_upcall_init(void);
+
+/* BEGIN IGNORE CODESTYLE */
+extern bool
+exclaves_upcall_in_range(uintptr_t, bool);
+/* END IGNORE CODESTYLE */
 
 __END_DECLS

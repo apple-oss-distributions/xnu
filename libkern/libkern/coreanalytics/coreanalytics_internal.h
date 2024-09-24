@@ -35,6 +35,9 @@
  */
 #include <kern/mpsc_queue.h>
 #include <kern/zalloc.h>
+#include <sys/cdefs.h>
+
+__BEGIN_DECLS
 
 /*
  * Macros to perform a foreach loop over variadic macro arguments.
@@ -173,6 +176,8 @@ extern ca_event_t core_analytics_allocate_event(size_t data_size, const char *fo
 typedef char ca_sstr;
 
 extern size_t core_analytics_event_size(const char *event_spec);
+
+__END_DECLS
 
 #endif /* _COREANALYTICS_H */
 #endif /* XNU_KERNEL_PRIVATE */

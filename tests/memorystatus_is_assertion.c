@@ -14,18 +14,21 @@
 #include <mach-o/dyld.h>
 
 #include <darwintest.h>
+#include <darwintest_multiprocess.h>
 #include <darwintest_utils.h>
 
 #include "memorystatus_assertion_helpers.h"
 
 T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.vm"),
+	T_META_NAMESPACE("xnu.memorystatus"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
-	T_META_RADAR_COMPONENT_VERSION("VM"),
-	T_META_CHECK_LEAKS(false)
+	T_META_RADAR_COMPONENT_VERSION("VM - memory pressure"),
+	T_META_CHECK_LEAKS(false),
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED
 	);
 
-extern char **environ;
+#define IDLE_AGEOUT_S 30
 
 /*
  * This test has multiple sub-tests that set and then verify jetsam priority transitions
@@ -60,13 +63,6 @@ extern char **environ;
  * assertion based priorities.
  */
 
-/*
- * New flag to tell kernel this is an assertion driven priority update.
- */
-#ifndef MEMORYSTATUS_SET_PRIORITY_ASSERTION
-#define MEMORYSTATUS_SET_PRIORITY_ASSERTION 0x1
-#endif
-
 static void
 proc_will_set_clean(pid_t pid)
 {
@@ -83,15 +79,15 @@ proc_will_set_dirty(pid_t pid)
 	return;
 }
 
-#define kJetsamAgingPolicyNone                          (0)
-#define kJetsamAgingPolicyLegacy                        (1)
-#define kJetsamAgingPolicySysProcsReclaimedFirst        (2)
-#define kJetsamAgingPolicyAppsReclaimedFirst            (3)
-#define kJetsamAgingPolicyMax                           kJetsamAgingPolicyAppsReclaimedFirst
-
-#ifndef kMemorystatusAssertion
-#define kMemorystatusAssertion 0x40
-#endif
+static void
+proc_set_managed(pid_t pid, bool managed)
+{
+	int err;
+	err = memorystatus_control(MEMORYSTATUS_CMD_SET_PROCESS_IS_MANAGED, pid,
+	    managed, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(err,
+	    "memorystatus_control(MEMORYSTATUS_CMD_SET_PROCESS_IS_MANAGED)");
+}
 
 /*
  * Make repetitive (eg: back-to-back) calls using MEMORYSTATUS_SET_PRIORITY_ASSERTION.
@@ -155,6 +151,7 @@ memorystatus_assertion_test_repetitive(char *test, boolean_t turn_on_dirty_track
 		 */
 	}
 
+	proc_set_managed(mypid, true);
 
 	verbose = false;
 	(void)get_priority_props(mypid, verbose, NULL, NULL, NULL, NULL);
@@ -168,8 +165,8 @@ memorystatus_assertion_test_repetitive(char *test, boolean_t turn_on_dirty_track
 	boolean_t ret;
 	for (i = 0; i < 2; i++) {
 		if (i == 1 && turn_on_dirty_tracking) {
-			T_LOG("Avoid idle-deferred - sleeping for 20");
-			sleep(20);
+			T_LOG("Avoid idle-deferred - sleeping for %d s", IDLE_AGEOUT_S);
+			sleep(IDLE_AGEOUT_S);
 
 			if (start_clean) {
 				proc_will_set_dirty(mypid);
@@ -221,7 +218,7 @@ memorystatus_assertion_test_repetitive(char *test, boolean_t turn_on_dirty_track
  * Process is dirty tracking and opts into pressured exit.
  */
 static void
-memorystatus_assertion_test_allow_idle_exit()
+memorystatus_assertion_test_allow_idle_exit(void)
 {
 	pid_t mypid = getpid();
 
@@ -238,10 +235,11 @@ memorystatus_assertion_test_allow_idle_exit()
 	set_priority(mypid, requestedpriority, 0, false);
 
 	proc_track_dirty(mypid, (PROC_DIRTY_TRACK | PROC_DIRTY_ALLOW_IDLE_EXIT | PROC_DIRTY_DEFER));
+	proc_set_managed(mypid, true);
 
 	proc_will_set_clean(mypid);
 
-	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, inactive_limit_mb, 0x0, ASSERTION_STATE_IS_RELINQUISHED, "Clean start");
+	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, active_limit_mb, 0x0, ASSERTION_STATE_IS_RELINQUISHED, "Clean start");
 
 	T_LOG("SETUP STATE COMPLETE");
 
@@ -262,29 +260,32 @@ memorystatus_assertion_test_allow_idle_exit()
 	 */
 	T_LOG("********Test0 clean: no state change on relinquish");
 	relinquish_assertion_priority(mypid, 0xF00D);
-	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, inactive_limit_mb, 0xF00D, ASSERTION_STATE_IS_RELINQUISHED, "Test0");
+	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, active_limit_mb, 0xF00D, ASSERTION_STATE_IS_RELINQUISHED, "Test0");
 
 	T_LOG("********Test1 clean: deferred now assertion[10]");
 	set_assertion_priority(mypid, JETSAM_PRIORITY_FOREGROUND, 0xFEED);
-	(void)check_properties(mypid, JETSAM_PRIORITY_FOREGROUND, inactive_limit_mb, 0xFEED, ASSERTION_STATE_IS_SET, "Test1");
+	(void)check_properties(mypid, JETSAM_PRIORITY_FOREGROUND, active_limit_mb, 0xFEED, ASSERTION_STATE_IS_SET, "Test1");
 
 	/* Test2 */
 	T_LOG("********Test2 clean:  assertion[10 -> 3]");
 	set_assertion_priority(mypid, JETSAM_PRIORITY_BACKGROUND, 0xFACE);
-	(void)check_properties(mypid, JETSAM_PRIORITY_BACKGROUND, inactive_limit_mb, 0xFACE, ASSERTION_STATE_IS_SET, "Test2");
+	(void)check_properties(mypid, JETSAM_PRIORITY_BACKGROUND, active_limit_mb, 0xFACE, ASSERTION_STATE_IS_SET, "Test2");
 
 	/* Test3 */
 	T_LOG("********Test3 clean: assertion[3 -> 0], but now deferred");
 	relinquish_assertion_priority(mypid, 0xBEEF);
-	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, inactive_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test3");
+	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, active_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test3");
+
+	T_LOG("Avoid idle-deferred moving forward. Sleeping for %d s", IDLE_AGEOUT_S);
+	sleep(IDLE_AGEOUT_S);
+
+	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE, inactive_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test3");
 
 	/* Test4 */
 	T_LOG("********Test4 clean: deferred now assertion[10]");
 	set_assertion_priority(mypid, JETSAM_PRIORITY_FOREGROUND, 0xFEED);
-	(void)check_properties(mypid, JETSAM_PRIORITY_FOREGROUND, inactive_limit_mb, 0xFEED, ASSERTION_STATE_IS_SET, "Test4");
+	(void)check_properties(mypid, JETSAM_PRIORITY_FOREGROUND, active_limit_mb, 0xFEED, ASSERTION_STATE_IS_SET, "Test4");
 
-	T_LOG("Avoid idle-deferred moving forward. Sleeping for 20");
-	sleep(20);
 
 	/* Test5 */
 	T_LOG("********Test5 dirty: set dirty priority but assertion[10] prevails");
@@ -331,13 +332,8 @@ memorystatus_assertion_test_allow_idle_exit()
 	/* Test13 */
 	T_LOG("********Test13 dirty goes clean: both assertion[0] and clean");
 	proc_will_set_clean(mypid);
-	if (g_jetsam_aging_policy == kJetsamAgingPolicySysProcsReclaimedFirst) {
-		/* For sysproc aging policy the daemon should be at idle deferred and with an active memory limit */
-		(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, active_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test13");
-	} else {
-		/* For the legacy aging policy, daemon should be at idle band with inactive memory limit */
-		(void)check_properties(mypid, JETSAM_PRIORITY_IDLE, inactive_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test13");
-	}
+	/* For sysproc aging policy the daemon should be at idle deferred and with an active memory limit */
+	(void)check_properties(mypid, JETSAM_PRIORITY_IDLE_DEFERRED, active_limit_mb, 0xBEEF, ASSERTION_STATE_IS_RELINQUISHED, "Test13");
 }
 
 /*
@@ -346,7 +342,7 @@ memorystatus_assertion_test_allow_idle_exit()
  * except where the assertion priority bumps it above the requested priority.
  */
 static void
-memorystatus_assertion_test_do_not_allow_idle_exit()
+memorystatus_assertion_test_do_not_allow_idle_exit(void)
 {
 	pid_t mypid = getpid();
 
@@ -360,6 +356,7 @@ memorystatus_assertion_test_do_not_allow_idle_exit()
 	set_memlimits(mypid, active_limit_mb, inactive_limit_mb, true, true);
 	set_priority(mypid, requestedpriority, 0, false);
 	proc_track_dirty(mypid, (PROC_DIRTY_TRACK));
+	proc_set_managed(mypid, true);
 
 	proc_will_set_dirty(mypid);
 
@@ -467,6 +464,22 @@ T_DECL(assertion_test_bad_flags, "verify bad flag returns an error", T_META_TIME
 	T_ASSERT_POSIX_FAILURE(err, EINVAL, "MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES should fail with bad flags (err=%d)", err);
 }
 
+T_DECL(set_assertion_pri_unmanaged,
+    "verify that an unmanaged process cannot have assertion-driven priority set")
+{
+	int err;
+	memorystatus_priority_properties_t mjp = {
+		.priority = JETSAM_PRIORITY_FOREGROUND,
+		.user_data = 0x0
+	};
+	err = memorystatus_control(MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES,
+	    getpid(), MEMORYSTATUS_SET_PRIORITY_ASSERTION, &mjp, sizeof(mjp));
+
+	T_EXPECT_POSIX_FAILURE(err, EPERM,
+	    "Should not be able to set assertion-driven priority of unmanaged process.");
+}
+
+
 #if TARGET_OS_OSX
 /*
  * Idle band deferral, aka aging band/demotion, has been disabled on macOS till
@@ -475,6 +488,44 @@ T_DECL(assertion_test_bad_flags, "verify bad flag returns an error", T_META_TIME
  * The following set of tests rely on PROC_DIRTY_DEFER, aka aging bands, for the tests.
  */
 #else /* TARGET_OS_OSX */
+
+T_HELPER_DECL(idle_age_as_app_then_sysproc,
+    "Launch as managed, begin idle aging, then enroll in ActivityTracking")
+{
+	pid_t my_pid = getpid();
+	int32_t priority;
+
+	// Set self as managed and begin idle aging
+	proc_set_managed(my_pid, true);
+	set_priority(my_pid, JETSAM_PRIORITY_IDLE, 0, false);
+	// process must have a fatal memlimit to enroll in dirtytracking while
+	// managed
+	set_memlimits(my_pid, 100, 100, true, true);
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_AGING_BAND2, "Process is placed in App aging band");
+
+	// Enroll in dirty tracking
+	proc_track_dirty(my_pid,
+	    (PROC_DIRTY_TRACK | PROC_DIRTY_ALLOW_IDLE_EXIT | PROC_DIRTY_DEFER));
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_AGING_BAND1, "Process is placed in SysProc aging band");
+
+	T_LOG("Sleeping for %d sec...", IDLE_AGEOUT_S);
+	sleep(IDLE_AGEOUT_S);
+
+	get_priority_props(my_pid, FALSE, &priority, NULL, NULL, NULL);
+	T_EXPECT_EQ(priority, JETSAM_PRIORITY_IDLE, "Process ages to IDLE");
+}
+
+T_DECL(idle_aging_app_to_sysproc,
+    "Processes that transition from App -> SysProc while aging are deferred properly")
+{
+	dt_helper_t helper = dt_child_helper("idle_age_as_app_then_sysproc");
+
+	dt_run_helpers(&helper, 1, 60);
+}
 
 T_DECL(assertion_test_repetitive_non_dirty_tracking, "Scenario #1 - repetitive assertion priority on non-dirty-tracking process", T_META_TIMEOUT(60), T_META_ASROOT(true)) {
 	/*
@@ -515,3 +566,54 @@ T_DECL(assertion_test_do_not_allow_idle_exit, "set assertion priorities on proce
 	memorystatus_assertion_test_do_not_allow_idle_exit();
 }
 #endif /* TARGET_OS_OSX */
+
+T_DECL(daemon_memlimits,
+    "test that daemons have their memlimits set correctly according to dirtiness",
+    T_META_ENABLED(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR))
+{
+	int ret;
+	const uint32_t memlimit_active = 6; /* 6 MB */
+	const uint32_t memlimit_inactive = 4; /* 4 MB */
+	pid_t pid = getpid();
+
+	set_priority(pid, JETSAM_PRIORITY_UI_SUPPORT, 0, false);
+	set_memlimits(pid, memlimit_active, memlimit_inactive, true, true);
+
+	ret = proc_track_dirty(pid, PROC_DIRTY_TRACK | PROC_DIRTY_ALLOW_IDLE_EXIT | PROC_DIRTY_DEFER);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "proc_track_dirty()");
+
+	check_properties(pid, JETSAM_PRIORITY_IDLE_DEFERRED, memlimit_active, 0x0,
+	    false, "jetsam_test_daemon_memlimit - #1 post-track-dirty");
+
+	T_LOG("Sleeping for %d to allow idle-ageout.", IDLE_AGEOUT_S);
+	sleep(IDLE_AGEOUT_S);
+
+	check_properties(pid, JETSAM_PRIORITY_IDLE, memlimit_inactive, 0x0, false,
+	    "jetsam_test_daemon_memlimit - #4 post-sleep");
+
+	proc_set_dirty(pid, true);
+
+	check_properties(pid, JETSAM_PRIORITY_UI_SUPPORT, memlimit_active, 0x0,
+	    false, "jetsam_test_daemon_memlimit - #2 post-set-dirty");
+
+	proc_set_dirty(pid, false);
+
+	check_properties(pid, JETSAM_PRIORITY_IDLE_DEFERRED, memlimit_active, 0x0,
+	    false, "jetsam_test_daemon_memlimit - #3 post-clear-dirty");
+
+	T_LOG("Sleeping for %d s to allow idle-ageout.", IDLE_AGEOUT_S);
+	sleep(IDLE_AGEOUT_S);
+
+	check_properties(pid, JETSAM_PRIORITY_IDLE, memlimit_inactive, 0x0, false,
+	    "jetsam_test_daemon_memlimit - #4 post-sleep");
+
+	proc_set_dirty(pid, true);
+
+	check_properties(pid, JETSAM_PRIORITY_UI_SUPPORT, memlimit_active, 0x0,
+	    false, "jetsam_test_daemon_memlimit - #5 post-set-dirty-2");
+
+	proc_set_dirty(pid, false);
+
+	check_properties(pid, JETSAM_PRIORITY_IDLE_DEFERRED, memlimit_active, 0x0, false,
+	    "jetsam_test_daemon_memlimit - #6 post-clear-dirty-2");
+}

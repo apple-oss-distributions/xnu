@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -66,13 +66,14 @@ uint32_t thread_get_sigreturn_diversifier(thread_t thread);
  * Maps state flavor to number of words in the state:
  */
 /* __private_extern__ */
-unsigned int _MachineStateCount[] = {
+unsigned int _MachineStateCount[THREAD_STATE_FLAVORS] = {
 	[ARM_UNIFIED_THREAD_STATE] = ARM_UNIFIED_THREAD_STATE_COUNT,
 	[ARM_VFP_STATE] = ARM_VFP_STATE_COUNT,
 	[ARM_EXCEPTION_STATE] = ARM_EXCEPTION_STATE_COUNT,
 	[ARM_DEBUG_STATE] = ARM_DEBUG_STATE_COUNT,
 	[ARM_THREAD_STATE64] = ARM_THREAD_STATE64_COUNT,
 	[ARM_EXCEPTION_STATE64] = ARM_EXCEPTION_STATE64_COUNT,
+	[ARM_EXCEPTION_STATE64_V2] = ARM_EXCEPTION_STATE64_V2_COUNT,
 	[ARM_THREAD_STATE32] = ARM_THREAD_STATE32_COUNT,
 	[ARM_DEBUG_STATE32] = ARM_DEBUG_STATE32_COUNT,
 	[ARM_DEBUG_STATE64] = ARM_DEBUG_STATE64_COUNT,
@@ -334,6 +335,7 @@ machine_thread_state_convert_to_user(
 	bool stash_sigreturn_token = !!(tssf_flags & TSSF_STASH_SIGRETURN_TOKEN);
 	bool random_div = !!(tssf_flags & TSSF_RANDOM_USER_DIV);
 	bool thread_div = !!(tssf_flags & TSSF_THREAD_USER_DIV);
+	bool task_div = !!(tssf_flags & TSSF_TASK_USER_DIV);
 	uint32_t old_flags;
 	bool kernel_signed_pc = true;
 	bool kernel_signed_lr = true;
@@ -404,7 +406,8 @@ machine_thread_state_convert_to_user(
 		}
 	} else {
 		/* Set a non zero userland diversifier */
-		if (random_div) {
+		if (random_div || task_div) {
+			/* Still use random div in case of task_div to avoid leaking the secret key */
 			do {
 				read_random(&userland_diversifier, sizeof(userland_diversifier));
 				userland_diversifier &=
@@ -577,14 +580,9 @@ machine_thread_state_convert_from_user(
 	mach_msg_type_number_t old_count,
 	thread_set_status_flags_t tssf_flags)
 {
-#if __has_feature(ptrauth_calls)
 	arm_thread_state64_t *ts64;
 	arm_thread_state64_t *old_ts64 = NULL;
-	void *userland_diversifier = NULL;
-	bool kernel_signed_pc;
-	bool kernel_signed_lr;
-	bool random_div = !!(tssf_flags & TSSF_RANDOM_USER_DIV);
-	bool thread_div = !!(tssf_flags & TSSF_THREAD_USER_DIV);
+	bool only_set_pc = !!(tssf_flags & TSSF_ONLY_PC);
 
 	switch (flavor) {
 	case ARM_THREAD_STATE:
@@ -617,6 +615,24 @@ machine_thread_state_convert_from_user(
 	default:
 		return KERN_SUCCESS;
 	}
+
+	if (only_set_pc) {
+		uint64_t new_pc = ts64->pc;
+		uint64_t new_flags = ts64->flags;
+		/* Only allow pc to be modified in new_state */
+		memcpy(ts64, old_ts64, sizeof(arm_thread_state64_t));
+		ts64->pc = new_pc;
+		ts64->flags = new_flags;
+	}
+
+#if __has_feature(ptrauth_calls)
+
+	void *userland_diversifier = NULL;
+	bool kernel_signed_pc;
+	bool kernel_signed_lr;
+	bool random_div = !!(tssf_flags & TSSF_RANDOM_USER_DIV);
+	bool thread_div = !!(tssf_flags & TSSF_THREAD_USER_DIV);
+	bool task_div = !!(tssf_flags & TSSF_TASK_USER_DIV);
 
 	// Note that kernel threads never have disable_user_jop set
 	if ((current_thread()->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) ||
@@ -707,6 +723,10 @@ machine_thread_state_convert_from_user(
 		    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
 	} else if (thread_div) {
 		userland_diversifier = (void *)(long)(thread_get_sigreturn_diversifier(thread) &
+		    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
+	} else if (task_div) {
+		userland_diversifier =
+		    (void *)(long)((get_threadtask(thread)->hardened_exception_action.signed_pc_key) &
 		    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK);
 	}
 
@@ -910,10 +930,7 @@ machine_thread_get_state(thread_t                 thread,
 			return KERN_INVALID_ARGUMENT;
 		}
 
-		const arm_saved_state_t *current_state = thread->machine.upcb;
-
-		kern_return_t rn = handle_get_arm64_thread_state(tstate, count,
-		    current_state);
+		kern_return_t rn = handle_get_arm64_thread_state(tstate, count, thread->machine.upcb);
 		if (rn) {
 			return rn;
 		}
@@ -936,7 +953,7 @@ machine_thread_get_state(thread_t                 thread,
 		saved_state = saved_state32(thread->machine.upcb);
 
 		state->exception = saved_state->exception;
-		state->fsr = saved_state->esr;
+		state->fsr = (uint32_t) saved_state->esr;
 		state->far = saved_state->far;
 
 		*count = ARM_EXCEPTION_STATE_COUNT;
@@ -956,11 +973,31 @@ machine_thread_get_state(thread_t                 thread,
 		state = (struct arm_exception_state64 *) tstate;
 		saved_state = saved_state64(thread->machine.upcb);
 
-		state->exception = saved_state->exception;
+		state->exception = 0;
+		state->far = saved_state->far;
+		state->esr = (uint32_t) saved_state->esr;
+
+		*count = ARM_EXCEPTION_STATE64_COUNT;
+		break;
+	}
+	case ARM_EXCEPTION_STATE64_V2:{
+		struct arm_exception_state64_v2 *state;
+		struct arm_saved_state64 *saved_state;
+
+		if (*count < ARM_EXCEPTION_STATE64_V2_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (!thread_is_64bit_data(thread)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		state = (struct arm_exception_state64_v2 *) tstate;
+		saved_state = saved_state64(thread->machine.upcb);
+
 		state->far = saved_state->far;
 		state->esr = saved_state->esr;
 
-		*count = ARM_EXCEPTION_STATE64_COUNT;
+		*count = ARM_EXCEPTION_STATE64_V2_COUNT;
 		break;
 	}
 	case ARM_DEBUG_STATE:{
@@ -1269,6 +1306,16 @@ machine_thread_set_state(thread_t               thread,
 	}
 	case ARM_EXCEPTION_STATE64:{
 		if (count != ARM_EXCEPTION_STATE64_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+		if (!thread_is_64bit_data(thread)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		break;
+	}
+	case ARM_EXCEPTION_STATE64_V2:{
+		if (count != ARM_EXCEPTION_STATE64_V2_COUNT) {
 			return KERN_INVALID_ARGUMENT;
 		}
 		if (!thread_is_64bit_data(thread)) {
@@ -1675,6 +1722,11 @@ machine_thread_dup(thread_t self,
 	arm_neon_saved_state_t *target_neon_state = target->machine.uNeon;
 	bcopy(self_neon_state, target_neon_state, sizeof(*target_neon_state));
 
+#if HAVE_MACHINE_THREAD_MATRIX_STATE
+	if (self->machine.umatrix_hdr) {
+		machine_thread_matrix_state_dup(target);
+	}
+#endif
 
 	return KERN_SUCCESS;
 }

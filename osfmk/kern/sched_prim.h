@@ -249,8 +249,9 @@ extern void             idle_thread(
 	void*           parameter,
 	wait_result_t   result);
 
-extern kern_return_t    idle_thread_create(
-	processor_t             processor);
+extern void idle_thread_create(
+	processor_t             processor,
+	thread_continue_t       continuation);
 
 /* Continuation return from syscall */
 extern void     thread_syscall_return(
@@ -305,6 +306,9 @@ extern int pset_available_cpu_count(
 	processor_set_t pset);
 
 extern bool pset_is_recommended(
+	processor_set_t pset);
+
+extern bool pset_type_is_recommended(
 	processor_set_t pset);
 
 extern pset_node_t sched_choose_node(
@@ -589,6 +593,8 @@ extern void     sys_override_cpu_throttle(boolean_t enable_override);
 extern int sched_get_powered_cores(void);
 extern void sched_set_powered_cores(int n);
 
+uint64_t sched_sysctl_get_recommended_cores(void);
+
 /*
  ****************** Only exported until BSD stops using ********************
  */
@@ -818,7 +824,8 @@ extern boolean_t preemption_enabled(void);
 
 #ifdef MACH_KERNEL_PRIVATE
 
-#if   !defined(CONFIG_SCHED_TRADITIONAL) && !defined(CONFIG_SCHED_PROTO) && !defined(CONFIG_SCHED_GRRR) && !defined(CONFIG_SCHED_MULTIQ) && !defined(CONFIG_SCHED_CLUTCH) && !defined(CONFIG_SCHED_EDGE)
+
+#if   !CONFIG_SCHED_TIMESHARE_CORE && !CONFIG_SCHED_CLUTCH && !CONFIG_SCHED_EDGE
 #error Enable at least one scheduler algorithm in osfmk/conf/MASTER.XXX
 #endif
 
@@ -865,6 +872,7 @@ struct sched_dispatch_table {
 	thread_t        (*choose_thread)(
 		processor_t           processor,
 		int                           priority,
+		thread_t              prev_thread,
 		ast_t reason);
 
 	/* True if scheduler supports stealing threads for this pset */
@@ -981,8 +989,6 @@ struct sched_dispatch_table {
 
 	/* Supports more than one pset */
 	boolean_t   multiple_psets_enabled;
-	/* Supports scheduler groups */
-	boolean_t   sched_groups_enabled;
 
 	/* Supports avoid-processor */
 	boolean_t   avoid_processor_enabled;
@@ -1029,25 +1035,9 @@ struct sched_dispatch_table {
 	bool (*thread_eligible_for_pset)(thread_t thread, processor_set_t pset);
 };
 
-#if defined(CONFIG_SCHED_TRADITIONAL)
-extern const struct sched_dispatch_table sched_traditional_dispatch;
-extern const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch;
-#endif
-
-#if defined(CONFIG_SCHED_MULTIQ)
-extern const struct sched_dispatch_table sched_multiq_dispatch;
 extern const struct sched_dispatch_table sched_dualq_dispatch;
 #if __AMP__
 extern const struct sched_dispatch_table sched_amp_dispatch;
-#endif
-#endif
-
-#if defined(CONFIG_SCHED_PROTO)
-extern const struct sched_dispatch_table sched_proto_dispatch;
-#endif
-
-#if defined(CONFIG_SCHED_GRRR)
-extern const struct sched_dispatch_table sched_grrr_dispatch;
 #endif
 
 #if defined(CONFIG_SCHED_CLUTCH)

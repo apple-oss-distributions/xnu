@@ -297,6 +297,9 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
  * - add it to this mask
  * - add a vmf_* field to vm_map_kernel_flags_t in the right spot
  * - add a check in vm_map_kernel_flags_check_vmflags()
+ * - update tests vm_parameter_validation_[user|kern] and their expected
+ *     results; they deliberately call VM functions with invalid flag values
+ *     and you may be turning one of those invalid flags valid.
  */
 #define VM_FLAGS_ANY_MASK       (VM_FLAGS_FIXED |               \
 	                         VM_FLAGS_ANYWHERE |            \
@@ -414,9 +417,10 @@ __enum_decl(vm_map_range_id_t, uint8_t, {
 	UMEM_RANGE_ID_DEFAULT = 0, /* same as MACH_VM_RANGE_DEFAULT */
 	UMEM_RANGE_ID_HEAP,        /* same as MACH_VM_RANGE_DATA    */
 	UMEM_RANGE_ID_FIXED,       /* same as MACH_VM_RANGE_FIXED   */
+	UMEM_RANGE_ID_LARGE_FILE,
 
 	/* these UMEM_* are XNU internal only range IDs, and aren't ABI */
-	UMEM_RANGE_ID_MAX     = UMEM_RANGE_ID_FIXED,
+	UMEM_RANGE_ID_MAX     = UMEM_RANGE_ID_LARGE_FILE,
 
 #define KMEM_RANGE_COUNT        (KMEM_RANGE_ID_MAX + 1)
 });
@@ -477,7 +481,6 @@ typedef union {
 		    vmkf_map_jit:1,             /* mark entry as JIT region */
 		    vmkf_iokit_acct:1,          /* IOKit accounting */
 		    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
-		    vmkf_fourk:1,               /* use fourk pager */
 		    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
 		    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
 		    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
@@ -498,14 +501,14 @@ typedef union {
 		    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
 
 		/*
-		 * Flags altering the behavior of vm_map_locate_space()
+		 * Flags altering the behavior of vm_map_locate_space_anywhere()
 		 */
 		    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
 		    vmkf_guard_before:1,        /* guard page before the mapping */
 		    vmkf_last_free:1,           /* find space from the end */
 		    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
 
-		    __vmkf_unused:1;
+		    __vmkf_unused:2;
 	};
 
 	/*
@@ -533,6 +536,9 @@ typedef union {
 
 #define VM_MAP_KERNEL_FLAGS_FIXED_PERMANENT(...) \
 	VM_MAP_KERNEL_FLAGS_FIXED(.vmf_permanent = true, __VA_ARGS__)
+
+#define VM_MAP_KERNEL_FLAGS_ANYWHERE_PERMANENT(...) \
+	VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmf_permanent = true, __VA_ARGS__)
 
 #define VM_MAP_KERNEL_FLAGS_DATA_ANYWHERE(...) \
 	VM_MAP_KERNEL_FLAGS_ANYWHERE(.vmkf_range_id = KMEM_RANGE_ID_DATA, __VA_ARGS__)
@@ -565,10 +571,12 @@ typedef struct {
 #define VM_LEDGER_TAG_UNCHANGED ((int)-1)
 
 /* individual bits: */
-#define VM_LEDGER_FLAG_NO_FOOTPRINT               (1 << 0)
+#define VM_LEDGER_FLAG_NO_FOOTPRINT              (1 << 0)
 #define VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG    (1 << 1)
-#define VM_LEDGER_FLAGS (VM_LEDGER_FLAG_NO_FOOTPRINT | VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG)
+#define VM_LEDGER_FLAG_FROM_KERNEL               (1 << 2)
 
+#define VM_LEDGER_FLAGS_USER (VM_LEDGER_FLAG_NO_FOOTPRINT | VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG)
+#define VM_LEDGER_FLAGS_ALL (VM_LEDGER_FLAGS_USER | VM_LEDGER_FLAG_FROM_KERNEL)
 
 #define VM_MEMORY_MALLOC 1
 #define VM_MEMORY_MALLOC_SMALL 2

@@ -69,6 +69,8 @@ private:
 
 	IOReturn            secureGetSystemSleepType( uint32_t *sleepType, uint32_t *sleepTimer);
 
+	IOReturn            secureAttemptIdleSleepAbort( uint32_t *outReverted);
+
 public:
 
 	virtual IOReturn clientClose( void ) APPLE_KEXT_OVERRIDE;

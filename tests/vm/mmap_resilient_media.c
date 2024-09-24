@@ -52,7 +52,7 @@ T_GLOBAL_META(
 
 T_DECL(mmap_resilient_media,
     "test mmap(MAP_RESILIENT_MEDIA)",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
 {
 	int ret;
 	int new_rate, old_rate1, old_rate2, old_rate3;

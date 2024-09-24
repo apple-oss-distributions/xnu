@@ -29,6 +29,10 @@
 #include <arm64/proc_reg.h>
 #include "assym.s"
 
+#if CONFIG_SPTM
+#include <sptm/sptm_xnu.h>
+#endif /* CONFIG_SPTM */
+
 #if defined(__arm64__)
 /* We're fine, use adrp, add */
 #else
@@ -69,6 +73,7 @@ LEXT(excepstack_high_guard)
 
 #endif
 
+
 // Must align to 16K here, due to <rdar://problem/33268668>
         .global EXT(kd_early_buffer)
         .align 14
@@ -107,7 +112,7 @@ LEXT(ropagetable_begin)
 	    // it's not block mapped.
 	    // Note that we don't distuinguish between KASAN or not: With
 	    // a KASAN kernel, the effective auxKC limit is smaller.
-		.space 18*16*1024,0
+		.space 20*16*1024,0
 #elif KASAN
         .space 16*16*1024,0
 #else

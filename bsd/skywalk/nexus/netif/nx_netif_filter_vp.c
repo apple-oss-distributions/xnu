@@ -146,7 +146,7 @@ netif_filter_deliver(struct nexus_adapter *na, struct __kern_channel_ring *ring,
 static errno_t
 netif_filter_rx_cb(void *arg, struct __kern_packet *pkt_chain, uint32_t flags)
 {
-	struct nexus_adapter *na = arg;
+	struct nexus_adapter *__single na = arg;
 	struct __kern_channel_ring *ring =
 	    &na->na_rx_rings[NETIF_FILTER_RING_INBOUND];
 	return netif_filter_deliver(na, ring, pkt_chain, flags);
@@ -155,7 +155,7 @@ netif_filter_rx_cb(void *arg, struct __kern_packet *pkt_chain, uint32_t flags)
 static errno_t
 netif_filter_tx_cb(void *arg, struct __kern_packet *pkt_chain, uint32_t flags)
 {
-	struct nexus_adapter *na = arg;
+	struct nexus_adapter *__single na = arg;
 	struct __kern_channel_ring *ring =
 	    &na->na_rx_rings[NETIF_FILTER_RING_OUTBOUND];
 	return netif_filter_deliver(na, ring, pkt_chain, flags);
@@ -178,7 +178,7 @@ static int
 netif_filter_na_activate(struct nexus_adapter *na, na_activate_mode_t mode)
 {
 	errno_t err;
-	struct netif_filter *nf;
+	struct netif_filter *__single nf;
 	struct nexus_netif_adapter *nifna;
 
 	ASSERT(na->na_type == NA_NETIF_FILTER);
@@ -221,7 +221,7 @@ netif_filter_na_krings_delete(struct nexus_adapter *na, struct kern_channel *ch,
 
 static int
 netif_filter_region_params_setup(struct nexus_adapter *na,
-    struct skmem_region_params *srp)
+    struct skmem_region_params srp[SKMEM_REGIONS])
 {
 	uint32_t max_mtu;
 	uint32_t buf_sz, buf_cnt, nslots, afslots, totalrings;
@@ -308,7 +308,7 @@ static int
 netif_filter_na_mem_new(struct nexus_adapter *na)
 {
 	struct kern_nexus *nx = na->na_nx;
-	struct nx_netif *nif = nx->nx_arg;
+	struct nx_netif *__single nif = nx->nx_arg;
 	struct skmem_region_params srp[SKMEM_REGIONS];
 	int err;
 
@@ -328,13 +328,14 @@ netif_filter_na_mem_new(struct nexus_adapter *na)
 		struct kern_pbufpool *pp = NULL;
 		uint32_t pp_flags = 0;
 		char pp_name[64];
+		const char *__null_terminated filter_pp_name;
 
-		snprintf(pp_name, sizeof(pp_name), "%s_netif_filter_pp",
-		    if_name(nif->nif_ifp));
+		filter_pp_name = tsnprintf(pp_name, sizeof(pp_name),
+		    "%s_netif_filter_pp", if_name(nif->nif_ifp));
 		if (srp[SKMEM_REGION_KMD].srp_max_frags > 1) {
 			pp_flags |= PPCREATEF_ONDEMAND_BUF;
 		}
-		pp = pp_create(pp_name, srp, NULL, NULL, NULL, NULL, NULL,
+		pp = pp_create(filter_pp_name, srp, NULL, NULL, NULL, NULL, NULL,
 		    pp_flags);
 		if (pp == NULL) {
 			SK_ERR("failed to create filter pp");

@@ -18,7 +18,7 @@ signal_handler(int  __unused signum, struct __siginfo * __unused info, void * __
 	T_END;
 }
 
-T_DECL(signalstack, "Check that the signal stack is set up correctly", T_META_ASROOT(YES))
+T_DECL(signalstack, "Check that the signal stack is set up correctly", T_META_ASROOT(YES), T_META_TAG_VM_PREFERRED)
 {
 	void* stack_allocation = malloc(SIGSTKSZ);
 

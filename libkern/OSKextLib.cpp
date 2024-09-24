@@ -36,6 +36,8 @@ extern "C" {
 #include <libkern/c++/OSKext.h>
 #include <libkern/OSKextLib.h>
 #include <libkern/OSKextLibPrivate.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
 
 extern "C" {
 #if PRAGMA_MARK
@@ -380,7 +382,6 @@ finish:
 extern vm_offset_t segPRELINKTEXTB;
 extern vm_offset_t segLINKB;
 extern unsigned long segSizePRELINKTEXT;
-extern vm_map_t g_kext_map;
 
 vm_map_t
 kext_get_vm_map(kmod_info_t *info)

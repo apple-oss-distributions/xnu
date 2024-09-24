@@ -107,7 +107,7 @@ uncore_counts(int fd, uint64_t ctr_mask, uint64_t *counts)
 T_DECL(uncore_max_counters,
     "ensure that the maximum number of uncore countes is sane",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int nctrs = 0;
 	int fd;
@@ -165,7 +165,7 @@ uncore_add(int fd, uint64_t event, uint64_t allowed_ctrs, int error)
 
 T_DECL(uncore_collision,
     "ensure that trying to add an event on the same counter fails",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	uint32_t ctr;
@@ -191,7 +191,7 @@ uncore_enable(int fd)
 
 T_DECL(uncore_enabled_busy,
     "ensure that trying to add an event while enabled fails",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 
@@ -204,7 +204,7 @@ T_DECL(uncore_enabled_busy,
 }
 
 T_DECL(uncore_reset,
-    "ensure that resetting the counters works")
+    "ensure that resetting the counters works", T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	int r;
@@ -261,7 +261,7 @@ T_DECL(uncore_accuracy,
     "ensure that the uncore counters count accurately",
     T_META_ASROOT(true),
     XNU_T_META_SOC_SPECIFIC,
-    T_META_MAYFAIL("rdar://88973518, threads need to be forced onto clusters"))
+    T_META_MAYFAIL("rdar://88973518, threads need to be forced onto clusters"), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	int nctrs = 0;
@@ -347,7 +347,7 @@ T_DECL(uncore_accuracy,
 
 T_DECL(uncore_ownership,
     "ensure the dev node cannot be open in two places",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	int other_fd;
@@ -361,7 +361,7 @@ T_DECL(uncore_ownership,
 
 T_DECL(uncore_root_required,
     "ensure the dev node cannot be opened by non-root users",
-    T_META_ASROOT(false))
+    T_META_ASROOT(false), T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	int error = 0;
@@ -377,7 +377,7 @@ T_DECL(uncore_root_required,
 T_DECL(perf_uncore,
     "measure the latency of accessing the counters",
     XNU_T_META_SOC_SPECIFIC,
-    T_META_TAG_PERF)
+    T_META_TAG_PERF, T_META_TAG_VM_NOT_ELIGIBLE)
 {
 	int fd;
 	int nctrs;

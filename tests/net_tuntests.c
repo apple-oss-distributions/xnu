@@ -735,13 +735,13 @@ permute_enables(void)
 	T_QUIET; T_WITH_ERRNO; T_EXPECT_POSIX_ZERO(close(tunsock), NULL);
 }
 
-T_DECL(ipsec_enables, "This test checks combinations of netif/channel/flowswitch on ipsec")
+T_DECL(ipsec_enables, "This test checks combinations of netif/channel/flowswitch on ipsec", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	permute_enables();
 }
 
-T_DECL(utun_enables, "This test checks combinations of netif/channel/flowswitch on utun")
+T_DECL(utun_enables, "This test checks combinations of netif/channel/flowswitch on utun", T_META_TAG_VM_PREFERRED)
 {
 	setup_utun_test();
 	permute_enables();
@@ -785,13 +785,13 @@ setup_tunsock(int channel_count, uuid_t uuids[])
 	}
 }
 
-T_DECL(setup_ipsec, "This test sets up an ipsec interface")
+T_DECL(setup_ipsec, "This test sets up an ipsec interface", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	setup_tunsock(1, NULL);
 }
 
-T_DECL(setup_utun, "This test sets up a utun interface")
+T_DECL(setup_utun, "This test sets up a utun interface", T_META_TAG_VM_PREFERRED)
 {
 	setup_utun_test();
 	setup_tunsock(1, NULL);
@@ -1029,19 +1029,19 @@ xfer_1_packet_singly(int channel_count, int type)
 	T_QUIET; T_WITH_ERRNO; T_EXPECT_POSIX_ZERO(close(kq), NULL);
 }
 
-T_DECL(ipsec35889979u1s, "transfers 1 packet at a time of each sevice class over udp to a single ring")
+T_DECL(ipsec35889979u1s, "transfers 1 packet at a time of each sevice class over udp to a single ring", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_singly(1, SOCK_DGRAM);
 }
 
-T_DECL(ipsec35889979u4s, "transfers 1 packet at a time of each sevice class over udp to 4 rings")
+T_DECL(ipsec35889979u4s, "transfers 1 packet at a time of each sevice class over udp to 4 rings", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_singly(4, SOCK_DGRAM);
 }
 
-T_DECL(ipsec35889979t1s, "transfers 1 packet at a time of each sevice class over tcp to a single ring")
+T_DECL(ipsec35889979t1s, "transfers 1 packet at a time of each sevice class over tcp to a single ring", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_singly(1, SOCK_STREAM);
@@ -1052,7 +1052,7 @@ T_DECL(ipsec35889979t4s, "transfers 1 packet at a time of each sevice class over
     /* This test will fail because tcp syn packets get elevated
      * due to ack prioritization
      */
-    T_META_ENABLED(false))
+    T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_singly(4, SOCK_STREAM);
@@ -1146,19 +1146,19 @@ xfer_1_packet_together(int channel_count, int type)
 	T_QUIET; T_WITH_ERRNO; T_EXPECT_POSIX_ZERO(close(kq), NULL);
 }
 
-T_DECL(ipsec35889979u1m, "transfers 1 packet together of each sevice class over udp to a single ring")
+T_DECL(ipsec35889979u1m, "transfers 1 packet together of each sevice class over udp to a single ring", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_together(1, SOCK_DGRAM);
 }
 
-T_DECL(ipsec35889979u4m, "transfers 1 packet together of each sevice class over udp to 4 rings")
+T_DECL(ipsec35889979u4m, "transfers 1 packet together of each sevice class over udp to 4 rings", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_together(4, SOCK_DGRAM);
 }
 
-T_DECL(ipsec35889979t1m, "transfers 1 packet together of each sevice class over tcp to a single ring")
+T_DECL(ipsec35889979t1m, "transfers 1 packet together of each sevice class over tcp to a single ring", T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_together(1, SOCK_STREAM);
@@ -1168,7 +1168,7 @@ T_DECL(ipsec35889979t4m, "transfers 1 packet together of each sevice class over 
     /* This test will fail because tcp syn packets get elevated
      * due to ack prioritization
      */
-    T_META_ENABLED(false))
+    T_META_ENABLED(false), T_META_TAG_VM_PREFERRED)
 {
 	setup_ipsec_test();
 	xfer_1_packet_together(4, SOCK_STREAM);

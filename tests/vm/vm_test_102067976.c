@@ -13,7 +13,7 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"));
 
-T_DECL(vm_test_102067976, "Test dangling PTE due to mis-aligned memory entry")
+T_DECL(vm_test_102067976, "Test dangling PTE due to mis-aligned memory entry", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kr;
 	mach_vm_size_t vm_named_entry_size, vm_map_entry_size;

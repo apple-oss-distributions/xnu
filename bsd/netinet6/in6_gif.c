@@ -100,7 +100,7 @@ in6_gif_output(
 	struct mbuf *m,
 	__unused struct rtentry *rt)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
 	struct sockaddr_in6 *dst = SIN6(&sc->gif_ro6.ro_dst);
 	struct sockaddr_in6 *sin6_src = SIN6(sc->gif_psrc);
 	struct sockaddr_in6 *sin6_dst = SIN6(sc->gif_pdst);
@@ -400,7 +400,7 @@ gif_encapcheck6(
 	void *arg)
 {
 	struct ip6_hdr ip6;
-	struct gif_softc *sc;
+	struct gif_softc *__single sc;
 	struct ifnet *ifp;
 
 	/* sanity check done in caller */
@@ -408,7 +408,7 @@ gif_encapcheck6(
 
 	GIF_LOCK_ASSERT(sc);
 
-	mbuf_copydata((struct mbuf *)(size_t)m, 0, sizeof(ip6), &ip6);
+	mbuf_copydata(__DECONST(struct mbuf *, m), 0, sizeof(ip6), &ip6);
 	ifp = ((m->m_flags & M_PKTHDR) != 0) ? m->m_pkthdr.rcvif : NULL;
 
 	return gif_validate6(&ip6, sc, ifp);

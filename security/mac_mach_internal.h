@@ -2,7 +2,7 @@
  * Copyright (c) 2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- * 
+ *
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- * 
+ *
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
+ *
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- * 
+ *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*-
@@ -92,6 +92,10 @@ int	mac_task_check_get_task_special_port(struct task *task,
 	    struct task *target, int which);
 int	mac_task_check_set_task_special_port(struct task *task,
 	    struct task *target, int which, struct ipc_port *port);
+int	mac_task_check_set_task_exception_ports(struct task *task,
+	    struct task *target, unsigned int exception_mask, int new_behavior);
+int	mac_task_check_set_thread_exception_ports(struct task *task,
+	    struct task *target, unsigned int exception_mask, int new_behavior);
 int mac_task_check_get_movable_control_port(void);
 int mac_task_check_dyld_process_info_notify_register(void);
 
@@ -106,6 +110,9 @@ extern mac_task_mach_filter_cbfunc_t mac_task_mach_trap_evaluate;
 extern mac_task_kobj_filter_cbfunc_t mac_task_kobj_msg_evaluate;
 extern const int mach_trap_count;
 extern int mach_kobj_count;
+
+uint8_t *mac_task_get_mach_filter_mask(struct task *task);
+uint8_t *mac_task_get_kobj_filter_mask(struct task *task);
 
 void mac_task_set_mach_filter_mask(struct task *task, uint8_t *maskptr);
 void mac_task_set_kobj_filter_mask(struct task *task, uint8_t *maskptr);

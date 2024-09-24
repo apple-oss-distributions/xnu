@@ -54,7 +54,7 @@
 #include <i386/pmap_internal.h>
 #include <i386/misc_protos.h>
 #include <kern/timer_queue.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_xnu.h>
 #include <kern/monotonic.h>
 #include <kern/kpc.h>
 #include <architecture/i386/pio.h>
@@ -539,7 +539,7 @@ machine_signal_idle_cancel(
 	panic("Unimplemented");
 }
 
-static kern_return_t
+static void
 register_cpu(
 	uint32_t        lapic_id,
 	processor_t     *processor_out,
@@ -549,9 +549,8 @@ register_cpu(
 	cpu_data_t      *this_cpu_datap;
 
 	this_cpu_datap = cpu_data_alloc(boot_cpu);
-	if (this_cpu_datap == NULL) {
-		return KERN_FAILURE;
-	}
+	assert(this_cpu_datap);
+
 	target_cpu = this_cpu_datap->cpu_number;
 	assert((boot_cpu && (target_cpu == 0)) ||
 	    (!boot_cpu && (target_cpu != 0)));
@@ -564,16 +563,12 @@ register_cpu(
 	this_cpu_datap->cpu_phys_number = lapic_id;
 
 #if CONFIG_CPU_COUNTERS
-	if (kpc_register_cpu(this_cpu_datap) != TRUE) {
-		goto failed;
-	}
+	kpc_register_cpu(this_cpu_datap);
 #endif /* CONFIG_CPU_COUNTERS */
 
 	if (!boot_cpu) {
 		cpu_thread_alloc(this_cpu_datap->cpu_number);
-		if (this_cpu_datap->lcpu.core == NULL) {
-			goto failed;
-		}
+		assert(this_cpu_datap->lcpu.core != NULL);
 	}
 
 	/*
@@ -582,17 +577,21 @@ register_cpu(
 	 * are not yet finalized.
 	 */
 	*processor_out = this_cpu_datap->cpu_processor;
-
-	return KERN_SUCCESS;
-
-failed:
-#if CONFIG_CPU_COUNTERS
-	kpc_unregister_cpu(this_cpu_datap);
-#endif /* CONFIG_CPU_COUNTERS */
-
-	return KERN_FAILURE;
 }
 
+/*
+ * AppleACPICPU calls this function twice for each CPU.
+ * Once with start == false to register the CPU, then xnu sorts the topology,
+ * then again with start == true to boot the CPU with the assigned CPU number.
+ *
+ * xnu or EFI can limit the number of booted CPUs.
+ * xnu does it by cpu_topology_start_cpu refusing to call processor_boot.
+ * EFI does it by populating the ACPI table with a flag that convinces
+ * AppleACPICPU to not call ml_processor_register.
+ *
+ * See https://support.apple.com/en-us/101870 for when EFI does this. (nvram SMTDisable=%01)
+ * When this happens the processors show up in ACPI but they do not get ml_processor_register'ed.
+ */
 kern_return_t
 ml_processor_register(
 	cpu_id_t        cpu_id,
@@ -602,6 +601,7 @@ ml_processor_register(
 	boolean_t       start )
 {
 	static boolean_t done_topo_sort = FALSE;
+	static bool done_registering_and_starting = false;
 	static uint32_t num_registered = 0;
 
 	/* Register all CPUs first, and track max */
@@ -610,7 +610,8 @@ ml_processor_register(
 
 		DBG( "registering CPU lapic id %d\n", lapic_id );
 
-		return register_cpu( lapic_id, processor_out, boot_cpu );
+		register_cpu( lapic_id, processor_out, boot_cpu );
+		return KERN_SUCCESS;
 	}
 
 	/* Sort by topology before we start anything */
@@ -647,7 +648,42 @@ ml_processor_register(
 	*processor_out = this_cpu_datap->cpu_processor;
 
 	/* OK, try and start this CPU */
-	return cpu_topology_start_cpu( cpunum );
+	kern_return_t ret = cpu_topology_start_cpu( cpunum );
+
+	/*
+	 * AppleACPICPU will start processors in CPU number order,
+	 * so when we get the last CPU number, it's finished
+	 * calling ml_processor_register.
+	 *
+	 * By this point max cpus has been determined.  There may be more
+	 * registrations than max_cpus in the case of `cpus=` boot arg.
+	 */
+	if (cpunum == num_registered - 1) {
+		__assert_only bool success;
+		success = os_atomic_cmpxchg(&done_registering_and_starting, false, true, relaxed);
+		assert(success);
+
+		assert(max_cpus_initialized == MAX_CPUS_SET);
+
+		ml_cpu_init_completed();
+	} else {
+		assert(os_atomic_load(&done_registering_and_starting, relaxed) == false);
+	}
+
+	return ret;
+}
+
+
+/*
+ * This is called when all of the ml_processor_info_t structures have been
+ * initialized and all the processors have been started through processor_start().
+ *
+ * Required by the scheduler subsystem.
+ */
+void
+ml_cpu_init_completed(void)
+{
+	sched_cpu_init_completed();
 }
 
 
@@ -835,7 +871,8 @@ ml_panic_trap_to_debugger(__unused const char *panic_format_str,
     __unused unsigned int reason,
     __unused void *ctx,
     __unused uint64_t panic_options_mask,
-    __unused unsigned long panic_caller)
+    __unused unsigned long panic_caller,
+    __unused const char *panic_initiator)
 {
 	return;
 }
@@ -1334,12 +1371,6 @@ machine_lockdown(void)
 	x86_64_protect_data_const();
 }
 
-bool
-ml_cpu_can_exit(__unused int cpu_id, __unused processor_reason_t reason)
-{
-	return true;
-}
-
 void
 ml_cpu_begin_state_transition(__unused int cpu_id)
 {
@@ -1391,4 +1422,18 @@ ml_addr_in_non_xnu_stack(__unused uintptr_t addr)
 {
 	/* There are no non-XNU stacks on x86 systems. */
 	return false;
+}
+
+/**
+ * Explicitly preallocates a floating point save area.
+ */
+void
+ml_fp_save_area_prealloc(void)
+{
+	fpnoextflt();
+}
+
+void
+ml_task_post_signature_processing_hook(__unused task_t task)
+{
 }

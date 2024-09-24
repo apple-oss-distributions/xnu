@@ -28,7 +28,8 @@ lldb can be used for kernel debugging the same way as gdb. The simplest way is t
     File: ~/.lldbinit
     settings set target.load-script-from-symbol-file true
 
-Now lldb will be ready to connect over kdp-remote '\<hostname:port>' or 'gdb-remote \<hostname:port>'. In case using a core file please do 'file --core /path/to/corefile'
+Now lldb will be ready to connect over kdp-remote '\<hostname:port>' or 'gdb-remote \<hostname:port>'.
+If you need to debug a core file, you can add '--core /path/to/corefile' to your lldb command (e.g. `xcrun --sdk macosx.internal lldb --core /path/to/corefile`)
 
 Following are detailed steps on how to debug a panic'ed / NMI'ed machine (For the curious souls).
 
@@ -97,7 +98,7 @@ The xnu script in xnu/tools/lldbmacros provides the following:
 
   * Ability to register test cases for macros (see doc strings for @xnudebug_test).
 
-The file layout is like following
+The file layout is as follows
 
     xnu/
      |-tools/
@@ -108,7 +109,11 @@ The file layout is like following
          |-xnudefines.py
          |-utils.py
          |-process.py  # files containing commands/summaries code for each subsystem
+         |-memory.py
          |-...
+       |-tests/
+         |-lldb_tests/          # unit tests for macros, using lldb scripted process to simulate debugging a core file
+         |-standalone_tests/    # standalone tests for functionality that's seperate from lldb/macros (but used by them)
 
 
 The lldbmacros directory has a Makefile that follows the build process for xnu. This packages lldbmacros scripts into the dSYM of each kernel build. This helps in rev-locking the lldb commands with changes in kernel sources.
@@ -390,6 +395,9 @@ Please search and look around the code for common util functions and paradigm
   * If you need to get pagesize of the traget system, do not hard code any value. kern.globals.page_size is your friend. Similarly use config['verbosity'] for finding about configs.
 
   * If you are developing a command for structure that is different based on development/release kernels please use "hasattr()" functionality to conditionalize referencing #ifdef'ed fields in structure. See example in def GetTaskSummary(task) in process.py
+
+  * `ArgumentStringToInt()` is recommended for argument parsing, as it supports binary/octal/decimal/hexadecimal literal
+    representations, as well as lldb expressions, which allows for convenient for usage e.g. `showmapvme foo_map_ptr`
 
 
 F. Development and Debugging on lldb kernel debugging platform.

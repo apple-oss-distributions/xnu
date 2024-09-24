@@ -101,7 +101,7 @@ struct knote_lock_ctx {
 	thread_t                    knlc_thread;
 	uintptr_t                   knlc_waiters;
 	LIST_ENTRY(knote_lock_ctx)  knlc_link;
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 #define KNOTE_LOCK_CTX_UNLOCKED 0
 #define KNOTE_LOCK_CTX_LOCKED   1
 #define KNOTE_LOCK_CTX_WAITING  2
@@ -110,7 +110,7 @@ struct knote_lock_ctx {
 };
 LIST_HEAD(knote_locks, knote_lock_ctx);
 
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 /*
  * KNOTE_LOCK_CTX(name) is a convenience macro to define a knote lock context on
  * the stack named `name`. In development kernels, it uses tricks to make sure
@@ -453,8 +453,11 @@ typedef union {
 
 extern void kqueue_threadreq_unbind(struct proc *p, workq_threadreq_t);
 
+#define KQUEUE_THREADREQ_BIND_NO_INHERITOR_UPDATE 0x1
+// The soft binding of kqworkloop only applies to kqwls configured
+// with a permanently bound thread.
+#define KQUEUE_THREADREQ_BIND_SOFT 0x2
 // called with the kq req held
-#define KQUEUE_THREADERQ_BIND_NO_INHERITOR_UPDATE 0x1
 extern void kqueue_threadreq_bind(struct proc *p, workq_threadreq_t req,
     thread_t thread, unsigned int flags);
 
@@ -488,6 +491,15 @@ extern int kqueue_stat(struct kqueue *, void *, int, proc_t);
 
 extern void kevent_set_workq_quantum_expiry_user_tsd(proc_t p, thread_t t,
     uint64_t flags);
+
+// Helper functions for workqueue subsystem.
+extern void kqworkloop_bound_thread_park_prepost(workq_threadreq_t req);
+
+extern void kqworkloop_bound_thread_park_commit(workq_threadreq_t req,
+    event_t event, thread_continue_t continuation);
+
+extern void kqworkloop_bound_thread_terminate(workq_threadreq_t req,
+    uint16_t *uu_workq_flags_orig);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

@@ -101,7 +101,7 @@ test_open_ioregistry(const char *match_name, const char *service_name,
 T_DECL(io_catalog_send_data_test,
 	"build an IORegistry entry with mismatching IOService and "
 	"IOUserClientClass by IOCatalogueSendData to check for DoS in "
-	"IOCatalogueSendData")
+	"IOCatalogueSendData", T_META_TAG_VM_PREFERRED)
 {
 	kern_return_t kret = build_ioregistry_by_catalog_send_data("fooBar",
 	    "IOSurfaceRootUserClient", "IOReportHub");

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <darwintest.h>
+#include <darwintest_multiprocess.h>
 #include <darwintest_utils.h>
 
 #include <Kernel/kern/ledger.h>
@@ -24,6 +25,9 @@ extern int ledger(int cmd, caddr_t arg1, caddr_t arg2, caddr_t arg3);
 #define VM_RECLAIM_THRESHOLD_BOOTARG_HIGH "vm_reclaim_max_threshold=268435456"
 #define VM_RECLAIM_THRESHOLD_BOOTARG_LOW "vm_reclaim_max_threshold=16384"
 #define VM_RECLAIM_BOOTARG_DISABLED "vm_reclaim_max_threshold=0"
+#define VM_RECLAIM_THRESHOLD_SYSCTL_HIGH "vm.reclaim_max_threshold=268435456"
+#define VM_RECLAIM_THRESHOLD_SYSCTL_LOW "vm.reclaim_max_threshold=16384"
+#define VM_RECLAIM_SYSCTL_DISABLED "vm.reclaim_max_threshold=0"
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
@@ -37,7 +41,8 @@ T_GLOBAL_META(
 	);
 
 T_DECL(vm_reclaim_init, "Set up and tear down a reclaim buffer",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
 
@@ -47,7 +52,7 @@ T_DECL(vm_reclaim_init, "Set up and tear down a reclaim buffer",
 }
 
 T_DECL(vm_reclaim_init_fails_when_disabled, "Initializing a ring buffer on a system with vm_reclaim disabled should fail",
-    T_META_BOOTARGS_SET(VM_RECLAIM_BOOTARG_DISABLED))
+    T_META_BOOTARGS_SET(VM_RECLAIM_BOOTARG_DISABLED), T_META_TAG_VM_PREFERRED)
 {
 	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
 
@@ -83,7 +88,8 @@ allocate_and_defer_deallocate(size_t size, mach_vm_reclaim_ringbuffer_v1_t ringb
 }
 
 T_DECL(vm_reclaim_single_entry, "Place a single entry in the buffer and call sync",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
 	static const size_t kAllocationSize = (1UL << 20); // 1MB
@@ -236,7 +242,8 @@ T_HELPER_DECL(reuse_freed_entry_reusable,
 
 T_DECL(vm_reclaim_single_entry_verify_free, "Place a single entry in the buffer and call sync",
     T_META_IGNORECRASHES(".*vm_reclaim_single_entry_verify_free.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	int status = spawn_helper_and_wait_for_exit("reuse_freed_entry_dealloc");
 	T_QUIET; T_ASSERT_TRUE(WIFSIGNALED(status), "Test process crashed.");
@@ -245,7 +252,8 @@ T_DECL(vm_reclaim_single_entry_verify_free, "Place a single entry in the buffer 
 
 T_DECL(vm_reclaim_single_entry_reusable,
     "Reclaim a reusable entry and verify re-use is legal",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	int status = spawn_helper_and_wait_for_exit("reuse_freed_entry_reusable");
 	T_QUIET; T_ASSERT_TRUE(WIFEXITED(status), "Test process exited.");
@@ -413,7 +421,8 @@ test_after_background_helper_launches(char* variant, char * arg1, dispatch_block
 
 T_DECL(vm_reclaim_full_reclaim_on_suspend, "Defer free memory and then suspend.",
     T_META_ASROOT(true),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	test_after_background_helper_launches("allocate_and_suspend", "20", ^{
 		int ret = 0;
@@ -447,7 +456,8 @@ T_DECL(vm_reclaim_full_reclaim_on_suspend, "Defer free memory and then suspend."
 }
 
 T_DECL(vm_reclaim_limit_kills, "Deferred reclaims are processed before a limit kill",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	int err;
 	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
@@ -471,7 +481,8 @@ T_DECL(vm_reclaim_limit_kills, "Deferred reclaims are processed before a limit k
 }
 
 T_DECL(vm_reclaim_update_reclaimable_bytes_threshold, "Kernel reclaims when num_bytes_reclaimable crosses threshold",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	mach_vm_size_t kNumEntries = 0;
 	struct mach_vm_reclaim_ringbuffer_v1_s ringbuffer;
@@ -525,7 +536,8 @@ T_HELPER_DECL(deallocate_buffer,
 
 T_DECL(vm_reclaim_copyio_buffer_error, "Force a copyio error on the buffer",
     T_META_IGNORECRASHES(".*deallocate_buffer.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	int status = spawn_helper_and_wait_for_exit("deallocate_buffer");
 	T_QUIET; T_ASSERT_TRUE(WIFSIGNALED(status), "Test process crashed.");
@@ -554,7 +566,8 @@ T_HELPER_DECL(dealloc_gap, "Put a bad entry in the buffer")
 
 T_DECL(vm_reclaim_dealloc_gap, "Ensure a dealloc gap delivers a fatal exception",
     T_META_IGNORECRASHES(".*vm_reclaim_dealloc_gap.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	int status = spawn_helper_and_wait_for_exit("dealloc_gap");
 	T_QUIET; T_ASSERT_TRUE(WIFSIGNALED(status), "Test process crashed.");
@@ -592,7 +605,8 @@ vm_reclaim_async_exception(char *variant, char *arg1)
 
 T_DECL(vm_reclaim_dealloc_gap_async, "Ensure a dealloc gap delivers an async fatal exception",
     T_META_IGNORECRASHES(".*vm_reclaim_dealloc_gap_async.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
 	vm_reclaim_async_exception("allocate_and_suspend_with_dealloc_gap", "15");
 }
@@ -605,7 +619,8 @@ T_HELPER_DECL(allocate_and_suspend_with_buffer_error,
 
 T_DECL(vm_reclaim_copyio_buffer_error_async, "Ensure a buffer copyio failure delivers an async fatal exception",
     T_META_IGNORECRASHES(".*vm_reclaim_dealloc_gap_async.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	vm_reclaim_async_exception("allocate_and_suspend_with_buffer_error", "15");
 }
@@ -641,7 +656,8 @@ T_HELPER_DECL(reuse_freed_entry_fork,
 
 T_DECL(vm_reclaim_fork, "Ensure reclaim buffer is inherited across a fork",
     T_META_IGNORECRASHES(".*vm_reclaim_fork.*"),
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	int status = spawn_helper_and_wait_for_exit("reuse_freed_entry_fork");
 	T_QUIET; T_ASSERT_TRUE(WIFEXITED(status), "Test process exited.");
@@ -653,7 +669,8 @@ T_DECL(vm_reclaim_fork, "Ensure reclaim buffer is inherited across a fork",
 // rdar://110081398
 T_DECL(reclaim_async_on_repeated_suspend,
     "verify that subsequent suspends are allowed",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_HIGH))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_HIGH),
+    T_META_TAG_VM_PREFERRED)
 {
 	const int sleep_duration = 3;
 	test_after_background_helper_launches("allocate_and_suspend", "20", ^{
@@ -719,30 +736,11 @@ T_HELPER_DECL(exec_after_ringbuffer_init,
 
 T_DECL(reclaim_exec_new_reclaim_buffer,
     "verify that an exec-ed process may instantiate a new buffer",
-    T_META_BOOTARGS_SET(VM_RECLAIM_THRESHOLD_BOOTARG_LOW))
+    T_META_SYSCTL_INT(VM_RECLAIM_THRESHOLD_SYSCTL_LOW),
+    T_META_TAG_VM_PREFERRED)
 {
-	char **launch_tool_args;
-	char testpath[PATH_MAX];
-	uint32_t testpath_buf_size;
+	dt_helper_t helpers[1];
+	helpers[0] = dt_child_helper("exec_after_ringbuffer_init");
 
-	testpath_buf_size = sizeof(testpath);
-	int ret = _NSGetExecutablePath(testpath, &testpath_buf_size);
-	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "_NSGetExecutablePath");
-	T_LOG("Executable path: %s", testpath);
-	launch_tool_args = (char *[]){
-		testpath,
-		"-n",
-		"exec_after_ringbuffer_init",
-		NULL
-	};
-
-	/* Spawn the child process. */
-	ret = dt_launch_tool(&child_pid, launch_tool_args, false, NULL, NULL);
-	if (ret != 0) {
-		T_LOG("dt_launch tool returned %d with error code %d", ret, errno);
-	}
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(child_pid, "dt_launch_tool");
-
-	bool success = dt_waitpid(child_pid, NULL, NULL, 10);
-	T_QUIET; T_ASSERT_TRUE(success, "dt_waitpid()");
+	dt_run_helpers(helpers, 1, 30);
 }

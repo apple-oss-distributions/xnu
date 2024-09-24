@@ -581,10 +581,6 @@ ipc_object_copyin_type(
 	case MACH_MSG_TYPE_COPY_SEND:
 		return MACH_MSG_TYPE_PORT_SEND;
 
-	case MACH_MSG_TYPE_DISPOSE_RECEIVE:
-	case MACH_MSG_TYPE_DISPOSE_SEND:
-	case MACH_MSG_TYPE_DISPOSE_SEND_ONCE:
-	/* fall thru */
 	default:
 		return MACH_MSG_TYPE_PORT_NONE;
 	}
@@ -914,13 +910,18 @@ ipc_object_insert_send_right(
 	}
 	/* space is write-locked and active */
 
-	if (!IO_VALID(entry->ie_object)) {
+	bits   = entry->ie_bits;
+	object = entry->ie_object;
+
+	if (!IO_VALID(object)) {
 		is_write_unlock(space);
 		return KERN_INVALID_CAPABILITY;
 	}
+	if ((bits & MACH_PORT_TYPE_PORT_RIGHTS) == 0) {
+		is_write_unlock(space);
+		return KERN_INVALID_RIGHT;
+	}
 
-	bits   = entry->ie_bits;
-	object = entry->ie_object;
 	port   = ip_object_to_port(object);
 
 	ip_mq_lock(port);

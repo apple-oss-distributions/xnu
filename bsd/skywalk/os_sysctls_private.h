@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -121,7 +121,9 @@
 	X(uint32_t, fin_timeout, 30)                                    \
 	X(uint32_t, accurate_ecn, 0)                                    \
 	X(int32_t, tso, 1)                                              \
-	X(int32_t, awdl_rtobase, 100)
+	X(int32_t, awdl_rtobase, 100)                                   \
+	X(int32_t, rack, 1)                                             \
+	X(int32_t, l4s, 0)
 
 #define SKMEM_SYSCTL_KERN_IPC_LIST                                      \
 	X(uint32_t, throttle_best_effort, 0)
@@ -134,6 +136,8 @@
 #define SKMEM_SYSCTL_TCP_HAS_ACC_ECN 1
 #define SKMEM_SYSCTL_TCP_HAS_ACC_ECN_OPTION 1
 #define SKMEM_SYSCTL_TCP_HAS_AWDL_RTOBASE 1
+#define SKMEM_SYSCTL_TCP_HAS_RACK 1
+#define SKMEM_SYSCTL_TCP_HAS_L4S 1
 /*
  * When adding a new type above, be sure to add a corresponding
  * printf format below. Clients use NW_SYSCTL_PRI_##type
@@ -171,14 +175,15 @@ typedef struct skmem_sysctl {
  * in sync with a subset of syctl values in the networking stack.
  */
 __BEGIN_DECLS
+extern uint32_t sk_sys_objsize;
 extern void skmem_sysctl_init(void);
-extern void *skmem_get_sysctls_obj(size_t *);
+extern void *__sized_by(sk_sys_objsize) skmem_get_sysctls_obj(size_t *);
 extern int skmem_sysctl_handle_int(struct sysctl_oid *oidp, void *arg1,
     int arg2, struct sysctl_req *req);
 __END_DECLS
 
 #define SYSCTL_SKMEM_UPDATE_FIELD(field, value) do {                    \
-	skmem_sysctl *swptr = skmem_get_sysctls_obj(NULL);              \
+	skmem_sysctl *__single swptr = skmem_get_sysctls_obj(NULL);     \
 	if (swptr) {                                                    \
 	        swptr->field = value;                                   \
 	}                                                               \
@@ -193,8 +198,9 @@ __END_DECLS
 #define SYSCTL_SKMEM_UPDATE_AT_OFFSET(offset, value) do {               \
 	if (offset >= 0 &&                                              \
 	    offset + sizeof (typeof(value)) <= sizeof (skmem_sysctl)) { \
-	        skmem_sysctl *swptr = skmem_get_sysctls_obj(NULL);      \
-	        void *offp = (u_int8_t *)swptr + offset;                \
+	        skmem_sysctl *__single swptr = skmem_get_sysctls_obj(NULL);     \
+	        void *offp = (u_int8_t *__bidi_indexable)               \
+	            (skmem_sysctl *__bidi_indexable)swptr + offset;     \
 	        if (swptr &&                                            \
 	            ((uintptr_t)offp) % _Alignof(typeof(value)) == 0) { \
 	                *(typeof(value)*)offp = (value);                \

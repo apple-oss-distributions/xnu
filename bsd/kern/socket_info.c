@@ -49,6 +49,8 @@
 #include <netinet/tcp_var.h>
 #include <string.h>
 
+#include <net/sockaddr_utils.h>
+
 static void fill_sockbuf_info(struct sockbuf *sb, struct sockbuf_info *sbi);
 static void fill_common_sockinfo(struct socket *so, struct socket_info *si);
 
@@ -71,12 +73,12 @@ fill_sockbuf_info(struct sockbuf *sb, struct sockbuf_info *sbi)
 static void
 fill_common_sockinfo(struct socket *so, struct socket_info *si)
 {
-	si->soi_so = (u_int64_t)VM_KERNEL_ADDRPERM(so);
+	si->soi_so = (u_int64_t)VM_KERNEL_ADDRHASH(so);
 	si->soi_type = so->so_type;
 	si->soi_options = (short)(so->so_options & 0xffff);
 	si->soi_linger = so->so_linger;
 	si->soi_state = so->so_state;
-	si->soi_pcb = (u_int64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+	si->soi_pcb = (u_int64_t)VM_KERNEL_ADDRHASH(so->so_pcb);
 	if (so->so_proto) {
 		si->soi_protocol = SOCK_PROTO(so);
 		if (so->so_proto->pr_domain) {
@@ -164,7 +166,7 @@ fill_socketinfo(struct socket *so, struct socket_info *si)
 			tcpsi->tcpsi_mss = tp->t_maxseg;
 			tcpsi->tcpsi_flags = tp->t_flags;
 			tcpsi->tcpsi_tp =
-			    (u_int64_t)VM_KERNEL_ADDRPERM(tp);
+			    (u_int64_t)VM_KERNEL_ADDRHASH(tp);
 		}
 		break;
 	}
@@ -175,10 +177,10 @@ fill_socketinfo(struct socket *so, struct socket_info *si)
 		si->soi_kind = SOCKINFO_UN;
 
 		unsi->unsi_conn_pcb =
-		    (uint64_t)VM_KERNEL_ADDRPERM(unp->unp_conn);
+		    (uint64_t)VM_KERNEL_ADDRHASH(unp->unp_conn);
 		if (unp->unp_conn) {
 			unsi->unsi_conn_so = (uint64_t)
-			    VM_KERNEL_ADDRPERM(unp->unp_conn->unp_socket);
+			    VM_KERNEL_ADDRHASH(unp->unp_conn->unp_socket);
 		}
 
 		if (unp->unp_addr) {
@@ -187,7 +189,8 @@ fill_socketinfo(struct socket *so, struct socket_info *si)
 			if (addrlen > SOCK_MAXADDRLEN) {
 				addrlen = SOCK_MAXADDRLEN;
 			}
-			bcopy(unp->unp_addr, &unsi->unsi_addr, addrlen);
+			SOCKADDR_COPY(unp->unp_addr, &unsi->unsi_addr.ua_sun,
+			    addrlen);
 		}
 		if (unp->unp_conn && unp->unp_conn->unp_addr) {
 			size_t  addrlen = unp->unp_conn->unp_addr->sun_len;
@@ -195,7 +198,7 @@ fill_socketinfo(struct socket *so, struct socket_info *si)
 			if (addrlen > SOCK_MAXADDRLEN) {
 				addrlen = SOCK_MAXADDRLEN;
 			}
-			bcopy(unp->unp_conn->unp_addr, &unsi->unsi_caddr,
+			SOCKADDR_COPY(unp->unp_conn->unp_addr, &unsi->unsi_caddr.ua_sun,
 			    addrlen);
 		}
 		break;

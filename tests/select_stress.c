@@ -384,7 +384,7 @@ test_select_sleep(uint32_t niterations, unsigned long usecs)
 	        } \
 	} while (0)
 
-T_DECL(select_sleep, "select sleep test for rdar://problem/20804876 Gala: select with no FDs leaks waitq table objects (causes asserts/panics)")
+T_DECL(select_sleep, "select sleep test for rdar://problem/20804876 Gala: select with no FDs leaks waitq table objects (causes asserts/panics)", T_META_TAG_VM_PREFERRED)
 {
 	char *env_sval = NULL;
 
@@ -394,7 +394,7 @@ T_DECL(select_sleep, "select sleep test for rdar://problem/20804876 Gala: select
 	test_select_sleep((uint32_t)g_sleep_iterations, (unsigned long)g_sleep_usecs);
 }
 
-T_DECL(select_stress, "select stress test for rdar://problem/20804876 Gala: select with no FDs leaks waitq table objects (causes asserts/panics)")
+T_DECL(select_stress, "select stress test for rdar://problem/20804876 Gala: select with no FDs leaks waitq table objects (causes asserts/panics)", T_META_TAG_VM_PREFERRED)
 {
 	char *env_sval = NULL;
 

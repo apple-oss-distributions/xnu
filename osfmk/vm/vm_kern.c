@@ -67,17 +67,17 @@
 #include <mach/vm_param.h>
 #include <kern/assert.h>
 #include <kern/thread.h>
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_internal.h>
 #include <vm/vm_map_internal.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_compressor.h>
-#include <vm/vm_pageout.h>
-#include <vm/vm_init.h>
+#include <vm/vm_object_internal.h>
+#include <vm/vm_page_internal.h>
+#include <vm/vm_compressor_xnu.h>
+#include <vm/vm_pageout_xnu.h>
+#include <vm/vm_init_xnu.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_memtag.h>
 #include <kern/misc_protos.h>
-#include <vm/cpm.h>
+#include <vm/cpm_internal.h>
 #include <kern/ledger.h>
 #include <kern/bits.h>
 #include <kern/startup.h>
@@ -778,9 +778,10 @@ kmem_alloc_guard_internal(
 	assert(kernel_map && map->pmap == kernel_pmap);
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START,
 	    size, 0, 0, 0);
 #endif
+
 
 	if (size == 0 ||
 	    (size >> VM_KERNEL_POINTER_SIGNIFICANT_BITS) ||
@@ -881,7 +882,9 @@ kmem_alloc_guard_internal(
 	 *	locking the map, or risk deadlock with the default pager.
 	 */
 	if (flags & KMA_KOBJECT) {
-		object = kernel_object_default;
+		{
+			object = kernel_object_default;
+		}
 		vm_object_reference(object);
 	} else if (flags & KMA_COMPRESSOR) {
 		object = compressor_object;
@@ -973,7 +976,7 @@ kmem_alloc_guard_internal(
 	}
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 	    atop(fill_size), 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 	kmr.kmr_address = CAST_DOWN(vm_offset_t, map_addr);
@@ -1021,7 +1024,7 @@ out_error:
 	}
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 	    0, 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 
@@ -1222,6 +1225,117 @@ kmem_alloc_pageable_external(
 	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
 }
 
+static inline kern_return_t
+mach_vm_allocate_kernel_sanitize(
+	vm_map_t                map,
+	mach_vm_offset_ut       addr_u,
+	mach_vm_size_ut         size_u,
+	vm_map_kernel_flags_t   vmk_flags,
+	vm_map_offset_t        *map_addr,
+	vm_map_size_t          *map_size)
+{
+	kern_return_t   result;
+	vm_map_offset_t map_end;
+
+	if (vmk_flags.vmf_fixed) {
+		result = vm_sanitize_addr_size(addr_u, size_u,
+		    VM_SANITIZE_CALLER_VM_ALLOCATE_FIXED,
+		    map,
+		    VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS | VM_SANITIZE_FLAGS_REALIGN_START,
+		    map_addr, &map_end, map_size);
+		if (__improbable(result != KERN_SUCCESS)) {
+			return result;
+		}
+	} else {
+		*map_addr = 0;
+		result = vm_sanitize_size(0, size_u,
+		    VM_SANITIZE_CALLER_VM_ALLOCATE_ANYWHERE, map,
+		    VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS,
+		    map_size);
+		if (__improbable(result != KERN_SUCCESS)) {
+			return result;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+mach_vm_allocate_kernel(
+	vm_map_t                map,
+	mach_vm_offset_ut      *addr_u,
+	mach_vm_size_ut         size_u,
+	vm_map_kernel_flags_t   vmk_flags)
+{
+	vm_map_offset_t map_addr;
+	vm_map_size_t   map_size;
+	kern_return_t   result;
+
+	if (map == VM_MAP_NULL) {
+		ktriage_record(thread_tid(current_thread()),
+		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+		    KDBG_TRIAGE_RESERVED,
+		    KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADMAP_ERROR),
+		    KERN_INVALID_ARGUMENT /* arg */);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (!vm_map_kernel_flags_check_vm_and_kflags(vmk_flags,
+	    VM_FLAGS_USER_ALLOCATE)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	result = mach_vm_allocate_kernel_sanitize(map,
+	    *addr_u,
+	    size_u,
+	    vmk_flags,
+	    &map_addr,
+	    &map_size);
+	if (__improbable(result != KERN_SUCCESS)) {
+		result = vm_sanitize_get_kr(result);
+		if (result == KERN_SUCCESS) {
+			*addr_u = vm_sanitize_wrap_addr(0);
+		} else {
+			ktriage_record(thread_tid(current_thread()),
+			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+			    KDBG_TRIAGE_RESERVED,
+			    KDBG_TRIAGE_VM_ALLOCATE_KERNEL_BADSIZE_ERROR),
+			    KERN_INVALID_ARGUMENT /* arg */);
+		}
+		return result;
+	}
+
+	vm_map_kernel_flags_update_range_id(&vmk_flags, map, map_size);
+
+	result = vm_map_enter(
+		map,
+		&map_addr,
+		map_size,
+		(vm_map_offset_t)0,
+		vmk_flags,
+		VM_OBJECT_NULL,
+		(vm_object_offset_t)0,
+		FALSE,
+		VM_PROT_DEFAULT,
+		VM_PROT_ALL,
+		VM_INHERIT_DEFAULT);
+
+	if (result == KERN_SUCCESS) {
+#if KASAN
+		if (map->pmap == kernel_pmap) {
+			kasan_notify_address(map_addr, map_size);
+		}
+#endif
+		*addr_u = vm_sanitize_wrap_addr(map_addr);
+	} else {
+		ktriage_record(thread_tid(current_thread()),
+		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+		    KDBG_TRIAGE_RESERVED,
+		    KDBG_TRIAGE_VM_ALLOCATE_KERNEL_VMMAPENTER_ERROR),
+		    result /* arg */);
+	}
+	return result;
+}
 
 #pragma mark population
 
@@ -1287,6 +1401,8 @@ kernel_memory_populate_object_and_unlock(
 
 	assert(((flags & KMA_KOBJECT) != 0) == (is_kernel_object(object) != 0));
 	assert3u((bool)(flags & KMA_COMPRESSOR), ==, object == compressor_object);
+
+
 	if (flags & (KMA_KOBJECT | KMA_COMPRESSOR)) {
 		assert3u(offset, ==, addr);
 	} else {
@@ -1412,9 +1528,10 @@ kernel_memory_populate(
 	vm_object_t     object = __kmem_object(ANYF(flags));
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_START,
 	    size, 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
+
 
 	kr = vm_page_alloc_list(page_count, flags, &page_list);
 	if (kr == KERN_SUCCESS) {
@@ -1425,7 +1542,7 @@ kernel_memory_populate(
 	}
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 	    page_count, 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 	return kr;
@@ -1749,7 +1866,7 @@ kmem_realloc_guard(
 	if (oldsize < newsize) {
 #if DEBUG || DEVELOPMENT
 		VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
-		    VM_KERN_REQUEST, DBG_FUNC_START,
+		    DBG_VM_KERN_REQUEST, DBG_FUNC_START,
 		    newsize - oldsize, 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 		kmr.kmr_return = vm_page_alloc_list(atop(newsize - oldsize),
@@ -1770,7 +1887,7 @@ kmem_realloc_guard(
 			}
 #if DEBUG || DEVELOPMENT
 			VM_DEBUG_CONSTANT_EVENT(vm_kern_request,
-			    VM_KERN_REQUEST, DBG_FUNC_END,
+			    DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 			    0, 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 			return kmr;
@@ -1874,6 +1991,10 @@ again:
 		newentry->wired_count = 1;
 		vme_btref_consider_and_set(newentry, __builtin_frame_address(0));
 		newoffs = newaddr + oldsize;
+#if KASAN
+		newentry->vme_object_or_delta = delta +
+		    (-req_newsize & PAGE_MASK);
+#endif /* KASAN */
 	} else {
 		if (object->pager_created || object->pager) {
 			/*
@@ -2066,8 +2187,11 @@ again:
 		 * and if the pages are typed XNU_KERNEL_RESTRICTED,
 		 * this would cause a second mapping of the page and panic.
 		 */
-		kr = vm_map_wire_kernel(map, newaddr, newaddr + newsize,
-		    VM_PROT_DEFAULT, guard.kmg_tag, FALSE);
+		kr = vm_map_wire_kernel(map,
+		    vm_sanitize_wrap_addr(newaddr),
+		    vm_sanitize_wrap_addr(newaddr + newsize),
+		    vm_sanitize_wrap_prot(VM_PROT_DEFAULT),
+		    guard.kmg_tag, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		if (flags & KMR_FREEOLD) {
@@ -2113,7 +2237,7 @@ again:
 	}
 
 #if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, DBG_VM_KERN_REQUEST, DBG_FUNC_END,
 	    atop(newsize - oldsize), 0, 0, 0);
 #endif /* DEBUG || DEVELOPMENT */
 	kmr.kmr_address = newaddr;
@@ -2138,6 +2262,73 @@ again:
 	return kmr;
 }
 
+#pragma mark map/remap/wire
+
+kern_return_t
+mach_vm_map_kernel(
+	vm_map_t                target_map,
+	mach_vm_offset_ut      *address,
+	mach_vm_size_ut         initial_size,
+	mach_vm_offset_ut       mask,
+	vm_map_kernel_flags_t   vmk_flags,
+	ipc_port_t              port,
+	memory_object_offset_ut offset,
+	boolean_t               copy,
+	vm_prot_ut              cur_protection,
+	vm_prot_ut              max_protection,
+	vm_inherit_ut           inheritance)
+{
+	/* range_id is set by vm_map_enter_mem_object */
+	return vm_map_enter_mem_object(target_map,
+	           address,
+	           initial_size,
+	           mask,
+	           vmk_flags,
+	           port,
+	           offset,
+	           copy,
+	           cur_protection,
+	           max_protection,
+	           inheritance,
+	           NULL,
+	           0);
+}
+
+kern_return_t
+mach_vm_remap_new_kernel(
+	vm_map_t                target_map,
+	mach_vm_offset_ut      *address,
+	mach_vm_size_ut         size,
+	mach_vm_offset_ut       mask,
+	vm_map_kernel_flags_t   vmk_flags,
+	vm_map_t                src_map,
+	mach_vm_offset_ut       memory_address,
+	boolean_t               copy,
+	vm_prot_ut             *cur_protection,   /* IN/OUT */
+	vm_prot_ut             *max_protection,   /* IN/OUT */
+	vm_inherit_ut           inheritance)
+{
+	if (!vm_map_kernel_flags_check_vm_and_kflags(vmk_flags,
+	    VM_FLAGS_USER_REMAP)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+
+	vmk_flags.vmf_return_data_addr = true;
+
+	/* range_id is set by vm_map_remap */
+	return vm_map_remap(target_map,
+	           address,
+	           size,
+	           mask,
+	           vmk_flags,
+	           src_map,
+	           memory_address,
+	           copy,
+	           cur_protection,
+	           max_protection,
+	           inheritance);
+}
 
 #pragma mark free
 
@@ -3244,9 +3435,7 @@ kmem_meta_is_from_right(
 	struct kmem_page_meta  *meta)
 {
 	struct kmem_page_meta *metaf = kmem_meta_hwm[kmem_get_front(range_id, 0)];
-#if DEBUG || DEVELOPMENT
-	struct kmem_page_meta *metab = kmem_meta_hwm[kmem_get_front(range_id, 1)];
-#endif
+	__assert_only struct kmem_page_meta *metab = kmem_meta_hwm[kmem_get_front(range_id, 1)];
 	struct kmem_page_meta *meta_base = kmem_meta_base[range_id];
 	struct kmem_page_meta *meta_end;
 
@@ -3725,7 +3914,8 @@ kmem_scramble_ranges(void)
 		vm_map_offset_t end = 0;
 		struct kmem_range_startup_spec sp = kmem_claims[i];
 		struct mach_vm_range *sp_range = sp.kc_range;
-		if (vm_map_locate_space(kernel_map, sp.kc_size, 0,
+
+		if (vm_map_locate_space_anywhere(kernel_map, sp.kc_size, 0,
 		    VM_MAP_KERNEL_FLAGS_ANYWHERE(), &start, NULL) != KERN_SUCCESS) {
 			panic("kmem_range_init: vm_map_locate_space failing for claim %s",
 			    sp.kc_name);
@@ -3984,20 +4174,15 @@ kmem_init(
 
 
 #pragma mark map copyio
-
 /*
- *	Routine:	copyinmap
- *	Purpose:
- *		Like copyin, except that fromaddr is an address
- *		in the specified VM map.  This implementation
- *		is incomplete; it handles the current user map
- *		and the kernel map/submaps.
+ * Note: semantic types aren't used as `copyio` already validates.
  */
+
 kern_return_t
 copyinmap(
 	vm_map_t                map,
 	vm_map_offset_t         fromaddr,
-	void                    *todata,
+	void                   *todata,
 	vm_size_t               length)
 {
 	kern_return_t   kr = KERN_SUCCESS;
@@ -4022,16 +4207,10 @@ copyinmap(
 	return kr;
 }
 
-/*
- *	Routine:	copyoutmap
- *	Purpose:
- *		Like copyout, except that toaddr is an address
- *		in the specified VM map.
- */
 kern_return_t
 copyoutmap(
 	vm_map_t                map,
-	void                    *fromdata,
+	void                   *fromdata,
 	vm_map_address_t        toaddr,
 	vm_size_t               length)
 {
@@ -4043,14 +4222,22 @@ copyoutmap(
 		memcpy(CAST_DOWN(void *, toaddr), fromdata, length);
 	} else if (current_map() == map) {
 		if (copyout(fromdata, toaddr, length) != 0) {
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COPYOUTMAP_SAMEMAP_ERROR), KERN_INVALID_ADDRESS /* arg */);
+			ktriage_record(thread_tid(current_thread()),
+			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+			    KDBG_TRIAGE_RESERVED,
+			    KDBG_TRIAGE_VM_COPYOUTMAP_SAMEMAP_ERROR),
+			    KERN_INVALID_ADDRESS /* arg */);
 			kr = KERN_INVALID_ADDRESS;
 		}
 	} else {
 		vm_map_reference(map);
 		oldmap = vm_map_switch(map);
 		if (copyout(fromdata, toaddr, length) != 0) {
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COPYOUTMAP_DIFFERENTMAP_ERROR), KERN_INVALID_ADDRESS /* arg */);
+			ktriage_record(thread_tid(current_thread()),
+			    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM,
+			    KDBG_TRIAGE_RESERVED,
+			    KDBG_TRIAGE_VM_COPYOUTMAP_DIFFERENTMAP_ERROR),
+			    KERN_INVALID_ADDRESS /* arg */);
 			kr = KERN_INVALID_ADDRESS;
 		}
 		vm_map_switch(oldmap);
@@ -4059,12 +4246,6 @@ copyoutmap(
 	return kr;
 }
 
-/*
- *	Routine:	copyoutmap_atomic{32, 64}
- *	Purpose:
- *		Like copyoutmap, except that the operation is atomic.
- *      Takes in value rather than *fromdata pointer.
- */
 kern_return_t
 copyoutmap_atomic32(
 	vm_map_t                map,
@@ -4175,13 +4356,6 @@ vm_kernel_addrhide(
 	*hide_addr = VM_KERNEL_ADDRHIDE(addr);
 }
 
-/*
- *	vm_kernel_addrperm_external:
- *	vm_kernel_unslide_or_perm_external:
- *
- *	Use these macros when exposing an address to userspace that could come from
- *	either kernel text/data *or* the heap.
- */
 void
 vm_kernel_addrperm_external(
 	vm_offset_t addr,
@@ -4248,7 +4422,7 @@ vm_packing_verify_range(
 }
 
 #pragma mark tests
-#if DEBUG || DEVELOPMENT
+#if MACH_ASSERT
 #include <sys/errno.h>
 
 static void
@@ -4311,7 +4485,7 @@ kmem_alloc_basic_test(vm_map_t map)
 	assert3u((addr + PAGE_SIZE) % ptoa(2), ==, 0);
 	kmem_test_assert_map(map, 10, 1);
 
-	kmem_test_for_entry(map, addr, ^(vm_map_entry_t e){
+	kmem_test_for_entry(map, addr, ^(__assert_only vm_map_entry_t e){
 		assertf(e, "unable to find address %p in map %p", (void *)addr, map);
 		assert(e->vme_kernel_object);
 		assert(!e->vme_atomic);
@@ -4514,7 +4688,7 @@ SYSCTL_TEST_REGISTER(kmem_basic, kmem_basic_test);
 static void
 kmem_test_get_size_idx_for_chunks(uint32_t chunks)
 {
-	uint32_t idx = kmem_get_size_idx_for_chunks(chunks);
+	__assert_only uint32_t idx = kmem_get_size_idx_for_chunks(chunks);
 
 	assert(chunks >= kmem_size_array[idx].ks_num_chunk);
 }
@@ -4548,4 +4722,4 @@ kmem_guard_obj_test(__unused int64_t in, int64_t *out)
 	return 0;
 }
 SYSCTL_TEST_REGISTER(kmem_guard_obj, kmem_guard_obj_test);
-#endif /* DEBUG || DEVELOPMENT */
+#endif /* MACH_ASSERT */

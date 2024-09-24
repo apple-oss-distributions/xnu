@@ -2771,6 +2771,7 @@ nfsrv_rename(
 	struct nfs_export_options *fnxo, *tnxo;
 	enum vtype fvtype, tvtype;
 	int holding_mntlock;
+	int is_subdir = 0;
 	mount_t locked_mp;
 	struct nfsm_chain *nmreq, nmrep;
 	char *from_name, *to_name;
@@ -2938,6 +2939,16 @@ retry:
 			error = ENOTEMPTY;
 		}
 		goto out;
+	}
+	if (fvtype == VDIR) {
+		error = vnode_issubdir(tdvp, fvp, &is_subdir, ctx);
+		if (error) {
+			goto out;
+		}
+		if (is_subdir) {
+			error = EINVAL;
+			goto out;
+		}
 	}
 
 	/*

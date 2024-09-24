@@ -7,7 +7,7 @@
 
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
-T_DECL(proc_udata_info, "Get and set a proc udata token"){
+T_DECL(proc_udata_info, "Get and set a proc udata token", T_META_TAG_VM_PREFERRED){
 	uint64_t token = mach_absolute_time();
 	proc_info_udata_t udata;
 	int ret;

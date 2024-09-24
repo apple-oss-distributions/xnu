@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2023 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -73,7 +73,7 @@
 #include <netinet6/nd6.h>
 #include <net/route.h>
 
-extern struct rtstat rtstat;
+extern struct rtstat_64 rtstat;
 
 static LCK_GRP_DECLARE(flow_route_lock_group, "sk_flow_route_lock");
 static LCK_ATTR_DECLARE(flow_route_lock_attr, 0, 0);
@@ -130,8 +130,8 @@ flow_route_fini(void)
 }
 
 struct flow_route_bucket *
-flow_route_buckets_alloc(size_t frb_cnt, size_t *frb_sz, size_t *tot_sz)
-{
+__sized_by(*tot_sz)
+flow_route_buckets_alloc(size_t frb_cnt, size_t * frb_sz, size_t * tot_sz){
 	uint32_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_route_bucket *frb;
 	size_t frb_tot_sz;
@@ -226,8 +226,8 @@ flow_route_find_by_addr(struct flow_route_bucket *frb,
 }
 
 struct flow_route_id_bucket *
-flow_route_id_buckets_alloc(size_t frib_cnt, size_t *frib_sz, size_t *tot_sz)
-{
+__sized_by(*tot_sz)
+flow_route_id_buckets_alloc(size_t frib_cnt, size_t * frib_sz, size_t * tot_sz){
 	uint32_t cache_sz = skmem_cpu_cache_line_size();
 	struct flow_route_id_bucket *frib;
 	size_t frib_tot_sz;
@@ -308,18 +308,17 @@ fr_alloc(boolean_t cansleep)
 {
 	struct flow_route *fr;
 
-	if ((fr = skmem_cache_alloc(flow_route_cache,
-	    (cansleep ? SKMEM_SLEEP : SKMEM_NOSLEEP))) != NULL) {
-		bzero(fr, flow_route_size);
-		lck_spin_init(&fr->fr_reflock, &flow_route_lock_group,
-		    &flow_route_lock_attr);
-		lck_mtx_init(&fr->fr_lock, &flow_route_lock_group,
-		    &flow_route_lock_attr);
-		uuid_generate_random(fr->fr_uuid);
-
-		SK_DF(SK_VERB_MEM, "allocated fr 0x%llx", SK_KVA(fr));
+	fr = skmem_cache_alloc(flow_route_cache,
+	    (cansleep ? SKMEM_SLEEP : SKMEM_NOSLEEP));
+	if (fr == NULL) {
+		return NULL;
 	}
+	bzero(fr, flow_route_size);
+	lck_spin_init(&fr->fr_reflock, &flow_route_lock_group, &flow_route_lock_attr);
+	lck_mtx_init(&fr->fr_lock, &flow_route_lock_group, &flow_route_lock_attr);
+	uuid_generate_random(fr->fr_uuid);
 
+	SK_DF(SK_VERB_MEM, "allocated fr 0x%llx", SK_KVA(fr));
 	return fr;
 }
 
@@ -386,7 +385,7 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 	char src_s[MAX_IPv6_STR_LEN];   /* src */
 	char dst_s[MAX_IPv6_STR_LEN];   /* dst */
 #endif /* SK_LOG */
-	struct rtentry *rt = NULL, *gwrt = NULL;
+	struct rtentry *rt = NULL, *__single gwrt = NULL;
 	int err = 0;
 
 	FR_LOCK_ASSERT_HELD(fr);
@@ -455,7 +454,7 @@ flow_route_configure(struct flow_route *fr, struct ifnet *ifp, struct nx_flow_re
 		fr->fr_rt_dst = rt;             /* move reference to fr */
 		fr->fr_rt_evhdlr_tag =
 		    EVENTHANDLER_REGISTER(&rt->rt_evhdlr_ctxt, route_event,
-		    flow_route_ev_callback, ee_arg, EVENTHANDLER_PRI_ANY);
+		    &flow_route_ev_callback, ee_arg, EVENTHANDLER_PRI_ANY);
 		ASSERT(fr->fr_rt_evhdlr_tag != NULL);
 		os_atomic_andnot(&fr->fr_flags, FLOWRTF_DELETED, relaxed);
 
@@ -1000,7 +999,7 @@ flow_route_prune(struct flow_mgr *fm, struct ifnet *ifp,
  */
 static void
 flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
-    struct sockaddr *dst, int route_ev, struct sockaddr *gw_addr, int flags)
+    struct sockaddr *dst, int route_ev, struct sockaddr *gw_addr_orig, int flags)
 {
 #pragma unused(dst, flags)
 #if SK_LOG
@@ -1012,6 +1011,9 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 
 	VERIFY(!uuid_is_null(ee_arg.ee_fm_uuid));
 	VERIFY(!uuid_is_null(ee_arg.ee_fr_uuid));
+
+	evhlog(debug, "%s: eventhandler saw event type=route_event event_code=%s",
+	    __func__, route_event2str(route_ev));
 
 	/*
 	 * Upon success, callee will hold flow manager lock as reader,
@@ -1104,15 +1106,22 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			OS_FALLTHROUGH;
 
 		case ROUTE_LLENTRY_RESOLVED:
+		{
 			/*
 			 * SDL address length may be 0 for cellular.
 			 * If Ethernet, copy into flow route and mark
 			 * it as cached.  In all cases, mark the flow
 			 * route as resolved.
 			 */
-			ASSERT(SDL(gw_addr)->sdl_family == AF_LINK);
-			if (SDL(gw_addr)->sdl_alen == ETHER_ADDR_LEN) {
-				FLOWRT_UPD_ETH_DST(fr, LLADDR(SDL(gw_addr)));
+			/*
+			 * XXX Remove explicit __bidi_indexable once
+			 * rdar://119193012 lands
+			 */
+			struct sockaddr_dl *__bidi_indexable gw_addr =
+			    (struct sockaddr_dl *__bidi_indexable) SDL(gw_addr_orig);
+			ASSERT(gw_addr->sdl_family == AF_LINK);
+			if (gw_addr->sdl_alen == ETHER_ADDR_LEN) {
+				FLOWRT_UPD_ETH_DST(fr, LLADDR(gw_addr));
 				SK_DF(SK_VERB_FLOW_ROUTE,
 				    "%s: dst %s llentry %s", fm->fm_name,
 				    sk_sa_ntop(dst, dst_s, sizeof(dst_s)),
@@ -1148,7 +1157,7 @@ flow_route_ev_callback(struct eventhandler_entry_arg ee_arg,
 			}
 #endif /* SK_LOG */
 			break;
-
+		}
 		case ROUTE_LLENTRY_DELETED:
 			/*
 			 * If the route entry points to a router and an
@@ -1212,8 +1221,8 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 	char dst_s[MAX_IPv6_STR_LEN];   /* dst */
 #endif /* SK_LOG */
 	sa_family_t af = SA(dst)->sa_family;
-	struct ifnet *src_ifp = NULL;
-	struct ifaddr *ifa = NULL;
+	struct ifnet *__single src_ifp = NULL;
+	struct ifaddr *__single ifa = NULL;
 	int err = 0;
 
 	/* see comments in flow_route_configure() regarding loopback */
@@ -1246,7 +1255,7 @@ flow_route_select_laddr(union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
 		ro.ro_rt = rt;
 
 		if ((in6 = in6_selectsrc_core(SIN6(dst), hints,
-		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro)) == NULL) {
+		    ifp, 0, &src_storage, &src_ifp, &err, &ifa, &ro, FALSE)) == NULL) {
 			if (err == 0) {
 				err = EADDRNOTAVAIL;
 			}
@@ -1409,7 +1418,11 @@ _flow_route_laddr_validate(struct flow_ip_addr *src_ip0, uint8_t ip_v,
 	}
 
 	if (ip_v == IPV6_VERSION) {
-		struct in6_ifaddr *ia6 = (struct in6_ifaddr *)ifa;
+		/*
+		 * -fbounds-safety: ia6 (in6_ifaddr) overlays ifa (ifaddr)
+		 */
+		struct in6_ifaddr *ia6 = __container_of(ifa, struct in6_ifaddr,
+		    ia_ifa);
 
 		/*
 		 * Fail if IPv6 address is not ready or if the address

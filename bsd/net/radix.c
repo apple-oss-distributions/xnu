@@ -65,6 +65,7 @@
  * Routines to build and maintain radix trees for routing lookups.
  */
 #ifndef _RADIX_H_
+#include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/domain.h>
@@ -79,7 +80,7 @@ static int      rn_walktree_from(struct radix_node_head *h, void *a,
     void *m, walktree_f_t *f, void *w);
 static int rn_walktree(struct radix_node_head *, walktree_f_t *, void *);
 static struct radix_node *rn_insert(void *, struct radix_node_head *, int *, struct radix_node[2]);
-static struct radix_node *rn_newpair(void *, int, struct radix_node[2]);
+static struct radix_node *rn_newpair(void * __sized_by(vlen), uint8_t vlen, int, struct radix_node[2]);
 static struct radix_node *rn_search(void *, struct radix_node *);
 static struct radix_node *rn_search_m(void *, struct radix_node *, void *);
 
@@ -99,9 +100,7 @@ KALLOC_TYPE_DEFINE(radix_node_head_zone, struct radix_node_head, KT_DEFAULT);
 	(l == 0 ? 0 : bcmp((caddr_t)(a), (caddr_t)(b), (uint32_t)l))
 
 static int      rn_lexobetter(void *m_arg, void *n_arg);
-static struct radix_mask *
-rn_new_radix_mask(struct radix_node *tt,
-    struct radix_mask *next);
+static struct radix_mask * rn_new_radix_mask(struct radix_node *tt, struct radix_mask *next);
 static int rn_satisfies_leaf(char *trial, struct radix_node *leaf, int skip,
     rn_matchf_t *f, void *w);
 
@@ -141,14 +140,39 @@ static int rn_satisfies_leaf(char *trial, struct radix_node *leaf, int skip,
  * that governs a subtree.
  */
 
+static inline void*
+__sized_by(*arglen)
+__attribute__((always_inline))
+rnarg_unpack(void *packed_arg, uint8_t *arglen)
+{
+	if (!packed_arg) {
+		*arglen = 0;
+		return NULL;
+	}
+	*arglen = *((uint8_t * __single)packed_arg);
+	return __unsafe_forge_bidi_indexable(void *, packed_arg, *arglen);
+}
+
+static inline char
+__attribute__((always_inline))
+rnarg_get(caddr_t rnarg __sized_by(arglen), uint8_t arglen, unsigned int offset)
+{
+	if (arglen <= offset) {
+		return 0;
+	}
+	return rnarg[offset];
+}
+
+
 static struct radix_node *
 rn_search(void *v_arg, struct radix_node *head)
 {
-	struct radix_node *x;
-	caddr_t v;
+	struct radix_node *x = head;
+	uint8_t vlen = 0;
+	caddr_t v = rnarg_unpack(v_arg, &vlen);
 
-	for (x = head, v = v_arg; x->rn_bit >= 0;) {
-		if (x->rn_bmask & v[x->rn_offset]) {
+	while (x->rn_bit >= 0) {
+		if (x->rn_bmask & rnarg_get(v, vlen, x->rn_offset)) {
 			x = x->rn_right;
 		} else {
 			x = x->rn_left;
@@ -160,12 +184,15 @@ rn_search(void *v_arg, struct radix_node *head)
 static struct radix_node *
 rn_search_m(void *v_arg, struct radix_node *head, void *m_arg)
 {
-	struct radix_node *x;
-	caddr_t v = v_arg, m = m_arg;
+	struct radix_node *x = head;
+	uint8_t vlen = 0;
+	caddr_t v = rnarg_unpack(v_arg, &vlen);
+	uint8_t mlen = 0;
+	caddr_t m = rnarg_unpack(m_arg, &mlen);
 
-	for (x = head; x->rn_bit >= 0;) {
-		if ((x->rn_bmask & m[x->rn_offset]) &&
-		    (x->rn_bmask & v[x->rn_offset])) {
+	while (x->rn_bit >= 0) {
+		if ((x->rn_bmask & rnarg_get(m, mlen, x->rn_offset)) &&
+		    (x->rn_bmask & rnarg_get(v, vlen, x->rn_offset))) {
 			x = x->rn_right;
 		} else {
 			x = x->rn_left;
@@ -177,9 +204,13 @@ rn_search_m(void *v_arg, struct radix_node *head, void *m_arg)
 int
 rn_refines(void *m_arg, void *n_arg)
 {
-	caddr_t m = m_arg, n = n_arg;
-	caddr_t lim, lim2 = lim = n + *(u_char *)n;
-	int longer = (*(u_char *)n++) - (int)(*(u_char *)m++);
+	uint8_t mlen, nlen;
+	caddr_t m = rnarg_unpack(m_arg, &mlen);
+	caddr_t n = rnarg_unpack(n_arg, &nlen);
+	caddr_t lim, lim2 = lim = n + nlen;
+	int longer = nlen - mlen;
+	n++;
+	m++;
 	int masks_are_equal = 1;
 
 	if (longer > 0) {
@@ -251,7 +282,8 @@ static int
 rn_satisfies_leaf(char *trial, struct radix_node *leaf, int skip,
     rn_matchf_t *f, void *w)
 {
-	char *cp = trial;
+	uint8_t cplen;
+	char *cp = rnarg_unpack(trial, &cplen);
 	char *cp2 = rn_get_key(leaf);
 	char *cp3 = rn_get_mask(leaf);
 	char *cplim;
@@ -282,12 +314,13 @@ struct radix_node *
 rn_match_args(void *v_arg, struct radix_node_head *head,
     rn_matchf_t *f, void *w)
 {
-	caddr_t v = v_arg;
+	uint8_t vlen0;
+	caddr_t v = rnarg_unpack(v_arg, &vlen0);
 	struct radix_node *t = head->rnh_treetop, *x;
 	caddr_t cp = v, cp2;
 	caddr_t cplim;
 	struct radix_node *saved_t, *top = t;
-	int off = t->rn_offset, vlen = *(u_char *)cp, matched_off;
+	int off = t->rn_offset, vlen = vlen0, matched_off;
 	int test, b, rn_bit;
 
 	/*
@@ -313,7 +346,7 @@ rn_match_args(void *v_arg, struct radix_node_head *head,
 	 * are probably the most common case...
 	 */
 	if (rn_get_mask(t)) {
-		vlen = *(u_char *)rn_get_mask(t);
+		vlen = rn_get_masklen(t);
 	}
 	cp += off;
 	cp2 = rn_get_key(t) + off;
@@ -421,7 +454,7 @@ int     rn_debug =  1;
 #endif
 
 static struct radix_node *
-rn_newpair(void *v, int b, struct radix_node nodes[2])
+rn_newpair(void *v __sized_by(vlen), uint8_t vlen, int b, struct radix_node nodes[2])
 {
 	struct radix_node *tt = nodes, *t = tt + 1;
 	t->rn_bit = (short)b;
@@ -429,7 +462,7 @@ rn_newpair(void *v, int b, struct radix_node nodes[2])
 	t->rn_left = tt;
 	t->rn_offset = b >> 3;
 	tt->rn_bit = -1;
-	tt->rn_key = (caddr_t)v;
+	rn_set_key(tt, v, vlen);
 	tt->rn_parent = t;
 	tt->rn_flags = t->rn_flags = RNF_ACTIVE;
 	tt->rn_mklist = t->rn_mklist = NULL;
@@ -446,9 +479,10 @@ static struct radix_node *
 rn_insert(void *v_arg, struct radix_node_head *head, int *dupentry,
     struct radix_node nodes[2])
 {
-	caddr_t v = v_arg;
+	uint8_t vlen;
+	caddr_t v = rnarg_unpack(v_arg, &vlen);
 	struct radix_node *top = head->rnh_treetop;
-	int head_off = top->rn_offset, vlen = (int)*((u_char *)v);
+	int head_off = top->rn_offset;
 	struct radix_node *t = rn_search(v_arg, top);
 	caddr_t cp = v + head_off;
 	int b;
@@ -492,7 +526,7 @@ on1:
 			log(LOG_DEBUG, "rn_insert: Going In:\n"), traverse(p);
 		}
 #endif
-		t = rn_newpair(v_arg, b, nodes);
+		t = rn_newpair(v_arg, vlen, b, nodes);
 		tt = t->rn_left;
 		if ((cp[p->rn_offset] & p->rn_bmask) == 0) {
 			p->rn_left = t;
@@ -629,7 +663,7 @@ rn_new_radix_mask(struct radix_node *tt, struct radix_mask *next)
 	if (tt->rn_flags & RNF_NORMAL) {
 		m->rm_leaf = tt;
 	} else {
-		m->rm_mask = rn_get_mask(tt);
+		rm_set_mask(m, rn_get_mask(tt), rn_get_masklen(tt));
 	}
 	m->rm_mklist = next;
 	tt->rn_mklist = m;
@@ -640,7 +674,9 @@ struct radix_node *
 rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
     struct radix_node treenodes[2])
 {
-	caddr_t v = (caddr_t)v_arg, netmask = (caddr_t)n_arg;
+	uint8_t vlen, masklen;
+	caddr_t v = rnarg_unpack(v_arg, &vlen);
+	caddr_t netmask = rnarg_unpack(n_arg, &masklen);
 	struct radix_node *t, *x = NULL, *tt;
 	struct radix_node *saved_tt, *top = head->rnh_treetop;
 	short b = 0, b_leaf = 0;
@@ -718,7 +754,7 @@ rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		t = tt + 1; tt->rn_info = rn_nodenum++; t->rn_info = rn_nodenum++;
 		tt->rn_twin = t; tt->rn_ybro = rn_clist; rn_clist = tt;
 #endif
-		tt->rn_key = (caddr_t) v;
+		rn_set_key(tt, v, vlen);
 		tt->rn_bit = -1;
 		tt->rn_flags = RNF_ACTIVE;
 	}
@@ -727,7 +763,7 @@ rn_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	 * Put mask in tree.
 	 */
 	if (netmask) {
-		tt->rn_mask = netmask;
+		rn_set_mask(tt, netmask, masklen);
 		tt->rn_bit = x->rn_bit;
 		tt->rn_flags |= x->rn_flags & RNF_NORMAL;
 	}
@@ -1233,7 +1269,7 @@ rn_inithead(void **head, int off)
 
 	rnh = zalloc_flags(radix_node_head_zone, Z_WAITOK_ZERO_NOFAIL);
 	*head = rnh;
-	t = rn_newpair(rn_zeros, off, rnh->rnh_nodes);
+	t = rn_newpair(rn_zeros, (int8_t)max_keylen, off, rnh->rnh_nodes);
 	ttt = rnh->rnh_nodes + 2;
 	t->rn_right = ttt;
 	t->rn_parent = t;
@@ -1241,7 +1277,7 @@ rn_inithead(void **head, int off)
 	tt->rn_flags = t->rn_flags = RNF_ROOT | RNF_ACTIVE;
 	tt->rn_bit = (short)(-1 - off);
 	*ttt = *tt;
-	ttt->rn_key = rn_ones;
+	rn_set_key(ttt, rn_ones, (int8_t)max_keylen);
 	rnh->rnh_addaddr = rn_addroute;
 	rnh->rnh_deladdr = rn_delete;
 	rnh->rnh_matchaddr = rn_match;

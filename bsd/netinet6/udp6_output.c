@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -113,6 +113,7 @@
 #include <net/route.h>
 #include <net/if_types.h>
 #include <net/ntstat.h>
+#include <net/droptap.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -153,33 +154,34 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	u_int32_t ulen = m->m_pkthdr.len;
 	u_int32_t plen = sizeof(struct udphdr) + ulen;
 	struct ip6_hdr *ip6;
-	struct udphdr *udp6;
-	struct in6_addr *laddr, *faddr;
+	struct udphdr *__single udp6;
+	struct in6_addr *__single laddr, *__single faddr;
 	u_short fport;
 	int error = 0;
-	struct ip6_pktopts opt, *optp = NULL;
-	struct ip6_moptions *im6o;
+	struct ip6_pktopts opt, *__single optp = NULL;
+	struct ip6_moptions *__single im6o;
 	int af = AF_INET6, hlen = sizeof(struct ip6_hdr);
 	int flags;
 	struct sockaddr_in6 tmp;
-	struct  in6_addr storage;
+	struct in6_addr storage;
 	int sotc = SO_TC_UNSPEC;
 	int netsvctype = _NET_SERVICE_TYPE_UNSPEC;
 	struct ip6_out_args ip6oa;
-	struct flowadv *adv = &ip6oa.ip6oa_flowadv;
-	struct socket *so = in6p->in6p_socket;
+	struct flowadv *__single adv = &ip6oa.ip6oa_flowadv;
+	struct socket *__single so = in6p->in6p_socket;
 	struct route_in6 ro;
 	int flowadv = 0;
 	bool sndinprog_cnt_used = false;
 #if CONTENT_FILTER
-	struct m_tag *cfil_tag = NULL;
+	struct m_tag *__single cfil_tag = NULL;
 	bool cfil_faddr_use = false;
 	uint32_t cfil_so_state_change_cnt = 0;
-	struct sockaddr *cfil_faddr = NULL;
-	struct sockaddr_in6 *cfil_sin6 = NULL;
+	struct sockaddr *__single cfil_faddr = NULL;
+	struct sockaddr_in6 *__single cfil_sin6 = NULL;
 #endif
 	bool check_qos_marking_again = (so->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE) ? FALSE : TRUE;
 	uint32_t lifscope = IFSCOPE_NONE, fifscope = IFSCOPE_NONE;
+	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
@@ -190,6 +192,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 	if (flowadv && INP_WAIT_FOR_IF_FEEDBACK(in6p)) {
 		error = ENOBUFS;
+		drop_reason = DROP_REASON_IP_ENOBUFS;
 		goto release;
 	}
 
@@ -244,7 +247,8 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	if (control) {
 		sotc = so_tc_from_control(control, &netsvctype);
 		if ((error = ip6_setpktopts(control, &opt,
-		    NULL, IPPROTO_UDP)) != 0) {
+		    in6p->in6p_outputopts, IPPROTO_UDP)) != 0) {
+			drop_reason = DROP_REASON_IP6_BAD_OPTION;
 			goto release;
 		}
 		optp = &opt;
@@ -272,16 +276,18 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		 * and in6_pcbsetport in order to fill in the local address
 		 * and the local port.
 		 */
-		struct sockaddr_in6 *sin6 = SIN6(addr6);
+		struct sockaddr_in6 *__single sin6 = SIN6(addr6);
 
 		if (sin6->sin6_port == 0) {
 			error = EADDRNOTAVAIL;
+			drop_reason = DROP_REASON_IP_DST_ADDR_NO_AVAIL;
 			goto release;
 		}
 
 		if (!IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr)) {
 			/* how about ::ffff:0.0.0.0 case? */
 			error = EISCONN;
+			drop_reason = DROP_REASON_IP_EISCONN;
 			goto release;
 		}
 
@@ -305,6 +311,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				 * (20010421 jinmei@kame.net)
 				 */
 				error = EINVAL;
+				drop_reason = DROP_REASON_IP6_ONLY;
 				goto release;
 			} else {
 				af = AF_INET;
@@ -315,12 +322,13 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		if (in6_embedscope(&sin6->sin6_addr, sin6, in6p, NULL,
 		    optp, IN6_NULL_IF_EMBEDDED_SCOPE(&sin6->sin6_scope_id)) != 0) {
 			error = EINVAL;
+			drop_reason = DROP_REASON_IP6_BAD_SCOPE;
 			goto release;
 		}
 		fifscope = sin6->sin6_scope_id;
 
 		if (!IN6_IS_ADDR_V4MAPPED(faddr)) {
-			struct ifnet *src_ifp = NULL;
+			struct ifnet *__single src_ifp = NULL;
 			laddr = in6_selectsrc(sin6, optp,
 			    in6p, &in6p->in6p_route, &src_ifp, &storage,
 			    ip6oa.ip6oa_boundif, &error);
@@ -336,15 +344,17 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			if (error == 0) {
 				error = EADDRNOTAVAIL;
 			}
+			drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
 			goto release;
 		}
 		if (in6p->in6p_lport == 0 &&
-		    (error = in6_pcbsetport(laddr, in6p, p, 0)) != 0) {
+		    (error = in6_pcbsetport(laddr, addr6, in6p, p, 0)) != 0) {
 			goto release;
 		}
 	} else {
 		if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr)) {
 			error = ENOTCONN;
+			drop_reason = DROP_REASON_IP6_ADDR_UNSPECIFIED;
 			goto release;
 		}
 		laddr = &in6p->in6p_laddr;
@@ -408,6 +418,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	M_PREPEND(m, hlen + sizeof(struct udphdr), M_DONTWAIT, 1);
 	if (m == 0) {
 		error = ENOBUFS;
+		drop_reason = DROP_REASON_IP_ENOBUFS;
 		goto release;
 	}
 
@@ -496,6 +507,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 			if (!necp_socket_is_allowed_to_send_recv_v6(in6p, in6p->in6p_lport, fport, laddr, faddr, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 				error = EHOSTUNREACH;
+				drop_reason = DROP_REASON_IP_NECP_POLICY_DROP;
 				goto release;
 			}
 
@@ -517,6 +529,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 #if IPSEC
 		if (in6p->in6p_sp != NULL && ipsec_setsocket(m, so) != 0) {
 			error = ENOBUFS;
+			drop_reason = DROP_REASON_IP_ENOBUFS;
 			goto release;
 		}
 #endif /*IPSEC*/
@@ -592,20 +605,14 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		}
 
 		if (error == 0 && nstat_collect) {
-			boolean_t cell, wifi, wired;
+			stats_functional_type ifnet_count_type = stats_functional_type_none;
 
 			if (in6p->in6p_route.ro_rt != NULL) {
-				cell = IFNET_IS_CELLULAR(in6p->in6p_route.
+				ifnet_count_type = IFNET_COUNT_TYPE(in6p->in6p_route.
 				    ro_rt->rt_ifp);
-				wifi = (!cell && IFNET_IS_WIFI(in6p->in6p_route.
-				    ro_rt->rt_ifp));
-				wired = (!wifi && IFNET_IS_WIRED(in6p->in6p_route.
-				    ro_rt->rt_ifp));
-			} else {
-				cell = wifi = wired = FALSE;
 			}
-			INP_ADD_STAT(in6p, cell, wifi, wired, txpackets, 1);
-			INP_ADD_STAT(in6p, cell, wifi, wired, txbytes, ulen);
+			INP_ADD_STAT(in6p, ifnet_count_type, txpackets, 1);
+			INP_ADD_STAT(in6p, ifnet_count_type, txbytes, ulen);
 			inp_set_activity_bitmap(in6p);
 		}
 
@@ -620,7 +627,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		}
 
 		if (ro.ro_rt != NULL) {
-			struct ifnet *outif = ro.ro_rt->rt_ifp;
+			struct ifnet *__single outif = ro.ro_rt->rt_ifp;
 
 			so->so_pktheadroom = (uint16_t)P2ROUNDUP(
 				sizeof(struct udphdr) +
@@ -634,8 +641,8 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		in6p_route_copyin(in6p, &ro);
 
 		if (in6p->in6p_route.ro_rt != NULL) {
-			struct rtentry *rt = in6p->in6p_route.ro_rt;
-			struct ifnet *outif;
+			struct rtentry *__single rt = in6p->in6p_route.ro_rt;
+			struct ifnet *__single outif;
 
 			if (IS_LOCALNET_ROUTE(rt)) {
 				in6p->in6p_flags2 |= INP2_LAST_ROUTE_LOCAL;
@@ -711,6 +718,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		break;
 	case AF_INET:
 		error = EAFNOSUPPORT;
+		drop_reason = DROP_REASON_IP_EAFNOSUPPORT;
 		goto release;
 	}
 	goto releaseopt;
@@ -718,7 +726,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 release:
 
 	if (m != NULL) {
-		m_freem(m);
+		m_drop(m, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	}
 
 releaseopt:

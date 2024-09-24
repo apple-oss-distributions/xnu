@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2024 Apple Inc. All rights reserved.
  */
 
 #undef offset
@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <vm/vm_kern.h>
+#include <vm/vm_kern_xnu.h>
 #include <mach/vm_statistics.h>
 #include <kern/debug.h>
 #include <libkern/libkern.h>
@@ -359,8 +359,8 @@ os_log_encoded_metadata(firehose_tracepoint_id_u ftid, uint64_t ts, const void *
 }
 
 bool
-os_log_encoded_log(firehose_tracepoint_id_u ftid, uint64_t ts, const void *msg,
-    size_t msg_size, size_t pub_data_size)
+os_log_encoded_log(firehose_stream_t stream, firehose_tracepoint_id_u ftid,
+    uint64_t ts, const void *msg, size_t msg_size, size_t pub_data_size)
 {
 	assert(ftid.ftid._namespace == firehose_tracepoint_namespace_log);
 	counter_inc(&oslog_p_total_msgcount);
@@ -369,8 +369,6 @@ os_log_encoded_log(firehose_tracepoint_id_u ftid, uint64_t ts, const void *msg,
 		counter_inc(&oslog_p_dropped_msgcount);
 		return false;
 	}
-
-	firehose_stream_t stream = firehose_stream(ftid.ftid._type);
 
 	log_payload_s log;
 	log_payload_init(&log, stream, ftid, ts, msg_size, pub_data_size);
@@ -384,8 +382,8 @@ os_log_encoded_log(firehose_tracepoint_id_u ftid, uint64_t ts, const void *msg,
 }
 
 bool
-os_log_encoded_signpost(firehose_tracepoint_id_u ftid, uint64_t ts, const void *msg,
-    size_t msg_size, size_t pub_data_size)
+os_log_encoded_signpost(firehose_stream_t stream, firehose_tracepoint_id_u ftid,
+    uint64_t ts, const void *msg, size_t msg_size, size_t pub_data_size)
 {
 	assert(ftid.ftid._namespace == firehose_tracepoint_namespace_signpost);
 	counter_inc(&oslog_p_total_msgcount);
@@ -396,7 +394,7 @@ os_log_encoded_signpost(firehose_tracepoint_id_u ftid, uint64_t ts, const void *
 	}
 
 	log_payload_s log;
-	log_payload_init(&log, firehose_stream_signpost, ftid, ts, msg_size, pub_data_size);
+	log_payload_init(&log, stream, ftid, ts, msg_size, pub_data_size);
 
 	if (log_queue_log(&log, msg, true)) {
 		return true;

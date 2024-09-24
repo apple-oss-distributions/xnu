@@ -100,10 +100,10 @@ in_gif_output(
 	struct mbuf     *m,
 	__unused struct rtentry *rt)
 {
-	struct gif_softc *sc = ifnet_softc(ifp);
-	struct sockaddr_in *dst = SIN(&sc->gif_ro.ro_dst);
-	struct sockaddr_in *sin_src = SIN(sc->gif_psrc);
-	struct sockaddr_in *sin_dst = SIN(sc->gif_pdst);
+	struct gif_softc *__single sc = ifnet_softc(ifp);
+	struct sockaddr_in *__single dst = SIN(&sc->gif_ro.ro_dst);
+	struct sockaddr_in *__single sin_src = SIN(sc->gif_psrc);
+	struct sockaddr_in *__single sin_dst = SIN(sc->gif_pdst);
 	struct ip iphdr;        /* capsule IP header, host byte ordered */
 	int proto, error;
 	u_int8_t tos;
@@ -128,7 +128,7 @@ in_gif_output(
 #if INET
 	case AF_INET:
 	{
-		struct ip *ip;
+		struct ip *__single ip;
 
 		proto = IPPROTO_IPV4;
 		if (mbuf_len(m) < sizeof(*ip)) {
@@ -345,10 +345,10 @@ gif_encapcheck4(
 	void *arg)
 {
 	struct ip ip;
-	struct gif_softc *sc;
-	struct sockaddr_in *src, *dst;
+	struct gif_softc *__single sc;
+	struct sockaddr_in *__single src, *__single dst;
 	int addrmatch;
-	struct in_ifaddr *ia4;
+	struct in_ifaddr *__single ia4;
 
 	/* sanity check done in caller */
 	sc = (struct gif_softc *)arg;
@@ -357,7 +357,7 @@ gif_encapcheck4(
 
 	GIF_LOCK_ASSERT(sc);
 
-	mbuf_copydata((struct mbuf *)(size_t)m, 0, sizeof(ip), &ip);
+	mbuf_copydata(__DECONST(struct mbuf *, m), 0, sizeof(ip), &ip);
 
 	/* check for address match */
 	addrmatch = 0;

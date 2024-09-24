@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021, 2023 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -43,6 +43,7 @@
 #include <netinet/in_pcb.h>
 #include <string.h>
 #include <libkern/libkern.h>
+#include <net/sockaddr_utils.h>
 
 extern int tcp_tcbhashsize;
 
@@ -133,7 +134,7 @@ typedef struct tracker_hash_entry_short {
 LIST_HEAD(trackerhashhead, tracker_hash_entry);
 
 struct tracker_db {
-	struct trackerhashhead              *tracker_hashbase;
+	struct trackerhashhead              * __indexable tracker_hashbase;
 	u_long                              tracker_hashmask;
 	uint32_t                            tracker_count;
 	uint32_t                            tracker_count_short;
@@ -187,38 +188,55 @@ static void tracker_entry_expire(void *v, wait_result_t w);
     ((entry && entry->metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT) ?                   \
 	    sizeof(struct tracker_hash_entry_short) : entry ? sizeof(struct tracker_hash_entry) : 0)
 
+#define STRLEN_SRC_DOMAIN strbuflen((char *)src_domain_buffer, src_domain_buffer_size)
+#define STRLEN_SRC_DOMAIN_OWNER strbuflen((char *)src_domain_owner_buffer, src_domain_owner_buffer_size)
+#define STRLEN_DST_DOMAIN strbuflen((char *)dst_domain_buffer, dst_domain_buffer_size)
+#define STRLEN_DST_DOMAIN_OWNER strbuflen((char *)dst_domain_owner_buffer, dst_domain_owner_buffer_size)
+
 #define GET_METADATA_BUFFERS_DST(metadata)                                                          \
     size_t dst_domain_max = 0;                                                                      \
-    uint8_t *dst_domain_buffer = NULL;                                                              \
-    uint8_t *dst_domain_owner_buffer = NULL;                                                        \
+    size_t dst_domain_buffer_size = 0;                                                              \
+    uint8_t * __sized_by(dst_domain_buffer_size) dst_domain_buffer = NULL;                          \
+    size_t dst_domain_owner_buffer_size = 0;                                                        \
+    uint8_t * __sized_by(dst_domain_owner_buffer_size) dst_domain_owner_buffer = NULL;              \
     if (metadata != NULL) {                                                                         \
-    if (metadata->flags & SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT) {                                \
-	tracker_metadata_short_t *short_metadata = (tracker_metadata_short_t *)metadata;                \
-	dst_domain_max = TRACKER_DOMAIN_SHORT_MAX;                                                      \
-	dst_domain_buffer = (uint8_t *)(&short_metadata->domain);                                       \
-	dst_domain_owner_buffer = (uint8_t *)(&short_metadata->domain_owner);                           \
-    } else {                                                                                        \
-	dst_domain_max = TRACKER_DOMAIN_MAX;                                                            \
-	dst_domain_buffer = (uint8_t *)(&metadata->domain);                                             \
-	dst_domain_owner_buffer = (uint8_t *)(&metadata->domain_owner);                                 \
-    }                                                                                               \
+	if (metadata->flags & SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT) {                            \
+	    tracker_metadata_short_t *short_metadata = (tracker_metadata_short_t *)metadata;        \
+	    dst_domain_max = TRACKER_DOMAIN_SHORT_MAX;                                              \
+	    dst_domain_buffer = (uint8_t *)(&short_metadata->domain);                               \
+	    dst_domain_buffer_size = dst_domain_max + 1;                                            \
+	    dst_domain_owner_buffer = (uint8_t *)(&short_metadata->domain_owner);                   \
+	    dst_domain_owner_buffer_size = dst_domain_max + 1;                                      \
+	} else {                                                                                    \
+	    dst_domain_max = TRACKER_DOMAIN_MAX;                                                    \
+	    dst_domain_buffer = (uint8_t *)(&metadata->domain);                                     \
+	    dst_domain_buffer_size = dst_domain_max + 1;                                            \
+	    dst_domain_owner_buffer = (uint8_t *)(&metadata->domain_owner);                         \
+	    dst_domain_owner_buffer_size = dst_domain_max + 1;                                      \
+	}                                                                                           \
     }
 
 #define GET_METADATA_BUFFERS_SRC(metadata)                                                          \
     size_t src_domain_max = 0;                                                                      \
-    uint8_t *src_domain_buffer = NULL;                                                              \
-    uint8_t *src_domain_owner_buffer = NULL;                                                        \
+    size_t src_domain_buffer_size = 0;                                                              \
+    uint8_t * __sized_by(src_domain_buffer_size) src_domain_buffer = NULL;                          \
+    size_t src_domain_owner_buffer_size = 0;                                                        \
+    uint8_t * __sized_by(src_domain_owner_buffer_size) src_domain_owner_buffer = NULL;              \
     if (metadata != NULL) {                                                                         \
-	if (metadata->flags & SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT) {                                \
-tracker_metadata_short_t *short_metadata = (tracker_metadata_short_t *)metadata;                    \
-	    src_domain_max = TRACKER_DOMAIN_SHORT_MAX;                                                  \
-	    src_domain_buffer = (uint8_t *)(&short_metadata->domain);                                   \
-	    src_domain_owner_buffer = (uint8_t *)(&short_metadata->domain_owner);                       \
-	} else {                                                                                        \
-	    src_domain_max = TRACKER_DOMAIN_MAX;                                                        \
-	    src_domain_buffer = (uint8_t *)(&metadata->domain);                                         \
-	    src_domain_owner_buffer = (uint8_t *)(&metadata->domain_owner);                             \
-	}                                                                                               \
+	if (metadata->flags & SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT) {                            \
+	    tracker_metadata_short_t *short_metadata = (tracker_metadata_short_t *)metadata;        \
+	    src_domain_max = TRACKER_DOMAIN_SHORT_MAX;                                              \
+	    src_domain_buffer = (uint8_t *)(&short_metadata->domain);                               \
+	    src_domain_buffer_size = src_domain_max + 1;                                            \
+	    src_domain_owner_buffer = (uint8_t *)(&short_metadata->domain_owner);                   \
+	    src_domain_owner_buffer_size = src_domain_max + 1;                                      \
+	} else {                                                                                    \
+	    src_domain_max = TRACKER_DOMAIN_MAX;                                                    \
+	    src_domain_buffer = (uint8_t *)(&metadata->domain);                                     \
+	    src_domain_buffer_size = src_domain_max + 1;                                            \
+	    src_domain_owner_buffer = (uint8_t *)(&metadata->domain_owner);                         \
+	    src_domain_owner_buffer_size = src_domain_max + 1;                                      \
+	}                                                                                           \
     }
 
 static int
@@ -226,7 +244,9 @@ tracker_db_init(void)
 {
 	tracker_db_log_handle = os_log_create("com.apple.xnu.kern.tracker_db", "tracker_db");
 
-	g_tracker_db.tracker_hashbase = hashinit(TRACKERHASHSIZE, M_TRACKER, &g_tracker_db.tracker_hashmask);
+	void * __single hash = hashinit(TRACKERHASHSIZE, M_TRACKER, &g_tracker_db.tracker_hashmask);
+	g_tracker_db.tracker_hashbase = __unsafe_forge_bidi_indexable(struct trackerhashhead *, hash, TRACKERHASHSIZE * sizeof(void *));
+
 	if (g_tracker_db.tracker_hashbase == NULL) {
 		TRACKER_LOG(LOG_ERR, "Failed to initialize");
 		return ENOMEM;
@@ -263,8 +283,8 @@ copy_metadata(tracker_metadata_t *dst_metadata, tracker_metadata_t *src_metadata
 		return false;
 	}
 
-	size_t src_domain_len = strlen((const char *)src_domain_buffer);
-	size_t src_domain_owner_len = strlen((const char *)src_domain_owner_buffer);
+	size_t src_domain_len = STRLEN_SRC_DOMAIN;
+	size_t src_domain_owner_len = STRLEN_SRC_DOMAIN_OWNER;
 
 	if ((src_domain_len > dst_domain_max) || (src_domain_owner_len > dst_domain_max)) {
 		TRACKER_LOG(LOG_ERR, "Failed to copy metadata, dst buffer size too small");
@@ -272,8 +292,9 @@ copy_metadata(tracker_metadata_t *dst_metadata, tracker_metadata_t *src_metadata
 	}
 
 	if (src_domain_buffer[0]) {
-		size_t dst_domain_len = strlen((const char *)dst_domain_buffer);
-		if (dst_domain_len != src_domain_len || strncmp((const char *)dst_domain_buffer, (const char *)src_domain_buffer, src_domain_len)) {
+		size_t dst_domain_len = STRLEN_DST_DOMAIN;
+		if (dst_domain_len != src_domain_len ||
+		    strbufcmp((char *)dst_domain_buffer, dst_domain_buffer_size, (char *)src_domain_buffer, src_domain_buffer_size)) {
 			if (src_domain_len <= dst_domain_max) {
 				bcopy(src_domain_buffer, dst_domain_buffer, src_domain_len);
 				dst_domain_buffer[src_domain_len] = 0;
@@ -284,8 +305,9 @@ copy_metadata(tracker_metadata_t *dst_metadata, tracker_metadata_t *src_metadata
 	}
 
 	if (src_domain_owner_buffer[0]) {
-		size_t dst_domain_owner_len = strlen((const char *)dst_domain_owner_buffer);
-		if (dst_domain_owner_len != src_domain_owner_len || strncmp((const char *)dst_domain_owner_buffer, (const char *)src_domain_owner_buffer, src_domain_owner_len)) {
+		size_t dst_domain_owner_len = STRLEN_DST_DOMAIN_OWNER;
+		if (dst_domain_owner_len != src_domain_owner_len ||
+		    strbufcmp((char *)dst_domain_owner_buffer, dst_domain_owner_buffer_size, (char *)src_domain_owner_buffer, src_domain_owner_buffer_size)) {
 			if (src_domain_owner_len <= dst_domain_max) {
 				bcopy(src_domain_owner_buffer, dst_domain_owner_buffer, src_domain_owner_len);
 				dst_domain_owner_buffer[src_domain_owner_len] = 0;
@@ -328,7 +350,7 @@ fill_hash_entry(struct tracker_hash_entry *entry, uuid_t appuuid, struct sockadd
 
 	switch (address->sa_family) {
 	case AF_INET:
-		sin = satosin(address);
+		sin = SIN(address);
 		if (sin->sin_len < sizeof(*sin)) {
 			return EINVAL;
 		}
@@ -338,7 +360,7 @@ fill_hash_entry(struct tracker_hash_entry *entry, uuid_t appuuid, struct sockadd
 		entry->address_family = AF_INET;
 		return 0;
 	case AF_INET6:
-		sin6 = satosin6(address);
+		sin6 = SIN6(address);
 		if (sin6->sin6_len < sizeof(*sin6)) {
 			return EINVAL;
 		}
@@ -380,7 +402,7 @@ tracker_entry_log(int log_level, char *log_msg, struct tracker_hash_entry *entry
 
 	uint8_t *ptr = (uint8_t *)&entry->app_uuid;
 	TRACKER_LOG(log_level, "%s - %s <%s> len %d <%s> len %d <flags %X> %x%x%x%x-%x%x%x%x-%x%x%x%x-%x%x%x%x (hash 0x%X hashsize %d)", log_msg ? log_msg : "n/a",
-	    addr_buffer, dst_domain_buffer, (int)strlen((const char *)dst_domain_buffer), dst_domain_owner_buffer, (int)strlen((const char *)dst_domain_owner_buffer),
+	    addr_buffer, dst_domain_buffer, (int)STRLEN_DST_DOMAIN, dst_domain_owner_buffer, (int)STRLEN_DST_DOMAIN_OWNER,
 	    entry->metadata.flags,
 	    ptr[0], ptr[1], ptr[2], ptr[3], ptr[4], ptr[5], ptr[6], ptr[7],
 	    ptr[8], ptr[9], ptr[10], ptr[11], ptr[12], ptr[13], ptr[14], ptr[15],
@@ -392,7 +414,7 @@ tracker_search_and_insert(struct tracker_db *db, struct tracker_hash_entry *matc
 {
 	u_int32_t key0 = 0, key1 = 0, key2 = 0, key3 = 0;
 	struct trackerhashhead *trackerhash = NULL;
-	struct tracker_hash_entry *nextentry = NULL;
+	struct tracker_hash_entry * __single nextentry = NULL;
 	int hash_element = 0;
 	int count = 0;
 
@@ -477,7 +499,7 @@ tracker_search_and_insert(struct tracker_db *db, struct tracker_hash_entry *matc
 }
 
 static int
-tracker_retrieve_attribute(u_int8_t *buffer, size_t buffer_length, u_int8_t type, u_int8_t *out_buffer, size_t out_size, size_t out_max_size)
+tracker_retrieve_attribute(u_int8_t * __sized_by(buffer_length)buffer, size_t buffer_length, u_int8_t type, u_int8_t * __sized_by(out_max_size)out_buffer, size_t out_size, size_t out_max_size)
 {
 	int cursor = 0;
 	size_t value_size = 0;
@@ -489,7 +511,7 @@ tracker_retrieve_attribute(u_int8_t *buffer, size_t buffer_length, u_int8_t type
 		return ENOENT;
 	}
 
-	value_size = necp_buffer_get_tlv_length(buffer, cursor);
+	value_size = necp_buffer_get_tlv_length(buffer, buffer_length, cursor);
 	if (out_size && value_size != out_size) {
 		TRACKER_LOG(LOG_ERR, "Wrong size for tracker attribute type %d size %zu <got size %zu>", type, out_size, value_size);
 		return EINVAL;
@@ -499,7 +521,7 @@ tracker_retrieve_attribute(u_int8_t *buffer, size_t buffer_length, u_int8_t type
 		return EINVAL;
 	}
 
-	value = necp_buffer_get_tlv_value(buffer, cursor, NULL);
+	value = necp_buffer_get_tlv_value(buffer, buffer_length, cursor, NULL);
 	if (value == NULL) {
 		TRACKER_LOG(LOG_ERR, "Failed to get value for tracker attribute type %d size %zu", type, value_size);
 		return EINVAL;
@@ -515,11 +537,11 @@ tracker_add(struct proc *p, struct tracker_action_args *uap, int *retval)
 	uint8_t scratch_pad[TRACKER_SCRATCH_PAD_SIZE] = { };
 	struct sockaddr_in6 addrBuffer = { };
 	struct sockopt sopt = { };
-	struct tracker_hash_entry *entry = NULL;
+	struct tracker_hash_entry * __single entry = NULL;
 	struct tracker_db *db = NULL;
 	sa_family_t address_family = 0;
 	u_int address_size = 0;
-	u_int8_t *buffer = scratch_pad;
+	u_int8_t * __indexable buffer = scratch_pad;
 	size_t buffer_size = 0;
 	int error = 0;
 	uint32_t flags = 0;
@@ -566,7 +588,7 @@ tracker_add(struct proc *p, struct tracker_action_args *uap, int *retval)
 	address_size = (address_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
 
 	// Address (Required)
-	error = tracker_retrieve_attribute(buffer, buffer_size, SO_TRACKER_ATTRIBUTE_ADDRESS, (u_int8_t *)&addrBuffer, address_size, address_size);
+	error = tracker_retrieve_attribute(buffer, buffer_size, SO_TRACKER_ATTRIBUTE_ADDRESS, __SA_UTILS_CONV_TO_BYTES(&addrBuffer), address_size, address_size);
 	if (error) {
 		TRACKER_LOG(LOG_ERR, "Could not retrieve address TLV from parameters");
 		goto cleanup;
@@ -619,7 +641,8 @@ tracker_add(struct proc *p, struct tracker_action_args *uap, int *retval)
 		}
 	}
 
-	if (fill_hash_entry(entry, NULL, (struct sockaddr *)&addrBuffer) != 0) {
+	uuid_t dummy = {};
+	if (fill_hash_entry(entry, dummy, SA(&addrBuffer)) != 0) {
 		error = EINVAL;
 		goto cleanup;
 	}
@@ -692,12 +715,12 @@ tracker_entry_dump_size(struct tracker_hash_entry *entry)
 		return 0;
 	}
 
-	str_len = strlen((const char *)dst_domain_buffer);
+	str_len = STRLEN_DST_DOMAIN;
 	if (str_len) {
 		len += TRACKER_TLV_HDR_LEN + str_len + 1;
 	}
 
-	str_len = strlen((const char *)dst_domain_owner_buffer);
+	str_len = STRLEN_DST_DOMAIN_OWNER;
 	if (str_len) {
 		len += TRACKER_TLV_HDR_LEN + str_len + 1;
 	}
@@ -710,7 +733,7 @@ tracker_entry_dump_size(struct tracker_hash_entry *entry)
 }
 
 static size_t
-tracker_entry_dump(struct tracker_hash_entry *entry, uint8_t *buffer, size_t buffer_size)
+tracker_entry_dump(struct tracker_hash_entry *entry, uint8_t *__sized_by(buffer_size)buffer, size_t buffer_size)
 {
 	u_int8_t *cursor = buffer;
 	size_t str_len = 0;
@@ -745,14 +768,14 @@ tracker_entry_dump(struct tracker_hash_entry *entry, uint8_t *buffer, size_t buf
 		return 0;
 	}
 
-	str_len = strlen((const char *)dst_domain_buffer);
+	str_len = STRLEN_DST_DOMAIN;
 	TRACKER_LOG(LOG_DEBUG, "Dumping domain <%s> len <%zu>", dst_domain_buffer, str_len);
 	if (str_len) {
 		str_len++;
 		cursor = necp_buffer_write_tlv(cursor, SO_TRACKER_ATTRIBUTE_DOMAIN, (u_int32_t)str_len, dst_domain_buffer, buffer, (u_int32_t)buffer_size);
 	}
 
-	str_len = strlen((const char *)dst_domain_owner_buffer);
+	str_len = STRLEN_DST_DOMAIN_OWNER;
 	TRACKER_LOG(LOG_DEBUG, "Dumping domain owner <%s> len <%zu>", dst_domain_owner_buffer, str_len);
 	if (str_len) {
 		str_len++;
@@ -771,7 +794,7 @@ tracker_dump(struct proc *p, struct tracker_action_args *uap, int *retval, bool 
 	struct tracker_hash_entry *entry = NULL;
 	struct tracker_hash_entry *temp_entry = NULL;
 	struct trackerhashhead *hash = NULL;
-	uint8_t *buffer = scratch_pad_all;
+	uint8_t * __indexable buffer = scratch_pad_all;
 	size_t buffer_size = sizeof(scratch_pad_all);
 	uint8_t *data_start = NULL;
 	uint8_t *cursor = NULL;
@@ -920,7 +943,7 @@ done:
 int
 tracker_action(struct proc *p, struct tracker_action_args *uap, int *retval)
 {
-	const task_t task = proc_task(p);
+	const task_t __single task = proc_task(p);
 	if (task == NULL || !IOTaskHasEntitlement(task, "com.apple.private.ip-domain-table")) {
 		TRACKER_LOG(LOG_ERR, "Process (%d) does not hold the necessary entitlement", proc_pid(p));
 		*retval = EPERM;
@@ -1028,7 +1051,7 @@ static void
 tracker_entry_expire(void *v, wait_result_t w)
 {
 #pragma unused (v, w)
-	struct tracker_hash_entry *entry = NULL;
+	struct tracker_hash_entry * __single entry = NULL;
 	struct tracker_hash_entry *temp_entry = NULL;
 	struct trackerhashhead *hash = NULL;
 

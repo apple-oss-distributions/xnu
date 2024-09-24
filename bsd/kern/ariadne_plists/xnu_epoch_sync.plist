@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<array>
+		<dict>
+			<key>Name</key>
+			<string>Epoch Sync</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wait Stale</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c0000</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>Id</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wait</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12c0005</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12c0006</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+						<key>Arg4</key>
+						<string>Owner</string>
+					</dict>
+					<key>ArgValueLabelsBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+					<key>ArgValueTypesBegin</key>
+					<dict>
+						<key>Arg4</key>
+						<string>ThreadName</string>
+					</dict> 
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Wait Result</string>
+					</dict>
+					<key>ArgValueLabelsEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>-1</key>
+							<string>Waiting</string>
+							<key>0x0</key>
+							<string>Awakened</string>
+							<key>0x1</key>
+							<string>Timed Out</string>
+							<key>0x2</key>
+							<string>Interrupted</string>
+							<key>0x3</key>
+							<string>Restart</string>
+							<key>0xa</key>
+							<string>Not Waiting</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wake - No Waiters</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c0008</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+
+					<key>Name</key>
+					<string>Epoch Sync Wake One</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c000c</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wake All</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c0010</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wake With Owner</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c0014</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+						<key>Arg4</key>
+						<string>Owner</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+					<key>ArgValueTypes</key>
+					<dict>
+						<key>Arg4</key>
+						<string>ThreadName</string>
+					</dict> 
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Epoch Sync Wake Thread</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12c0018</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Space</string>
+						<key>Arg2</key>
+						<string>ID</string>
+						<key>Arg3</key>
+						<string>Epoch</string>
+						<key>Arg4</key>
+						<string>Thread</string>
+					</dict>
+					<key>ArgValueLabels</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>0x1</key>
+							<string>Exclaves Queue</string>
+							<key>0x2</key>
+							<string>Exclaves Thread</string>
+						</dict>
+					</dict>
+					<key>ArgValueTypes</key>
+					<dict>
+						<key>Arg4</key>
+						<string>ThreadName</string>
+					</dict> 
+				</dict>
+			</array>
+		</dict>
+	</array>
+</plist>
+

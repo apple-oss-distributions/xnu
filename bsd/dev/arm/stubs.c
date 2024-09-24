@@ -21,6 +21,7 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <vm/vm_map.h>
+#include <arm/machine_routines.h>
 
 
 /*
@@ -93,3 +94,15 @@ copywithin(void *src, void *dst, size_t count)
 	return 0;
 }
 
+
+int
+objc_bp_assist_cfg_np(
+	__unused struct proc                        *p,
+	__unused struct objc_bp_assist_cfg_np_args  *uap,
+	__unused int                                *retvalp)
+{
+	int ret = KERN_FAILURE;
+
+
+	return ret;
+}
