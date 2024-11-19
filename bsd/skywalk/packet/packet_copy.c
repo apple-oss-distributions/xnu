@@ -972,9 +972,8 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 		}
 
 		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
-		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
-			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
-			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		if (ts_tag != NULL) {
+			__packet_set_tx_timestamp(ph, *(uint64_t *)(ts_tag->m_tag_data));
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,
@@ -1362,9 +1361,8 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 		}
 
 		ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
-		if (ts_tag != NULL && pkt->pkt_com_opt != NULL) {
-			pkt->pkt_com_opt->__po_pkt_tx_time = *(uint64_t *)(ts_tag->m_tag_data);
-			pkt->pkt_pflags |= PKT_F_OPT_TX_TIMESTAMP;
+		if (ts_tag != NULL) {
+			__packet_set_tx_timestamp(ph, *(uint64_t *)(ts_tag->m_tag_data));
 		}
 
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_TX,

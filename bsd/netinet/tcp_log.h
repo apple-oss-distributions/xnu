@@ -49,7 +49,8 @@
 	X(TLEF_FSW_FLOW,	0x00008000, fswflow)    \
 	X(TLEF_STATE,           0x00010000, state)      \
 	X(TLEF_SYN_RXMT,	0x00020000, synrxmt)    \
-	X(TLEF_OUTPUT,	        0x00040000, output)
+	X(TLEF_OUTPUT,	        0x00040000, output)     \
+	X(TLEF_BIND,	        0x00080000, bind)
 
 /*
  * Flag values for tcp_log_enabled
@@ -104,6 +105,7 @@ extern void tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp
 extern void tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
 extern void tcp_log_state_change(struct tcpcb *tp, int new_state);
 extern void tcp_log_output(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
+extern void tcp_log_bind(struct inpcb *inp, const char *event, int error);
 
 static inline bool
 tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
@@ -204,6 +206,9 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 
 #define TCP_LOG_OUTPUT(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_OUTPUT)) \
     tcp_log_output(__func__, __LINE__, tp, format, ## __VA_ARGS__)
+
+#define TCP_LOG_BIND(tp, error) if (tcp_is_log_enabled(tp, TLEF_BIND)) \
+    tcp_log_connection((tp), "bind", (error))
 
 #endif /* BSD_KERNEL_PRIVATE */
 

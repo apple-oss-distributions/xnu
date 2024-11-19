@@ -2949,7 +2949,7 @@ findpcb:
 	}
 
 	/* Accurate ECN has different semantics for TH_CWR. */
-	if (!TCP_ACC_ECN_ENABLED(tp)) {
+	if (!TCP_ACC_ECN_ON(tp)) {
 		/*
 		 * Clear TE_SENDECE if TH_CWR is set. This is harmless, so we don't
 		 * bother doing extensive checks for state and whatnot.
@@ -4153,14 +4153,17 @@ trimthenstep6:
 	 *                     In that case, accept the RST for non-established
 	 *                     state if it's one off from last_ack_sent.
 	 *
+	 * Also be lenient in closing states to allow last_ack_sent and also
+	 * last_ack_sent - 1 in case there is a lot of delay upstream
+	 * and it is an older segment that is triggering the RST
 	 */
 	if (thflags & TH_RST) {
 		if ((SEQ_GEQ(th->th_seq, tp->last_ack_sent) &&
 		    SEQ_LT(th->th_seq, tp->last_ack_sent + tp->rcv_wnd)) ||
-		    (tp->rcv_wnd == 0 &&
+		    ((tp->rcv_wnd == 0 || tp->t_state >= TCPS_CLOSE_WAIT) &&
 		    ((tp->last_ack_sent == th->th_seq) ||
-		    ((tp->last_ack_sent - 1) == th->th_seq)))) {
-			if (tp->last_ack_sent == th->th_seq) {
+		    (tp->last_ack_sent - 1 == th->th_seq)))) {
+			if (tp->last_ack_sent == th->th_seq || tp->last_ack_sent - 1 == th->th_seq) {
 				switch (tp->t_state) {
 				case TCPS_SYN_RECEIVED:
 					IF_TCP_STATINC(ifp, rstinsynrcv);
@@ -7410,6 +7413,7 @@ void
 inp_fc_unthrottle_tcp(struct inpcb *inp)
 {
 	struct tcpcb *tp = inp->inp_ppcb;
+	struct ifnet *outifp = inp->inp_last_outifp;
 
 	if (tcp_flow_control_response) {
 		if (CC_ALGO(tp)->post_fr != NULL) {
@@ -7422,9 +7426,14 @@ inp_fc_unthrottle_tcp(struct inpcb *inp)
 		 * Reset retransmit shift as we know that the reason
 		 * for delay in sending a packet is due to flow
 		 * control on the outgoing interface. There is no need
-		 * to backoff retransmit timer.
+		 * to backoff retransmit timer except for cellular interface
 		 */
-		TCP_RESET_REXMT_STATE(tp);
+		if (tp->t_rxtshift != 0 && outifp != NULL &&
+		    IFNET_IS_CELLULAR(outifp)) {
+			TCP_LOG(tp, "inp_fc_unthrottle_tcp keep rxmit state t_rxtshift %d", tp->t_rxtshift);
+		} else {
+			TCP_RESET_REXMT_STATE(tp);
+		}
 
 		tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
 
@@ -7458,7 +7467,12 @@ inp_fc_unthrottle_tcp(struct inpcb *inp)
 	 * control on the outgoing interface. There is no need
 	 * to backoff retransmit timer.
 	 */
-	TCP_RESET_REXMT_STATE(tp);
+	if (tp->t_rxtshift != 0 && outifp != NULL &&
+	    IFNET_IS_CELLULAR(outifp)) {
+		TCP_LOG(tp, "inp_fc_unthrottle_tcp keep rxmit state t_rxtshift %d", tp->t_rxtshift);
+	} else {
+		TCP_RESET_REXMT_STATE(tp);
+	}
 
 	/*
 	 * Start the output stream again. Since we are

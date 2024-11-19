@@ -386,7 +386,7 @@ fq_addq(fq_if_t *fqs, fq_if_group_t *fq_grp, pktsched_pkt_t *pkt,
 	 * will be made at dequeue time.
 	 */
 	if (ifclassq_enable_l4s && tfc_type == FQ_TFC_L4S) {
-		fq_cl->fcl_stat.fcl_l4s_pkts++;
+		fq_cl->fcl_stat.fcl_l4s_pkts += cnt;
 		droptype = DTYPE_NODROP;
 	}
 
@@ -652,8 +652,8 @@ fq_get_next_tx_time(fq_if_t *fqs, fq_t *fq)
 	}
 	case QP_PACKET: {
 		struct __kern_packet *p = KPKTQ_FIRST(&fq->fq_kpktq);
-		if (__probable(p != NULL && (p->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0)) {
-			tx_time = p->pkt_com_opt->__po_pkt_tx_time;
+		if (__probable(p != NULL)) {
+			tx_time = __packet_get_tx_timestamp(SK_PKT2PH(p));
 		}
 		break;
 	}
@@ -738,7 +738,7 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 			    fq_if_t *, fqs, fq_t *, fq);
 		}
 #if (DEVELOPMENT || DEBUG)
-		else {
+		else if (pkt_tx_time != 0) {
 			DTRACE_SKYWALK5(aqm__miss__pacing__delay, uint64_t, *pkt_timestamp,
 			    uint64_t, pkt_tx_time, uint64_t, now, fq_if_t *,
 			    fqs, fq_t *, fq);
@@ -833,12 +833,6 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt, uint64_t now)
 		if (fq->fq_min_qdelay > fq_min_delay_threshold) {
 			if (!FQ_IS_DELAY_HIGH(fq)) {
 				FQ_SET_DELAY_HIGH(fq);
-				os_log_error(OS_LOG_DEFAULT,
-				    "%s: scidx: %d, %llu, flow: 0x%x, "
-				    "iface: %s, grp: %hhu\n", __func__, fq->fq_sc_index,
-				    fq->fq_min_qdelay, fq->fq_flowhash,
-				    if_name(fqs->fqs_ifq->ifcq_ifp),
-				    FQ_GROUP(fq)->fqg_index);
 			}
 		} else {
 			FQ_CLEAR_DELAY_HIGH(fq);

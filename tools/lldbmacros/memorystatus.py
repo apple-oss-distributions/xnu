@@ -40,6 +40,9 @@ def GetMemoryStatusNode(proc_val):
     """
     out_str = ''
     task_val = GetTaskFromProc(proc_val)
+    if task_val is None:
+        return out_str
+
     task_ledgerp = task_val.ledger
     ledger_template = kern.globals.task_ledger_template
 

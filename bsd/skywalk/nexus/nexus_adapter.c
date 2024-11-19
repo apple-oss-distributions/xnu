@@ -3344,13 +3344,14 @@ na_flowadv_entry_free(const struct nexus_adapter *na, uuid_t fae_id,
 }
 
 bool
-na_flowadv_set(const struct nexus_adapter *na, const flowadv_idx_t fe_idx,
+na_flowadv_set(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
     const flowadv_token_t flow_token)
 {
+	struct nexus_adapter *na = ch->ch_na;
 	struct skmem_arena *ar = na->na_arena;
 	struct skmem_arena_nexus *arn = skmem_arena_nexus(ar);
 	uuid_string_t fae_uuid_str;
-	bool suspend = false, found = false;
+	bool suspend = false;
 
 	ASSERT(NA_IS_ACTIVE(na) && (na->na_flowadv_max != 0));
 	ASSERT(fe_idx < na->na_flowadv_max);
@@ -3368,27 +3369,18 @@ na_flowadv_set(const struct nexus_adapter *na, const flowadv_idx_t fe_idx,
 		 * We cannot guarantee that the flow is still around by now,
 		 * so check if that's the case and let the caller know.
 		 */
-		if ((found = (fae->fae_token == flow_token))) {
+		if ((suspend = (fae->fae_token == flow_token))) {
 			ASSERT(fae->fae_flags & FLOWADVF_VALID);
-			if ((fae->fae_flags & FLOWADV_RESUME_PENDING) == 0) {
-				fae->fae_flags |= FLOWADVF_SUSPENDED;
-				suspend = true;
-			} else {
-				fae->fae_flags &= ~FLOWADV_RESUME_PENDING;
-			}
+			fae->fae_flags |= FLOWADVF_SUSPENDED;
 			uuid_unparse(fae->fae_id, fae_uuid_str);
 		}
+	} else {
+		suspend = false;
 	}
-	if (found) {
-		if (suspend) {
-			SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x fidx %u "
-			    "SUSPEND", sk_proc_name_address(current_proc()),
-			    sk_proc_pid(current_proc()), fae_uuid_str, flow_token, fe_idx);
-		} else {
-			SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x fidx %u "
-			    "SUSPEND->RESUME", sk_proc_name_address(current_proc()),
-			    sk_proc_pid(current_proc()), fae_uuid_str, flow_token, fe_idx);
-		}
+	if (suspend) {
+		SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x fidx %u "
+		    "SUSPEND", sk_proc_name_address(current_proc()),
+		    sk_proc_pid(current_proc()), fae_uuid_str, flow_token, fe_idx);
 	} else {
 		SK_ERR("%s(%d) flow token 0x%llu fidx %u no longer around",
 		    sk_proc_name_address(current_proc()),
@@ -3400,7 +3392,7 @@ na_flowadv_set(const struct nexus_adapter *na, const flowadv_idx_t fe_idx,
 	return suspend;
 }
 
-int
+bool
 na_flowadv_clear(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
     const flowadv_token_t flow_token)
 {
@@ -3408,7 +3400,7 @@ na_flowadv_clear(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
 	struct skmem_arena *ar = na->na_arena;
 	struct skmem_arena_nexus *arn = skmem_arena_nexus(ar);
 	uuid_string_t fae_uuid_str;
-	boolean_t found = false, resume = false;
+	boolean_t resume = false;
 
 	ASSERT(NA_IS_ACTIVE(na) && (na->na_flowadv_max != 0));
 	ASSERT(fe_idx < na->na_flowadv_max);
@@ -3426,32 +3418,18 @@ na_flowadv_clear(const struct kern_channel *ch, const flowadv_idx_t fe_idx,
 		 * We cannot guarantee that the flow is still around by now,
 		 * so check if that's the case and let the caller know.
 		 */
-		if ((found = (fae->fae_token == flow_token))) {
+		if ((resume = (fae->fae_token == flow_token))) {
 			ASSERT(fae->fae_flags & FLOWADVF_VALID);
-			/*
-			 * Signal to suspend and resume a flow can happen in different threads.
-			 * Due to scheduling, the resume signal can happen before a suspend.
-			 * In such case, mark the flag so that it can ignore the suspend call later.
-			 */
-			if (fae->fae_flags & FLOWADVF_SUSPENDED) {
-				fae->fae_flags &= ~FLOWADVF_SUSPENDED;
-				resume = true;
-			} else {
-				fae->fae_flags |= FLOWADV_RESUME_PENDING;
-			}
+			fae->fae_flags &= ~FLOWADVF_SUSPENDED;
 			uuid_unparse(fae->fae_id, fae_uuid_str);
 		}
+	} else {
+		resume = FALSE;
 	}
-	if (found) {
-		if (resume) {
-			SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x "
-			    "fidx %u RESUME", ch->ch_name, ch->ch_pid, fae_uuid_str, flow_token,
-			    fe_idx);
-		} else {
-			SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x "
-			    "fidx %u RESUME PENDING", ch->ch_name, ch->ch_pid, fae_uuid_str,
-			    flow_token, fe_idx);
-		}
+	if (resume) {
+		SK_DF(SK_VERB_FLOW_ADVISORY, "%s(%d) %s flow token 0x%x "
+		    "fidx %u RESUME", ch->ch_name, ch->ch_pid, fae_uuid_str, flow_token,
+		    fe_idx);
 	} else {
 		SK_ERR("%s(%d): flow token 0x%x fidx %u no longer around",
 		    ch->ch_name, ch->ch_pid, flow_token, fe_idx);

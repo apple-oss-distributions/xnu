@@ -575,6 +575,14 @@ out:
 	return result;
 }
 
+static uint64_t
+ktriage_encode_v_tag_and_error(vnode_t vp, int error)
+{
+	uint64_t tag = vp->v_tag;
+	uint32_t ktriage_error = (uint32_t)error;
+	return tag << 32 | ktriage_error;
+}
+
 
 pager_return_t
 vnode_pagein(
@@ -632,7 +640,8 @@ vnode_pagein(
 			ubc_upl_abort_range(upl, upl_offset, size, UPL_ABORT_FREE_ON_EMPTY | UPL_ABORT_ERROR);
 		}
 
-		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UBCINFO), 0 /* arg */);
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UBCINFO),
+		    ktriage_encode_v_tag_and_error(vp, 0) /* arg */);
 		goto out;
 	}
 	if (upl == (upl_t)NULL) {
@@ -659,9 +668,10 @@ vnode_pagein(
 			if ((error = VNOP_PAGEIN(vp, NULL, upl_offset, (off_t)f_offset,
 			    size, flags, vfs_context_current()))) {
 				set_thread_pagein_error(current_thread(), error);
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
+				    ktriage_encode_v_tag_and_error(vp, error) /* arg */);
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL), 0 /* arg */);
 			}
 			goto out;
 		}
@@ -670,7 +680,8 @@ vnode_pagein(
 		if (upl == (upl_t)NULL) {
 			result =  PAGER_ABSENT;
 			error = PAGER_ABSENT;
-			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL), 0 /* arg */);
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL),
+			    ktriage_encode_v_tag_and_error(vp, 0) /* arg */);
 			goto out;
 		}
 		ubc_upl_range_needed(upl, upl_offset / PAGE_SIZE, 1);
@@ -805,9 +816,10 @@ vnode_pagein(
 					}
 				}
 				set_thread_pagein_error(current_thread(), error);
+				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL),
+				    ktriage_encode_v_tag_and_error(vp, error) /* arg */);
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
-				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL), 0 /* arg */);
 			}
 		}
 	}

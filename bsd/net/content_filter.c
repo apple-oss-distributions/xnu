@@ -497,6 +497,7 @@ struct cfil_info {
 
 	boolean_t               cfi_isSignatureLatest;                  /* Indicates if signature covers latest flow attributes */
 	u_int32_t               cfi_filter_control_unit;
+	u_int32_t               cfi_filter_policy_gencount;
 	u_int32_t               cfi_debug;
 	struct cfi_buf {
 		/*
@@ -1469,10 +1470,11 @@ cfil_ctl_disconnect(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo)
 			cfc->cf_sock_count--;
 
 			// This is the last filter disconnecting, clear the cfil_info
-			// saved control unit so we will be able to drop this flow if
+			// saved policy state so we will be able to drop this flow if
 			// a new filter get installed.
 			if (cfil_active_count == 1) {
 				cfil_info->cfi_filter_control_unit = 0;
+				cfil_info->cfi_filter_policy_gencount = 0;
 			}
 release:
 			socket_unlock(so, 1);
@@ -2276,18 +2278,16 @@ cfil_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 		if (sock->so_flags & SOF_DELEGATED) {
 			sock_info->cfs_e_pid = sock->e_pid;
 			memcpy(sock_info->cfs_e_uuid, sock->e_uuid, sizeof(uuid_t));
-		}
-#if defined(XNU_TARGET_OS_OSX)
-		else if (!uuid_is_null(sock->so_ruuid)) {
-			sock_info->cfs_e_pid = sock->so_rpid;
-			memcpy(sock_info->cfs_e_uuid, sock->so_ruuid, sizeof(uuid_t));
-		}
-#endif
-		else {
+		} else {
 			sock_info->cfs_e_pid = sock->last_pid;
 			memcpy(sock_info->cfs_e_uuid, sock->last_uuid, sizeof(uuid_t));
 		}
-
+#if defined(XNU_TARGET_OS_OSX)
+		if (!uuid_is_null(sock->so_ruuid)) {
+			sock_info->cfs_r_pid = sock->so_rpid;
+			memcpy(sock_info->cfs_r_uuid, sock->so_ruuid, sizeof(uuid_t));
+		}
+#endif
 		socket_unlock(sock, 1);
 
 		goto return_already_unlocked;
@@ -3028,6 +3028,7 @@ cfil_sock_attach(struct socket *so, struct sockaddr *local, struct sockaddr *rem
 		}
 		so->so_cfil->cfi_dir = dir;
 		so->so_cfil->cfi_filter_control_unit = filter_control_unit;
+		so->so_cfil->cfi_filter_policy_gencount = necp_socket_get_policy_gencount(so);
 		so->so_cfil->cfi_debug = debug;
 	}
 	if (cfil_info_attach_unit(so, filter_control_unit, so->so_cfil) == 0) {
@@ -3154,8 +3155,10 @@ cfil_dispatch_attach_event_sign(cfil_crypto_state_t crypto_state,
 
 	data.pid = msg->cfs_pid;
 	data.effective_pid = msg->cfs_e_pid;
+	data.responsible_pid = msg->cfs_r_pid;
 	uuid_copy(data.uuid, msg->cfs_uuid);
 	uuid_copy(data.effective_uuid, msg->cfs_e_uuid);
+	uuid_copy(data.responsible_uuid, msg->cfs_r_uuid);
 	data.socketProtocol = msg->cfs_sock_protocol;
 	if (data.direction == CFS_CONNECTION_DIR_OUT) {
 		data.remote.sin6 = msg->cfs_dst.sin6;
@@ -3236,17 +3239,16 @@ cfil_dispatch_data_event_sign(cfil_crypto_state_t crypto_state,
 	if (so->so_flags & SOF_DELEGATED) {
 		data.effective_pid = so->e_pid;
 		memcpy(data.effective_uuid, so->e_uuid, sizeof(uuid_t));
-	}
-#if defined(XNU_TARGET_OS_OSX)
-	else if (!uuid_is_null(so->so_ruuid)) {
-		data.effective_pid = so->so_rpid;
-		memcpy(data.effective_uuid, so->so_ruuid, sizeof(uuid_t));
-	}
-#endif
-	else {
+	} else {
 		data.effective_pid = so->last_pid;
 		memcpy(data.effective_uuid, so->last_uuid, sizeof(uuid_t));
 	}
+#if defined(XNU_TARGET_OS_OSX)
+	if (!uuid_is_null(so->so_ruuid)) {
+		data.responsible_pid = so->so_rpid;
+		memcpy(data.responsible_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
 	data.socketProtocol = GET_SO_PROTO(so);
 
 	if (data.direction == CFS_CONNECTION_DIR_OUT) {
@@ -3304,17 +3306,16 @@ cfil_dispatch_closed_event_sign(cfil_crypto_state_t crypto_state,
 	if (so->so_flags & SOF_DELEGATED) {
 		data.effective_pid = so->e_pid;
 		memcpy(data.effective_uuid, so->e_uuid, sizeof(uuid_t));
-	}
-#if defined(XNU_TARGET_OS_OSX)
-	else if (!uuid_is_null(so->so_ruuid)) {
-		data.effective_pid = so->so_rpid;
-		memcpy(data.effective_uuid, so->so_ruuid, sizeof(uuid_t));
-	}
-#endif
-	else {
+	} else {
 		data.effective_pid = so->last_pid;
 		memcpy(data.effective_uuid, so->last_uuid, sizeof(uuid_t));
 	}
+#if defined(XNU_TARGET_OS_OSX)
+	if (!uuid_is_null(so->so_ruuid)) {
+		data.responsible_pid = so->so_rpid;
+		memcpy(data.responsible_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
 	data.socketProtocol = GET_SO_PROTO(so);
 
 	/*
@@ -3467,18 +3468,16 @@ cfil_dispatch_attach_event(struct socket *so, struct cfil_info *cfil_info,
 	if (so->so_flags & SOF_DELEGATED) {
 		msg_attached->cfs_e_pid = so->e_pid;
 		memcpy(msg_attached->cfs_e_uuid, so->e_uuid, sizeof(uuid_t));
-	}
-#if defined(XNU_TARGET_OS_OSX)
-	else if (!uuid_is_null(so->so_ruuid)) {
-		msg_attached->cfs_e_pid = so->so_rpid;
-		memcpy(msg_attached->cfs_e_uuid, so->so_ruuid, sizeof(uuid_t));
-	}
-#endif
-	else {
+	} else {
 		msg_attached->cfs_e_pid = so->last_pid;
 		memcpy(msg_attached->cfs_e_uuid, so->last_uuid, sizeof(uuid_t));
 	}
-
+#if defined(XNU_TARGET_OS_OSX)
+	if (!uuid_is_null(so->so_ruuid)) {
+		msg_attached->cfs_r_pid = so->so_rpid;
+		memcpy(msg_attached->cfs_r_uuid, so->so_ruuid, sizeof(uuid_t));
+	}
+#endif
 	/*
 	 * Fill in address info:
 	 * For UDP, use the cfil_info hash entry directly.
@@ -5268,7 +5267,8 @@ cfil_sock_data_out(struct socket *so, struct sockaddr  *to,
 	/* Drop pre-existing TCP sockets when filter state changed */
 	new_filter_control_unit = necp_socket_get_content_filter_control_unit(so);
 	if (new_filter_control_unit > 0 && new_filter_control_unit != so->so_cfil->cfi_filter_control_unit && !SKIP_FILTER_FOR_TCP_SOCKET(so)) {
-		if (DO_PRESERVE_CONNECTIONS) {
+		if (DO_PRESERVE_CONNECTIONS || (so->so_cfil->cfi_filter_policy_gencount == necp_socket_get_policy_gencount(so))) {
+			// CFIL state has changed, but preserve the flow intentionally or if this is not a result of NECP policy change
 			so->so_cfil->cfi_filter_control_unit = new_filter_control_unit;
 		} else {
 			CFIL_LOG(LOG_NOTICE, "CFIL: TCP(OUT) <so %llx> - filter state changed - dropped pre-existing flow (old state 0x%x new state 0x%x)",
@@ -5351,7 +5351,8 @@ cfil_sock_data_in(struct socket *so, struct sockaddr *from,
 	/* Drop pre-existing TCP sockets when filter state changed */
 	new_filter_control_unit = necp_socket_get_content_filter_control_unit(so);
 	if (new_filter_control_unit > 0 && new_filter_control_unit != so->so_cfil->cfi_filter_control_unit && !SKIP_FILTER_FOR_TCP_SOCKET(so)) {
-		if (DO_PRESERVE_CONNECTIONS) {
+		if (DO_PRESERVE_CONNECTIONS || (so->so_cfil->cfi_filter_policy_gencount == necp_socket_get_policy_gencount(so))) {
+			// CFIL state has changed, but preserve the flow intentionally or if this is not a result of NECP policy change
 			so->so_cfil->cfi_filter_control_unit = new_filter_control_unit;
 		} else {
 			CFIL_LOG(LOG_NOTICE, "CFIL: TCP(IN) <so %llx> - filter state changed - dropped pre-existing flow (old state 0x%x new state 0x%x)",
@@ -5924,15 +5925,7 @@ sysctl_cfil_sock_list(struct sysctl_oid *oidp, void *arg1, int arg2,
 				stat.cfs_e_pid = so->e_pid;
 				memcpy(stat.cfs_e_uuid, so->e_uuid,
 				    sizeof(uuid_t));
-			}
-#if defined(XNU_TARGET_OS_OSX)
-			else if (!uuid_is_null(so->so_ruuid)) {
-				stat.cfs_e_pid = so->so_rpid;
-				memcpy(stat.cfs_e_uuid, so->so_ruuid,
-				    sizeof(uuid_t));
-			}
-#endif
-			else {
+			} else {
 				stat.cfs_e_pid = so->last_pid;
 				memcpy(stat.cfs_e_uuid, so->last_uuid,
 				    sizeof(uuid_t));
@@ -6257,7 +6250,8 @@ cfil_sock_udp_get_info(struct socket *so, uint32_t filter_control_unit, bool out
 		new_filter_control_unit = necp_socket_get_content_filter_control_unit(so);
 		if (new_filter_control_unit > 0 &&
 		    new_filter_control_unit != cfil_info->cfi_filter_control_unit) {
-			if (DO_PRESERVE_CONNECTIONS) {
+			if (DO_PRESERVE_CONNECTIONS || (cfil_info->cfi_filter_policy_gencount == necp_socket_get_policy_gencount(so))) {
+				// CFIL state has changed, but preserve the flow intentionally or if this is not a result of NECP policy change
 				cfil_info->cfi_filter_control_unit = new_filter_control_unit;
 			} else {
 				CFIL_LOG(LOG_NOTICE, "CFIL: UDP(%s) <so %llx> - filter state changed - dropped pre-existing flow (old state 0x%x new state 0x%x)",

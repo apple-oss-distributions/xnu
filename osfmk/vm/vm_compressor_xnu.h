@@ -489,6 +489,7 @@ extern uint64_t compressor_perf_test_pages_processed;
 
 #endif /* MACH_KERNEL_PRIVATE */
 
+#define HIBERNATE_FLUSHING_SECS_TO_COMPLETE     120
 
 #if DEVELOPMENT || DEBUG
 int do_cseg_wedge_thread(void);

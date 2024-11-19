@@ -35,7 +35,7 @@
 
 #include <pexpert/pexpert.h>
 
-#define DEFAULT_IOTRACE_ENTRIES_PER_CPU (64)
+#define DEFAULT_IOTRACE_ENTRIES_PER_CPU (186)
 #define IOTRACE_MAX_ENTRIES_PER_CPU (1024)
 
 volatile int mmiotrace_enabled = 1;

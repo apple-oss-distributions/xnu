@@ -1664,6 +1664,10 @@ handle_sw_step_debug(arm_saved_state_t *state)
 	__builtin_unreachable();
 }
 
+#if MACH_ASSERT
+TUNABLE_WRITEABLE(int, panic_on_jit_guard, "panic_on_jit_guard", 0);
+#endif /* MACH_ASSERT */
+
 static void
 handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
     fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
@@ -1807,13 +1811,27 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 
 	if (user_fault_in_self_restrict_mode(thread) &&
 	    task_is_jit_exception_fatal(get_threadtask(thread))) {
-		int flags = PX_KTRIAGE | PX_NO_EXCEPTION_UTHREAD;
+		int flags = PX_KTRIAGE;
 		exception_info_t info = {
-			.os_reason = OS_REASON_GUARD,
-			.exception_type = EXC_GUARD,
-			.mx_code = GUARD_REASON_JIT,
-			.mx_subcode = fault_addr,
+			.os_reason = OS_REASON_SELF_RESTRICT,
+			.exception_type = exc,
+			.mx_code = codes[0],
+			.mx_subcode = codes[1]
 		};
+
+#if MACH_ASSERT
+		printf("\nGUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx\n",
+		    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr);
+		if (panic_on_jit_guard &&
+		    current_task()->thread_count == 1 &&
+		    thread->syscalls_unix < 24) {
+			panic("GUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx state %p j %d t %d s user 0x%llx (0x%llx) jb 0x%llx (0x%llx)",
+			    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr, state,
+			    0, 0, 0ull, 0ull,
+			    0ull, 0ull
+			    );
+		}
+#endif /* MACH_ASSERT */
 
 		exit_with_mach_exception(current_proc(), info, flags);
 	}
@@ -1987,12 +2005,20 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 		    startup_phase < STARTUP_SUB_EARLY_BOOT ||
 		    current_cpu_datap()->cpu_hibernate)) {
 			if (result != KERN_PROTECTION_FAILURE) {
+				// VM will query this property when deciding to throttle this fault, we don't want to
+				// throttle kernel faults for copyio faults. The presence of a recovery entry is used as a
+				// proxy for being in copyio code.
+				bool const was_recover = thread->recover;
+				thread->recover = was_recover || recover;
+
 				/*
 				 *  We have to "fault" the page in.
 				 */
 				result = vm_fault(map, fault_addr, fault_type,
 				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, interruptible,
 				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+
+				thread->recover = was_recover;
 			}
 
 			if (result == KERN_SUCCESS) {

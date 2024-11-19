@@ -199,7 +199,7 @@ def ShowAllWorkqueues(cmd_args=None, cmd_options={}, O=None):
     with O.table(GetWorkqueueSummary.header):
         for t in kern.tasks:
             proc = GetProcFromTask(t)
-            if not proc:
+            if proc is None:
                 continue
             wq = Cast(proc.p_wqptr, "struct workqueue *");
             if wq:

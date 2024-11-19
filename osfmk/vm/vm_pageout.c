@@ -5595,7 +5595,7 @@ upl_create(int type, int flags, upl_size_t size)
 #endif
 
 #if UPL_DEBUG
-	upl->uple_create_btref = btref_get(__builtin_frame_address(0), 0);
+	upl->upl_create_btref = btref_get(__builtin_frame_address(0), 0);
 #endif /* UPL_DEBUG */
 
 	return upl;
@@ -5668,7 +5668,7 @@ upl_destroy(upl_t upl)
 	for (int i = 0; i < upl->upl_commit_index; i++) {
 		btref_put(upl->upl_commit_records[i].c_btref);
 	}
-	btref_put(upl->uple_create_btref);
+	btref_put(upl->upl_create_btref);
 #endif /* UPL_DEBUG */
 
 	if ((upl->flags & UPL_LITE) && pages) {
@@ -8818,8 +8818,11 @@ return_err:
 			if (need_unwire == TRUE) {
 				vm_page_unwire(dst_page, TRUE);
 			}
-
-			vm_page_wakeup_done(object, dst_page);
+			if (dst_page->vmp_busy) {
+				vm_page_wakeup_done(object, dst_page);
+			} else {
+				vm_page_wakeup(object, dst_page);
+			}
 		}
 		vm_page_unlock_queues();
 

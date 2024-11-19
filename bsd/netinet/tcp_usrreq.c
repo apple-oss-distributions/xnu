@@ -290,7 +290,10 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	}
 #endif /* NECP */
 
-	COMMON_END(PRU_BIND);
+out:
+	TCP_LOG_BIND(tp, error);
+
+	return error;
 }
 
 static int
@@ -358,7 +361,10 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		goto out;
 	}
 
-	COMMON_END(PRU_BIND);
+out:
+	TCP_LOG_BIND(tp, error);
+
+	return error;
 }
 
 /*

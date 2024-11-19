@@ -3730,7 +3730,7 @@ def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
     t = kern.GetValueFromAddress(cmd_args[0], 'struct task *')
     print_format = "0x{0:x} - 0x{1:x} {2: <50s} (??? - ???) <{3: <36s}> {4: <50s}"
     p = GetProcFromTask(t)
-    if not p:
+    if p is None:
         print("Task has no associated BSD process.")
         return
     uuid_out_string = GetUUIDSummary(p.p_uuid)
@@ -5228,6 +5228,9 @@ def GetDiagThresholdStatusNode(proc_val,interested_pid,show_all,human_readable):
 
     out_str = ''
     task_val = GetTaskFromProc(proc_val)
+    if task_val is None:
+        return out_str
+
     task_ledgerp = task_val.ledger
     ledger_template = kern.globals.task_ledger_template
 

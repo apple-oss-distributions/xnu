@@ -1459,10 +1459,10 @@ noAuxKC:
 	arm_vm_page_granular_RNX((vm_offset_t)&intstack_high_guard, PAGE_MAX_SIZE, 0);
 	arm_vm_page_granular_RNX((vm_offset_t)&excepstack_high_guard, PAGE_MAX_SIZE, 0);
 
-	arm_vm_page_granular_ROX(segKLDB, segSizeKLD, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT, ARM64_PAGE_GUARDED);
-	arm_vm_page_granular_RNX(segKLDDATAB, segSizeKLDDATA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
-	arm_vm_page_granular_RWNX(segLINKB, segSizeLINK, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
-	arm_vm_page_granular_RWNX(segPLKLINKEDITB, segSizePLKLINKEDIT, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // Coalesced kext LINKEDIT segment
+	arm_vm_page_granular_ROX(segKLDB, segSizeKLD, 0, ARM64_PAGE_GUARDED);
+	arm_vm_page_granular_RNX(segKLDDATAB, segSizeKLDDATA, 0);
+	arm_vm_page_granular_RWNX(segLINKB, segSizeLINK, 0);
+	arm_vm_page_granular_RWNX(segPLKLINKEDITB, segSizePLKLINKEDIT, 0); // Coalesced kext LINKEDIT segment
 	arm_vm_page_granular_ROX(segLASTB, segSizeLAST, ARM64_GRANULE_ALLOW_BLOCK, ARM64_PAGE_GUARDED); // __LAST may be empty, but we cannot assume this
 	if (segLASTDATACONSTB) {
 		arm_vm_page_granular_RWNX(segLASTDATACONSTB, segSizeLASTDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // __LASTDATA_CONST may be empty, but we cannot assume this
@@ -1472,7 +1472,7 @@ noAuxKC:
 	if (segSizePLKLLVMCOV > 0) {
 		arm_vm_page_granular_RWNX(segPLKLLVMCOVB, segSizePLKLLVMCOV, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // LLVM code coverage data
 	}
-	arm_vm_page_granular_RWNX(segPRELINKINFOB, segSizePRELINKINFO, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); /* PreLinkInfoDictionary */
+	arm_vm_page_granular_RWNX(segPRELINKINFOB, segSizePRELINKINFO, 0); /* PreLinkInfoDictionary */
 
 	/* Record the bounds of the kernelcache. */
 	vm_kernelcache_base = segLOWEST;

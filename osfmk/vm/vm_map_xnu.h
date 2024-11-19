@@ -1104,7 +1104,7 @@ extern kern_return_t vm_map_partial_reap(
  * a fake pointer based on the map's ledger and the index of the ledger being
  * reported.
  */
-#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRPERM((int*)((map)->pmap->ledger)+(ledger_id)))
+#define VM_OBJECT_ID_FAKE(map, ledger_id) ((uint32_t)(uintptr_t)VM_KERNEL_ADDRHASH((int*)((map)->pmap->ledger)+(ledger_id)))
 
 #if DEVELOPMENT || DEBUG
 

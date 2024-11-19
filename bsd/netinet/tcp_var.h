@@ -370,7 +370,8 @@ struct accecn {
 
 struct pacer {
 	uint64_t rate;
-	uint32_t tso_burst_size;
+	uint32_t tso_burst_size; /* maximum allowed burst size, segments that fit in a burst have the same Tx timestamp */
+	uint32_t current_size; /* track how many bytes have been accumulated in a burst */
 	uint64_t packet_tx_time;
 };
 

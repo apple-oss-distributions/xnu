@@ -343,6 +343,8 @@ static int verify_in_flight = 0;
 
 #if defined(XNU_TARGET_OS_IOS)
 #define NUM_DEFAULT_THREADS 2
+#elif defined(XNU_TARGET_OS_OSX)
+#define NUM_DEFAULT_THREADS 4
 #else
 #define NUM_DEFAULT_THREADS 0
 #endif
@@ -804,6 +806,65 @@ do_commit:
 	}
 }
 
+static void
+cluster_iodone_verify_continue(void)
+{
+	lck_mtx_lock_spin(&cl_transaction_mtxp);
+	for (;;) {
+		struct verify_buf *vb = TAILQ_FIRST(&verify_work_head);
+
+		if (!vb) {
+			assert_wait(&verify_work_head, (THREAD_UNINT));
+			break;
+		}
+		buf_t cbp = vb->vb_cbp;
+		void* callback_arg = vb->vb_callback_arg;
+
+		TAILQ_REMOVE(&verify_work_head, vb, vb_entry);
+		vb->vb_cbp = NULL;
+		vb->vb_callback_arg = NULL;
+		vb->vb_whichq = 0;
+		TAILQ_INSERT_TAIL(&verify_free_head, vb, vb_entry);
+		lck_mtx_unlock(&cl_transaction_mtxp);
+
+		(void)cluster_iodone_finish(cbp, callback_arg);
+		cbp = NULL;
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+	}
+	lck_mtx_unlock(&cl_transaction_mtxp);
+	thread_block((thread_continue_t)cluster_iodone_verify_continue);
+	/* NOT REACHED */
+}
+
+static void
+cluster_verify_thread(void)
+{
+	thread_set_thread_name(current_thread(), "cluster_verify_thread");
+#if !defined(__x86_64__)
+	thread_group_join_io_storage();
+#endif /* __x86_64__ */
+	cluster_iodone_verify_continue();
+	/* NOT REACHED */
+}
+
+static bool
+enqueue_buf_for_verify(buf_t cbp, void *callback_arg)
+{
+	struct verify_buf *vb;
+
+	vb = TAILQ_FIRST(&verify_free_head);
+	if (vb) {
+		TAILQ_REMOVE(&verify_free_head, vb, vb_entry);
+		vb->vb_cbp = cbp;
+		vb->vb_callback_arg = callback_arg;
+		vb->vb_whichq = 1;
+		TAILQ_INSERT_TAIL(&verify_work_head, vb, vb_entry);
+		return true;
+	} else {
+		return false;
+	}
+}
+
 static int
 cluster_ioerror(upl_t upl, int upl_offset, int abort_size, int error, int io_flags, vnode_t vp)
 {
@@ -843,6 +904,85 @@ cluster_ioerror(upl_t upl, int upl_offset, int abort_size, int error, int io_fla
 		ubc_upl_abort_range(upl, upl_offset, abort_size, upl_abort_code);
 	}
 	return upl_abort_code;
+}
+
+
+static int
+cluster_iodone(buf_t bp, void *callback_arg)
+{
+	buf_t   cbp;
+	buf_t   cbp_head;
+	int     error = 0;
+	boolean_t       transaction_complete = FALSE;
+	bool async;
+
+	__IGNORE_WCASTALIGN(cbp_head = (buf_t)(bp->b_trans_head));
+
+	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_START,
+	    cbp_head, bp->b_lblkno, bp->b_bcount, bp->b_flags, 0);
+
+	async = cluster_verify_threads &&
+	    (os_atomic_load(&cbp_head->b_attr.ba_flags, acquire) & BA_ASYNC_VERIFY);
+
+	assert(!async || cbp_head->b_attr.ba_verify_ctx);
+
+	if (cbp_head->b_trans_next || !(cbp_head->b_flags & B_EOT)) {
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+
+		bp->b_flags |= B_TDONE;
+
+		for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
+			/*
+			 * all I/O requests that are part of this transaction
+			 * have to complete before we can process it
+			 */
+			if (!(cbp->b_flags & B_TDONE)) {
+				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+
+				lck_mtx_unlock(&cl_transaction_mtxp);
+
+				return 0;
+			}
+
+			if (cbp->b_trans_next == CLUSTER_IO_WAITING) {
+				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+
+				lck_mtx_unlock(&cl_transaction_mtxp);
+				wakeup(cbp);
+
+				return 0;
+			}
+
+			if (cbp->b_flags & B_EOT) {
+				transaction_complete = TRUE;
+
+				if (async) {
+					async = enqueue_buf_for_verify(cbp_head, callback_arg);
+				}
+			}
+		}
+		lck_mtx_unlock(&cl_transaction_mtxp);
+
+		if (transaction_complete == FALSE) {
+			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+			    cbp_head, 0, 0, 0, 0);
+			return 0;
+		}
+	} else if (async) {
+		lck_mtx_lock_spin(&cl_transaction_mtxp);
+		async = enqueue_buf_for_verify(cbp_head, callback_arg);
+		lck_mtx_unlock(&cl_transaction_mtxp);
+	}
+
+	if (async) {
+		wakeup(&verify_work_head);
+	} else {
+		error = cluster_iodone_finish(cbp_head, callback_arg);
+	}
+
+	return error;
 }
 
 static int
@@ -1059,143 +1199,6 @@ cluster_iodone_finish(buf_t cbp_head, void *callback_arg)
 	}
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
 	    upl, upl_offset - pg_offset, commit_size, (error << 24) | upl_flags, 0);
-
-	return error;
-}
-
-static void
-cluster_iodone_verify_continue(void)
-{
-	lck_mtx_lock_spin(&cl_transaction_mtxp);
-	for (;;) {
-		struct verify_buf *vb = TAILQ_FIRST(&verify_work_head);
-
-		if (!vb) {
-			assert_wait(&verify_work_head, (THREAD_UNINT));
-			break;
-		}
-		buf_t cbp = vb->vb_cbp;
-		void* callback_arg = vb->vb_callback_arg;
-
-		TAILQ_REMOVE(&verify_work_head, vb, vb_entry);
-		vb->vb_cbp = NULL;
-		vb->vb_callback_arg = NULL;
-		vb->vb_whichq = 0;
-		TAILQ_INSERT_TAIL(&verify_free_head, vb, vb_entry);
-		lck_mtx_unlock(&cl_transaction_mtxp);
-
-		(void)cluster_iodone_finish(cbp, callback_arg);
-		cbp = NULL;
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-	}
-	lck_mtx_unlock(&cl_transaction_mtxp);
-	thread_block((thread_continue_t)cluster_iodone_verify_continue);
-	/* NOT REACHED */
-}
-
-static void
-cluster_verify_thread(void)
-{
-	thread_set_thread_name(current_thread(), "cluster_verify_thread");
-#if !defined(__x86_64__)
-	thread_group_join_io_storage();
-#endif /* __x86_64__ */
-	cluster_iodone_verify_continue();
-	/* NOT REACHED */
-}
-
-static bool
-enqueue_buf_for_verify(buf_t cbp, void *callback_arg)
-{
-	struct verify_buf *vb;
-
-	vb = TAILQ_FIRST(&verify_free_head);
-	if (vb) {
-		TAILQ_REMOVE(&verify_free_head, vb, vb_entry);
-		vb->vb_cbp = cbp;
-		vb->vb_callback_arg = callback_arg;
-		vb->vb_whichq = 1;
-		TAILQ_INSERT_TAIL(&verify_work_head, vb, vb_entry);
-		return true;
-	} else {
-		return false;
-	}
-}
-
-static int
-cluster_iodone(buf_t bp, void *callback_arg)
-{
-	buf_t   cbp;
-	buf_t   cbp_head;
-	int     error = 0;
-	boolean_t       transaction_complete = FALSE;
-	bool async;
-
-	__IGNORE_WCASTALIGN(cbp_head = (buf_t)(bp->b_trans_head));
-
-	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_START,
-	    cbp_head, bp->b_lblkno, bp->b_bcount, bp->b_flags, 0);
-
-	async = cluster_verify_threads &&
-	    (os_atomic_load(&cbp_head->b_attr.ba_flags, acquire) & BA_ASYNC_VERIFY);
-
-	assert(!async || cbp_head->b_attr.ba_verify_ctx);
-
-	if (cbp_head->b_trans_next || !(cbp_head->b_flags & B_EOT)) {
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-
-		bp->b_flags |= B_TDONE;
-
-		for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
-			/*
-			 * all I/O requests that are part of this transaction
-			 * have to complete before we can process it
-			 */
-			if (!(cbp->b_flags & B_TDONE)) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
-
-				lck_mtx_unlock(&cl_transaction_mtxp);
-
-				return 0;
-			}
-
-			if (cbp->b_trans_next == CLUSTER_IO_WAITING) {
-				KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-				    cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
-
-				lck_mtx_unlock(&cl_transaction_mtxp);
-				wakeup(cbp);
-
-				return 0;
-			}
-
-			if (cbp->b_flags & B_EOT) {
-				transaction_complete = TRUE;
-
-				if (async) {
-					async = enqueue_buf_for_verify(cbp_head, callback_arg);
-				}
-			}
-		}
-		lck_mtx_unlock(&cl_transaction_mtxp);
-
-		if (transaction_complete == FALSE) {
-			KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-			    cbp_head, 0, 0, 0, 0);
-			return 0;
-		}
-	} else if (async) {
-		lck_mtx_lock_spin(&cl_transaction_mtxp);
-		async = enqueue_buf_for_verify(cbp_head, callback_arg);
-		lck_mtx_unlock(&cl_transaction_mtxp);
-	}
-
-	if (async) {
-		wakeup(&verify_work_head);
-	} else {
-		error = cluster_iodone_finish(cbp_head, callback_arg);
-	}
 
 	return error;
 }
@@ -1457,54 +1460,17 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 	vm_offset_t upl_end_offset;
 	boolean_t   need_EOT = FALSE;
 
-	if (real_bp) {
-		/*
-		 * we currently don't support buffers larger than a page
-		 */
-		if (non_rounded_size > PAGE_SIZE) {
-			panic("%s(): Called with real buffer of size %d bytes which "
-			    "is greater than the maximum allowed size of "
-			    "%d bytes (the system PAGE_SIZE).\n",
-			    __FUNCTION__, non_rounded_size, PAGE_SIZE);
-		}
+	/*
+	 * we currently don't support buffers larger than a page
+	 */
+	if (real_bp && non_rounded_size > PAGE_SIZE) {
+		panic("%s(): Called with real buffer of size %d bytes which "
+		    "is greater than the maximum allowed size of "
+		    "%d bytes (the system PAGE_SIZE).\n",
+		    __FUNCTION__, non_rounded_size, PAGE_SIZE);
 	}
 
 	mp = vp->v_mount;
-
-	if ((flags & CL_READ) && mp && !(mp->mnt_kern_flag & MNTK_VIRTUALDEV)) {
-		if ((flags & CL_PAGEIN) || cluster_verify_threads) {
-			error = VNOP_VERIFY(vp, f_offset, NULL, 0, &verify_block_size, NULL, VNODE_VERIFY_DEFAULT, NULL);
-			if (error) {
-				if (error != ENOTSUP) {
-					return error;
-				}
-				error = 0;
-			}
-			if (verify_block_size != PAGE_SIZE) {
-				verify_block_size = 0;
-			}
-		}
-
-		if (verify_block_size && real_bp) {
-			panic("%s(): Called with real buffer and needs verification ",
-			    __FUNCTION__);
-		}
-
-		/*
-		 * For direct io, only allow cluster verification if f_offset
-		 * and upl_offset are both page aligned. They will always be
-		 * page aligned for pageins and cached reads. If they are not
-		 * page aligned, leave it to the filesystem to do verification
-		 * Furthermore, the size also has to be aligned to page size.
-		 * Strictly speaking the alignments need to be for verify_block_size
-		 * but since the only verify_block_size that is currently supported
-		 * is page size, we check against page alignment.
-		 */
-		if (verify_block_size && (flags & (CL_DEV_MEMORY | CL_DIRECT_IO)) &&
-		    ((f_offset & PAGE_MASK) || (upl_offset & PAGE_MASK) || (non_rounded_size & PAGE_MASK))) {
-			verify_block_size = 0;
-		}
-	}
 
 	/*
 	 * we don't want to do any funny rounding of the size for IO requests
@@ -1555,6 +1521,33 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 
 		max_iosize  = mp->mnt_maxreadcnt;
 		max_vectors = mp->mnt_segreadcnt;
+
+		/* See if we can do cluster verification (pageins and aligned reads) */
+		if ((flags & CL_PAGEIN || cluster_verify_threads) &&
+		    !(mp->mnt_kern_flag & MNTK_VIRTUALDEV) &&
+		    (VNOP_VERIFY(vp, f_offset, NULL, 0, &verify_block_size, NULL, VNODE_VERIFY_DEFAULT, NULL) == 0) &&
+		    verify_block_size) {
+			if (verify_block_size != PAGE_SIZE) {
+				verify_block_size = 0;
+			}
+			if (real_bp && verify_block_size) {
+				panic("%s(): Called with real buffer and needs verification ",
+				    __FUNCTION__);
+			}
+			/*
+			 * For reads, only allow cluster verification if f_offset
+			 * and upl_offset are both page aligned. If they are not
+			 * page aligned, leave it to the filesystem to do verification
+			 * Furthermore, the size also has to be aligned to page size.
+			 * Strictly speaking the alignments need to be for verify_block_size
+			 * but since the only verify_block_size that is currently supported
+			 * is page size, we check against page alignment.
+			 */
+			if (verify_block_size && !(flags & CL_PAGEIN) &&
+			    ((f_offset & PAGE_MASK) || (upl_offset & PAGE_MASK) || (non_rounded_size & PAGE_MASK))) {
+				verify_block_size = 0;
+			}
+		}
 	} else {
 		io_flags = B_WRITE;
 		bmap_flags = VNODE_WRITE;

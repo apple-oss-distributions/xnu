@@ -4410,6 +4410,19 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 		return false;
 	}
 
+	/*
+	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
+	 * A migration is only recommended if there's also an idle core available that needn't be avoided.
+	 */
+	if (reason & AST_QUANTUM) {
+		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id)) {
+			uint64_t non_avoided_idle_primary_map = processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->recommended_bitmask & ~processor->processor_set->perfcontrol_cpu_migration_bitmask;
+			if (non_avoided_idle_primary_map != 0) {
+				return true;
+			}
+		}
+	}
+
 	processor_set_t preferred_pset = pset_array[sched_edge_thread_preferred_cluster(thread)];
 
 	/* Evaluate shared resource policies */
@@ -4438,19 +4451,6 @@ sched_edge_thread_avoid_processor(processor_t processor, thread_t thread, ast_t 
 	if ((processor->processor_set != preferred_pset) &&
 	    (sched_edge_cluster_load_metric(preferred_pset, thread->th_sched_bucket) == 0)) {
 		return true;
-	}
-
-	/*
-	 * On quantum expiry, check the migration bitmask if this thread should be migrated off this core.
-	 * A migration is only recommended if there's also an idle core available that needn't be avoided.
-	 */
-	if (reason & AST_QUANTUM) {
-		if (bit_test(processor->processor_set->perfcontrol_cpu_migration_bitmask, processor->cpu_id)) {
-			uint64_t non_avoided_idle_primary_map = processor->processor_set->cpu_state_map[PROCESSOR_IDLE] & processor->processor_set->recommended_bitmask & ~processor->processor_set->perfcontrol_cpu_migration_bitmask;
-			if (non_avoided_idle_primary_map != 0) {
-				return true;
-			}
-		}
 	}
 
 	return false;

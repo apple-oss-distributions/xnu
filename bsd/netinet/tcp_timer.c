@@ -1033,6 +1033,7 @@ tcp_timers(struct tcpcb *tp, int timer)
 	struct socket *so;
 	u_int64_t accsleep_ms;
 	u_int64_t last_sleep_ms = 0;
+	struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 
 	so = tp->t_inpcb->inp_socket;
 	idle_time = tcp_now - tp->t_rcvtime;
@@ -1384,13 +1385,19 @@ retransmit_packet:
 		 */
 		tp->t_flags |= TF_ACKNOW;
 
-		/* If timing a segment in this window, stop the timer */
-		tp->t_rtttime = 0;
+		/*
+		 * If timing a segment in this window, stop the timer
+		 * except when we are in connecting states on cellular
+		 * interfaces
+		 */
+		if (tp->t_state >= TCPS_ESTABLISHED || (outifp != NULL &&
+		    IFNET_IS_CELLULAR(outifp) == false)) {
+			tp->t_rtttime = 0;
+		}
 
 		if (!IN_FASTRECOVERY(tp) && tp->t_rxtshift == 1) {
 			tcpstat.tcps_tailloss_rto++;
 		}
-
 
 		/*
 		 * RFC 5681 says: when a TCP sender detects segment loss
@@ -1514,7 +1521,6 @@ fc_output:
 			    TCP_CONN_KEEPIDLE(tp));
 		}
 		if (tp->t_flagsext & TF_DETECT_READSTALL) {
-			struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 			bool reenable_probe = false;
 			/*
 			 * The keep alive packets sent to detect a read

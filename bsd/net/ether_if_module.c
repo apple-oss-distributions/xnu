@@ -367,6 +367,7 @@ static bool
 ether_remove_vlan_encapsulation(ifnet_t ifp, mbuf_t m, char * frame_header,
     uint16_t * tag_p, uint16_t * ether_type_p)
 {
+	char *                          current;
 	struct ether_header *           eh_p;
 	struct ether_vlan_encap_header  encap;
 	struct ether_header             new_eh;
@@ -379,13 +380,21 @@ ether_remove_vlan_encapsulation(ifnet_t ifp, mbuf_t m, char * frame_header,
 		    ETHER_VLAN_ENCAP_LEN);
 		goto done;
 	}
+	current = mtod(m, char *);
 	if (frame_header < (char *)mbuf_datastart(m) ||
-	    frame_header > mtod(m, char *)) {
+	    frame_header > current) {
 		os_log_debug(OS_LOG_DEFAULT,
 		    "%s: dropping VLAN non-contiguous header %p, %p",
-		    ifp->if_xname, mbuf_data(m), frame_header);
+		    ifp->if_xname, current, frame_header);
 		goto done;
 	}
+	if ((current - frame_header) < ETHER_HDR_LEN) {
+		os_log_debug(OS_LOG_DEFAULT,
+		    "%s: dropping VLAN short header %p %p",
+		    ifp->if_xname, current, frame_header);
+		goto done;
+	}
+
 	/*
 	 * Remove the VLAN encapsulation header by shifting the
 	 * ethernet destination and source addresses over by the

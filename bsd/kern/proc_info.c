@@ -1417,8 +1417,8 @@ proc_pidpathinfo_internal(proc_t p, __unused uint64_t arg, char *buf, uint32_t b
 				}
 				if (error == EACCES) {
 					vfs_context_t ctx = vfs_context_current();
-#if DEVLOPMENT || DEBUG
-					printf("%s : EACCES returned vnode_lookup for path %s for uid %d\n", __FUNCTION__, buf, (int)kauth_cred_getuid(ctx->vc_ucred));
+#if DEVELOPMENT || DEBUG
+					printf("%s : EACCES returned by vnode_lookup for path %s for uid %d\n", __FUNCTION__, buf, (int)kauth_cred_getuid(ctx->vc_ucred));
 #else
 					printf("%s : EACCES returned by vnode_lookup for uid %d\n", __FUNCTION__, (int)kauth_cred_getuid(ctx->vc_ucred));
 #endif
@@ -1430,13 +1430,21 @@ proc_pidpathinfo_internal(proc_t p, __unused uint64_t arg, char *buf, uint32_t b
 						vnode_put(nvp);
 						nvp = NULLVP;
 					} else if (error == EACCES) {
-#if DEVLOPMENT || DEBUG
-						printf("%s : EACCES returned vnode_lookup for path %s for uid 0\n", __FUNCTION__, buf);
+#if DEVELOPMENT || DEBUG
+						printf("%s : EACCES returned by vnode_lookup for path %s for uid 0\n", __FUNCTION__, buf);
 #else
 						printf("%s : EACCES returned by vnode_lookup for uid 0\n", __FUNCTION__);
 #endif
 						/* This should be a panic for a local FS */
 						error = ENODEV;
+					} else {
+#if DEVELOPMENT || DEBUG
+						printf("%s : vnode_lookup for path %s returned error %d\n",
+						    __FUNCTION__, buf, error);
+#else
+						printf("%s : vnode_lookup returned error %d\n",
+						    __FUNCTION__, error);
+#endif
 					}
 				}
 			}

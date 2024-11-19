@@ -407,7 +407,7 @@ def ShowThreadSchedHistory(thread, most_recent_dispatch):
 
     task_name = "unknown"
     p = GetProcFromTask(task)
-    if task and p:
+    if task and p is not None:
         task_name = GetProcName(p)
 
     sched_mode = ""

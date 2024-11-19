@@ -16,11 +16,16 @@ def GetAllConclavesSummary(t):
         params: task: value - value object representing a task in kernel
         returns: str - summary of all conclaves
     """
+    out_str  = f"{t:<#20x}"
+
     proc     = GetProcFromTask(t)
+    p_pid = proc.p_pid if proc is not None else ""
+    p_comm = proc.p_comm if proc is not None else ""
+
     resource = Cast(t.conclave, 'exclaves_resource_t *')
     state    = GetEnumName('conclave_state_t',    resource.r_conclave.c_state, 'CONCLAVE_S_')
     
-    out_str  = f"{t:<#20x} {proc.p_pid:<8} {proc.p_comm:<30s} {t.conclave:<#20x} {resource.r_name:<60s} {state:<15s}"
+    out_str += f"{p_pid:<8} {p_comm:<30s}" f"{t.conclave:<#20x} {resource.r_name:<60s} {state:<15s}"
 
     return out_str
 

@@ -667,9 +667,9 @@ extern void na_flowadv_entry_alloc(const struct nexus_adapter *, uuid_t,
     const flowadv_idx_t, const uint32_t);
 extern void na_flowadv_entry_free(const struct nexus_adapter *, uuid_t,
     const flowadv_idx_t, const uint32_t);
-extern bool na_flowadv_set(const struct nexus_adapter *,
+extern bool na_flowadv_set(const struct kern_channel *,
     const flowadv_idx_t, const flowadv_token_t);
-extern boolean_t na_flowadv_clear(const struct kern_channel *,
+extern bool na_flowadv_clear(const struct kern_channel *,
     const flowadv_idx_t, const flowadv_token_t);
 extern int na_flowadv_report_ce_event(const struct kern_channel *ch,
     const flowadv_idx_t fe_idx, const flowadv_token_t flow_token,

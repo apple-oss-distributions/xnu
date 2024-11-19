@@ -2,7 +2,7 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
-from typing import Union
+from typing import Union, Optional
 from xnu import *
 import sys, shlex
 from utils import *
@@ -17,7 +17,7 @@ from collections import defaultdict, namedtuple
 
 NO_PROC_NAME = "unknown"
 P_LHASTASK = 0x00000002
-TF_HAS_PROC = 0x00800000
+TF_HASPROC = 0x00800000
 
 THREAD_STATE_CHARS = {
     0x0: '',
@@ -40,7 +40,7 @@ def GetProcPID(proc):
         returns:
             int: the pid of the process.
     """
-    return unsigned(proc.p_pid) if proc else -1
+    return unsigned(proc.p_pid) if proc is not None else -1
 
 def GetProcPlatform(proc):
     """ returns the platform identifier of a process.
@@ -60,7 +60,7 @@ def GetProcName(proc):
         returns:
             str: a string name of the process linked to the task.
     """
-    if not proc:
+    if proc is None:
         return NO_PROC_NAME
     name = str(proc.p_name)
     return name if name != '' else str(proc.p_comm)
@@ -76,7 +76,7 @@ def GetProcNameForTask(task):
     """
     if task:
         p = GetProcFromTask(task)
-        if p:
+        if p is not None:
             return GetProcName(p)
 
         if (hasattr(task, 'task_imp_base') and
@@ -97,7 +97,7 @@ def GetProcPIDForTask(task):
         return -1
 
     p = GetProcFromTask(task)
-    if p:
+    if p is not None:
         return GetProcPID(p)
 
     proc_ro = Cast(task.bsd_info_ro, 'proc_ro *')
@@ -107,7 +107,7 @@ def GetProcPIDForTask(task):
 def GetProcStartAbsTimeForTask(task):
     if task:
         p = GetProcFromTask(task)
-        if unsigned(p):
+        if p is not None:
             return p.p_stats.ps_start
     return None
 
@@ -224,7 +224,8 @@ def ShowZombStacks(O=None, regex=None):
                 print("\nZombie Stacks:")
                 header_flag = 1
             t = GetTaskFromProc(proc)
-            ShowTaskStacks(t, O=O, regex=regex)
+            if t is not None:
+                ShowTaskStacks(t, O=O, regex=regex)
 
 @lldb_command('zombstacks', fancy=True)
 def ZombStacksCommand(cmd_args=None, cmd_options={}, O=None):
@@ -291,14 +292,18 @@ def GetKCDataSummary(kcdata):
     format_string = "{0: <#020x} {1: <#020x} {2: <#020x} {3: <10d} {4: <#05x}"
     return format_string.format(kcdata, kcdata.kcd_addr_begin, kcdata.kcd_addr_end, kcdata.kcd_length, kcdata.kcd_flags)
 
+INVALID_TASK_SUMMARY = "Process is not valid."
 
 @lldb_type_summary(['task', 'task_t'])
 @header("{0: <20s} {1: <20s} {2: <20s} {3: >5s} {4: <5s}".format("task","vm_map", "ipc_space", "#acts", "flags"))
-def GetTaskSummary(task, showcorpse=False):
+def GetTaskSummary(task: Optional[value], showcorpse=False) -> str:
     """ Summarizes the important fields in task structure.
         params: task: value - value object representing a task in kernel
         returns: str - summary of the task
     """
+    if task is None:
+        return INVALID_TASK_SUMMARY
+
     out_string = ""
     format_string = '{0: <#020x} {1: <#020x} {2: <#020x} {3: >5d} {4: <5s}'
     thread_count = int(task.thread_count)
@@ -354,17 +359,17 @@ def GetBSDThread(thread: Union[lldb.SBValue, value]) -> value:
     addr = unsigned(thread) + sizeof('struct thread')
     return kern.CreateValueFromAddress(addr, 'struct uthread')
 
-def GetProcFromTask(task):
+def GetProcFromTask(task) -> Optional[value]:
     """ Converts the passed in value interpreted as a task_t into a proc_t
     """
-    if unsigned(task) and unsigned(task.t_flags) & TF_HAS_PROC:
+    if unsigned(task) and unsigned(task.t_flags) & TF_HASPROC:
         addr = unsigned(task) - kern.globals.proc_struct_size
         return value(task.GetSBValue().xCreateValueFromAddress(
             'proc', addr, gettype('struct proc')
         ).AddressOf())
-    return kern.GetValueFromAddress(0, 'proc *')
+    return None
 
-def GetTaskFromProc(proc):
+def GetTaskFromProc(proc) -> Optional[value]:
     """ Converts the passed in value interpreted as a proc_t into a task_t
     """
     if unsigned(proc) and unsigned(proc.p_lflag) & P_LHASTASK:
@@ -372,7 +377,7 @@ def GetTaskFromProc(proc):
         return value(proc.GetSBValue().xCreateValueFromAddress(
             'task', addr, gettype('struct task')
         ).AddressOf())
-    return kern.GetValueFromAddress(0, 'task *')
+    return None
 
 def GetThreadNameFromBSDThread(uthread):
     """ Get the name of a thread from a BSD thread, if possible.
@@ -776,17 +781,19 @@ def ShowTaskCoalitions(cmd_args=None, cmd_options={}):
 
 # EndMacro: showtaskcoalitions
 
+INVALID_PROC_SUMMARY = "Process is not valid."
+
 @lldb_type_summary(['proc', 'proc *'])
 @header("{0: >6s}   {1: <18s} {2: >11s} {3: ^10s} {4: <32s}".format("pid", "process", "io_policy", "wq_state", "command"))
-def GetProcSummary(proc):
+def GetProcSummary(proc: Optional[value]) -> str:
     """ Summarize the process data. 
         params:
           proc : value - value representaitng a proc * in kernel
         returns:
           str - string summary of the process.
     """
-    if not proc:
-        return "Process is not valid."
+    if proc is None:
+        return INVALID_PROC_SUMMARY
 
     out_string = ""
     format_string= "{0: >6d}   {1: <#018x} {2: >11s} {3: >2d} {4: >2d} {5: >2d}   {6: <32s}"
@@ -801,6 +808,8 @@ def GetProcSummary(proc):
         proc_rage_str = "RAGE"
     
     task = GetTaskFromProc(proc)
+    if task is None:
+        return "Process is not associated with a Task"
     
     io_policy_str = ""
     
@@ -904,7 +913,7 @@ def ShowPid(cmd_args=None):
     pidval = ArgumentStringToInt(cmd_args[0])
     for t in kern.tasks:
         pval = GetProcFromTask(t)
-        if pval and GetProcPID(pval) == pidval:
+        if pval is not None and GetProcPID(pval) == pidval:
             print(GetTaskSummary.header + " " + GetProcSummary.header)
             print(GetTaskSummary(t) + " " + GetProcSummary(pval))
             break
@@ -1185,7 +1194,7 @@ def ShowAllTasks(cmd_args=None, cmd_options={}, O=None):
 
     ZombTasks()
 
-def TaskForPmapHelper(pmap):
+def TaskForPmapHelper(pmap) -> Optional[value]:
     """ Given a pmap pointer, return the task pointer which contains that
         address space.
 
@@ -1236,7 +1245,7 @@ def ShowTerminatedTasks(cmd_args=None):
         # gone too. If there is no proc it may still be possible to find
         # the original proc name.
         pval = GetProcFromTask(t)
-        if pval:
+        if pval is not None:
             psummary = GetProcSummary(pval)
         else:
             name = GetProcNameForTask(t);
@@ -1521,7 +1530,7 @@ def GetCallChains(filter_regex) -> dict[str, list[str]]:
     ## Filter threads and build call graph
     root = CallChainNode({"root": CallChainNode({}, [])}, [])
 
-    zomb_tasks = [GetTaskFromProc(proc) for proc in kern.zombprocs]
+    zomb_tasks = [t for proc in kern.zombprocs if (t := GetTaskFromProc(proc)) is not None]
     for t in kern.tasks + zomb_tasks:
         for th in IterateQueue(t.threads, 'thread *', 'task_threads'):
             thread_val = GetLLDBThreadForKernelThread(th)
@@ -2074,7 +2083,7 @@ def GetTaskLedgers(task_val):
     task["address"] = unsigned(task_val)
 
     pval = GetProcFromTask(task_val)
-    if pval:
+    if pval is not None:
         task["name"] = GetProcName(pval)
         task["pid"] = int(GetProcPID(pval))
 
@@ -2323,9 +2332,9 @@ def ShowAllPte(cmd_args=None):
     head_taskp = addressof(kern.globals.tasks)
     taskp = Cast(head_taskp.next, 'task *')
     while taskp != head_taskp:
-        procp = GetProcFromTask(taskp)
         out_str = "task = {:#x} pte = {:#x}\t".format(taskp, taskp.map.pmap.ttep)
-        if procp != 0:
+        procp = GetProcFromTask(taskp)
+        if procp is not None:
             out_str += "{:s}\n".format(GetProcName(procp))
         else:
             out_str += "\n"

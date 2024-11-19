@@ -197,8 +197,7 @@ def ShowTaskUserArgs(cmd_args=None, cmd_options={}):
         raise ArgumentError("Insufficient arguments")
 
     task = kern.GetValueFromAddress(cmd_args[0], 'task *')
-    proc = GetProcFromTask(task)
-    if not proc:
+    if (proc := GetProcFromTask(task)) is None:
         print("Task has no associated BSD process.")
         return False
     ptrsize = 8 if int(task.t_flags) & 0x1 else 4
@@ -267,7 +266,7 @@ Synthetic crash log generated from Kernel userstacks
 """
     user_lib_rex = re.compile("([0-9a-fx]+)\s-\s([0-9a-fx]+)\s+(.*?)\s", re.IGNORECASE|re.MULTILINE)
     from datetime import datetime
-    if pval:
+    if pval is not None:
         ts = datetime.fromtimestamp(int(pval.p_start.tv_sec))
         date_string = ts.strftime('%Y-%m-%d %H:%M:%S')
     else:
@@ -354,7 +353,7 @@ def ShowTaskUserStacksCmdHelper(cmd_args=None, cmd_options={}):
         pidval = ArgumentStringToInt(cmd_options["-P"])
         for t in kern.tasks:
             pval = GetProcFromTask(t)
-            if pval and GetProcPID(pval) == pidval:
+            if pval is not None and GetProcPID(pval) == pidval:
                 task_list.append(t)
                 break
     elif cmd_args:

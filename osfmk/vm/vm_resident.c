@@ -3459,8 +3459,25 @@ restart:
 		*PERCPU_GET_WITH_BASE(pcpu_base, free_pages) = head;
 		*PERCPU_GET_WITH_BASE(pcpu_base, start_color) = color;
 
+		/*
+		 * We decremented vm_page_free_count above
+		 * so we must wake up vm_pageout_scan() if
+		 * we brought it down below vm_page_free_min.
+		 */
+		bool wakeup_pageout_scan = false;
+		if (vm_page_free_count < vm_page_free_min &&
+		    !vm_pageout_running) {
+			wakeup_pageout_scan = true;
+		}
 		vm_free_page_unlock();
+
 		enable_preemption();
+
+		if (wakeup_pageout_scan) {
+			thread_wakeup((event_t) &vm_page_free_wanted);
+		}
+		VM_CHECK_MEMORYSTATUS;
+
 		goto restart;
 	}
 
@@ -7050,7 +7067,7 @@ vm_page_alloc_list(
 			/* VM privileged threads should have waited in vm_page_grab() and not get here. */
 			assert(!(current_thread()->options & TH_OPT_VMPRIV));
 
-			if ((flags & KMA_NOFAIL) == 0 && ptoa_64(page_size) > max_mem / 4) {
+			if ((flags & KMA_NOFAIL) == 0 && ptoa_64(page_count) > max_mem / 4) {
 				uint64_t unavailable = ptoa_64(vm_page_wire_count + vm_page_free_target);
 				if (unavailable > max_mem || ptoa_64(page_count) > (max_mem - unavailable)) {
 					kr = KERN_RESOURCE_SHORTAGE;
@@ -7851,11 +7868,14 @@ hibernate_vm_unlock_queues(void)
 
 #if CONFIG_SPTM
 static bool
-hibernate_sptm_should_force_page_to_wired_pagelist(sptm_paddr_t paddr)
+hibernate_sptm_should_force_page_to_wired_pagelist(vm_page_t vmp)
 {
+	const sptm_paddr_t paddr = ptoa_64(VM_PAGE_GET_PHYS_PAGE(vmp));
 	const sptm_frame_type_t frame_type = sptm_get_frame_type(paddr);
+	const vm_object_t vmp_objp = VM_PAGE_OBJECT(vmp);
 
-	return frame_type == XNU_USER_JIT || frame_type == XNU_USER_DEBUG;
+	return frame_type == XNU_USER_JIT || frame_type == XNU_USER_DEBUG ||
+	       (frame_type == XNU_USER_EXEC && vmp_objp->internal == TRUE);
 }
 #endif
 
@@ -8034,7 +8054,7 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 		assert(m->vmp_q_state == VM_PAGE_ON_INACTIVE_INTERNAL_Q);
 		bool force_to_wired_list = false;       /* Default to NOT forcing page into the wired page list */
 #if CONFIG_SPTM
-		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(m);
 #endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;
@@ -8113,7 +8133,7 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 		assert(m->vmp_q_state == VM_PAGE_ON_ACTIVE_Q);
 		bool force_to_wired_list = false;       /* Default to NOT forcing page into the wired page list */
 #if CONFIG_SPTM
-		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(m);
 #endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;
@@ -8162,7 +8182,7 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 		assert(m->vmp_q_state == VM_PAGE_ON_INACTIVE_EXTERNAL_Q);
 		bool force_to_wired_list = false;        /* Default to NOT forcing page into the wired page list */
 #if CONFIG_SPTM
-		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(ptoa_64(VM_PAGE_GET_PHYS_PAGE(m)));
+		force_to_wired_list = hibernate_sptm_should_force_page_to_wired_pagelist(m);
 #endif
 		next = (vm_page_t)VM_PAGE_UNPACK_PTR(m->vmp_pageq.next);
 		discard = FALSE;

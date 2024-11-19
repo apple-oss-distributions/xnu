@@ -1672,7 +1672,7 @@ ipc_kobject_destroy(
 	ipc_kobject_ops_t ops = ipc_kobject_ops_get(ip_kotype(port));
 
 	if (ops->iko_op_permanent) {
-		panic("trying to destroy an permanent port %p", port);
+		panic("trying to destroy a permanent port %p with kobject type: %d", port, ip_kotype(port));
 	}
 	if (ops->iko_op_destroy) {
 		ops->iko_op_destroy(port);

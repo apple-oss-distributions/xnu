@@ -1189,6 +1189,10 @@ after_sack_rexmit:
 	if (max_len != 0 && len > 0) {
 		len = min(len, max_len);
 	}
+	if (tp->tcp_cc_index == TCP_CC_ALGO_PRAGUE_INDEX &&
+	    tp->t_pacer.tso_burst_size != 0 && len > 0) {
+		len = min(len, tp->t_pacer.tso_burst_size);
+	}
 
 	/*
 	 * Lop off SYN bit if it has already been sent.  However, if this
@@ -2008,13 +2012,15 @@ send:
 	/*
 	 * AccECN option - after SACK
 	 * Don't send on <SYN>,
-	 * send only on <SYN,ACK> before ACCECN is negotiated or
+	 * send only on <SYN,ACK> before ACCECN is negotiated when
+	 * the client requests it or
 	 * when doing an AccECN session. Don't send AccECN option
 	 * if retransmitting a SYN-ACK or a data segment
 	 */
 	if ((TCP_ACC_ECN_ON(tp) ||
-	    (TCP_ACC_ECN_ENABLED(tp) && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK)))
-	    && ((tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0)) {
+	    (TCP_ACC_ECN_ENABLED(tp) && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+	    (tp->ecn_flags & TE_ACE_SETUPRECEIVED))) &&
+	    (tp->ecn_flags & TE_RETRY_WITHOUT_ACO) == 0) {
 		uint32_t *lp = (uint32_t *)(void *)(opt + optlen);
 		/* lp will become outdated after options are added */
 		tcp_add_accecn_option(tp, flags, lp, (uint8_t *)&optlen);
@@ -2912,21 +2918,28 @@ timer:
 		    tp->t_rxtshift == 0 &&
 		    (tp->t_flagsext & (TF_SENT_TLPROBE | TF_PKTS_REORDERED)) == 0) {
 			uint32_t pto, srtt;
+			struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
 
+			/*
+			 * Don't use TLP on cellular link when RTT is unknown
+			 * as this is often overly aggressive
+			 */
 			srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-			pto = 2 * srtt;
-			if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
-				pto += tcp_delack;
-			} else {
-				pto += 2;
-			}
+			if (srtt != 0 || (outifp != NULL && IFNET_IS_CELLULAR(outifp) == false)) {
+				pto = 2 * srtt;
+				if ((tp->snd_max - tp->snd_una) <= tp->t_maxseg) {
+					pto += tcp_delack;
+				} else {
+					pto += 2;
+				}
 
-			/* if RTO is less than PTO, choose RTO instead */
-			if (tp->t_rxtcur < pto) {
-				pto = tp->t_rxtcur;
-			}
+				/* if RTO is less than PTO, choose RTO instead */
+				if (tp->t_rxtcur < pto) {
+					pto = tp->t_rxtcur;
+				}
 
-			tp->t_timer[TCPT_PTO] = OFFSET_FROM_START(tp, pto);
+				tp->t_timer[TCPT_PTO] = OFFSET_FROM_START(tp, pto);
+			}
 		}
 	} else {
 		/*

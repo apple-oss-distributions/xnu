@@ -373,6 +373,7 @@ T_DECL(secure_kpc_counting_system, "kpc should not allow counting the kernel whe
 			T_FAIL("found configurable counter %u with configuration 0x%llx", i, configs[i]);
 		}
 	}
+	T_LOG("checked %d events for EL2 counting", config_count);
 
 	kpep_config_free(config);
 	kpep_db_free(db);

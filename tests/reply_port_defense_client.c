@@ -1,17 +1,19 @@
-#include <mach/kern_return.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <mach/kern_return.h>
 #include <mach/mach.h>
 #include <mach/task.h>
 #include <mach/thread_status.h>
+#include <os/tsd.h>
 #include <assert.h>
 #include <sys/codesign.h>
 #include <stdbool.h>
+
 #include "cs_helpers.h"
 
-#define MAX_TEST_NUM 9
+#define MAX_TEST_NUM 10
 
 #if __arm64__
 #define machine_thread_state_t          arm_thread_state64_t
@@ -280,6 +282,28 @@ exception_ports_crash(void)
 	printf("thread_set_exception_ports did not crash: %d\n", kr);
 }
 
+static void
+kobject_reply_port_defense(void)
+{
+	machine_thread_state_t ts;
+	mach_msg_type_number_t count = MACHINE_THREAD_STATE_COUNT;
+	mach_port_t port = MACH_PORT_NULL;
+
+	kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+	assert(kr == KERN_SUCCESS);
+
+	// make a kobject call
+	kr = thread_get_state(mach_thread_self(), MACHINE_THREAD_STATE, (thread_state_t)&ts, &count);
+	assert(kr == KERN_SUCCESS);
+
+	// set the MIG reply port to a "normal" port
+	_os_tsd_set_direct(__TSD_MIG_REPLY, (void *)(uintptr_t)port);
+
+	kr = thread_get_state(mach_thread_self(), MACHINE_THREAD_STATE, (thread_state_t)&ts, &count);
+
+	printf("kobject call did not crash: %d\n", kr);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -303,6 +327,7 @@ main(int argc, char *argv[])
 		test_unentitled_thread_set_state, /* 6 */
 		unentitled_set_exception_ports_pass,
 		exception_ports_crash, /* 8 */
+		kobject_reply_port_defense, /* 9 */
 	};
 
 	if (argc < 2) {

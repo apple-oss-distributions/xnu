@@ -2044,8 +2044,7 @@ ipc_right_copyin_check_reply(
 			/* populates reply_port_semantics_violation if we need to send telemetry */
 			if (ip_violates_rigid_reply_port_semantics(dest_port, reply_port, reply_port_semantics_violation) ||
 			    ip_violates_reply_port_semantics(dest_port, reply_port, reply_port_semantics_violation)) {
-				if (reply_port_semantics && (*reply_port_semantics_violation == REPLY_PORT_SEMANTICS_VIOLATOR)) {
-					/* Don't crash for rigid reply ports */
+				if (reply_port_semantics) {
 					mach_port_guard_exception(reply_name, 0, 0, kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS);
 					return FALSE;
 				}

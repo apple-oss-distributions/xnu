@@ -1122,6 +1122,10 @@ vnode_is_rsr(vnode_t vp)
 }
 
 
+// Check entitlements to see if this is a hardened runtime binary.
+// Save this in load_result until later for two purposes:
+// 1. Once the task is created, we can mark it as hardened runtime if needed
+// 2. we can propagate which entitlements are present to the apple array
 static inline void
 encode_HR_entitlement(const char *entitlement, HR_flags_t mask,
     const struct image_params *imgp, load_result_t *load_result)
@@ -1378,6 +1382,16 @@ grade:
 
 	assert(imgp->ip_free_map == NULL);
 
+
+	// It's safe to check entitlements anytime after `load_machfile` if you check
+	// based on the vnode in imgp. We must perform this entitlement check
+	// before we start using load_result->hardened_runtime_binary further down
+	load_result.hardened_runtime_binary = 0;
+	encode_HR_entitlement(kCSWebBrowserHostEntitlement, BrowserHostEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserGPUEntitlement, BrowserGPUEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserNetworkEntitlement, BrowserNetworkEntitlementMask, imgp, &load_result);
+	encode_HR_entitlement(kCSWebBrowserWebContentEntitlement, BrowserWebContentEntitlementMask, imgp, &load_result);
+
 	/*
 	 * ERROR RECOVERY
 	 *
@@ -1510,12 +1524,6 @@ grade:
 #endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
 
 
-	load_result.hardened_runtime_binary = 0;
-	// Propogate which hardened runtime entitlements are active to the apple array
-	encode_HR_entitlement(kCSWebBrowserHostEntitlement, BrowserHostEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserGPUEntitlement, BrowserGPUEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserNetworkEntitlement, BrowserNetworkEntitlementMask, imgp, &load_result);
-	encode_HR_entitlement(kCSWebBrowserWebContentEntitlement, BrowserWebContentEntitlementMask, imgp, &load_result);
 
 	/*
 	 * Set up the shared cache region in the new process.

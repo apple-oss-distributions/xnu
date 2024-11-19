@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,8 +78,10 @@ do { \
 	socd_client_trace((x), (socd_client_trace_arg_t)(a), (socd_client_trace_arg_t)(b), \
 	                        (socd_client_trace_arg_t)(c), (socd_client_trace_arg_t)(d)); \
 } while (0)
+#define SOCD_TRACE_REINIT() socd_client_reinit()
 #else // SOCD_TRACE_ENABLED
 #define SOCD_TRACE_IMPL(x, a, b, c, d)
+#define SOCD_TRACE_REINIT()
 #endif // !SOCD_TRACE_ENABLED
 
 #define SOCD_ADDR(_a) (VM_KERNEL_UNSLIDE((vm_offset_t)(_a)))
@@ -99,6 +101,7 @@ static_assert(SOCD_PACK_LSB(VALUE(0xffff), VALUE(0x0)) == 0xfffe, "PACK_LSB fail
 #define SOCD_TRACE_XNU_START(c, ...) _SOCD_TRACE_XNU(c, DBG_FUNC_START, ## __VA_ARGS__)
 #define SOCD_TRACE_XNU_END(c, ...) _SOCD_TRACE_XNU(c, DBG_FUNC_END, ## __VA_ARGS__)
 
+extern void socd_client_reinit(void);
 extern void socd_client_trace(uint32_t debugid, socd_client_trace_arg_t arg1,
     socd_client_trace_arg_t arg2, socd_client_trace_arg_t arg3, socd_client_trace_arg_t arg4);
 

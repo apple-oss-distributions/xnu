@@ -544,6 +544,25 @@ uncmon_set_counting_locked_r(unsigned int monid, uint64_t enctrmask)
 #define UPMC_ALL(X, A) UPMC_0_7(X, A); UPMC_8_15(X, A)
 #endif /* UNCORE_NCTRS > 8 */
 
+static void
+_broadcast_block_trampoline(void *blk)
+{
+	void (^cb)(unsigned int) = blk;
+	const ml_topology_info_t *topo = ml_get_topology_info();
+	unsigned int cpu = cpu_number();
+	unsigned int cluster = topo->cpus[cpu].cluster_id;
+	if (topo->clusters[cluster].first_cpu_id == cpu) {
+		cb(topo->cpus[cpu].cluster_id);
+	}
+}
+
+__unused
+static void
+_broadcast_each_cluster(void (^cb)(unsigned int cluster_id))
+{
+	cpu_broadcast_xcall_simple(TRUE, _broadcast_block_trampoline, cb);
+}
+
 __unused
 static inline uint64_t
 uncmon_read_counter_locked_l(__unused unsigned int monid, unsigned int ctr)
@@ -1086,6 +1105,7 @@ uncmon_set_enabled_l_locked(unsigned int monid, bool enable)
 
 #if UNCORE_PER_CLUSTER
 
+__unused
 static void
 uncmon_set_enabled_r_locked(unsigned int monid, bool enable)
 {
@@ -1111,18 +1131,12 @@ uncore_set_enabled(bool enable)
 {
 	mt_uncore_enabled = enable;
 
-	for (unsigned int monid = 0; monid < uncore_nmonitors(); monid++) {
-		struct uncore_monitor *mon = &uncore_monitors[monid];
+	_broadcast_each_cluster(^(unsigned int cluster_id) {
+		struct uncore_monitor *mon = &uncore_monitors[cluster_id];
 		int intrs_en = uncmon_lock(mon);
-		if (uncmon_is_remote(monid)) {
-#if UNCORE_PER_CLUSTER
-			uncmon_set_enabled_r_locked(monid, enable);
-#endif /* UNCORE_PER_CLUSTER */
-		} else {
-			uncmon_set_enabled_l_locked(monid, enable);
-		}
+		uncmon_set_enabled_l_locked(cluster_id, enable);
 		uncmon_unlock(mon, intrs_en);
-	}
+	});
 }
 
 /*

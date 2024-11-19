@@ -352,7 +352,8 @@ do_textfiles_install_mi:: $(TRACE_CODES_DEST)
 
 ARIADNE_PLISTS = \
 	xnu_exclaves.plist \
-	xnu_epoch_sync.plist
+	xnu_epoch_sync.plist \
+	xnu_suspension.plist
 
 ARIADNE_PLISTS_SRC = $(patsubst %,$(SRCROOT)/bsd/kern/ariadne_plists/%,$(ARIADNE_PLISTS))
 ARIADNE_PLISTS_DEST = $(patsubst %,$(DSTROOT)/$(INSTALL_ARIADNE_PLISTS_DIR)/%,$(ARIADNE_PLISTS))

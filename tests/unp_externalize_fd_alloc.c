@@ -63,8 +63,8 @@ T_DECL(scm_rights_control_msg, "Test the fd alloc failure behavior with SCM_RIGH
 	rmsg.msg_controllen = CMSG_SPACE(sizeof(int));
 
 	ssize_t ret = recvmsg(sock[0], &rmsg, 0);
-	T_ASSERT_TRUE(ret == -1, "recvmsg should fail");
-	T_ASSERT_TRUE(errno == 24, "the fail code is EMFILE");
+	T_ASSERT_EQ(errno, 24, "the fail code is EMFILE");
+	T_ASSERT_EQ(ret, -1, "recvmsg should fail");
 
 	close(fd);
 	close(sock[0]);

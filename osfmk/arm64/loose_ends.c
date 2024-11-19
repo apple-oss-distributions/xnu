@@ -339,7 +339,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	uint32_t const trace_phy_read_delay = os_atomic_load(&trace_phy_read_delay_to, relaxed);
 
 	if (__improbable(report_phy_read_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_get_timebase();
 		timeread = true;
 	}
@@ -412,15 +412,11 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -446,7 +442,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 			    (eabs - sabs), sabs, addr, result);
 		}
 
-		ml_set_interrupts_enabled(istate);
+		ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 
@@ -568,7 +564,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 	uint32_t const trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
 
 	if (__improbable(report_phy_write_delay != 0)) {
-		istate = ml_set_interrupts_enabled(FALSE);
+		istate = ml_set_interrupts_enabled_with_debug(false, false);
 		sabs = ml_get_timebase();
 		timewrite = true;
 	}
@@ -635,15 +631,11 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 			if (override != 0) {
 #if SCHED_HYGIENE_DEBUG
 				/*
-				 * The IO timeout was overridden. As interrupts are disabled in
-				 * order to accurately measure IO time this can cause the
-				 * interrupt masked timeout threshold to be exceeded.  If the
-				 * interrupt masked debug mode is set to panic, abandon the
-				 * measurement. If in trace mode leave it as-is for
-				 * observability.
+				 * The IO timeout was overridden. If we were called in an
+				 * interrupt handler context, that can lead to a timeout
+				 * panic, so we need to abandon the measurement.
 				 */
 				if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC) {
-					ml_spin_debug_clear(current_thread());
 					ml_irq_debug_abandon();
 				}
 #endif
@@ -669,7 +661,7 @@ ml_phys_write_data(pmap_paddr_t paddr, uint128_t data, int size)
 			    (eabs - sabs), sabs, paddr, data);
 		}
 
-		ml_set_interrupts_enabled(istate);
+		ml_set_interrupts_enabled_with_debug(istate, false);
 	}
 #endif /*  ML_IO_TIMEOUTS_ENABLED */
 }

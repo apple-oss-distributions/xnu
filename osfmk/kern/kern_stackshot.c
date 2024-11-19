@@ -87,6 +87,8 @@
 
 #include <kern/exclaves_test_stackshot.h>
 
+#include <libkern/coreanalytics/coreanalytics.h>
+
 #if defined(__x86_64__)
 #include <i386/mp.h>
 #include <i386/cpu_threads.h>
@@ -107,6 +109,8 @@
 #define STACKSHOT_COLLECTS_DIAGNOSTICS 0
 #define STACKSHOT_COLLECTS_LATENCY_INFO 0
 #endif /* DEBUG || DEVELOPMENT */
+
+#define STACKSHOT_COLLECTS_RDAR_126582377_DATA 0
 
 #if defined(__AMP__)
 #define STACKSHOT_NUM_WORKQUEUES 2
@@ -1223,6 +1227,19 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	if (error != KERN_SUCCESS) {
 		return error;
 	}
+
+#if STACKSHOT_COLLECTS_RDAR_126582377_DATA
+	// Opportunistically collect reports of the rdar://126582377 failure.
+	// If the allocation doesn't succeed, or if another CPU "steals" the
+	// allocated event first, that is acceptable.
+	ca_event_t new_event = CA_EVENT_ALLOCATE_FLAGS(bad_stackshot_upper16, Z_NOWAIT);
+	if (new_event) {
+		if (os_atomic_cmpxchg(&rdar_126582377_event, NULL, new_event, relaxed) == 0) {
+			// Already set up, so free it
+			CA_EVENT_DEALLOCATE(new_event);
+		}
+	}
+#endif
 
 	istate = ml_set_interrupts_enabled(FALSE);
 	uint64_t time_start      = mach_absolute_time();
@@ -3077,7 +3094,17 @@ kdp_stackshot_plh_record_locked(void)
 			}
 			if (_stackshot_validate_kva((vm_offset_t)ispl, ispl_size)) {
 				kdp_ipc_fill_splabel(ispl, &spl, &name);
+#if STACKSHOT_COLLECTS_RDAR_126582377_DATA
+			} else {
+				if (ispl != NULL && (vm_offset_t)ispl >> 48 == 0x0000) {
+					ca_event_t event_to_send = os_atomic_xchg(&rdar_126582377_event, NULL, relaxed);
+					if (event_to_send) {
+						CA_EVENT_SEND(event_to_send);
+					}
+				}
+#endif
 			}
+
 			kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
 			    STACKSHOT_KCCONTAINER_PORTLABEL, idx + 1));
 			if (name != NULL && (name_sz = _stackshot_strlen(name, max_namelen)) > 0) {   /* validates the kva */

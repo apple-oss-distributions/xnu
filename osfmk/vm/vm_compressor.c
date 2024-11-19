@@ -249,9 +249,6 @@ uint32_t        c_segment_count_max = 0;   /* maximum c_segment_count has ever b
 uint64_t        c_generation_id = 0;
 uint64_t        c_generation_id_flush_barrier;
 
-
-#define         HIBERNATE_FLUSHING_SECS_TO_COMPLETE     120
-
 boolean_t       hibernate_no_swapspace = FALSE;
 boolean_t       hibernate_flush_timed_out = FALSE;
 clock_sec_t     hibernate_flushing_deadline = 0;

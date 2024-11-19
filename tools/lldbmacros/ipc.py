@@ -585,7 +585,7 @@ def GetKObjectFromPort(portval):
     elif objtype_str[:5] == 'TASK_' and objtype_str != 'TASK_ID_TOKEN':
         task = value(portval.GetSBValue().xCreateValueFromAddress(
             None, kobject_addr, gettype('struct task')).AddressOf())
-        if GetProcFromTask(task):
+        if GetProcFromTask(task) is not None:
             desc_str += " {:s}({:d})".format(GetProcNameForTask(task), GetProcPIDForTask(task))
 
     return desc_str
@@ -598,7 +598,7 @@ def GetSpaceProcDesc(space):
             str  : string containing receiver's name and pid
     """
     task = space.is_task
-    if not GetProcFromTask(task):
+    if GetProcFromTask(task) is None:
         return "task {:<#20x}".format(unsigned(task))
     return "{:s}({:d})".format(GetProcNameForTask(task), GetProcPIDForTask(task))
 
@@ -1685,7 +1685,7 @@ def ShowBusyPortSummary(cmd_args=None):
         ipc_busy_ports += nbusy
         ipc_msgs += nmsgs
         print(summary)
-    for t in kern.terminated_tasks:
+    for tsk in kern.terminated_tasks:
         (summary, table_size, nbusy, nmsgs) = GetTaskBusyIPCSummary(tsk)
         ipc_table_size += table_size
         ipc_busy_ports += nbusy
@@ -1865,19 +1865,18 @@ def ShowIPCImportance(cmd_args=[], cmd_options={}):
     print(GetIPCImportanceElemSummary.header)
     print(GetIPCImportanceElemSummary(elem))
 
-@header("{: <18s} {: <10s} {: <18s} {: <8s} {: <5s} {: <5s} {: <5s}".format("ivac", "refs", "tbl", "tblsize", "index", "Grow", "freelist"))
+@header("{: <18s} {: <18s} {: <8s} {: <5s} {: <5s} {: <8s}".format("ivac", "tbl", "tblsize", "index", "Grow", "freelist"))
 @lldb_type_summary(['ipc_voucher_attr_control *', 'ipc_voucher_attr_control_t'])
 def GetIPCVoucherAttrControlSummary(ivac):
     """ describes a voucher attribute control settings """
     out_str = ""
-    fmt = "{c: <#18x} {c.ivac_refs.ref_count: <10d} {c.ivac_table: <#18x} {c.ivac_table_size: <8d} {c.ivac_key_index: <5d} {growing: <5s} {c.ivac_freelist: <5d}"
+    fmt = "{c: <#18x} {c.ivac_table: <#18x} {c.ivac_table_size: <8d} {c.ivac_key_index: <5d} {growing: <5s} {c.ivac_freelist: <8d}"
     growing_str = ""
 
-    if unsigned(ivac) == 0:
+    if ivac == 0:
         return "{: <#18x}".format(ivac)
 
-    if unsigned(ivac.ivac_is_growing):
-        growing_str = "Y"
+    growing_str = "Y" if unsigned(ivac.ivac_is_growing) else "N"    
     out_str += fmt.format(c=ivac, growing = growing_str)
     return out_str
 
@@ -1919,15 +1918,25 @@ def GetIPCVoucherAttrManagerSummary(ivam):
     out_str += fmt.format(ivam, get_value_fn, extract_fn, release_value_fn, command_fn)
     return out_str
 
+def iv_key_to_index(key):
+    """ ref: osfmk/ipc/ipc_voucher.c: iv_key_to_index """
+    if (key == xnudefines.MACH_VOUCHER_ATTR_KEY_ALL) or (key > xnudefines.MACH_VOUCHER_ATTR_KEY_NUM):
+        return xnudefines.IV_UNUSED_KEYINDEX
+    return key - 1
 
+def iv_index_to_key(index):
+    """ ref: osfmk/ipc/ipc_voucher.c: iv_index_to_key """
+    if index < xnudefines.MACH_VOUCHER_ATTR_KEY_NUM_WELL_KNOWN:
+        return index + 1
+    return xnudefines.MACH_VOUCHER_ATTR_KEY_NONE
 
-@header("{: <18s} {: <10s} {:s} {:s}".format("ivgte", "key", GetIPCVoucherAttrControlSummary.header.strip(), GetIPCVoucherAttrManagerSummary.header.strip()))
+@header("{: <3s} {: <3s} {:s} {:s}".format("idx", "key", GetIPCVoucherAttrControlSummary.header.strip(), GetIPCVoucherAttrManagerSummary.header.strip()))
 @lldb_type_summary(['ipc_voucher_global_table_element *', 'ipc_voucher_global_table_element_t'])
-def GetIPCVoucherGlobalTableElementSummary(ivgte):
+def GetIPCVoucherGlobalTableElementSummary(idx, ivac, ivam):
     """ describes a ipc_voucher_global_table_element object """
     out_str = ""
-    fmt = "{g: <#18x} {g.ivgte_key: <10d} {ctrl_s:s} {mgr_s:s}"
-    out_str += fmt.format(g=ivgte, ctrl_s=GetIPCVoucherAttrControlSummary(ivgte.ivgte_control), mgr_s=GetIPCVoucherAttrManagerSummary(ivgte.ivgte_manager))
+    fmt = "{idx: <3d} {key: <3d} {ctrl_s:s} {mgr_s:s}"
+    out_str += fmt.format(idx=idx, key=iv_index_to_key(idx), ctrl_s=GetIPCVoucherAttrControlSummary(addressof(ivac)), mgr_s=GetIPCVoucherAttrManagerSummary(ivam))
     return out_str
 
 @lldb_command('showglobalvouchertable', '')
@@ -1935,12 +1944,15 @@ def ShowGlobalVoucherTable(cmd_args=[], cmd_options={}):
     """ show detailed information of all voucher attribute managers registered with vouchers system
         Usage: (lldb) showglobalvouchertable
     """
-    entry_size = sizeof(kern.globals.iv_global_table[0])
-    elems = sizeof(kern.globals.iv_global_table) // entry_size
+    entry_size = sizeof(kern.globals.ivac_global_table[0])
+    elems = sizeof(kern.globals.ivac_global_table) // entry_size
     print(GetIPCVoucherGlobalTableElementSummary.header)
     for i in range(elems):
-        elt = addressof(kern.globals.iv_global_table[i])
-        print(GetIPCVoucherGlobalTableElementSummary(elt))
+        ivac = kern.globals.ivac_global_table[i]
+        ivam = kern.globals.ivam_global_table[i]
+        if unsigned(ivam) == 0:
+            continue
+        print(GetIPCVoucherGlobalTableElementSummary(i, ivac, ivam))
 
 # Type summaries for Bag of Bits.
 
@@ -2095,39 +2107,32 @@ def GetIPCVoucherSummary(voucher, show_entries=False):
 def GetVoucherManagerKeyForIndex(idx):
     """ Returns key number for index based on global table. Will raise index error if value is incorrect
     """
-    return unsigned(kern.globals.iv_global_table[idx].ivgte_key)
+    ret = iv_index_to_key(idx)
+    if ret == xnudefines.MACH_VOUCHER_ATTR_KEY_NONE:
+        raise IndexError("invalid voucher key")
+    return ret
 
 def GetVoucherAttributeManagerForKey(k):
-    """ Walks through the iv_global_table and finds the attribute manager name
+    """ Return the attribute manager name for a given key 
         params: k - int key number of the manager
         return: cvalue - the attribute manager object. 
                 None - if not found
     """
-    retval = None
-    entry_size = sizeof(kern.globals.iv_global_table[0])
-    elems = sizeof(kern.globals.iv_global_table) // entry_size
-    for i in range(elems):
-        elt = addressof(kern.globals.iv_global_table[i])
-        if k == unsigned(elt.ivgte_key):
-            retval = elt.ivgte_manager
-            break
-    return retval
+    idx = iv_key_to_index(k)
+    if idx == xnudefines.IV_UNUSED_KEYINDEX:
+        return None
+    return kern.globals.ivam_global_table[idx]
 
 def GetVoucherAttributeControllerForKey(k):
-    """ Walks through the iv_global_table and finds the attribute controller
-        params: k - int key number of the manager
+    """ Return the  attribute controller for a given key 
+        params: k - int key number of the controller
         return: cvalue - the attribute controller object. 
                 None - if not found
     """
-    retval = None
-    entry_size = sizeof(kern.globals.iv_global_table[0])
-    elems = sizeof(kern.globals.iv_global_table) // entry_size
-    for i in range(elems):
-        elt = addressof(kern.globals.iv_global_table[i])
-        if k == unsigned(elt.ivgte_key):
-            retval = elt.ivgte_control
-            break
-    return retval
+    idx = iv_key_to_index(k)
+    if idx == xnudefines.IV_UNUSED_KEYINDEX:
+        return None
+    return kern.globals.ivac_global_table[idx]
 
 
 def GetVoucherAttributeManagerName(ivam):
@@ -2159,11 +2164,10 @@ def GetVoucherValueHandleFromVoucherForIndex(voucher, idx):
     voucher_entry_value = unsigned(voucher.iv_table[idx])
     debuglog("manager_key %d" % manager_key)
     ivac = GetVoucherAttributeControllerForKey(manager_key)
-    if ivac is None or unsigned(ivac) == 0:
+    if ivac is None or addressof(ivac) == 0:
         debuglog("No voucher attribute controller for idx %d" % idx)
         return None
 
-    ivac = kern.GetValueFromAddress(unsigned(ivac), 'ipc_voucher_attr_control_t')  # ??? No idea why lldb does not addressof directly
     ivace_table = ivac.ivac_table
     if voucher_entry_value >= unsigned(ivac.ivac_table_size):
         print("Failed to get ivace for value %d in table of size %d" % (voucher_entry_value, unsigned(ivac.ivac_table_size)))

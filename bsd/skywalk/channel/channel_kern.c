@@ -449,8 +449,14 @@ kern_channel_get_service_class(const kern_channel_ring_t kring,
 	return 0;
 }
 
-void
-kern_channel_flowadv_clear(struct flowadv_fcentry *fce)
+typedef bool (* flow_adv_func_type_t)(const struct kern_channel *,
+    const flowadv_idx_t fe_idx, const flowadv_token_t flow_token);
+typedef enum {
+	FLOW_ADV_SIGNAL_SUSPEND,
+	FLOW_ADV_SIGNAL_RESUME,
+} flow_adv_type_t;
+static void
+_kern_channel_flowadv_signal(struct flowadv_fcentry *fce, flow_adv_type_t type)
 {
 	const flowadv_token_t ch_token = fce->fce_flowsrc_token;
 	const flowadv_token_t flow_token = fce->fce_flowid;
@@ -460,10 +466,22 @@ kern_channel_flowadv_clear(struct flowadv_fcentry *fce)
 	struct kern_nexus *fsw_nx;
 	struct kern_channel *ch = NULL;
 	struct nx_flowswitch *fsw;
+	flow_adv_func_type_t flow_adv_func = NULL;
 
 	_CASSERT(sizeof(ch->ch_info->cinfo_ch_token) == sizeof(ch_token));
 
-	SK_LOCK();
+	if (type == FLOW_ADV_SIGNAL_SUSPEND) {
+		flow_adv_func = na_flowadv_set;
+	} else if (type == FLOW_ADV_SIGNAL_RESUME) {
+		flow_adv_func = na_flowadv_clear;
+	}
+	VERIFY(flow_adv_func != NULL);
+
+	if (type == FLOW_ADV_SIGNAL_RESUME) {
+		SK_LOCK();
+	} else {
+		LCK_RW_ASSERT(&fsw_ifp_to_fsw(ifp)->fsw_lock, LCK_RW_ASSERT_SHARED);
+	}
 	if (ifnet_is_attached(ifp, 0) == 0 || ifp->if_na == NULL) {
 		goto done;
 	}
@@ -488,7 +506,7 @@ kern_channel_flowadv_clear(struct flowadv_fcentry *fce)
 
 	if (ch != NULL) {
 		if (ch->ch_na != NULL &&
-		    na_flowadv_clear(ch, flow_fidx, flow_token)) {
+		    flow_adv_func(ch, flow_fidx, flow_token)) {
 			/* trigger flow advisory kevent */
 			na_flowadv_event(
 				&ch->ch_na->na_tx_rings[ch->ch_first[NR_TX]]);
@@ -505,7 +523,21 @@ kern_channel_flowadv_clear(struct flowadv_fcentry *fce)
 		    ch_token, flow_fidx, ifp->if_xname);
 	}
 done:
-	SK_UNLOCK();
+	if (type == FLOW_ADV_SIGNAL_RESUME) {
+		SK_UNLOCK();
+	}
+}
+
+void
+kern_channel_flowadv_clear(struct flowadv_fcentry *fce)
+{
+	_kern_channel_flowadv_signal(fce, FLOW_ADV_SIGNAL_RESUME);
+}
+
+void
+kern_channel_flowadv_set(struct flowadv_fcentry *fce)
+{
+	_kern_channel_flowadv_signal(fce, FLOW_ADV_SIGNAL_SUSPEND);
 }
 
 void

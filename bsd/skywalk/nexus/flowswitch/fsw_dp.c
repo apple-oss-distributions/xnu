@@ -1712,12 +1712,6 @@ fsw_flow_get_rx_ring(struct nx_flowswitch *fsw, struct flow_entry *fe)
 	return flow_get_ring(fsw, fe, NR_RX);
 }
 
-static inline struct __kern_channel_ring *
-fsw_flow_get_tx_ring(struct nx_flowswitch *fsw, struct flow_entry *fe)
-{
-	return flow_get_ring(fsw, fe, NR_TX);
-}
-
 static bool
 dp_flow_route_process(struct nx_flowswitch *fsw, struct flow_entry *fe)
 {
@@ -3000,7 +2994,6 @@ static void
 classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
     bool chain, uint32_t cnt, uint32_t bytes)
 {
-	bool flowadv_is_set = false;
 	struct __kern_packet *pkt, *tail, *tpkt;
 	flowadv_idx_t flow_adv_idx;
 	bool flowadv_cap;
@@ -3022,15 +3015,7 @@ classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 		flow_adv_token = pkt->pkt_flow_token;
 
 		err = classq_enqueue_flow_chain(fsw, pkt, tail, cnt, bytes);
-
-		/* set flow advisory if needed */
-		if (__improbable((err == EQFULL || err == EQSUSPENDED) &&
-		    flowadv_cap)) {
-			flowadv_is_set = na_flowadv_set(flow_get_na(fsw, fe),
-			    flow_adv_idx, flow_adv_token);
-		}
-		DTRACE_SKYWALK3(chain__enqueue, uint32_t, cnt, uint32_t, bytes,
-		    bool, flowadv_is_set);
+		DTRACE_SKYWALK3(chain__enqueue, uint32_t, cnt, uint32_t, bytes, int, err);
 	} else {
 		uint32_t c = 0, b = 0;
 
@@ -3044,32 +3029,11 @@ classq_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			c++;
 			b += pkt->pkt_length;
 			err = classq_enqueue_flow_single(fsw, pkt);
-
-			/* set flow advisory if needed */
-			if (__improbable(!flowadv_is_set &&
-			    ((err == EQFULL || err == EQSUSPENDED) &&
-			    flowadv_cap))) {
-				flowadv_is_set = na_flowadv_set(
-					flow_get_na(fsw, fe), flow_adv_idx,
-					flow_adv_token);
-			}
 		}
 		ASSERT(c == cnt);
 		ASSERT(b == bytes);
 		DTRACE_SKYWALK3(non__chain__enqueue, uint32_t, cnt, uint32_t, bytes,
-		    bool, flowadv_is_set);
-	}
-
-	/* notify flow advisory event */
-	if (__improbable(flowadv_is_set)) {
-		struct __kern_channel_ring *r = fsw_flow_get_tx_ring(fsw, fe);
-		if (__probable(r)) {
-			na_flowadv_event(r);
-			SK_DF(SK_VERB_FLOW_ADVISORY | SK_VERB_TX,
-			    "%s(%d) notified of flow update",
-			    sk_proc_name_address(current_proc()),
-			    sk_proc_pid(current_proc()));
-		}
+		    int, err);
 	}
 }
 
@@ -3083,7 +3047,6 @@ classq_qset_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 #pragma unused(chain)
 	struct __kern_packet *pkt, *tail;
 	flowadv_idx_t flow_adv_idx;
-	bool flowadv_is_set = false;
 	bool flowadv_cap;
 	flowadv_token_t flow_adv_token;
 	uint32_t flowctl = 0, dropped = 0;
@@ -3105,31 +3068,9 @@ classq_qset_enqueue_flow(struct nx_flowswitch *fsw, struct flow_entry *fe,
 	err = netif_qset_enqueue(fe->fe_qset, pkt, tail, cnt, bytes,
 	    &flowctl, &dropped);
 
-	if (__improbable(err != 0)) {
-		/* set flow advisory if needed */
-		if (flowctl > 0 && flowadv_cap) {
-			flowadv_is_set = na_flowadv_set(flow_get_na(fsw, fe),
-			    flow_adv_idx, flow_adv_token);
-
-			/* notify flow advisory event */
-			if (flowadv_is_set) {
-				struct __kern_channel_ring *r =
-				    fsw_flow_get_tx_ring(fsw, fe);
-				if (__probable(r)) {
-					na_flowadv_event(r);
-					SK_DF(SK_VERB_FLOW_ADVISORY |
-					    SK_VERB_TX,
-					    "%s(%d) notified of flow update",
-					    sk_proc_name_address(current_proc()),
-					    sk_proc_pid(current_proc()));
-				}
-			}
-		}
-		if (dropped > 0) {
-			STATS_ADD(&fsw->fsw_stats, FSW_STATS_DROP, dropped);
-			STATS_ADD(&fsw->fsw_stats, FSW_STATS_TX_AQM_DROP,
-			    dropped);
-		}
+	if (__improbable(err != 0) && dropped > 0) {
+		STATS_ADD(&fsw->fsw_stats, FSW_STATS_DROP, dropped);
+		STATS_ADD(&fsw->fsw_stats, FSW_STATS_TX_AQM_DROP, dropped);
 	}
 }
 
@@ -3600,7 +3541,7 @@ dp_tx_pktq(struct nx_flowswitch *fsw, struct pktq *spktq)
 			continue;
 		}
 
-		do_pacing |= ((pkt->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0);
+		do_pacing |= __packet_get_tx_timestamp(SK_PKT2PH(pkt)) != 0;
 		af = fsw_ip_demux(fsw, pkt);
 		if (__improbable(af == AF_UNSPEC)) {
 			dp_tx_log_pkt(SK_VERB_ERROR, "demux err", pkt);
@@ -3723,6 +3664,7 @@ do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
 	uint32_t tcp_seq;
 	uint16_t ipid;
 	uint32_t pseudo_hdr_csum, bufsz;
+	uint64_t pkt_tx_timestamp = 0;
 
 	ASSERT(headroom <= UINT8_MAX);
 	if (proto != IPPROTO_TCP) {
@@ -3782,6 +3724,8 @@ do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
 	}
 	tcp_seq = ntohl(tcp->th_seq);
 
+	pkt_tx_timestamp = __packet_get_tx_timestamp(orig_ph);
+
 	for (n = 1, payload_sz = mss, off = total_hlen; off < total_len;
 	    off += payload_sz) {
 		uint8_t *baddr, *baddr0;
@@ -3812,6 +3756,9 @@ do_gso(struct nx_flowswitch *fsw, int af, struct __kern_packet *orig_pkt,
 			METADATA_SET_LEN(pkt, 0, 0);
 		}
 		baddr += total_hlen;
+
+		/* copy tx timestamp from the orignal packet */
+		__packet_set_tx_timestamp(SK_PKT2PH(pkt), pkt_tx_timestamp);
 
 		/* Copy/checksum the payload from the original packet */
 		if (off + payload_sz > total_len) {

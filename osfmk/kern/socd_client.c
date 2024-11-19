@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2021, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -39,6 +39,7 @@
 
 /* Configuration values mutable only at init time */
 typedef struct {
+	uint64_t boot_time_ns;
 	vm_offset_t trace_buff_offset;
 	uint32_t trace_buff_len;
 } socd_client_cfg_t;
@@ -51,36 +52,40 @@ static struct {
 	_Atomic uint32_t trace_idx;
 } socd_client_state = {0};
 
-__startup_func
 static void
 socd_client_init(void)
 {
-	vm_size_t buff_size;
-	vm_size_t trace_buff_size;
 	socd_client_hdr_t hdr = {0};
-	uint64_t time_ns;
+	bool already_initialized = os_atomic_load(&socd_client_trace_available, relaxed);
 
-	buff_size = PE_init_socd_client();
-	if (!buff_size) {
-		return;
+	if (!already_initialized) {
+		vm_size_t buff_size;
+		vm_size_t trace_buff_size;
+
+		buff_size = PE_init_socd_client();
+		if (!buff_size) {
+			return;
+		}
+
+		if (os_sub_overflow(buff_size, sizeof(hdr), &trace_buff_size)) {
+			panic("socd buffer size is too small");
+		}
+
+		absolutetime_to_nanoseconds(mach_continuous_time(), &(socd_client_cfg.boot_time_ns));
+		socd_client_cfg.trace_buff_offset = sizeof(hdr);
+		socd_client_cfg.trace_buff_len = (uint32_t)(trace_buff_size / sizeof(socd_client_trace_entry_t));
 	}
 
-	if (os_sub_overflow(buff_size, sizeof(hdr), &trace_buff_size)) {
-		panic("socd buffer size is too small");
-	}
-
-	absolutetime_to_nanoseconds(mach_continuous_time(), &time_ns);
-	socd_client_cfg.trace_buff_offset = sizeof(hdr);
-	socd_client_cfg.trace_buff_len = (uint32_t)(trace_buff_size / sizeof(socd_client_trace_entry_t));
 	hdr.version = SOCD_CLIENT_HDR_VERSION;
-	hdr.boot_time = time_ns;
+	hdr.boot_time = socd_client_cfg.boot_time_ns;
 	memcpy(&hdr.kernel_uuid, kernel_uuid, sizeof(hdr.kernel_uuid));
 	PE_write_socd_client_buffer(0, &hdr, sizeof(hdr));
-	os_atomic_store(&socd_client_trace_available, true, release);
+	if (!already_initialized) {
+		os_atomic_store(&socd_client_trace_available, true, release);
+	}
 }
 STARTUP(PMAP_STEAL, 0, socd_client_init);
 
-__startup_func
 static void
 socd_client_set_primary_kernelcache_uuid(void)
 {
@@ -90,6 +95,13 @@ socd_client_set_primary_kernelcache_uuid(void)
 	}
 }
 STARTUP(EARLY_BOOT, 0, socd_client_set_primary_kernelcache_uuid);
+
+void
+socd_client_reinit(void)
+{
+	socd_client_init();
+	socd_client_set_primary_kernelcache_uuid();
+}
 
 void
 socd_client_trace(

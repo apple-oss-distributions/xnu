@@ -72,10 +72,15 @@ cfil_crypto_print_data(cfil_crypto_data_t data, const char *prefix)
 	ptr = (u_int8_t *)&data->effective_pid;
 	CFIL_CRYPTO_LOG_4BYTES("effective_pid");
 
+	ptr = (u_int8_t *)&data->responsible_pid;
+	CFIL_CRYPTO_LOG_4BYTES("responsible_pid");
+
 	ptr = (u_int8_t *)&data->uuid;
 	CFIL_CRYPTO_LOG_16BYTES("uuid");
 	ptr = (u_int8_t *)&data->effective_uuid;
 	CFIL_CRYPTO_LOG_16BYTES("effective_uuid");
+	ptr = (u_int8_t *)&data->responsible_uuid;
+	CFIL_CRYPTO_LOG_16BYTES("responsible_uuid");
 
 	ptr = (u_int8_t *)&data->byte_count_in;
 	CFIL_CRYPTO_LOG_8BYTES("byte_count_in");

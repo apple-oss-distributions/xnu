@@ -1322,11 +1322,14 @@ dosetrlimit(struct proc *p, u_int which, struct rlimit *newrlim)
 		}
 
 		/*
-		 * rlim.rlim_cur could be arbitrarily large due to previous calls to setrlimit().
+		 * rlim.rlim_cur/rlim_max could be arbitrarily large due to previous calls to setrlimit().
 		 * Use the actual size for stack region adjustment.
 		 */
 		if (rlim.rlim_cur > maxsmap) {
 			rlim.rlim_cur = maxsmap;
+		}
+		if (rlim.rlim_max > maxsmap) {
+			rlim.rlim_max = maxsmap;
 		}
 
 		/*

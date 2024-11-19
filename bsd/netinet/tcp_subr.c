@@ -3624,12 +3624,10 @@ uint64_t
 tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
 {
 	/*
-	 * size is a static variable as this function is called
-	 * multiple times for mss-sized packets and for high-speeds,
-	 * we'd want to send multiple packets that add up to burst_size
-	 * at the same time.
+	 * This function is called multiple times for mss-sized packets
+	 * and for high-speeds, we'd want to send multiple packets
+	 * that add up to burst_size at the same time.
 	 */
-	static uint32_t size = 0;
 	uint64_t now = microuptime_ns();
 
 	if (pkt_len == 0 || now == 0) {
@@ -3638,17 +3636,17 @@ tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
 
 	if (tp->t_pacer.packet_tx_time == 0) {
 		tp->t_pacer.packet_tx_time = now;
-		size = pkt_len;
+		tp->t_pacer.current_size = pkt_len;
 	} else {
-		size += pkt_len;
-		if (size > tp->t_pacer.tso_burst_size) {
+		tp->t_pacer.current_size += pkt_len;
+		if (tp->t_pacer.current_size > tp->t_pacer.tso_burst_size) {
 			/*
 			 * Increment tx_time by packet_interval and
 			 * reset size to this packet's len
 			 */
 			tp->t_pacer.packet_tx_time +=
 			    tcp_pacer_get_packet_interval(tp, pkt_len);
-			size = pkt_len;
+			tp->t_pacer.current_size = pkt_len;
 			if (now > tp->t_pacer.packet_tx_time) {
 				/*
 				 * If current time is bigger, then application

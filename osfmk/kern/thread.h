@@ -753,7 +753,7 @@ struct thread {
 	bool                    th_vm_faults_disabled;
 
 	/* Ast/Halt data structures */
-	vm_offset_t             recover;                /* page fault recover(copyin/out) */
+	bool                    recover;                /* True if page faulted in recoverable IO */
 
 	queue_chain_t           threads;                /* global list of all threads */
 

@@ -770,7 +770,14 @@ again:
 				}
 				len = (unsigned int)strlen(str);
 
-				vnode_update_identity(vp, dvp, str, len, 0, VNODE_UPDATE_NAME | VNODE_UPDATE_PARENT);
+				/* Don't update parent for namedstream vnode. */
+				if (vp->v_flag & VISNAMEDSTREAM) {
+					vnode_update_identity(vp, NULL, str, len, 0,
+					    VNODE_UPDATE_NAME);
+				} else {
+					vnode_update_identity(vp, dvp, str, len, 0,
+					    VNODE_UPDATE_NAME | VNODE_UPDATE_PARENT);
+				}
 
 				/*
 				 * Check that there's enough space.

@@ -267,7 +267,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 {
 	uuid_t euuid;
 	struct pktq pktq_alloc, pktq_seg;
-	uint64_t timestamp = 0;
+	uint64_t timestamp = 0, m_tx_timestamp = 0;
 	uint64_t pflags;
 	int error = 0;
 	uint32_t policy_id;
@@ -278,6 +278,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 	uint8_t tx_headroom = (uint8_t)ifp->if_tx_headroom;
 	struct netif_stats *nifs = &NA(ifp)->nifna_netif->nif_stats;
 	struct __kern_packet *pkt_chain_head, *pkt_chain_tail;
+	struct m_tag *ts_tag = NULL;
 	uint16_t mss = state->mss;
 	bool skip_pktap;
 
@@ -305,6 +306,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 	ASSERT(((m->m_pkthdr.pkt_flags & PKTF_TX_COMPL_TS_REQ) == 0));
 	pflags = m->m_pkthdr.pkt_flags & PKT_F_COMMON_MASK;
 	pflags |= PKTF_START_SEQ;
+	pflags |= (m->m_pkthdr.pkt_ext_flags & PKTF_EXT_L4S) ? PKT_F_L4S : 0;
 	(void) mbuf_get_timestamp(m, &timestamp, NULL);
 	necp_get_app_uuid_from_packet(m, euuid);
 	policy_id = necp_get_policy_id_from_packet(m);
@@ -312,6 +314,11 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 	svc_class = m_get_service_class(m);
 	skip_pktap = (m->m_pkthdr.pkt_flags & PKTF_SKIP_PKTAP) != 0 ||
 	    pktap_total_tap_count == 0;
+
+	ts_tag = m_tag_locate(m, KERNEL_MODULE_TAG_ID, KERNEL_TAG_TYPE_AQM);
+	if (ts_tag != NULL) {
+		m_tx_timestamp = *(uint64_t *)(ts_tag->m_tag_data);
+	}
 
 	for (n = 1, off = state->hlen; off < total_len; off += mss, n++) {
 		uint8_t *baddr, *baddr0;
@@ -368,6 +375,7 @@ netif_gso_tcp_segment_mbuf(struct mbuf *m, struct ifnet *ifp,
 		pkt->pkt_flow_ip_proto = IPPROTO_TCP;
 		pkt->pkt_transport_protocol = IPPROTO_TCP;
 		pkt->pkt_flow_tcp_seq = htonl(state->tcp_seq);
+		__packet_set_tx_timestamp(SK_PKT2PH(pkt), m_tx_timestamp);
 
 		state->update(state, pkt, baddr0);
 		/*

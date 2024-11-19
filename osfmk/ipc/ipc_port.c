@@ -3489,6 +3489,9 @@ __ip_rigid_reply_port_semantics_violation(ipc_port_t reply_port, int *reply_port
 #if CONFIG_ROSETTA
 	    || task_is_translated(current_task())
 #endif
+#if XNU_TARGET_OS_OSX
+	    || task_opted_out_mach_hardening(current_task())
+#endif /* XNU_TARGET_OS_OSX */
 	    ) {
 		return FALSE;
 	}

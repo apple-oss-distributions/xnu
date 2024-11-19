@@ -4232,6 +4232,12 @@ IOPMrootDomain::willNotifyPowerChildren( IOPMPowerStateIndex newPowerState )
 		}
 
 #if HIBERNATION
+		// Adjust watchdog for IOHibernateSystemSleep
+		int defaultTimeout = getWatchdogTimeout();
+		int timeout = defaultTimeout > WATCHDOG_HIBERNATION_TIMEOUT ?
+		    defaultTimeout : WATCHDOG_HIBERNATION_TIMEOUT;
+		reset_watchdog_timer(timeout);
+
 		IOHibernateSystemSleep();
 		IOHibernateIOKitSleep();
 #endif

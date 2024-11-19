@@ -461,7 +461,6 @@ struct __flowadv_entry {
 
 #define FLOWADVF_VALID          0x1     /* flow is valid */
 #define FLOWADVF_SUSPENDED      0x2     /* flow is suspended */
-#define FLOWADV_RESUME_PENDING  0x4     /* flow is resumed before being suspended */
 
 /* channel event threshold */
 struct ch_ev_thresh {

@@ -8205,10 +8205,10 @@ vm_page_wakeup(vm_object_t object, vm_page_t m)
 		vm_object_lock_assert_exclusive(object);
 	}
 
-	KDBG(VMDBG_CODE(DBG_VM_PAGE_WAKEUP) | DBG_FUNC_NONE,
-	    VM_KERNEL_ADDRHIDE(object), VM_KERNEL_ADDRHIDE(m),
-	    m->vmp_wanted);
 	if (m->vmp_wanted) {
+		KDBG(VMDBG_CODE(DBG_VM_PAGE_WAKEUP) | DBG_FUNC_NONE,
+		    VM_KERNEL_ADDRHIDE(object), m->vmp_offset,
+		    VM_KERNEL_ADDRHIDE(m));
 		m->vmp_wanted = false;
 		thread_wakeup((event_t)m);
 	}
@@ -8222,14 +8222,10 @@ vm_page_wakeup_done(__assert_only vm_object_t object, vm_page_t m)
 	vm_object_lock_assert_exclusive(object);
 
 	KDBG(VMDBG_CODE(DBG_VM_PAGE_WAKEUP_DONE) | DBG_FUNC_NONE,
-	    VM_KERNEL_ADDRHIDE(object), VM_KERNEL_ADDRHIDE(m),
-	    m->vmp_wanted);
-	m->vmp_busy = false;                          \
-
-	if (m->vmp_wanted) {
-		m->vmp_wanted = false;
-		thread_wakeup((event_t)m);
-	}
+	    VM_KERNEL_ADDRHIDE(object), m->vmp_offset,
+	    VM_KERNEL_ADDRHIDE(m), m->vmp_wanted);
+	m->vmp_busy = false;
+	vm_page_wakeup(object, m);
 }
 
 static void

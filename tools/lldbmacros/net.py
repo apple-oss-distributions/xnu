@@ -41,6 +41,34 @@ def GetIfFlagsAsString(if_flags):
         num = num << 1
     return out_string.rstrip(",")
 
+def GetIfEflagsAsString(if_eflags):
+    """ Return a formatted string description of the interface extra flags
+    """
+    out_string = ""
+    flags = unsigned(if_eflags)
+    i = 0
+    num = 1
+    while num <= flags:
+        if flags & num:
+            out_string += if_eflags_strings[i] + ","
+        i += 1
+        num = num << 1
+    return out_string.rstrip(",")
+
+def GetIfXflagsAsString(if_xflags):
+    """ Return a formatted string description of the interface extended flags
+    """
+    out_string = ""
+    flags = unsigned(if_xflags)
+    i = 0
+    num = 1
+    while num <= flags:
+        if flags & num:
+            out_string += if_xflags_strings[i] + ","
+        i += 1
+        num = num << 1
+    return out_string.rstrip(",")
+
 
 def ShowIfConfiguration(ifnet):
     """ Display ifconfig-like output for the ifnet
@@ -49,9 +77,18 @@ def ShowIfConfiguration(ifnet):
     dlifnet = Cast(ifnet, 'dlil_ifnet *')
     out_string = ""
     format_string = "{0: <s}: flags={1: <x} <{2: <s}> index {3: <d} mtu {4: <d}"
+    extended_flags_format_string = "\n\teflags={0: <x} <{1: <s}>"
+    extra_flags_format_string = "\n\txflags={0: <x} <{1: <s}>"
+    capenabled_format_string = "\n\toptions={0: <x} <{1: <s}>"
     if iface :
         out_string += format_string.format(iface.if_xname, (iface.if_flags & 0xffff), GetIfFlagsAsString(iface.if_flags), iface.if_index, iface.if_data.ifi_mtu)
         out_string += "\n\tdlil flags=" + hex(dlifnet.dl_if_flags)+ " <" + GetDlilIfFlagsAsString(dlifnet.dl_if_flags) + ">"
+        if (iface.if_eflags) :
+            out_string += extended_flags_format_string.format(iface.if_eflags, GetIfEflagsAsString(iface.if_eflags))
+        if (iface.if_xflags) :
+            out_string += extra_flags_format_string.format(iface.if_xflags, GetIfXflagsAsString(iface.if_xflags))
+        if (iface.if_capenable) :
+            out_string += capenabled_format_string.format(iface.if_capenable, GetCapabilitiesAsString(iface.if_capenable))
         out_string += "\n\t(struct ifnet *)" + hex(ifnet)
         if iface.if_snd and iface.if_snd.ifcq_len :
             out_string += "\n\t" + str(iface.if_snd.ifcq_len)
@@ -115,23 +152,6 @@ def NetGetAlwaysOnPktap(cmd_args=None):
     print(f.name)
     f.close()
 # EndMacro: net_get_always_on_pktap
-
-# Macro: ifconfig
-@lldb_command('ifconfig')
-def ShowIfconfig(cmd_args=None) :
-    """ Display ifconfig-like output, and print the (struct ifnet *) pointers for further inspection
-    """
-    if cmd_args != None and len(cmd_args) > 0:
-        showall = 1
-    else:
-        showall = 0
-
-    ifnets = kern.globals.ifnet_head
-    for ifnet in IterateTAILQ_HEAD(ifnets, "if_link"):
-        ShowIfConfiguration(ifnet)
-        if (showall == 1):
-            print(GetIfaddrs(ifnet))
-# EndMacro: ifconfig
 
 #Macro: ifconfig_dlil
 @lldb_command('ifconfig_dlil')
@@ -282,34 +302,6 @@ def GetCapabilitiesAsString(flags):
         num = num << 1
     return out_string.rstrip(",")
 
-def GetIfEflagsAsString(if_eflags):
-    """ Return a formatted string description of the interface extra flags
-    """
-    out_string = ""
-    flags = unsigned(if_eflags)
-    i = 0
-    num = 1
-    while num <= flags:
-        if flags & num:
-            out_string += if_eflags_strings[i] + ","
-        i += 1
-        num = num << 1
-    return out_string.rstrip(",")
-
-def GetIfXflagsAsString(if_xflags):
-    """ Return a formatted string description of the interface extended flags
-    """
-    out_string = ""
-    flags = unsigned(if_xflags)
-    i = 0
-    num = 1
-    while num <= flags:
-        if flags & num:
-            out_string += if_xflags_strings[i] + ","
-        i += 1
-        num = num << 1
-    return out_string.rstrip(",")
-
 def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
     """ Formatted display of dlil_ifnet structures
     """
@@ -344,6 +336,23 @@ def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
         out_string += "\n"
     print(out_string)
 
+# Macro: ifconfig
+@lldb_command('ifconfig')
+def ShowIfconfig(cmd_args=None) :
+    """ Display ifconfig-like output, and print the (struct ifnet *) pointers for further inspection
+    """
+    if cmd_args != None and len(cmd_args) > 0:
+        showall = 1
+    else:
+        showall = 0
+
+    ifnets = kern.globals.ifnet_head
+    for ifnet in IterateTAILQ_HEAD(ifnets, "if_link"):
+        ShowIfConfiguration(ifnet)
+        if (showall == 1):
+            print(GetIfaddrs(ifnet))
+# EndMacro: ifconfig
+
 # Macro: showifnets
 @lldb_command('showifnets')
 def ShowIfnets(cmd_args=None) :
@@ -356,6 +365,38 @@ def ShowIfnets(cmd_args=None) :
     for dlil_ifnet in IterateTAILQ_HEAD(dlil_ifnets, "dl_if_link"):
         ShowDlilIfnetConfiguration(dlil_ifnet, showall)
 # EndMacro: showifnets
+
+# Macro: showdetachingifnets
+@lldb_command('showdetachingifnets')
+def ShowDetachingIfnets(cmd_args=None) :
+    """ Display ifconfig-like output for all detaching interfaces
+    """
+    if cmd_args != None and len(cmd_args) > 0:
+        showall = 1
+    else:
+        showall = 0
+    ifnets = kern.globals.ifnet_detaching_head
+    for ifnet in IterateTAILQ_HEAD(ifnets, "if_detaching_link"):
+        ShowIfConfiguration(ifnet)
+        if (showall == 1):
+            print(GetIfaddrs(ifnet))
+# EndMacro: showdetachingifnets
+
+# Macro: showorderedifnets
+@lldb_command('showorderedifnets')
+def ShowOrderedIfnets(cmd_args=None) :
+    """ Display ifconfig-like output for ordered interfaces
+    """
+    if cmd_args != None and len(cmd_args) > 0:
+        showall = 1
+    else:
+        showall = 0
+    ifnets = kern.globals.ifnet_ordered_head
+    for ifnet in IterateTAILQ_HEAD(ifnets, "if_ordered_link"):
+        ShowIfConfiguration(ifnet)
+        if (showall == 1):
+            print(GetIfaddrs(ifnet))
+# EndMacro: showorderedifnets
 
 # Macro: showifmultiaddrs
 @lldb_command('showifmultiaddrs')

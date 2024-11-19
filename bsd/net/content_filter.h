@@ -95,8 +95,10 @@ struct cfil_opt_sock_info {
 	union sockaddr_in_4_6   cfs_remote;
 	pid_t                   cfs_pid;
 	pid_t                   cfs_e_pid;
+	pid_t                   cfs_r_pid;
 	uuid_t                  cfs_uuid;
 	uuid_t                  cfs_e_uuid;
+	uuid_t                  cfs_r_uuid;
 };
 
 /*
@@ -129,11 +131,18 @@ typedef struct cfil_crypto_data {
 	u_int32_t socketProtocol;
 	pid_t pid;
 	pid_t effective_pid;
+	pid_t responsible_pid;
 	uuid_t uuid;
 	uuid_t effective_uuid;
+	uuid_t responsible_uuid;
 	u_int64_t byte_count_in;
 	u_int64_t byte_count_out;
 } *cfil_crypto_data_t;
+
+/*
+ * Responsible pid/uuid support
+ */
+#define CFIL_RESPONSIBLE_PID_SUPPORT 1
 
 /*
  * Types of messages
@@ -211,8 +220,10 @@ struct cfil_msg_sock_attached {
 	int                     cfs_unused;             /* padding */
 	pid_t                   cfs_pid;
 	pid_t                   cfs_e_pid;
+	pid_t                   cfs_r_pid;
 	uuid_t                  cfs_uuid;
 	uuid_t                  cfs_e_uuid;
+	uuid_t                  cfs_r_uuid;
 	union sockaddr_in_4_6   cfs_src;
 	union sockaddr_in_4_6   cfs_dst;
 	int                     cfs_conn_dir;

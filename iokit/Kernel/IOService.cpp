@@ -5727,7 +5727,7 @@ IOService::waitQuietWithOptions( uint64_t timeout, IOOptionBits options )
 						}
 #if defined(XNU_TARGET_OS_OSX)
 						OSObject * prop;
-						if ((prop = next->copyProperty(kIOServiceBusyTimeoutExtensionsKey))) {
+						if ((prop = next->copyProperty(kIOServiceBusyTimeoutExtensionsKey, gIOServicePlane))) {
 							OSNumber * num;
 							uint32_t   value;
 							if ((num = OSDynamicCast(OSNumber, prop))) {

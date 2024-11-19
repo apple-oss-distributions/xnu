@@ -507,14 +507,13 @@ accept_nocancel(proc_ref_t p, struct accept_nocancel_args *uap,
 			error = EINVAL;
 		}
 		socket_unlock(head, 1);
-		os_log(OS_LOG_DEFAULT, "%s:%d accept() SO_ACCEPTCONN %d: msleep", proc_name_address(p), proc_selfpid(), error);
+		DBG_PRINTF("%s:%d accept() SO_ACCEPTCONN %d: msleep", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 check_again:
 	if ((head->so_state & SS_NBIO) && head->so_comp.tqh_first == NULL) {
 		socket_unlock(head, 1);
 		error = EWOULDBLOCK;
-		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: non-blocking  empty queue", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 	while (TAILQ_EMPTY(&head->so_comp) && head->so_error == 0) {
@@ -536,7 +535,7 @@ check_again:
 			error = ECONNABORTED;
 		}
 		if (error) {
-			os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: msleep", proc_name_address(p), proc_selfpid(), error);
+			DBG_PRINTF("%s:%d accept() error %d: msleep", proc_name_address(p), proc_selfpid(), error);
 			socket_unlock(head, 1);
 			goto out;
 		}
@@ -545,7 +544,7 @@ check_again:
 		error = head->so_error;
 		head->so_error = 0;
 		socket_unlock(head, 1);
-		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: head->so_error", proc_name_address(p), proc_selfpid(), error);
+		DBG_PRINTF("%s:%d accept() error %d: head->so_error", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 
@@ -612,7 +611,7 @@ check_again:
 		/* Drop reference on listening socket */
 		sodereference(head);
 		/* Propagate socket filter's error code to the caller */
-		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: soacceptfilter", proc_name_address(p), proc_selfpid(), error);
+		DBG_PRINTF("%s:%d accept() error %d: soacceptfilter", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 
@@ -631,7 +630,7 @@ check_again:
 		socket_unlock(so, 1);
 		soclose(so);
 		sodereference(head);
-		os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
+		DBG_PRINTF("%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
 		goto out;
 	}
 	*retval = newfd;
@@ -688,7 +687,7 @@ gotnoname:
 		error = copyout((caddr_t)&namelen, uap->anamelen,
 		    sizeof(socklen_t));
 		if (__improbable(error != 0)) {
-			os_log(OS_LOG_DEFAULT, "%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
+			DBG_PRINTF("%s:%d accept() error %d: falloc", proc_name_address(p), proc_selfpid(), error);
 		}
 	}
 	free_sockaddr(sa);

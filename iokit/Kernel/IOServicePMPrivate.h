@@ -32,6 +32,8 @@
 #include <IOKit/IOCommand.h>
 #include <IOKit/IOEventSource.h>
 
+#include <vm/vm_compressor_xnu.h>
+
 #define USE_SETTLE_TIMER    0
 
 //******************************************************************************
@@ -491,6 +493,8 @@ private:
 #define WATCHDOG_SLEEP_TIMEOUT      (35)   // 35 secs (kMaxTimeRequested + 5s)
 #define WATCHDOG_WAKE_TIMEOUT       (35)   // 35 secs (kMaxTimeRequested + 5s)
 #endif
+// Slightly larger than the internal VM flush timeout
+#define WATCHDOG_HIBERNATION_TIMEOUT (HIBERNATE_FLUSHING_SECS_TO_COMPLETE + 1)
 
 // Max wait time in microseconds for kernel priority and capability clients
 // with async message handlers to acknowledge.

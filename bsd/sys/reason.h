@@ -152,11 +152,12 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_AUDIO      39
 #define OS_REASON_WAKEBOARD  40
 #define OS_REASON_CORERC     41
+#define OS_REASON_SELF_RESTRICT 42
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_CORERC
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_SELF_RESTRICT
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 

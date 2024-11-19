@@ -349,8 +349,9 @@ class KernelTarget(object):
             raises : Exception in case the variable is not found.
         """
         var = addressof(self.GetGlobalVariable('percpu_slot_' + name))
+        var_type = var.GetSBValue().GetType().name
         addr = unsigned(var) + self.PERCPU_BASE(cpu)
-        return dereference(self.GetValueFromAddress(addr, var))
+        return dereference(self.GetValueFromAddress(addr, var_type))
 
     def GetLoadAddressForSymbol(self, name):
         """ Get the load address of a symbol in the kernel.

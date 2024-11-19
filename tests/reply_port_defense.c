@@ -15,7 +15,7 @@
 #include "cs_helpers.h"
 #include <TargetConditionals.h>
 
-#define MAX_TEST_NUM 9
+#define MAX_TEST_NUM 10
 #define MAX_ARGV 3
 
 extern char **environ;
@@ -314,6 +314,23 @@ T_DECL(unentitled_set_exception_ports_pass,
 	int test_num = 7;
 	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)0;
 	bool triggers_exception = false;
+	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
+	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
+}
+
+
+T_DECL(kobject_reply_port_defense,
+    "sending messages to kobjects without a proper reply port should crash",
+    T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(!TARGET_OS_OSX)) {     /* disable on macOS due to BATS boot-args */
+	int test_num = 9;
+#if __x86_64__
+	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_REQUIRE_REPLY_PORT_SEMANTICS;
+#else
+	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_SEND_INVALID_REPLY;
+#endif
+	bool triggers_exception = true;
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }

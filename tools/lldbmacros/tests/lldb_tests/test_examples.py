@@ -43,7 +43,7 @@ import lldb
 from lldbmock.utils import lookup_type
 
 # Import macro function to be tested.
-from process import ShowTask, P_LHASTASK, TF_HAS_PROC
+from process import ShowTask, P_LHASTASK, TF_HASPROC
 
 
 class TestExamples(LLDBTestCase):
@@ -76,7 +76,7 @@ class TestExamples(LLDBTestCase):
                 'tep_darwinbg': 0,
                 'tep_lowpri_cpu': 1
             },
-            't_flags': TF_HAS_PROC
+            't_flags': TF_HASPROC
         })
 
         # Created shared proc_ro reference from both task/proc

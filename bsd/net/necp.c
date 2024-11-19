@@ -9346,6 +9346,12 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		info->has_client = !uuid_is_null(inp->necp_client_uuid);
 	}
 
+	if (inp->inp_ip_p) {
+		info->protocol = inp->inp_ip_p;
+	} else {
+		info->protocol = SOCK_PROTO(so);
+	}
+
 	if (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_CLIENT_FLAGS) {
 		info->client_flags = 0;
 		if (INP_NO_CONSTRAINED(inp)) {
@@ -9363,7 +9369,7 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		if (inp->inp_socket->so_flags1 & SOF1_APPROVED_APP_DOMAIN) {
 			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN;
 		}
-		if (inp->inp_socket->so_flags1 & SOF1_INBOUND || override_is_inbound) {
+		if (inp->inp_socket->so_flags1 & SOF1_INBOUND || ((info->protocol == IPPROTO_UDP) && override_is_inbound)) {
 			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
 		}
 		if (inp->inp_socket->so_options & SO_ACCEPTCONN ||
@@ -9375,15 +9381,6 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		}
 		if (inp->inp_socket->so_options & SO_REUSEPORT) {
 			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_REUSE_LOCAL;
-		}
-	}
-
-	if ((necp_data_tracing_level && necp_data_tracing_proto) ||
-	    necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_PROTOCOL) {
-		if (inp->inp_ip_p) {
-			info->protocol = inp->inp_ip_p;
-		} else {
-			info->protocol = SOCK_PROTO(so);
 		}
 	}
 
@@ -12516,6 +12513,7 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
 		    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 			inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+			inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
 		}
 		if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 			inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12598,6 +12596,7 @@ skip_agent_check:
 			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
 			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12633,6 +12632,7 @@ skip_agent_check:
 			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
 			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
+				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12967,6 +12967,17 @@ necp_socket_get_content_filter_control_unit(struct socket *so)
 		return 0;
 	}
 	return inp->inp_policyresult.results.filter_control_unit;
+}
+
+u_int32_t
+necp_socket_get_policy_gencount(struct socket *so)
+{
+	struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+
+	if (inp == NULL) {
+		return 0;
+	}
+	return inp->inp_policyresult.policy_gencount;
 }
 
 bool

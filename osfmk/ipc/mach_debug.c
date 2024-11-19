@@ -69,6 +69,7 @@
 #include <mach/mach_port_server.h>
 #include <mach_debug/ipc_info.h>
 #include <mach_debug/hash_info.h>
+#include <kern/task_ident.h>
 
 #include <kern/host.h>
 #include <kern/misc_protos.h>
@@ -450,6 +451,7 @@ mach_port_kobject_description(
 	mach_vm_address_t kaddr = 0;
 	io_object_t obj = NULL;
 	io_kobject_t kobj = NULL;
+	ipc_port_t port = IP_NULL;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -468,7 +470,7 @@ mach_port_kobject_description(
 
 	*typep = (unsigned int)io_kotype(object);
 	if (io_is_kobject(object)) {
-		ipc_port_t port = ip_object_to_port(object);
+		port = ip_object_to_port(object);
 		kaddr = (mach_vm_address_t)ipc_kobject_get_raw(port, io_kotype(object));
 	}
 	*addrp = 0;
@@ -485,7 +487,13 @@ mach_port_kobject_description(
 				iokit_kobject_retain(kobj);
 			}
 			break;
-
+		case IKOT_TASK_ID_TOKEN:
+		{
+			task_id_token_t token;
+			token = (task_id_token_t)ipc_kobject_get_stable(port, IKOT_TASK_ID_TOKEN);
+			snprintf(desc, KOBJECT_DESCRIPTION_LENGTH, "%d,%llu,%d", token->ident.p_pid, token->ident.p_uniqueid, token->ident.p_idversion);
+			break;
+		}
 		default:
 			break;
 		}

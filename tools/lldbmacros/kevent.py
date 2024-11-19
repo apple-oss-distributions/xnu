@@ -69,7 +69,7 @@ def IterateAllKqueues():
     """
     for t in kern.tasks:
         proc = GetProcFromTask(t)
-        if not proc:
+        if proc is None:
             continue
         proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
         for kq in IterateProcKqueues(proc):
@@ -365,7 +365,7 @@ def ShowKqCounts(cmd_args=None, cmd_options={}, O=None):
     print ('{: <20s} {: <35s} {: <10s} {: <6s}'.format('process', 'proc_name', '#kqfiles', '#kqworkloop'))
     for t in kern.tasks:
         proc = GetProcFromTask(t)
-        if not proc:
+        if proc is None:
             continue
         proc = kern.GetValueFromAddress(unsigned(proc), 'proc_t')
         kqfcount = 0

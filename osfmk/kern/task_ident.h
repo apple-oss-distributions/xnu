@@ -67,6 +67,19 @@ __BEGIN_DECLS
 kern_return_t task_id_token_port_name_to_task(mach_port_name_t name, task_t *taskp)
 __XNU_INTERNAL(task_id_token_port_name_to_task);
 
+struct proc_ident {
+	uint64_t        p_uniqueid;
+	pid_t           p_pid;
+	int             p_idversion;
+};
+
+struct task_id_token {
+	struct proc_ident ident;
+	ipc_port_t        port;
+	uint64_t          task_uniqueid; /* for corpse task */
+	os_refcnt_t       tidt_refs;
+};
+
 void task_id_token_release(task_id_token_t token);
 
 ipc_port_t convert_task_id_token_to_port(task_id_token_t token);

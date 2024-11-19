@@ -284,8 +284,9 @@ disable_counter(uint32_t counter)
  * Enable counter in processor modes determined by configuration word.
  */
 static void
-set_modes(uint32_t counter, kpc_config_t cfgword)
+set_modes(uint32_t counter, kpc_config_t cfgword, bool secure)
 {
+	bool const allow_kernel = !secure || kpc_allows_counting_system;
 	uint64_t bits = 0;
 
 	if (cfgword & CFGWORD_EL0A32EN_MASK) {
@@ -294,7 +295,7 @@ set_modes(uint32_t counter, kpc_config_t cfgword)
 	if (cfgword & CFGWORD_EL0A64EN_MASK) {
 		bits |= PMCR1_EL0_A64_ENABLE_MASK(counter);
 	}
-	if (kpc_allows_counting_system && (cfgword & CFGWORD_EL1EN_MASK)) {
+	if (allow_kernel && (cfgword & CFGWORD_EL1EN_MASK)) {
 		bits |= PMCR1_EL1_A64_ENABLE_MASK(counter);
 	}
 
@@ -304,7 +305,7 @@ set_modes(uint32_t counter, kpc_config_t cfgword)
 	 * This matches the behavior when the PMCR1 bits weren't exposed.
 	 */
 	if (bits == 0 && cfgword != 0) {
-		bits = kpc_allows_counting_system ?
+		bits = allow_kernel ?
 		    PMCR1_EL_ALL_ENABLE_MASK(counter)
 		    : PMCR1_EL0_A64_ENABLE_MASK(counter);
 	}
@@ -905,7 +906,7 @@ kpc_set_config_arch(struct kpc_config_remote *mp_config)
 	unsigned int offset = kpc_fixed_count();
 	unsigned int config_index = 0;
 
-	if (mp_config->allow_list) {
+	if (mp_config->secure) {
 		/* Do a pass to find any disallowed events to avoid partial configuration. */
 		for (uint32_t i = 0; i < cfg_count; ++i) {
 			if (((1ULL << i) & cfg_pmc_mask) == 0) {
@@ -933,7 +934,7 @@ kpc_set_config_arch(struct kpc_config_remote *mp_config)
 		saved_PMESR[pmesr_idx] &= PMESR_EVT_CLEAR(counter, pmesr_off);
 		saved_PMESR[pmesr_idx] |= PMESR_EVT_ENCODE(config_value, counter,
 		    pmesr_off);
-		set_modes(counter, config_value);
+		set_modes(counter, config_value, mp_config->secure);
 		config_index++;
 	}
 

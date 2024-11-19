@@ -605,6 +605,18 @@ handle_kernel_breakpoint(x86_saved_state64_t *state, uint16_t *out_comment)
 	return false;
 }
 
+// Find a recovery entry for an instruction address if one is present.
+static struct recovery const*
+find_recovery_entry(vm_offset_t kern_ip)
+{
+	for (struct recovery const* rp = recover_table; rp < recover_table_end; rp++) {
+		if (kern_ip == rp->fault_addr) {
+			return rp;
+		}
+	}
+	return NULL;
+}
+
 /*
  * Trap from kernel mode.  Only page-fault errors are recoverable,
  * and then only in special circumstances.  All other errors are
@@ -630,7 +642,7 @@ kernel_trap(
 	thread_t                thread;
 	boolean_t               intr;
 	vm_prot_t               prot;
-	struct recovery         *rp;
+	struct recovery const   *rp = NULL;
 	vm_offset_t             kern_ip;
 	int                     is_user;
 	int                     trap_pl = get_preemption_level();
@@ -839,12 +851,21 @@ kernel_trap(
 			fault_result = result = KERN_FAILURE;
 			goto FALL_THROUGH;
 		}
+
+		// VM will query this property when deciding to throttle this fault, we don't want to
+		// throttle kernel faults for copyio faults. The presence of a recovery entry is used as a
+		// proxy for being in copyio code.
+		rp = find_recovery_entry(kern_ip);
+		const bool was_recover = thread->recover;
+		thread->recover = was_recover || (rp != NULL);
+
 		fault_result = result = vm_fault(map,
 		    vaddr,
 		    prot,
 		    FALSE, VM_KERN_MEMORY_NONE,
 		    THREAD_UNINT, NULL, 0);
 
+		thread->recover = was_recover;
 		if (result == KERN_SUCCESS) {
 			goto common_return;
 		}
@@ -858,11 +879,9 @@ FALL_THROUGH:
 		 * If there is a failure recovery address
 		 * for this fault, go there.
 		 */
-		for (rp = recover_table; rp < recover_table_end; rp++) {
-			if (kern_ip == rp->fault_addr) {
-				set_recovery_ip(saved_state, rp->recover_addr);
-				goto common_return;
-			}
+		if ((rp != NULL) || (rp = find_recovery_entry(kern_ip))) {
+			set_recovery_ip(saved_state, rp->recover_addr);
+			goto common_return;
 		}
 
 		/*

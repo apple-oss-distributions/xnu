@@ -526,8 +526,8 @@ pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
 		if (comp_gencnt != NULL) {
 			*comp_gencnt = kp->pkt_comp_gencnt;
 		}
-		if (pkt_tx_time != NULL && (kp->pkt_pflags & PKT_F_OPT_TX_TIMESTAMP) != 0) {
-			*pkt_tx_time = kp->pkt_com_opt->__po_pkt_tx_time;
+		if (pkt_tx_time != NULL) {
+			*pkt_tx_time = __packet_get_tx_timestamp(SK_PKT2PH(kp));
 		}
 
 		break;

@@ -1127,7 +1127,9 @@
 #define __single
 #define __unsafe_indexable
 #define __counted_by(N)
+#define __counted_by_or_null(N)
 #define __sized_by(N)
+#define __sized_by_or_null(N)
 #define __ended_by(E)
 #define __terminated_by(T)
 #define __null_terminated

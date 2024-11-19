@@ -31,16 +31,21 @@
 
 """ Test process.py """
 
+import contextlib
+import io
 import unittest
+from lldbtest.testcase import LLDBTestCase
 from lldbmock.utils import lookup_type
 from lldbmock.valuemock import ValueMock
 
 import process as tst_process
 import utils as tst_utils
+from process import ShowTask, ShowProc, INVALID_PROC_SUMMARY, INVALID_TASK_SUMMARY
 
-
-class ProcessTest(unittest.TestCase):
+class ProcessTest(LLDBTestCase):
     """ Tests for process.py module """
+
+    ROUNDED_UP_PROC_SIZE = 2048
 
     def test_GetProcPid(self):
         """ Test a pid gets returned. """
@@ -110,3 +115,44 @@ class ProcessTest(unittest.TestCase):
         aststr = ''.join(char for _, char in tst_process._AST_CHARS.items())
 
         self.assertEqual(tst_process.GetASTSummary(ast), aststr)
+    
+    # Mock global variable value (accessed by the macro being used)
+    @unittest.mock.patch('xnu.kern.globals.proc_struct_size', ROUNDED_UP_PROC_SIZE)
+    def test_ProcWithoutTask(self):
+        """ Test that ShowTask handles process-less task gracefully, and vice-versa for ShowProc """
+        self.reset_mocks()
+
+        PROC_ADDR = 0xffffffff90909090
+        TASK_ADDR = PROC_ADDR + self.ROUNDED_UP_PROC_SIZE
+        PROC_RO_ADDR = 0xffffff0040404040
+
+        # Create fake proc_t instance at 0xffffffff90909090
+        proc = self.create_mock('proc', PROC_ADDR).fromDict({
+            'p_pid': 12345,
+            'p_lflag': 0, # P_LHASTASK not set
+            'p_comm': b'test-proc\0'
+        })
+
+        # Create task which is expected to be placed + sizeof(proc)
+        task = self.create_mock('task', TASK_ADDR).fromDict({
+            'effective_policy': {
+                'tep_sup_active': 0,
+                'tep_darwinbg': 0,
+                'tep_lowpri_cpu': 1
+            },
+            't_flags': 0 # TF_HASPROC not set
+        })
+
+        # Created shared proc_ro reference from both task/proc
+        self.create_mock('proc_ro', PROC_RO_ADDR)
+        proc.p_proc_ro = PROC_RO_ADDR
+        task.bsd_info_ro = PROC_RO_ADDR
+
+        # Capture stdout and check expected output
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            ShowTask([f'{TASK_ADDR:#x}'])
+            ShowProc([f'{PROC_ADDR:#x}'])
+
+        self.assertIn(INVALID_PROC_SUMMARY, stdout.getvalue())
+        self.assertIn(INVALID_TASK_SUMMARY, stdout.getvalue())

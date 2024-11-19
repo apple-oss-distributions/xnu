@@ -3925,6 +3925,11 @@ IOService::notifyRootDomainDone( void )
 	assert( fDriverCallBusy == false );
 	assert( fMachineState == kIOPM_DriverThreadCallDone );
 
+	if (IS_ROOT_DOMAIN) {
+		// Reset in case watchdog was adjusted for hibernation
+		reset_watchdog_timer();
+	}
+
 	MS_POP(); // pop notifyAll() machine state
 	notifyChildren();
 }
@@ -5807,6 +5812,33 @@ exit:
 	IOLockUnlock(fWatchdogLock);
 }
 
+void
+IOService::reset_watchdog_timer(int timeout)
+{
+	uint64_t deadline;
+
+	if (!fWatchdogTimer || (kIOSleepWakeWdogOff & gIOKitDebug)) {
+		return;
+	}
+
+	IOLockLock(fWatchdogLock);
+	if (!fWatchdogDeadline) {
+		goto exit;
+	}
+
+	if (timeout == 0) {
+		int defaultTimeout = getPMRootDomain()->getWatchdogTimeout();
+		clock_interval_to_deadline(defaultTimeout, kSecondScale, &deadline);
+	} else {
+		clock_interval_to_deadline(timeout, kSecondScale, &deadline);
+	}
+
+	thread_call_cancel(fWatchdogTimer);
+	start_watchdog_timer(deadline);
+
+exit:
+	IOLockUnlock(fWatchdogLock);
+}
 
 //*********************************************************************************
 // [static] watchdog_timer_expired

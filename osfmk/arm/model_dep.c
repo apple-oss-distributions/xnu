@@ -323,6 +323,7 @@ panic_display_tpidrs(void)
 #endif //defined(__arm64__)
 }
 
+
 static void
 panic_display_hung_cpus_help(void)
 {

@@ -1412,6 +1412,7 @@ extern void necp_inpcb_remove_cb(struct inpcb *inp);
 extern void necp_inpcb_dispose(struct inpcb *inp);
 
 extern u_int32_t necp_socket_get_content_filter_control_unit(struct socket *so);
+extern u_int32_t necp_socket_get_policy_gencount(struct socket *so);
 
 extern bool necp_socket_should_use_flow_divert(struct inpcb *inp);
 extern u_int32_t necp_socket_get_flow_divert_control_unit(struct inpcb *inp, uint32_t *aggregate_unit);

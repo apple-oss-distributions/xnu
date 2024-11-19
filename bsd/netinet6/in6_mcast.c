@@ -1928,9 +1928,11 @@ in6p_lookup_mcast_ifp(const struct inpcb *in6p,
 	struct ifnet            *ifp;
 	unsigned int            ifscope = IFSCOPE_NONE;
 
-	VERIFY(in6p == NULL || (in6p->inp_vflag & INP_IPV6));
 	VERIFY(gsin6->sin6_family == AF_INET6);
 	if (IN6_IS_ADDR_MULTICAST(&gsin6->sin6_addr) == 0) {
+		return NULL;
+	}
+	if (in6p != NULL && (in6p->in6p_vflag & INP_IPV6) == 0) {
 		return NULL;
 	}
 

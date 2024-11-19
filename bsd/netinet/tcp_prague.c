@@ -373,7 +373,7 @@ prague_update_pacer_state(struct tcpcb *tp)
 	uint32_t burst = (uint32_t)(rate >> BURST_SHIFT);
 
 	tp->t_pacer.rate = rate;
-	tp->t_pacer.tso_burst_size = burst;
+	tp->t_pacer.tso_burst_size = max(tp->t_maxopd, burst);
 }
 
 /*

@@ -2055,6 +2055,11 @@ fq_if_add_fcentry(fq_if_t *fqs, pktsched_pkt_t *pkt, uint8_t flowsrc,
 		    fq->fq_flowhash, AQM_KTRACE_FQ_GRP_SC_IDX(fq),
 		    fq->fq_bytes, fq->fq_min_qdelay);
 	}
+
+	if (fce != NULL && fce->fce_flowsrc_type == FLOWSRC_CHANNEL) {
+		kern_channel_flowadv_set(fce);
+	}
+
 	return (fce != NULL) ? TRUE : FALSE;
 }
 
