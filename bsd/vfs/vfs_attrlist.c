@@ -377,6 +377,7 @@ static struct getvolattrlist_attrtab getvolattrlist_vol_tab[] = {
 	{.attr = ATTR_VOL_ENCODINGSUSED, .bits = 0, .size = sizeof(uint64_t)},
 	{.attr = ATTR_VOL_CAPABILITIES, .bits = VFSATTR_BIT(f_capabilities), .size = sizeof(vol_capabilities_attr_t)},
 	{.attr = ATTR_VOL_UUID, .bits = VFSATTR_BIT(f_uuid), .size = sizeof(uuid_t)},
+	{.attr = ATTR_VOL_MOUNTEXTFLAGS, .bits = 0, .size = sizeof(uint32_t)},
 	{.attr = ATTR_VOL_SPACEUSED, .bits = VFSATTR_BIT(f_bused) | VFSATTR_BIT(f_bsize) | VFSATTR_BIT(f_bfree), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_QUOTA_SIZE, .bits = VFSATTR_BIT(f_quota) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
 	{.attr = ATTR_VOL_RESERVED_SIZE, .bits = VFSATTR_BIT(f_reserved) | VFSATTR_BIT(f_bsize), .size = sizeof(off_t)},
@@ -616,7 +617,8 @@ static struct getattrlist_attrtab getattrlistbulk_common_extended_tab[] = {
 	                         ATTR_VOL_ALLOCATIONCLUMP |  ATTR_VOL_IOBLOCKSIZE |  \
 	                         ATTR_VOL_MOUNTPOINT | ATTR_VOL_MOUNTFLAGS |  \
 	                         ATTR_VOL_MOUNTEDDEVICE | ATTR_VOL_CAPABILITIES |  \
-	                         ATTR_VOL_ATTRIBUTES | ATTR_VOL_ENCODINGSUSED)
+	                         ATTR_VOL_ATTRIBUTES | ATTR_VOL_ENCODINGSUSED | \
+	                         ATTR_VOL_MOUNTEXTFLAGS)
 
 #define VFS_DFLT_ATTR_CMN       (ATTR_CMN_NAME | ATTR_CMN_DEVID |  \
 	                         ATTR_CMN_FSID | ATTR_CMN_OBJTYPE |  \
@@ -1538,6 +1540,10 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	if (alp->volattr & ATTR_VOL_UUID) {
 		ATTR_PACK(&ab, vs.f_uuid);
 		ab.actual.volattr |= ATTR_VOL_UUID;
+	}
+	if (alp->volattr & ATTR_VOL_MOUNTEXTFLAGS) {
+		ATTR_PACK_CAST(&ab, uint32_t, vfs_getextflags(mnt));
+		ab.actual.volattr |= ATTR_VOL_MOUNTEXTFLAGS;
 	}
 	if (alp->volattr & ATTR_VOL_QUOTA_SIZE) {
 		ATTR_PACK_CAST(&ab, off_t, vs.f_bsize * vs.f_quota);

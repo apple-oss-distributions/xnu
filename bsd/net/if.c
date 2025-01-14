@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1413,7 +1413,7 @@ ifaof_ifpforaddr_select(const struct sockaddr *addr, struct ifnet *ifp)
 	u_int af = addr->sa_family;
 
 	if (af == AF_INET6) {
-		return in6_selectsrc_core_ifa(__DECONST(struct sockaddr_in6 *, addr), ifp, 0);
+		return in6_selectsrc_core_ifa(__DECONST(struct sockaddr_in6 *, addr), ifp);
 	}
 
 	return ifaof_ifpforaddr(addr, ifp);

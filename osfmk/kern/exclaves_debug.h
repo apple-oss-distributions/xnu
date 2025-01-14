@@ -38,6 +38,8 @@
 
 #include <mach/exclaves.h>
 
+#include <os/atomic_private.h>
+
 #if DEVELOPMENT || DEBUG
 extern unsigned int exclaves_debug;
 #else
@@ -132,24 +134,19 @@ static inline bool
 exclaves_requirement_is_relaxed(exclaves_requirement_t requirement)
 {
 	assert3u(requirement & (requirement - 1), ==, 0);
-
-	/*
-	 * The medium-term plan is that the boot-arg controlling entitlements
-	 * goes away entirely and is replaced with EXCLAVES_R_ENTITLEMENTS.
-	 * Until that happens, for historical reasons, if the entitlement
-	 * boot-arg has disabled EXCLAVES_PRIV_CONCLAVE_HOST, then relax
-	 * EXCLAVES_R_CONCLAVE and EXCLAVES_R_CONCLAVE_RESOURCES here too.
-	 */
-	extern unsigned int exclaves_entitlement_flags;
-	exclaves_requirement_t current = exclaves_relaxed_requirements;
-	if ((exclaves_entitlement_flags & EXCLAVES_PRIV_CONCLAVE_HOST) == 0) {
-		current |= EXCLAVES_R_CONCLAVE | EXCLAVES_R_CONCLAVE_RESOURCES;
-	}
-
-
-	return (requirement & current) != 0;
+	return (requirement & exclaves_relaxed_requirements) != 0;
 }
 
+#if DEVELOPMENT || DEBUG
+static inline void
+exclaves_requirement_relax(exclaves_requirement_t requirement)
+{
+	assert3u(requirement & (requirement - 1), ==, 0);
+	os_atomic_or(&exclaves_relaxed_requirements, requirement, relaxed);
+}
+#else
+#define exclaves_requirement_relax(req)
+#endif /* DEVELOPMENT || DEBUG */
 /*
  * Called when a requirement has not been met. Produces a log message and
  * continues if the requirement is relaxed, otherwise panics.

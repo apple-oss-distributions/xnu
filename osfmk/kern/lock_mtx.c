@@ -112,6 +112,10 @@ TUNABLE(bool, LckDisablePreemptCheck, "-disable_mtx_chk", false);
 
 extern unsigned int not_in_kdp;
 
+#if CONFIG_SPTM
+extern const bool * sptm_xnu_triggered_panic_ptr;
+#endif /* CONFIG_SPTM */
+
 KALLOC_TYPE_DEFINE(KT_LCK_MTX, lck_mtx_t, KT_PRIV_ACCT);
 
 #define LCK_MTX_NULL_CTID       0x00000000u
@@ -222,6 +226,15 @@ lck_mtx_check_preemption(lck_mtx_t *lock, thread_t thread, int expected)
 	if (startup_phase < STARTUP_SUB_EARLY_BOOT) {
 		return;
 	}
+#if CONFIG_SPTM
+	/*
+	 * If a panic has been initiated on SPTM devices, preemption was disabled by sleh,
+	 * but platform callbacks could be acquiring mutexes
+	 */
+	if (*sptm_xnu_triggered_panic_ptr) {
+		return;
+	}
+#endif
 	__lck_mtx_preemption_disabled_panic(lock, expected);
 }
 

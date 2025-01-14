@@ -669,13 +669,6 @@ extern vm_map_t         vm_map_fork(
 #define VM_MAP_FORK_CORPSE_FOOTPRINT            0x00000004
 #define VM_MAP_FORK_SHARE_IF_OWNED              0x00000008
 
-/* Change inheritance */
-extern kern_return_t    vm_map_inherit(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_inherit_t            new_inheritance);
-
 
 extern kern_return_t vm_map_query_volatile(
 	vm_map_t        map,
@@ -742,14 +735,6 @@ extern vm_map_size_t    vm_map_adjusted_size(vm_map_t map);
 
 extern vm_map_t         vm_map_switch(
 	vm_map_t                map);
-
-/* Change protection */
-extern kern_return_t    vm_map_protect(
-	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_prot_t               new_prot,
-	boolean_t               set_max);
 
 extern boolean_t vm_map_cs_enforcement(
 	vm_map_t                map);
@@ -1006,14 +991,15 @@ extern void vm_map_single_jit(vm_map_t map);
 
 extern kern_return_t vm_map_page_info(
 	vm_map_t                map,
-	vm_map_offset_t         offset,
+	vm_map_offset_ut        offset,
 	vm_page_info_flavor_t   flavor,
 	vm_page_info_t          info,
 	mach_msg_type_number_t  *count);
+
 extern kern_return_t vm_map_page_range_info_internal(
 	vm_map_t                map,
-	vm_map_offset_t         start_offset,
-	vm_map_offset_t         end_offset,
+	vm_map_offset_ut        start_offset,
+	vm_map_offset_ut        end_offset,
 	int                     effective_page_shift,
 	vm_page_info_flavor_t   flavor,
 	vm_page_info_t          info,

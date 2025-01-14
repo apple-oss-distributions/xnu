@@ -42,9 +42,9 @@ __enum_closed_decl(vm_deferred_reclamation_action_t, uint32_t, {
 });
 
 kern_return_t vm_deferred_reclamation_buffer_init_internal(
-	task_t            task,
-	mach_vm_address_t *address,
-	mach_vm_size_t    size);
+	task_t             task,
+	mach_vm_address_ut *address,
+	mach_vm_size_ut    size);
 
 kern_return_t vm_deferred_reclamation_buffer_synchronize_internal(task_t task, size_t max_entries_to_reclaim);
 

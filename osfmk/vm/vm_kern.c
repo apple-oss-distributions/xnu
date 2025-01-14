@@ -1225,7 +1225,8 @@ kmem_alloc_pageable_external(
 	return size ? KERN_NO_SPACE: KERN_INVALID_ARGUMENT;
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_vm_allocate_kernel_sanitize(
 	vm_map_t                map,
 	mach_vm_offset_ut       addr_u,
@@ -4328,6 +4329,8 @@ vm_kernel_addrhash_internal(vm_offset_t addr, uint64_t salt)
 	if (VM_KERNEL_IS_SLID(addr)) {
 		return VM_KERNEL_UNSLIDE(addr);
 	}
+
+	addr = VM_KERNEL_STRIP_UPTR(addr);
 
 	vm_offset_t sha_digest[SHA256_DIGEST_LENGTH / sizeof(vm_offset_t)];
 	SHA256_CTX sha_ctx;

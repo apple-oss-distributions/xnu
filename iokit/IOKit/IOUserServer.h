@@ -173,6 +173,7 @@ class IOUserServer : public IOUserClient2022
 	bool                  fPlatformDriver;
 	OSString            * fTeamIdentifier;
 	unsigned int          fCSValidationCategory;
+	IOWorkLoop          * fWorkLoop;
 public:
 	kern_allocation_name_t fAllocationName;
 	task_t                 fOwningTask;
@@ -192,6 +193,7 @@ public:
 	virtual bool           finalize(IOOptionBits options) APPLE_KEXT_OVERRIDE;
 	virtual void           stop(IOService * provider) APPLE_KEXT_OVERRIDE;
 	virtual void           free() APPLE_KEXT_OVERRIDE;
+	virtual IOWorkLoop   * getWorkLoop() const APPLE_KEXT_OVERRIDE;
 
 	virtual IOReturn       setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn       externalMethod(uint32_t selector, IOExternalMethodArgumentsOpaque * args) APPLE_KEXT_OVERRIDE;

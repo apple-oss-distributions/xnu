@@ -73,10 +73,26 @@ VM_GENERATE_UNSAFE_WRAPPER(uint32_t, vm32_size_struct_t);
 #if defined(__cplusplus)
 /*
  * C++ doesn't support transparent_unions which fortunately isn't something
- * we need, as files who need to see unsafe types as structs are all Code
+ * we need, as files who need to see unsafe types as structs are all C code
  */
 #error "Can't turn on unsafe types in C++"
 #endif
+
+/*
+ * For defining a custom unsafe type that doesn't directly follow the
+ * transparent union model, and needs to be properly typedef'd outside of
+ * the VM subsystem.
+ */
+#define VM_DEFINE_UNSAFE_TYPE(_safe_type, _unsafe_type, _unsafe_contents) \
+	typedef _unsafe_contents _unsafe_type;                            \
+	_Static_assert(                                                   \
+	(                                                                 \
+	        sizeof(_unsafe_type)                                      \
+	        == sizeof(_safe_type))                                    \
+	&& (                                                              \
+	        _Alignof(_unsafe_type)                                    \
+	        == _Alignof(_safe_type)),                                 \
+	"Unsafe type should be compatible with corresponding safe type.")
 
 #define VM_GENERATE_UNSAFE_TYPE(_safe_type, _unsafe_type) \
 	VM_GENERATE_UNSAFE_WRAPPER(_safe_type, _unsafe_type)
@@ -121,8 +137,11 @@ VM_GENERATE_UNSAFE_WRAPPER(uint32_t, vm32_size_struct_t);
 	VM_GENERATE_UNSAFE_EXT(_safe_type, _unsafe_type, size, 32)
 
 #else  /* VM_UNSAFE_TYPES */
-#define VM_GENERATE_UNSAFE_TYPE(_safe_type, _unsafe_type)               \
+#define VM_DEFINE_UNSAFE_TYPE(_safe_type, _unsafe_type, _unsafe_contents) \
 	typedef _safe_type _unsafe_type
+
+#define VM_GENERATE_UNSAFE_TYPE(_safe_type, _unsafe_type)               \
+	VM_DEFINE_UNSAFE_TYPE(_safe_type, _unsafe_type, )
 
 #define VM_GENERATE_UNSAFE_ADDR(_safe_type, _unsafe_type)               \
 	VM_GENERATE_UNSAFE_TYPE(_safe_type, _unsafe_type)
@@ -156,6 +175,8 @@ VM_GENERATE_UNSAFE_SIZE(memory_object_size_t, memory_object_size_ut);
 VM_GENERATE_UNSAFE_ADDR(vm_object_offset_t, vm_object_offset_ut);
 VM_GENERATE_UNSAFE_SIZE(vm_object_size_t, vm_object_size_ut);
 
+VM_GENERATE_UNSAFE_ADDR(pointer_t, pointer_ut);
+
 #ifdef  MACH_KERNEL_PRIVATE
 VM_GENERATE_UNSAFE_ADDR32(vm32_address_t, vm32_address_ut);
 VM_GENERATE_UNSAFE_ADDR32(vm32_offset_t, vm32_offset_ut);
@@ -164,6 +185,7 @@ VM_GENERATE_UNSAFE_SIZE32(vm32_size_t, vm32_size_ut);
 
 VM_GENERATE_UNSAFE_TYPE(vm_prot_t, vm_prot_ut);
 VM_GENERATE_UNSAFE_TYPE(vm_inherit_t, vm_inherit_ut);
+VM_GENERATE_UNSAFE_TYPE(vm_behavior_t, vm_behavior_ut);
 
 #if VM_UNSAFE_TYPES
 VM_GENERATE_UNSAFE_BSD_ADDR(caddr_t, caddr_ut);
@@ -171,5 +193,21 @@ VM_GENERATE_UNSAFE_BSD_ADDR(user_addr_t, user_addr_ut);
 VM_GENERATE_UNSAFE_BSD_SIZE(size_t, size_ut);
 VM_GENERATE_UNSAFE_BSD_SIZE(user_size_t, user_size_ut);
 #endif /* VM_UNSAFE_TYPES */
+
+VM_DEFINE_UNSAFE_TYPE(struct mach_vm_range, mach_vm_range_ut, struct {
+	mach_vm_offset_ut min_address_u;
+	mach_vm_offset_ut max_address_u;
+});
+
+#pragma pack(1)
+
+VM_DEFINE_UNSAFE_TYPE(mach_vm_range_recipe_v1_t, mach_vm_range_recipe_v1_ut, struct {
+	mach_vm_range_flags_t flags: 48;
+	mach_vm_range_tag_t   range_tag: 8;
+	uint8_t               vm_tag: 8;
+	mach_vm_range_ut      range_u;
+});
+
+#pragma pack()
 
 #endif /* _VM_UNSAFE_TYPES_H_ */

@@ -713,6 +713,7 @@ typedef uint16_t        iff_flags_t;
 #define IFF_FLAGS_VLAN_MTU              0x0080
 #define IFF_FLAGS_VLAN_TAGGING          0x0100
 #define IFF_FLAGS_SEPARATE_FRAME_HEADER 0x0200
+#define IFF_FLAGS_NX_ATTACHED           0x0400
 
 #if SKYWALK
 
@@ -743,7 +744,7 @@ typedef struct {
 	uint32_t                fl_idx;
 	uint32_t                fl_qset_cnt;
 	fake_qset               fl_qset[FETH_MAX_QSETS];
-} fake_llink;
+} fake_llink, * fake_llink_t;
 
 static kern_pbufpool_t         S_pp;
 
@@ -777,7 +778,7 @@ struct if_fake {
 	uint32_t                iff_llink_cnt;
 	kern_channel_ring_t     iff_rx_ring[IFF_MAX_RX_RINGS];
 	kern_channel_ring_t     iff_tx_ring[IFF_MAX_TX_RINGS];
-	fake_llink             *iff_llink __counted_by(FETH_MAX_LLINKS);
+	fake_llink_t            iff_llink __counted_by(FETH_MAX_LLINKS);
 	thread_call_t           iff_doorbell_tcall;
 	thread_call_t           iff_if_adv_tcall;
 	boolean_t               iff_doorbell_tcall_active;
@@ -1019,7 +1020,9 @@ feth_free(if_fake_ref fakeif)
 #endif /* SKYWALK */
 
 	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s", fakeif->iff_name);
-	kfree_type(fake_llink, FETH_MAX_LLINKS, fakeif->iff_llink);
+	if (fakeif->iff_llink != NULL) {
+		kfree_type(fake_llink, FETH_MAX_LLINKS, fakeif->iff_llink);
+	}
 	kfree_type(struct if_fake, fakeif);
 }
 
@@ -1885,6 +1888,7 @@ feth_if_adv_tcall_create(if_fake_ref fakeif)
 		FAKE_LOG(LOG_DEBUG, FE_DBGF_MISC,
 		    "%s if_adv tcall alloc failed",
 		    fakeif->iff_name);
+		feth_unlock();
 		return ENXIO;
 	}
 	/* retain for the interface advisory thread call */
@@ -1895,30 +1899,6 @@ feth_if_adv_tcall_create(if_fake_ref fakeif)
 	feth_unlock();
 	return 0;
 }
-
-static void
-feth_if_adv_tcall_destroy(if_fake_ref fakeif)
-{
-	thread_call_t tcall;
-
-	feth_lock();
-	ASSERT(fakeif->iff_if_adv_tcall != NULL);
-	tcall = fakeif->iff_if_adv_tcall;
-	feth_unlock();
-	(void) thread_call_cancel_wait(tcall);
-	if (!thread_call_free(tcall)) {
-		boolean_t freed;
-		(void) thread_call_cancel_wait(tcall);
-		freed = thread_call_free(tcall);
-		VERIFY(freed);
-	}
-	feth_lock();
-	fakeif->iff_if_adv_tcall = NULL;
-	feth_unlock();
-	/* release for the interface advisory thread call */
-	feth_release(fakeif);
-}
-
 
 /**
 ** nexus netif domain provider
@@ -2152,6 +2132,8 @@ feth_nx_pre_disconnect(kern_nexus_provider_t nxprov,
 {
 #pragma unused(nxprov, channel)
 	if_fake_ref fakeif;
+	thread_call_t tcall;
+	boolean_t connected;
 
 	fakeif = feth_nexus_context(nexus);
 	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
@@ -2160,10 +2142,24 @@ feth_nx_pre_disconnect(kern_nexus_provider_t nxprov,
 	/* Quiesce the interface and flush any pending outbound packets. */
 	if_down(fakeif->iff_ifp);
 	feth_lock();
+	connected = fakeif->iff_channel_connected;
 	fakeif->iff_channel_connected = FALSE;
+	tcall = fakeif->iff_if_adv_tcall;
+	fakeif->iff_if_adv_tcall = NULL;
 	feth_unlock();
-	if (fakeif->iff_if_adv_tcall != NULL) {
-		feth_if_adv_tcall_destroy(fakeif);
+	if (tcall != NULL) {
+		(void) thread_call_cancel_wait(tcall);
+		if (!thread_call_free(tcall)) {
+			boolean_t freed;
+			(void) thread_call_cancel_wait(tcall);
+			freed = thread_call_free(tcall);
+			VERIFY(freed);
+		}
+		/* release for the interface advisory thread call */
+		feth_release(fakeif);
+	}
+	if (connected) {
+		feth_release(fakeif);
 	}
 }
 
@@ -2177,7 +2173,6 @@ feth_nx_disconnected(kern_nexus_provider_t nxprov,
 	fakeif = feth_nexus_context(nexus);
 	FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE, "%s: disconnected channel %p",
 	    fakeif->iff_name, channel);
-	feth_release(fakeif);
 }
 
 static errno_t
@@ -3316,37 +3311,37 @@ feth_attach_netif_nexus(if_fake_ref fakeif,
 }
 
 static void
-remove_non_default_llinks(if_fake_ref fakeif)
+remove_non_default_llinks(const char * name, fake_nx_t fnx,
+    fake_llink_t llink __counted_by(FETH_MAX_LLINKS),
+    uint32_t llink_cnt)
 {
 	struct kern_nexus *nx;
-	fake_nx_t fnx = &fakeif->iff_nx;
 	uint32_t i;
 
-	if (fakeif->iff_llink_cnt <= 1) {
-		return;
+	if (llink_cnt <= 1) {
+		goto done;
 	}
 	nx = nx_find(fnx->fnx_instance, FALSE);
 	if (nx == NULL) {
 		FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
-		    "%s: nx not found", fakeif->iff_name);
-		return;
+		    "%s: nx not found", name);
+		goto done;
 	}
 	/* Default llink (at index 0) is freed separately */
-	for (i = 1; i < fakeif->iff_llink_cnt; i++) {
+	for (i = 1; i < llink_cnt; i++) {
 		int err;
 
-		err = kern_nexus_netif_llink_remove(nx, fakeif->
-		    iff_llink[i].fl_id);
+		err = kern_nexus_netif_llink_remove(nx, llink[i].fl_id);
 		if (err != 0) {
 			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
 			    "%s: llink remove failed, llink_id 0x%llx, "
-			    "error %d", fakeif->iff_name,
-			    fakeif->iff_llink[i].fl_id, err);
+			    "error %d", name,
+			    llink[i].fl_id, err);
 		}
-		fakeif->iff_llink[i].fl_id = 0;
 	}
-	fakeif->iff_llink_cnt = 0;
 	nx_release(nx);
+done:
+	return;
 }
 
 static void
@@ -3361,8 +3356,10 @@ detach_provider_and_instance(uuid_t provider, uuid_t instance)
 		if (err != 0) {
 			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
 			    "free_provider_instance failed %d", err);
+		} else {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+			    "deregister_instance");
 		}
-		uuid_clear(instance);
 	}
 	if (!uuid_is_null(provider)) {
 		err = kern_nexus_controller_deregister_provider(controller,
@@ -3370,8 +3367,10 @@ detach_provider_and_instance(uuid_t provider, uuid_t instance)
 		if (err != 0) {
 			FAKE_LOG(LOG_NOTICE, FE_DBGF_LIFECYCLE,
 			    "deregister_provider %d", err);
+		} else {
+			FAKE_LOG(LOG_DEBUG, FE_DBGF_LIFECYCLE,
+			    "deregister_provider");
 		}
-		uuid_clear(provider);
 	}
 	return;
 }
@@ -3379,12 +3378,25 @@ detach_provider_and_instance(uuid_t provider, uuid_t instance)
 static void
 feth_detach_netif_nexus(if_fake_ref fakeif)
 {
-	fake_nx_t fnx = &fakeif->iff_nx;
+	fake_nx         fnx;
+	fake_llink_t    llink __counted_by(FETH_MAX_LLINKS);
+	uint32_t        llink_cnt;
 
-	remove_non_default_llinks(fakeif);
-	detach_provider_and_instance(fnx->fnx_provider, fnx->fnx_instance);
+	feth_lock();
+	fnx = fakeif->iff_nx;
+	bzero(&fakeif->iff_nx, sizeof(fakeif->iff_nx));
+	llink = fakeif->iff_llink;
+	fakeif->iff_llink = NULL;
+	llink_cnt = fakeif->iff_llink_cnt;
+	fakeif->iff_llink_cnt = 0;
+	feth_unlock();
+	remove_non_default_llinks(fakeif->iff_name, &fnx, llink, llink_cnt);
+	detach_provider_and_instance(fnx.fnx_provider, fnx.fnx_instance);
+	if (llink != NULL) {
+		kfree_type(fake_llink, FETH_MAX_LLINKS, llink);
+	}
+	return;
 }
-
 #endif /* SKYWALK */
 
 /**
@@ -3466,7 +3478,7 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	int                             error;
 	if_fake_ref                     fakeif;
 	struct ifnet_init_eparams       feth_init;
-	fake_llink                     *iff_llink;
+	fake_llink                     *iff_llink = NULL;
 	ifnet_t                         ifp;
 	uint8_t                         mac_address[ETHER_ADDR_LEN];
 	bool                            multi_buflet;
@@ -3498,11 +3510,11 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 			    "multi-buflet not supported for split rx & tx pool");
 			return EINVAL;
 		}
-	}
-
-	iff_llink = kalloc_type(fake_llink, FETH_MAX_LLINKS, Z_WAITOK_ZERO);
-	if (iff_llink == NULL) {
-		return ENOBUFS;
+		iff_llink = kalloc_type(fake_llink,
+		    FETH_MAX_LLINKS, Z_WAITOK_ZERO);
+		if (iff_llink == NULL) {
+			return ENOBUFS;
+		}
 	}
 	fakeif = kalloc_type(struct if_fake, Z_WAITOK_ZERO_NOFAIL);
 	fakeif->iff_llink = iff_llink;
@@ -3631,6 +3643,7 @@ feth_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 		}
 		/* take an additional reference to ensure that it doesn't go away */
 		feth_retain(fakeif);
+		fakeif->iff_flags |= IFF_FLAGS_NX_ATTACHED;
 		fakeif->iff_ifp = ifp;
 	}
 #endif /* SKYWALK */
@@ -3670,17 +3683,16 @@ feth_clone_destroy(ifnet_t ifp)
 	}
 	feth_set_detaching(fakeif);
 #if SKYWALK
-	nx_attached = !feth_in_bsd_mode(fakeif);
+	nx_attached = (fakeif->iff_flags & IFF_FLAGS_NX_ATTACHED) != 0;
 #endif /* SKYWALK */
 	feth_unlock();
-
+	feth_config(ifp, NULL);
 #if SKYWALK
 	if (nx_attached) {
 		feth_detach_netif_nexus(fakeif);
 		feth_release(fakeif);
 	}
 #endif /* SKYWALK */
-	feth_config(ifp, NULL);
 	ifnet_detach(ifp);
 	return 0;
 }

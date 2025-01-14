@@ -79,7 +79,6 @@
 #include <os/cpp_util.h>
 #include <os/atomic_private.h>
 #include <libkern/c++/OSBoundedArrayRef.h>
-#include <libkern/coreanalytics/coreanalytics.h>
 
 #if DEVELOPMENT || DEBUG
 #include <os/system_event_log.h>
@@ -1442,8 +1441,8 @@ update_aotmode(uint32_t mode)
 	result = gIOPMWorkLoop->runActionBlock(^IOReturn (void) {
 		unsigned int oldCount;
 
-		if (mode) {
-		        gRootDomain->initAOTMetrics();
+		if (mode && !gRootDomain->_aotMetrics) {
+		        gRootDomain->_aotMetrics = IOMallocType(IOPMAOTMetrics);
 		}
 
 		oldCount = gRootDomain->idleSleepPreventersCount();
@@ -11023,19 +11022,15 @@ IOPMrootDomain::claimSystemWakeEvent(
 	if (_aotNow && aotFlags) {
 		if (kIOPMWakeEventAOTPossibleExit & flags) {
 			_aotMetrics->possibleCount++;
-			_aotAnalytics->possibleCount++;
 		}
 		if (kIOPMWakeEventAOTConfirmedPossibleExit & flags) {
 			_aotMetrics->confirmedPossibleCount++;
-			_aotAnalytics->confirmedPossibleCount++;
 		}
 		if (kIOPMWakeEventAOTRejectedPossibleExit & flags) {
 			_aotMetrics->rejectedPossibleCount++;
-			_aotAnalytics->rejectedPossibleCount++;
 		}
 		if (kIOPMWakeEventAOTExpiredPossibleExit & flags) {
 			_aotMetrics->expiredPossibleCount++;
-			_aotAnalytics->expiredPossibleCount++;
 		}
 
 		_aotPendingFlags |= aotFlags;
@@ -11948,70 +11943,6 @@ IOPMrootDomain::getWatchdogTimeout()
 	}
 }
 
-static void
-reportAnalyticsTimerExpired(
-	thread_call_param_t us, thread_call_param_t )
-{
-	((IOPMrootDomain *)us)->reportAnalytics();
-}
-
-void
-IOPMrootDomain::initAOTMetrics()
-{
-	if (!_aotMetrics) {
-		_aotMetrics = IOMallocType(IOPMAOTMetrics);
-	}
-
-	if (!_aotAnalytics) {
-		_aotAnalytics = IOMallocType(IOPMAOTAnalytics);
-		analyticsThreadCall = thread_call_allocate_with_options(reportAnalyticsTimerExpired,
-		    (thread_call_param_t)this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
-		scheduleAnalyticsThreadCall();
-	}
-}
-
-#define ANALYTICS_PERIOD_HOURS 24
-#define ANALYTICS_LEEWAY_MINUTES 5
-
-void
-IOPMrootDomain::scheduleAnalyticsThreadCall()
-{
-	uint64_t leeway, period, leeway_ns, period_ns, deadline;
-
-	period_ns = ANALYTICS_PERIOD_HOURS * 60 * 60 * NSEC_PER_SEC;
-	leeway_ns = ANALYTICS_LEEWAY_MINUTES * 60 * NSEC_PER_SEC;
-
-	nanoseconds_to_absolutetime(period_ns, &period);
-	nanoseconds_to_absolutetime(leeway_ns, &leeway);
-	deadline = mach_continuous_time() + period;
-	thread_call_enter_delayed_with_leeway(analyticsThreadCall, NULL, deadline, leeway, THREAD_CALL_CONTINUOUS);
-}
-
-CA_EVENT(aot_analytics,
-    CA_INT, possible_count,
-    CA_INT, confirmed_possible_count,
-    CA_INT, rejected_possible_count,
-    CA_INT, expired_possible_count);
-
-void
-IOPMrootDomain::reportAnalytics()
-{
-	if (_aotAnalytics) {
-		IOLog("IOPMAOTAnalytics possibleCount: %u, confirmedPossibleCount: %u, rejectedPossibleCount: %u, expiredPossibleCount: %u\n",
-		    _aotAnalytics->possibleCount, _aotAnalytics->confirmedPossibleCount, _aotAnalytics->rejectedPossibleCount, _aotAnalytics->expiredPossibleCount);
-
-		ca_event_t event = CA_EVENT_ALLOCATE(aot_analytics);
-		CA_EVENT_TYPE(aot_analytics) * e = (CA_EVENT_TYPE(aot_analytics) *)event->data;
-		e->possible_count = _aotAnalytics->possibleCount;
-		e->confirmed_possible_count = _aotAnalytics->confirmedPossibleCount;
-		e->rejected_possible_count = _aotAnalytics->rejectedPossibleCount;
-		e->expired_possible_count = _aotAnalytics->expiredPossibleCount;
-		CA_EVENT_SEND(event);
-
-		bzero(_aotAnalytics, sizeof(IOPMAOTAnalytics));
-		scheduleAnalyticsThreadCall();
-	}
-}
 
 #if defined(__i386__) || defined(__x86_64__) || (defined(__arm64__) && HIBERNATION)
 IOReturn

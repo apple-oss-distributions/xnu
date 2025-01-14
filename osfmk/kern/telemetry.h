@@ -36,6 +36,9 @@
 
 __BEGIN_DECLS
 
+/*
+ * No longer supported.
+ */
 #define TELEMETRY_CMD_TIMER_EVENT 1
 #define TELEMETRY_CMD_VOUCHER_NAME 2
 #define TELEMETRY_CMD_VOUCHER_STAIN TELEMETRY_CMD_VOUCHER_NAME
@@ -175,11 +178,6 @@ extern int telemetry_gather(user_addr_t buffer, uint32_t *length, bool mark);
 extern void telemetry_mark_curthread(boolean_t interrupted_userspace,
     boolean_t pmi);
 
-extern void telemetry_task_ctl(task_t task, uint32_t reason, int enable_disable);
-extern void telemetry_task_ctl_locked(task_t task, uint32_t reason, int enable_disable);
-extern void telemetry_global_ctl(int enable_disable);
-
-extern int telemetry_timer_event(uint64_t deadline, uint64_t interval, uint64_t leeway);
 extern int telemetry_pmi_setup(enum telemetry_pmi pmi_type, uint64_t interval);
 
 #if CONFIG_MACF

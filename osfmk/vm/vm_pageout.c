@@ -114,6 +114,7 @@
 #include <vm/vm_ubc.h>
 
 #include <san/kasan.h>
+#include <sys/kern_memorystatus_xnu.h>
 
 #if CONFIG_PHANTOM_CACHE
 #include <vm/vm_phantom_cache_internal.h>
@@ -129,16 +130,6 @@ extern int cs_debug;
 extern void mbuf_drain(boolean_t);
 #endif /* CONFIG_MBUF_MCACHE */
 
-#if VM_PRESSURE_EVENTS
-#if CONFIG_JETSAM
-extern unsigned int memorystatus_available_pages;
-extern unsigned int memorystatus_available_pages_pressure;
-extern unsigned int memorystatus_available_pages_critical;
-#else /* CONFIG_JETSAM */
-extern uint64_t memorystatus_available_pages;
-extern uint64_t memorystatus_available_pages_pressure;
-extern uint64_t memorystatus_available_pages_critical;
-#endif /* CONFIG_JETSAM */
 #if CONFIG_FREEZE
 extern unsigned int memorystatus_frozen_count;
 extern unsigned int memorystatus_suspended_count;
@@ -153,7 +144,6 @@ void vm_pressure_response(void);
 extern void consider_vm_pressure_events(void);
 
 #define MEMORYSTATUS_SUSPENDED_THRESHOLD  4
-#endif /* VM_PRESSURE_EVENTS */
 
 SECURITY_READ_ONLY_LATE(thread_t) vm_pageout_scan_thread;
 SECURITY_READ_ONLY_LATE(thread_t) vm_pageout_gc_thread;
@@ -540,7 +530,7 @@ vm_pageout_object_terminate(
 	vm_object_activity_end(shadow_object);
 	vm_object_unlock(shadow_object);
 
-	assert(object->ref_count == 0);
+	assert(os_ref_get_count_raw(&object->ref_count) == 0);
 	assert(object->paging_in_progress == 0);
 	assert(object->activity_in_progress == 0);
 	assert(object->resident_page_count == 0);
@@ -1498,6 +1488,13 @@ vm_pageout_page_queue(vm_page_queue_head_t *q, size_t qcount, bool perf_test)
 				delayed_unlock = 0;
 			}
 			if (!m_object->pager_initialized || m_object->pager == MEMORY_OBJECT_NULL) {
+				/*
+				 * We dropped the page queues lock above, so
+				 * "m" might no longer be on this queue...
+				 */
+				if (m != (vm_page_t) vm_page_queue_first(q)) {
+					continue;
+				}
 				goto reenter_pg_on_q;
 			}
 			/*
@@ -2641,7 +2638,7 @@ vps_choose_victim_page(vm_page_t *victim_page, int *anons_grabbed, boolean_t *gr
 		    vm_pageout_state.vm_page_filecache_min) {
 			if ((vm_page_pageable_external_count *
 			    vm_pageout_memorystatus_fb_factor_dr) >
-			    (memorystatus_available_pages_critical *
+			    (memorystatus_get_critical_page_shortage_threshold() *
 			    vm_pageout_memorystatus_fb_factor_nr)) {
 				*grab_anonymous = FALSE;
 
@@ -3811,23 +3808,9 @@ throttle_inactive:
 		if (inactive_throttled == TRUE) {
 			goto throttle_inactive;
 		}
-
-#if VM_PRESSURE_EVENTS
-#if CONFIG_JETSAM
-
-		/*
-		 * If Jetsam is enabled, then the sending
-		 * of memory pressure notifications is handled
-		 * from the same thread that takes care of high-water
-		 * and other jetsams i.e. the memorystatus_thread.
-		 */
-
-#else /* CONFIG_JETSAM */
-
-		vm_pressure_response();
-
-#endif /* CONFIG_JETSAM */
-#endif /* VM_PRESSURE_EVENTS */
+#if !CONFIG_JETSAM
+		memorystatus_update_available_page_count(AVAILABLE_NON_COMPRESSED_MEMORY);
+#endif /* !CONFIG_JETSAM */
 
 		if (page_prev_q_state == VM_PAGE_ON_SPECULATIVE_Q) {
 			VM_PAGEOUT_DEBUG(vm_pageout_speculative_dirty, 1);
@@ -4702,16 +4685,7 @@ vm_pressure_response(void)
 		return;
 	}
 
-#if !XNU_TARGET_OS_OSX
-
-	available_memory = (uint64_t) memorystatus_available_pages;
-
-#else /* !XNU_TARGET_OS_OSX */
-
-	available_memory = (uint64_t) AVAILABLE_NON_COMPRESSED_MEMORY;
-	memorystatus_available_pages = (uint64_t) AVAILABLE_NON_COMPRESSED_MEMORY;
-
-#endif /* !XNU_TARGET_OS_OSX */
+	available_memory = (uint64_t) memorystatus_get_available_page_count();
 
 	total_pages = (unsigned int) atop_64(max_mem);
 #if CONFIG_SECLUDED_MEMORY
@@ -6932,7 +6906,7 @@ REDISCOVER_ENTRY:
 	    ( /* case 2 */
 		    local_object->internal &&
 		    (local_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) &&
-		    local_object->ref_count > 1))) {
+		    os_ref_get_count_raw(&local_object->ref_count) > 1))) {
 		vm_prot_t       prot;
 
 		/*
@@ -8408,6 +8382,21 @@ vm_object_iopl_request(
 				ret = KERN_MEMORY_ERROR;
 				goto return_err;
 			}
+
+			if (dst_page != VM_PAGE_NULL &&
+			    dst_page->vmp_busy) {
+				wait_result_t wait_result;
+				vm_object_lock_assert_exclusive(object);
+				wait_result = vm_page_sleep(object, dst_page,
+				    interruptible, LCK_SLEEP_DEFAULT);
+				if (wait_result == THREAD_AWAKENED ||
+				    wait_result == THREAD_RESTART) {
+					continue;
+				}
+				ret = MACH_SEND_INTERRUPTED;
+				goto return_err;
+			}
+
 			set_cache_attr_needed = TRUE;
 
 			/*
@@ -8776,6 +8765,7 @@ return_err:
 
 	for (; offset < dst_offset; offset += PAGE_SIZE) {
 		boolean_t need_unwire;
+		bool need_wakeup;
 
 		dst_page = vm_page_lookup(object, offset);
 
@@ -8795,6 +8785,7 @@ return_err:
 		 */
 		need_unwire = TRUE;
 
+		need_wakeup = false;
 		if (dw_count) {
 			if ((dwp_start)[dw_index].dw_m == dst_page) {
 				/*
@@ -8803,6 +8794,16 @@ return_err:
 				 * vm_page_wire on this page
 				 */
 				need_unwire = FALSE;
+
+				if (dst_page->vmp_busy &&
+				    ((dwp_start)[dw_index].dw_mask & DW_clear_busy)) {
+					/*
+					 * It's our own "busy" bit, so we need to clear it
+					 * now and wake up waiters below.
+					 */
+					dst_page->vmp_busy = false;
+					need_wakeup = true;
+				}
 
 				dw_index++;
 				dw_count--;
@@ -8819,8 +8820,11 @@ return_err:
 				vm_page_unwire(dst_page, TRUE);
 			}
 			if (dst_page->vmp_busy) {
-				vm_page_wakeup_done(object, dst_page);
-			} else {
+				/* not our "busy" or we would have cleared it above */
+				assert(!need_wakeup);
+			}
+			if (need_wakeup) {
+				assert(!dst_page->vmp_busy);
 				vm_page_wakeup(object, dst_page);
 			}
 		}
@@ -10048,7 +10052,8 @@ VM_PRESSURE_NORMAL_TO_WARNING(void)
 {
 	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
 		/* Available pages below our threshold */
-		if (memorystatus_available_pages < memorystatus_available_pages_pressure) {
+		uint32_t available_pages = memorystatus_get_available_page_count();
+		if (available_pages < memorystatus_get_soft_memlimit_page_shortage_threshold()) {
 #if CONFIG_FREEZE
 			/* No frozen processes to kill */
 			if (memorystatus_frozen_count == 0) {
@@ -10072,10 +10077,8 @@ VM_PRESSURE_WARNING_TO_CRITICAL(void)
 {
 	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
 		/* Available pages below our threshold */
-		if (memorystatus_available_pages < memorystatus_available_pages_critical) {
-			return TRUE;
-		}
-		return FALSE;
+		uint32_t available_pages = memorystatus_get_available_page_count();
+		return available_pages < memorystatus_get_critical_page_shortage_threshold();
 	} else {
 		return vm_compressor_low_on_space() || (AVAILABLE_NON_COMPRESSED_MEMORY < ((12 * VM_PAGE_COMPRESSOR_SWAP_UNTHROTTLE_THRESHOLD) / 10)) ? 1 : 0;
 	}
@@ -10089,11 +10092,9 @@ VM_PRESSURE_WARNING_TO_NORMAL(void)
 {
 	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
 		/* Available pages above our threshold */
-		unsigned int target_threshold = (unsigned int) (memorystatus_available_pages_pressure + ((15 * memorystatus_available_pages_pressure) / 100));
-		if (memorystatus_available_pages > target_threshold) {
-			return TRUE;
-		}
-		return FALSE;
+		uint32_t available_pages = memorystatus_get_available_page_count();
+		uint32_t target_threshold = (((115 * memorystatus_get_soft_memlimit_page_shortage_threshold()) / 100));
+		return available_pages > target_threshold;
 	} else {
 		return (AVAILABLE_NON_COMPRESSED_MEMORY > ((12 * VM_PAGE_COMPRESSOR_COMPACT_THRESHOLD) / 10)) ? 1 : 0;
 	}
@@ -10103,12 +10104,9 @@ boolean_t
 VM_PRESSURE_CRITICAL_TO_WARNING(void)
 {
 	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
-		/* Available pages above our threshold */
-		unsigned int target_threshold = (unsigned int)(memorystatus_available_pages_critical + ((15 * memorystatus_available_pages_critical) / 100));
-		if (memorystatus_available_pages > target_threshold) {
-			return TRUE;
-		}
-		return FALSE;
+		uint32_t available_pages = memorystatus_get_available_page_count();
+		uint32_t target_threshold = (((115 * memorystatus_get_critical_page_shortage_threshold()) / 100));
+		return available_pages > target_threshold;
 	} else {
 		return (AVAILABLE_NON_COMPRESSED_MEMORY > ((14 * VM_PAGE_COMPRESSOR_SWAP_UNTHROTTLE_THRESHOLD) / 10)) ? 1 : 0;
 	}

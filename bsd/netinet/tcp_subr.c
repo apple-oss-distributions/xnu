@@ -123,6 +123,7 @@
 #include <netinet/tcp_log.h>
 
 #include <netinet6/ip6protosw.h>
+#include <netinet6/esp.h>
 
 #if IPSEC
 #include <netinet6/ipsec.h>
@@ -1257,8 +1258,7 @@ tcp_drop(struct tcpcb *tp, int errno)
 void
 tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 {
-	u_int32_t rtt = rt->rt_rmx.rmx_rtt;
-	int isnetlocal = (tp->t_flags & TF_LOCAL);
+	uint32_t rtt = rt->rt_rmx.rmx_rtt;
 
 	TCP_LOG_RTM_RTT(tp, rt);
 
@@ -1270,8 +1270,7 @@ tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt)
 		if (rt->rt_rmx.rmx_locks & RTV_RTT) {
 			tp->t_rttmin = rtt / (RTM_RTTUNIT / TCP_RETRANSHZ);
 		} else {
-			tp->t_rttmin = isnetlocal ? tcp_TCPTV_MIN :
-			    TCPTV_REXMTMIN;
+			tp->t_rttmin = TCPTV_REXMTMIN;
 		}
 
 		tp->t_srtt =
@@ -2819,6 +2818,57 @@ tcp_drop_syn_sent(struct inpcb *inp, int errno)
 }
 
 /*
+ * Get effective MTU for redirect virtual interface. Redirect
+ * virtual interface switches between multiple delegated interfaces.
+ * For cases, where redirect forwards packets to an ipsec interface,
+ * MTU should be adjusted to consider ESP encapsulation overhead.
+ */
+uint32_t
+tcp_get_effective_mtu(struct rtentry *rt, uint32_t current_mtu)
+{
+	ifnet_t ifp = NULL;
+	ifnet_t delegated_ifp = NULL;
+	ifnet_t outgoing_ifp = NULL;
+	uint32_t min_mtu = 0;
+	uint32_t outgoing_mtu = 0;
+	uint32_t tunnel_overhead = 0;
+
+	if (rt == NULL || rt->rt_ifp == NULL) {
+		return current_mtu;
+	}
+
+	ifp = rt->rt_ifp;
+	if (ifp->if_subfamily != IFNET_SUBFAMILY_REDIRECT) {
+		return current_mtu;
+	}
+
+	delegated_ifp = ifp->if_delegated.ifp;
+	if (delegated_ifp == NULL || delegated_ifp->if_family != IFNET_FAMILY_IPSEC) {
+		return current_mtu;
+	}
+
+	min_mtu = MIN(delegated_ifp->if_mtu, current_mtu);
+
+	outgoing_ifp = delegated_ifp->if_delegated.ifp;
+	if (outgoing_ifp == NULL) {
+		return min_mtu;
+	}
+
+	outgoing_mtu = outgoing_ifp->if_mtu;
+	if (outgoing_mtu > 0) {
+		tunnel_overhead = (u_int32_t)(esp_hdrsiz(NULL) + sizeof(struct ip6_hdr));
+		if (outgoing_mtu > tunnel_overhead) {
+			outgoing_mtu -= tunnel_overhead;
+		}
+		if (outgoing_mtu < min_mtu) {
+			return outgoing_mtu;
+		}
+	}
+
+	return min_mtu;
+}
+
+/*
  * When `need fragmentation' ICMP is received, update our idea of the MSS
  * based on the new value in the route.  Also nudge TCP to send something,
  * since we know the packet we just sent was dropped.
@@ -2865,6 +2915,8 @@ tcp_mtudisc(struct inpcb *inp, __unused int errno)
 			return;
 		}
 		mtu = rt->rt_rmx.rmx_mtu;
+
+		mtu = tcp_get_effective_mtu(rt, mtu);
 
 		/* Route locked during lookup above */
 		RT_UNLOCK(rt);
@@ -3601,7 +3653,7 @@ microuptime_ns(void)
 #define MAX_BURST_INTERVAL_KERNEL_PACING_NSEC                                  \
 	(10 * NSEC_PER_MSEC) // Don't delay more than 10ms between two bursts
 static uint64_t
-tcp_pacer_get_packet_interval(struct tcpcb *tp, uint16_t pkt_len)
+tcp_pacer_get_packet_interval(struct tcpcb *tp, uint32_t size)
 {
 	if (tp->t_pacer.rate == 0) {
 		os_log_error(OS_LOG_DEFAULT,
@@ -3611,7 +3663,7 @@ tcp_pacer_get_packet_interval(struct tcpcb *tp, uint16_t pkt_len)
 		return MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
 	}
 
-	uint64_t interval = (uint64_t)pkt_len * NSEC_PER_SEC / tp->t_pacer.rate;
+	uint64_t interval = (uint64_t)size * NSEC_PER_SEC / tp->t_pacer.rate;
 	if (interval > MAX_BURST_INTERVAL_KERNEL_PACING_NSEC) {
 		interval = MAX_BURST_INTERVAL_KERNEL_PACING_NSEC;
 	}
@@ -3645,8 +3697,8 @@ tcp_pacer_get_packet_tx_time(struct tcpcb *tp, uint16_t pkt_len)
 			 * reset size to this packet's len
 			 */
 			tp->t_pacer.packet_tx_time +=
-			    tcp_pacer_get_packet_interval(tp, pkt_len);
-			tp->t_pacer.current_size = pkt_len;
+			    tcp_pacer_get_packet_interval(tp, tp->t_pacer.current_size);
+			tp->t_pacer.current_size = 0;
 			if (now > tp->t_pacer.packet_tx_time) {
 				/*
 				 * If current time is bigger, then application
@@ -3809,8 +3861,6 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 
 		tcp_rxt_seg_drop++;
 		tp->t_rxt_seg_drop++;
-		TCP_LOG(tp, "removed rxseg list overflow %u:%u ",
-		    rxseg->rx_start, rxseg->rx_end);
 		zfree(tcp_rxt_seg_zone, rxseg);
 
 		tp->t_rxt_seg_count -= 1;

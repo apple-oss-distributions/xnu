@@ -38,8 +38,6 @@ When the system hits the vnode limit, and the VFS subsystem is not able to recyc
 
 The number of available pages is below `memorystatus_available_pages_critical`. The `memorystatus_thread` will kill processes in ascending priority order until available pages is above `memorystatus_available_pages_critical`. 
 
-Note that `memorystatus_available_pages_critical = memorystatus_available_pages_critical_idle` when there are processes in the idle band. When the idle band is empty `memorystatus_available_pages_critical = memorystatus_available_pages_critical_base`. In practice this means we kill idle procs when available\_pages < 10% and all others when available\_pages < 5%. One exception is on devices with >= 4GB of memory. For those devices the critical base is 4% instead of 5%.
-
 ### JETSAM\_REASON\_MEMORY\_PROCTHRASHING
 
 This is also known as aggressive jetsam. If we determine that the idle band contains exclusively false idle daemons, and there are at least 5 daemons in the idle band, we will trigger proc thrashing jetsams. These can kill up to and above the foreground band in an attempt to relieve the false idle problem.
@@ -77,7 +75,9 @@ See `kill_all_frozen_processes` in `bsd/kern/kern_memorystatus_freeze.c` for the
 
 ### JETSAM\_REASON\_MEMORY\_IDLE\_EXIT
 
-These are idle daemon kills on macOS. When the memory pressure level escalates above normal, the memorystatus notification thread calls `memorystatus_idle_exit_from_VM` to kill 1 idle daemon. Note that daemons must opt in to pressured exit on macOS.
+These are idle kills.
+
+On macOS, when the memory pressure level escalates above normal, the memorystatus notification thread calls `memorystatus_idle_exit_from_VM` to kill 1 idle daemon. Note that daemons must opt in to pressured exit on macOS.
 
 ### JETSAM\_REASON\_ZONE\_MAP\_EXHAUSTION
 

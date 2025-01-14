@@ -40,8 +40,20 @@
 #include <sys/kdebug.h>
 
 #include <stdint.h>
+#include <stdbool.h>
+
+#include <kern/block_hint.h>
 
 #define ES_INVALID_ID UINT64_MAX
+
+/*
+ * Combine space and ID into a unique identifier.
+ * The ID passed in must leave the top byte clear.
+ */
+#define ES_UNIQUE_ID(space, id) ({                                        \
+	assert3u(id >> 56, ==, 0); /* IDs must have the top byte clear */ \
+	(id | ((uint64_t)space << 56));                                   \
+})
 
 static LCK_GRP_DECLARE(esync_lckgrp, "esync");
 os_refgrp_decl(static, esync_refgrp, "esync", NULL);
@@ -357,6 +369,45 @@ esync_update_epoch(const uint64_t epoch, os_atomic(uint64_t) *counter)
 	}) == 1;
 }
 
+
+static void
+esync_wait_set_block_hint(const esync_space_t space, const esync_policy_t policy)
+{
+	thread_t self = current_thread();
+
+	switch (space) {
+	case ESYNC_SPACE_EXCLAVES_Q:
+	case ESYNC_SPACE_EXCLAVES_T:
+		switch (policy) {
+		case ESYNC_POLICY_KERNEL:
+			thread_set_pending_block_hint(self, kThreadWaitExclaveCore);
+			return;
+		case ESYNC_POLICY_USER:
+			thread_set_pending_block_hint(self, kThreadWaitExclaveKit);
+			return;
+		default:
+			return;
+		}
+	default:
+		return;
+	}
+}
+
+void
+kdp_esync_find_owner(struct waitq *waitq, event64_t event,
+    thread_waitinfo_t *waitinfo)
+{
+	const esync_t *esync = (esync_t *)event;
+	waitinfo->context = esync->es_id;
+
+	if (waitq_held(waitq)) {
+		return;
+	}
+
+	const struct turnstile *turnstile = waitq_to_turnstile(waitq);
+	waitinfo->owner = thread_tid(turnstile->ts_inheritor);
+}
+
 /*
  * Block until esync_wake() is called on this id.
  * The epoch is incremented by the client on wakes. If the epoch is stale, then
@@ -370,18 +421,19 @@ esync_wait(esync_space_t space, const uint64_t id, const uint64_t epoch,
     const esync_policy_t policy, const wait_interrupt_t interruptible)
 {
 	assert3u(id, !=, ES_INVALID_ID);
+	const uint64_t unique_id = ES_UNIQUE_ID(space, id);
 
 	ht_t *ht = space_to_ht(space);
 
 	esync_t *to_be_freed = NULL;
-	esync_t *sync = esync_get(ht, id, policy, &to_be_freed);
+	esync_t *sync = esync_get(ht, unique_id, policy, &to_be_freed);
 
 	LCK_SPIN_ASSERT(&sync->es_lock, LCK_ASSERT_OWNED);
 
 	const bool fresh_epoch = esync_update_epoch(epoch, counter);
 	if (!fresh_epoch) {
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAIT_STALE), space, id, epoch, NULL);
+		    MACH_EPOCH_SYNC_WAIT_STALE), unique_id, epoch, NULL);
 		esync_put(ht, sync, to_be_freed);
 		return THREAD_NOT_WAITING;
 	}
@@ -389,12 +441,13 @@ esync_wait(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	/*
 	 * It is safe to lookup the thread from the ctid here as the lock is
 	 * held and the epoch is fresh.
+	 * ctid and hence tid may be 0.
 	 */
 	thread_t owner_thread = ctid_get_thread(owner_ctid);
+	uint64_t tid = thread_tid(owner_thread);
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC, MACH_EPOCH_SYNC_WAIT) |
-	    DBG_FUNC_START, space, id, epoch,
-	    owner_thread != NULL ? thread_tid(owner_thread) : 0);
+	    DBG_FUNC_START, unique_id, epoch, tid);
 
 	assert(sync->es_policy == ESYNC_POLICY_KERNEL ||
 	    sync->es_policy == ESYNC_POLICY_USER);
@@ -409,6 +462,8 @@ esync_wait(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	 */
 	turnstile_update_inheritor(ts, owner_thread,
 	    (TURNSTILE_DELAYED_UPDATE | TURNSTILE_INHERITOR_THREAD));
+
+	esync_wait_set_block_hint(space, policy);
 
 	wait_result_t wr = waitq_assert_wait64(&ts->ts_waitq,
 	    CAST_EVENT64_T(sync), interruptible, TIMEOUT_WAIT_FOREVER);
@@ -451,6 +506,7 @@ esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
 		mode == ESYNC_WAKE_THREAD);
 
 	ht_t *ht = space_to_ht(space);
+	const uint64_t unique_id = ES_UNIQUE_ID(space, id);
 
 	kern_return_t kr = KERN_FAILURE;
 
@@ -462,11 +518,11 @@ esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	 */
 	(void) esync_update_epoch(epoch, counter);
 
-	esync_t *sync = ht_get(ht, id);
+	esync_t *sync = ht_get(ht, unique_id);
 	if (sync == NULL) {
 		/* Drop pre-posted WAKEs. */
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAKE_NO_WAITERS), space, id,
+		    MACH_EPOCH_SYNC_WAKE_NO_WAITERS), unique_id,
 		    epoch, mode);
 		return KERN_NOT_WAITING;
 	}
@@ -481,11 +537,15 @@ esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	struct turnstile *ts = turnstile_prepare((uintptr_t)sync,
 	    &sync->es_turnstile, TURNSTILE_NULL, tt);
 
+	/* ctid and hence tid may be 0. */
+	thread_t thread = ctid_get_thread(ctid);
+	uint64_t tid = thread_tid(thread);
+
 	switch (mode) {
 	case ESYNC_WAKE_ONE:
 		/* The woken thread is the new inheritor. */
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAKE_ONE), space, id, epoch);
+		    MACH_EPOCH_SYNC_WAKE_ONE), unique_id, epoch);
 		kr = waitq_wakeup64_one(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 		break;
@@ -493,7 +553,7 @@ esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	case ESYNC_WAKE_ALL:
 		/* The inheritor is cleared. */
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAKE_ALL), space, id, epoch);
+		    MACH_EPOCH_SYNC_WAKE_ALL), unique_id, epoch);
 		kr = waitq_wakeup64_all(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_UPDATE_INHERITOR);
 		break;
@@ -501,21 +561,19 @@ esync_wake(esync_space_t space, const uint64_t id, const uint64_t epoch,
 	case ESYNC_WAKE_ONE_WITH_OWNER:
 		/* The specified thread is the new inheritor (may be NULL). */
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAKE_ONE_WITH_OWNER), space, id, epoch,
-		    thread_tid(ctid_get_thread(ctid)));
+		    MACH_EPOCH_SYNC_WAKE_ONE_WITH_OWNER), unique_id, epoch, tid);
 		kr = waitq_wakeup64_one(&ts->ts_waitq, CAST_EVENT64_T(sync),
 		    THREAD_AWAKENED, WAITQ_WAKEUP_DEFAULT);
-		turnstile_update_inheritor(ts, ctid_get_thread(ctid),
+		turnstile_update_inheritor(ts, thread,
 		    TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD);
 		break;
 
 	case ESYNC_WAKE_THREAD:
 		/* No new inheritor. Wake the specified thread (if waiting). */
 		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EPOCH_SYNC,
-		    MACH_EPOCH_SYNC_WAKE_THREAD), space, id, epoch,
-		    thread_tid(ctid_get_thread(ctid)));
+		    MACH_EPOCH_SYNC_WAKE_THREAD), unique_id, epoch, tid);
 		kr = waitq_wakeup64_thread(&ts->ts_waitq, CAST_EVENT64_T(sync),
-		    ctid_get_thread(ctid), WAITQ_WAKEUP_DEFAULT);
+		    thread, WAITQ_WAKEUP_DEFAULT);
 	}
 
 	turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
@@ -601,7 +659,7 @@ test_lock(uint64_t *lock)
 				os_atomic_inc(&test_waiter_count, acq_rel);
 
 				random_delay();
-				const wait_result_t wr = esync_wait(ESYNC_SPACE_TEST, (uintptr_t)lock, epoch,
+				const wait_result_t wr = esync_wait(ESYNC_SPACE_TEST, (uint32_t)(uintptr_t)lock, epoch,
 				    &server_counter, OWNER(old), ESYNC_POLICY_KERNEL, THREAD_UNINT);
 				assert(wr == THREAD_NOT_WAITING || wr == THREAD_AWAKENED);
 				random_delay();
@@ -636,7 +694,7 @@ test_unlock(uint64_t *lock)
 
 	if ((old & WAITER_BIT) != 0) {
 		random_delay();
-		(void) esync_wake(ESYNC_SPACE_TEST, (uintptr_t)lock, epoch,
+		(void) esync_wake(ESYNC_SPACE_TEST, (uint32_t)(uintptr_t)lock, epoch,
 		    &server_counter, ESYNC_WAKE_ONE, 0);
 		random_delay();
 	}

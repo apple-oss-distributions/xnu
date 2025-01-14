@@ -1695,6 +1695,14 @@ hibernate_write_image(void)
 	svPageCount         = 0;
 	zvPageCount         = 0;
 
+#if DEVELOPMENT || DEBUG
+	// Enable panic injection on the entry path.
+	// The panic must occur after boot-image is set but before the image is written.
+	if ((panic_test_case & PANIC_TEST_CASE_HIBERNATION_ENTRY) && (panic_test_failure_mode & PANIC_TEST_FAILURE_MODE_PANIC)) {
+		panic("injected panic on hibernation entry");
+	}
+#endif
+
 	if (!vars->fileVars
 	    || !vars->fileVars->pollers
 	    || !(kIOHibernateModeOn & gIOHibernateMode)) {

@@ -900,9 +900,9 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 		if (kIOMapGuardedMask & ref->options) {
 			vm_map_offset_t lastpage = vm_map_trunc_page(addr + size - guardSize, vm_map_page_mask(map));
 
-			err = vm_map_protect(map, addr, addr + guardSize, VM_PROT_NONE, false /*set_max*/);
+			err = mach_vm_protect(map, addr, guardSize, false /*set max*/, VM_PROT_NONE);
 			assert(KERN_SUCCESS == err);
-			err = vm_map_protect(map, lastpage, lastpage + guardSize, VM_PROT_NONE, false /*set_max*/);
+			err = mach_vm_protect(map, lastpage, guardSize, false /*set max*/, VM_PROT_NONE);
 			assert(KERN_SUCCESS == err);
 			ref->mapped += guardSize;
 		}

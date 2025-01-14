@@ -1767,6 +1767,8 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 			goto release;
 		}
 		if (lport == 0) {
+			inp_enter_bind_in_progress(so);
+
 			/*
 			 * In case we don't have a local port set, go through
 			 * the full connect.  We don't have a local port yet
@@ -1784,6 +1786,9 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 			 */
 			error = in_pcbconnect(inp, addr, p, ipoa.ipoa_boundif,
 			    &outif);
+
+			inp_exit_bind_in_progress(so);
+
 			if (error) {
 				goto release;
 			}
@@ -2299,6 +2304,9 @@ udp_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+
+	inp_enter_bind_in_progress(so);
+
 	error = in_pcbbind(inp, nam, NULL, p);
 
 #if NECP
@@ -2314,6 +2322,8 @@ udp_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	UDP_LOG_BIND(inp, error);
 
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 
@@ -2327,8 +2337,11 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
+	inp_enter_bind_in_progress(so);
+
 	if (inp->inp_faddr.s_addr != INADDR_ANY) {
-		return EISCONN;
+		error = EISCONN;
+		goto done;
 	}
 
 	if (!(so->so_flags1 & SOF1_CONNECT_COUNTED)) {
@@ -2343,8 +2356,7 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		if (error == 0) {
 			error = flow_divert_connect_out(so, nam, p);
 		}
-		UDP_LOG_CONNECT(inp, error);
-		return error;
+		goto done;
 	} else {
 		so->so_flags1 |= SOF1_FLOW_DIVERT_SKIP;
 	}
@@ -2369,7 +2381,11 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		}
 		inp->inp_connect_timestamp = mach_continuous_time();
 	}
+done:
 	UDP_LOG_CONNECT(inp, error);
+
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 

@@ -740,6 +740,7 @@ _load_trust_cache
 _load_trust_cache_with_type
 _load_legacy_trust_cache
 _query_trust_cache
+_query_trust_cache_for_rem
 _m_cat
 _m_free:_mbuf_free
 _m_freem:_mbuf_freem
@@ -931,6 +932,7 @@ _pru_sense_null
 _pru_shutdown_notsupp
 _pru_sockaddr_notsupp
 _pru_sopoll_notsupp
+_psignal_sigkill_try_thread_with_reason
 _psignal_sigkill_with_reason
 _pthread_kext_register
 _q_to_b

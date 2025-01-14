@@ -133,11 +133,7 @@ pmap_sptm_percpu_data_t PERCPU_DATA(pmap_sptm_percpu);
 os_refgrp_decl(static, pmap_refgrp, "pmap", NULL);
 
 /* Boot-arg to enable/disable the use of XNU_KERNEL_RESTRICTED type in SPTM. */
-#if !XNU_TARGET_OS_XR
 TUNABLE(bool, use_xnu_restricted, "xnu_restricted", true);
-#else
-TUNABLE(bool, use_xnu_restricted, "xnu_restricted", false);
-#endif // !XNU_TARGET_OS_XR
 
 extern u_int32_t random(void); /* from <libkern/libkern.h> */
 

@@ -1768,7 +1768,14 @@ vm_shared_region_map_file_setup(
 			}
 
 			/* mapping's address is relative to the shared region base */
-			target_address = (vm_map_offset_t)(mappings[i].sms_address - sr_base_address);
+			if (__improbable(
+				    os_sub_overflow(
+					    mappings[i].sms_address,
+					    sr_base_address,
+					    &target_address))) {
+				kr = KERN_INVALID_ARGUMENT;
+				break;
+			}
 
 			vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 			vmk_flags.vmkf_already = TRUE;

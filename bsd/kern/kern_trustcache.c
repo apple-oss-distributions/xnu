@@ -58,9 +58,6 @@ static bool boot_app_tc_loaded = false;
  */
 #include <sys/trusted_execution_monitor.h>
 
-LCK_GRP_DECLARE(txm_trust_cache_lck_grp, "txm_trust_cache_lck_grp");
-decl_lck_rw_data(, txm_trust_cache_lck);
-
 /* Immutable part of the runtime */
 SECURITY_READ_ONLY_LATE(TrustCacheRuntime_t*) trust_cache_rt = NULL;
 
@@ -109,9 +106,6 @@ trust_cache_runtime_init(void)
 		panic("amfi interface is stale: %u", amfi->TrustCache.version);
 	}
 
-	/* Initialize the TXM trust cache read-write lock */
-	lck_rw_init(&txm_trust_cache_lck, &txm_trust_cache_lck_grp, 0);
-
 	/* Acquire trust cache information from the monitor */
 	get_trust_cache_info();
 }
@@ -155,9 +149,6 @@ txm_load_trust_cache(
 	txm_transfer_region(payload_addr, img4_payload_len);
 	txm_transfer_region(manifest_addr, img4_manifest_len);
 
-	/* Take the trust cache lock exclusively */
-	lck_rw_lock_exclusive(&txm_trust_cache_lck);
-
 	/* TXM will round-up to page length itself */
 	ret = txm_kernel_call(
 		&txm_call,
@@ -165,9 +156,6 @@ txm_load_trust_cache(
 		payload_addr, img4_payload_len,
 		manifest_addr, img4_manifest_len,
 		0, 0);
-
-	/* Release the trust cache lock */
-	lck_rw_unlock_exclusive(&txm_trust_cache_lck);
 
 	/* Check for duplicate trust cache error */
 	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
@@ -217,11 +205,7 @@ txm_query_trust_cache(
 		.num_input_args = 2,
 		.num_output_args = 2,
 	};
-	kern_return_t ret = KERN_NOT_FOUND;
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, query_type, cdhash);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
+	kern_return_t ret = txm_kernel_call(&txm_call, query_type, cdhash);
 
 	if (ret == KERN_SUCCESS) {
 		if (query_token) {
@@ -242,6 +226,31 @@ txm_query_trust_cache(
 }
 
 static kern_return_t
+txm_query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	uint8_t *rem_perms)
+{
+#if XNU_HAS_TRUST_CACHE_QUERY_FOR_REM
+	txm_call_t txm_call = {
+		.selector = kTXMKernelSelectorQueryTrustCacheForREM,
+		.num_input_args = 1,
+		.num_output_args = 1
+	};
+	kern_return_t ret = txm_kernel_call(&txm_call, cdhash);
+
+	if ((ret == KERN_SUCCESS) && (rem_perms != NULL)) {
+		*rem_perms = (uint8_t)txm_call.return_words[0];
+	}
+
+	return ret;
+#else
+	(void)cdhash;
+	(void)rem_perms;
+	return KERN_NOT_SUPPORTED;
+#endif /* XNU_HAS_TRUST_CACHE_QUERY_FOR_REM */
+}
+
+static kern_return_t
 txm_check_trust_cache_runtime_for_uuid(
 	const uint8_t check_uuid[kUUIDSize])
 {
@@ -250,11 +259,7 @@ txm_check_trust_cache_runtime_for_uuid(
 		.failure_silent = true,
 		.num_input_args = 1
 	};
-	kern_return_t ret = KERN_DENIED;
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, check_uuid);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
+	kern_return_t ret = txm_kernel_call(&txm_call, check_uuid);
 
 	/* Check for not-found trust cache error */
 	if (txm_call.txm_ret.returnCode == kTXMReturnTrustCache) {
@@ -937,6 +942,30 @@ query_trust_cache(
 	ret = ppl_query_trust_cache(query_type, cdhash, query_token);
 #else
 	ret = xnu_query_trust_cache(query_type, cdhash, query_token);
+#endif
+
+	return ret;
+}
+
+kern_return_t
+query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	__unused uint8_t *rem_perms)
+{
+	kern_return_t ret = KERN_NOT_SUPPORTED;
+
+	if (cdhash == NULL) {
+		printf("unable to query trust caches: no cdhash provided\n");
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * Only when the system is using the Trusted Execution Monitor environment does
+	 * it support restricted execution mode. For all other monitor environments, or
+	 * when we don't have a monitor, the return defaults to a not supported.
+	 */
+#if CONFIG_SPTM
+	ret = txm_query_trust_cache_for_rem(cdhash, rem_perms);
 #endif
 
 	return ret;

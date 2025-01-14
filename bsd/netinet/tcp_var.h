@@ -660,6 +660,7 @@ struct tcpcb {
 #define TF_L4S_ENABLED          0x8000000       /* L4S was force enabled */
 #define TF_L4S_DISABLED         0x10000000      /* L4S was force disabled */
 #define TF_RACK_ENABLED         0x20000000      /* RACK is enabled */
+#define TF_TLP_IS_RETRANS       0x40000000      /* Is TLP-probe a retransmission ? (field TLP.is_retrans in RFC 8985) */
 
 #if TRAFFIC_MGT
 	/* Inter-arrival jitter related state */
@@ -684,7 +685,7 @@ struct tcpcb {
 /* Tail loss probe related state */
 	tcp_seq         t_tlphighrxt;           /* snd_nxt after PTO */
 	tcp_seq         t_tlphightrxt_persist;  /* like t_tlphighrxt but persists over ACKs until DSACK (if any) is processed */
-	u_int32_t       t_tlpstart;             /* timestamp at PTO */
+	uint32_t        t_tlpstart;             /* timestamp at PTO */
 /* DSACK data receiver state */
 	tcp_seq         t_dsack_lseq;           /* DSACK left sequence */
 	tcp_seq         t_dsack_rseq;           /* DSACK right sequence */
@@ -868,6 +869,12 @@ struct tcpcb {
 #define SACK_ENABLED(tp)        (tp->t_flagsext & TF_SACK_ENABLE)
 #define TFO_ENABLED(tp)         (tp->t_flagsext & TF_FASTOPEN)
 #define TCP_RACK_ENABLED(tp)    ((tp->t_flagsext & TF_RACK_ENABLED) && SACK_ENABLED(tp) && !TFO_ENABLED(tp))
+
+static inline bool
+tcp_sent_tlp_retrans(const struct tcpcb *tp)
+{
+	return (tp->t_flagsext & (TF_SENT_TLPROBE | TF_TLP_IS_RETRANS)) == (TF_SENT_TLPROBE | TF_TLP_IS_RETRANS);
+}
 
 /*
  * If the connection is in a throttled state due to advisory feedback from
@@ -1789,6 +1796,7 @@ uint32_t ntoh24(u_char *p);
 uint32_t tcp_packets_this_ack(struct tcpcb *tp, uint32_t acked);
 int      tcp_mssopt(struct tcpcb *);
 void     tcp_drop_syn_sent(struct inpcb *, int);
+uint32_t tcp_get_effective_mtu(struct rtentry *, uint32_t);
 void     tcp_mtudisc(struct inpcb *, int);
 struct tcpcb *
 tcp_newtcpcb(struct inpcb *);

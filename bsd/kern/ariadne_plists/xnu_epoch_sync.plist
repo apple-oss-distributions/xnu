@@ -3,6 +3,18 @@
 <plist version="1.0">
 	<array>
 		<dict>
+			<key>Enums</key>
+			<dict>
+				<key>EsyncSpace</key>
+				<dict>
+					<key>0</key>
+					<string>Test</string>
+					<key>1</key>
+					<string>Exclaves Queue</string>
+					<key>2</key>
+					<string>Exclaves Thread</string>
+				</dict>
+			</dict>
 			<key>Name</key>
 			<string>Epoch Sync</string>
 			<key>Children</key>
@@ -19,20 +31,39 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>Id</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
 				</dict>
@@ -50,29 +81,52 @@
 					<key>ArgNamesBegin</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>Owner</string>
-					</dict>
-					<key>ArgValueLabelsBegin</key>
-					<dict>
-						<key>Arg1</key>
-						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
-						</dict>
 					</dict>
 					<key>ArgValueTypesBegin</key>
 					<dict>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>ThreadName</string>
-					</dict> 
+					</dict>
+					<key>Labels</key>
+					<dict>
+						<key>ID</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Begin</key>
+								<true/>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Begin</key>
+								<true/>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
+						</dict>
+					</dict>
 					<key>ArgNamesEnd</key>
 					<dict>
 						<key>Arg1</key>
@@ -109,23 +163,43 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
-
+				</dict>
+				<dict>
 					<key>Name</key>
 					<string>Epoch Sync Wake One</string>
 					<key>Type</key>
@@ -137,20 +211,39 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
 				</dict>
@@ -166,20 +259,39 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
 				</dict>
@@ -195,27 +307,46 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>Owner</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
 					<key>ArgValueTypes</key>
 					<dict>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>ThreadName</string>
 					</dict> 
 				</dict>
@@ -231,27 +362,46 @@
 					<key>ArgNames</key>
 					<dict>
 						<key>Arg1</key>
-						<string>Space</string>
-						<key>Arg2</key>
 						<string>ID</string>
-						<key>Arg3</key>
+						<key>Arg2</key>
 						<string>Epoch</string>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>Thread</string>
 					</dict>
-					<key>ArgValueLabels</key>
+					<key>Labels</key>
 					<dict>
-						<key>Arg1</key>
+						<key>ID</key>
 						<dict>
-							<key>0x1</key>
-							<string>Exclaves Queue</string>
-							<key>0x2</key>
-							<string>Exclaves Thread</string>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>0</integer>
+									<integer>55</integer>
+								</array>
+							</dict>
+						</dict>
+						<key>EsyncSpace</key>
+						<dict>
+							<key>Value</key>
+							<dict>
+								<key>Arg</key>
+								<integer>1</integer>
+								<key>BitRange</key>
+								<array>
+									<integer>56</integer>
+									<integer>63</integer>
+								</array>
+							</dict>
+							<key>Format</key>
+							<string>EsyncSpace</string>
 						</dict>
 					</dict>
 					<key>ArgValueTypes</key>
 					<dict>
-						<key>Arg4</key>
+						<key>Arg3</key>
 						<string>ThreadName</string>
 					</dict> 
 				</dict>

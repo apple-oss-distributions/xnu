@@ -199,10 +199,7 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 	kauth_cred_t __single cred;
 #endif /* XNU_TARGET_OS_OSX */
 
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		return EINVAL;
-	}
-	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	ASSERT((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0);
 
 	if (TAILQ_EMPTY(&in6_ifaddrhead)) { /* XXX broken! */
 		error = EADDRNOTAVAIL;
@@ -608,7 +605,6 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, st
 	lck_rw_done(&pcbinfo->ipi_lock);
 	sflt_notify(so, sock_evt_bound, NULL);
 done:
-	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
 	return error;
 }
 

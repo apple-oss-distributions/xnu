@@ -638,7 +638,7 @@ extern void kfree_data_addr(
  * @macro kfree_type
  *
  * @abstract
- * Allocates element of a particular type
+ * Frees element of a particular type
  *
  * @discussion
  * This pairs with the @c kalloc_type() that was made to allocate this element.

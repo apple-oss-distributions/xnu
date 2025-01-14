@@ -98,13 +98,16 @@ struct droptap_header {
 /* All domains for Skywalk component */
 #define DROPTAP_FSW     1
 #define DROPTAP_NETIF   2
+#define _DROPTAP_PAD_3  3
+#define _DROPTAP_PAD_4  4
+#define DROPTAP_AQM     5
 
 /* All domains for BSD component */
 #define DROPTAP_TCP     1
 #define DROPTAP_UDP     2
 #define DROPTAP_IP      3
 #define DROPTAP_SOCK    4
-#define DROPTAP_AQM     5
+#define _DROPTAP_PAD_5  5
 #define DROPTAP_IPSEC   6
 #define DROPTAP_IP6     7
 
@@ -134,6 +137,10 @@ struct droptap_header {
 	X(DROP_REASON_FSW_GSO_NOMEM_MBUF,           DROPTAP_SKYWALK, DROPTAP_FSW,  19, "Flowswitch GSO not enough mbuf memory")      \
 	X(DROP_REASON_FSW_DST_NXPORT_INVALID,       DROPTAP_SKYWALK, DROPTAP_FSW,  20, "Flowswitch dst nexus port invalid")          \
 	X(DROP_REASON_AQM_FULL,                     DROPTAP_SKYWALK, DROPTAP_AQM,  1,  "AQM full")                                   \
+	X(DROP_REASON_AQM_COMPRESSED,               DROPTAP_SKYWALK, DROPTAP_AQM,  2,  "AQM compressed")                             \
+	X(DROP_REASON_AQM_BK_SYS_THROTTLED,         DROPTAP_SKYWALK, DROPTAP_AQM,  3,  "AQM BK_SYS throttled")                       \
+	X(DROP_REASON_AQM_PURGE_FLOW,               DROPTAP_SKYWALK, DROPTAP_AQM,  4,  "AQM purge flow")                             \
+	X(DROP_REASON_AQM_DROP,                     DROPTAP_SKYWALK, DROPTAP_AQM,  5,  "AQM drop")                             \
 	/* Socket */                                                                                                                 \
 	X(DROP_REASON_FULL_SOCK_RCVBUF,             DROPTAP_BSD,     DROPTAP_SOCK, 1,  "Socket receive buffer full")                 \
 	/* TCP */                                                                                                                    \
@@ -203,7 +210,7 @@ struct droptap_header {
 	X(DROP_REASON_IP6_NO_ND6ALT_IF,             DROPTAP_BSD,     DROPTAP_IP6,  11, "IPv6 no ND6ALT interface")                   \
 	X(DROP_REASON_IP6_BAD_ND_STATE,             DROPTAP_BSD,     DROPTAP_IP6,  12, "IPv6 Bad ND state")                          \
 	X(DROP_REASON_IP6_ONLY,                     DROPTAP_BSD,     DROPTAP_IP6,  13, "IPv6 Only")                                  \
-	X(DROP_REASON_IP6_ADDR_UNSPECIFIED,         DROPTAP_BSD,     DROPTAP_IP6,  14, "IPv6 Address is unspecified")
+	X(DROP_REASON_IP6_ADDR_UNSPECIFIED,         DROPTAP_BSD,     DROPTAP_IP6,  14, "IPv6 Address is unspecified")                \
 
 
 typedef enum drop_reason : uint32_t {
@@ -235,6 +242,7 @@ drop_reason_str(drop_reason_t value)
 #define DROPTAP_FLAG_L2_MISSING 0x0004
 
 extern uint32_t droptap_total_tap_count;
+extern uint32_t droptap_verbose;
 
 extern void droptap_init(void);
 #if SKYWALK

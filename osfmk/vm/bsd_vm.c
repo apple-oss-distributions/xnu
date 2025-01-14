@@ -208,11 +208,27 @@ memory_object_control_uiomove(
 		}
 
 		for (cur_run = 0; cur_run < cur_needed;) {
+			if (mark_dirty && object->vo_copy != VM_OBJECT_NULL) {
+				/*
+				 * We checked that this file-backed object did not have
+				 * a copy object when we entered this routine but it now has
+				 * one, so we can't stay on this optimized path.
+				 * We can finish processing the pages we have already grabbed
+				 * because they were made "busy" before the copy object was
+				 * created so they can't have been seen through that copy
+				 * object yet.
+				 */
+				break;
+			}
+
 			if ((dst_page = vm_page_lookup(object, offset)) == VM_PAGE_NULL) {
 				break;
 			}
 
-
+			if (__improbable(dst_page->vmp_error)) {
+				retval = EIO;
+				break;
+			}
 			if (dst_page->vmp_busy || dst_page->vmp_cleaning) {
 				/*
 				 * someone else is playing with the page... if we've
@@ -229,6 +245,12 @@ memory_object_control_uiomove(
 			}
 			if (dst_page->vmp_laundry) {
 				vm_pageout_steal_laundry(dst_page, FALSE);
+			}
+			if (__improbable(dst_page->vmp_absent)) {
+				printf("absent page %p (obj %p offset 0x%llx) -> EIO",
+				    dst_page, object, offset);
+				retval = EIO;
+				break;
 			}
 
 			if (mark_dirty) {

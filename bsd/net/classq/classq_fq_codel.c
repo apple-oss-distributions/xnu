@@ -73,6 +73,7 @@
 #include <net/pktsched/pktsched.h>
 #include <net/pktsched/pktsched_fq_codel.h>
 #include <net/classq/classq_fq_codel.h>
+#include <net/droptap.h>
 
 #include <netinet/tcp_var.h>
 
@@ -277,6 +278,12 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 		old_timestamp = m->m_pkthdr.pkt_timestamp;
 
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+
+		if (__improbable(droptap_verbose > 0)) {
+			droptap_output_mbuf(m, DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
+			    fqs->fqs_ifq->ifcq_ifp);
+		}
+
 		m_freem(m);
 	}
 #if SKYWALK
@@ -293,6 +300,12 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 		old_timestamp = kpkt->pkt_timestamp;
 
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+
+		if (__improbable(droptap_verbose > 0)) {
+			droptap_output_packet(SK_PKT2PH(kpkt), DROP_REASON_AQM_COMPRESSED, NULL, 0, 0,
+			    fqs->fqs_ifq->ifcq_ifp, 0, NULL, -1, NULL, 0, 0);
+		}
+
 		struct kern_pbufpool *pp =
 		    __DECONST(struct kern_pbufpool *, ((struct __kern_quantum *)kpkt)->qum_pp);
 		pp_free_packet(pp, (uint64_t)kpkt);

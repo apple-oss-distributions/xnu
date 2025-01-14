@@ -57,7 +57,6 @@
 #include <kern/exclaves_test_stackshot.h>
 #include <vm/pmap.h>
 #include <pexpert/pexpert.h>
-#include <pexpert/device_tree.h>
 
 #include <mach/exclaves_l4.h>
 #include <mach/mach_port.h>
@@ -93,19 +92,6 @@ LCK_GRP_DECLARE(exclaves_lck_grp, "exclaves");
 extern lck_mtx_t exclaves_boot_lock;
 
 /*
- * Control access to exclaves. Multicore support is learned at runtime.
- */
-static LCK_MTX_DECLARE(exclaves_scheduler_lock, &exclaves_lck_grp);
-static bool exclaves_multicore;
-#if DEVELOPMENT || DEBUG
-/* boot-arg to control use of the exclaves_scheduler_lock independently of
- * whether exclaves multicore support is enabled */
-static TUNABLE(bool, exclaves_smp_enabled, "exclaves_smp", true);
-#else
-#define exclaves_smp_enabled true
-#endif
-
-/*
  * Sent/latest offset for updating exclaves clocks
  */
 typedef struct {
@@ -113,15 +99,23 @@ typedef struct {
 		/* atomic fields are used via atomic primitives */
 		struct { _Atomic uint64_t sent_offset, latest_offset; } a_u64;
 		_Atomic unsigned __int128 a_u128;
-		/* non-atomic fields are used via local variable. this is needed to
-		 * avoid undefined behavior with an atomic struct or accessing atomic
-		 * fields non-atomically */
+		/* non-atomic fields are used via local variable. this is needed
+		 * to avoid undefined behavior with an atomic struct or
+		 * accessing atomic fields non-atomically */
 		struct { uint64_t sent_offset, latest_offset; } u64;
 		unsigned __int128 u128;
 	};
 } exclaves_clock_t;
 
-static exclaves_clock_t exclaves_absolute_clock, exclaves_continuous_clock;
+
+/*
+ * Two clocks indexed by their type.
+ * This makes things easy to lookup.
+ */
+static exclaves_clock_t exclaves_clock[] = {
+	[EXCLAVES_CLOCK_ABSOLUTE] = {},
+	[EXCLAVES_CLOCK_CONTINUOUS] = {},
+};
 
 static kern_return_t
 exclaves_endpoint_call_internal(ipc_port_t port, exclaves_id_t endpoint_id);
@@ -137,16 +131,22 @@ OS_NORETURN OS_NOINLINE
 static void
 exclaves_wait_for_panic(void);
 
-static bool
-exclaves_clock_needs_update(const exclaves_clock_t *clock);
-static kern_return_t
-exclaves_clock_update(exclaves_clock_t *clock, XrtHosted_Buffer_t *save_out_ptr, XrtHosted_Buffer_t *save_in_ptr);
+static inline bool
+exclaves_clocks_need_update(void);
 
 static kern_return_t
 exclaves_scheduler_boot(void);
 
 static kern_return_t
 exclaves_hosted_error(bool success, XrtHosted_Error_t *error);
+
+static kern_return_t
+exclaves_scheduler_request_update_timer(XrtHosted_Timer_t timer,
+    uint64_t offset);
+
+static kern_return_t
+exclaves_scheduler_request_boot(void);
+
 
 /*
  * A static set of exclave epoch counters.
@@ -173,9 +173,9 @@ exclaves_get_thread_counter(const uint64_t id)
 TUNABLE_WRITEABLE(unsigned int, exclaves_debug, "exclaves_debug",
     exclaves_debug_show_errors);
 
-TUNABLE_DT(exclaves_requirement_t, exclaves_relaxed_requirements, "/defaults",
-    "kern.exclaves_relaxed_reqs", "exclaves_relaxed_requirements", 0,
-    TUNABLE_DT_NONE);
+TUNABLE_DT_WRITEABLE(exclaves_requirement_t, exclaves_relaxed_requirements,
+    "/defaults", "kern.exclaves_relaxed_reqs", "exclaves_relaxed_requirements",
+    0, TUNABLE_DT_NONE);
 #else
 const exclaves_requirement_t exclaves_relaxed_requirements = 0;
 #endif
@@ -220,6 +220,8 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	mach_vm_size_t uoffset = (mach_vm_size_t)uap->identifier;
 	mach_vm_size_t usize2 = uap->size2;
 	mach_vm_size_t uoffset2 = uap->offset;
+	mach_vm_address_t ustatus = uap->status;
+
 	task_t task = current_task();
 
 	/*
@@ -259,10 +261,10 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	}
 
 	/*
-	 * Wait for STAGE_2 boot to complete. If exclaves are unsupported,
-	 * return immediately,.
+	 * Wait for EXCLAVECORE boot to complete. If exclaves are unsupported,
+	 * return immediately.
 	 */
-	kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_2);
+	kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVECORE);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -271,13 +273,15 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		/*
 		 * For calls from tasks that have joined conclaves, now wait until
 		 * booted up to EXCLAVEKIT. If EXCLAVEKIT boot fails for some reason,
-		 * KERN_NOT_SUPPORTED will be returned (on RELEASE this would panic).
-		 * For testing purposes, continue even if EXCLAVEKIT fails. This is a
-		 * separate call to the one above because we need to distinguish
-		 * STAGE_2 NOT SUPPORTED and still wait for EXCLAVEKIT to boot if it
-		 * *is* supported.
+		 * KERN_NOT_SUPPORTED will be returned (on RELEASE this would
+		 * panic). This is a separate call to the one above because we
+		 * need to distinguish EXCLAVECORE being not supported and
+		 * still wait for EXCLAVEKIT to boot if it *is* supported.
 		 */
-		(void) exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVEKIT);
+		kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVEKIT);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
 	}
 
 	switch (operation) {
@@ -349,18 +353,9 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		}
 
 		const char *domain = exclaves_conclave_get_domain(task_get_conclave(task));
-		const bool new_api =
-		    (perm == EXCLAVES_BUFFER_PERM_READ) ||
-		    (perm == EXCLAVES_BUFFER_PERM_WRITE);
-		const bool shared_mem_available =
-		    exclaves_resource_lookup_by_name(domain, id_name,
-		    XNUPROXY_RESOURCETYPE_SHAREDMEMORY) != NULL;
-		const bool use_shared_mem = new_api && shared_mem_available;
-
 		exclaves_resource_t *resource = NULL;
-		kr = use_shared_mem ?
-		    exclaves_resource_shared_memory_map(domain, id_name, usize, perm, &resource) :
-		    exclaves_named_buffer_map(domain, id_name, usize, perm, &resource);
+		kr = exclaves_resource_shared_memory_map(domain, id_name, usize,
+		    perm, &resource);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}
@@ -388,21 +383,13 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return kr;
 		}
 
-		switch (resource->r_type) {
-		case XNUPROXY_RESOURCETYPE_NAMEDBUFFER:
-			kr = exclaves_named_buffer_copyin(resource, ubuffer,
-			    usize, uoffset, usize2, uoffset2);
-			break;
-
-		case XNUPROXY_RESOURCETYPE_SHAREDMEMORY:
-			kr = exclaves_resource_shared_memory_copyin(resource,
-			    ubuffer, usize, uoffset, usize2, uoffset2);
-			break;
-
-		default:
+		if (resource->r_type != XNUPROXY_RESOURCETYPE_SHAREDMEMORY) {
 			exclaves_resource_release(resource);
 			return KERN_INVALID_CAPABILITY;
 		}
+
+		kr = exclaves_resource_shared_memory_copyin(resource,
+		    ubuffer, usize, uoffset, usize2, uoffset2);
 
 		exclaves_resource_release(resource);
 
@@ -420,21 +407,13 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return kr;
 		}
 
-		switch (resource->r_type) {
-		case XNUPROXY_RESOURCETYPE_NAMEDBUFFER:
-			kr = exclaves_named_buffer_copyout(resource, ubuffer,
-			    usize, uoffset, usize2, uoffset2);
-			break;
-
-		case XNUPROXY_RESOURCETYPE_SHAREDMEMORY:
-			kr = exclaves_resource_shared_memory_copyout(resource,
-			    ubuffer, usize, uoffset, usize2, uoffset2);
-			break;
-
-		default:
+		if (resource->r_type != XNUPROXY_RESOURCETYPE_SHAREDMEMORY) {
 			exclaves_resource_release(resource);
 			return KERN_INVALID_CAPABILITY;
 		}
+
+		kr = exclaves_resource_shared_memory_copyout(resource,
+		    ubuffer, usize, uoffset, usize2, uoffset2);
 
 		exclaves_resource_release(resource);
 
@@ -541,13 +520,9 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 		}
 
 		const char *domain = exclaves_conclave_get_domain(task_get_conclave(task));
-		const bool use_audio_memory =
-		    exclaves_resource_lookup_by_name(domain, id_name,
-		    XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY) != NULL;
 		exclaves_resource_t *resource = NULL;
-		kr = use_audio_memory ?
-		    exclaves_resource_audio_memory_map(domain, id_name, usize, &resource) :
-		    exclaves_audio_buffer_map(domain, id_name, usize, &resource);
+		kr = exclaves_resource_audio_memory_map(domain, id_name, usize,
+		    &resource);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}
@@ -575,21 +550,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 			return kr;
 		}
 
-		switch (resource->r_type) {
-		case XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER:
-			kr = exclaves_audio_buffer_copyout(resource, ubuffer,
-			    usize, uoffset, usize2, uoffset2);
-			break;
-
-		case XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY:
-			kr = exclaves_resource_audio_memory_copyout(resource,
-			    ubuffer, usize, uoffset, usize2, uoffset2);
-			break;
-
-		default:
+		if (resource->r_type !=
+		    XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY) {
 			exclaves_resource_release(resource);
 			return KERN_INVALID_CAPABILITY;
 		}
+
+		kr = exclaves_resource_audio_memory_copyout(resource,
+		    ubuffer, usize, uoffset, usize2, uoffset2, ustatus);
 
 		exclaves_resource_release(resource);
 
@@ -997,18 +965,18 @@ exclaves_boot_early(void)
 		return KERN_FAILURE;
 	}
 
-	kr = exclaves_panic_thread_setup();
-	if (kr != KERN_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "XNU proxy panic thread setup failed\n");
-		return KERN_FAILURE;
-	}
-
 	kr = exclaves_resource_init();
 	if (kr != KERN_SUCCESS) {
 		exclaves_debug_printf(show_errors,
 		    "exclaves: failed to initialize resources\n");
 		return kr;
+	}
+
+	kr = exclaves_panic_thread_setup();
+	if (kr != KERN_SUCCESS) {
+		exclaves_debug_printf(show_errors,
+		    "XNU proxy panic thread setup failed\n");
+		return KERN_FAILURE;
 	}
 
 	return KERN_SUCCESS;
@@ -1034,9 +1002,11 @@ exclaves_register_xrt_hosted_callbacks(struct XrtHosted_Callbacks *callbacks)
 void
 exclaves_update_timebase(exclaves_clock_type_t type, uint64_t offset)
 {
+	assert(
+		type == EXCLAVES_CLOCK_CONTINUOUS ||
+		type == EXCLAVES_CLOCK_ABSOLUTE);
 #if CONFIG_EXCLAVES
-	exclaves_clock_t *clock = (type == EXCLAVES_CLOCK_ABSOLUTE ?
-	    &exclaves_absolute_clock : &exclaves_continuous_clock);
+	exclaves_clock_t *clock = &exclaves_clock[type];
 	uint64_t latest_offset = os_atomic_load(&clock->a_u64.latest_offset, relaxed);
 	while (latest_offset < offset) {
 		/* Update the latest offset with the new offset. If this fails, then a
@@ -1111,7 +1081,8 @@ exclaves_enter(void)
 	__assert_only const thread_exclaves_state_flags_t mask = (
 		TH_EXCLAVES_RPC |
 		TH_EXCLAVES_XNUPROXY |
-		TH_EXCLAVES_SCHEDULER_CALL);
+		TH_EXCLAVES_SCHEDULER_CALL |
+		TH_EXCLAVES_RESUME_PANIC_THREAD);
 	assert3u(thread->th_exclaves_state & mask, !=, 0);
 	assert3u(thread->th_exclaves_intstate & TH_EXCLAVES_EXECUTION, ==, 0);
 
@@ -1137,11 +1108,11 @@ exclaves_enter(void)
 	 * entered from xnu.
 	 */
 	__asm__ volatile (
-            "EXCLAVES_ENTRY_START: nop\n\t"
+            "EXCLAVES_ENTRY_START:\n\t"
         );
 	result = sk_enter(endpoint, &regs);
 	__asm__ volatile (
-            "EXCLAVES_ENTRY_END: nop\n\t"
+            "EXCLAVES_ENTRY_END:\n\t"
         );
 
 	thread->th_exclaves_intstate &= ~TH_EXCLAVES_EXECUTION;
@@ -1215,26 +1186,12 @@ static XrtHosted_Buffer_t * PERCPU_DATA(exclaves_response);
 static void
 exclaves_init_multicore(void)
 {
-	assert(exclaves_multicore);
-
 	XrtHosted_Buffer_t **req, **res;
 
 	exclaves_wait_for_cpu_init();
 
-	DTEntry entry, child;
-	OpaqueDTEntryIterator iter;
-	int err = SecureDTLookupEntry(NULL, "/cpus", &entry);
-	assert(err == kSuccess);
-	err = SecureDTInitEntryIterator(entry, &iter);
-	assert(err == kSuccess);
-
-	bool exclaves_uses_mpidr = (exclaves_callbacks->v1.global()->v2.smpStatus == XrtHosted_SmpStatus_MulticoreMpidr);
-	if (exclaves_uses_mpidr) {
-		exclaves_debug_printf(show_progress, "Using MPIDR for exclave scheduler core IDs\n");
-	} else {
-		// TODO(rdar://120679733) - clean up non-MPIDR identification logic.
-		exclaves_debug_printf(show_progress, "Not using MPIDR for exclave scheduler core IDs\n");
-	}
+	exclaves_debug_printf(show_progress,
+	    "Using MPIDR for exclave scheduler core IDs\n");
 
 	/*
 	 * Match the hardwareID to the physical ID and stash the pointers to the
@@ -1243,33 +1200,8 @@ exclaves_init_multicore(void)
 	size_t core_count = exclaves_callbacks->v1.cores();
 	for (size_t i = 0; i < core_count; i++) {
 		const XrtHosted_Core_t *core = exclaves_callbacks->v1.core(i);
-		uint32_t dt_phys_id = 0;
-		if (exclaves_uses_mpidr) {
-			dt_phys_id = (uint32_t)core->v2.hardwareId;
-		} else {
-			/* Find the physical ID of the entry at position hardwareId in the
-			 * DeviceTree "cpus" array */
-			uint32_t dt_index = 0;
-			bool dt_entry_found = false;
-			err = SecureDTRestartEntryIteration(&iter);
-			assert(err == kSuccess);
-			while (kSuccess == SecureDTIterateEntries(&iter, &child)) {
-				if (core->v2.hardwareId == dt_index) {
-					void const *dt_prop;
-					unsigned int dt_prop_sz;
-					err = SecureDTGetProperty(child, "reg", &dt_prop, &dt_prop_sz);
-					assert(err == kSuccess);
-					assert(dt_prop_sz == sizeof(uint32_t));
-					dt_phys_id = *((uint32_t const *)dt_prop);
-					dt_entry_found = true;
-					break;
-				}
-				dt_index++;
-			}
-			if (!dt_entry_found) {
-				continue;
-			}
-		}
+		uint32_t dt_phys_id = (uint32_t)core->v2.hardwareId;
+
 		percpu_foreach(cpu_data, cpu_data) {
 			if (cpu_data->cpu_phys_id != dt_phys_id) {
 				continue;
@@ -1282,28 +1214,6 @@ exclaves_init_multicore(void)
 
 			break;
 		}
-	}
-}
-
-static void
-exclaves_init_unicore(void)
-{
-	assert(!exclaves_multicore);
-
-	XrtHosted_Buffer_t *breq, *bres, **req, **res;
-
-	exclaves_wait_for_cpu_init();
-
-	breq = exclaves_callbacks->v1.Core.request(XrtHosted_Core_bootIndex);
-	bres = exclaves_callbacks->v1.Core.response(XrtHosted_Core_bootIndex);
-
-	/* Always use the boot request/response buffers. */
-	percpu_foreach(cpu_data, cpu_data) {
-		req = PERCPU_GET_RELATIVE(exclaves_request, cpu_data, cpu_data);
-		*req = breq;
-
-		res = PERCPU_GET_RELATIVE(exclaves_response, cpu_data, cpu_data);
-		*res = bres;
 	}
 }
 
@@ -1380,10 +1290,13 @@ exclaves_scheduler_init(uint64_t boot_info, uint64_t *xnuproxy_boot_info)
 
 	XrtHosted_Global_t *global = exclaves_callbacks->v1.global();
 
-	exclaves_multicore = (global->v2.smpStatus ==
-	    XrtHosted_SmpStatus_Multicore ||
-	    global->v2.smpStatus == XrtHosted_SmpStatus_MulticoreMpidr);
-	exclaves_multicore ? exclaves_init_multicore() : exclaves_init_unicore();
+	/* Only support MPIDR multicore. */
+	if (global->v2.smpStatus != XrtHosted_SmpStatus_MulticoreMpidr) {
+		exclaves_debug_printf(show_errors,
+		    "exclaves: exclaves scheduler doesn't support multicore");
+		return KERN_FAILURE;
+	}
+	exclaves_init_multicore();
 
 	/* Initialise the XNU proxy */
 	if (!pmap_valid_address(global->v1.proxyInit)) {
@@ -1399,58 +1312,114 @@ exclaves_scheduler_init(uint64_t boot_info, uint64_t *xnuproxy_boot_info)
 }
 
 #if EXCLAVES_ENABLE_SHOW_SCHEDULER_REQUEST_RESPONSE
-#define exclaves_scheduler_debug_save_buffer(_buf_in, _buf_out) \
-	*(_buf_out) = *(_buf_in)
+#define exclaves_scheduler_debug_save_buffer(_buf) \
+	XrtHosted_Buffer_t _buf##_copy = *(_buf)
 #define exclaves_scheduler_debug_show_request_response(_request_buf, \
 	    _response_buf) ({ \
 	if (exclaves_debug_enabled(show_scheduler_request_response)) { \
 	        printf("exclaves: Scheduler request = %p\n", _request_buf); \
 	        printf("exclaves: Scheduler request.tag = 0x%04llx\n", \
-	            (_request_buf)->tag); \
+	            _request_buf##_copy.tag); \
 	        for (size_t arg = 0; arg < XrtHosted_Buffer_args; arg += 1) { \
 	                printf("exclaves: Scheduler request.arguments[%02zu] = " \
 	                    "0x%04llx\n", arg, \
-	                    (_request_buf)->arguments[arg]); \
+	                    _request_buf##_copy.arguments[arg]); \
 	        } \
 	        printf("exclaves: Scheduler response = %p\n", _response_buf); \
 	        printf("exclaves: Scheduler response.tag = 0x%04llx\n", \
-	                (_response_buf)->tag); \
+	                _response_buf##_copy.tag); \
 	        for (size_t arg = 0; arg < XrtHosted_Buffer_args; arg += 1) { \
 	                printf("exclaves: Scheduler response.arguments[%02zu] = " \
 	                    "0x%04llx\n", arg, \
-	                    (_response_buf)->arguments[arg]); \
+	                    _response_buf##_copy.arguments[arg]); \
 	        } \
 	}})
 #else // EXCLAVES_SHOW_SCHEDULER_REQUEST_RESPONSE
-#define exclaves_scheduler_debug_save_buffer(_buf_in, _buf_out) (void)_buf_out
+#define exclaves_scheduler_debug_save_buffer(_buf) ({ })
 #define exclaves_scheduler_debug_show_request_response(_request_buf, \
 	    _response_buf) ({ })
 #endif // EXCLAVES_SHOW_SCHEDULER_REQUEST_RESPONSE
 
-__attribute__((always_inline))
-static kern_return_t
-exclaves_scheduler_send(const XrtHosted_Request_t *request,
-    XrtHosted_Response_t *response, XrtHosted_Buffer_t *save_out_ptr, XrtHosted_Buffer_t *save_in_ptr)
+static void
+request_trace_start(const XrtHosted_Request_t *request)
 {
-	/* Must be called with preemption and interrupts disabled */
-	kern_return_t kr;
+	switch (request->tag) {
+	case XrtHosted_Request_ResumeWithHostId:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_RESUME_WITH_HOSTID) | DBG_FUNC_START,
+		    request->ResumeWithHostId.hostId, request->ResumeWithHostId.thread);
+		break;
 
-	XrtHosted_Buffer_t *request_buf = *PERCPU_GET(exclaves_request);
-	assert3p(request_buf, !=, NULL);
+	case XrtHosted_Request_InterruptWithHostId:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_INTERRUPT_WITH_HOSTID) | DBG_FUNC_START,
+		    request->InterruptWithHostId.hostId, request->InterruptWithHostId.thread);
+		break;
 
-	exclaves_callbacks->v1.Request.encode(request_buf, request);
-	exclaves_scheduler_debug_save_buffer(request_buf, save_out_ptr);
+	case XrtHosted_Request_UpdateTimerOffset:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_UPDATE_TIMER_OFFSET) | DBG_FUNC_START,
+		    request->UpdateTimerOffset.timer, request->UpdateTimerOffset.offset);
+		break;
 
-	kr = exclaves_enter();
+	case XrtHosted_Request_BootExclaves:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_BOOT_EXCLAVES) | DBG_FUNC_START);
+		break;
 
-	/* The response may have come back on a different core. */
-	XrtHosted_Buffer_t *response_buf = *PERCPU_GET(exclaves_response);
-	assert3p(response_buf, !=, NULL);
+	case XrtHosted_Request_PmmEarlyAllocResponse:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_PMM_EARLY_ALLOC_RESPONSE) | DBG_FUNC_START,
+		    request->PmmEarlyAllocResponse.a);
+		break;
 
-	exclaves_scheduler_debug_save_buffer(response_buf, save_in_ptr);
-	exclaves_callbacks->v1.Response.decode(response_buf, response);
+	case XrtHosted_Request_WatchdogPanic:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_WATCHDOG_PANIC) | DBG_FUNC_START);
+		break;
 
-	return kr;
+	default:
+		panic("Unsupported exclaves scheduler request: %d", request->tag);
+	}
+}
+
+static void
+request_trace_end(const XrtHosted_Request_t *request)
+{
+	switch (request->tag) {
+	case XrtHosted_Request_ResumeWithHostId:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_RESUME_WITH_HOSTID) | DBG_FUNC_END);
+		break;
+
+	case XrtHosted_Request_InterruptWithHostId:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_INTERRUPT_WITH_HOSTID) | DBG_FUNC_END);
+		break;
+
+	case XrtHosted_Request_UpdateTimerOffset:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_UPDATE_TIMER_OFFSET) | DBG_FUNC_END);
+		break;
+
+	case XrtHosted_Request_BootExclaves:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_BOOT_EXCLAVES) | DBG_FUNC_END);
+		break;
+
+	case XrtHosted_Request_PmmEarlyAllocResponse:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_PMM_EARLY_ALLOC_RESPONSE) | DBG_FUNC_END);
+		break;
+
+	case XrtHosted_Request_WatchdogPanic:
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+		    MACH_EXCLAVES_SCHEDULER_REQ_WATCHDOG_PANIC) | DBG_FUNC_END);
+		break;
+
+	default:
+		panic("Unsupported exclaves scheduler request: %d", request->tag);
+	}
 }
 
 __attribute__((always_inline))
@@ -1458,52 +1427,37 @@ static kern_return_t
 exclaves_scheduler_request(const XrtHosted_Request_t *request,
     XrtHosted_Response_t *response)
 {
-#if EXCLAVES_ENABLE_SHOW_SCHEDULER_REQUEST_RESPONSE
-	XrtHosted_Buffer_t save_in[3], save_out[3] = {{ .tag = XrtHosted_Message_Invalid }, { .tag = XrtHosted_Message_Invalid }, { .tag = XrtHosted_Message_Invalid }};
-	XrtHosted_Buffer_t *save_out_ptr = save_out, *save_in_ptr = save_in;
-#else
-	XrtHosted_Buffer_t *save_out_ptr = NULL, *save_in_ptr = NULL;
-#endif // EXCLAVES_SHOW_SCHEDULER_REQUEST_RESPONSE
-
 	assert3u(request->tag, >, XrtHosted_Request_Invalid);
 	assert3u(request->tag, <, XrtHosted_Request_Limit);
 
 	kern_return_t kr = KERN_SUCCESS;
 	bool istate;
 
-	if (!exclaves_multicore || !exclaves_smp_enabled) {
-		lck_mtx_lock(&exclaves_scheduler_lock);
-	}
-
 	/*
 	 * Disable preemption and interrupts as the xrt hosted scheduler data
 	 * structures are per-core.
 	 * Preemption disabled and interrupt disabled timeouts are disabled for
-	 * now until we can co-ordinate the measurements with the exclaves side of
-	 * things.
+	 * now until we can co-ordinate the measurements with the exclaves side
+	 * of things.
 	 */
 	istate = ml_set_interrupts_enabled_with_debug(false, false);
 
+	/* Interrupts should have been enabled entering this function. */
+	assert(istate);
+
 	/*
-	 * This needs to be done with interrupts disabled, otherwise stackshot could
-	 * mark the thread blocked just after this function exits and a thread marked
-	 * as AST blocked would go into exclaves.
+	 * This needs to be done with interrupts disabled, otherwise stackshot
+	 * could mark the thread blocked just after this function exits and a
+	 * thread marked as AST blocked would go into exclaves.
 	 */
 
-	while ((os_atomic_load(&current_thread()->th_exclaves_inspection_state, relaxed) & ~TH_EXCLAVES_INSPECTION_NOINSPECT) != 0) {
+	while ((os_atomic_load(&current_thread()->th_exclaves_inspection_state,
+	    relaxed) & ~TH_EXCLAVES_INSPECTION_NOINSPECT) != 0) {
 		/* Enable interrupts */
 		(void) ml_set_interrupts_enabled_with_debug(true, false);
 
-		if (!exclaves_multicore || !exclaves_smp_enabled) {
-			lck_mtx_unlock(&exclaves_scheduler_lock);
-		}
-
 		/* Wait until the thread is collected on exclaves side */
 		exclaves_inspection_check_ast();
-
-		if (!exclaves_multicore || !exclaves_smp_enabled) {
-			lck_mtx_lock(&exclaves_scheduler_lock);
-		}
 
 		/* Disable interrupts and preemption before next AST check */
 		ml_set_interrupts_enabled_with_debug(false, false);
@@ -1512,36 +1466,41 @@ exclaves_scheduler_request(const XrtHosted_Request_t *request,
 
 	disable_preemption_without_measurements();
 
-	/* Update clock offsets before any other scheduler operation */
-	exclaves_clock_t *clocks[] = { &exclaves_absolute_clock,
-		                       &exclaves_continuous_clock };
-	for (unsigned i = 0; i < ARRAY_COUNT(clocks); ++i) {
-		if (exclaves_clock_needs_update(clocks[i])) {
-			kr = exclaves_clock_update(clocks[i], &save_out_ptr[i], &save_in_ptr[i]);
-			if (kr != KERN_SUCCESS) {
-				break;
-			}
-		}
+	/*
+	 * Don't enter with a stale clock (unless updating the clock or
+	 * panicking).
+	 */
+	if (request->tag != XrtHosted_Request_UpdateTimerOffset &&
+	    request->tag != XrtHosted_Request_WatchdogPanic &&
+	    exclaves_clocks_need_update()) {
+		enable_preemption();
+		(void) ml_set_interrupts_enabled_with_debug(istate, false);
+		return KERN_POLICY_LIMIT;
 	}
 
-	if (kr == KERN_SUCCESS) {
-		kr = exclaves_scheduler_send(request, response, &save_out_ptr[2], &save_in_ptr[2]);
-	}
+	XrtHosted_Buffer_t *request_buf = *PERCPU_GET(exclaves_request);
+	assert3p(request_buf, !=, NULL);
+
+	request_trace_start(request);
+
+	exclaves_callbacks->v1.Request.encode(request_buf, request);
+	exclaves_scheduler_debug_save_buffer(request_buf);
+
+	kr = exclaves_enter();
+
+	/* The response may have come back on a different core. */
+	XrtHosted_Buffer_t *response_buf = *PERCPU_GET(exclaves_response);
+	assert3p(response_buf, !=, NULL);
+
+	exclaves_scheduler_debug_save_buffer(response_buf);
+	exclaves_callbacks->v1.Response.decode(response_buf, response);
+
+	request_trace_end(request);
 
 	enable_preemption();
 	(void) ml_set_interrupts_enabled_with_debug(istate, false);
 
-#if EXCLAVES_ENABLE_SHOW_SCHEDULER_REQUEST_RESPONSE
-	for (unsigned i = 0; i < ARRAY_COUNT(save_out); ++i) {
-		if (save_out_ptr[i].tag != XrtHosted_Message_Invalid) {
-			exclaves_scheduler_debug_show_request_response(&save_out_ptr[i], &save_in_ptr[i]);
-		}
-	}
-#endif // EXCLAVES_ENABLE_SHOW_SCHEDULER_REQUEST_RESPONSE
-
-	if (!exclaves_multicore || !exclaves_smp_enabled) {
-		lck_mtx_unlock(&exclaves_scheduler_lock);
-	}
+	exclaves_scheduler_debug_show_request_response(request_buf, response_buf);
 
 	if (kr == KERN_ABORTED) {
 		/* RINGGATE_EP_ENTER returned RINGGATE_STATUS_PANIC indicating that
@@ -1959,7 +1918,7 @@ handle_response_pmm_early_alloc(const XrtHosted_PmmEarlyAlloc_t *pmm_early_alloc
 	 * to the heap.
 	 */
 	uint32_t page[EXCLAVES_MEMORY_MAX_REQUEST];
-	exclaves_memory_alloc(npages, page, XNUUPCALLS_PAGEKIND_ROOTDOMAIN);
+	exclaves_memory_alloc(npages, page, EXCLAVES_MEMORY_PAGEKIND_ROOTDOMAIN);
 
 	/* Now copy the list of pages into the first page. */
 	uint64_t first_page_pa = ptoa(page[0]);
@@ -1975,69 +1934,99 @@ handle_response_pmm_early_alloc(const XrtHosted_PmmEarlyAlloc_t *pmm_early_alloc
 	return KERN_SUCCESS;
 }
 
-static inline bool
-exclaves_clock_needs_update(const exclaves_clock_t *clock)
+static void
+handle_response_watchdog_panic_complete(
+	__unused const XrtHosted_WatchdogPanicComplete_t *panic_complete)
 {
-	exclaves_clock_t local = {
-		.u128 = os_atomic_load(&clock->a_u128, relaxed),
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+	    MACH_EXCLAVES_SCHEDULER_WATCHDOG_PANIC_COMPLETE));
+}
+
+OS_NORETURN
+static void
+handle_response_panicking(
+	__unused const XrtHosted_Panicking_t *panicking)
+{
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES_SCHEDULER,
+	    MACH_EXCLAVES_SCHEDULER_PANICKING));
+
+	exclaves_wait_for_panic();
+
+	/* Not reached. */
+}
+
+static inline bool
+exclaves_clocks_need_update(void)
+{
+	const exclaves_clock_type_t clocks[] = {
+		EXCLAVES_CLOCK_ABSOLUTE,
+		EXCLAVES_CLOCK_CONTINUOUS
 	};
 
-	return local.u64.sent_offset != local.u64.latest_offset;
+	for (int i = 0; i < ARRAY_COUNT(clocks); i++) {
+		const exclaves_clock_t *clock = &exclaves_clock[i];
+		exclaves_clock_t local = {
+			.u128 = os_atomic_load(&clock->a_u128, relaxed),
+		};
+
+		if (local.u64.sent_offset != local.u64.latest_offset) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 OS_NOINLINE
 static kern_return_t
-exclaves_clock_update(exclaves_clock_t *clock, XrtHosted_Buffer_t *save_out_ptr, XrtHosted_Buffer_t *save_in_ptr)
+exclaves_clocks_update(void)
 {
-	XrtHosted_Response_t response = { .tag = XrtHosted_Response_NothingScheduled, };
-	kern_return_t kr = KERN_SUCCESS;
-	exclaves_clock_t local;
+	const exclaves_clock_type_t clocks[] = {
+		EXCLAVES_CLOCK_ABSOLUTE,
+		EXCLAVES_CLOCK_CONTINUOUS
+	};
 
-	local.u128 = os_atomic_load(&clock->a_u128, relaxed);
-	while (local.u64.sent_offset != local.u64.latest_offset) {
-		XrtHosted_Request_t request = XrtHosted_Request_UpdateTimerOffsetMsg(
-			.timer =
-			(clock == &exclaves_absolute_clock ?
-			XrtHosted_Timer_Absolute : XrtHosted_Timer_Continuous),
-			.offset = local.u64.latest_offset,
-			);
+	for (int i = 0; i < ARRAY_COUNT(clocks); i++) {
+		exclaves_clock_t local;
+		exclaves_clock_t *clock = &exclaves_clock[i];
 
-		kr = exclaves_scheduler_send(&request, &response, save_out_ptr, save_in_ptr);
-		if (kr) {
-			return kr;
+		local.u128 = os_atomic_load(&clock->a_u128, relaxed);
+		while (local.u64.sent_offset != local.u64.latest_offset) {
+			XrtHosted_Timer_t timer = i == EXCLAVES_CLOCK_ABSOLUTE ?
+			    XrtHosted_Timer_Absolute :
+			    XrtHosted_Timer_Continuous;
+
+			kern_return_t kr =
+			    exclaves_scheduler_request_update_timer(timer,
+			    local.u64.latest_offset);
+			if (kr != KERN_SUCCESS) {
+				return kr;
+			}
+
+			/*
+			 * Swap the sent offset with the local latest offset. If
+			 * it fails, the sent offset will be reloaded.
+			 */
+			os_atomic_cmpxchgv(&clock->a_u64.sent_offset,
+			    local.u64.sent_offset, local.u64.latest_offset,
+			    &local.u64.sent_offset, relaxed);
+
+			/*
+			 * Fetch the latest offset again, in case we are stale.
+			 */
+			local.u64.latest_offset = os_atomic_load(
+				&clock->a_u64.latest_offset, relaxed);
 		}
-
-		/* Swap the sent offset with the local latest offset. If it fails,
-		 * the sent offset will be reloaded. */
-		os_atomic_cmpxchgv(&clock->a_u64.sent_offset, local.u64.sent_offset,
-		    local.u64.latest_offset, &local.u64.sent_offset, relaxed);
-
-		/* Fetch the latest offset again, in case we are stale. */
-		local.u64.latest_offset = os_atomic_load(&clock->a_u64.latest_offset,
-		    relaxed);
 	}
 
-	if (response.tag != XrtHosted_Response_NothingScheduled) {
-		kr = KERN_FAILURE;
-	}
-
-	return kr;
+	return KERN_SUCCESS;
 }
 
 static kern_return_t
 exclaves_scheduler_boot(void)
 {
-	kern_return_t kr = KERN_FAILURE;
-	thread_t thread = current_thread();
-
-	exclaves_debug_printf(show_progress,
-	    "exclaves: Scheduler: Request to boot exclave\n");
-
 	/* This must happen on the boot CPU - bind the thread. */
 	bind_to_boot_core();
-
-	assert3u(thread->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
-	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
 
 	/*
 	 * Set the request/response buffers. These may be overriden later when
@@ -2048,7 +2037,85 @@ exclaves_scheduler_boot(void)
 	*PERCPU_GET(exclaves_response) =
 	    exclaves_callbacks->v1.Core.response(XrtHosted_Core_bootIndex);
 
-	XrtHosted_Response_t response = {.tag = XrtHosted_Response_Invalid};
+	kern_return_t kr = exclaves_scheduler_request_boot();
+
+	unbind_from_boot_core();
+
+	return kr;
+}
+
+static kern_return_t
+exclaves_scheduler_request_update_timer(XrtHosted_Timer_t timer,
+    uint64_t offset)
+{
+	thread_t thread = current_thread();
+
+	exclaves_debug_printf(show_progress,
+	    "exclaves: Scheduler: Request to update timer\n");
+
+	XrtHosted_Response_t response = {
+		.tag = XrtHosted_Response_NothingScheduled,
+	};
+
+	const XrtHosted_Request_t request = XrtHosted_Request_UpdateTimerOffsetMsg(
+		.timer = timer,
+		.offset = offset,
+		);
+
+	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
+	kern_return_t kr = exclaves_scheduler_request(&request, &response);
+	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_CALL;
+
+	switch (kr) {
+	case KERN_SUCCESS:
+		break;
+
+	case KERN_POLICY_LIMIT:
+		/*
+		 * POLICY_LIMIT should only happen if a timer update was pending
+		 * (and thus should never happen when trying to update a timer.
+		 */
+		panic("exclaves: timer update requested when updating timer");
+
+	default:
+		exclaves_debug_printf(show_errors,
+		    "exclaves: scheduler request failed\n");
+		return kr;
+	}
+
+	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_REQUEST;
+
+	switch (response.tag) {
+	case XrtHosted_Response_NothingScheduled:
+		kr = handle_response_nothing_scheduled(&response.NothingScheduled);
+		break;
+
+	default:
+		exclaves_debug_printf(show_errors, "exclaves: "
+		    "unexpected scheduler response when updating timer\n");
+		kr = KERN_FAILURE;
+		break;
+	}
+
+	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_REQUEST;
+
+	return kr;
+}
+
+static kern_return_t
+exclaves_scheduler_request_boot(void)
+{
+	kern_return_t kr = KERN_FAILURE;
+	thread_t thread = current_thread();
+
+	assert3u(thread->th_exclaves_state & TH_EXCLAVES_STATE_ANY, ==, 0);
+
+	exclaves_debug_printf(show_progress,
+	    "exclaves: Scheduler: Request to boot exclave\n");
+
+	XrtHosted_Response_t response = {
+		.tag = XrtHosted_Response_Invalid,
+	};
 	uint64_t pagelist_pa = 0;
 
 	while (response.tag != XrtHosted_Response_AllExclavesBooted) {
@@ -2057,11 +2124,29 @@ exclaves_scheduler_boot(void)
 		    XrtHosted_Request_BootExclavesMsg();
 		pagelist_pa = 0;
 
+		thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
 		kr = exclaves_scheduler_request(&request, &response);
-		if (kr != KERN_SUCCESS) {
-			exclaves_debug_printf(show_errors,
-			    "exclaves: Enter failed\n");
+		thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_CALL;
+
+		switch (kr) {
+		case KERN_SUCCESS:
 			break;
+
+		case KERN_POLICY_LIMIT:
+			kr = exclaves_clocks_update();
+			if (kr != KERN_SUCCESS) {
+				return kr;
+			}
+			/*
+			 * Don't try to process the response - we just updated
+			 * the clock so continue with the boot request.
+			 */
+			continue;
+
+		default:
+			exclaves_debug_printf(show_errors,
+			    "exclaves: scheduler request failed\n");
+			return KERN_FAILURE;
 		}
 
 		thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_REQUEST;
@@ -2087,6 +2172,10 @@ exclaves_scheduler_boot(void)
 			handle_response_panic_buffer_address(response.PanicBufferAddress.physical);
 			break;
 
+		case XrtHosted_Response_Panicking:
+			handle_response_panicking(&response.Panicking);
+		/* Not reached. */
+
 		default:
 			exclaves_debug_printf(show_errors,
 			    "exclaves: Scheduler: Unexpected response: tag 0x%x\n",
@@ -2097,26 +2186,23 @@ exclaves_scheduler_boot(void)
 
 		thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_REQUEST;
 
-		/* Bail out if an error is hit. */
 		if (kr != KERN_SUCCESS) {
 			break;
 		}
 	}
 
-	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_CALL;
-
-	unbind_from_boot_core();
-
 	return kr;
 }
 
+OS_INLINE
 kern_return_t
-exclaves_scheduler_resume_scheduling_context(const exclaves_ctx_t *ctx,
-    bool interrupted)
+exclaves_scheduler_request_resume(const exclaves_ctx_t *ctx, bool interrupted)
 {
-	kern_return_t kr = KERN_SUCCESS;
 	thread_t thread = current_thread();
 	const ctid_t ctid = thread_get_ctid(thread);
+
+	assert3u(thread->th_exclaves_state &
+	    (TH_EXCLAVES_RESUME_PANIC_THREAD | TH_EXCLAVES_RPC), !=, 0);
 
 	exclaves_debug_printf(show_progress,
 	    "exclaves: Scheduler: Request to resume scid 0x%lx\n", ctx->scid);
@@ -2131,54 +2217,78 @@ exclaves_scheduler_resume_scheduling_context(const exclaves_ctx_t *ctx,
 		.thread = ctx->scid,
 		.hostId = ctid,
 		);
-	kr = exclaves_scheduler_request(&request, &response);
-	if (kr) {
-		exclaves_debug_printf(show_errors, "exclaves: Enter failed\n");
+
+	kern_return_t kr = exclaves_scheduler_request(&request, &response);
+
+	switch (kr) {
+	case KERN_SUCCESS:
+		break;
+
+	case KERN_POLICY_LIMIT:
+		/*
+		 * Don't try to handle any response (as there isn't one), just
+		 * return to the caller which will check MSG STATUS and re-enter
+		 * if neccessary.
+		 */
+		return exclaves_clocks_update();
+
+	default:
+		exclaves_debug_printf(show_errors,
+		    "exclaves: scheduler request failed\n");
+		break;
+	}
+
+	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
 
+	__asm__ volatile ( "EXCLAVES_SCHEDULER_REQUEST_START:\n\t");
 	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_REQUEST;
 
 	switch (response.tag) {
 	case XrtHosted_Response_Wait:
 		kr = handle_response_wait(&response.Wait);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Wake:
 		kr = handle_response_wake(&response.Wake);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Yield:
 		kr = handle_response_yield(false, ctx->scid, &response.Yield);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Spawned:
 		kr = handle_response_spawned(ctx->scid, &response.Spawned);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Terminated:
 		kr = handle_response_terminated(&response.Terminated);
-		goto out;
+		break;
 
 	case XrtHosted_Response_WakeWithOwner:
 		kr = handle_response_wake_with_owner(&response.WakeWithOwner);
-		goto out;
+		break;
 
 	case XrtHosted_Response_PanicWait:
 		kr = handle_response_panic_wait(&response.PanicWait);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Suspended:
 		kr = handle_response_suspended(&response.Suspended);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Resumed:
 		kr = handle_response_resumed(&response.Resumed);
-		goto out;
+		break;
 
 	case XrtHosted_Response_Interrupted:
 		kr = handle_response_interrupted(&response.Interrupted);
-		goto out;
+		break;
+
+	case XrtHosted_Response_Panicking:
+		handle_response_panicking(&response.Panicking);
+	/* Not reached. */
 
 	case XrtHosted_Response_Invalid:
 	case XrtHosted_Response_Failure:
@@ -2190,11 +2300,86 @@ exclaves_scheduler_resume_scheduling_context(const exclaves_ctx_t *ctx,
 		    "exclaves: Scheduler: Unexpected response: tag 0x%x\n",
 		    response.tag);
 		kr = KERN_FAILURE;
-		goto out;
+		break;
 	}
 
-out:
 	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_REQUEST;
+	__asm__ volatile ( "EXCLAVES_SCHEDULER_REQUEST_END:\n\t");
+
+	return kr;
+}
+
+/* A friendly name to show up in backtraces. */
+OS_NOINLINE
+kern_return_t
+exclaves_run(thread_t thread, bool interrupted)
+{
+	return exclaves_scheduler_request_resume(&thread->th_exclaves_ipc_ctx,
+	           interrupted);
+}
+
+/*
+ * Note: this is called from a thread with RT priority which is on the way to
+ * panicking and thus doesn't log.
+ */
+kern_return_t
+exclaves_scheduler_request_watchdog_panic(void)
+{
+	thread_t thread = current_thread();
+
+	XrtHosted_Response_t response = {};
+	const XrtHosted_Request_t request = XrtHosted_Request_WatchdogPanicMsg();
+
+	/*
+	 * Check for consistent exclaves thread state to make sure we don't
+	 * accidentally block. This should normally never happen but if it does,
+	 * just return and allow the caller to panic without gathering an
+	 * exclaves stackshot.
+	 */
+	if (os_atomic_load(&thread->th_exclaves_inspection_state, relaxed) != 0 ||
+	    thread->th_exclaves_state != 0) {
+		return KERN_FAILURE;
+	}
+
+	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_CALL;
+	kern_return_t kr = exclaves_scheduler_request(&request, &response);
+	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_CALL;
+
+	switch (kr) {
+	case KERN_SUCCESS:
+		break;
+
+	case KERN_POLICY_LIMIT:
+		/*
+		 * POLICY_LIMIT should only happen if a timer update was pending
+		 * (and thus should never happen when trying to send a watchdog
+		 * panic message.
+		 */
+		panic("exclaves: "
+		    "timer update requested when calling watchdog panic");
+
+	default:
+		return kr;
+	}
+
+	thread->th_exclaves_state |= TH_EXCLAVES_SCHEDULER_REQUEST;
+
+	switch (response.tag) {
+	case XrtHosted_Response_WatchdogPanicComplete:
+		handle_response_watchdog_panic_complete(&response.WatchdogPanicComplete);
+		break;
+
+	case XrtHosted_Response_Panicking:
+		handle_response_panicking(&response.Panicking);
+	/* Not Reached. */
+
+	default:
+		panic("exclaves: unexpected scheduler response "
+		    "when sending watchdog panic request: %d", response.tag);
+	}
+
+	thread->th_exclaves_state &= ~TH_EXCLAVES_SCHEDULER_REQUEST;
+
 	return kr;
 }
 
@@ -2368,17 +2553,26 @@ exclaves_has_priv_vnode(void *vnode, int64_t off, exclaves_priv_t priv)
 uintptr_t exclaves_enter_range_start;
 uintptr_t exclaves_enter_range_end;
 
+/* Unslid pointers defining the range of code which handles exclaves scheduler request */
+uintptr_t exclaves_scheduler_request_range_start;
+uintptr_t exclaves_scheduler_request_range_end;
+
 
 __startup_func
 static void
-initialize_exclaves_enter_range(void)
+initialize_exclaves_ranges(void)
 {
 	exclaves_enter_range_start = VM_KERNEL_UNSLIDE(&exclaves_enter_start_label);
 	assert3u(exclaves_enter_range_start, !=, 0);
 	exclaves_enter_range_end = VM_KERNEL_UNSLIDE(&exclaves_enter_end_label);
 	assert3u(exclaves_enter_range_end, !=, 0);
+
+	exclaves_scheduler_request_range_start = VM_KERNEL_UNSLIDE(&exclaves_scheduler_request_start_label);
+	assert3u(exclaves_scheduler_request_range_start, !=, 0);
+	exclaves_scheduler_request_range_end = VM_KERNEL_UNSLIDE(&exclaves_scheduler_request_end_label);
+	assert3u(exclaves_scheduler_request_range_end, !=, 0);
 }
-STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, initialize_exclaves_enter_range);
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, initialize_exclaves_ranges);
 
 /*
  * Return true if the specified address is in exclaves_enter.
@@ -2391,10 +2585,33 @@ exclaves_enter_in_range(uintptr_t addr, bool slid)
 	       exclaves_in_range(addr, exclaves_enter_range_start, exclaves_enter_range_end);
 }
 
+/*
+ * Return true if the specified address is in scheduler request handlers.
+ */
+static bool
+exclaves_scheduler_request_in_range(uintptr_t addr, bool slid)
+{
+	return slid ?
+	       exclaves_in_range(addr, (uintptr_t)&exclaves_scheduler_request_start_label, (uintptr_t)&exclaves_scheduler_request_end_label) :
+	       exclaves_in_range(addr, exclaves_scheduler_request_range_start, exclaves_scheduler_request_range_end);
+}
+
 uint32_t
 exclaves_stack_offset(const uintptr_t *addr, size_t nframes, bool slid)
 {
 	size_t i = 0;
+
+	// Check for a frame matching scheduler request range
+	for (i = 0; i < nframes; i++) {
+		if (exclaves_scheduler_request_in_range(addr[i], slid)) {
+			break;
+		}
+	}
+
+	// Insert exclaves stacks before the scheduler request frame
+	if (i < nframes) {
+		return (uint32_t)(i + 1);
+	}
 
 	// Check for a frame matching upcall code range
 	for (i = 0; i < nframes; i++) {
@@ -2421,6 +2638,30 @@ exclaves_stack_offset(const uintptr_t *addr, size_t nframes, bool slid)
 	}
 	return (uint32_t)i;
 }
+
+#if DEVELOPMENT || DEBUG
+
+/* Tweak the set of relaxed requirements on startup. */
+__startup_func
+static void
+exclaves_requirement_startup(void)
+{
+	/*
+	 * The medium-term plan is that the boot-arg controlling entitlements
+	 * goes away entirely and is replaced with EXCLAVES_R_ENTITLEMENTS.
+	 * Until that happens, for historical reasons, if the entitlement
+	 * boot-arg has disabled EXCLAVES_PRIV_CONCLAVE_HOST, then relax
+	 * EXCLAVES_R_CONCLAVE_RESOURCES here too.
+	 */
+	if ((exclaves_entitlement_flags & EXCLAVES_PRIV_CONCLAVE_HOST) == 0) {
+		exclaves_requirement_relax(EXCLAVES_R_CONCLAVE_RESOURCES);
+	}
+
+	exclaves_requirement_relax(EXCLAVES_R_EIC);
+}
+STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, exclaves_requirement_startup);
+
+#endif /* DEVELOPMENT || DEBUG */
 
 #endif /* CONFIG_EXCLAVES */
 

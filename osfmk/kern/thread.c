@@ -727,6 +727,9 @@ thread_terminate_self(void)
 	assert(thread->handoff_thread == THREAD_NULL);
 	assert(thread->th_work_interval == NULL);
 	assert(thread->t_rr_state.trr_value == 0);
+#if DEBUG || DEVELOPMENT
+	assert(thread->th_test_ctx == NULL);
+#endif
 
 	assert3u(0, ==, thread->sched_flags &
 	    (TH_SFLAG_WAITQ_PROMOTED |
@@ -2524,28 +2527,6 @@ guard_ast(thread_t t)
 static void
 thread_cputime_callback(int warning, __unused const void *arg0, __unused const void *arg1)
 {
-	if (warning == LEDGER_WARNING_ROSE_ABOVE) {
-#if CONFIG_TELEMETRY
-		/*
-		 * This thread is in danger of violating the CPU usage monitor. Enable telemetry
-		 * on the entire task so there are micro-stackshots available if and when
-		 * EXC_RESOURCE is triggered. We could have chosen to enable micro-stackshots
-		 * for this thread only; but now that this task is suspect, knowing what all of
-		 * its threads are up to will be useful.
-		 */
-		telemetry_task_ctl(current_task(), TF_CPUMON_WARNING, 1);
-#endif
-		return;
-	}
-
-#if CONFIG_TELEMETRY
-	/*
-	 * If the balance has dipped below the warning level (LEDGER_WARNING_DIPPED_BELOW) or
-	 * exceeded the limit, turn telemetry off for the task.
-	 */
-	telemetry_task_ctl(current_task(), TF_CPUMON_WARNING, 0);
-#endif
-
 	if (warning == 0) {
 		SENDING_NOTIFICATION__THIS_THREAD_IS_CONSUMING_TOO_MUCH_CPU();
 	}

@@ -59,6 +59,7 @@
 #define HAS_SPECRES              1 /* Supports SPECRES. */
 #define HAS_ERRATA_123855614     1
 #define HAS_BTI                  1 /* Supports Branch Target Identification (ARMv8.5) */
+#define HAS_GUARDED_IO_FILTER    1 /* Has a guarded runtime dedicated to the fine-grained IO access filter */
 
 #define CPU_HAS_APPLE_PAC                    1
 #define HAS_UNCORE_CTRS                      1

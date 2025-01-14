@@ -91,13 +91,14 @@
 #define RB_PANIC_ZPRINT 0x1000   /* add zprint info to panic string */
 #define RB_PANIC_FORCERESET 0x2000   /* do force-reset panic */
 
-#ifndef KERNEL
 __BEGIN_DECLS
-enum panic_with_data_flags {
+__options_closed_decl(panic_with_data_flags, unsigned int, {
 	PANIC_WITH_DATA_FLAGS_NONE = 0,
+	PANIC_WITH_DATA_FLAGS_EXCLAVE_STACKSHOT,
 	PANIC_WITH_DATA_FLAGS_MAX,
-};
+});
 
+#ifndef KERNEL
 /* userspace reboot control */
 int usrctl(uint32_t flags);
 /* The normal reboot syscall. */
@@ -110,8 +111,8 @@ int reboot_np(int howto, const char *message);
  * the paniclog.
  */
 int panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint32_t flags, const char *msg);
+#endif /* KERNEL */
 __END_DECLS
-#endif
 
 #endif /* __APPLE_API_PRIVATE */
 

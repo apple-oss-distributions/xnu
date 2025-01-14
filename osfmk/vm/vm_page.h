@@ -73,6 +73,7 @@
 #include <mach/vm_prot.h>
 #include <mach/vm_param.h>
 #include <mach/memory_object_types.h> /* for VMP_CS_BITS... */
+#include <sys/kern_memorystatus_xnu.h>
 
 
 #if    defined(__LP64__)
@@ -1195,17 +1196,18 @@ extern void             vm_page_reactivate_all_throttled(void);
 
 extern void vm_pressure_response(void);
 
-#if CONFIG_JETSAM
-extern void memorystatus_pages_update(unsigned int pages_avail);
+#define AVAILABLE_NON_COMPRESSED_MEMORY         (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
+#define AVAILABLE_MEMORY                        (AVAILABLE_NON_COMPRESSED_MEMORY + VM_PAGE_COMPRESSOR_COUNT)
 
-#define VM_CHECK_MEMORYSTATUS do { \
-	memorystatus_pages_update(              \
+#if CONFIG_JETSAM
+
+#define VM_CHECK_MEMORYSTATUS \
+	memorystatus_update_available_page_count( \
 	        vm_page_pageable_external_count + \
-	        vm_page_free_count +            \
+	        vm_page_free_count +              \
 	        VM_PAGE_SECLUDED_COUNT_OVER_TARGET() + \
 	        (VM_DYNAMIC_PAGING_ENABLED() ? 0 : vm_page_purgeable_count) \
-	        ); \
-	} while(0)
+	        )
 
 #else /* CONFIG_JETSAM */
 
@@ -1215,7 +1217,7 @@ extern void memorystatus_pages_update(unsigned int pages_avail);
 
 #else /* !XNU_TARGET_OS_OSX */
 
-#define VM_CHECK_MEMORYSTATUS   vm_pressure_response()
+#define VM_CHECK_MEMORYSTATUS memorystatus_update_available_page_count(AVAILABLE_NON_COMPRESSED_MEMORY)
 
 #endif /* !XNU_TARGET_OS_OSX */
 

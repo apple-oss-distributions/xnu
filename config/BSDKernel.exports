@@ -214,6 +214,7 @@ _ifaddr_address
 _ifaddr_address_family
 _ifaddr_dstaddress
 _ifaddr_findbestforaddr
+_ifaddr_get_ia6_flags
 _ifaddr_ifnet
 _ifaddr_netmask
 _ifaddr_reference

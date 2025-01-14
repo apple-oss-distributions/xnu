@@ -169,10 +169,12 @@ sys_panic_with_data(struct proc *p,
 	int copy_len = 0;
 	size_t dummy = 0;
 	uuid_t uuid = {0};
+	uint64_t debugger_options_mask = 0;
 
 	AUDIT_ARG(addr, uap->addr);
 	AUDIT_ARG(value32, uap->len);
 	AUDIT_ARG(addr, uap->uuid);
+	AUDIT_ARG(value32, uap->flags);
 
 	if (!IOCurrentTaskHasEntitlement(EXTPANICLOG_ENTITLEMENT)) {
 		return EPERM;
@@ -215,8 +217,12 @@ sys_panic_with_data(struct proc *p,
 		}
 	}
 
+	if (uap->flags & PANIC_WITH_DATA_FLAGS_EXCLAVE_STACKSHOT) {
+		debugger_options_mask |= DEBUGGER_OPTION_USER_WATCHDOG;
+	}
+
 finish:
-	panic_with_data(uuid, data, copy_len,
+	panic_with_data(uuid, data, copy_len, debugger_options_mask,
 	    "Panic called from Process: %s Message: %s", proc_name, message);
 }
 

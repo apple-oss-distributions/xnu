@@ -436,3 +436,4 @@ SYSCTL_PROC(_machdep, OID_AUTO, ptrauth_enabled,
     CTLTYPE_INT | CTLFLAG_KERN | CTLFLAG_RD,
     0, 0,
     machdep_ptrauth_enabled, "I", "");
+

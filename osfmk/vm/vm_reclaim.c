@@ -215,20 +215,60 @@ vmdr_metadata_free(vm_deferred_reclamation_metadata_t metadata)
 	zfree(vm_reclaim_metadata_zone, metadata);
 }
 
+static inline __result_use_check
+kern_return_t
+vm_deferred_reclamation_buffer_init_internal_sanitize(
+	vm_map_t           map,
+	mach_vm_address_ut address_u,
+	mach_vm_size_ut    size_u,
+	mach_vm_address_t  *address,
+	mach_vm_size_t     *size)
+{
+	/* Sanitize addr/size separately since addr is only a hint. */
+	*address = vm_sanitize_addr(map, address_u);
+
+	static_assert(
+		sizeof(struct mach_vm_reclaim_buffer_v1_s) < FOURK_PAGE_SIZE,
+		"If growing struct mach_vm_reclaim_buffer_v1_s beyond 4K, "
+		"add a runtime check on size to prevent subtraction "
+		"underflow.");
+	return vm_sanitize_size(
+		0,
+		size_u,
+		VM_SANITIZE_CALLER_MACH_VM_DEFERRED_RECLAMATION_BUFFER_INIT,
+		map,
+		VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS,
+		size);
+}
+
 kern_return_t
 vm_deferred_reclamation_buffer_init_internal(
-	task_t                   task,
-	mach_vm_address_t        *address,
-	mach_vm_size_t           size)
+	task_t             task,
+	mach_vm_address_ut *address_u,
+	mach_vm_size_ut    size_u)
 {
 	kern_return_t kr = KERN_FAILURE;
+	mach_vm_address_t address;
+	mach_vm_size_t size;
 	vm_deferred_reclamation_metadata_t metadata = NULL;
 	vm_map_t map;
 	uint64_t head = 0, tail = 0, busy = 0;
 	static bool reclaim_disabled_logged = false;
 
-	if (task == TASK_NULL || address == NULL || size == 0) {
+	if (task == TASK_NULL || address_u == NULL) {
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	map = task->map;
+
+	kr = vm_deferred_reclamation_buffer_init_internal_sanitize(
+		map,
+		*address_u,
+		size_u,
+		&address,
+		&size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr);
 	}
 
 	if (!vm_reclaim_max_threshold) {
@@ -242,32 +282,40 @@ vm_deferred_reclamation_buffer_init_internal(
 		return KERN_NOT_SUPPORTED;
 	}
 
-	map = task->map;
-	size = vm_map_round_page(size, VM_MAP_PAGE_MASK(map));
-
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_START,
 	    task_pid(task), size);
 	/*
 	 * TODO: If clients other than libmalloc adopt deferred reclaim, a
 	 * different tag should be given
 	 */
+	/*
+	 * `address` was sanitized under the assumption that we'll only use
+	 * it as a hint (overflow checks were used) so we must pass the
+	 * anywhere flag.
+	 */
 	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_ANYWHERE_PERMANENT(
 		.vm_tag = VM_MEMORY_MALLOC);
-	mach_vm_offset_ut *offset_u = vm_sanitize_wrap_addr_ref(address);
-	mach_vm_size_ut size_u = vm_sanitize_wrap_size(size);
-	kr = mach_vm_allocate_kernel(map, offset_u, size_u, vmk_flags);
+	kr = mach_vm_allocate_kernel(
+		map,
+		vm_sanitize_wrap_addr_ref(&address),
+		vm_sanitize_wrap_size(size),
+		vmk_flags);
 	if (kr != KERN_SUCCESS) {
 		os_log_error(vm_reclaim_log_handle, "vm_reclaim: failed to allocate VA for reclaim "
 		    "buffer (%d) - %s [%d]\n", kr, task_best_name(task), task_pid(task));
 		return kr;
 	}
-	assert3u(*address, !=, 0);
+	assert3u(address, !=, 0);
 
-	user_addr_t buffer = *address + \
+	user_addr_t buffer = address + \
 	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
+	/*
+	 * vm_sanitize_size above guarantees that size is at least one map
+	 * page. This guarantees that subtraction below doesn't underflow.
+	 */
 	mach_vm_size_t buffer_size = size - \
 	    offsetof(struct mach_vm_reclaim_buffer_v1_s, entries);
-	user_addr_t indices = *address + \
+	user_addr_t indices = address + \
 	    offsetof(struct mach_vm_reclaim_buffer_v1_s, indices);
 
 	metadata = vmdr_metadata_alloc(task, buffer, buffer_size, indices);
@@ -324,8 +372,10 @@ vm_deferred_reclamation_buffer_init_internal(
 	task_unlock(task);
 	lck_mtx_unlock(&reclamation_buffers_lock);
 
+	*address_u = vm_sanitize_wrap_addr(address);
+
 	KDBG(VM_RECLAIM_CODE(VM_RECLAIM_INIT) | DBG_FUNC_END,
-	    task_pid(task), KERN_SUCCESS, *address);
+	    task_pid(task), KERN_SUCCESS, address);
 	return KERN_SUCCESS;
 
 fail_task:

@@ -285,6 +285,9 @@ extern int vm_log_xnu_user_debug;
 SYSCTL_INT(_vm, OID_AUTO, log_xnu_user_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_log_xnu_user_debug, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
 
+extern int vm_log_map_delete_permanent_prot_none;
+SYSCTL_INT(_vm, OID_AUTO, log_map_delete_permanent_prot_none, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_log_map_delete_permanent_prot_none, 0, "");
+
 extern int cs_executable_create_upl;
 extern int cs_executable_wire;
 SYSCTL_INT(_vm, OID_AUTO, cs_executable_create_upl, CTLFLAG_RD | CTLFLAG_LOCKED, &cs_executable_create_upl, 0, "");
@@ -378,6 +381,17 @@ SYSCTL_INT(_vm, OID_AUTO, vm_shadow_max_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &v
 #endif /* VM_SCAN_FOR_SHADOW_CHAIN */
 
 SYSCTL_INT(_vm, OID_AUTO, vm_debug_events, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_debug_events, 0, "");
+
+#if PAGE_SLEEP_WITH_INHERITOR
+#if DEVELOPMENT || DEBUG
+extern uint32_t page_worker_table_size;
+SYSCTL_INT(_vm, OID_AUTO, page_worker_table_size, CTLFLAG_RD | CTLFLAG_LOCKED, &page_worker_table_size, 0, "");
+SCALABLE_COUNTER_DECLARE(page_worker_hash_collisions);
+SYSCTL_SCALABLE_COUNTER(_vm, page_worker_hash_collisions, page_worker_hash_collisions, "");
+SCALABLE_COUNTER_DECLARE(page_worker_inheritor_sleeps);
+SYSCTL_SCALABLE_COUNTER(_vm, page_worker_inheritor_sleeps, page_worker_inheritor_sleeps, "");
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* PAGE_SLEEP_WITH_INHERITOR */
 
 /*
  * Sysctl's related to data/stack execution.  See osfmk/vm/vm_map.c
@@ -546,24 +560,27 @@ vm_purge_filebacked_pagers(void)
 
 int
 useracc(
-	user_addr_t     addr,
-	user_size_t     len,
-	int     prot)
+	user_addr_ut    addr_u,
+	user_size_ut    len_u,
+	int             prot)
 {
 	vm_map_t        map;
+	vm_prot_t       vm_prot = VM_PROT_WRITE;
 
 	map = current_map();
-	return vm_map_check_protection(
-		map,
-		vm_map_trunc_page(addr,
-		vm_map_page_mask(map)),
-		vm_map_round_page(addr + len,
-		vm_map_page_mask(map)),
-		prot == B_READ ? VM_PROT_READ : VM_PROT_WRITE);
+
+	if (prot == B_READ) {
+		vm_prot = VM_PROT_READ;
+	}
+
+	return vm_map_check_protection(map, addr_u,
+	           vm_sanitize_compute_ut_end(addr_u, len_u), vm_prot,
+	           VM_SANITIZE_CALLER_USERACC);
 }
 
 #if XNU_PLATFORM_MacOSX
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 vslock_sanitize(
 	vm_map_t                map,
 	user_addr_ut            addr_u,
@@ -619,7 +636,7 @@ vslock(user_addr_ut addr, user_size_ut len)
 #endif /* XNU_PLATFORM_MacOSX */
 
 	kret = vm_map_wire_kernel(current_map(), addr,
-	    vm_sanitize_compute_unsafe_end(addr, len),
+	    vm_sanitize_compute_ut_end(addr, len),
 	    vm_sanitize_wrap_prot(VM_PROT_READ | VM_PROT_WRITE),
 	    VM_KERN_MEMORY_BSD,
 	    FALSE);
@@ -701,7 +718,7 @@ vsunlock(user_addr_ut addr, user_size_ut len, __unused int dirtied)
 #endif /* XNU_PLATFORM_MacOSX */
 
 	kret = vm_map_unwire(map, addr,
-	    vm_sanitize_compute_unsafe_end(addr, len), false);
+	    vm_sanitize_compute_ut_end(addr, len), false);
 	switch (kret) {
 	case KERN_SUCCESS:
 		return 0;
@@ -1697,6 +1714,133 @@ shared_region_map_and_slide_cleanup(
 #define SLIDE_AMOUNT_MASK ~SIXTEENK_PAGE_MASK
 #endif
 
+static inline __result_use_check kern_return_t
+shared_region_map_and_slide_2_np_sanitize(
+	struct proc                         *p,
+	user_addr_t                         mappings_userspace_addr,
+	unsigned int                        count,
+	shared_file_mapping_slide_np_t      *mappings)
+{
+	kern_return_t kr;
+	vm_map_t map = current_map();
+	mach_vm_address_t addr, end;
+	mach_vm_offset_t offset, offset_end;
+	mach_vm_size_t size, offset_size;
+	user_addr_t slide_start, slide_end, slide_size;
+	vm_prot_t cur;
+	vm_prot_t max;
+
+	user_addr_t user_addr = mappings_userspace_addr;
+
+	for (size_t i = 0; i < count; i++) {
+		shared_file_mapping_slide_np_ut mapping_u;
+		/*
+		 * First we bring each mapping struct into our kernel stack to
+		 * avoid TOCTOU.
+		 */
+		kr = shared_region_copyin(
+			p,
+			user_addr,
+			1, // copy 1 element at a time
+			sizeof(shared_file_mapping_slide_np_ut),
+			&mapping_u);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		/*
+		 * Then, we sanitize the data on the kernel stack.
+		 */
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_address_u,
+			mapping_u.sms_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_START
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE),
+			&addr,
+			&end,
+			&size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_file_offset_u,
+			mapping_u.sms_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			PAGE_MASK,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES),
+			&offset,
+			&offset_end,
+			&offset_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+		if (__improbable(0 != (offset & vm_map_page_mask(map)))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		/*
+		 * Unsafe access is immediately followed by wrap to
+		 * convert from addr to size.
+		 */
+		mach_vm_size_ut sms_slide_size_u =
+		    vm_sanitize_wrap_size(
+			VM_SANITIZE_UNSAFE_UNWRAP(
+				mapping_u.sms_slide_size_u));
+
+		kr = vm_sanitize_addr_size(
+			mapping_u.sms_slide_start_u,
+			sms_slide_size_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			(VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH
+			| VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES),
+			&slide_start,
+			&slide_end,
+			&slide_size);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		kr = vm_sanitize_cur_and_max_prots(
+			mapping_u.sms_init_prot_u,
+			mapping_u.sms_max_prot_u,
+			VM_SANITIZE_CALLER_SHARED_REGION_MAP_AND_SLIDE_2_NP,
+			map,
+			VM_PROT_SFM_EXTENSIONS_MASK | VM_PROT_TPRO,
+			&cur,
+			&max);
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+
+		/*
+		 * Finally, we move the data from the kernel stack to our
+		 * caller-allocated kernel heap buffer.
+		 */
+		mappings[i].sms_address = addr;
+		mappings[i].sms_size = size;
+		mappings[i].sms_file_offset = offset;
+		mappings[i].sms_slide_size = slide_size;
+		mappings[i].sms_slide_start = slide_start;
+		mappings[i].sms_max_prot = max;
+		mappings[i].sms_init_prot = cur;
+
+		if (__improbable(os_add_overflow(
+			    user_addr,
+			    sizeof(shared_file_mapping_slide_np_ut),
+			    &user_addr))) {
+			return KERN_INVALID_ARGUMENT;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 int
 shared_region_map_and_slide_2_np(
 	struct proc                                  *p,
@@ -1762,13 +1906,22 @@ shared_region_map_and_slide_2_np(
 		goto done;
 	}
 
+	/*
+	 * struct shared_file_np does not have fields that are subject to
+	 * sanitization, it is thus copied from userspace as is.
+	 */
 	kr = shared_region_copyin(p, uap->files, files_count, sizeof(shared_files[0]), shared_files);
 	if (kr != KERN_SUCCESS) {
 		goto done;
 	}
 
-	kr = shared_region_copyin(p, uap->mappings, mappings_count, sizeof(mappings[0]), mappings);
-	if (kr != KERN_SUCCESS) {
+	kr = shared_region_map_and_slide_2_np_sanitize(
+		p,
+		uap->mappings_u,
+		mappings_count,
+		mappings);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		kr = vm_sanitize_get_kr(kr);
 		goto done;
 	}
 
@@ -1807,9 +1960,29 @@ shared_region_map_and_slide_2_np(
 				kr = KERN_FAILURE;
 				goto done;
 			}
-			mappings[m].sms_address += slide_amount;
+			if (__improbable(
+				    os_add_overflow(
+					    mappings[m].sms_address,
+					    slide_amount,
+					    &mappings[m].sms_address))) {
+				kr = KERN_INVALID_ARGUMENT;
+				goto done;
+			}
 			if (mappings[m].sms_slide_size != 0) {
-				mappings[m].sms_slide_start += slide_amount;
+				mach_vm_address_t discard;
+				/* Slide and check that new start/size pairs do not overflow. */
+				if (__improbable(
+					    os_add_overflow(
+						    mappings[m].sms_slide_start,
+						    slide_amount,
+						    &mappings[m].sms_slide_start) ||
+					    os_add_overflow(
+						    mappings[m].sms_slide_start,
+						    mappings[m].sms_slide_size,
+						    &discard))) {
+					kr = KERN_INVALID_ARGUMENT;
+					goto done;
+				}
 			}
 		}
 	}
@@ -2187,6 +2360,9 @@ extern unsigned int vm_page_kern_lpage_count;
 SYSCTL_INT(_vm, OID_AUTO, kern_lpage_count, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_page_kern_lpage_count, 0, "kernel used large pages");
 
+SCALABLE_COUNTER_DECLARE(vm_page_grab_count);
+SYSCTL_SCALABLE_COUNTER(_vm, pages_grabbed, vm_page_grab_count, "Total pages grabbed");
+
 #if DEVELOPMENT || DEBUG
 #if __ARM_MIXED_PAGE_SIZE__
 static int vm_mixed_pagesize_supported = 1;
@@ -2196,8 +2372,6 @@ static int vm_mixed_pagesize_supported = 0;
 SYSCTL_INT(_debug, OID_AUTO, vm_mixed_pagesize_supported, CTLFLAG_ANYBODY | CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_mixed_pagesize_supported, 0, "kernel support for mixed pagesize");
 
-SCALABLE_COUNTER_DECLARE(vm_page_grab_count);
-SYSCTL_SCALABLE_COUNTER(_vm, pages_grabbed, vm_page_grab_count, "Total pages grabbed");
 SYSCTL_ULONG(_vm, OID_AUTO, pages_freed, CTLFLAG_RD | CTLFLAG_LOCKED,
     &vm_pageout_vminfo.vm_page_pages_freed, "Total pages freed");
 

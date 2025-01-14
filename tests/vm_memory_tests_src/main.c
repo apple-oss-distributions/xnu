@@ -163,5 +163,6 @@ T_DECL(memory_share_tests,
  */
 T_DECL_REF(memory_share_tests_4k, memory_share_tests, "vm memory sharing with 4k processes",
     T_META_ENVVAR("USE4K=YES"),
-    T_META_ASROOT(true)
+    T_META_ASROOT(true),
+    T_META_ENABLED(false /* rdar://133462123 */)
     );

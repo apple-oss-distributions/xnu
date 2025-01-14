@@ -687,10 +687,6 @@ private:
 	thread_call_t           fullWakeThreadCall;
 	thread_call_t           updateConsoleUsersEntry;
 
-// Core Analytics
-	IOPMAOTAnalytics        * _aotAnalytics;
-	thread_call_t           analyticsThreadCall;
-
 // Track system capabilities.
 	uint32_t                _desiredCapability;
 	uint32_t                _currentCapability;
@@ -873,12 +869,6 @@ private:
 	void        aotEvaluate(IOTimerEventSource * timer);
 public:
 	bool        isAOTMode(void);
-
-// Core Analytics
-	void        initAOTMetrics();
-	void        scheduleAnalyticsThreadCall();
-	void        reportAnalytics();
-
 private:
 	// -- AOT
 	enum {

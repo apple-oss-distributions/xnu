@@ -1191,9 +1191,8 @@ extern kern_return_t    vm_map_wire_kernel(
 	vm_tag_t                tag,
 	boolean_t               user_wire);
 
-
 /*!
- * @function vm_purgable_control()
+ * @function vm_map_purgable_control()
  *
  * @brief
  * Perform a purgeability operation on a VM object at a given address
@@ -1213,17 +1212,17 @@ extern kern_return_t    vm_map_wire_kernel(
  * @param control       a purgeability operation to perform.
  * @param state         an in/out parameter that is operation dependent.
  */
-extern kern_return_t vm_purgable_control(
+extern kern_return_t vm_map_purgable_control(
 	vm_map_t                map,
-	vm_offset_t             address,
+	vm_map_offset_ut        address,
 	vm_purgable_t           control,
-	int                     *state);
+	int                    *state);
 
 extern kern_return_t mach_vm_purgable_control(
 	vm_map_t                map,
-	mach_vm_offset_t        address,
+	mach_vm_offset_ut       address_u,
 	vm_purgable_t           control,
-	int                     *state);
+	int                    *state);
 
 
 #ifdef MACH_KERNEL_PRIVATE
@@ -1739,6 +1738,11 @@ extern void             vm_init_before_launchd(void);
 extern void             vm_allocation_zones_init(void);
 
 #endif /* VM_TAG_SIZECLASSES */
+
+extern memory_object_t device_pager_setup(memory_object_t, uintptr_t, vm_size_t, int);
+
+extern kern_return_t device_pager_populate_object( memory_object_t device,
+    memory_object_offset_t offset, ppnum_t page_num, vm_size_t size);
 
 #endif /* XNU_KERNEL_PRIVATE */
 #pragma GCC visibility pop

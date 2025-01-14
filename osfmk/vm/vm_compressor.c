@@ -3519,7 +3519,7 @@ vm_compressor_flush(void)
 		}
 	}
 	vm_compressor_compact_and_swap(TRUE);
-
+	/* need to wait here since the swap thread may also be running in parallel and handling segments */
 	while (!queue_empty(&c_early_swapout_list_head) || !queue_empty(&c_regular_swapout_list_head) || !queue_empty(&c_late_swapout_list_head)) {
 		assert_wait_timeout((event_t) &compaction_swapper_running, THREAD_INTERRUPTIBLE, 5000, 1000 * NSEC_PER_USEC);
 

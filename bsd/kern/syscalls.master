@@ -116,7 +116,7 @@
 62	AUE_NULL	ALL	{ int nosys(void); }   { old fstat }
 63	AUE_NULL	ALL	{ int nosys(void); }   { used internally and reserved }
 64	AUE_NULL	ALL	{ int nosys(void); }   { old getpagesize }
-65	AUE_MSYNC	ALL	{ int msync(caddr_t addr, size_t len, int flags) NO_SYSCALL_STUB; }
+65	AUE_MSYNC	ALL	{ int msync(caddr_ut addr, size_ut len, int flags) NO_SYSCALL_STUB; }
 #if CONFIG_VFORK
 66	AUE_VFORK	ALL	{ int vfork(void) NO_SYSCALL_STUB; }
 #else
@@ -129,11 +129,11 @@
 71	AUE_NULL	ALL	{ int nosys(void); }   { old mmap }
 72	AUE_NULL	ALL	{ int nosys(void); }   { old vadvise }
 73	AUE_MUNMAP	ALL	{ int munmap(caddr_ut addr, size_ut len) NO_SYSCALL_STUB; }
-74	AUE_MPROTECT	ALL	{ int mprotect(caddr_t addr, size_t len, int prot) NO_SYSCALL_STUB; }
-75	AUE_MADVISE	ALL	{ int madvise(caddr_t addr, size_t len, int behav); }
+74	AUE_MPROTECT	ALL	{ int mprotect(caddr_ut addr, size_ut len, int prot) NO_SYSCALL_STUB; }
+75	AUE_MADVISE	ALL	{ int madvise(caddr_ut addr, size_ut len, int behav); }
 76	AUE_NULL	ALL	{ int nosys(void); }   { old vhangup }
 77	AUE_NULL	ALL	{ int nosys(void); }   { old vlimit }
-78	AUE_MINCORE	ALL	{ int mincore(user_addr_t addr, user_size_t len, user_addr_t vec); }
+78	AUE_MINCORE	ALL	{ int mincore(caddr_ut addr, size_ut len, user_addr_t vec); }
 79	AUE_GETGROUPS	ALL	{ int getgroups(u_int gidsetsize, gid_t *gidset); }
 80	AUE_SETGROUPS	ALL	{ int setgroups(u_int gidsetsize, gid_t *gidset); }
 81	AUE_GETPGRP	ALL	{ int getpgrp(void); }
@@ -361,7 +361,7 @@
 #endif
 
 249	AUE_NULL	ALL	{ int nosys(void); }
-250	AUE_MINHERIT	ALL	{ int minherit(void *addr, size_t len, int inherit); }
+250	AUE_MINHERIT	ALL	{ int minherit(caddr_ut addr, size_ut len, int inherit); }
 #if SYSV_SEM
 251	AUE_SEMSYS	ALL	{ int semsys(u_int which, int a2, int a3, int a4, int a5) NO_SYSCALL_STUB; }
 #else
@@ -603,7 +603,7 @@
 403	AUE_NULL	ALL	{ int nosys(void); }
 404	AUE_NULL	ALL	{ int nosys(void); }
 #endif /* SOCKETS */
-405	AUE_MSYNC	ALL	{ int msync_nocancel(caddr_t addr, size_t len, int flags) NO_SYSCALL_STUB; }
+405	AUE_MSYNC	ALL	{ int msync_nocancel(caddr_ut addr, size_ut len, int flags) NO_SYSCALL_STUB; }
 406	AUE_FCNTL	ALL	{ int sys_fcntl_nocancel(int fd, int cmd, long arg) NO_SYSCALL_STUB; }
 407	AUE_SELECT	ALL	{ int select_nocancel(int nd, u_int32_t *in, u_int32_t *ou, u_int32_t *ex, struct timeval *tv) NO_SYSCALL_STUB; }
 408	AUE_FSYNC	ALL	{ int fsync_nocancel(int fd) NO_SYSCALL_STUB; }
@@ -845,7 +845,7 @@
 533     AUE_NULL        ALL     { int log_data(unsigned int tag, unsigned int flags, void *buffer, unsigned int size) NO_SYSCALL_STUB; }
 534 AUE_NULL	ALL	{ uint64_t memorystatus_available_memory(void) NO_SYSCALL_STUB; }
 535 AUE_NULL	ALL	{ int objc_bp_assist_cfg_np(uint64_t adr, uint64_t ctl); }
-536	AUE_NULL	ALL	{ int shared_region_map_and_slide_2_np(uint32_t files_count, const struct shared_file_np *files, uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings) NO_SYSCALL_STUB; }
+536	AUE_NULL	ALL	{ int shared_region_map_and_slide_2_np(uint32_t files_count, const struct shared_file_np *files, uint32_t mappings_count, const shared_file_mapping_slide_np_ut *mappings_u) NO_SYSCALL_STUB; }
 537	AUE_NULL	ALL { int pivot_root(const char *new_rootfs_path_before, const char *old_rootfs_path_after); }
 538 AUE_TASKINSPECTFORPID	ALL { int task_inspect_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }
 539 AUE_TASKREADFORPID	ALL { int task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }

@@ -5490,6 +5490,8 @@ SYSCTL_PROC(_debug, OID_AUTO, xnu_simultaneous_panic_test, CTLTYPE_STRING | CTLF
 extern int exc_resource_threads_enabled;
 SYSCTL_INT(_kern, OID_AUTO, exc_resource_threads_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &exc_resource_threads_enabled, 0, "exc_resource thread limit enabled");
 
+extern unsigned int verbose_panic_flow_logging;
+SYSCTL_INT(_debug, OID_AUTO, verbose_panic_flow_logging, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &verbose_panic_flow_logging, 0, "verbose logging during panic");
 
 #endif /* DEVELOPMENT || DEBUG */
 
@@ -6091,7 +6093,14 @@ SYSCTL_QUAD(_kern, OID_AUTO, num_static_scalable_counters, CTLFLAG_RD | CTLFLAG_
 
 #if SCHED_HYGIENE_DEBUG
 TUNABLE_DT(bool, sched_hygiene_nonspec_tb, "machine-timeouts", "nonspec-tb", "sched-hygiene-nonspec-tb", false, TUNABLE_DT_NONE);
+static SECURITY_READ_ONLY_LATE(int) sched_hygiene_debug_available = 1;
+#else
+static SECURITY_READ_ONLY_LATE(int) sched_hygiene_debug_available = 0;
 #endif /* SCHED_HYGIENE_DEBUG */
+
+SYSCTL_INT(_debug, OID_AUTO, sched_hygiene_debug_available,
+    CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &sched_hygiene_debug_available, 0, "");
 
 uuid_string_t trial_treatment_id;
 uuid_string_t trial_experiment_id;

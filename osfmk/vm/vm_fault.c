@@ -1165,9 +1165,9 @@ vm_fault_page(
 			 * clean up and return error
 			 */
 #if DEVELOPMENT || DEBUG
-			printf("FBDP rdar://93769854 %s:%d object %p internal %d pager %p (%s) copy %p shadow %p alive %d terminating %d named %d ref %d shadow_severed %d\n", __FUNCTION__, __LINE__, object, object->internal, object->pager, object->pager ? object->pager->mo_pager_ops->memory_object_pager_name : "?", object->vo_copy, object->shadow, object->alive, object->terminating, object->named, object->ref_count, object->shadow_severed);
+			printf("FBDP rdar://93769854 %s:%d object %p internal %d pager %p (%s) copy %p shadow %p alive %d terminating %d named %d ref %d shadow_severed %d\n", __FUNCTION__, __LINE__, object, object->internal, object->pager, object->pager ? object->pager->mo_pager_ops->memory_object_pager_name : "?", object->vo_copy, object->shadow, object->alive, object->terminating, object->named, os_ref_get_count_raw(&object->ref_count), object->shadow_severed);
 			if (panic_object_not_alive) {
-				panic("FBDP rdar://93769854 %s:%d object %p internal %d pager %p (%s) copy %p shadow %p alive %d terminating %d named %d ref %d shadow_severed %d\n", __FUNCTION__, __LINE__, object, object->internal, object->pager, object->pager ? object->pager->mo_pager_ops->memory_object_pager_name : "?", object->vo_copy, object->shadow, object->alive, object->terminating, object->named, object->ref_count, object->shadow_severed);
+				panic("FBDP rdar://93769854 %s:%d object %p internal %d pager %p (%s) copy %p shadow %p alive %d terminating %d named %d ref %d shadow_severed %d\n", __FUNCTION__, __LINE__, object, object->internal, object->pager, object->pager ? object->pager->mo_pager_ops->memory_object_pager_name : "?", object->vo_copy, object->shadow, object->alive, object->terminating, object->named, os_ref_get_count_raw(&object->ref_count), object->shadow_severed);
 			}
 #endif /* DEVELOPMENT || DEBUG */
 			vm_fault_cleanup(object, first_m);
@@ -1465,7 +1465,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 
 				vm_object_lock(object);
-				assert(object->ref_count > 0);
+				assert(os_ref_get_count_raw(&object->ref_count) > 0);
 
 				m = vm_page_lookup(object, vm_object_trunc_page(offset));
 
@@ -1617,7 +1617,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 
 				vm_object_lock(object);
-				assert(object->ref_count > 0);
+				assert(os_ref_get_count_raw(&object->ref_count) > 0);
 
 				if (!object->pager_ready) {
 					wait_result = vm_object_sleep(object, VM_OBJECT_EVENT_PAGER_READY, interruptible, LCK_SLEEP_UNLOCK);
@@ -1652,7 +1652,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 
 				vm_object_lock(object);
-				assert(object->ref_count > 0);
+				assert(os_ref_get_count_raw(&object->ref_count) > 0);
 
 				if (object->paging_in_progress >= vm_object_pagein_throttle) {
 					wait_result = vm_object_paging_throttle_wait(object, interruptible);
@@ -1700,6 +1700,12 @@ vm_fault_page(
 				pager = object->pager;
 
 				assert(object->paging_in_progress > 0);
+
+				page_worker_token_t pw_token;
+#if PAGE_SLEEP_WITH_INHERITOR
+				page_worker_register_worker((event_t)m, &pw_token);
+#endif /* PAGE_SLEEP_WITH_INHERITOR */
+
 				vm_object_unlock(object);
 
 				rc = vm_compressor_pager_get(
@@ -1802,7 +1808,7 @@ vm_fault_page(
 					    "vm_compressor_pager_get()\n",
 					    rc);
 				}
-				vm_page_wakeup_done(object, m);
+				vm_page_wakeup_done_with_inheritor(object, m, &pw_token);
 
 				rc = KERN_SUCCESS;
 				goto data_requested;
@@ -2345,10 +2351,9 @@ dont_look_for_page:
 				vm_fault_cleanup(object, first_m);
 
 				vm_object_lock(copy_object);
-				assert(copy_object->ref_count > 0);
 				vm_object_lock_assert_exclusive(copy_object);
-				copy_object->ref_count--;
-				assert(copy_object->ref_count > 0);
+				os_ref_release_live_locked_raw(&copy_object->ref_count,
+				    &vm_object_refgrp);
 				copy_m = vm_page_lookup(copy_object, copy_offset);
 
 				if (copy_m != VM_PAGE_NULL && copy_m->vmp_busy) {
@@ -2382,8 +2387,8 @@ dont_look_for_page:
 				RELEASE_PAGE(m);
 
 				vm_object_lock_assert_exclusive(copy_object);
-				copy_object->ref_count--;
-				assert(copy_object->ref_count > 0);
+				os_ref_release_live_locked_raw(&copy_object->ref_count,
+				    &vm_object_refgrp);
 
 				vm_object_unlock(copy_object);
 				vm_fault_cleanup(object, first_m);
@@ -2455,7 +2460,8 @@ dont_look_for_page:
 				 * check whether we'll have
 				 * to deallocate the hard way.
 				 */
-				if ((copy_object->shadow != object) || (copy_object->ref_count == 1)) {
+				if ((copy_object->shadow != object) ||
+				    (os_ref_get_count_raw(&copy_object->ref_count) == 1)) {
 					vm_object_unlock(copy_object);
 					vm_object_deallocate(copy_object);
 					vm_object_lock(object);
@@ -2493,8 +2499,8 @@ dont_look_for_page:
 		 * copy_object).
 		 */
 		vm_object_lock_assert_exclusive(copy_object);
-		copy_object->ref_count--;
-		assert(copy_object->ref_count > 0);
+		os_ref_release_live_locked_raw(&copy_object->ref_count,
+		    &vm_object_refgrp);
 
 		vm_object_unlock(copy_object);
 
@@ -4586,7 +4592,17 @@ RetryFault:
 	if ((object->copy_strategy == MEMORY_OBJECT_COPY_DELAY ||
 	    object->copy_strategy == MEMORY_OBJECT_COPY_DELAY_FORK) &&
 	    object->vo_copy != VM_OBJECT_NULL && (fault_type & VM_PROT_WRITE)) {
-		goto handle_copy_delay;
+		if (resilient_media_retry && object && object->internal) {
+			/*
+			 * We're handling a "resilient media retry" and we
+			 * just want to insert of zero-filled page in this
+			 * top object (if there's not already a page there),
+			 * so this is not a real "write" and we want to stay
+			 * on this code path.
+			 */
+		} else {
+			goto handle_copy_delay;
+		}
 	}
 
 	cur_object = object;
@@ -4938,6 +4954,38 @@ upgrade_lock_and_retry:
 FastPmapEnter:
 				assert(m_object == VM_PAGE_OBJECT(m));
 
+				if (resilient_media_retry && (prot & VM_PROT_WRITE)) {
+					/*
+					 * We might have bypassed some copy-on-write
+					 * mechanism to get here (theoretically inserting
+					 * a zero-filled page in the top object to avoid
+					 * raising an exception on an unavailable page at
+					 * the bottom of the shadow chain.
+					 * So let's not grant write access to this page yet.
+					 * If write access is needed, the next fault should
+					 * handle any copy-on-write obligations.
+					 */
+					if (pmap_has_prot_policy(pmap, fault_info->pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+						/*
+						 * For a protection that the pmap cares
+						 * about, we must hand over the full
+						 * set of protections (so that the pmap
+						 * layer can apply any desired policy).
+						 * This means that cs_bypass must be
+						 * set, as this can force us to pass
+						 * RWX.
+						 */
+						if (!fault_info->cs_bypass) {
+							panic("%s: pmap %p vaddr 0x%llx prot 0x%x options 0x%x",
+							    __FUNCTION__, pmap,
+							    (uint64_t)vaddr, prot,
+							    fault_info->pmap_options);
+						}
+					} else {
+						prot &= ~VM_PROT_WRITE;
+					}
+				}
+
 				/*
 				 * prepare for the pmap_enter...
 				 * object and map are both locked
@@ -5133,7 +5181,8 @@ FastPmapEnter:
 			/*
 			 * Now cope with the source page and object
 			 */
-			if (object->ref_count > 1 && cur_m->vmp_pmapped) {
+			if (os_ref_get_count_raw(&object->ref_count) > 1 &&
+			    cur_m->vmp_pmapped) {
 				pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(cur_m));
 			} else if (VM_MAP_PAGE_SIZE(map) < PAGE_SIZE) {
 				/*
@@ -5603,9 +5652,25 @@ FastPmapEnter:
 						prot &= ~VM_PROT_WRITE;
 					}
 				}
-				assertf(!((fault_type & VM_PROT_WRITE) && object->vo_copy),
-				    "map %p va 0x%llx wrong path for write fault (fault_type 0x%x) on object %p with copy %p\n",
-				    map, (uint64_t)vaddr, fault_type, object, object->vo_copy);
+				if (resilient_media_retry) {
+					/*
+					 * Not a real write, so no reason to assert.
+					 * We've just allocated a new page for this
+					 * <object,offset> so we know nobody has any
+					 * PTE pointing at any previous version of this
+					 * page and no copy-on-write is involved here.
+					 * We're just inserting a page of zeroes at this
+					 * stage of the shadow chain because the pager
+					 * for the lowest object in the shadow chain
+					 * said it could not provide that page and we
+					 * want to avoid failing the fault and causing
+					 * a crash on this "resilient_media" mapping.
+					 */
+				} else {
+					assertf(!((fault_type & VM_PROT_WRITE) && object->vo_copy),
+					    "map %p va 0x%llx wrong path for write fault (fault_type 0x%x) on object %p with copy %p\n",
+					    map, (uint64_t)vaddr, fault_type, object, object->vo_copy);
+				}
 
 				vm_object_t saved_copy_object;
 				uint32_t saved_copy_version;

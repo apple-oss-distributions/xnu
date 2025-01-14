@@ -2381,7 +2381,7 @@ telemetry(__unused struct proc *p, struct telemetry_args *args, __unused int32_t
 	switch (args->cmd) {
 #if CONFIG_TELEMETRY
 	case TELEMETRY_CMD_TIMER_EVENT:
-		error = telemetry_timer_event(args->deadline, args->interval, args->leeway);
+		error = ENOTSUP;
 		break;
 	case TELEMETRY_CMD_PMI_SETUP:
 		error = telemetry_pmi_setup((enum telemetry_pmi)args->deadline, args->interval);

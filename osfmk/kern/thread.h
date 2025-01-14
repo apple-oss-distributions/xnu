@@ -317,13 +317,18 @@ __options_decl(thread_exclaves_state_flags_t, uint16_t, {
 	/* Thread is expecting that an exclaves-side thread may be spawned.
 	 */
 	TH_EXCLAVES_SPAWN_EXPECTED             = 0x40,
+	/* Thread is resuming the panic thread.
+	 * Must not re-enter exclaves or return to Darwin userspace.
+	 */
+	TH_EXCLAVES_RESUME_PANIC_THREAD        = 0x80,
 });
 #define TH_EXCLAVES_STATE_ANY           ( \
     TH_EXCLAVES_RPC               | \
     TH_EXCLAVES_UPCALL            | \
     TH_EXCLAVES_SCHEDULER_REQUEST | \
     TH_EXCLAVES_XNUPROXY          | \
-    TH_EXCLAVES_SCHEDULER_CALL)
+    TH_EXCLAVES_SCHEDULER_CALL    | \
+    TH_EXCLAVES_RESUME_PANIC_THREAD)
 
 __options_decl(thread_exclaves_inspection_flags_t, uint16_t, {
 	/* Thread is on Stackshot's inspection queue */
@@ -754,6 +759,10 @@ struct thread {
 
 	/* Ast/Halt data structures */
 	bool                    recover;                /* True if page faulted in recoverable IO */
+
+#if DEBUG || DEVELOPMENT
+	struct thread_test_context *th_test_ctx;        /* thread-specific data for kernel tests */
+#endif
 
 	queue_chain_t           threads;                /* global list of all threads */
 

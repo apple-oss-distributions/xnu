@@ -1173,18 +1173,36 @@ ml_is_quiescing(void)
 uint64_t
 ml_get_booter_memory_size(void)
 {
+#if CONFIG_SPTM
+	extern uint64_t memSize;
+#endif /* CONFIG_SPTM */
 	uint64_t size;
 	uint64_t roundsize = 512 * 1024 * 1024ULL;
 	size = BootArgs->memSizeActual;
 	if (!size) {
-		size  = BootArgs->memSize;
+#if CONFIG_SPTM
+		/*
+		 * SPTM systems cache [memSize] in a CTRR-protected variable rather
+		 * than relying on [BootArgs]. This is to enable the possibility
+		 * for XNU to modify it before machine lockdown, which happens in
+		 * KASAN kernels. If we did not do this, XNU would fault on the first
+		 * attempt to overwrite [BootArgs->memSize].
+		 */
+		size = memSize;
+#else
+		size = BootArgs->memSize;
+#endif /* CONFIG_SPTM */
 		if (size < (2 * roundsize)) {
 			roundsize >>= 1;
 		}
 		size  = (size + roundsize - 1) & ~(roundsize - 1);
 	}
 
+#if CONFIG_SPTM
+	size -= memSize;
+#else
 	size -= BootArgs->memSize;
+#endif /* CONFIG_SPTM */
 
 	return size;
 }

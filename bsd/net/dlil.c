@@ -1132,7 +1132,7 @@ failed:
 static boolean_t
 dlil_attach_flowswitch_nexus(ifnet_t ifp)
 {
-	boolean_t               attached;
+	boolean_t               attached = FALSE;
 	if_nexus_flowswitch     nexus_fsw;
 
 #if (DEVELOPMENT || DEBUG)
@@ -1151,27 +1151,23 @@ dlil_attach_flowswitch_nexus(ifnet_t ifp)
 		    if_name(ifp));
 		return FALSE;
 	}
-
-	if (uuid_is_null(ifp->if_nx_flowswitch.if_fsw_instance) == 0) {
-		/* it's already attached */
-		return FALSE;
-	}
 	bzero(&nexus_fsw, sizeof(nexus_fsw));
-	attached = _dlil_attach_flowswitch_nexus(ifp, &nexus_fsw);
-	if (attached) {
-		ifnet_lock_exclusive(ifp);
-		if (!IF_FULLY_ATTACHED(ifp)) {
-			/* interface is going away */
-			attached = FALSE;
-		} else {
+	if (!ifnet_is_attached(ifp, 1)) {
+		os_log(OS_LOG_DEFAULT, "%s: %s not attached",
+		    __func__, ifp->if_xname);
+		goto done;
+	}
+	if (uuid_is_null(ifp->if_nx_flowswitch.if_fsw_instance)) {
+		attached = _dlil_attach_flowswitch_nexus(ifp, &nexus_fsw);
+		if (attached) {
+			ifnet_lock_exclusive(ifp);
 			ifp->if_nx_flowswitch = nexus_fsw;
-		}
-		ifnet_lock_done(ifp);
-		if (!attached) {
-			/* clean up flowswitch nexus */
-			dlil_detach_flowswitch_nexus(&nexus_fsw);
+			ifnet_lock_done(ifp);
 		}
 	}
+	ifnet_decr_iorefcnt(ifp);
+
+done:
 	return attached;
 }
 
@@ -1210,7 +1206,6 @@ dlil_quiesce_and_detach_nexuses(ifnet_t ifp)
 		ASSERT(!uuid_is_null(nx_fsw->if_fsw_provider));
 		ASSERT(!uuid_is_null(nx_fsw->if_fsw_instance));
 		dlil_detach_flowswitch_nexus(nx_fsw);
-		bzero(nx_fsw, sizeof(*nx_fsw));
 	} else {
 		ASSERT(uuid_is_null(nx_fsw->if_fsw_provider));
 		ASSERT(uuid_is_null(nx_fsw->if_fsw_instance));
@@ -1221,7 +1216,6 @@ dlil_quiesce_and_detach_nexuses(ifnet_t ifp)
 		ASSERT(!uuid_is_null(nx_netif->if_nif_provider));
 		ASSERT(!uuid_is_null(nx_netif->if_nif_instance));
 		dlil_detach_netif_nexus(nx_netif);
-		bzero(nx_netif, sizeof(*nx_netif));
 	} else {
 		ASSERT(uuid_is_null(nx_netif->if_nif_provider));
 		ASSERT(uuid_is_null(nx_netif->if_nif_instance));
@@ -6100,7 +6094,7 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 				 * space for Ethernet header
 				 */
 				if (M_LEADINGSPACE(m) < ETHER_HDR_LEN) {
-					m_free(m);
+					m_freem(m);
 					ip6stat.ip6s_clat464_in_drop++;
 					goto next;
 				}
@@ -9522,6 +9516,7 @@ ifnet_detach_final(struct ifnet *ifp)
 	struct ifaddr *ifa;
 	ifnet_detached_func if_free;
 	int i;
+	bool waited = false;
 
 	/* Let BPF know we're detaching */
 	bpfdetach(ifp);
@@ -9548,12 +9543,16 @@ ifnet_detach_final(struct ifnet *ifp)
 	 * common case, so block without using a continuation.
 	 */
 	while (ifp->if_refio > 0) {
-		DLIL_PRINTF("%s: Waiting for IO references on %s interface "
-		    "to be released\n", __func__, if_name(ifp));
+		waited = true;
+		DLIL_PRINTF("%s: %s waiting for IO references to drain\n",
+		    __func__, if_name(ifp));
 		(void) msleep(&(ifp->if_refio), &ifp->if_ref_lock,
 		    (PZERO - 1), "ifnet_ioref_wait", NULL);
 	}
-
+	if (waited) {
+		DLIL_PRINTF("%s: %s IO references drained\n",
+		    __func__, if_name(ifp));
+	}
 	VERIFY(ifp->if_datamov == 0);
 	VERIFY(ifp->if_drainers == 0);
 	VERIFY(ifp->if_suspend == 0);
@@ -9596,6 +9595,9 @@ ifnet_detach_final(struct ifnet *ifp)
 	if_purgeaddrs(ifp);
 
 	ifnet_lock_exclusive(ifp);
+
+	bzero(&ifp->if_nx_netif, sizeof(ifp->if_nx_netif));
+	bzero(&ifp->if_nx_flowswitch, sizeof(ifp->if_nx_flowswitch));
 
 	/* Unplumb all protocols */
 	for (i = 0; i < PROTO_HASH_SLOTS; i++) {

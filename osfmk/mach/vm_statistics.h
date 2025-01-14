@@ -483,6 +483,7 @@ typedef union {
 		    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
 		    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
 		    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
+		    vmkf_remap_legacy_mode:1,   /* vm_remap, not vm_remap_new */
 		    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
 		    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
 		    vmkf_nested_pmap:1,         /* use a nested pmap */
@@ -508,7 +509,7 @@ typedef union {
 		    vmkf_last_free:1,           /* find space from the end */
 		    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
 
-		    __vmkf_unused:2;
+		    __vmkf_unused:1;
 	};
 
 	/*
@@ -560,6 +561,12 @@ typedef struct {
 /* current accounting postmark */
 #define __VM_LEDGER_ACCOUNTING_POSTMARK 2019032600
 
+/*
+ *  When making a new VM_LEDGER_TAG_* or VM_LEDGER_FLAG_*, update tests
+ *  vm_parameter_validation_[user|kern] and their expected results; they
+ *  deliberately call VM functions with invalid ledger values and you may
+ *  be turning one of those invalid tags/flags valid.
+ */
 /* discrete values: */
 #define VM_LEDGER_TAG_NONE      0x00000000
 #define VM_LEDGER_TAG_DEFAULT   0x00000001
@@ -793,6 +800,11 @@ typedef struct {
 
 /* kernel map tags */
 /* please add new definition strings to zprint */
+/*
+ *  When making a new VM_KERN_MEMORY_*, update tests vm_parameter_validation_[user|kern]
+ *  and their expected results; they deliberately call VM functions with invalid
+ *  kernel tag values and you may be turning one of those invalid tags valid.
+ */
 
 #define VM_KERN_MEMORY_NONE             0
 
@@ -830,8 +842,9 @@ typedef struct {
 #define VM_KERN_MEMORY_TRIAGE           32
 #define VM_KERN_MEMORY_RECOUNT          33
 #define VM_KERN_MEMORY_EXCLAVES         35
+#define VM_KERN_MEMORY_EXCLAVES_SHARED  36
 /* add new tags here and adjust first-dynamic value */
-#define VM_KERN_MEMORY_FIRST_DYNAMIC    36
+#define VM_KERN_MEMORY_FIRST_DYNAMIC    37
 
 /* out of tags: */
 #define VM_KERN_MEMORY_ANY              255
@@ -873,7 +886,12 @@ typedef struct {
 #define VM_KERN_COUNT_MAP_KALLOC_LARGE_DATA     12
 #define VM_KERN_COUNT_MAP_KERNEL_DATA   13
 
-#define VM_KERN_COUNTER_COUNT           14
+/* The size of the exclaves iboot carveout (exclaves memory not from XNU) in bytes. */
+#define VM_KERN_COUNT_EXCLAVES_CARVEOUT 14
+
+/* The number of VM_KERN_COUNT_ stats. New VM_KERN_COUNT_ entries should be less than this. */
+#define VM_KERN_COUNTER_COUNT           15
+
 
 #endif /* KERNEL_PRIVATE */
 

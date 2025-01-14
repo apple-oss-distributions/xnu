@@ -69,6 +69,7 @@
 #include <libkern/crypto/crypto_internal.h>
 #include <os/log.h>
 #include <corecrypto/cc.h>
+#include <net/sockaddr_utils.h>
 #if CONTENT_FILTER
 #include <net/content_filter.h>
 #endif /* CONTENT_FILTER */
@@ -449,7 +450,7 @@ flow_divert_packet_init(struct flow_divert_pcb *fd_cb, uint8_t packet_type, mbuf
 }
 
 static int
-flow_divert_packet_append_tlv(mbuf_ref_t packet, uint8_t type, uint32_t length, const void *value)
+flow_divert_packet_append_tlv(mbuf_ref_t packet, uint8_t type, uint32_t length, const void __sized_by(length) *value)
 {
 	uint32_t        net_length      = htonl(length);
 	int                     error           = 0;
@@ -1339,7 +1340,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 	}
 
 	if (fd_cb->local_endpoint.sa.sa_family == AF_INET || fd_cb->local_endpoint.sa.sa_family == AF_INET6) {
-		error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_LOCAL_ADDR, fd_cb->local_endpoint.sa.sa_len, &(fd_cb->local_endpoint.sa));
+		error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_LOCAL_ADDR, fd_cb->local_endpoint.sa.sa_len, SA_BYTES(&(fd_cb->local_endpoint.sa)));
 		if (error) {
 			goto done;
 		}
@@ -1468,7 +1469,7 @@ flow_divert_send_connect_result(struct flow_divert_pcb *fd_cb)
 	}
 
 	if (fd_cb->local_endpoint.sa.sa_family == AF_INET || fd_cb->local_endpoint.sa.sa_family == AF_INET6) {
-		error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_LOCAL_ADDR, fd_cb->local_endpoint.sa.sa_len, &(fd_cb->local_endpoint.sa));
+		error = flow_divert_packet_append_tlv(packet, FLOW_DIVERT_TLV_LOCAL_ADDR, fd_cb->local_endpoint.sa.sa_len, SA_BYTES(&(fd_cb->local_endpoint.sa)));
 		if (error) {
 			goto done;
 		}
@@ -3532,7 +3533,7 @@ flow_divert_append_target_endpoint_tlv(mbuf_ref_t connect_packet, struct sockadd
 		goto done;
 	}
 
-	error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_TARGET_ADDRESS, toaddr->sa_len, toaddr);
+	error = flow_divert_packet_append_tlv(connect_packet, FLOW_DIVERT_TLV_TARGET_ADDRESS, toaddr->sa_len, SA_BYTES(toaddr));
 	if (error) {
 		goto done;
 	}

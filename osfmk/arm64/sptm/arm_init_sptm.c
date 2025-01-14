@@ -80,6 +80,9 @@ extern pmap_paddr_t vm_last_phys;
 /* UART hibernation flag - import so we can set it ASAP on resume. */
 extern MARK_AS_HIBERNATE_DATA bool uart_hibernation;
 
+/* Used to cache memSize, as passed by iBoot */
+SECURITY_READ_ONLY_LATE(uint64_t) memSize = 0;
+
 int debug_task;
 
 /**
@@ -205,6 +208,9 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) reset_vector_vaddr = 0;
  * Forward definition
  */
 void arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_args);
+#if KASAN
+void arm_init_kasan(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_args);
+#endif /* KASAN */
 
 #if __arm64__
 unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
@@ -620,10 +626,32 @@ static SECURITY_READ_ONLY_LATE(bool) enable_sme = true;
  */
 bool sptm_supports_local_coredump = true;
 
+#if KASAN
+/* Prototypes for KASAN functions */
+void kasan_bootstrap(boot_args *, vm_offset_t pgtable, sptm_bootstrap_args_xnu_t *sptm_boot_args);
+
 /**
- * Entry point for systems that support an SPTM. Bootstrap stacks
- * have been set up by the SPTM by this point, and XNU is responsible
- * for rebasing and signing absolute addresses.
+ * Entry point for systems that support an SPTM and are booting a KASAN kernel.
+ * This is required because KASAN kernels need to set up the shadow map before
+ * arm_init() can even run.
+ */
+void
+arm_init_kasan(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
+{
+	/* Initialize SPTM helper library. */
+	libsptm_init(&sptm_boot_args->libsptm_state);
+
+	memSize = args->memSize;
+	kasan_bootstrap(args, phystokv(sptm_boot_args->libsptm_state.root_table_paddr), sptm_boot_args);
+
+	arm_init(args, sptm_boot_args);
+}
+#endif /* KASAN */
+
+/**
+ * Entry point for systems that support an SPTM - except on KASAN kernels,
+ * see above. Bootstrap stacks have been set up by the SPTM by this point,
+ * and XNU is responsible for rebasing and signing absolute addresses.
  */
 void
 arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
@@ -668,8 +696,12 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
 
+#if !KASAN
+	memSize = args->memSize;
+
 	/* Initialize SPTM helper library. */
 	libsptm_init(&const_sptm_args.libsptm_state);
+#endif
 
 #if __arm64__
 	configure_timer_apple_regs();
@@ -690,7 +722,7 @@ arm_init(boot_args *args, sptm_bootstrap_args_xnu_t *sptm_boot_args)
 		/*
 		 * Select the advertised kernel page size.
 		 */
-		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+		if (memSize > 1ULL * 1024 * 1024 * 1024) {
 			/*
 			 * arm64 device with > 1GB of RAM:
 			 * kernel uses 16KB pages.
@@ -1443,32 +1475,6 @@ arm_vm_prot_finalize(boot_args * args __unused)
 #endif /* __ARM_KERNEL_PROTECT__ */
 }
 
-/*
- * TBI (top-byte ignore) is an ARMv8 feature for ignoring the top 8 bits of
- * address accesses. It can be enabled separately for TTBR0 (user) and
- * TTBR1 (kernel).
- */
-void
-arm_set_kernel_tbi(void)
-{
-#if !__ARM_KERNEL_PROTECT__ && CONFIG_KERNEL_TBI
-	uint64_t old_tcr, new_tcr;
-
-	old_tcr = new_tcr = get_tcr();
-	/*
-	 * For kernel configurations that require TBI support on
-	 * PAC systems, we enable DATA TBI only.
-	 */
-	new_tcr |= TCR_TBI1_TOPBYTE_IGNORED;
-	new_tcr |= TCR_TBID1_ENABLE;
-
-	if (old_tcr != new_tcr) {
-		set_tcr(new_tcr);
-		sysreg_restore.tcr_el1 = new_tcr;
-	}
-#endif /* !__ARM_KERNEL_PROTECT__ && CONFIG_KERNEL_TBI */
-}
-
 /* allocate a page for a page table: we support static and dynamic mappings.
  *
  * returns a physical address for the allocated page
@@ -1557,9 +1563,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 
 	/* Get the memory size */
 #if KASAN
-	real_phys_size = args->memSize + (shadow_ptop - shadow_pbase);
+	real_phys_size = memSize + (shadow_ptop - shadow_pbase);
 #else
-	real_phys_size = args->memSize;
+	real_phys_size = memSize;
 #endif
 
 	/**
@@ -1571,7 +1577,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 * completely own.  The KASAN shadow region, if present, is managed entirely
 	 * in units of the hardware page size and should not need similar treatment.
 	 */
-	gPhysSize = mem_size = ((gPhysBase + args->memSize) & ~PAGE_MASK) - gPhysBase;
+	gPhysSize = mem_size = ((gPhysBase + memSize) & ~PAGE_MASK) - gPhysBase;
 
 
 	/* Obtain total memory size, including non-managed memory */
@@ -1593,7 +1599,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	physmap_base = SPTMArgs->physmap_base;
 	physmap_end = static_memory_end = SPTMArgs->physmap_end;
 
-#if KASAN && !defined(ARM_LARGE_MEMORY)
+#if KASAN && !defined(ARM_LARGE_MEMORY) && !defined(CONFIG_SPTM)
 	/* add the KASAN stolen memory to the physmap */
 	dynamic_memory_begin = static_memory_end + (shadow_ptop - shadow_pbase);
 #else

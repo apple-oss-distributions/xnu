@@ -857,12 +857,7 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (inp == NULL) {
 		return EINVAL;
 	}
-	/*
-	 * Another thread won the binding race so do not change inp_vflag
-	 */
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		return EINVAL;
-	}
+	inp_enter_bind_in_progress(so);
 
 	const uint8_t old_flags = inp->inp_vflag;
 	inp->inp_vflag &= ~INP_IPV4;
@@ -888,7 +883,7 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			if (error != 0) {
 				inp->inp_vflag = old_flags;
 			}
-			return error;
+			goto out;
 		}
 	}
 
@@ -896,8 +891,10 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (error != 0) {
 		inp->inp_vflag = old_flags;
 	}
-
+out:
 	UDP_LOG_BIND(inp, error);
+
+	inp_exit_bind_in_progress(so);
 
 	return error;
 }
@@ -918,6 +915,8 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		return EINVAL;
 	}
 
+	inp_enter_bind_in_progress(so);
+
 #if defined(NECP) && defined(FLOW_DIVERT)
 	should_use_flow_divert = necp_socket_should_use_flow_divert(inp);
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
@@ -932,7 +931,8 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			sin6_p->sin6_addr.s6_addr[10] = 0xff;
 			sin6_p->sin6_addr.s6_addr[11] = 0xff;
 		} else {
-			return EINVAL;
+			error = EINVAL;
+			goto done;
 		}
 	}
 
@@ -942,7 +942,16 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			const uint8_t old_flags = inp->inp_vflag;
 
 			if (inp->inp_faddr.s_addr != INADDR_ANY) {
-				return EISCONN;
+				error = EISCONN;
+				goto done;
+			}
+			/*
+			 * If bound to an IPv6 address, we cannot connect to
+			 * an IPv4 mapped address
+			 */
+			if (inp->inp_vflag == INP_IPV6) {
+				error = EINVAL;
+				goto done;
 			}
 
 			if (!(so->so_flags1 & SOF1_CONNECT_COUNTED)) {
@@ -974,13 +983,22 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 			} else {
 				inp->inp_vflag = old_flags;
 			}
-			UDP_LOG_CONNECT(inp, error);
-			return error;
+			goto done;
 		}
 	}
 
+	/*
+	 * If bound to an IPv4 mapped address, we cannot connect to
+	 * an IPv6 address
+	 */
+	if (inp->inp_vflag == INP_IPV4) {
+		error = EINVAL;
+		goto done;
+	}
+
 	if (!IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
-		return EISCONN;
+		error = EISCONN;
+		goto done;
 	}
 
 	if (!(so->so_flags1 & SOF1_CONNECT_COUNTED)) {
@@ -995,7 +1013,7 @@ do_flow_divert:
 		if (error == 0) {
 			error = flow_divert_connect_out(so, nam, p);
 		}
-		return error;
+		goto done;
 	}
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
 
@@ -1029,7 +1047,11 @@ do_flow_divert:
 		}
 		inp->inp_connect_timestamp = mach_continuous_time();
 	}
+done:
 	UDP_LOG_CONNECT(inp, error);
+
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 

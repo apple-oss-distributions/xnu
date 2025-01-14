@@ -347,9 +347,20 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			drop_reason = DROP_REASON_IP_SRC_ADDR_NO_AVAIL;
 			goto release;
 		}
-		if (in6p->in6p_lport == 0 &&
-		    (error = in6_pcbsetport(laddr, addr6, in6p, p, 0)) != 0) {
-			goto release;
+		if (in6p->in6p_lport == 0) {
+			inp_enter_bind_in_progress(so);
+
+			error = in6_pcbsetport(laddr, addr6, in6p, p, 0);
+
+			if (error == 0) {
+				ASSERT(in6p->in6p_lport != 0);
+			}
+
+			inp_exit_bind_in_progress(so);
+
+			if (error != 0) {
+				goto release;
+			}
 		}
 	} else {
 		if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr)) {

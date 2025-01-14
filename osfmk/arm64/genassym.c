@@ -93,6 +93,8 @@
 #if XNU_MONITOR
 #include <arm/pmap/pmap_data.h>
 #endif /* XNU_MONITOR */
+#include <kern/debug.h>
+
 /*
  * genassym.c is used to produce an
  * assembly file which, intermingled with unuseful assembly code,
@@ -399,6 +401,17 @@ main(int     argc,
 	DECLARE("SPTM_TRACE_SIZE_SHIFT", SPTM_TRACE_SIZE_SHIFT);
 #endif
 
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_PC", offsetof(struct panic_lockdown_initiator_state, initiator_pc));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP", offsetof(struct panic_lockdown_initiator_state, initiator_sp));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR", offsetof(struct panic_lockdown_initiator_state, initiator_tpidr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_MPIDR", offsetof(struct panic_lockdown_initiator_state, initiator_mpidr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_TIMESTAMP", offsetof(struct panic_lockdown_initiator_state, timestamp));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ESR", offsetof(struct panic_lockdown_initiator_state, esr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_ELR", offsetof(struct panic_lockdown_initiator_state, elr));
+	DECLARE("PANIC_LOCKDOWN_INITIATOR_STATE_FAR", offsetof(struct panic_lockdown_initiator_state, far));
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 	return 0;
 }

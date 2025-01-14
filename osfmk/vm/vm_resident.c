@@ -105,6 +105,10 @@
 #include <i386/misc_protos.h>
 #endif
 
+#if CONFIG_SPTM
+#include <arm64/sptm/sptm.h>
+#endif
+
 #if CONFIG_PHANTOM_CACHE
 #include <vm/vm_phantom_cache_internal.h>
 #endif
@@ -5003,7 +5007,8 @@ vm_page_deactivate_internal(
 			m->vmp_q_state = VM_PAGE_ON_THROTTLED_Q;
 			vm_page_throttled_count++;
 		} else {
-			if (m_object->named && m_object->ref_count == 1) {
+			if (m_object->named &&
+			    os_ref_get_count_raw(&m_object->ref_count) == 1) {
 				vm_page_speculate(m, FALSE);
 #if DEVELOPMENT || DEBUG
 				vm_page_speculative_recreated++;
@@ -9362,7 +9367,21 @@ vm_tag_bt(void)
 		frameptr = frameptr_next;
 	}
 
-	return site ? site->tag : VM_KERN_MEMORY_NONE;
+	if (site) {
+		return site->tag;
+	}
+
+#if MACH_ASSERT
+	/*
+	 * Kernel tests appear here as unrecognized call sites and would get
+	 * no memory tag. Give them a default tag to prevent panics later.
+	 */
+	if (thread_get_test_option(test_option_vm_prevent_wire_tag_panic)) {
+		return VM_KERN_MEMORY_OSFMK;
+	}
+#endif
+
+	return VM_KERN_MEMORY_NONE;
 }
 
 static uint64_t free_tag_bits[VM_MAX_TAG_VALUE / 64];
@@ -10155,6 +10174,9 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	SET_COUNT(VM_KERN_COUNT_WIRED_BOOT, ptoa_64(vm_page_wire_count_on_boot), 0);
 	SET_COUNT(VM_KERN_COUNT_BOOT_STOLEN, booter_size, VM_KERN_SITE_WIRED);
 	SET_COUNT(VM_KERN_COUNT_WIRED_STATIC_KERNELCACHE, ptoa_64(vm_page_kernelcache_count), 0);
+#if CONFIG_SPTM
+	SET_COUNT(VM_KERN_COUNT_EXCLAVES_CARVEOUT, SPTMArgs->sk_carveout_size, 0);
+#endif
 
 #define SET_MAP(xcount, xsize, xfree, xlargest) \
     counts[xcount].site    = (xcount);                  \

@@ -53,15 +53,13 @@ exclaves_shared_memory_init(const uint64_t endpoint,
 static kern_return_t
 exclaves_shared_memory_access_check(
 	const sharedmemorybase_segxnuaccess_s *sm_client,
-	const sharedmemorybase_perms_s perm, const uint64_t endpage,
-	bool *access_allowed)
+	const sharedmemorybase_perms_s perm, const uint64_t endpage)
 {
 	assert3p(sm_client, !=, NULL);
-	assert3p(access_allowed, !=, NULL);
 
+	__block kern_return_t kr = KERN_SUCCESS;
 	tb_error_t ret = TB_ERROR_SUCCESS;
 
-	__block bool allowed = true;
 	ret = sharedmemorybase_segxnuaccess_xnuaccessstatus(sm_client,
 	    ^(sharedmemorybase_accessstatus_s result) {
 		/*
@@ -69,23 +67,27 @@ exclaves_shared_memory_access_check(
 		 * For the moment just check for writable
 		 * access (if relevant).
 		 */
-		if (perm == SHAREDMEMORYBASE_PERMS_READWRITE) {
-		        allowed = allowed && perm == result.permissions;
+		if (perm != result.permissions) {
+		        kr = KERN_PROTECTION_FAILURE;
+		        return;
 		}
 
-		/* Check that it's xnu mappable. */
-		allowed = allowed && result.xnu;
+		if (!result.xnu) {
+		        kr = KERN_FAILURE;
+		        return;
+		}
 
-		/* Check that there are enough pages. */
-		allowed = allowed && endpage <= result.segmentstatus.npages;
+		if (endpage > result.segmentstatus.npages) {
+		        kr = KERN_FAILURE;
+		        return;
+		}
 	});
 
 	if (ret != TB_ERROR_SUCCESS) {
 		return KERN_FAILURE;
 	}
 
-	*access_allowed = allowed;
-	return KERN_SUCCESS;
+	return kr;
 }
 
 kern_return_t
@@ -102,8 +104,8 @@ exclaves_shared_memory_setup(const sharedmemorybase_segxnuaccess_s *sm_client,
 	tb_error_t ret = TB_ERROR_SUCCESS;
 
 	/* Do a quick sanity check that this access is allowed. */
-	bool allowed = false;
-	kern_return_t kret = exclaves_shared_memory_access_check(sm_client, perm, endpage, &allowed);
+	kern_return_t kret = exclaves_shared_memory_access_check(sm_client,
+	    perm, endpage);
 	if (kret != KERN_SUCCESS) {
 		return kret;
 	}

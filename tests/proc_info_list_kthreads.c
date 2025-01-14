@@ -16,22 +16,21 @@
 
 T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 
+#if TARGET_OS_OSX
+#define _ASROOT false
+#else
+#define _ASROOT true
+#endif
+
 #define MAX_TRIES 20
 #define EXTRA_THREADS 15
 
-#if TARGET_OS_OSX
 T_DECL(proc_info_list_kthreads,
     "Test to verify PROC_PIDLISTTHREADIDS returns kernel thread IDs for pid 0",
-    T_META_ASROOT(true),
+    T_META_ASROOT(_ASROOT),
     T_META_CHECK_LEAKS(false),
-    T_META_TAG_VM_PREFERRED)
-#else
-T_DECL(proc_info_list_kthreads,
-    "Test to verify PROC_PIDLISTTHREADIDS returns kernel thread IDs for pid 0",
-    T_META_ASROOT(false),
-    T_META_CHECK_LEAKS(false),
-    T_META_TAG_VM_PREFERRED)
-#endif /* TARGET_OS_OSX */
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133956230 */))
 {
 	int buf_used = 0;
 

@@ -1405,7 +1405,7 @@ struct mbuf;
 
 extern void m_freem(struct mbuf *) __XNU_INTERNAL(m_freem);
 extern void m_drop(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
-extern void m_drop_list(mbuf_t, uint16_t, uint32_t, const char *, uint16_t);
+extern void m_drop_list(mbuf_t, struct ifnet *, uint16_t, uint32_t, const char *, uint16_t);
 extern u_int64_t mcl_to_paddr(char *);
 extern void m_adj(struct mbuf *, int);
 extern void m_cat(struct mbuf *, struct mbuf *);

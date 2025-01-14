@@ -1234,7 +1234,7 @@ OSKext::removeKextBootstrap(void)
 		ml_static_mfree(ml_static_ptovirt(seg_kld->vmaddr - gVirtBase + gPhysBase),
 		    seg_kld->vmsize);
 #else
-		ml_static_mfree((seg_kld->vmaddr), seg_kld->vmsize);
+		ml_static_mfree(seg_kld->vmaddr, seg_kld->vmsize);
 #endif
 	}
 #endif
@@ -7884,11 +7884,13 @@ OSKext_protect(
 	kernel_mach_header_t *kext_mh,
 	vm_map_t   map,
 	vm_map_offset_t    start,
-	vm_map_offset_t    end,
+	vm_map_size_t      size,
 	vm_prot_t  new_prot,
 	boolean_t  set_max,
 	kc_kind_t  kc_type)
 {
+	vm_map_offset_t    end = start + size;
+
 #pragma unused(kext_mh,map,kc_type)
 	assert(map == kernel_map);         // we can handle KEXTs arising from the PRELINK segment and no others
 	assert(start <= end);
@@ -7897,7 +7899,7 @@ OSKext_protect(
 	} else if (set_max) {
 		return KERN_SUCCESS;         // Punt set_max, as there's no mechanism to record that state
 	} else {
-		return ml_static_protect(start, end - start, new_prot);
+		return ml_static_protect(start, size, new_prot);
 	}
 }
 
@@ -7923,11 +7925,13 @@ OSKext_protect(
 	kernel_mach_header_t *kext_mh,
 	vm_map_t   map,
 	vm_map_offset_t    start,
-	vm_map_offset_t    end,
+	vm_map_size_t      size,
 	vm_prot_t  new_prot,
 	boolean_t  set_max,
 	kc_kind_t  kc_type)
 {
+	vm_map_offset_t    end = start + size;
+
 	if (start == end) {         // 10538581
 		return KERN_SUCCESS;
 	}
@@ -7936,9 +7940,9 @@ OSKext_protect(
 		 * XXX: This will probably need to be different for AuxKC and
 		 * pageableKC!
 		 */
-		return ml_static_protect(start, end - start, new_prot);
+		return ml_static_protect(start, size, new_prot);
 	}
-	return vm_map_protect(map, start, end, new_prot, set_max);
+	return mach_vm_protect(map, start, size, set_max, new_prot);
 }
 
 static inline kern_return_t
@@ -7967,6 +7971,7 @@ OSKext::setVMAttributes(bool protect, bool wire)
 	vm_map_offset_t             start_protect   = 0;
 	vm_map_offset_t             start_wire      = 0;
 	vm_map_offset_t             end_protect     = 0;
+	vm_map_size_t               size_protect    = 0;
 	vm_map_offset_t             end_wire        = 0;
 	OSReturn                    result          = kOSReturnError;
 
@@ -8005,7 +8010,7 @@ OSKext::setVMAttributes(bool protect, bool wire)
 	/* Protect the headers as read-only; they do not need to be wired */
 	result = (protect) ? OSKext_protect((kernel_mach_header_t *)kmod_info->address,
 	    kext_map, kmod_info->address,
-	    kmod_info->address + kmod_info->hdr_size, VM_PROT_READ, TRUE, kc_type)
+	    kmod_info->hdr_size, VM_PROT_READ, TRUE, kc_type)
 	    : KERN_SUCCESS;
 	if (result != KERN_SUCCESS) {
 		goto finish;
@@ -8035,6 +8040,7 @@ OSKext::setVMAttributes(bool protect, bool wire)
 		 */
 		start_protect = round_page(seg->vmaddr);
 		end_protect = trunc_page(seg->vmaddr + seg->vmsize);
+		size_protect = end_protect - start_protect;
 
 		start_wire = trunc_page(seg->vmaddr);
 		end_wire = round_page(seg->vmaddr + seg->vmsize);
@@ -8048,7 +8054,7 @@ OSKext::setVMAttributes(bool protect, bool wire)
 		    strncmp(seg->segname, SEG_LINKINFO, sizeof(seg->segname)) != 0) ||
 		    (kc_type != KCKindPageable && kc_type != KCKindAuxiliary))) {
 			result = OSKext_protect((kernel_mach_header_t *)kmod_info->address,
-			    kext_map, start_protect, end_protect, seg->maxprot, TRUE, kc_type);
+			    kext_map, start_protect, size_protect, seg->maxprot, TRUE, kc_type);
 			if (result != KERN_SUCCESS) {
 				OSKextLog(this,
 				    kOSKextLogErrorLevel |
@@ -8060,7 +8066,7 @@ OSKext::setVMAttributes(bool protect, bool wire)
 			}
 
 			result = OSKext_protect((kernel_mach_header_t *)kmod_info->address,
-			    kext_map, start_protect, end_protect, seg->initprot, FALSE, kc_type);
+			    kext_map, start_protect, size_protect, seg->initprot, FALSE, kc_type);
 			if (result != KERN_SUCCESS) {
 				OSKextLog(this,
 				    kOSKextLogErrorLevel |
@@ -13899,6 +13905,7 @@ OSKext::protectKCFileSet(
 	kernel_segment_command_t  * seg             = NULL;
 	vm_map_offset_t             start           = 0;
 	vm_map_offset_t             end             = 0;
+	vm_map_size_t               size            = 0;
 	OSReturn                    ret             = 0;
 
 	/* Set VM permissions */
@@ -13906,6 +13913,7 @@ OSKext::protectKCFileSet(
 	while (seg) {
 		start = round_page(seg->vmaddr);
 		end = trunc_page(seg->vmaddr + seg->vmsize);
+		size = end - start;
 
 		/*
 		 * Wire down and protect __TEXT, __BRANCH_STUBS and __BRANCH_GOTS
@@ -13918,14 +13926,14 @@ OSKext::protectKCFileSet(
 		    (type == KCKindAuxiliary && !resetAuxKCSegmentOnUnload &&
 		    strncmp(seg->segname, SEG_LINKEDIT, sizeof(seg->segname)) == 0)) {
 			ret = OSKext_protect((kernel_mach_header_t *)mh,
-			    kext_map, start, end, seg->maxprot, TRUE, type);
+			    kext_map, start, size, seg->maxprot, TRUE, type);
 			if (ret != KERN_SUCCESS) {
 				printf("OSKext protect failed with error %d", ret);
 				return kOSKextReturnInvalidArgument;
 			}
 
 			ret = OSKext_protect((kernel_mach_header_t *)mh,
-			    kext_map, start, end, seg->initprot, FALSE, type);
+			    kext_map, start, size, seg->initprot, FALSE, type);
 			if (ret != KERN_SUCCESS) {
 				printf("OSKext protect failed with error %d", ret);
 				return kOSKextReturnInvalidArgument;
@@ -16339,7 +16347,7 @@ OSKext::updateLoadedKextSummaries(void)
 	OSKextLoadedKextSummaryHeader *summaryHeader = NULL;
 	OSKextLoadedKextSummaryHeader *summaryHeaderAlloc = NULL;
 	OSKext *aKext;
-	vm_map_offset_t start, end;
+	vm_map_offset_t start;
 	size_t summarySize = 0;
 	size_t size;
 	u_int count;
@@ -16399,12 +16407,11 @@ OSKext::updateLoadedKextSummaries(void)
 		summarySize = sLoadedKextSummariesAllocSize;
 
 		start = (vm_map_offset_t) summaryHeader;
-		end = start + summarySize;
-		result = vm_map_protect(kernel_map,
+		result = mach_vm_protect(kernel_map,
 		    start,
-		    end,
-		    VM_PROT_DEFAULT,
-		    FALSE);
+		    summarySize,
+		    false,
+		    VM_PROT_DEFAULT);
 		if (result != KERN_SUCCESS) {
 			goto finish;
 		}
@@ -16458,9 +16465,8 @@ OSKext::updateLoadedKextSummaries(void)
 	 */
 
 	start = (vm_map_offset_t) summaryHeader;
-	end = start + summarySize;
 
-	result = vm_map_protect(kernel_map, start, end, VM_PROT_READ, FALSE);
+	result = mach_vm_protect(kernel_map, start, summarySize, false, VM_PROT_READ);
 	if (result != KERN_SUCCESS) {
 		goto finish;
 	}

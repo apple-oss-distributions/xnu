@@ -48,6 +48,64 @@
 #include <vm/vm_sanitize_telemetry.h>
 #include <vm/vm_protos.h>
 
+#pragma mark KTriage strings
+
+static const char *vm_sanitize_triage_strings[] =
+{
+	[KDBG_TRIAGE_VM_SANITIZE_PREFIX] = "VM API - Unsanitary input passed to ",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_MAKE_MEMORY_ENTRY]     = "mach_make_memory_entry\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_PAGE_OP]  = "mach_memory_entry_page_op\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_RANGE_OP] = "mach_memory_entry_range_op\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_MAP_SIZE] = "mach_memory_entry_map_size\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_OBJECT_MEMORY_ENTRY] = "mach_memory_object_memory_entry\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_FIXED]          = "vm_allocate(VM_FLAGS_FIXED)\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_ANYWHERE]       = "vm_allocate(VM_FLAGS_ANYWHERE)\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_DEALLOCATE]              = "vm_deallocate\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MUNMAP]                     = "munmap\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_REMAP]               = "vm_remap or vm_remap_new\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MMAP]                       = "mmap\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MAP_WITH_LINKING_NP]        = "map_with_linking_np\n",
+	[KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ]              = "vm_map\n",
+	[KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ_CTL]          = "vm_map\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MREMAP_ENCRYPTED]           = "mremap_encrypted\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_WIRE_USER]               = "vm_wire\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_UNWIRE_USER]             = "vm_wire\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WIRE]                = "vm_map_wire\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_UNWIRE]              = "vm_map_unwire\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VSLOCK]                     = "vslock\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VSUNLOCK]                   = "vsunlock\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPY_OVERWRITE]      = "vm_map_copy_overwrite\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPYIN]              = "vm_map_copyin\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_READ_USER]           = "vm_read\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WRITE_USER]          = "vm_write\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_INHERIT]            = "mach_vm_inherit\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_INHERIT]                 = "vm_inherit\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM32_INHERIT]               = "vm32_inherit\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_INHERIT]             = "vm_map_inherit\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MINHERIT]                   = "minherit\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_PROTECT]            = "mach_vm_protect\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_PROTECT]                 = "vm_protect\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM32_PROTECT]               = "vm32_protect\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PROTECT]             = "vm_map_protect\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MPROTECT]                   = "mprotect\n",
+	[KDBG_TRIAGE_VM_SANITIZE_USERACC]                    = "useracc\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MSYNC]               = "vm_map_msync\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MSYNC]                      = "msync\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MACHINE_ATTRIBUTE]   = "vm_map_machine_attribute\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MINCORE]                    = "mincore\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_INFO]     = "vm_map_page_range_info\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_QUERY]    = "vm_map_page_range_query\n",
+	[KDBG_TRIAGE_VM_SANITIZE_VM_BEHAVIOR_SET]            = "vm_behavior_set\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MADVISE]                    = "madvise\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_DEFERRED_RECLAMATION_BUFFER_INIT] = "mach_vm_deferred_reclamation_buffer_init\n",
+	[KDBG_TRIAGE_VM_SANITIZE_MACH_VM_RANGE_CREATE]       = "mach_vm_range_create\n",
+	[KDBG_TRIAGE_VM_SANITIZE_SHARED_REGION_MAP_AND_SLIDE_2_NP] = "shared_region_map_and_slide_2_np\n",
+	[KDBG_TRIAGE_VM_SANITIZE_TEST]                       = "vm_sanitize_run_test\n",
+};
+
+static ktriage_strings_t ktriage_vm_sanitize_subsystem_strings = {VM_SANITIZE_MAX_TRIAGE_STRINGS, vm_sanitize_triage_strings};
+
+
 #pragma mark Lengths for CA event fields
 
 #define VM_SANITIZE_BACKTRACE_FRAME_COUNT (10)
@@ -93,6 +151,11 @@ extern void proc_getexecutableuuid(void *p, unsigned char *uuidbuf, unsigned lon
 
 #pragma mark Event declaration
 
+/*
+ * DO NOT change the event name, or we will stop getting telemetry.
+ * DO NOT rename fields, or that data will be lost.
+ * Ideally, DO NOT change this event at all.
+ */
 CA_EVENT(vm_sanitize_updated_return_code,
     CA_STATIC_STRING(CA_VM_BACKTRACE_AND_SYM_LEN), backtrace,
     CA_STATIC_STRING(CA_VM_PROCESS_NAME_LEN), process_name,
@@ -113,7 +176,7 @@ static const
 // Set by a sysctl to disable telemetry while tests are running.
 uint32_t disable_vm_sanitize_telemetry = 0;
 
-#pragma mark Implementation
+#pragma mark CoreAnalytics wrapper implementation
 
 static void
 vm_sanitize_populate_symbolicatable_backtrace_string(uintptr_t addr, char *buffer, size_t buf_size)
@@ -179,6 +242,41 @@ vm_sanitize_send_telemetry_core_analytics(
 	return;
 }
 
+#pragma mark KTriage wrapper implementation
+
+static bool ktriage_initialized = false;
+
+static void
+vm_sanitize_initialize_ktriage()
+{
+	if (ktriage_initialized) {
+		return;
+	}
+	if (__improbable(0 != ktriage_register_subsystem_strings(
+		    KDBG_TRIAGE_SUBSYS_VM_SANITIZE,
+		    &ktriage_vm_sanitize_subsystem_strings))) {
+		panic("Failed to set up ktriage for VM sanitization.");
+	}
+	ktriage_initialized = true;
+}
+
+static void
+vm_sanitize_ktriage_record(
+	enum vm_sanitize_subsys_error_codes ktriage_code,
+	uint64_t past_ret)
+{
+	vm_sanitize_initialize_ktriage();
+	if (ktriage_code != KDBG_TRIAGE_VM_SANITIZE_SKIP) {
+		ktriage_record(thread_tid(current_thread()),
+		    KDBG_TRIAGE_EVENTID(
+			    KDBG_TRIAGE_SUBSYS_VM_SANITIZE,
+			    KDBG_TRIAGE_RESERVED,
+			    ktriage_code),
+		    past_ret /* arg */);
+	}
+}
+
+#pragma mark Entry point implementation
 
 void
 vm_sanitize_send_telemetry(
@@ -209,11 +307,7 @@ vm_sanitize_send_telemetry(
 	    uint64_t, future_ret,
 	    uint64_t, past_ret);
 
-	if (ktriage_code != KDBG_TRIAGE_VM_SANITIZE_SKIP) {
-		ktriage_record(thread_tid(current_thread()),
-		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM_SANITIZE, KDBG_TRIAGE_RESERVED, ktriage_code),
-		    past_ret /* arg */);
-	}
+	vm_sanitize_ktriage_record(ktriage_code, past_ret);
 
 	return;
 }

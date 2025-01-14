@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,8 +32,8 @@
 #ifdef PRIVATE
 
 #define UDP_ENABLE_FLAG_LIST \
-	X(ULEF_BIND,            0x00000002, bind) \
-	X(ULEF_CONNECTION,      0x00000001, connection) \
+	X(ULEF_CONNECT,         0x00000001, connect)    \
+	X(ULEF_BIND,            0x00000002, bind)       \
 	X(ULEF_LOG,             0x00000008, log)        \
 	X(ULEF_DST_LOOPBACK,    0x00000010, loop)       \
 	X(ULEF_DST_LOCAL,       0x00000020, local)      \
@@ -58,13 +58,13 @@ enum {
 #include <netinet/inp_log.h>
 
 extern uint32_t udp_log_enable_flags;
-extern uint32_t udp_log_port;
 
 #define ULEF_MASK_DST (ULEF_DST_LOOPBACK | ULEF_DST_LOCAL | ULEF_DST_GW)
 
-extern void udp_log_bind(struct inpcb *inp, const char *event, int error);
-extern void udp_log_connection(struct inpcb *inp, const char *event, int error);
+extern void udp_log_bind(struct inpcb *inp, int error);
+extern void udp_log_connect(struct inpcb *inp, int error);
 extern void udp_log_connection_summary(struct inpcb *inp);
+extern void udp_log_message(const char *func_name, int line_no, struct inpcb *inp, const char *format, ...) __printflike(4, 5);
 
 static inline bool
 udp_is_log_enabled(struct inpcb *inp, uint32_t req_flags)
@@ -89,25 +89,31 @@ udp_is_log_enabled(struct inpcb *inp, uint32_t req_flags)
 		}
 		/* We only check for loopback */
 		if (inp->inp_log_flags == 0) {
-			inp->inp_log_flags |= ULEF_DST_LOCAL | ULEF_DST_GW;
+			inp->inp_log_flags = ULEF_DST_LOCAL | ULEF_DST_GW;
 		}
 	}
 	/*
 	 * Check separately the destination flags that are per TCP connection
 	 * and the other functional flags that are global
 	 */
-	return (inp->inp_log_flags & udp_log_enable_flags & ULEF_MASK_DST) &&
-	       (udp_log_enable_flags & (req_flags & ~ULEF_MASK_DST));
+	if ((inp->inp_log_flags & udp_log_enable_flags & ULEF_MASK_DST) &&
+	    (udp_log_enable_flags & (req_flags & ~ULEF_MASK_DST))) {
+		return true;
+	}
+	return false;
 }
 
-#define UDP_LOG_BIND(inp, error) if (udp_is_log_enabled(inp, ULEF_BIND)) \
-    udp_log_connection((inp), "bind", (error))
+#define UDP_LOG_BIND(inp, error) if (udp_is_log_enabled((inp), ULEF_BIND)) \
+    udp_log_bind((inp), (error))
 
-#define UDP_LOG_CONNECT(inp, error) if (udp_is_log_enabled(inp, ULEF_CONNECTION)) \
-    udp_log_connection((inp), "connect", (error))
+#define UDP_LOG_CONNECT(inp, error) if (udp_is_log_enabled((inp), ULEF_CONNECT)) \
+    udp_log_connect((inp), (error))
 
-#define UDP_LOG_CONNECTION_SUMMARY(inp) if (udp_is_log_enabled(inp, ULEF_CONNECTION)) \
+#define UDP_LOG_CONNECTION_SUMMARY(inp) if ((inp) != NULL && ((inp)->inp_flags2 & INP2_LOGGING_ENABLED)) \
     udp_log_connection_summary((inp))
+
+#define UDP_LOG(inp, format, ...) if (udp_is_log_enabled((inp), ULEF_LOG)) \
+    udp_log_message(__func__, __LINE__, (inp), format, ## __VA_ARGS__)
 
 #endif /* BSD_KERNEL_PRIVATE */
 

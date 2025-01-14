@@ -221,6 +221,9 @@ struct fd_vn_data * fg_vn_data_alloc(void);
 
 #define MAX_LINK_ENOENT_RETRIES 1024
 
+/* Max retries for concurrent mounts on the same covered vnode. */
+#define MAX_MOUNT_RETRIES       10
+
 static int rmdirat_internal(vfs_context_t, int, user_addr_t, enum uio_seg,
     int unlink_flags);
 
@@ -304,6 +307,9 @@ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
 
 	NDINIT(&nd, LOOKUP, OP_MOUNT, FOLLOW | AUDITVNPATH1 | WANTPARENT,
 	    UIO_SYSSPACE, CAST_USER_ADDR_T(path), ctx);
+	if (syscall_flags & MNT_NOFOLLOW) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
 
 	kern_flags &= KERNEL_MOUNT_SANITIZE_MASK;
 
@@ -858,8 +864,8 @@ boolean_t root_fs_upgrade_try = FALSE;
 int
 __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int32_t *retval)
 {
-	vnode_t pvp = NULL;
-	vnode_t vp = NULL;
+	vnode_t pvp = NULLVP;
+	vnode_t vp = NULLVP;
 	int need_nameidone = 0;
 	vfs_context_t ctx = vfs_context_current();
 	char fstypename[MFSNAMELEN];
@@ -869,6 +875,7 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 	size_t labelsz = 0;
 	int flags = uap->flags;
 	int error;
+	int num_retries = 0;
 #if CONFIG_IMGSRC_ACCESS || CONFIG_MACF
 	boolean_t is_64bit = IS_64BIT_PROCESS(p);
 #else
@@ -882,6 +889,7 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 		return error;
 	}
 
+retry:
 	/*
 	 * Get the vnode to be covered
 	 */
@@ -1033,12 +1041,22 @@ out:
 
 	if (vp) {
 		vnode_put(vp);
+		vp = NULLVP;
 	}
 	if (pvp) {
 		vnode_put(pvp);
+		pvp = NULLVP;
 	}
 	if (need_nameidone) {
 		nameidone(&nd);
+		need_nameidone = 0;
+	}
+
+	if (error == EBUSY) {
+		/* Retry the lookup and mount again due to concurrent mounts. */
+		if (++num_retries < MAX_MOUNT_RETRIES) {
+			goto retry;
+		}
 	}
 
 	return error;
@@ -1084,6 +1102,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	boolean_t did_rele = FALSE;
 	boolean_t have_usecount = FALSE;
 	boolean_t did_set_lmount = FALSE;
+	boolean_t did_set_vmount = FALSE;
 	boolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
 
 #if CONFIG_ROSV_STARTUP || CONFIG_MOUNT_VM || CONFIG_BASESYSTEMROOT
@@ -1239,6 +1258,11 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	if (error != 0) {
 		goto out1;
 	}
+
+	/*
+	 * Upon successful of prepare_coveredvp(), VMOUNT is set for the covered vp.
+	 */
+	did_set_vmount = TRUE;
 
 	/*
 	 * Allocate and initialize the filesystem (mount_t)
@@ -1415,6 +1439,9 @@ update:
 #endif // CONFIG_BASESYSTEMROOT
 
 			NDINIT(&nd, LOOKUP, OP_MOUNT, FOLLOW, seg, devpath, ctx);
+			if (flags & MNT_NOFOLLOW) {
+				nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+			}
 			if ((error = namei(&nd))) {
 				goto out1;
 			}
@@ -1723,6 +1750,12 @@ update:
 		CLR(vp->v_flag, VMOUNT);
 		vp->v_mountedhere = mp;
 		SET(vp->v_flag, VMOUNTEDHERE);
+
+		/*
+		 * Wakeup any waiter(s) in prepare_coveredvp() that is waiting for the
+		 * 'v_mountedhere' to be planted.
+		 */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 
 		/*
@@ -1823,6 +1856,8 @@ update:
 
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 		mount_list_lock();
 		mp->mnt_vtable->vfc_refcount--;
@@ -1925,6 +1960,14 @@ out1:
 		mount_unlock(mp);
 	}
 
+	if (did_set_vmount) {
+		vnode_lock_spin(vp);
+		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
+		vnode_unlock(vp);
+	}
+
 	if (mntalloc) {
 		if (mp->mnt_crossref) {
 			mount_dropcrossref(mp, vp, 0);
@@ -1963,7 +2006,7 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	int error;
 	boolean_t skip_auth = !!(internal_flags & KERNEL_MOUNT_NOAUTH);
 	boolean_t is_fmount = !!(internal_flags & KERNEL_MOUNT_FMOUNT);
-	boolean_t is_busy;
+	boolean_t is_kmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
 
 	if (!skip_auth) {
 		/*
@@ -1994,12 +2037,29 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	}
 
 	vnode_lock_spin(vp);
-	is_busy = is_fmount ?
-	    (ISSET(vp->v_flag, VMOUNT) || (vp->v_mountedhere != NULL)) :
-	    (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL));
-	if (is_busy) {
-		vnode_unlock(vp);
+
+	if (is_fmount && (ISSET(vp->v_flag, VMOUNT) || (vp->v_mountedhere != NULL))) {
 		error = EBUSY;
+	} else if (!is_kmount && (ISSET(vp->v_flag, VMOUNT) ||
+	    (vp->v_mountedhere != NULL))) {
+		/*
+		 * For mount triggered from mount() call, we want to wait for the
+		 * current in-progress mount to complete, redo lookup and retry the
+		 * mount again. Similarly, we also want to retry if we lost the race
+		 * due to concurrent mounts and the 'VMOUNT' flag has been cleared and
+		 * 'v_mountedhere' has been planted after initial lookup.
+		 */
+		if (ISSET(vp->v_flag, VMOUNT)) {
+			vnode_lock_convert(vp);
+			msleep(&vp->v_flag, &vp->v_lock, PVFS, "vnode_waitformount", NULL);
+		}
+		error = EBUSY;
+	} else if (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL)) {
+		error = EBUSY;
+	}
+
+	if (error) {
+		vnode_unlock(vp);
 		goto out;
 	}
 	SET(vp->v_flag, VMOUNT);
@@ -2011,6 +2071,8 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 	if (error != 0) {
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 	}
 #endif
@@ -2125,6 +2187,8 @@ place_mount_and_checkdirs(mount_t mp, vnode_t vp, vfs_context_t ctx)
 	CLR(vp->v_flag, VMOUNT);
 	vp->v_mountedhere = mp;
 	SET(vp->v_flag, VMOUNTEDHERE);
+	/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+	wakeup(&vp->v_flag);
 	vnode_unlock(vp);
 
 	/*
@@ -2165,6 +2229,8 @@ undo_place_on_covered_vp(mount_t mp, vnode_t vp)
 	vnode_lock_spin(vp);
 	CLR(vp->v_flag, (VMOUNT | VMOUNTEDHERE));
 	vp->v_mountedhere = (mount_t)NULL;
+	/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+	wakeup(&vp->v_flag);
 	vnode_unlock(vp);
 
 	mp->mnt_vnodecovered = NULLVP;
@@ -2452,6 +2518,8 @@ out2:
 	} else {
 		vnode_lock_spin(vp);
 		CLR(vp->v_flag, VMOUNT);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&vp->v_flag);
 		vnode_unlock(vp);
 	}
 out1:
@@ -2640,6 +2708,7 @@ unmount(__unused proc_t p, struct unmount_args *uap, __unused int32_t *retval)
 {
 	vnode_t vp;
 	struct mount *mp;
+	int flags = uap->flags;
 	int error;
 	struct nameidata nd;
 	vfs_context_t ctx;
@@ -2654,6 +2723,10 @@ unmount(__unused proc_t p, struct unmount_args *uap, __unused int32_t *retval)
 
 	NDINIT(&nd, LOOKUP, OP_UNMOUNT, FOLLOW | AUDITVNPATH1,
 	    UIO_USERSPACE, uap->path, ctx);
+	if (flags & MNT_NOFOLLOW) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	error = namei(&nd);
 	if (error) {
 		return error;
@@ -2679,7 +2752,7 @@ unmount(__unused proc_t p, struct unmount_args *uap, __unused int32_t *retval)
 	mount_ref(mp, 0);
 	vnode_put(vp);
 	/* safedounmount consumes the mount ref */
-	return safedounmount(mp, uap->flags, ctx);
+	return safedounmount(mp, flags, ctx);
 }
 
 int
@@ -2932,6 +3005,8 @@ dounmount(struct mount *mp, int flags, int withref, vfs_context_t ctx)
 		mp->mnt_crossref++;
 		coveredvp->v_mountedhere = (struct mount *)0;
 		CLR(coveredvp->v_flag, VMOUNT | VMOUNTEDHERE);
+		/* Wakeup waiter(s) waiting for in-progress mount to finish. */
+		wakeup(&coveredvp->v_flag);
 		vnode_unlock(coveredvp);
 		vnode_put(coveredvp);
 	}
@@ -3585,13 +3660,7 @@ vfs_get_statfs64(struct mount *mp, struct statfs64 *sfs)
 	sfs->f_type = mp->mnt_vtable->vfc_typenum;
 	sfs->f_flags = mp->mnt_flag & MNT_VISFLAGMASK;
 	sfs->f_fssubtype = vsfs->f_fssubtype;
-	sfs->f_flags_ext = 0;
-	if (mp->mnt_kern_flag & MNTK_SYSTEMDATA) {
-		sfs->f_flags_ext |= MNT_EXT_ROOT_DATA_VOL;
-	}
-	if (mp->mnt_kern_flag & MNTK_FSKIT) {
-		sfs->f_flags_ext |= MNT_EXT_FSKIT;
-	}
+	sfs->f_flags_ext = vfs_getextflags(mp);
 	vfs_getfstypename(mp, sfs->f_fstypename, MFSTYPENAMELEN);
 	strlcpy(&sfs->f_mntonname[0], &vsfs->f_mntonname[0], MAXPATHLEN);
 	strlcpy(&sfs->f_mntfromname[0], &vsfs->f_mntfromname[0], MAXPATHLEN);
@@ -5629,13 +5698,14 @@ linkat_internal(vfs_context_t ctx, int fd1, user_addr_t path, int fd2,
 #if CONFIG_FSE
 	fse_info finfo;
 #endif
-	int need_event, has_listeners, need_kpath2;
 	char *target_path = NULL;
 	char  *no_firmlink_path = NULL;
+	vnode_t locked_vp = NULLVP;
 	int truncated = 0;
 	int truncated_no_firmlink_path = 0;
-	bool do_retry;
 	int num_retries = 0;
+	int need_event, has_listeners, need_kpath2;
+	bool do_retry;
 
 	/* look up the object we are linking to */
 	follow = (flag & AT_SYMLINK_FOLLOW) ? FOLLOW : NOFOLLOW;
@@ -5693,6 +5763,10 @@ retry:
 	dvp = nd.ni_dvp;
 	lvp = nd.ni_vp;
 
+	assert(locked_vp == NULLVP);
+	vnode_link_lock(vp);
+	locked_vp = vp;
+
 #if CONFIG_MACF
 	if ((error = mac_vnode_check_link(ctx, dvp, vp, &nd.ni_cnd)) != 0) {
 		goto out2;
@@ -5736,6 +5810,10 @@ retry:
 #if CONFIG_MACF
 	(void)mac_vnode_notify_link(ctx, vp, dvp, &nd.ni_cnd);
 #endif
+
+	assert(locked_vp == vp);
+	vnode_link_unlock(locked_vp);
+	locked_vp = NULLVP;
 
 #if CONFIG_FSE
 	need_event = need_fsevent(FSE_CREATE_FILE, dvp);
@@ -5830,6 +5908,11 @@ out2:
 		no_firmlink_path = NULL;
 	}
 out:
+	if (locked_vp) {
+		assert(locked_vp == vp);
+		vnode_link_unlock(locked_vp);
+		locked_vp = NULLVP;
+	}
 	if (lvp) {
 		vnode_put(lvp);
 	}
@@ -6088,6 +6171,7 @@ unlinkat_internal(vfs_context_t ctx, int fd, vnode_t start_dvp,
 	int truncated_no_firmlink_path;
 	int batched;
 	struct vnode_attr *vap;
+	vnode_t locked_vp = NULLVP;
 	int do_retry;
 	int retry_count = 0;
 	int cn_flags;
@@ -6151,6 +6235,11 @@ continue_lookup:
 		flags |= VNODE_REMOVE_SKIP_NAMESPACE_EVENT;
 	}
 
+	/* Update speculative telemetry with system discarded use state */
+	if (unlink_flags & VNODE_REMOVE_SYSTEM_DISCARDED) {
+		flags |= VNODE_REMOVE_SYSTEM_DISCARDED;
+	}
+
 	if (vp) {
 		batched = vnode_compound_remove_available(vp);
 		/*
@@ -6175,6 +6264,8 @@ continue_lookup:
 #endif /* DEVELOPMENT || DEBUG */
 
 		if (!batched) {
+			vnode_link_lock(vp);
+			locked_vp = vp;
 			error = vn_authorize_unlink(dvp, vp, cnp, ctx, NULL);
 			if (error) {
 				if (error == ENOENT) {
@@ -6183,6 +6274,8 @@ continue_lookup:
 						retry_count++;
 					}
 				}
+				vnode_link_unlock(vp);
+				locked_vp = NULLVP;
 				goto out;
 			}
 		}
@@ -6311,6 +6404,12 @@ continue_lookup:
 	}
 
 out:
+	if (locked_vp) {
+		assert(locked_vp == vp);
+		vnode_link_unlock(locked_vp);
+		locked_vp = NULLVP;
+	}
+
 	if (path != NULL) {
 		RELEASE_PATH(path);
 		path = NULL;
@@ -6382,12 +6481,16 @@ unlinkat(__unused proc_t p, struct unlinkat_args *uap, __unused int32_t *retval)
 {
 	int unlink_flags = 0;
 
-	if (uap->flag & ~(AT_REMOVEDIR | AT_REMOVEDIR_DATALESS | AT_SYMLINK_NOFOLLOW_ANY)) {
+	if (uap->flag & ~(AT_REMOVEDIR | AT_REMOVEDIR_DATALESS | AT_SYMLINK_NOFOLLOW_ANY | AT_SYSTEM_DISCARDED)) {
 		return EINVAL;
 	}
 
 	if (uap->flag & AT_SYMLINK_NOFOLLOW_ANY) {
 		unlink_flags |= VNODE_REMOVE_NOFOLLOW_ANY;
+	}
+
+	if (uap->flag & AT_SYSTEM_DISCARDED) {
+		unlink_flags |= VNODE_REMOVE_SYSTEM_DISCARDED;
 	}
 
 	if (uap->flag & (AT_REMOVEDIR | AT_REMOVEDIR_DATALESS)) {
@@ -9032,6 +9135,7 @@ renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
 	int vn_authorize_skipped;
 	mount_t locked_mp = NULL;
 	vnode_t oparent = NULLVP;
+	vnode_t locked_vp = NULLVP;
 #if CONFIG_FSE
 	fse_info from_finfo = {}, to_finfo;
 #endif
@@ -9424,6 +9528,9 @@ continue_lookup:
 	}
 
 	if (!batched) {
+		assert(locked_vp == NULLVP);
+		vnode_link_lock(fvp);
+		locked_vp = fvp;
 		error = vn_authorize_renamex_with_paths(fdvp, mntrename ? mnt_fvp : fvp,
 		    &fromnd->ni_cnd, from_name, tdvp, tvp, &tond->ni_cnd, to_name, ctx,
 		    flags, NULL);
@@ -9439,6 +9546,8 @@ continue_lookup:
 					retry_count += 1;
 				}
 			}
+			vnode_link_unlock(fvp);
+			locked_vp = NULLVP;
 			goto out1;
 		}
 	}
@@ -9465,6 +9574,11 @@ skipped_lookup:
 	error = vn_rename(fdvp, &fvp, &fromnd->ni_cnd, fvap,
 	    tdvp, &tvp, &tond->ni_cnd, tvap,
 	    flags, ctx);
+
+	if (locked_vp) {
+		vnode_link_unlock(fvp);
+		locked_vp = NULLVP;
+	}
 
 	if (holding_mntlock) {
 		/*
@@ -14598,7 +14712,7 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 	mount_t mp;
 	vnode_t rvp, snapdvp, snapvp, vp, pvp;
 	struct fs_snapshot_mount_args smnt_data;
-	int error;
+	int error, mount_flags = 0;
 	struct nameidata *snapndp, *dirndp;
 	/* carving out a chunk for structs that are too big to be on stack. */
 	struct {
@@ -14622,9 +14736,24 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 		goto out1;
 	}
 
+	/* Convert snapshot_mount flags to mount flags */
+	if (flags & SNAPSHOT_MNT_DONTBROWSE) {
+		mount_flags |= MNT_DONTBROWSE;
+	}
+	if (flags & SNAPSHOT_MNT_IGNORE_OWNERSHIP) {
+		mount_flags |= MNT_IGNORE_OWNERSHIP;
+	}
+	if (flags & SNAPSHOT_MNT_NOFOLLOW) {
+		mount_flags |= MNT_NOFOLLOW;
+	}
+
 	/* Get the vnode to be covered */
 	NDINIT(dirndp, LOOKUP, OP_MOUNT, FOLLOW | AUDITVNPATH1 | WANTPARENT,
 	    UIO_USERSPACE, directory, ctx);
+	if (mount_flags & MNT_NOFOLLOW) {
+		dirndp->ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+
 	error = namei(dirndp);
 	if (error) {
 		goto out1;
@@ -14650,7 +14779,7 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 	smnt_data.sm_mp  = mp;
 	smnt_data.sm_cnp = &snapndp->ni_cnd;
 	error = mount_common(mp->mnt_vfsstat.f_fstypename, pvp, vp,
-	    &dirndp->ni_cnd, CAST_USER_ADDR_T(&smnt_data), flags & (MNT_DONTBROWSE | MNT_IGNORE_OWNERSHIP),
+	    &dirndp->ni_cnd, CAST_USER_ADDR_T(&smnt_data), mount_flags,
 	    KERNEL_MOUNT_SNAPSHOT, NULL, ctx);
 
 out2:

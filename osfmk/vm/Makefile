@@ -56,6 +56,7 @@ XNU_ONLY_EXPORTS += \
 	vm_map_internal.h \
 	vm_protos_internal.h \
 	vm_sanitize_internal.h \
+	vm_sanitize_telemetry.h \
 	vm_shared_region_internal.h
 
 # Internal files exported with specific subsystems

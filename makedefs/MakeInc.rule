@@ -148,6 +148,61 @@ do_unifdef_headers::
 .PHONY: do_unifdef_headers
 endef
 
+# Helper function to call a verifier
+# Generally, a verifier is a function that post-processes a .o file to validate
+# some characteristics.
+#
+# This ensures that the output .o file is renamed if the verifier rejects the
+# input or fails. This forces the .o file to be re-generated & re-verified if
+# another build is run.
+#
+# Note: currently, it is possible to end up in an inconsistent state by
+# Ctrl+C-ing in the middle of a verifier run, causing a .o file that would
+# have failed verification to still exist as a .o instead o a .o.unverified.
+# The next build should be a "clean" build to prevent the .o file avoiding
+# verification.
+#
+# Any stderr output from the verifier is printed with an "error:" prefix.
+#
+# $(1) is the name of the verifier to call
+# $(2) is the name of the .o file to pass to the verifier
+define VERIFY
+{ ERROR_OUTPUT="$$({ $(call $(1),$(2)) } 2>&1 1>&3)"; } 3>&1; \
+RETURN=$$?; \
+$(ERR) "$$($(SED) -e 's/^/error: /' <<< "$$ERROR_OUTPUT")"; \
+if [ $$RETURN -ne 0 ]; then \
+	UNVERIFIED_FILE=$(@:o=o.unverified) ; \
+	$(MV) '$(2)' "$$UNVERIFIED_FILE"; \
+	$(ERR) "error: Moved object file $(2) with verifier failures to $$PWD/$$UNVERIFIED_FILE"; \
+	exit $$RETURN; \
+fi;
+endef
+
+# Verifier to ensure no UBSan runtime calls generated in a file
+# Compile with -fsanitize=... and WITHOUT -fsanitize-trap
+#
+# On failure, the build will fail and any offending symbols will be printed
+# along with a partial disassembly. A full disassembly of the object file may
+# also be useful, e.g.:
+# $ objdump -dSrl BUILD/obj/DEVELOPMENT_.../osfmk/DEVELOPMENT/vm_sanitize.o
+#
+# Note that objdump will not work on builds with LTO enabled, since the
+# intermediate files are LLVM bitcode instead of traditional object files.
+#
+# $(1) is the name of the .o file to be verified
+define VERIFIER_NO_UBSAN_CHECKS
+MATCHES="$$($(NM) -j '$(1)' | $(GREP) '^___ubsan')"; \
+if [[ ! -z "$$MATCHES" ]]; then \
+	$(ECHO) 1>&2 'UBSan verifier failure for $<:'; \
+	DISASM="$$($(OBJDUMP) -dSrl '$(1)' | $(GREP) -E '___ubsan|^;' | $(GREP) -B2 '___ubsan')"; \
+	if [[ -z "$$DISASM" ]]; then \
+		$(ECHO) 1>&2 "Failed to disassemble intermediate object file. It may be a bitcode file if LTO is enabled."; \
+	else \
+		$(ECHO) 1>&2 "$$($(SED) -e '/^--$$/d' -e 's/^/    /' <<< "$$DISASM")"; \
+	fi; \
+	exit 1; \
+fi;
+endef
 
 #
 # Empty the install lists of non-host and non-exclave headers if building the
@@ -496,9 +551,8 @@ C_RULE_1A=$(_v)$(KCC) -c $(filter-out $($@_CFLAGS_RM), $(CFLAGS) $(CWARNFLAGS)) 
 C_RULE_1B=$(<F)
 C_RULE_2=
 
-C_RULE_3=
-C_RULE_4A=
-C_RULE_4B=
+C_RULE_3=@$(if $($@_VERIFIER), $(LOG_VERIFIER) "$@")
+C_RULE_4=@$(if $($@_VERIFIER), $(call VERIFY,$($@_VERIFIER),$@))
 
 #
 # Compilation rules to generate .o from .c for driver files
@@ -508,8 +562,7 @@ C_RULE_1A_D=$(C_RULE_1A)
 C_RULE_1B_D=$(C_RULE_1B)
 C_RULE_2_D=$(C_RULE_2)
 C_RULE_3_D=$(C_RULE_3)
-C_RULE_4A_D=$(C_RULE_4A)
-C_RULE_4B_D=$(C_RULE_4B)
+C_RULE_4_D=$(C_RULE_4)
 
 #
 # Compilation rules to generate .co from .cp or .cpo from .cpp
@@ -520,9 +573,8 @@ P_RULE_1A=$(_v)$(KC++) -o $@ -c $(CXXFLAGS) $(filter-out $($@_CFLAGS_RM), $(CFLA
 P_RULE_1B=$(<F)
 P_RULE_2=
 
-P_RULE_3=
-P_RULE_4A=
-P_RULE_4B=
+P_RULE_3=@$(if $($@_VERIFIER), $(LOG_VERIFIER) "$@")
+P_RULE_4=@$(if $($@_VERIFIER), $(call VERIFY,$($@_VERIFIER),$@))
 
 #
 # Explain how to make the bsd syscall list

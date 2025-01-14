@@ -1822,6 +1822,7 @@ map_segment(
 	vm_map_t                map,
 	vm_map_offset_t         vm_start,
 	vm_map_offset_t         vm_end,
+	vm_map_kernel_flags_t   vmk_flags,
 	memory_object_control_t control,
 	vm_map_offset_t         file_start,
 	vm_map_offset_t         file_end,
@@ -1831,7 +1832,6 @@ map_segment(
 {
 	kern_return_t   ret;
 	vm_map_offset_t effective_page_mask;
-	vm_map_kernel_flags_t vmk_flags;
 
 	if (vm_end < vm_start ||
 	    file_end < file_start) {
@@ -1845,7 +1845,6 @@ map_segment(
 
 	effective_page_mask = vm_map_page_mask(map);
 
-	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 	if (vm_map_page_aligned(vm_start, effective_page_mask) &&
 	    vm_map_page_aligned(vm_end, effective_page_mask) &&
 	    vm_map_page_aligned(file_start, effective_page_mask) &&
@@ -1938,6 +1937,7 @@ load_segment(
 	size_t                  vm_size;
 	vm_map_offset_t         vm_start, vm_end, vm_end_aligned;
 	vm_map_offset_t         file_start, file_end;
+	vm_map_kernel_flags_t   vmk_flags;
 	kern_return_t           kr;
 	boolean_t               verbose;
 	vm_map_size_t           effective_page_size;
@@ -1950,6 +1950,7 @@ load_segment(
 
 	effective_page_size = vm_map_page_size(map);
 	effective_page_mask = vm_map_page_mask(map);
+	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
 
 	verbose = FALSE;
 	if (LC_SEGMENT_64 == lcp->cmd) {
@@ -2232,6 +2233,11 @@ load_segment(
 	}
 
 	if (vm_size > 0) {
+#if !__x86_64__
+		if (!strncmp(scp->segname, "__LINKEDIT", 11)) {
+			vmk_flags.vmf_permanent = true;
+		}
+#endif /* !__x86_64__ */
 		initprot = (scp->initprot) & VM_PROT_ALL;
 		maxprot = (scp->maxprot) & VM_PROT_ALL;
 		/*
@@ -2249,6 +2255,7 @@ load_segment(
 		ret = map_segment(map,
 		    vm_start,
 		    vm_end,
+		    vmk_flags,
 		    control,
 		    file_start,
 		    file_end,
@@ -2319,6 +2326,7 @@ load_segment(
 		kr = map_segment(map,
 		    tmp_start,
 		    tmp_end,
+		    vmk_flags,
 		    MEMORY_OBJECT_CONTROL_NULL,
 		    0,
 		    delta_size,

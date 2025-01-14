@@ -168,7 +168,7 @@ struct shared_file_mapping_np {
 	vm_prot_t               sfm_init_prot;
 };
 
-struct shared_file_mapping_slide_np {
+typedef struct shared_file_mapping_slide_np {
 	/* address at which to create mapping */
 	mach_vm_address_t       sms_address __kernel_data_semantics;
 	/* size of region to map */
@@ -182,7 +182,19 @@ struct shared_file_mapping_slide_np {
 	/* protections, plus flags, see below */
 	vm_prot_t               sms_max_prot;
 	vm_prot_t               sms_init_prot;
-};
+} shared_file_mapping_slide_np_t;
+#if KERNEL
+VM_DEFINE_UNSAFE_TYPE(shared_file_mapping_slide_np_t, shared_file_mapping_slide_np_ut, struct {
+	mach_vm_address_ut       sms_address_u;
+	mach_vm_size_ut          sms_size_u;
+	mach_vm_offset_ut        sms_file_offset_u;
+	user_addr_ut             sms_slide_size_u;
+	user_addr_ut             sms_slide_start_u;
+	vm_prot_ut               sms_max_prot_u;
+	vm_prot_ut               sms_init_prot_u;
+});
+#endif
+
 struct shared_file_np {
 	int                     sf_fd;             /* file to be mapped into shared region */
 	uint32_t                sf_mappings_count; /* number of mappings */
@@ -209,6 +221,13 @@ struct shared_file_np {
 #define VM_PROT_SLIDE                    0x20
 #define VM_PROT_NOAUTH                   0x40
 #define VM_PROT_TRANSLATED_ALLOW_EXECUTE 0x80
+
+#define VM_PROT_SFM_EXTENSIONS_MASK       \
+	(VM_PROT_COW |                    \
+	VM_PROT_ZF |                      \
+	VM_PROT_SLIDE |                   \
+	VM_PROT_NOAUTH |                  \
+	VM_PROT_TRANSLATED_ALLOW_EXECUTE)
 
 #ifndef KERNEL
 

@@ -7,6 +7,8 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/memory_entry.h>
+#include <mach/shared_region.h>
+#include <mach/vm_reclaim.h>
 #include <mach/vm_types.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -25,10 +27,14 @@
 // code shared with kernel/kext tests
 #include "../../osfmk/tests/vm_parameter_validation.h"
 
+#define GOLDEN_FILES_VERSION "vm_parameter_validation_golden_images_46d15ea.tar.xz"
+#define GOLDEN_FILES_ASSET_FILE_POINTER GOLDEN_FILES_VERSION
+
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"),
+	T_META_S3_ASSET(GOLDEN_FILES_ASSET_FILE_POINTER),
 	T_META_ASROOT(true),  /* required for vm_wire tests on macOS */
 	T_META_RUN_CONCURRENTLY(false), /* vm_parameter_validation_kern uses kernel globals */
 	T_META_ALL_VALID_ARCHS(true),
@@ -91,7 +97,7 @@ T_GLOBAL_META(
  * Because that data section is one of the first things in our address space,
  * the behavior of wire is (more) predictable.
  */
-_Alignas(KB16) char guard_page[KB16];
+static _Alignas(KB16) char guard_page[KB16];
 
 static void
 set_up_guard_page(void)
@@ -120,6 +126,37 @@ get_fd()
 	fd = mkstemp(filename);
 	assert(fd > 2);  // not stdin/stdout/stderr
 	return fd;
+}
+
+static int rosetta_dyld_fd = -1;
+// Return a file descriptor that Rosetta dyld will accept
+static int
+get_dyld_fd()
+{
+	if (rosetta_dyld_fd >= 0) {
+		return rosetta_dyld_fd;
+	}
+
+	if (!isRosetta()) {
+		rosetta_dyld_fd = 0;
+		return rosetta_dyld_fd;
+	}
+
+	rosetta_dyld_fd = 0;
+	return rosetta_dyld_fd;
+}
+
+// Close the Rosetta dyld fd (only one test calls this)
+static void
+close_dyld_fd()
+{
+	if (isRosetta()) {
+		assert(rosetta_dyld_fd > 2);
+		if (close(rosetta_dyld_fd) != 0) {
+			assert(0);
+		}
+		rosetta_dyld_fd = -1;
+	}
 }
 
 static int
@@ -156,10 +193,12 @@ call_mlock(void *start, size_t size)
 	return err ? errno : 0;
 }
 
+extern int __munmap(void *, size_t);
+
 static kern_return_t
 call_munmap(MAP_T map __unused, mach_vm_address_t start, mach_vm_size_t size)
 {
-	int err = munmap((void*)start, (size_t)size);
+	int err = __munmap((void*)start, (size_t)size);
 	return err ? errno : 0;
 }
 
@@ -174,7 +213,7 @@ call_mremap_encrypted(void *start, size_t size)
 // Mach tests
 
 static mach_port_t
-make_a_mem_object(vm_size_t size)
+make_a_mem_object(mach_vm_size_t size)
 {
 	mach_port_t out_handle;
 	kern_return_t kr = mach_memory_object_memory_entry_64(mach_host_self(), 1, size, VM_PROT_READ | VM_PROT_WRITE, 0, &out_handle);
@@ -213,14 +252,16 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              VM_PROT_READ | MAP_MEM_ONLY, &out_handle, memobject); \
 	        if (kr == 0) {                                                    \
 	                (void)mach_port_deallocate(mach_task_self(), out_handle); \
 	/* MAP_MEM_ONLY doesn't use the size. It should not change it. */         \
-	                assert(io_size == size);                                  \
+	                if(io_size != size) {                                     \
+	                        kr = OUT_PARAM_BAD;                               \
+	                }                                                         \
 	        }                                                                 \
 	        (void)mach_port_deallocate(mach_task_self(), memobject);          \
 	        check_mach_memory_entry_outparam_changes(&kr, out_handle, invalid_value); \
@@ -232,7 +273,7 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              VM_PROT_READ | MAP_MEM_NAMED_CREATE, &out_handle, memobject); \
@@ -249,7 +290,7 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              VM_PROT_READ | MAP_MEM_VM_COPY, &out_handle, memobject); \
@@ -266,7 +307,7 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              VM_PROT_READ | MAP_MEM_VM_SHARE, &out_handle, memobject); \
@@ -283,7 +324,7 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              VM_PROT_READ | MAP_MEM_NAMED_REUSE, &out_handle, memobject); \
@@ -300,7 +341,7 @@ check_mach_memory_entry_outparam_changes(kern_return_t * kr, mach_port_t out_han
 	{                                                                         \
 	        mach_port_t memobject = make_a_mem_object(TEST_ALLOC_SIZE + 1);          \
 	        T io_size = size;                                                 \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;            \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;            \
 	        mach_port_t out_handle = invalid_value;                           \
 	        kern_return_t kr = FN(map, &io_size, start,                       \
 	                              prot, &out_handle, memobject); \
@@ -335,7 +376,7 @@ check_mach_memory_object_memory_entry_outparam_changes(kern_return_t * kr, mach_
 	call_ ## FN ## __size(MAP_T map __unused, mach_vm_size_t size)  \
 	{                                                               \
 	        kern_return_t kr;                                       \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;  \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;  \
 	        mach_port_t out_entry = invalid_value;                  \
 	        kr = FN(mach_host_self(), 1, size, VM_PROT_READ | VM_PROT_WRITE, 0, &out_entry); \
 	        if (kr == 0) {                                          \
@@ -348,7 +389,7 @@ check_mach_memory_object_memory_entry_outparam_changes(kern_return_t * kr, mach_
 	call_ ## FN ## __vm_prot(MAP_T map __unused, mach_vm_size_t size, vm_prot_t prot) \
 	{                                                               \
 	        kern_return_t kr;                                       \
-	        mach_port_t invalid_value = INVALID_INITIAL_MACH_PORT;  \
+	        mach_port_t invalid_value = UNLIKELY_INITIAL_MACH_PORT;  \
 	        mach_port_t out_entry = invalid_value;                  \
 	        kr = FN(mach_host_self(), 1, size, prot, 0, &out_entry); \
 	        if (kr == 0) {                                          \
@@ -385,8 +426,8 @@ check_vm_read_outparam_changes(kern_return_t * kr, mach_vm_size_t size, mach_vm_
 static kern_return_t
 call_mach_vm_read(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
 {
-	vm_offset_t out_addr = INVALID_INITIAL_ADDRESS;
-	mach_msg_type_number_t out_size = INVALID_INITIAL_SIZE;
+	vm_offset_t out_addr = UNLIKELY_INITIAL_ADDRESS;
+	mach_msg_type_number_t out_size = UNLIKELY_INITIAL_SIZE;
 	kern_return_t kr = mach_vm_read(map, start, size, &out_addr, &out_size);
 	if (kr == 0) {
 		(void)mach_vm_deallocate(mach_task_self(), out_addr, out_size);
@@ -398,8 +439,8 @@ call_mach_vm_read(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
 static kern_return_t
 call_vm_read(MAP_T map, vm_address_t start, vm_size_t size)
 {
-	vm_offset_t out_addr = INVALID_INITIAL_ADDRESS;
-	mach_msg_type_number_t out_size = INVALID_INITIAL_SIZE;
+	vm_offset_t out_addr = UNLIKELY_INITIAL_ADDRESS;
+	mach_msg_type_number_t out_size = UNLIKELY_INITIAL_SIZE;
 	kern_return_t kr = vm_read(map, start, size, &out_addr, &out_size);
 	if (kr == 0) {
 		(void)mach_vm_deallocate(mach_task_self(), out_addr, out_size);
@@ -473,30 +514,30 @@ call_mach_vm_read_overwrite__dst(MAP_T map, mach_vm_address_t dst, mach_vm_size_
 
 #if TEST_OLD_STYLE_MACH
 static kern_return_t __unused
-call_vm_read_overwrite__ssz(MAP_T map, mach_vm_address_t start, mach_vm_address_t start_2, mach_vm_size_t size)
+call_vm_read_overwrite__ssz(MAP_T map, vm_address_t start, vm_address_t start_2, vm_size_t size)
 {
 	vm_size_t out_size;
-	kern_return_t kr = vm_read_overwrite(map, (vm_address_t) start, (vm_size_t) size, (vm_address_t) start_2, &out_size);
+	kern_return_t kr = vm_read_overwrite(map, start, size, start_2, &out_size);
 	check_vm_read_overwrite_outparam_changes(&kr, out_size, size);
 	return kr;
 }
 
 static kern_return_t
-call_vm_read_overwrite__src(MAP_T map, mach_vm_address_t src, mach_vm_size_t size)
+call_vm_read_overwrite__src(MAP_T map, vm_address_t src, vm_size_t size)
 {
 	vm_size_t out_size;
 	allocation_t dst SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	kern_return_t kr = vm_read_overwrite(map, (vm_address_t) src, (vm_size_t) size, (vm_address_t) dst.addr, &out_size);
+	kern_return_t kr = vm_read_overwrite(map, src, size, (vm_address_t) dst.addr, &out_size);
 	check_vm_read_overwrite_outparam_changes(&kr, out_size, size);
 	return kr;
 }
 
 static kern_return_t
-call_vm_read_overwrite__dst(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size)
+call_vm_read_overwrite__dst(MAP_T map, vm_address_t dst, vm_size_t size)
 {
 	vm_size_t out_size;
 	allocation_t src SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	kern_return_t kr = vm_read_overwrite(map, (vm_address_t) src.addr, (vm_size_t) size, (vm_address_t) dst, &out_size);
+	kern_return_t kr = vm_read_overwrite(map, (vm_address_t) src.addr, size, dst, &out_size);
 	check_vm_read_overwrite_outparam_changes(&kr, out_size, size);
 	return kr;
 }
@@ -536,18 +577,18 @@ call_vm_copy__ssz(MAP_T map, mach_vm_address_t start, mach_vm_address_t start_2,
 }
 
 static kern_return_t
-call_vm_copy__src(MAP_T map, mach_vm_address_t src, mach_vm_size_t size)
+call_vm_copy__src(MAP_T map, vm_address_t src, vm_size_t size)
 {
 	allocation_t dst SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	kern_return_t kr = vm_copy(map, (vm_address_t) src, (vm_size_t) size, (vm_address_t) dst.addr);
+	kern_return_t kr = vm_copy(map, src, size, (vm_address_t) dst.addr);
 	return kr;
 }
 
 static kern_return_t
-call_vm_copy__dst(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size)
+call_vm_copy__dst(MAP_T map, vm_address_t dst, vm_size_t size)
 {
 	allocation_t src SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	kern_return_t kr = vm_copy(map, (vm_address_t) src.addr, (vm_size_t) size, (vm_address_t) dst);
+	kern_return_t kr = vm_copy(map, (vm_address_t) src.addr, size, dst);
 	return kr;
 }
 #endif
@@ -887,6 +928,7 @@ help_call_map_fn__memobject__prot_pairs(map_fn_t fn, MAP_T map, int flags, bool 
 	kern_return_t kr = fn(map, &out_addr, KB16, 0, flags,
 	    memobject, KB16, copy, cur, max, VM_INHERIT_DEFAULT);
 	deallocate_if_not_fixed_overwrite(kr, map, out_addr, KB16, flags);
+	(void)mach_port_deallocate(mach_task_self(), memobject);
 	return kr;
 }
 
@@ -1116,7 +1158,7 @@ help_call_mmap__vm_prot(MAP_T map __unused, int flags, mach_vm_address_t start, 
 	if (!(flags & MAP_ANON)) {
 		fd = get_fd();
 	}
-	void *rv = mmap_wrapper((void *)start, size, prot, flags, fd, 0);
+	void *rv = mmap_wrapper((void *)start, (size_t) size, prot, flags, fd, 0);
 	if (rv == MAP_FAILED) {
 		return maybe_hide_mmap_failure(errno, prot, fd);
 	} else {
@@ -1128,7 +1170,7 @@ help_call_mmap__vm_prot(MAP_T map __unused, int flags, mach_vm_address_t start, 
 static kern_return_t
 help_call_mmap__kernel_flags(MAP_T map __unused, int mmap_flags, mach_vm_address_t start, mach_vm_size_t size, int kernel_flags)
 {
-	void *rv = mmap_wrapper((void *)start, size, VM_PROT_DEFAULT, mmap_flags, kernel_flags, 0);
+	void *rv = mmap_wrapper((void *)start, (size_t) size, VM_PROT_DEFAULT, mmap_flags, kernel_flags, 0);
 	if (rv == MAP_FAILED) {
 		return errno;
 	} else {
@@ -1144,7 +1186,7 @@ help_call_mmap__dst_size_fileoff(MAP_T map __unused, int flags, mach_vm_address_
 	if (!(flags & MAP_ANON)) {
 		fd = get_fd();
 	}
-	void *rv = mmap_wrapper((void *)dst, size, VM_PROT_DEFAULT, flags, fd, (off_t)fileoff);
+	void *rv = mmap_wrapper((void *)dst, (size_t) size, VM_PROT_DEFAULT, flags, fd, (off_t)fileoff);
 	if (rv == MAP_FAILED) {
 		return errno;
 	} else {
@@ -1160,7 +1202,7 @@ help_call_mmap__start_size(MAP_T map __unused, int flags, mach_vm_address_t star
 	if (!(flags & MAP_ANON)) {
 		fd = get_fd();
 	}
-	void *rv = mmap_wrapper((void *)start, size, VM_PROT_DEFAULT, flags, fd, 0);
+	void *rv = mmap_wrapper((void *)start, (size_t) size, VM_PROT_DEFAULT, flags, fd, 0);
 	if (rv == MAP_FAILED) {
 		return errno;
 	} else {
@@ -1176,7 +1218,7 @@ help_call_mmap__offset_size(MAP_T map __unused, int flags, mach_vm_address_t off
 	if (!(flags & MAP_ANON)) {
 		fd = get_fd();
 	}
-	void *rv = mmap_wrapper((void *)0, size, VM_PROT_DEFAULT, flags, fd, (off_t)offset);
+	void *rv = mmap_wrapper((void *)0, (size_t) size, VM_PROT_DEFAULT, flags, fd, (off_t)offset);
 	if (rv == MAP_FAILED) {
 		return errno;
 	} else {
@@ -1187,6 +1229,7 @@ help_call_mmap__offset_size(MAP_T map __unused, int flags, mach_vm_address_t off
 
 #define IMPL_ONE_FROM_HELPER(type, variant, flags, ...)                                                                                 \
 	static kern_return_t                                                                                                            \
+	__attribute__((used))                                                                                                           \
 	call_mmap ## __ ## variant ## __ ## type(MAP_T map, mach_vm_address_t start, mach_vm_size_t size DROP_COMMAS(__VA_ARGS__)) {    \
 	        return help_call_mmap__ ## type(map, flags, start, size DROP_TYPES(__VA_ARGS__));                                       \
 	}
@@ -1218,11 +1261,11 @@ call_mmap__mmap_flags(MAP_T map __unused, mach_vm_address_t start, mach_vm_size_
 	if (!(mmap_flags & MAP_ANON)) {
 		fd = get_fd();
 	}
-	void *rv = mmap_wrapper((void *)start, size, VM_PROT_DEFAULT, mmap_flags, fd, 0);
+	void *rv = mmap_wrapper((void *)start, (size_t) size, VM_PROT_DEFAULT, mmap_flags, fd, 0);
 	if (rv == MAP_FAILED) {
 		return errno;
 	} else {
-		assert(0 == munmap(rv, size));
+		assert(0 == munmap(rv, (size_t) size));
 		return 0;
 	}
 }
@@ -1265,7 +1308,7 @@ short_circuit_deallocator(MAP_T map, start_size_trial_t trial)
 	}
 
 	// Avoid overwriting random live memory.
-	if (!range_overflows_strict_zero(trial.start, trial.size, VM_MAP_PAGE_MASK(map))) {
+	if (!vm_sanitize_range_overflows_strict_zero(trial.start, trial.size, VM_MAP_PAGE_MASK(map))) {
 		return IGNORED;
 	}
 
@@ -1291,13 +1334,14 @@ call_mach_vm_deallocate(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
 	return kr;
 }
 
+#if TEST_OLD_STYLE_MACH
 static kern_return_t
 call_vm_deallocate(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
 {
 	kern_return_t kr = vm_deallocate(map, (vm_address_t) start, (vm_size_t) size);
 	return kr;
 }
-
+#endif
 
 static kern_return_t
 call_mach_vm_allocate__flags(MAP_T map, mach_vm_address_t * start, mach_vm_size_t size, int flags)
@@ -1327,33 +1371,1013 @@ call_mach_vm_allocate__start_size_anywhere(MAP_T map, mach_vm_address_t * start,
 	return kr;
 }
 
+static kern_return_t
+call_mach_vm_inherit(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	kern_return_t kr = mach_vm_inherit(map, start, size, VM_INHERIT_NONE);
+	return kr;
+}
+#if TEST_OLD_STYLE_MACH
+static kern_return_t
+call_vm_inherit(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	kern_return_t kr = vm_inherit(map, start, size, VM_INHERIT_NONE);
+	return kr;
+}
+#endif
+
+static int
+call_minherit(void *start, size_t size)
+{
+	int err = minherit(start, size, VM_INHERIT_SHARE);
+	return err ? errno : 0;
+}
+
+static kern_return_t
+call_mach_vm_inherit__inherit(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_inherit_t value)
+{
+	kern_return_t kr = mach_vm_inherit(map, start, size, value);
+	return kr;
+}
+
+static int
+call_minherit__inherit(void * start, size_t size, int value)
+{
+	int err = minherit(start, size, value);
+	return err ? errno : 0;
+}
+
+static kern_return_t
+call_mach_vm_protect__start_size(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	kern_return_t kr = mach_vm_protect(map, start, size, 0, VM_PROT_READ | VM_PROT_WRITE);
+	return kr;
+}
+static kern_return_t
+call_mach_vm_protect__vm_prot(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_prot_t prot)
+{
+	kern_return_t kr = mach_vm_protect(map, start, size, 0, prot);
+	return kr;
+}
+#if TEST_OLD_STYLE_MACH
+static kern_return_t
+call_vm_protect__start_size(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	kern_return_t kr = vm_protect(map, start, size, 0, VM_PROT_READ | VM_PROT_WRITE);
+	return kr;
+}
+static kern_return_t
+call_vm_protect__vm_prot(MAP_T map, vm_address_t start, vm_size_t size, vm_prot_t prot)
+{
+	kern_return_t kr = vm_protect(map, start, size, 0, prot);
+	return kr;
+}
+#endif
+
+extern int __mprotect(void *, size_t, int);
+
+static int
+call_mprotect__start_size(void *start, size_t size)
+{
+	int err = __mprotect(start, size, PROT_READ | PROT_WRITE);
+	return err ? errno : 0;
+}
+
+static int
+call_mprotect__vm_prot(void *start, size_t size, int prot)
+{
+	int err = __mprotect(start, size, prot);
+	return err ? errno : 0;
+}
+
+#if TEST_OLD_STYLE_MACH
+static kern_return_t
+call_vm_behavior_set__start_size__default(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	kern_return_t kr = vm_behavior_set(map, start, size, VM_BEHAVIOR_DEFAULT);
+	return kr;
+}
+
+static kern_return_t
+call_vm_behavior_set__start_size__can_reuse(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	kern_return_t kr = vm_behavior_set(map, start, size, VM_BEHAVIOR_CAN_REUSE);
+	return kr;
+}
+
+static kern_return_t
+call_vm_behavior_set__vm_behavior(MAP_T map, vm_address_t start, vm_size_t size, vm_behavior_t behavior)
+{
+	kern_return_t kr = vm_behavior_set(map, start, size, behavior);
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+extern int __shared_region_map_and_slide_2_np(uint32_t files_count,
+    const struct shared_file_np *files,
+    uint32_t mappings_count,
+    const struct shared_file_mapping_slide_np *mappings);
+
+static int
+maybe_hide_shared_region_map_failure(int ret,
+    uint32_t files_count, const struct shared_file_np *files,
+    uint32_t mappings_count)
+{
+	// Special case for __shared_region_map_and_slide_2_np().
+	// When SIP is enabled this case gets EPERM instead of EINVAL due to
+	// vm_shared_region_map_file returning KERN_PROTECTION_FAILURE instead of
+	// KERN_INVALID_ARGUMENT.
+	if (ret == EPERM && files_count == 1 && mappings_count == 1 &&
+	    files->sf_fd == get_fd() && files->sf_mappings_count == 1 &&
+	    unsigned_code_is_disallowed()) {
+		return ACCEPTABLE;
+	}
+	return ret;
+}
+
+static int
+call_shared_region_map_and_slide_2_np_child(uint32_t files_count, const struct shared_file_np *files,
+    uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings)
+{
+	int err = __shared_region_map_and_slide_2_np(files_count, files, mappings_count, mappings);
+	return err ? maybe_hide_shared_region_map_failure(errno, files_count, files, mappings_count) : 0;
+}
+
+typedef struct {
+	uint32_t files_count;
+	const struct shared_file_np *files;
+	uint32_t mappings_count;
+	const struct shared_file_mapping_slide_np *mappings;
+} map_n_slice_thread_args;
+
+void*
+thread_func(void* args)
+{
+	map_n_slice_thread_args *thread_args = (map_n_slice_thread_args *)args;
+	uint32_t files_count = thread_args->files_count;
+	const struct shared_file_np *files = thread_args->files;
+	uint32_t mappings_count = thread_args->mappings_count;
+	const struct shared_file_mapping_slide_np *mappings = thread_args->mappings;
+
+	int err = call_shared_region_map_and_slide_2_np_child(files_count, files, mappings_count, mappings);
+
+	int *result = malloc(sizeof(int));
+	assert(result != NULL);
+	*result = err;
+	return result;
+}
+
+static int
+call_shared_region_map_and_slide_2_np_in_thread(uint32_t files_count, const struct shared_file_np *files,
+    uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings)
+{
+	// From vm/vm_shared_region.c: After a chroot(), the calling process keeps using its original shared region [...]
+	// But its children will use a different shared region [...]
+	if (chroot(".") < 0) {
+		return BUSTED;
+	}
+
+	map_n_slice_thread_args args = {files_count, files, mappings_count, mappings};
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, thread_func, (void *)&args) < 0) {
+		return -91;
+	}
+
+	int *err;
+	if (pthread_join(thread, (void**)&err) < 0) {
+		return BUSTED;
+	}
+
+	if (chroot("/") < 0) {
+		return BUSTED;
+	}
+
+	return *err;
+}
+
+static int
+call_madvise__start_size(void *start, size_t size)
+{
+	int err = madvise(start, size, MADV_NORMAL);
+	return err ? errno : 0;
+}
+
+static int
+call_madvise__vm_advise(void *start, size_t size, int advise)
+{
+	int err = madvise(start, size, advise);
+	return err ? errno : 0;
+}
+
+static int
+call_mach_vm_msync__start_size(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	kern_return_t kr = mach_vm_msync(map, start, size, VM_SYNC_ASYNCHRONOUS);
+	return kr;
+}
+
+static int
+call_mach_vm_msync__vm_sync(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_sync_t sync)
+{
+	kern_return_t kr = mach_vm_msync(map, start, size, sync);
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH
+static int
+call_vm_msync__start_size(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	kern_return_t kr = vm_msync(map, start, size, VM_SYNC_ASYNCHRONOUS);
+	return kr;
+}
+
+static int
+call_vm_msync__vm_sync(MAP_T map, vm_address_t start, vm_size_t size, vm_sync_t sync)
+{
+	kern_return_t kr = vm_msync(map, start, size, sync);
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+// msync has a libsyscall wrapper that does alignment. We want the raw syscall.
+int __msync(void *, size_t, int);
+
+static int
+call_msync__start_size(void *start, size_t size)
+{
+	int err = __msync(start, size, MS_SYNC);
+	return err ? errno : 0;
+}
+
+static int
+call_msync__vm_msync(void *start, size_t size, int msync_value)
+{
+	int err = __msync(start, size, msync_value);
+	return err ? errno : 0;
+}
+
+// msync nocancel isn't declared, but we want to directly hit the syscall
+int __msync_nocancel(void *, size_t, int);
+
+static int
+call_msync_nocancel__start_size(void *start, size_t size)
+{
+	int err = __msync_nocancel(start, size, MS_SYNC);
+	return err ? errno : 0;
+}
+
+static int
+call_msync_nocancel__vm_msync(void *start, size_t size, int msync_value)
+{
+	int err = __msync_nocancel(start, size, msync_value);
+	return err ? errno : 0;
+}
+
+static void
+check_mach_vm_machine_attribute_outparam_changes(kern_return_t * kr, vm_machine_attribute_val_t value, vm_machine_attribute_val_t saved_value)
+{
+	if (value != saved_value) {
+		*kr = OUT_PARAM_BAD;
+	}
+}
+
+static int
+call_mach_vm_machine_attribute__start_size(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	vm_machine_attribute_val_t value = MATTR_VAL_GET;
+	vm_machine_attribute_val_t initial_value = value;
+	kern_return_t kr = mach_vm_machine_attribute(map, start, size, MATTR_CACHE, &value);
+	check_mach_vm_machine_attribute_outparam_changes(&kr, value, initial_value);
+	return kr;
+}
+
+
+static int
+call_mach_vm_machine_attribute__machine_attribute(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_machine_attribute_t attr)
+{
+	vm_machine_attribute_val_t value = MATTR_VAL_GET;
+	vm_machine_attribute_val_t initial_value = value;
+	kern_return_t kr = mach_vm_machine_attribute(map, start, size, attr, &value);
+	check_mach_vm_machine_attribute_outparam_changes(&kr, value, initial_value);
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH
+static int
+call_vm_machine_attribute__start_size(MAP_T map, vm_address_t start, vm_size_t size)
+{
+	vm_machine_attribute_val_t value = MATTR_VAL_GET;
+	vm_machine_attribute_val_t initial_value = value;
+	kern_return_t kr = vm_machine_attribute(map, start, size, MATTR_CACHE, &value);
+	check_mach_vm_machine_attribute_outparam_changes(&kr, value, initial_value);
+	return kr;
+}
+
+static int
+call_vm_machine_attribute__machine_attribute(MAP_T map, vm_address_t start, vm_size_t size, vm_machine_attribute_t attr)
+{
+	vm_machine_attribute_val_t value = MATTR_VAL_GET;
+	vm_machine_attribute_val_t initial_value = value;
+	kern_return_t kr = vm_machine_attribute(map, start, size, attr, &value);
+	check_mach_vm_machine_attribute_outparam_changes(&kr, value, initial_value);
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+static int
+call_mach_vm_purgable_control__address__get(MAP_T map, mach_vm_address_t addr)
+{
+	int state = INVALID_PURGABLE_STATE;
+	int initial_state = state;
+	kern_return_t kr = mach_vm_purgable_control(map, addr, VM_PURGABLE_GET_STATE, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, VM_PURGABLE_GET_STATE);
+	return kr;
+}
+
+
+static int
+call_mach_vm_purgable_control__address__purge_all(MAP_T map, mach_vm_address_t addr)
+{
+	int state = INVALID_PURGABLE_STATE;
+	int initial_state = state;
+	kern_return_t kr = mach_vm_purgable_control(map, addr, VM_PURGABLE_PURGE_ALL, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, VM_PURGABLE_PURGE_ALL);
+	return kr;
+}
+
+static int
+call_mach_vm_purgable_control__purgeable_state(MAP_T map, mach_vm_address_t addr, vm_purgable_t control, int state)
+{
+	int initial_state = state;
+	kern_return_t kr = mach_vm_purgable_control(map, addr, control, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, control);
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH
+static int
+call_vm_purgable_control__address__get(MAP_T map, vm_address_t addr)
+{
+	int state = INVALID_PURGABLE_STATE;
+	int initial_state = state;
+	kern_return_t kr = vm_purgable_control(map, addr, VM_PURGABLE_GET_STATE, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, VM_PURGABLE_GET_STATE);
+	return kr;
+}
+
+static int
+call_vm_purgable_control__address__purge_all(MAP_T map, vm_address_t addr)
+{
+	int state = INVALID_PURGABLE_STATE;
+	int initial_state = state;
+	kern_return_t kr = vm_purgable_control(map, addr, VM_PURGABLE_PURGE_ALL, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, VM_PURGABLE_PURGE_ALL);
+	return kr;
+}
+
+static int
+call_vm_purgable_control__purgeable_state(MAP_T map, vm_address_t addr, vm_purgable_t control, int state)
+{
+	int initial_state = state;
+	kern_return_t kr = vm_purgable_control(map, addr, control, &state);
+	check_mach_vm_purgable_control_outparam_changes(&kr, state, initial_state, control);
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+static void
+check_mach_vm_region_recurse_outparam_changes(kern_return_t * kr, void * info, void * saved_info, size_t info_size,
+    natural_t depth, natural_t saved_depth, mach_vm_address_t addr, mach_vm_address_t saved_addr,
+    mach_vm_size_t size, mach_vm_size_t saved_size)
+{
+	if (*kr == KERN_SUCCESS) {
+		if (depth == saved_depth) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (size == saved_size) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (memcmp(info, saved_info, info_size) == 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	} else {
+		if (depth != saved_depth || addr != saved_addr || size != saved_size || memcmp(info, saved_info, info_size) != 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	}
+}
+
+static kern_return_t
+call_mach_vm_region_recurse(MAP_T map, mach_vm_address_t addr)
+{
+	vm_region_submap_info_data_64_t info;
+	info.inheritance = INVALID_INHERIT;
+	vm_region_submap_info_data_64_t saved_info = info;
+	mach_vm_size_t size_out = UNLIKELY_INITIAL_SIZE;
+	mach_vm_size_t saved_size = size_out;
+	natural_t depth = 10;
+	natural_t saved_depth = depth;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	mach_vm_address_t addr_cpy = addr;
+
+	kern_return_t kr = mach_vm_region_recurse(map,
+	    &addr_cpy,
+	    &size_out,
+	    &depth,
+	    (vm_region_recurse_info_t)&info,
+	    &count);
+	check_mach_vm_region_recurse_outparam_changes(&kr, &info, &saved_info, sizeof(info), depth, saved_depth,
+	    addr, addr_cpy, size_out, saved_size);
+
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH
+static kern_return_t
+call_vm_region_recurse(MAP_T map, vm_address_t addr)
+{
+	vm_region_submap_info_data_t info;
+	info.inheritance = INVALID_INHERIT;
+	vm_region_submap_info_data_t saved_info = info;
+
+	vm_size_t size_out = UNLIKELY_INITIAL_SIZE;
+	vm_size_t saved_size = size_out;
+
+	natural_t depth = 10;
+	natural_t saved_depth = depth;
+
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT;
+	vm_address_t addr_cpy = addr;
+
+	kern_return_t kr = vm_region_recurse(map,
+	    &addr_cpy,
+	    &size_out,
+	    &depth,
+	    (vm_region_recurse_info_t)&info,
+	    &count);
+
+	check_mach_vm_region_recurse_outparam_changes(&kr, &info, &saved_info, sizeof(info), depth, saved_depth,
+	    addr_cpy, addr, size_out, saved_size);
+
+	return kr;
+}
+
+static kern_return_t
+call_vm_region_recurse_64(MAP_T map, vm_address_t addr)
+{
+	vm_region_submap_info_data_64_t info;
+	info.inheritance = INVALID_INHERIT;
+	vm_region_submap_info_data_64_t saved_info = info;
+
+	vm_size_t size_out = UNLIKELY_INITIAL_SIZE;
+	vm_size_t saved_size = size_out;
+
+	natural_t depth = 10;
+	natural_t saved_depth = depth;
+
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	vm_address_t addr_cpy = addr;
+
+	kern_return_t kr = vm_region_recurse_64(map,
+	    &addr_cpy,
+	    &size_out,
+	    &depth,
+	    (vm_region_recurse_info_t)&info,
+	    &count);
+
+	check_mach_vm_region_recurse_outparam_changes(&kr, &info, &saved_info, sizeof(info), depth, saved_depth,
+	    addr_cpy, addr, size_out, saved_size);
+
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+static kern_return_t
+call_mach_vm_page_info(MAP_T map, mach_vm_address_t addr)
+{
+	vm_page_info_flavor_t flavor = VM_PAGE_INFO_BASIC;
+	mach_msg_type_number_t count = VM_PAGE_INFO_BASIC_COUNT;
+	mach_msg_type_number_t saved_count = count;
+	vm_page_info_basic_data_t info = {0};
+	info.depth = -1;
+	vm_page_info_basic_data_t saved_info = info;
+
+	kern_return_t kr = mach_vm_page_info(map, addr, flavor, (vm_page_info_t)&info, &count);
+	check_mach_vm_page_info_outparam_changes(&kr, info, saved_info, count, saved_count);
+	return kr;
+}
+
+static void
+check_mach_vm_page_query_outparam_changes(kern_return_t * kr, int disposition, int saved_disposition, int ref_count)
+{
+	if (*kr == KERN_SUCCESS) {
+		/*
+		 * There should be no outside references to the memory created for this test
+		 */
+		if (ref_count != 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (disposition == saved_disposition) {
+			*kr = OUT_PARAM_BAD;
+		}
+	}
+}
+
+static kern_return_t
+call_mach_vm_page_query(MAP_T map, mach_vm_address_t addr)
+{
+	int disp = INVALID_DISPOSITION_VALUE, ref = 0;
+	int saved_disposition = disp;
+	kern_return_t kr = mach_vm_page_query(map, addr, &disp, &ref);
+	check_mach_vm_page_query_outparam_changes(&kr, disp, saved_disposition, ref);
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH
+static kern_return_t
+call_vm_map_page_query(MAP_T map, vm_address_t addr)
+{
+	int disp = INVALID_DISPOSITION_VALUE, ref = 0;
+	int saved_disposition = disp;
+	kern_return_t kr = vm_map_page_query(map, addr, &disp, &ref);
+	check_mach_vm_page_query_outparam_changes(&kr, disp, saved_disposition, ref);
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH */
+
+static void
+check_mach_vm_page_range_query_outparam_changes(kern_return_t * kr, mach_vm_size_t out_count, mach_vm_size_t in_count)
+{
+	if (out_count != in_count) {
+		*kr = OUT_PARAM_BAD;
+	}
+}
+
+static kern_return_t
+call_mach_vm_page_range_query(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	// mach_vm_page_range_query writes one int per page output
+	// and can accept any address range as input
+	// We can't provide that much storage for very large lengths.
+	// Instead we provide a limited output buffer,
+	// write-protect the page after it, and "succeed" if the kernel
+	// fills the buffer and then returns EFAULT.
+
+	// enough space for MAX_PAGE_RANGE_QUERY with 4KB pages, twice
+	mach_vm_size_t prq_buf_size = 2 * 262144 * sizeof(int);
+	mach_vm_address_t prq_buf = 0;
+	kern_return_t kr = mach_vm_allocate(map, &prq_buf,
+	    prq_buf_size + KB16, VM_FLAGS_ANYWHERE);
+	assert(kr == 0);
+
+	// protect the guard page
+	mach_vm_address_t prq_guard = prq_buf + prq_buf_size;
+	kr = mach_vm_protect(map, prq_guard, KB16, 0, VM_PROT_NONE);
+	assert(kr == 0);
+
+	// pre-fill the output buffer with an invalid value
+	memset((char *)prq_buf, 0xff, prq_buf_size);
+
+	mach_vm_size_t in_count = size / KB16 + (size % KB16 ? 1 : 0);
+	mach_vm_size_t out_count = in_count;
+	kr = mach_vm_page_range_query(map, start, size, prq_buf, &out_count);
+
+	// yes, EFAULT as a kern_return_t because mach_vm_page_range_query returns copyio's error
+	if (kr == EFAULT) {
+		bool bad = false;
+		for (unsigned i = 0; i < prq_buf_size / sizeof(uint32_t); i++) {
+			if (((uint32_t *)prq_buf)[i] == 0xffffffff) {
+				// kernel didn't fill the entire writeable buffer, that's bad
+				bad = true;
+				break;
+			}
+		}
+		if (!bad) {
+			// kernel filled our buffer and then hit our fault page
+			// we'll allow it
+			kr = 0;
+		}
+	}
+
+	check_mach_vm_page_range_query_outparam_changes(&kr, out_count, in_count);
+	(void)mach_vm_deallocate(map, prq_buf, prq_buf_size + KB16);
+
+	return kr;
+}
+
+static int
+call_mincore(void *start, size_t size)
+{
+	// mincore writes one byte per page output
+	// and can accept any address range as input
+	// We can't provide that much storage for very large lengths.
+	// Instead we provide a limited output buffer,
+	// write-protect the page after it, and "succeed" if the kernel
+	// fills the buffer and then returns EFAULT.
+
+	// enough space for MAX_PAGE_RANGE_QUERY with 4KB pages, twice
+	size_t mincore_buf_size = 2 * 262144;
+	char *mincore_buf = 0;
+	mincore_buf = mmap(NULL, mincore_buf_size + KB16, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	assert(mincore_buf != MAP_FAILED);
+
+	// protect the guard page
+	char *mincore_guard = mincore_buf + mincore_buf_size;
+	int err = mprotect(mincore_guard, KB16, PROT_NONE);
+	assert(err == 0);
+
+	// pre-fill the output buffer with an invalid value
+	memset(mincore_buf, 0xff, mincore_buf_size);
+
+	int ret;
+	err = mincore(start, size, mincore_buf);
+	if (err == 0) {
+		ret = 0;
+	} else if (errno != EFAULT) {
+		ret = errno;
+	} else {
+		// EFAULT - check if kernel hit our guard page
+		bool bad = false;
+		for (unsigned i = 0; i < mincore_buf_size; i++) {
+			if (mincore_buf[i] == (char)0xff) {
+				// kernel didn't fill the entire writeable buffer, that's bad
+				bad = true;
+				break;
+			}
+		}
+		if (!bad) {
+			// kernel filled our buffer and then hit our guard page
+			// we'll allow it
+			ret = 0;
+		} else {
+			ret = errno;
+		}
+	}
+
+	(void)munmap(mincore_buf, mincore_buf_size + PAGE_SIZE);
+
+	return ret;
+}
+
+
+typedef kern_return_t (*fn_mach_vm_deferred_reclamation_buffer_init)(task_t task, mach_vm_address_t address, mach_vm_size_t size);
+
 static results_t *
-test_mach_allocated_with_vm_inherit_t(kern_return_t (*func)(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_inherit_t flags), const char * testname)
+test_mach_vm_deferred_reclamation_buffer_init(fn_mach_vm_deferred_reclamation_buffer_init func,
+    const char * testname)
+{
+	int ret = 0;
+	// Set vm.reclaim_max_threshold to non-zero
+	int orig_reclaim_max_threshold = 0;
+	int new_reclaim_max_threshold = 1;
+	size_t size = sizeof(orig_reclaim_max_threshold);
+	int sysctl_res = sysctlbyname("vm.reclaim_max_threshold", &orig_reclaim_max_threshold, &size, NULL, 0);
+	assert(sysctl_res == 0);
+	sysctl_res = sysctlbyname("vm.reclaim_max_threshold", NULL, 0, &new_reclaim_max_threshold, size);
+	assert(sysctl_res == 0);
+
+	reclamation_buffer_init_trials_t *trials SMART_RECLAMATION_BUFFER_INIT_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_RECLAMATION_BUFFER_INIT_TRIALS, trials->count);
+
+	// reserve last trial to run without modified sysctl
+	for (unsigned i = 0; i < trials->count - 1; i++) {
+		reclamation_buffer_init_trial_t trial = trials->list[i];
+		ret = func(trial.task, trial.address, trial.size);
+		append_result(results, ret, trial.name);
+	}
+
+	// run with vm.reclaim_max_threshold = 0 and exercise KERN_NOT_SUPPORTED path
+	new_reclaim_max_threshold = 0;
+	reclamation_buffer_init_trial_t last_trial = trials->list[trials->count - 1];
+
+	sysctl_res = sysctlbyname("vm.reclaim_max_threshold", NULL, 0, &new_reclaim_max_threshold, size);
+	assert(sysctl_res == 0);
+
+	ret = func(last_trial.task, last_trial.address, last_trial.size);
+	if (__improbable(ret == KERN_INVALID_ARGUMENT)) {
+		// Unlikely case when args are rejected before sysctl check.
+		// When this happens during test run, return acceptable, but if this happens
+		// during golden file generation, record the expected value.
+		ret = generate_golden ? KERN_NOT_SUPPORTED : ACCEPTABLE;
+	}
+	append_result(results, ret, last_trial.name);
+
+	// Revert vm.reclaim_max_threshold to how we found it
+	sysctl_res = sysctlbyname("vm.reclaim_max_threshold", NULL, 0, &orig_reclaim_max_threshold, size);
+	assert(sysctl_res == 0);
+
+	return results;
+}
+
+
+static vm_map_kernel_flags_trials_t *
+generate_mmap_kernel_flags_trials()
+{
+	// mmap rejects both ANYWHERE and FIXED | OVERWRITE
+	// so don't set any prefix flags.
+	return generate_prefixed_vm_map_kernel_flags_trials(0, "");
+}
+
+
+#define SMART_MMAP_KERNEL_FLAGS_TRIALS()                                \
+	__attribute__((cleanup(cleanup_vm_map_kernel_flags_trials)))    \
+	= generate_mmap_kernel_flags_trials()
+
+static results_t *
+test_mmap_with_allocated_vm_map_kernel_flags_t(kern_return_t (*func)(MAP_T map, mach_vm_address_t src, mach_vm_size_t size, int flags), const char * testname)
 {
 	MAP_T map SMART_MAP;
+
 	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	vm_inherit_trials_t * trials SMART_VM_INHERIT_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	vm_map_kernel_flags_trials_t * trials SMART_MMAP_KERNEL_FLAGS_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_MMAP_KERNEL_FLAGS_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
-		int ret = func(map, base.addr, base.size, trials->list[i].value);
+		kern_return_t ret = func(map, base.addr, base.size, trials->list[i].flags);
 		append_result(results, ret, trials->list[i].name);
 	}
 	return results;
 }
 
+// Test a Unix function.
+// Run each trial with an allocated vm region and a vm_inherit_t
+typedef int (*unix_with_inherit_fn)(void *start, size_t size, int inherit);
 
 static results_t *
-test_unix_allocated_with_vm_inherit_t(kern_return_t (*func)(mach_vm_address_t start, mach_vm_size_t size, vm_inherit_t flags), const char * testname)
+test_unix_with_allocated_vm_inherit_t(unix_with_inherit_fn fn, const char * testname)
 {
 	MAP_T map SMART_MAP;
 	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	vm_inherit_trials_t * trials SMART_VM_INHERIT_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	vm_inherit_trials_t *trials SMART_VM_INHERIT_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_VM_INHERIT_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
-		int ret = func(base.addr, base.size, trials->list[i].value);
-		append_result(results, ret, trials->list[i].name);
+		vm_inherit_trial_t trial = trials->list[i];
+		int ret = fn((void*)(uintptr_t)base.addr, (size_t)base.size, (int)trial.value);
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+// Test a Unix function.
+// Run each trial with an allocated vm region and a vm_msync_t
+typedef int (*unix_with_msync_fn)(void *start, size_t size, int msync_value);
+
+static results_t *
+test_unix_with_allocated_vm_msync_t(unix_with_msync_fn fn, const char * testname)
+{
+	MAP_T map SMART_MAP;
+	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	vm_msync_trials_t *trials SMART_VM_MSYNC_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_VM_MSYNC_TRIALS, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		vm_msync_trial_t trial = trials->list[i];
+		int ret = fn((void*)(uintptr_t)base.addr, (size_t)base.size, (int)trial.value);
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+// Test a Unix function.
+// Run each trial with an allocated vm region and an advise
+typedef int (*unix_with_advise_fn)(void *start, size_t size, int advise);
+
+static results_t *
+test_unix_with_allocated_aligned_vm_advise_t(unix_with_advise_fn fn, mach_vm_size_t align_mask, const char * testname)
+{
+	MAP_T map SMART_MAP;
+	allocation_t base SMART_ALLOCATE_ALIGNED_VM(map, TEST_ALLOC_SIZE, align_mask, VM_PROT_DEFAULT);
+	vm_advise_trials_t *trials SMART_VM_ADVISE_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_VM_ADVISE_TRIALS, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		vm_advise_trial_t trial = trials->list[i];
+		int ret = fn((void*)(uintptr_t)base.addr, (size_t)base.size, (int)trial.value);
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+// Rosetta userspace intercepts shared_region_map_and_slide_2_np calls and this Rosetta wrapper
+// function doesn't have the necessary checks to support invalid input arguments. Skip these trials
+// intead of crashing the test.
+static bool
+shared_region_map_and_slide_would_crash(shared_region_map_and_slide_2_trial_t *trial)
+{
+	uint32_t files_count = trial->files_count;
+	struct shared_file_np *files = trial->files;
+	uint32_t mappings_count = trial->mappings_count;
+	struct shared_file_mapping_slide_np *mappings = trial->mappings;
+
+	if (files_count == 0 || files_count == 1 || files_count > _SR_FILE_MAPPINGS_MAX_FILES) {
+		return true;
+	}
+	if (mappings_count == 0 || mappings_count > SFM_MAX) {
+		return true;
+	}
+	if (!files) {
+		return true;
+	}
+	if (!mappings) {
+		return true;
+	}
+	if (mappings_count != (((files_count - 1) * kNumSharedCacheMappings) + 1) &&
+	    mappings_count != (files_count * kNumSharedCacheMappings)) {
+		return true;
+	}
+	if (files_count >= kMaxSubcaches) {
+		return true;
+	}
+	return false;
+}
+
+typedef int (*unix_shared_region_map_and_slide_2_np)(uint32_t files_coun, const struct shared_file_np *files, uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings);
+
+static results_t *
+test_unix_shared_region_map_and_slide_2_np(unix_shared_region_map_and_slide_2_np func, const char *testname)
+{
+	uint64_t dyld_fp = (uint64_t)get_dyld_fd();
+	shared_region_map_and_slide_2_trials_t *trials SMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS(dyld_fp);
+	results_t *results = alloc_results(testname, eSMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS, dyld_fp, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		int ret;
+		shared_region_map_and_slide_2_trial_t trial = trials->list[i];
+		if (isRosetta() && shared_region_map_and_slide_would_crash(&trial)) {
+			ret = IGNORED;
+		} else {
+			ret = func(trial.files_count, trial.files, trial.mappings_count, trial.mappings);
+		}
+		append_result(results, ret, trial.name);
+	}
+
+	close_dyld_fd();
+	return results;
+}
+
+static results_t *
+test_dst_size_fileoff(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size, mach_vm_address_t fileoff), const char * testname)
+{
+	MAP_T map SMART_MAP;
+	src_dst_size_trials_t * trials SMART_FILEOFF_DST_SIZE_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_FILEOFF_DST_SIZE_TRIALS, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		src_dst_size_trial_t trial = trials->list[i];
+		unallocation_t dst_base SMART_UNALLOCATE_VM(map, TEST_ALLOC_SIZE);
+		// src a.k.a. mmap fileoff doesn't slide
+		trial = slide_trial_dst(trial, dst_base.addr);
+		int ret = func(map, trial.dst, trial.size, trial.src);
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+// Try to allocate a destination for mmap(MAP_FIXED) to overwrite.
+// On exit:
+// *out_dst *out_size are the allocation, or 0
+// *out_panic is true if the trial should stop and record PANIC
+// (because the trial specifies an absolute address that is already occupied)
+// *out_slide is true if the trial should slide by *out_dst
+static __attribute__((overloadable)) void
+allocate_for_mmap_fixed(MAP_T map, mach_vm_address_t trial_dst, mach_vm_size_t trial_size, bool trial_dst_is_absolute, bool trial_size_is_absolute, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
+{
+	*out_panic = false;
+	*out_slide = false;
+
+	if (trial_dst_is_absolute && trial_size_is_absolute) {
+		// known dst addr, known size
+		*out_dst = trial_dst;
+		*out_size = trial_size;
+		kern_return_t kr = mach_vm_allocate(map, out_dst, *out_size, VM_FLAGS_FIXED);
+		if (kr == KERN_NO_SPACE) {
+			// this space is in use, we can't allow mmap to try to overwrite it
+			*out_panic = true;
+			*out_dst = 0;
+			*out_size = 0;
+		} else if (kr != 0) {
+			// some other error, assume mmap will also fail
+			*out_dst = 0;
+			*out_size = 0;
+		}
+		// no slide, trial and allocation are already at the same place
+		*out_slide = false;
+	} else {
+		// other cases either fit in a small allocation or fail
+		*out_dst = 0;
+		*out_size = TEST_ALLOC_SIZE;
+		kern_return_t kr = mach_vm_allocate(map, out_dst, *out_size, VM_FLAGS_ANYWHERE);
+		if (kr != 0) {
+			// allocation error, assume mmap will also fail
+			*out_dst = 0;
+			*out_size = 0;
+		}
+		*out_slide = true;
+	}
+}
+
+static __attribute__((overloadable)) void
+allocate_for_mmap_fixed(MAP_T map, start_size_trial_t trial, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
+{
+	allocate_for_mmap_fixed(map, trial.start, trial.size, trial.start_is_absolute, trial.size_is_absolute,
+	    out_dst, out_size, out_panic, out_slide);
+}
+static __attribute__((overloadable)) void
+allocate_for_mmap_fixed(MAP_T map, src_dst_size_trial_t trial, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
+{
+	allocate_for_mmap_fixed(map, trial.dst, trial.size, trial.dst_is_absolute, !trial.size_is_dst_relative,
+	    out_dst, out_size, out_panic, out_slide);
+}
+
+// Like test_dst_size_fileoff, but specialized for mmap(MAP_FIXED).
+// mmap(MAP_FIXED) is destructive, forcibly unmapping anything
+// already at that address.
+// We must ensure that each trial is either obviously invalid and caught
+// by the sanitizers, or is valid and overwrites an allocation we control.
+static results_t *
+test_fixed_dst_size_fileoff(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size, mach_vm_address_t fileoff), const char * testname)
+{
+	MAP_T map SMART_MAP;
+	src_dst_size_trials_t * trials SMART_FILEOFF_DST_SIZE_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_FILEOFF_DST_SIZE_TRIALS, trials->count);
+	for (unsigned i = 0; i < trials->count; i++) {
+		src_dst_size_trial_t trial = trials->list[i];
+		// Try to create an allocation for mmap to overwrite.
+		mach_vm_address_t dst_alloc;
+		mach_vm_size_t dst_size;
+		bool should_panic;
+		bool should_slide_trial;
+		allocate_for_mmap_fixed(map, trial, &dst_alloc, &dst_size, &should_panic, &should_slide_trial);
+		if (should_panic) {
+			append_result(results, PANIC, trial.name);
+			continue;
+		}
+		if (should_slide_trial) {
+			// src a.k.a. mmap fileoff doesn't slide
+			trial = slide_trial_dst(trial, dst_alloc);
+		}
+
+		kern_return_t ret = func(map, trial.dst, trial.size, trial.src);
+
+		if (dst_alloc != 0) {
+			(void)mach_vm_deallocate(map, dst_alloc, dst_size);
+		}
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+// Like test_mach_with_allocated_start_size, but specialized for mmap(MAP_FIXED).
+// See test_fixed_dst_size_fileoff for more.
+static results_t *
+test_fixed_dst_size(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size), const char *testname)
+{
+	MAP_T map SMART_MAP;
+	start_size_trials_t *trials SMART_START_SIZE_TRIALS(0);  // no base addr
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, 0, trials->count);
+	for (unsigned i = 0; i < trials->count; i++) {
+		start_size_trial_t trial = trials->list[i];
+		// Try to create an allocation for mmap to overwrite.
+		mach_vm_address_t dst_alloc;
+		mach_vm_size_t dst_size;
+		bool should_panic;
+		bool should_slide_trial;
+		allocate_for_mmap_fixed(map, trial, &dst_alloc, &dst_size, &should_panic, &should_slide_trial);
+		if (should_panic) {
+			append_result(results, PANIC, trial.name);
+			continue;
+		}
+		if (should_slide_trial) {
+			trial = slide_trial(trial, dst_alloc);
+		}
+
+		kern_return_t ret = func(map, trial.start, trial.size);
+
+		if (dst_alloc != 0) {
+			(void)mach_vm_deallocate(map, dst_alloc, dst_size);
+		}
+		append_result(results, ret, trial.name);
+	}
+	return results;
+}
+
+static results_t *
+test_allocated_src_allocated_dst_size(kern_return_t (*func)(MAP_T map, mach_vm_address_t src, mach_vm_size_t size, mach_vm_address_t dst), const char * testname)
+{
+	MAP_T map SMART_MAP;
+	allocation_t src_base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	allocation_t dst_base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	src_dst_size_trials_t * trials SMART_SRC_DST_SIZE_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_SRC_DST_SIZE_TRIALS, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		src_dst_size_trial_t trial = trials->list[i];
+		trial = slide_trial_src(trial, src_base.addr);
+		trial = slide_trial_dst(trial, dst_base.addr);
+		int ret = func(map, trial.src, trial.size, trial.dst);
+		// func should be fixed-overwrite, nothing new to deallocate
+		append_result(results, ret, trial.name);
 	}
 	return results;
 }
@@ -1412,17 +2436,219 @@ reenable_vm_sanitize_telemetry(void)
 
 #define MAX_LINE_LENGTH 100
 #define MAX_NUM_TESTS 350
-#define GOLDEN_FILES_VERSION "vm_parameter_validation_golden_images_168d625.tar.xz"
 #define TMP_DIR "/tmp/"
 #define ASSETS_DIR "../assets/vm_parameter_validation/"
 #define DECOMPRESS ASSETS_DIR "decompress.sh"
 #define GOLDEN_FILE TMP_DIR "user_golden_image.log"
 
 #define KERN_GOLDEN_FILE TMP_DIR "kern_golden_image.log"
-#define KERN_MAX_UNKNOWN_TEST_RESULTS    64
 
 results_t *golden_list[MAX_NUM_TESTS];
 results_t *kern_list[MAX_NUM_TESTS];
+
+#define FILL_TRIALS_NAMES_AND_CONTINUE(results, trials, t_count) { \
+	for (unsigned i = 0; i < t_count; i++) { \
+	/* trials names are free'd in dealloc_results() */ \
+	        (results)->list[i].name = kstrdup((trials)->list[i].name); \
+	} \
+}
+
+#define FILL_TRIALS_NAMES(results, trials) { \
+	unsigned t_count = ((trials)->count < (results)->count) ? (trials)->count : (results)->count; \
+	if ((trials)->count != (results)->count) { \
+	        T_LOG("%s:%d Trials count mismatch, expected %u, golden file %u\n", \
+	                __func__, __LINE__, (trials)->count, (results)->count); \
+	}\
+	FILL_TRIALS_NAMES_AND_CONTINUE((results), (trials), (t_count)) \
+	break; \
+}
+
+static void
+fill_golden_trials(uint64_t trialsargs[static TRIALSARGUMENTS_SIZE],
+    results_t *results)
+{
+	trialsformula_t formula = results->trialsformula;
+	uint64_t trialsargs0 = trialsargs[0];
+	uint64_t trialsargs1 = trialsargs[1];
+	switch (formula) {
+	case eUNKNOWN_TRIALS:
+		// Leave them empty
+		T_FAIL("Golden file with unknown trials, testname: %s\n", results->testname);
+		break;
+	case eSMART_VM_MAP_KERNEL_FLAGS_TRIALS: {
+		vm_map_kernel_flags_trials_t * trials SMART_VM_MAP_KERNEL_FLAGS_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_INHERIT_TRIALS: {
+		vm_inherit_trials_t *trials SMART_VM_INHERIT_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_MMAP_KERNEL_FLAGS_TRIALS: {
+		vm_map_kernel_flags_trials_t * trials SMART_MMAP_KERNEL_FLAGS_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_MMAP_FLAGS_TRIALS: {
+		mmap_flags_trials_t *trials SMART_MMAP_FLAGS_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_GENERIC_FLAG_TRIALS: {
+		generic_flag_trials_t *trials SMART_GENERIC_FLAG_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_TAG_TRIALS: {
+		// special case, trails (vm_tag_trials_values) depend on data only available on KERNEL
+		vm_tag_trials_t *trials SMART_VM_TAG_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_PROT_TRIALS: {
+		vm_prot_trials_t *trials SMART_VM_PROT_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_PROT_PAIR_TRIALS: {
+		vm_prot_pair_trials_t *trials SMART_VM_PROT_PAIR_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_LEDGER_TAG_TRIALS: {
+		ledger_tag_trials_t *trials SMART_LEDGER_TAG_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_LEDGER_FLAG_TRIALS: {
+		ledger_flag_trials_t *trials SMART_LEDGER_FLAG_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_ADDR_TRIALS: {
+		addr_trials_t *trials SMART_ADDR_TRIALS(trialsargs0);
+		if (trialsargs1) {
+			// Special case with an additional trial such that obj_size + addr == 0
+			FILL_TRIALS_NAMES_AND_CONTINUE(results, trials, trials->count);
+			assert(trials->count + 1 == results->count);
+			char *trial_desc;
+			kasprintf(&trial_desc, "addr: -0x%llx", trialsargs1);
+			results->list[results->count - 1].name = kstrdup(trial_desc);
+			kfree_str(trial_desc);
+			break;
+		} else {
+			FILL_TRIALS_NAMES(results, trials);
+		}
+	}
+	case eSMART_SIZE_TRIALS: {
+		size_trials_t *trials SMART_SIZE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_START_SIZE_TRIALS: {
+		// NB: base.addr is not constant between runs but doesn't affect trial name
+		start_size_trials_t *trials SMART_START_SIZE_TRIALS(trialsargs0);
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_START_SIZE_OFFSET_OBJECT_TRIALS: {
+		start_size_offset_object_trials_t *trials SMART_START_SIZE_OFFSET_OBJECT_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_START_SIZE_OFFSET_TRIALS: {
+		start_size_offset_trials_t *trials SMART_START_SIZE_OFFSET_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_SIZE_SIZE_TRIALS: {
+		T_FAIL("SIZE_SIZE_TRIALS not used\n");
+		break;
+	}
+	case eSMART_SRC_DST_SIZE_TRIALS: {
+		src_dst_size_trials_t * trials SMART_SRC_DST_SIZE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_FILEOFF_DST_SIZE_TRIALS: {
+		src_dst_size_trials_t * trials SMART_FILEOFF_DST_SIZE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_BEHAVIOR_TRIALS: {
+		vm_behavior_trials_t *trials SMART_VM_BEHAVIOR_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_ADVISE_TRIALS: {
+		vm_advise_trials_t *trials SMART_VM_ADVISE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_SYNC_TRIALS: {
+		vm_sync_trials_t *trials SMART_VM_SYNC_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_MSYNC_TRIALS: {
+		vm_msync_trials_t *trials SMART_VM_MSYNC_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_MACHINE_ATTRIBUTE_TRIALS: {
+		vm_machine_attribute_trials_t *trials SMART_VM_MACHINE_ATTRIBUTE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_VM_PURGEABLE_AND_STATE_TRIALS: {
+		vm_purgeable_and_state_trials_t *trials SMART_VM_PURGEABLE_AND_STATE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_START_SIZE_START_SIZE_TRIALS: {
+		start_size_start_size_trials_t *trials SMART_START_SIZE_START_SIZE_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS: {
+		shared_region_map_and_slide_2_trials_t *trials SMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS(trialsargs0);
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	case eSMART_RECLAMATION_BUFFER_INIT_TRIALS: {
+		reclamation_buffer_init_trials_t *trials SMART_RECLAMATION_BUFFER_INIT_TRIALS();
+		FILL_TRIALS_NAMES(results, trials);
+	}
+	default:
+		T_FAIL("New formula %u, args %llu %llu, update fill_golden_trials, testname: %s\n",
+		    formula, trialsargs[0], trialsargs[1], results->testname);
+	}
+}
+
+// Number of test trials with ret == OUT_PARAM_BAD
+int out_param_bad_count = 0;
+
+static results_t *
+test_name_to_golden_results(const char* testname)
+{
+	results_t *golden_results = NULL;
+	results_t *golden_results_found = NULL;
+
+	for (uint32_t x = 0; x < num_tests; x++) {
+		golden_results = golden_list[x];
+		if (strncmp(golden_results->testname, testname, strlen(testname)) == 0) {
+			golden_results->tested_count += 1;
+			golden_results_found = golden_results;
+			break;
+		}
+	}
+
+	return golden_results_found;
+}
+
+static void
+dump_results_list(results_t *res_list[], uint32_t res_num_tests)
+{
+	for (uint32_t x = 0; x < res_num_tests; x++) {
+		results_t *results = res_list[x];
+		testprintf("\t[%u] %s (%u)\n", x, results->testname, results->count);
+	}
+}
+
+static void
+dump_golden_list()
+{
+	testprintf("======\n");
+	testprintf("golden_list %p, num_tests %u\n", golden_list, num_tests);
+	dump_results_list(golden_list, num_tests);
+	testprintf("======\n");
+}
+
+static void
+dump_kernel_results_list()
+{
+	testprintf("======\n");
+	testprintf("kernel_results_list %p, num_tests %u\n", kern_list, num_kern_tests);
+	dump_results_list(kern_list, num_kern_tests);
+	testprintf("======\n");
+}
 
 // Read results written by dump_golden_results().
 static int
@@ -1430,7 +2656,10 @@ populate_golden_results(const char *filename)
 {
 	FILE *file;
 	char line[MAX_LINE_LENGTH];
+	char trial_formula[20];
 	results_t *results = NULL;
+	trialsformula_t formula = eUNKNOWN_TRIALS;
+	uint64_t trial_args[TRIALSARGUMENTS_SIZE] = {0, 0};
 	uint32_t num_results = 0;
 	uint32_t result_number = 0;
 	int result_ret = 0;
@@ -1438,12 +2667,15 @@ populate_golden_results(const char *filename)
 	char *sub_line = NULL;
 	char *s_num_results = NULL;
 	bool in_test = FALSE;
+	out_param_bad_count = 0;
+	kern_trialname_generation = strnstr(filename, "kern_golden_image", strlen(filename)) != NULL;
 
 	// cd to the directory containing this executable
 	// Test files are located relative to there.
 	uint32_t exesize = 0;
 	_NSGetExecutablePath(NULL, &exesize);
 	char *exe = malloc(exesize);
+	assert(exe != NULL);
 	_NSGetExecutablePath(exe, &exesize);
 	char *dir = dirname(exe);
 	chdir(dir);
@@ -1451,7 +2683,7 @@ populate_golden_results(const char *filename)
 
 	file = fopen(filename, "r");
 	if (file == NULL) {
-		T_LOG("Could not open file %s\n", filename);
+		T_FAIL("Could not open file %s\n", filename);
 		return 1;
 	}
 
@@ -1460,25 +2692,36 @@ populate_golden_results(const char *filename)
 		// Check if the line starts with "TESTNAME" or "RESULT COUNT"
 		if (strncmp(line, TESTNAME_DELIMITER, strlen(TESTNAME_DELIMITER)) == 0) {
 			// remove the newline char
-			line[strcspn(line, "\r")] = 0;
+			line[strcspn(line, "\n")] = 0;
 			sub_line = line + strlen(TESTNAME_DELIMITER);
 			test_name = strdup(sub_line);
+			formula = eUNKNOWN_TRIALS;
+			trial_args[0] = TRIALSARGUMENTS_NONE;
+			trial_args[1] = TRIALSARGUMENTS_NONE;
 			// T_LOG("TESTNAME %u : %s", num_tests, test_name);
 			in_test = TRUE;
+		} else if (in_test && strncmp(line, TRIALSFORMULA_DELIMITER, strlen(TRIALSFORMULA_DELIMITER)) == 0) {
+			sscanf(line, "%*s %s %*s %llu,%llu,%llu", trial_formula, &trial_args[0], &trial_args[1], &trial_page_size);
+			formula = trialsformula_from_string(trial_formula);
 		} else if (in_test && strncmp(line, RESULTCOUNT_DELIMITER, strlen(RESULTCOUNT_DELIMITER)) == 0) {
 			assert(num_tests < MAX_NUM_TESTS);
 			s_num_results = line + strlen(RESULTCOUNT_DELIMITER);
 			num_results = (uint32_t)strtoul(s_num_results, NULL, 10);
-			results = alloc_results(test_name, num_results);
+			results = alloc_results(test_name, formula, trial_args, TRIALSARGUMENTS_SIZE, num_results);
+			assert(results);
 			results->count = num_results;
+			fill_golden_trials(trial_args, results);
 			golden_list[num_tests++] = results;
 			// T_LOG("num_tests %u, testname %s, count: %u", num_tests, results->testname, results->count);
 		} else if (in_test && strncmp(line, TESTRESULT_DELIMITER, strlen(TESTRESULT_DELIMITER)) == 0) {
-			// T_LOG("checking: %s\n", line);
 			sscanf(line, "%d: %d", &result_number, &result_ret);
 			assert(result_number < num_results);
 			// T_LOG("\tresult #%u: %d\n", result_number, result_ret);
-			results->list[result_number] = (result_t){.ret = result_ret};
+			results->list[result_number].ret = result_ret;
+			if (result_ret == OUT_PARAM_BAD) {
+				out_param_bad_count += 1;
+				T_FAIL("Out parameter violation in test %s - %s\n", results->testname, results->list[result_number].name);
+			}
 		} else {
 			// T_LOG("Unknown line: %s\n", line);
 			in_test = FALSE;
@@ -1487,15 +2730,26 @@ populate_golden_results(const char *filename)
 
 	fclose(file);
 
-	dump_golden_list();
+	if (!out_param_bad_count) {
+		dump_golden_list();
+	}
+	kern_trialname_generation = FALSE;
 
-	return 0;
+	return out_param_bad_count;
 }
 
 static void
 clean_golden_results()
 {
 	for (uint32_t x = 0; x < num_tests; ++x) {
+		if (golden_list[x]->tested_count == 0) {
+			T_LOG("WARN: Test %s found in golden file but no test with that name was run\n",
+			    golden_list[x]->testname);
+		}
+		if (golden_list[x]->tested_count > 1) {
+			T_LOG("WARN: Test %s found in golden file with %d runs\n",
+			    golden_list[x]->testname, golden_list[x]->tested_count);
+		}
 		dealloc_results(golden_list[x]);
 		golden_list[x] = NULL;
 	}
@@ -1510,12 +2764,43 @@ clean_kernel_results()
 	}
 }
 
+// buffer to output userspace golden file results (using same size as the kern buffer)
+static const int64_t GOLDEN_OUTPUT_BUFFER_SIZE = SYSCTL_OUTPUT_BUFFER_SIZE;
+static char* GOLDEN_OUTPUT_START;
+static char* GOLDEN_OUTPUT_BUF;
+static char* GOLDEN_OUTPUT_END;
+
+void
+goldenprintf(const char *format, ...)
+{
+	if (!GOLDEN_OUTPUT_START) {
+		GOLDEN_OUTPUT_START = calloc(GOLDEN_OUTPUT_BUFFER_SIZE, 1);
+		GOLDEN_OUTPUT_BUF = GOLDEN_OUTPUT_START;
+		GOLDEN_OUTPUT_END = GOLDEN_OUTPUT_BUF + GOLDEN_OUTPUT_BUFFER_SIZE;
+	}
+
+	int printed;
+	ssize_t s_buffer_size = GOLDEN_OUTPUT_END - GOLDEN_OUTPUT_BUF;
+	assert(s_buffer_size > 0 && s_buffer_size <= GOLDEN_OUTPUT_BUFFER_SIZE);
+	size_t buffer_size = (size_t)s_buffer_size;
+	va_list args;
+	va_start(args, format);
+	printed = vsnprintf(GOLDEN_OUTPUT_BUF, buffer_size, format, args);
+	va_end(args);
+	assert(printed >= 0);
+	assert((unsigned)printed < buffer_size - 1);
+	assert(GOLDEN_OUTPUT_BUF + printed + 1 < GOLDEN_OUTPUT_END);
+	GOLDEN_OUTPUT_BUF += printed;
+}
+
 // Verbose output in dump_results, controlled by DUMP_RESULTS env.
 bool dump = FALSE;
 // Output to create a golden test result, controlled by GENERATE_GOLDEN_IMAGE.
 bool generate_golden = FALSE;
+// Read existing golden file and print its contents in verbose format (like dump_results). Controlled by DUMP_GOLDEN_IMAGE.
+bool dump_golden = FALSE;
 // Run tests as tests (i.e. emit TS_{PASS/FAIL}), enabled unless golden image generation is true.
-bool test_results =  TRUE;
+bool should_test_results =  TRUE;
 
 T_DECL(vm_parameter_validation_user,
     "parameter validation for userspace calls",
@@ -1532,7 +2817,7 @@ T_DECL(vm_parameter_validation_user,
 
 	read_env();
 
-	T_LOG("dump %d, golden %d, test %d\n", dump, generate_golden, test_results);
+	T_LOG("dump %d, golden %d, dump_golden %d, test %d\n", dump, generate_golden, dump_golden, should_test_results);
 
 	if (generate_golden && unsigned_code_is_disallowed()) {
 		// Some test results change when SIP is enabled.
@@ -1541,9 +2826,9 @@ T_DECL(vm_parameter_validation_user,
 		return;
 	}
 
-	if (test_results && populate_golden_results(GOLDEN_FILE)) {
-		// bail out early, couldn't load golden test results
-		T_FAIL("Could not open golden file '%s'\n", GOLDEN_FILE);
+	if ((dump_golden || should_test_results) && populate_golden_results(GOLDEN_FILE)) {
+		// bail out early, problem loading golden test results
+		T_FAIL("Could not load golden file '%s'\n", GOLDEN_FILE);
 		return;
 	}
 
@@ -1551,15 +2836,26 @@ T_DECL(vm_parameter_validation_user,
 
 	disable_exc_guard();
 
+	if (dump_golden) {
+		// just print the parsed golden file
+		for (uint32_t x = 0; x < num_tests; ++x) {
+			__dump_results(golden_list[x]);
+		}
+		goto out;
+	}
+
 	/*
-	 * Group 1: memory entry
+	 * -- memory entry functions --
+	 * The memory entry test functions use macros to generate each flavor of memory entry function.
+	 * This is partially becauseof many entrypoints (mach_make_memory_entry/mach_make_memory_entry_64/mach_make_memory_entry)
+	 * and partially because many flavors of each function are called (copy/memonly/share/...).
 	 */
 
 	// Mach start/size with both old-style and new-style types
 	// (co-located so old and new can be compared more easily)
-#define RUN_NEW(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
 #if TEST_OLD_STYLE_MACH
-#define RUN_OLD(fn, name) dealloc_results(dump_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
 #define RUN_OLD64(fn, name) RUN_NEW(fn, name)
 #else
 #define RUN_OLD(fn, name) do {} while (0)
@@ -1585,13 +2881,13 @@ T_DECL(vm_parameter_validation_user,
 #undef RUN_OLD
 #undef RUN_OLD64
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_size(fn, name " (size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_size(fn, name " (size)")))
 	RUN(call_mach_memory_object_memory_entry_64__size, "mach_memory_object_memory_entry_64");
 	RUN(call_replacement_mach_memory_object_memory_entry__size, "mach_memory_object_memory_entry");
 #undef RUN
 
-#define RUN_NEW(fn, name) dealloc_results(dump_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
-#define RUN_OLD(fn, name) dealloc_results(dump_results(test_oldmach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
 #define RUN_OLD64(fn, name) RUN_NEW(fn, name)
 
 	RUN_NEW(call_mach_make_memory_entry_64__vm_prot, "mach_make_memory_entry_64");
@@ -1604,53 +2900,57 @@ T_DECL(vm_parameter_validation_user,
 #undef RUN_OLD
 #undef RUN_OLD64
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_vm_prot(fn, name " (vm_prot_t)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_vm_prot(fn, name " (vm_prot_t)")))
 	RUN(call_mach_memory_object_memory_entry_64__vm_prot, "mach_memory_object_memory_entry_64");
 	RUN(call_replacement_mach_memory_object_memory_entry__vm_prot, "mach_memory_object_memory_entry");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_ledger_tag(fn, name " (ledger tag)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_ledger_tag(fn, name " (ledger tag)")))
 	RUN(call_mach_memory_entry_ownership__ledger_tag, "mach_memory_entry_ownership");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_ledger_flag(fn, name " (ledger flag)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_ledger_flag(fn, name " (ledger flag)")))
 	RUN(call_mach_memory_entry_ownership__ledger_flag, "mach_memory_entry_ownership");
 #undef RUN
 
 	/*
-	 * Group 2: allocate/deallocate
+	 * -- allocate/deallocate functions --
 	 */
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_allocation_func_with_start_size(fn, name)))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_allocation_func_with_start_size(fn, name)))
 	RUN(call_mach_vm_allocate__start_size_fixed, "mach_vm_allocate (fixed) (realigned start/size)");
 	RUN(call_mach_vm_allocate__start_size_anywhere, "mach_vm_allocate (anywhere) (hint/size)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_allocation_func_with_vm_map_kernel_flags_t(fn, name " (vm_map_kernel_flags_t)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_allocation_func_with_vm_map_kernel_flags_t(fn, name " (vm_map_kernel_flags_t)")))
 	RUN(call_mach_vm_allocate__flags, "mach_vm_allocate");
 #undef RUN
 
-	dealloc_results(dump_results(test_deallocator(call_mach_vm_deallocate, "mach_vm_deallocate (start/size)")));
+	dealloc_results(process_results(test_deallocator(call_mach_vm_deallocate, "mach_vm_deallocate (start/size)")));
 #if TEST_OLD_STYLE_MACH
-	dealloc_results(dump_results(test_deallocator(call_vm_deallocate, "vm_deallocate (start/size)")));
+	dealloc_results(process_results(test_deallocator(call_vm_deallocate, "vm_deallocate (start/size)")));
 #endif
 
-#define RUN(fn, name) dealloc_results(dump_results(test_deallocator(fn, name " (start/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_deallocator(fn, name " (start/size)")))
 	RUN(call_munmap, "munmap");
 #undef RUN
 
 	/*
-	 * Group 3: map/unmap
+	 * -- map/unmap functions --
+	 * The map/unmap functions use multiple layers of macros.
+	 * The macros are used both for function generation (see IMPL_ONE_FROM_HELPER) and to call all of those.
+	 * This was written this way to further avoid lots of code duplication, as the map/remap functions
+	 * have many different parameter combinations we want to test.
 	 */
 
 	// map tests
 
-#define RUN_START_SIZE(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (realigned start/size)")))
-#define RUN_HINT_SIZE(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (hint/size)")))
-#define RUN_PROT_PAIR(fn, name) dealloc_results(dump_results(test_mach_vm_prot_pair(fn, name " (prot_pairs)")))
-#define RUN_INHERIT(fn, name) dealloc_results(dump_results(test_mach_with_allocated_vm_inherit_t(fn, name " (vm_inherit_t)")))
-#define RUN_FLAGS(fn, name) dealloc_results(dump_results(test_mach_allocation_func_with_vm_map_kernel_flags_t(fn, name " (vm_map_kernel_flags_t)")))
-#define RUN_SSOO(fn, name) dealloc_results(dump_results(test_mach_with_start_size_offset_object(fn, name " (start/size/offset/object)")))
+#define RUN_START_SIZE(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (realigned start/size)")))
+#define RUN_HINT_SIZE(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (hint/size)")))
+#define RUN_PROT_PAIR(fn, name) dealloc_results(process_results(test_mach_vm_prot_pair(fn, name " (prot_pairs)")))
+#define RUN_INHERIT(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_inherit_t(fn, name " (vm_inherit_t)")))
+#define RUN_FLAGS(fn, name) dealloc_results(process_results(test_mach_allocation_func_with_vm_map_kernel_flags_t(fn, name " (vm_map_kernel_flags_t)")))
+#define RUN_SSOO(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size_offset_object(fn, name " (start/size/offset/object)")))
 
 #define RUN_ALL(fn, name)     \
 	RUN_START_SIZE(call_ ## fn ## __allocate_fixed, #name " (allocate fixed overwrite)");   \
@@ -1696,7 +2996,7 @@ T_DECL(vm_parameter_validation_user,
 	// remap tests
 
 #define FN_NAME(fn, variant, type) call_ ## fn ## __  ## variant ## __ ## type
-#define RUN_HELPER(harness, fn, variant, type, type_name, name) dealloc_results(dump_results(harness(FN_NAME(fn, variant, type), #name " (" #variant ") (" type_name ")")))
+#define RUN_HELPER(harness, fn, variant, type, type_name, name) dealloc_results(process_results(harness(FN_NAME(fn, variant, type), #name " (" #variant ") (" type_name ")")))
 #define RUN_SRC_SIZE(fn, variant, type_name, name) RUN_HELPER(test_mach_with_allocated_start_size, fn, variant, src_size, type_name, name)
 #define RUN_DST_SIZE(fn, variant, type_name, name) RUN_HELPER(test_mach_with_allocated_start_size, fn, variant, dst_size, type_name, name)
 #define RUN_PROT_PAIRS(fn, variant, name) RUN_HELPER(test_mach_with_allocated_vm_prot_pair, fn, variant, prot_pairs, "prot_pairs", name)
@@ -1740,16 +3040,16 @@ T_DECL(vm_parameter_validation_user,
 
 	// mmap tests
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mmap_with_allocated_vm_map_kernel_flags_t(fn, name " (kernel flags)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mmap_with_allocated_vm_map_kernel_flags_t(fn, name " (kernel flags)")))
 	RUN(call_mmap__anon_private__kernel_flags, "mmap (anon private)");
 	RUN(call_mmap__anon_shared__kernel_flags, "mmap (anon shared)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_mmap_flags(fn, name " (mmap flags)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_mmap_flags(fn, name " (mmap flags)")))
 	RUN(call_mmap__mmap_flags, "mmap");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (hint/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (hint/size)")))
 	RUN(call_mmap__file_private__start_size, "mmap (file private)");
 	RUN(call_mmap__anon_private__start_size, "mmap (anon private)");
 	RUN(call_mmap__file_shared__start_size, "mmap (file shared)");
@@ -1759,11 +3059,11 @@ T_DECL(vm_parameter_validation_user,
 	RUN(call_mmap__nounix03_private__start_size, "mmap (no unix03)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_fixed_dst_size(fn, name " (dst/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_fixed_dst_size(fn, name " (dst/size)")))
 	RUN(call_mmap__fixed_private__start_size, "mmap (fixed)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (offset/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (offset/size)")))
 	RUN(call_mmap__file_private__offset_size, "mmap (file private)");
 	RUN(call_mmap__anon_private__offset_size, "mmap (anon private)");
 	RUN(call_mmap__file_shared__offset_size, "mmap (file shared)");
@@ -1773,7 +3073,7 @@ T_DECL(vm_parameter_validation_user,
 	RUN(call_mmap__nounix03_private__offset_size, "mmap (no unix03)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_dst_size_fileoff(fn, name " (hint/size/fileoff)")))
+#define RUN(fn, name) dealloc_results(process_results(test_dst_size_fileoff(fn, name " (hint/size/fileoff)")))
 	RUN(call_mmap__file_private__dst_size_fileoff, "mmap (file private)");
 	RUN(call_mmap__anon_private__dst_size_fileoff, "mmap (anon private)");
 	RUN(call_mmap__file_shared__dst_size_fileoff, "mmap (file shared)");
@@ -1783,11 +3083,11 @@ T_DECL(vm_parameter_validation_user,
 	RUN(call_mmap__nounix03_private__dst_size_fileoff, "mmap (no unix03)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_fixed_dst_size_fileoff(fn, name " (dst/size/fileoff)")))
+#define RUN(fn, name) dealloc_results(process_results(test_fixed_dst_size_fileoff(fn, name " (dst/size/fileoff)")))
 	RUN(call_mmap__fixed_private__dst_size_fileoff, "mmap (fixed)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
 	RUN(call_mmap__file_private__vm_prot, "mmap (file private)");
 	RUN(call_mmap__anon_private__vm_prot, "mmap (anon private)");
 	RUN(call_mmap__file_shared__vm_prot, "mmap (file shared)");
@@ -1798,38 +3098,38 @@ T_DECL(vm_parameter_validation_user,
 	RUN(call_mmap__fixed_private__vm_prot, "mmap (fixed)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
 	RUN(call_mremap_encrypted, "mremap_encrypted");
 #undef RUN
 
 	/*
-	 * Group 4: wire/unwire
+	 * -- wire/unwire functions --
 	 */
 
-#define RUN(fn, name) dealloc_results(dump_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
 	RUN(call_mlock, "mlock");
 	RUN(call_munlock, "munlock");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
 	RUN(call_mach_vm_wire__wire, "mach_vm_wire (wire)");
 	RUN(call_replacement_vm_wire__wire, "vm_wire (wire)");
 	RUN(call_mach_vm_wire__unwire, "mach_vm_wire (unwire)");
 	RUN(call_replacement_vm_wire__unwire, "vm_wire (unwire)");
 #undef RUN
 
-#define RUN(fn, name) dealloc_results(dump_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
 	RUN(call_mach_vm_wire__vm_prot, "mach_vm_wire");
 	RUN(call_replacement_vm_wire__vm_prot, "vm_wire");
 #undef RUN
 
 	/*
-	 * Group 5: copyin/copyout
+	 * -- copyin/copyout functions --
 	 */
 
-#define RUN_NEW(fn, name) dealloc_results(dump_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
 #if TEST_OLD_STYLE_MACH
-#define RUN_OLD(fn, name) dealloc_results(dump_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
 #else
 #define RUN_OLD(fn, name) do {} while (0)
 #endif
@@ -1855,9 +3155,275 @@ T_DECL(vm_parameter_validation_user,
 #undef RUN_NEW
 #undef RUN_OLD
 
+	/*
+	 * -- inherit functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_inherit, "mach_vm_inherit");
+	RUN_OLD(call_vm_inherit, "vm_inherit");
+#undef RUN_OLD
+#undef RUN_NEW
+
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+	RUN(call_minherit, "minherit");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_inherit_t(fn, name " (vm_inherit_t)")))
+	RUN(call_mach_vm_inherit__inherit, "mach_vm_inherit");
+#undef RUN
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_vm_inherit_t(fn, name " (vm_inherit_t)")))
+	RUN(call_minherit__inherit, "minherit");
+#undef RUN
+
+	/*
+	 * -- protection functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_protect__start_size, "mach_vm_protect");
+	RUN_OLD(call_vm_protect__start_size, "vm_protect");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_protect__vm_prot, "mach_vm_protect");
+	RUN_OLD(call_vm_protect__vm_prot, "vm_protect");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+	RUN(call_mprotect__start_size, "mprotect");
+#undef RUN
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_vm_prot_t(fn, name " (vm_prot_t)")))
+	RUN(call_mprotect__vm_prot, "mprotect");
+#undef RUN
+
+	/*
+	 * -- madvise/behavior functions --
+	 */
+
+	unsigned alignment_for_can_reuse;
+	if (isRosetta()) {
+		/*
+		 * VM_BEHAVIOR_CAN_REUSE and MADV_CAN_REUSE get different errors
+		 * on Rosetta when the allocation happens to be 4K vs 16K aligned.
+		 * Force 16K alignment for consistent results.
+		 */
+		alignment_for_can_reuse = KB16 - 1;
+	} else {
+		/* Use default alignment everywhere else. */
+		alignment_for_can_reuse = 0;
+	}
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_behavior_set__start_size__default, "mach_vm_behavior_set (VM_BEHAVIOR_DEFAULT)");
+	RUN_OLD(call_vm_behavior_set__start_size__default, "vm_behavior_set (VM_BEHAVIOR_DEFAULT)");
+#undef RUN_NEW
+#undef RUN_OLD
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_aligned_start_size(fn, alignment_for_can_reuse, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_aligned_start_size(fn, alignment_for_can_reuse, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_behavior_set__start_size__can_reuse, "mach_vm_behavior_set (VM_BEHAVIOR_CAN_REUSE)");
+	RUN_OLD(call_vm_behavior_set__start_size__can_reuse, "vm_behavior_set (VM_BEHAVIOR_CAN_REUSE)");
+#undef RUN_NEW
+#undef RUN_OLD
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_aligned_vm_behavior_t(fn, alignment_for_can_reuse, name " (vm_behavior_t)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_aligned_vm_behavior_t(fn, alignment_for_can_reuse, name " (vm_behavior_t)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_behavior_set__vm_behavior, "mach_vm_behavior_set");
+	RUN_OLD(call_vm_behavior_set__vm_behavior, "vm_behavior_set");
+#undef RUN_NEW
+#undef RUN_OLD
+
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+	RUN(call_madvise__start_size, "madvise");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_aligned_vm_advise_t(fn, alignment_for_can_reuse, name " (vm_advise_t)")))
+	RUN(call_madvise__vm_advise, "madvise");
+#undef RUN
+
+	/*
+	 * -- msync functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_msync__start_size, "mach_vm_msync");
+	RUN_OLD(call_vm_msync__start_size, "vm_msync");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_sync_t(fn, name " (vm_sync_t)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_vm_sync_t(fn, name " (vm_sync_t)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_msync__vm_sync, "mach_vm_msync");
+	RUN_OLD(call_vm_msync__vm_sync, "vm_msync");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+	RUN(call_msync__start_size, "msync");
+	RUN(call_msync_nocancel__start_size, "msync_nocancel");
+#undef RUN
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_vm_msync_t(fn, name " (msync flags)")))
+	RUN(call_msync__vm_msync, "msync");
+	RUN(call_msync_nocancel__vm_msync, "msync_nocancel");
+#undef RUN
+
+	/*
+	 * -- machine attribute functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_start_size(fn, name " (start/size)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_machine_attribute__start_size, "mach_vm_machine_attribute");
+	RUN_OLD(call_vm_machine_attribute__start_size, "vm_machine_attribute");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_vm_machine_attribute_t(fn, name " (machine_attribute_t)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_vm_machine_attribute_t(fn, name " (machine_attribute_t)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_machine_attribute__machine_attribute, "mach_vm_machine_attribute");
+	RUN_OLD(call_vm_machine_attribute__machine_attribute, "vm_machine_attribute");
+#undef RUN_NEW
+#undef RUN_OLD
+
+	/*
+	 * -- purgability/purgeability functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_purgeable_addr(fn, name " (addr)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_purgeable_addr(fn, name " (addr)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_purgable_control__address__get, "mach_vm_purgable_control (get)");
+	RUN_OLD(call_vm_purgable_control__address__get, "vm_purgable_control (get)");
+
+	RUN_NEW(call_mach_vm_purgable_control__address__purge_all, "mach_vm_purgable_control (purge all)");
+	RUN_OLD(call_vm_purgable_control__address__purge_all, "vm_purgable_control (purge all)");
+#undef RUN_NEW
+#undef RUN_OLD
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_purgeable_and_state(fn, name " (purgeable and state)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_purgeable_and_state(fn, name " (purgeable and state)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_purgable_control__purgeable_state, "mach_vm_purgable_control");
+	RUN_OLD(call_vm_purgable_control__purgeable_state, "vm_purgable_control");
+#undef RUN_NEW
+#undef RUN_OLD
+
+	/*
+	 * -- region info functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_addr(fn, name " (addr)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_addr(fn, name " (addr)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_region, "mach_vm_region");
+	RUN_OLD(call_vm_region, "vm_region");
+	RUN_NEW(call_mach_vm_region_recurse, "mach_vm_region_recurse");
+	RUN_OLD(call_vm_region_recurse, "vm_region_recurse");
+	RUN_OLD(call_vm_region_recurse_64, "vm_region_recurse_64");
+#undef RUN_NEW
+#undef RUN_OLD
+
+	/*
+	 * -- page info functions --
+	 */
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_addr(fn, name " (addr)")))
+#if TEST_OLD_STYLE_MACH
+#define RUN_OLD(fn, name) dealloc_results(process_results(test_oldmach_with_allocated_addr(fn, name " (addr)")))
+#else
+#define RUN_OLD(fn, name) do {} while (0)
+#endif
+	RUN_NEW(call_mach_vm_page_info, "mach_vm_page_info");
+	RUN_NEW(call_mach_vm_page_query, "mach_vm_page_query");
+	RUN_OLD(call_vm_map_page_query, "vm_map_page_query");
+#undef RUN_NEW
+#undef RUN_OLD
+
+#define RUN_NEW(fn, name) dealloc_results(process_results(test_mach_with_allocated_start_size(fn, name " (start/size)")))
+	RUN_NEW(call_mach_vm_page_range_query, "mach_vm_page_range_query");
+#undef RUN_NEW
+
+#define RUN(fn, name) dealloc_results(process_results(test_unix_with_allocated_start_size(fn, name " (start/size)")))
+	RUN(call_mincore, "mincore");
+#undef RUN
+
+	/*
+	 * -- miscellaneous functions --
+	 */
+
+#define RUN(fn, name) dealloc_results(process_results(test_unix_shared_region_map_and_slide_2_np(fn, name " (files/mappings)")))
+	RUN(call_shared_region_map_and_slide_2_np_child, "shared_region_map_and_slide_2_np");
+	RUN(call_shared_region_map_and_slide_2_np_in_thread, "different thread shared_region_map_and_slide_2_np");
+#undef RUN
+
+#define RUN(fn, name) dealloc_results(process_results(test_mach_vm_deferred_reclamation_buffer_init(fn, name)))
+	RUN(call_mach_vm_deferred_reclamation_buffer_init, "mach_vm_deferred_reclamation_buffer_init");
+#undef RUN
+
+out:
 	restore_exc_guard();
 
-	if (test_results) {
+	if (generate_golden) {
+		if (!out_param_bad_count || (dump && !should_test_results)) {
+			// Print after verified there is not OUT_PARAM_BAD results before printing,
+			// or user explicitly set DUMP_RESULTS=1 GENERATE_GOLDEN_IMAGE=1
+			printf("%s", GOLDEN_OUTPUT_START);
+		}
+	}
+	free(GOLDEN_OUTPUT_START);
+
+	if (dump_golden || should_test_results) {
 		clean_golden_results();
 	}
 
@@ -1877,6 +3443,25 @@ T_DECL(vm_parameter_validation_user,
 
 #define KERN_RESULT_DELIMITER "\n"
 
+#ifndef STRINGIFY
+#define __STR(x)        #x
+#define STRINGIFY(x)    __STR(x)
+#endif
+
+// Verify golden list being generated doesn't contain OUT_BAD_PARAM
+static int
+out_bad_param_in_kern_golden_results(char *kern_buffer)
+{
+	const char *out_param_bad_str = STRINGIFY(OUT_PARAM_BAD);
+	char *out_param_bad_match = strstr(kern_buffer, out_param_bad_str);
+	if (out_param_bad_match) {
+		T_FAIL("Out parameter violation return code (%s) found in results, aborting.\n", out_param_bad_str);
+		return 1;
+	}
+	return 0;
+}
+
+
 // Read results written by __dump_results()
 static int
 populate_kernel_results(char *kern_buffer)
@@ -1886,6 +3471,7 @@ populate_kernel_results(char *kern_buffer)
 	char *test_name = NULL;
 	char *result_name = NULL;
 	char *token = NULL;
+	char *s_num_kern_results = NULL;
 	results_t *kern_results = NULL;
 	uint32_t num_kern_results = 0;
 	uint32_t result_number = 0;
@@ -1897,22 +3483,15 @@ populate_kernel_results(char *kern_buffer)
 		if (strncmp(line, TESTNAME_DELIMITER, strlen(TESTNAME_DELIMITER)) == 0) {
 			sub_line = line + strlen(TESTNAME_DELIMITER);
 			test_name = strdup(sub_line);
-			// Some test trials are up to 614656 combinations, use count from golden list if possible.
-			// Otherwise just get a small number of them (full results can be printed with DUMP=1)
-			num_kern_results = KERN_MAX_UNKNOWN_TEST_RESULTS;
-			results_t *golden_result = test_name_to_golden_results(test_name);
-			if (golden_result) {
-				num_kern_results = golden_result->count;
-			} else {
-				T_LOG("kern %s not found in golden list\n", test_name);
-			}
-			kern_results = alloc_results(test_name, NULL, num_kern_results);
-			kern_results->count = num_kern_results;
-			kern_list[num_kern_tests++] = kern_results;
 			result_number = 0;
 			in_test = TRUE;
+		} else if (in_test && strncmp(line, RESULTCOUNT_DELIMITER, strlen(RESULTCOUNT_DELIMITER)) == 0) {
+			s_num_kern_results = line + strlen(RESULTCOUNT_DELIMITER);
+			num_kern_results = (uint32_t)strtoul(s_num_kern_results, NULL, 10);
+			kern_results = alloc_results(test_name, eUNKNOWN_TRIALS, num_kern_results);
+			kern_results->count = num_kern_results;
+			kern_list[num_kern_tests++] = kern_results;
 		} else if (in_test && strncmp(line, TESTCONFIG_DELIMITER, strlen(TESTCONFIG_DELIMITER)) == 0) {
-			assert(kern_results->testconfig == NULL);
 			sub_line = line + strlen(TESTCONFIG_DELIMITER);
 			kern_results->testconfig = strdup(sub_line);
 		} else if (in_test && strstr(line, KERN_TESTRESULT_DELIMITER)) {
@@ -1925,7 +3504,8 @@ populate_kernel_results(char *kern_buffer)
 				token = token + 2; // skip the , and the extra space
 				result_name = strdup(token);
 				if (result_number >= num_kern_results) {
-					T_LOG("\tKERN Recreate Golden List? skipping result %d - %s from test %s\n", result_ret, result_name, test_name);
+					T_LOG("\tKERN Invalid output in test %s, seeing more results (%u) than expected (%u), ignoring trial RESULT %d, %s\n",
+					    test_name, result_number, num_kern_results, result_ret, result_name);
 					free(result_name);
 				} else {
 					kern_results->list[result_number++] = (result_t){.ret = result_ret, .name = result_name};
@@ -1973,23 +3553,26 @@ T_DECL(vm_parameter_validation_kern,
 
 	read_env();
 
-	// Check if kernel will return using golding list format.
-	int64_t kern_golden_arg = 0;
-	if (os_parse_boot_arg_int("vm_parameter_validation_kern_golden", &kern_golden_arg)) {
-		T_LOG("vm_parameter_validation_kern_golden=%lld found in boot args\n", kern_golden_arg);
-		generate_golden |= (kern_golden_arg == 1);
-	}
-
-	T_LOG("dump %d, golden %d, test %d\n", dump, generate_golden, test_results);
-	if (test_results && populate_golden_results(KERN_GOLDEN_FILE)) {
-		// couldn't load golden test results
-		T_FAIL("Could not open golden file '%s'\n", KERN_GOLDEN_FILE);
-		return;
-	}
+	T_LOG("dump %d, golden %d, dump_golden %d, test %d\n", dump, generate_golden, dump_golden, should_test_results);
 
 	disable_exc_guard();
 
-	T_LOG("Continue to test part\n");
+	if (dump_golden) {
+		if (populate_golden_results(KERN_GOLDEN_FILE)) {
+			// couldn't load golden test results
+			T_FAIL("Could not load golden file '%s'\n", KERN_GOLDEN_FILE);
+			goto out;
+		}
+
+		// just print the parsed golden file
+		for (uint32_t x = 0; x < num_tests; ++x) {
+			__dump_results(golden_list[x]);
+		}
+		clean_golden_results();
+		goto out;
+	}
+
+	T_LOG("Running kernel tests\n");
 
 	// We allocate a large buffer. The kernel-side code writes output to it.
 	// Then we print that output. This is faster than making the kernel-side
@@ -2013,28 +3596,39 @@ T_DECL(vm_parameter_validation_kern,
 
 	T_QUIET; T_EXPECT_EQ(1ull, result, "vm_parameter_validation_kern");
 
-	if (generate_golden || !test_results) {
-		// just print the reduced list result
-		printf("%s", output);
+	if (generate_golden) {
+		if (!out_bad_param_in_kern_golden_results(output) || (dump && !should_test_results)) {
+			// Print after verified there is not OUT_PARAM_BAD results before printing,
+			// or user explicitly set DUMP_RESULTS=1 GENERATE_GOLDEN_IMAGE=1
+			printf("%s", output);
+		}
+		free(output);
+		output = NULL;
 	} else {
 		// recreate a results_t to compare against the golden file results
 		if (populate_kernel_results(output)) {
 			T_FAIL("Error while parsing results\n");
 		}
+		free(output);
+		output = NULL;
+
+		if (should_test_results && populate_golden_results(KERN_GOLDEN_FILE)) {
+			// couldn't load golden test results
+			T_FAIL("Could not load golden file '%s'\n", KERN_GOLDEN_FILE);
+			clean_kernel_results();
+			goto out;
+		}
 
 		// compare results against values from golden list
 		for (uint32_t x = 0; x < num_kern_tests; ++x) {
-			dump_results(kern_list[x]);
+			process_results(kern_list[x]);
+			dealloc_results(kern_list[x]);
+			kern_list[x] = NULL;
 		}
-	}
-
-	free(output);
-
-	if (!generate_golden) {
-		clean_kernel_results();
 		clean_golden_results();
 	}
 
+out:
 	restore_exc_guard();
 
 	if (reenable_vm_sanitize_telemetry() != 0) {

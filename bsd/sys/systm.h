@@ -226,7 +226,7 @@ int    suiword(user_addr_t addr, long word);
 #define susize(_a, _s)  sulong((_a), (_s))
 #define fuptr(a)        ((user_addr_t)fulong(_a)
 #define suptr(_a, _p)   sulong((_a), (_p))
-int     useracc(user_addr_t addr, user_size_t len, int prot);
+int     useracc(user_addr_ut addr, user_size_ut len, int prot);
 typedef void (*timeout_fcn_t)(void *);
 void    bsd_timeout(void (*)(void *), void *arg, struct timespec * ts);
 void    bsd_untimeout(void (*)(void *), void *arg);

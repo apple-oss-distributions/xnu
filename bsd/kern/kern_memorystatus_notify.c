@@ -78,6 +78,7 @@
 #include <kern/kern_memorystatus_internal.h>
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_notify.h>
+#include <sys/kern_memorystatus_xnu.h>
 
 /*
  * Memorystatus klist structures
@@ -160,26 +161,12 @@ vm_pressure_level_t memorystatus_vm_pressure_level = kVMPressureNormal;
  * to keep track of HWM offenders that drop down below their memory
  * limit and/or exit. So, we choose to burn a couple of wasted wakeups
  * by allowing the unguarded modification of this variable.
+ *
+ * TODO: this should be a count of number of hwm candidates
  */
-boolean_t memorystatus_hwm_candidates = 0;
+_Atomic bool memorystatus_hwm_candidates = false;
 
 #endif /* VM_PRESSURE_EVENTS */
-
-#if CONFIG_JETSAM
-
-extern unsigned int memorystatus_available_pages;
-extern unsigned int memorystatus_available_pages_pressure;
-extern unsigned int memorystatus_available_pages_critical;
-extern unsigned int memorystatus_available_pages_critical_base;
-extern unsigned int memorystatus_available_pages_critical_idle_offset;
-
-#else /* CONFIG_JETSAM */
-
-extern uint64_t memorystatus_available_pages;
-extern uint64_t memorystatus_available_pages_pressure;
-extern uint64_t memorystatus_available_pages_critical;
-
-#endif /* CONFIG_JETSAM */
 
 uint32_t memorystatus_jetsam_fg_band_waiters = 0;
 uint32_t memorystatus_jetsam_bg_band_waiters = 0;
@@ -1662,15 +1649,15 @@ memorystatus_update_vm_pressure(boolean_t target_foreground_process)
 		} else {
 			uint32_t sleep_interval = INTER_NOTIFICATION_DELAY;
 #if CONFIG_JETSAM
-			unsigned int page_delta = 0;
-			unsigned int skip_delay_page_threshold = 0;
 
-			assert(memorystatus_available_pages_pressure >= memorystatus_available_pages_critical_base);
+			uint32_t critical_threshold = memorystatus_get_critical_page_shortage_threshold();
+			uint32_t soft_threshold = memorystatus_get_soft_memlimit_page_shortage_threshold();
+			assert(soft_threshold >= critical_threshold);
 
-			page_delta = (memorystatus_available_pages_pressure - memorystatus_available_pages_critical_base) / 2;
-			skip_delay_page_threshold = memorystatus_available_pages_pressure - page_delta;
+			uint32_t backoff_threshold = soft_threshold -
+			    ((soft_threshold - critical_threshold) / 2);
 
-			if (memorystatus_available_pages <= skip_delay_page_threshold) {
+			if (memorystatus_get_available_page_count() <= backoff_threshold) {
 				/*
 				 * We are nearing the critcal mark fast and can't afford to wait between
 				 * notifications.

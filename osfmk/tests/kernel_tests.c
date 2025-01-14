@@ -110,6 +110,7 @@ extern kern_return_t specres_test(void);
 #if BTI_ENFORCED
 kern_return_t arm64_bti_test(void);
 #endif /* BTI_ENFORCED */
+extern kern_return_t arm64_speculation_guard_test(void);
 #endif /* __arm64__ */
 
 extern kern_return_t test_thread_call(void);
@@ -137,6 +138,7 @@ struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test
 #if CONFIG_SPTM
 	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_panic_lockdown_test),
 #endif /* CONFIG_SPTM */
+	                                   XNUPOST_TEST_CONFIG_BASIC(arm64_speculation_guard_test),
 #endif /* __arm64__ */
 	                                   XNUPOST_TEST_CONFIG_BASIC(kcdata_api_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_test),

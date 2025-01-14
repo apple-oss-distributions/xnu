@@ -46,6 +46,8 @@
 			</array>
 			<key>TestName</key>
 			<string>xnu.vm.zero_fill_fault_throughput.share-vm-objects</string>
+			<key>Enabled</key>
+			<false/> <!-- rdar://133461827 -->
 		</dict>
 	</array>
 	<key>Timeout</key>

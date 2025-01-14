@@ -466,12 +466,20 @@ memorystatus_vm_map_fork_parent(int test_variant)
  * We test "not allowed first", then "allowed". If it were the other way around, the corpse from the "allowed"
  * test would likely cause memory pressure and jetsam would likely kill the "not allowed" test.
  */
-T_DECL(memorystatus_vm_map_fork_test_not_allowed, "test that corpse generation was not allowed", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+T_DECL(memorystatus_vm_map_fork_test_not_allowed,
+    "test that corpse generation was not allowed",
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133953771 */))
 {
 	memorystatus_vm_map_fork_parent(TEST_NOT_ALLOWED);
 }
 
-T_DECL(memorystatus_vm_map_fork_test_allowed, "test corpse generation allowed", T_META_ASROOT(true), T_META_TAG_VM_PREFERRED)
+T_DECL(memorystatus_vm_map_fork_test_allowed,
+    "test corpse generation allowed",
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133953771 */))
 {
 	memorystatus_vm_map_fork_parent(TEST_ALLOWED);
 }

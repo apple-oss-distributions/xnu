@@ -296,6 +296,14 @@ os_ref_release_locked_raw(os_ref_atomic_t *rc, struct os_refgrp *grp)
 	return os_ref_release_locked_internal(rc, grp);
 }
 
+static inline void
+os_ref_release_live_locked_raw(os_ref_atomic_t *rc, struct os_refgrp *grp)
+{
+	if (__improbable(os_ref_release_locked_internal(rc, grp) == 0)) {
+		os_ref_panic_live(rc);
+	}
+}
+
 static inline os_ref_count_t
 os_ref_get_count_raw(os_ref_atomic_t *rc)
 {
@@ -315,6 +323,7 @@ os_ref_get_count_raw(os_ref_atomic_t *rc)
 #define os_ref_retain_locked_raw(rc, grp) (os_ref_retain_locked_raw)((rc), NULL)
 #define os_ref_retain_floor_locked_raw(rc, f, grp) (os_ref_retain_floor_locked_raw)((rc), f, NULL)
 #define os_ref_release_locked_raw(rc, grp) (os_ref_release_locked_raw)((rc), NULL)
+#define os_ref_release_live_locked_raw(rc, grp) (os_ref_release_live_locked_raw)((rc), NULL)
 #endif
 
 extern void

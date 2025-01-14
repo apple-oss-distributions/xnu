@@ -22,20 +22,38 @@ RESULT_PANIC    = -96
 RESULT_GUARD    = -95
 RESULT_MISMATCH = -94
 RESULT_OUT_PARAM_BAD = -93
+# Some Mach errors use their normal integer values, 
+# but we handle them specially here because those
+# integers are too long to fit in the grid output.
 RESULT_MACH_SEND_INVALID_MEMORY = 0x1000000c
+RESULT_MACH_SEND_INVALID_DEST = 0x10000003
 
 # output formatting
 format_result = {
-    RESULT_SUCCESS  : '  .',
-    RESULT_BUSTED   : ' **',
-    RESULT_MISMATCH : ' ##',
-    RESULT_IGNORED  : '   ',
-    RESULT_ZEROSIZE : '  o',
-    RESULT_PANIC    : ' pp',
-    RESULT_GUARD    : ' gg',
-    RESULT_OUT_PARAM_BAD: ' ot',
+    RESULT_SUCCESS       : '  .',
+    RESULT_BUSTED        : ' **',
+    RESULT_MISMATCH      : ' ##',
+    RESULT_IGNORED       : '   ',
+    RESULT_ZEROSIZE      : '  o',
+    RESULT_PANIC         : ' pp',
+    RESULT_GUARD         : ' gg',
+    RESULT_OUT_PARAM_BAD : ' ot',
     RESULT_MACH_SEND_INVALID_MEMORY : ' mi',
+    RESULT_MACH_SEND_INVALID_DEST :   ' md',
 }
+
+# same as format_result, but for functions 
+# where 0=failure and 1=success
+format_bool_result = format_result.copy()
+format_bool_result.update({
+    0 : '  x',
+    1 : format_result[RESULT_SUCCESS],
+})
+
+def formatter_for_testname(testname):
+    if (error_code_values_for_testname(testname) == bool_return_values):
+        return format_bool_result
+    return format_result
 
 format_default = '%3d'
 format_col_width = 3
@@ -86,23 +104,26 @@ def print_column_labels(labels, indent_width, col_width):
         print(indent + unprinted*empty_column + label)
 
 # pretty-print one function return code
-def print_one_result(ret):
-    if ret in format_result:
-        print(format_result[ret], end='')
+def print_one_result(ret, formatter):
+    if ret in formatter:
+        print(formatter[ret], end='')
     else:
         print(format_default % (ret), end='')
 
 # choose the appropriate error code table for a test
-# (either errno_return_values or kern_return_values)
-def error_code_values_for_test(test):
+# (either errno_return_values, bool_return_values, or kern_return_values)
+def error_code_values_for_testname(testname):
     errno_fns = ['mprotect', 'msync', 'minherit', 'mincore', 'mlock', 'munlock',
                  'mmap', 'munmap', 'mremap_encrypted', 'vslock', 'vsunlock',
-                 'madvise', 'useracc']
+                 'madvise']
+    bool_fns = ['useracc', 'task_find_region_details']
     for fn in errno_fns:
-        if test.testname.startswith(fn):
+        if testname.startswith(fn):
             return errno_return_values
-    else:
-        return kern_return_values
+    for fn in bool_fns:
+        if testname.startswith(fn):
+            return bool_return_values
+    return kern_return_values
 
 # print a helpful description of the return values seen in results
 # fixme these won't include RESULT_MISMATCH
@@ -112,13 +133,13 @@ def print_legend(test):
     for result in test.results:
         codes[result.ret] = True
 
-    known_return_values = error_code_values_for_test(test)
+    known_return_values = error_code_values_for_testname(test.testname)
 
     # print the names of the detected error codes
     output = []
     for code in sorted(codes.keys()):
         if code in known_return_values:
-            output.append(str(code) + ': ' + known_return_values[code])
+            output.append(known_return_values[code])
         elif code in other_return_values:
             output.append(other_return_values[code])
         elif code != 0:
@@ -134,7 +155,10 @@ errno_return_values = {
     13: 'EACCES',
     14: 'EFAULT',
     22: 'EINVAL',
+    45: 'ENOTSUP',
 }
+for k, v in errno_return_values.items():
+    errno_return_values[k] = str(k) + ': ' + v
 
 # display names for error codes returned in kern_return_t
 kern_return_values = {
@@ -196,22 +220,34 @@ kern_return_values = {
     56: 'KERN_NOT_FOUND',
     100: 'KERN_RETURN_MAX',
     -304: 'MIG_BAD_ARGUMENTS (server type check failure)',
-    0x1000000c : 'MACH_SEND_INVALID_MEMORY',
+    # MACH_SEND_INVALID_MEMORY and other Mach errors with large integer values
+    # are not handled here. They use format_result and other_return_values instead.
+}
+for k, v in kern_return_values.items():
+    kern_return_values[k] = str(k) + ': ' + v
+
+# display names for error codes return by a boolean function
+# where 0=failure and 1=success
+bool_return_values = {
+    0: format_bool_result[0].lstrip() + ': false/failure',
+    1: format_bool_result[1].lstrip() + ': true/success',
 }
 
 # display names for the special return values used by the test machinery
 other_return_values = {
-    RESULT_BUSTED: format_result[RESULT_BUSTED].lstrip() + ': trial broken, not performed',
-    RESULT_IGNORED: '<empty> trial ignored, not performed',
+    RESULT_BUSTED:   format_result[RESULT_BUSTED].lstrip() + ': trial broken, not performed',
+    RESULT_IGNORED:  '<empty> trial ignored, not performed',
     RESULT_ZEROSIZE: format_result[RESULT_ZEROSIZE].lstrip() + ': size == 0',
-    RESULT_PANIC: format_result[RESULT_PANIC].lstrip() + ': trial is believed to panic, not performed',
-    RESULT_GUARD: format_result[RESULT_GUARD].lstrip() + ': trial is believed to throw EXC_GUARD, not performed',
+    RESULT_PANIC:    format_result[RESULT_PANIC].lstrip() + ': trial is believed to panic, not performed',
+    RESULT_GUARD:    format_result[RESULT_GUARD].lstrip() + ': trial is believed to throw EXC_GUARD, not performed',
     RESULT_OUT_PARAM_BAD: format_result[RESULT_OUT_PARAM_BAD].lstrip() + ': trial set incorrect values to out parameters',
+    RESULT_MACH_SEND_INVALID_MEMORY: format_result[RESULT_MACH_SEND_INVALID_MEMORY].lstrip() + ': MACH_SEND_INVALID_MEMORY',
+    RESULT_MACH_SEND_INVALID_DEST:   format_result[RESULT_MACH_SEND_INVALID_DEST].lstrip() + ': MACH_SEND_INVALID_DEST',
 }
 
 # inside line, replace 'return 123' with 'return ERR_CODE_NAME'
 def replace_error_code_return(test, line):
-    known_return_values = error_code_values_for_test(test)
+    known_return_values = error_code_values_for_testname(test.testname)
     for code, name in known_return_values.items():
         line = line.replace('return ' + str(code) + ';', 'return ' + name + ';')
     return line
@@ -275,7 +311,7 @@ def iterate_dimension(results, dim = 0):
 
 # Print the results of a test that has two parameters (for example a test of start/size)
 # If overrides!=None, use any non-SUCCESS return values from override in place of the other results.
-def print_results_2D(results, overrides=None):
+def print_results_2D(results, formatter, overrides=None):
     # complain if results and override have different dimensions
     if overrides:
         if len(overrides) != len(results):
@@ -306,19 +342,19 @@ def print_results_2D(results, overrides=None):
             prev_row_label = result.parameters[0]
 
         if overrides and override != RESULT_SUCCESS:
-            print_one_result(override)
+            print_one_result(override, formatter)
         else:
-            print_one_result(result.ret)
+            print_one_result(result.ret, formatter)
 
     if prev_row_label: print(format_indent + prev_row_label)
     print_column_labels(columns, format_indent_width + format_col_width - 1, format_col_width)
 
-def print_results_2D_try_condensed(results):
+def print_results_2D_try_condensed(results, formatter):
     if 0 == len(results):
         return
     singleton = results[0].ret
     if any([result.ret != singleton for result in results]):
-        print_results_2D(results)
+        print_results_2D(results, formatter)
         return
     # will print as condensed
     rows = set()
@@ -326,22 +362,22 @@ def print_results_2D_try_condensed(results):
     for result in results:
         rows.add(result.parameters[0].split()[1])
         cols.add(result.parameters[1].split()[1])
-    print_one_result(result.ret)
+    print_one_result(result.ret, formatter)
     print(" for all pairs")
 
-def print_results_3D(results, testname):
+def print_results_3D(results, formatter, testname):
     # foreach parameter[1], print 2D table of parameter[0] and parameter[2]
     for results2D, name in iterate_dimension(results, 1):
         print(testname + ': ' + name)
-        print_results_2D(results2D)
+        print_results_2D(results2D, formatter)
 
     # foreach parameter[0], print 2D table of parameter[1] and parameter[2]
     # This is redundant but can be useful for human readers.
     for results2D, name in iterate_dimension(results, 0):
         print(testname + ': ' + name)
-        print_results_2D(results2D)
+        print_results_2D(results2D, formatter)
 
-def print_results_4D(results):
+def print_results_4D(results, formatter):
     x, y, z = '', '', ''
     # Make a map[{3rd_param, 4th_param, ...}] = {all options}
     # For now, we print 2d tables of 1st, 2nd param for each possible combination of remaining values
@@ -378,13 +414,13 @@ def print_results_4D(results):
     # print
     for iter in iterable:
         print(iter[0])
-        print_results_2D_try_condensed(iter[1])
+        print_results_2D_try_condensed(iter[1], formatter)
 
 
 # Print the results of a test that has two parameters
 # (for example a test of addr only, or size only)
 # If overrides!=None, use any non-SUCCESS return values from override in place of the other results.
-def print_results_1D(results, overrides=None):
+def print_results_1D(results, formatter, overrides=None):
     # complain if results and overrides have different dimensions
     if overrides:
         if len(overrides) != len(results):
@@ -399,20 +435,22 @@ def print_results_1D(results, overrides=None):
         # indent, value, indent, label
         print(format_indent, end='')
         if overrides and override != RESULT_SUCCESS:
-            print_one_result(override)
+            print_one_result(override, formatter)
         else:
-            print_one_result(result.ret)
+            print_one_result(result.ret, formatter)
         print(format_indent + result.parameters[0])
 
 def print_results_nD(results, testname, overrides=None):
+    formatter = formatter_for_testname(testname)
+    
     if (dimensions(results) == 1):
-        print_results_1D(results, overrides)
+        print_results_1D(results, formatter, overrides)
     elif (dimensions(results) == 2):
-        print_results_2D(results, overrides)
+        print_results_2D(results, formatter, overrides)
     elif dimensions(results) == 3:
-        print_results_3D(results, testname)
+        print_results_3D(results, formatter, testname)
     elif dimensions(results) == 4:
-        print_results_4D(results)
+        print_results_4D(results, formatter)
     else:
         print(format_indent + 'too many dimensions')
 

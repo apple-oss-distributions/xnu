@@ -32,14 +32,7 @@
 #include <mach/vm_types_unsafe.h>
 #include <mach/error.h>
 #include <stdbool.h>
-#include <sys/kdebug_triage.h>
-
-#if MACH_KERNEL_PRIVATE
 #include <vm/vm_sanitize_telemetry.h>
-#else
-// fixme bsd/kern/kern_mman.c can't see vm/vm_sanitize_telemetry.h
-typedef uint64_t vm_sanitize_method_t;
-#endif
 
 __BEGIN_DECLS
 #pragma GCC visibility push(hidden)
@@ -121,16 +114,34 @@ __enum_closed_decl(vm_sanitize_caller_id_t, uint32_t, {
 	VM_SANITIZE_CALLER_ID_VM_MAP_WRITE_USER,
 
 	/* inherit */
+	VM_SANITIZE_CALLER_ID_VM_MAP_INHERIT,
+	VM_SANITIZE_CALLER_ID_MINHERIT,
 
 	/* protect */
+	VM_SANITIZE_CALLER_ID_VM_MAP_PROTECT,
+	VM_SANITIZE_CALLER_ID_MPROTECT,
+	VM_SANITIZE_CALLER_ID_USERACC,
 
 	/* behavior */
+	VM_SANITIZE_CALLER_ID_VM_BEHAVIOR_SET,
+	VM_SANITIZE_CALLER_ID_MADVISE,
 
 	/* msync */
+	VM_SANITIZE_CALLER_ID_VM_MAP_MSYNC,
+	VM_SANITIZE_CALLER_ID_MSYNC,
 
 	/* machine attribute */
+	VM_SANITIZE_CALLER_ID_VM_MAP_MACHINE_ATTRIBUTE,
 
 	/* page info */
+	VM_SANITIZE_CALLER_ID_VM_MAP_PAGE_RANGE_INFO,
+	VM_SANITIZE_CALLER_ID_VM_MAP_PAGE_RANGE_QUERY,
+	VM_SANITIZE_CALLER_ID_MINCORE,
+
+	/* single */
+	VM_SANITIZE_CALLER_ID_MACH_VM_DEFERRED_RECLAMATION_BUFFER_INIT,
+	VM_SANITIZE_CALLER_ID_MACH_VM_RANGE_CREATE,
+	VM_SANITIZE_CALLER_ID_SHARED_REGION_MAP_AND_SLIDE_2_NP,
 
 	/* test */
 	VM_SANITIZE_CALLER_ID_TEST
@@ -181,6 +192,12 @@ __enum_closed_decl(vm_sanitize_caller_id_t, uint32_t, {
  *
  * @const VM_SANITIZE_FLAGS_CANONICALIZE
  * Canonicalize address for CONFIG_KERNEL_TAGGING
+ *
+ * @const VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE
+ * Checks that the size is aligned to map page size.
+ *
+ * @const VM_SANITIZE_FLAGS_CHECK_BASE_ADDR_RANGE
+ * Checks that end address is inside the TTBR base address range.
  */
 
 __options_closed_decl(vm_sanitize_flags_t, uint32_t, {
@@ -193,6 +210,8 @@ __options_closed_decl(vm_sanitize_flags_t, uint32_t, {
 	VM_SANITIZE_FLAGS_REALIGN_START            = 0x00000020,
 	VM_SANITIZE_FLAGS_CHECK_USER_MEM_MAP_FLAGS = 0x00000040,
 	VM_SANITIZE_FLAGS_CANONICALIZE             = 0x00000080,
+	VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE       = 0x00000100,
+	VM_SANITIZE_FLAGS_CHECK_BASE_ADDR_RANGE    = 0x00000200,
 });
 
 #define __vm_sanitize_bits_one_of(flags) \
@@ -219,15 +238,15 @@ typedef struct {
 } vm_sanitize_compat_rewrite_t;
 
 typedef vm_sanitize_compat_rewrite_t (*vm_sanitize_err_compat_addr_size_fn)(kern_return_t kr,
-    vm_address_t addr, vm_size_t size, vm_offset_t pgmask);
+    vm_address_t addr, vm_size_t size, vm_offset_t pgmask, vm_map_t map_or_null);
 typedef vm_sanitize_compat_rewrite_t (*vm_sanitize_err_compat_cur_and_max_prots_fn)(kern_return_t kr,
     vm_prot_t *cur_inout, vm_prot_t *max_inout, vm_prot_t extra_mask);
 
 typedef const struct vm_sanitize_caller {
-	vm_sanitize_caller_id_t              vm_sanitize_caller_id;
-	const char                          *vm_sanitize_caller_name;
-	vm_sanitize_method_t                 vm_sanitize_telemetry_id;
-	enum vm_sanitize_subsys_error_codes  vm_sanitize_ktriage_id;
+	vm_sanitize_caller_id_t              vmsc_caller_id;
+	const char                          *vmsc_caller_name;
+	vm_sanitize_method_t                 vmsc_telemetry_id;
+	enum vm_sanitize_subsys_error_codes  vmsc_ktriage_id;
 
 	vm_sanitize_err_compat_addr_size_fn    err_compat_addr_size;
 	vm_sanitize_err_compat_cur_and_max_prots_fn err_compat_prot_cur_max;
@@ -241,10 +260,10 @@ typedef const struct vm_sanitize_caller {
 
 #define VM_SANITIZE_DEFINE_CALLER(name, ... /* error compat functions */)       \
 	static const struct vm_sanitize_caller vm_sanitize_caller_storage_ ## name = { \
-	    .vm_sanitize_caller_id = VM_SANITIZE_CALLER_ID_ ## name,        \
-	    .vm_sanitize_caller_name = #name,                       \
-	    .vm_sanitize_telemetry_id = VM_SANITIZE_METHOD_ ## name,     \
-	    .vm_sanitize_ktriage_id = KDBG_TRIAGE_VM_SANITIZE_ ## name,  \
+	    .vmsc_caller_id = VM_SANITIZE_CALLER_ID_ ## name,        \
+	    .vmsc_caller_name = #name,                       \
+	    .vmsc_telemetry_id = VM_SANITIZE_METHOD_ ## name,     \
+	    .vmsc_ktriage_id = KDBG_TRIAGE_VM_SANITIZE_ ## name,  \
 	    __VA_ARGS__                                     \
 	}; \
 	vm_sanitize_caller_t const VM_SANITIZE_CALLER_ ## name = &vm_sanitize_caller_storage_ ## name
@@ -288,16 +307,40 @@ VM_SANITIZE_DECL_CALLER(VM_MAP_READ_USER);
 VM_SANITIZE_DECL_CALLER(VM_MAP_WRITE_USER);
 
 /* inherit */
+VM_SANITIZE_DECL_CALLER(MACH_VM_INHERIT);
+VM_SANITIZE_DECL_CALLER(VM_INHERIT);
+VM_SANITIZE_DECL_CALLER(VM32_INHERIT);
+VM_SANITIZE_DECL_CALLER(VM_MAP_INHERIT);
+VM_SANITIZE_DECL_CALLER(MINHERIT);
 
 /* protect */
+VM_SANITIZE_DECL_CALLER(MACH_VM_PROTECT);
+VM_SANITIZE_DECL_CALLER(VM_PROTECT);
+VM_SANITIZE_DECL_CALLER(VM32_PROTECT);
+VM_SANITIZE_DECL_CALLER(VM_MAP_PROTECT);
+VM_SANITIZE_DECL_CALLER(MPROTECT);
+VM_SANITIZE_DECL_CALLER(USERACC);
 
 /* behavior */
+VM_SANITIZE_DECL_CALLER(VM_BEHAVIOR_SET);
+VM_SANITIZE_DECL_CALLER(MADVISE);
 
 /* msync */
+VM_SANITIZE_DECL_CALLER(VM_MAP_MSYNC);
+VM_SANITIZE_DECL_CALLER(MSYNC);
 
 /* machine attribute */
+VM_SANITIZE_DECL_CALLER(VM_MAP_MACHINE_ATTRIBUTE);
 
 /* page info */
+VM_SANITIZE_DECL_CALLER(VM_MAP_PAGE_RANGE_INFO);
+VM_SANITIZE_DECL_CALLER(VM_MAP_PAGE_RANGE_QUERY);
+VM_SANITIZE_DECL_CALLER(MINCORE);
+
+/* single */
+VM_SANITIZE_DECL_CALLER(MACH_VM_DEFERRED_RECLAMATION_BUFFER_INIT);
+VM_SANITIZE_DECL_CALLER(MACH_VM_RANGE_CREATE);
+VM_SANITIZE_DECL_CALLER(SHARED_REGION_MAP_AND_SLIDE_2_NP);
 
 /* test */
 VM_SANITIZE_DECL_CALLER(TEST);
@@ -308,11 +351,6 @@ VM_SANITIZE_DECL_CALLER(TEST);
  * inner struct member.
  */
 #define VM_SANITIZE_UNSAFE_UNWRAP(_val) (_val).UNSAFE
-
-/*
- * Macro that sets an unsafe value
- */
-#define VM_SANITIZE_UNSAFE_SET(_var, _val) ((_var).UNSAFE) = (_val)
 
 /*
  * Macro to check if unsafe value is a specific safe value
@@ -332,11 +370,18 @@ VM_SANITIZE_DECL_CALLER(TEST);
 	__tmp == (type_t)__tmp;            \
 })
 
+/*
+ * Macro that sets a value of unsafe type to a value of safe type.
+ * This is safe to do because we are only forcing ourselves to perform
+ * checks on a value we already have direct access to.
+ */
+#define VM_SANITIZE_UT_SET(_var, _val) ((_var).UNSAFE) = (_val)
+
 /*!
  * @function vm_sanitize_wrap_addr
  *
  * @abstract
- * Function that wrap unsanitized safe address into unsafe address
+ * Function that wraps unsanitized safe address into unsafe address
  *
  * @param val               safe address
  * @returns                 unsafe address
@@ -348,7 +393,7 @@ vm_addr_struct_t vm_sanitize_wrap_addr(vm_address_t val);
  * @function vm_sanitize_wrap_addr_ref
  *
  * @abstract
- * Function that wrap a safe address pointer,
+ * Function that wraps a safe address pointer,
  * into unsafe address pointer.
  *
  * @param val               safe address ref
@@ -363,7 +408,7 @@ vm_addr_struct_t vm_sanitize_wrap_addr(vm_address_t val);
  * @function vm_sanitize_wrap_size
  *
  * @abstract
- * Function that wrap unsanitized safe size into unsafe size
+ * Function that wraps unsanitized safe size into unsafe size
  *
  * @param val               safe size
  * @returns                 unsafe size
@@ -380,7 +425,7 @@ vm_size_struct_t vm_sanitize_wrap_size(vm_size_t val);
  * @function vm32_sanitize_wrap_size
  *
  * @abstract
- * Function that wrap unsanitized 32bit safe size into 32bit unsafe size
+ * Function that wraps unsanitized 32bit safe size into 32bit unsafe size
  *
  * @param val               safe size
  * @returns                 unsafe size
@@ -393,7 +438,7 @@ vm32_size_struct_t vm32_sanitize_wrap_size(vm32_size_t val);
  * @function vm_sanitize_wrap_prot
  *
  * @abstract
- * Function that wrap unsanitized safe protection into unsafe protection
+ * Function that wraps unsanitized safe protection into unsafe protection
  *
  * @param val               safe protection
  * @returns                 unsafe protection
@@ -405,7 +450,7 @@ vm_prot_ut vm_sanitize_wrap_prot(vm_prot_t val);
  * @function vm_sanitize_wrap_prot_ref
  *
  * @abstract
- * Function that wrap a safe protection pointer into unsafe protection pointer.
+ * Function that wraps a safe protection pointer into unsafe protection pointer.
  *
  * @param val               safe protection pointer
  * @returns                 unsafe protection pointer
@@ -421,13 +466,25 @@ vm_sanitize_wrap_prot_ref(vm_prot_t *val)
  * @function vm_sanitize_wrap_inherit
  *
  * @abstract
- * Function that wrap unsanitized safe vm_inherit into unsafe vm_inherit
+ * Function that wraps unsanitized safe vm_inherit into unsafe vm_inherit
  *
  * @param val               safe vm_inherit
  * @returns                 unsafe vm_inherit
  */
 __attribute__((always_inline, warn_unused_result))
 vm_inherit_ut vm_sanitize_wrap_inherit(vm_inherit_t val);
+
+/*!
+ * @function vm_sanitize_wrap_behavior
+ *
+ * @abstract
+ * Function that wraps a safe vm_behavior into an unsafe vm_behavior
+ *
+ * @param val               safe vm_behavior
+ * @returns                 unsafe vm_behavior
+ */
+__attribute__((always_inline, warn_unused_result))
+vm_behavior_ut vm_sanitize_wrap_behavior(vm_behavior_t val);
 
 #ifdef  MACH_KERNEL_PRIVATE
 
@@ -458,34 +515,6 @@ __attribute__((always_inline, warn_unused_result))
 vm_size_struct_t vm_sanitize_expand_size_to_64(vm32_size_ut val);
 
 /*!
- * @function vm_sanitize_expand_addr_size_to_64
- *
- * @abstract
- * Sanitization function used to transform a pair of 32bit {addr,size} values
- * into a set of unsafe addr/end pairs checking that it doesn't overflow the
- * 32bit space.
- *
- * @discussion
- * Use VM_BIND_* macros to bind return values to arguments.
- *
- * Note: this function is relatively approximate, which isn't a huge concern
- * for kernel security because all maps function on 64bit values and no
- * arithmetics is performed on 32bit quantities. The "worst" outcome is that
- * values returned to userspace truncate incorrectly.
- *
- * @param [in]  addr32_u        unsafe address to sanitize
- * @param [in]  size32_u        unsafe size to sanitize
- * @param [out] addr_u          unsafe address to sanitize
- * @param [out] size_u          unsafe size to sanitize
- */
-__attribute__((always_inline, warn_unused_result))
-kern_return_t vm_sanitize_expand_addr_size_to_64(
-	vm32_address_ut         addr32_u,
-	vm32_size_ut            size32_u,
-	vm_address_ut          *addr_u,
-	vm_size_ut             *size_u);
-
-/*!
  * @function vm_sanitize_trunc_addr_to_32
  *
  * @abstract
@@ -510,6 +539,24 @@ vm32_address_ut vm_sanitize_trunc_addr_to_32(vm_addr_struct_t val);
  */
 __attribute__((always_inline, warn_unused_result))
 vm32_size_ut vm_sanitize_trunc_size_to_32(vm_size_struct_t val);
+
+/*!
+ * @function vm_sanitize_add_overflow()
+ *
+ * @abstract
+ * Computes the sum of an address and a size checking for overflow,
+ * staying in the unsafe world.
+ *
+ * @param addr_u            unsafe address
+ * @param size_u            unsafe size
+ * @param addr_out_u        unsafe result
+ * @returns whether the operation overflowed
+ */
+__attribute__((always_inline, warn_unused_result, overloadable))
+bool vm_sanitize_add_overflow(
+	vm32_address_ut         addr_u,
+	vm32_size_ut            size_u,
+	vm32_address_ut        *addr_out_u);
 
 #endif  /* MACH_KERNEL_PRIVATE */
 
@@ -550,7 +597,7 @@ bool vm_sanitize_add_overflow(
 	vm_size_struct_t       *size_out_u);
 
 /*!
- * @function vm_sanitize_compute_unsafe_end
+ * @function vm_sanitize_compute_ut_end
  *
  * @abstract
  * Computes and returns unsafe end from unsafe start and size
@@ -560,12 +607,12 @@ bool vm_sanitize_add_overflow(
  * @returns                 unsafe end
  */
 __attribute__((always_inline, warn_unused_result))
-vm_addr_struct_t vm_sanitize_compute_unsafe_end(
+vm_addr_struct_t vm_sanitize_compute_ut_end(
 	vm_addr_struct_t        addr_u,
 	vm_size_struct_t        size_u);
 
 /*!
- * @function vm_sanitize_compute_unsafe_size
+ * @function vm_sanitize_compute_ut_size
  *
  * @abstract
  * Computes and returns unsafe size from unsafe start and end
@@ -575,7 +622,7 @@ vm_addr_struct_t vm_sanitize_compute_unsafe_end(
  * @returns                 unsafe size
  */
 __attribute__((always_inline, warn_unused_result))
-vm_size_struct_t vm_sanitize_compute_unsafe_size(
+vm_size_struct_t vm_sanitize_compute_ut_size(
 	vm_addr_struct_t        addr_u,
 	vm_addr_struct_t        end_u);
 
@@ -602,14 +649,34 @@ mach_vm_address_t vm_sanitize_addr(
  * Sanitization function that takes unsafe address,
  * and returns the offset in the page for this address.
  *
- * @param map               map the address belongs to
+ * @param mask              page mask to use
  * @param addr_u            unsafe address to sanitize
  * @returns                 a sanitized offset in page
  */
 __attribute__((always_inline, warn_unused_result))
 mach_vm_offset_t vm_sanitize_offset_in_page(
-	vm_map_t                map,
+	vm_map_offset_t         mask,
 	vm_addr_struct_t        addr_u);
+
+/*
+ * @function vm_sanitize_offset_in_page
+ *
+ * @abstract
+ * Sanitization function that takes unsafe address,
+ * and returns the offset in the page for this address.
+ *
+ * @param map               map the address belongs to
+ * @param addr_u            unsafe address to sanitize
+ * @returns                 a sanitized offset in page
+ */
+__attribute__((always_inline, warn_unused_result, overloadable))
+static inline mach_vm_offset_t
+vm_sanitize_offset_in_page(
+	vm_map_t                map,
+	vm_addr_struct_t        addr_u)
+{
+	return vm_sanitize_offset_in_page(vm_map_page_mask(map), addr_u);
+}
 
 /*!
  * @function vm_sanitize_offset
@@ -712,6 +779,7 @@ __vm_sanitize_require_size_zero_flag(flags);
  * @param size_u            unsafe size to sanitize
  * @param vm_sanitize_caller        caller of the sanitization function
  * @param mask              page mask to use
+ * @param map_or_null       optional map, used for error compat for some callers
  * @param flags             flags that influence sanitization performed
  * @param addr              sanitized start
  * @param end               sanitized end
@@ -724,11 +792,47 @@ kern_return_t vm_sanitize_addr_size(
 	vm_size_struct_t        size_u,
 	vm_sanitize_caller_t    vm_sanitize_caller,
 	mach_vm_offset_t        mask,
+	vm_map_t                map_or_null,
 	vm_sanitize_flags_t     flags,
 	vm_map_offset_t        *addr,
 	vm_map_offset_t        *end,
 	vm_map_size_t          *size)
 __vm_sanitize_require_size_zero_flag(flags);
+
+/*!
+ * @function vm_sanitize_addr_size
+ *
+ * @abstract
+ * Sanitization function that takes unsafe address and size and returns
+ * sanitized start, end and size via out parameters.
+ *
+ * @param addr_u            unsafe address to sanitize
+ * @param size_u            unsafe size to sanitize
+ * @param vm_sanitize_caller        caller of the sanitization function
+ * @param mask              page mask to use
+ * @param flags             flags that influence sanitization performed
+ * @param addr              sanitized start
+ * @param end               sanitized end
+ * @param size              sanitized size
+ * @returns                 return code indicating success/failure of sanitization
+ */
+__attribute__((always_inline, warn_unused_result, overloadable))
+static inline kern_return_t
+vm_sanitize_addr_size(
+	vm_addr_struct_t        addr_u,
+	vm_size_struct_t        size_u,
+	vm_sanitize_caller_t    vm_sanitize_caller,
+	mach_vm_offset_t        mask,
+	vm_sanitize_flags_t     flags,
+	vm_map_offset_t        *addr,
+	vm_map_offset_t        *end,
+	vm_map_size_t          *size)
+__vm_sanitize_require_size_zero_flag(flags)
+{
+	return vm_sanitize_addr_size(addr_u, size_u, vm_sanitize_caller, mask,
+	           VM_MAP_NULL, flags, addr, end, size);
+}
+
 
 /*!
  * @function vm_sanitize_addr_size
@@ -762,8 +866,73 @@ __vm_sanitize_require_size_zero_flag(flags)
 {
 	mach_vm_offset_t mask = vm_map_page_mask(map);
 
-	return vm_sanitize_addr_size(addr_u, size_u, vm_sanitize_caller, mask, flags,
-	           addr, end, size);
+	return vm_sanitize_addr_size(addr_u, size_u, vm_sanitize_caller, mask,
+	           map, flags, addr, end, size);
+}
+
+/*!
+ * @function vm_sanitize_addr_end
+ *
+ * @abstract
+ * Sanitization function that takes unsafe address and end and returns
+ * sanitized start, end and size via out parameters.
+ *
+ * @param addr_u            unsafe address to sanitize
+ * @param end_u             unsafe end to sanitize
+ * @param vm_sanitize_caller        caller of the sanitization function
+ * @param mask              page mask to use
+ * @param map_or_null       optional map, used for error compat for some callers
+ * @param flags             flags that influence sanitization performed
+ * @param start             sanitized start
+ * @param end               sanitized end
+ * @param size              sanitized size
+ * @returns                 return code indicating success/failure of sanitization
+ */
+__attribute__((always_inline, warn_unused_result))
+kern_return_t vm_sanitize_addr_end(
+	vm_addr_struct_t        addr_u,
+	vm_addr_struct_t        end_u,
+	vm_sanitize_caller_t    vm_sanitize_caller,
+	mach_vm_offset_t        mask,
+	vm_map_t                map_or_null,
+	vm_sanitize_flags_t     flags,
+	vm_map_offset_t        *start,
+	vm_map_offset_t        *end,
+	vm_map_size_t          *size)
+__vm_sanitize_require_size_zero_flag(flags);
+
+/*!
+ * @function vm_sanitize_addr_end
+ *
+ * @abstract
+ * Sanitization function that takes unsafe address and end and returns
+ * sanitized start, end and size via out parameters.
+ *
+ * @param addr_u            unsafe address to sanitize
+ * @param end_u             unsafe end to sanitize
+ * @param vm_sanitize_caller        caller of the sanitization function
+ * @param mask              page mask to use
+ * @param flags             flags that influence sanitization performed
+ * @param start             sanitized start
+ * @param end               sanitized end
+ * @param size              sanitized size
+ * @returns                 return code indicating success/failure of sanitization
+ */
+__attribute__((always_inline, warn_unused_result, overloadable))
+static inline kern_return_t
+vm_sanitize_addr_end(
+	vm_addr_struct_t        addr_u,
+	vm_addr_struct_t        end_u,
+	vm_sanitize_caller_t    vm_sanitize_caller,
+	mach_vm_offset_t        mask,
+	vm_sanitize_flags_t     flags,
+	vm_map_offset_t        *start,
+	vm_map_offset_t        *end,
+	vm_map_size_t          *size)
+__vm_sanitize_require_size_zero_flag(flags)
+{
+	return vm_sanitize_addr_end(addr_u, end_u, vm_sanitize_caller, mask,
+	           VM_MAP_NULL, flags, start, end, size);
 }
 
 /*!
@@ -783,8 +952,9 @@ __vm_sanitize_require_size_zero_flag(flags)
  * @param size              sanitized size
  * @returns                 return code indicating success/failure of sanitization
  */
-__attribute__((always_inline, warn_unused_result))
-kern_return_t vm_sanitize_addr_end(
+__attribute__((always_inline, warn_unused_result, overloadable))
+static inline kern_return_t
+vm_sanitize_addr_end(
 	vm_addr_struct_t        addr_u,
 	vm_addr_struct_t        end_u,
 	vm_sanitize_caller_t    vm_sanitize_caller,
@@ -793,7 +963,13 @@ kern_return_t vm_sanitize_addr_end(
 	vm_map_offset_t        *start,
 	vm_map_offset_t        *end,
 	vm_map_size_t          *size)
-__vm_sanitize_require_size_zero_flag(flags);
+__vm_sanitize_require_size_zero_flag(flags)
+{
+	mach_vm_offset_t mask = vm_map_page_mask(map);
+
+	return vm_sanitize_addr_end(addr_u, end_u, vm_sanitize_caller, mask,
+	           map, flags, start, end, size);
+}
 
 /*!
  * @function vm_sanitize_prot
@@ -901,14 +1077,12 @@ kern_return_t vm_sanitize_memory_entry_perm(
  *
  * @param prot_u            unsafe protections
  * @param vm_sanitize_caller        caller of the sanitization function
- * @param prot              sanitized protections
- * @returns                 return code indicating success/failure of sanitization
+ * @returns                 sanitized protections
  */
 __attribute__((always_inline, warn_unused_result))
-kern_return_t vm_sanitize_prot_bsd(
+vm_prot_t vm_sanitize_prot_bsd(
 	vm_prot_ut              prot_u,
-	vm_sanitize_caller_t    vm_sanitize_caller,
-	vm_prot_t              *prot);
+	vm_sanitize_caller_t    vm_sanitize_caller);
 
 /*!
  * @function vm_sanitize_inherit
@@ -926,6 +1100,23 @@ kern_return_t vm_sanitize_inherit(
 	vm_inherit_ut           inherit_u,
 	vm_sanitize_caller_t    vm_sanitize_caller,
 	vm_inherit_t           *inherit);
+
+/*!
+ * @function vm_sanitize_behavior
+ *
+ * @abstract
+ * Sanitization function that takes an unsafe vm_behavior and sanitizes it.
+ *
+ * @param behavior_u         unsafe vm_behavior
+ * @param vm_sanitize_caller caller of the sanitization function
+ * @param behavior           sanitized vm_behavior
+ * @returns                  return code indicating success/failure of sanitization
+ */
+__attribute__((always_inline, warn_unused_result))
+kern_return_t vm_sanitize_behavior(
+	vm_behavior_ut           behavior_u,
+	vm_sanitize_caller_t    vm_sanitize_caller __unused,
+	vm_behavior_t           *behavior);
 
 #pragma GCC visibility pop
 __END_DECLS

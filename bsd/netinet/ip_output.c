@@ -1843,7 +1843,7 @@ bad:
 	if (pktcnt > 0) {
 		m0 = packetlist;
 	}
-	m_drop_list(m0, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
+	m_drop_list(m0, ifp, DROPTAP_FLAG_DIR_OUT | DROPTAP_FLAG_L2_MISSING, drop_reason, NULL, 0);
 	goto done;
 
 #undef ipsec_state

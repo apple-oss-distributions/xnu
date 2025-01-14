@@ -213,6 +213,9 @@
 #define AT_REALDEV              0x0200  /* Return real device inodes resides on for fstatat(2) */
 #define AT_FDONLY               0x0400  /* Use only the fd and Ignore the path for fstatat(2) */
 #define AT_SYMLINK_NOFOLLOW_ANY 0x0800  /* Path should not contain any symlinks */
+#ifdef PRIVATE
+#define AT_SYSTEM_DISCARDED     0x1000  /* Indicated file/folder was discarded by system */
+#endif
 #endif
 #endif
 

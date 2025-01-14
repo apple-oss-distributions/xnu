@@ -19,6 +19,8 @@
 			</array>
 			<key>TestName</key>
 			<string>xnu.vm.mixed_pagesize</string>
+			<key>Enabled</key>
+			<false/> <!-- rdar://133462123 -->
 		</dict>
 	</array>
 	<key>Timeout</key>

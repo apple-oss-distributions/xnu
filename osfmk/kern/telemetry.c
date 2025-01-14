@@ -106,6 +106,7 @@ struct telemetry_target {
 	bool                             user64_regs;
 	uint16_t                         async_start_index;
 	enum micro_snapshot_flags        microsnapshot_flags;
+	bool                             include_metadata;
 	struct micro_snapshot_buffer    *buffer;
 	lck_mtx_t                       *buffer_mtx;
 };
@@ -132,15 +133,39 @@ uint32_t                telemetry_sample_rate = 0;
 volatile boolean_t      telemetry_needs_record = FALSE;
 volatile boolean_t      telemetry_needs_timer_arming_record = FALSE;
 
-/*
- * If TRUE, record micro-stackshot samples for all tasks.
- * If FALSE, only sample tasks which are marked for telemetry.
- */
-bool     telemetry_sample_all_tasks = false;
 bool     telemetry_sample_pmis = false;
-uint32_t telemetry_active_tasks = 0; // Number of tasks opted into telemetry
 
 uint32_t telemetry_timestamp = 0;
+
+struct telemetry_metadata {
+	/*
+	 * The current generation of microstackshot-based telemetry.
+	 * Incremented whenever the settings change.
+	 */
+	uint32_t tm_generation;
+	/*
+	 * The total number of samples recorded.
+	 */
+	uint64_t tm_samples_recorded;
+	/*
+	 * The total number of samples that were skipped.
+	 */
+	uint64_t tm_samples_skipped;
+	/*
+	 * What's triggering the microstackshot samples.
+	 */
+	enum telemetry_source {
+		TMSRC_NONE = 0,
+		TMSRC_UNKNOWN,
+		TMSRC_TIME,
+		TMSRC_INSTRUCTIONS,
+		TMSRC_CYCLES,
+	} tm_source;
+	/*
+	 * The interval used for periodic sampling.
+	 */
+	uint64_t tm_period;
+};
 
 /*
  * The telemetry_buffer is responsible
@@ -176,6 +201,7 @@ LCK_GRP_DECLARE(telemetry_lck_grp, "telemetry group");
 LCK_MTX_DECLARE(telemetry_mtx, &telemetry_lck_grp);
 LCK_MTX_DECLARE(telemetry_pmi_mtx, &telemetry_lck_grp);
 LCK_MTX_DECLARE(telemetry_macf_mtx, &telemetry_lck_grp);
+LCK_SPIN_DECLARE(telemetry_metadata_lck, &telemetry_lck_grp);
 
 #define TELEMETRY_LOCK() do { lck_mtx_lock(&telemetry_mtx); } while (0)
 #define TELEMETRY_TRY_SPIN_LOCK() lck_mtx_try_lock_spin(&telemetry_mtx)
@@ -186,6 +212,11 @@ LCK_MTX_DECLARE(telemetry_macf_mtx, &telemetry_lck_grp);
 
 #define TELEMETRY_MACF_LOCK() do { lck_mtx_lock(&telemetry_macf_mtx); } while (0)
 #define TELEMETRY_MACF_UNLOCK() do { lck_mtx_unlock(&telemetry_macf_mtx); } while (0)
+
+/*
+ * Protected by the telemetry_metadata_lck spinlock.
+ */
+struct telemetry_metadata telemetry_metadata = { 0 };
 
 #define TELEMETRY_BT_FRAMES  (5)
 
@@ -271,97 +302,10 @@ telemetry_init(void)
 		THREAD_CALL_OPTIONS_ONCE);
 
 	assert(telemetry_ca_send_callout != NULL);
-	/*
-	 * To enable telemetry for all tasks, include "telemetry_sample_all_tasks=1" in boot-args.
-	 */
-	if (!PE_parse_boot_argn("telemetry_sample_all_tasks",
-	    &telemetry_sample_all_tasks, sizeof(telemetry_sample_all_tasks))) {
-#if !defined(XNU_TARGET_OS_OSX) && !(DEVELOPMENT || DEBUG)
-		telemetry_sample_all_tasks = false;
-#else
-		telemetry_sample_all_tasks = true;
-#endif /* !defined(XNU_TARGET_OS_OSX) && !(DEVELOPMENT || DEBUG) */
-	}
-
-	kprintf("Telemetry: Sampling %stasks once per %u second%s\n",
-	    (telemetry_sample_all_tasks) ? "all " : "",
-	    telemetry_sample_rate, telemetry_sample_rate == 1 ? "" : "s");
-}
-
-/*
- * Enable or disable global microstackshots (ie telemetry_sample_all_tasks).
- *
- * enable_disable == 1: turn it on
- * enable_disable == 0: turn it off
- */
-void
-telemetry_global_ctl(int enable_disable)
-{
-	if (enable_disable == 1) {
-		telemetry_sample_all_tasks = true;
-	} else {
-		telemetry_sample_all_tasks = false;
-	}
-}
-
-/*
- * Opt the given task into or out of the telemetry stream.
- *
- * Supported reasons (callers may use any or all of):
- *     TF_CPUMON_WARNING
- *     TF_WAKEMON_WARNING
- *
- * enable_disable == 1: turn it on
- * enable_disable == 0: turn it off
- */
-void
-telemetry_task_ctl(task_t task, uint32_t reasons, int enable_disable)
-{
-	task_lock(task);
-	telemetry_task_ctl_locked(task, reasons, enable_disable);
-	task_unlock(task);
-}
-
-void
-telemetry_task_ctl_locked(task_t task, uint32_t reasons, int enable_disable)
-{
-	uint32_t origflags;
-
-	assert((reasons != 0) && ((reasons | TF_TELEMETRY) == TF_TELEMETRY));
-
-	task_lock_assert_owned(task);
-
-	origflags = task->t_flags;
-
-	if (enable_disable == 1) {
-		task->t_flags |= reasons;
-		if ((origflags & TF_TELEMETRY) == 0) {
-			OSIncrementAtomic(&telemetry_active_tasks);
-#if TELEMETRY_DEBUG
-			printf("%s: telemetry OFF -> ON (%d active)\n", proc_name_address(get_bsdtask_info(task)), telemetry_active_tasks);
-#endif
-		}
-	} else {
-		task->t_flags &= ~reasons;
-		if (((origflags & TF_TELEMETRY) != 0) && ((task->t_flags & TF_TELEMETRY) == 0)) {
-			/*
-			 * If this task went from having at least one telemetry bit to having none,
-			 * the net change was to disable telemetry for the task.
-			 */
-			OSDecrementAtomic(&telemetry_active_tasks);
-#if TELEMETRY_DEBUG
-			printf("%s: telemetry ON -> OFF (%d active)\n", proc_name_address(get_bsdtask_info(task)), telemetry_active_tasks);
-#endif
-		}
-	}
 }
 
 /*
  * Determine if the current thread is eligible for telemetry:
- *
- * telemetry_sample_all_tasks: All threads are eligible. This takes precedence.
- * telemetry_active_tasks: Count of tasks opted in.
- * task->t_flags & TF_TELEMETRY: This task is opted in.
  */
 static bool
 telemetry_is_active(thread_t thread)
@@ -369,35 +313,11 @@ telemetry_is_active(thread_t thread)
 	task_t task = get_threadtask(thread);
 
 	if (task == kernel_task) {
-		/* Kernel threads never return to an AST boundary, and are ineligible */
+		/* Kernel threads are currently exempted from PMI-based sampling. */
 		return false;
 	}
 
-	if (telemetry_sample_all_tasks || telemetry_sample_pmis) {
-		return true;
-	}
-
-	if ((telemetry_active_tasks > 0) && ((task->t_flags & TF_TELEMETRY) != 0)) {
-		return true;
-	}
-
-	return false;
-}
-
-/*
- * Userland is arming a timer. If we are eligible for such a record,
- * sample now. No need to do this one at the AST because we're already at
- * a safe place in this system call.
- */
-int
-telemetry_timer_event(__unused uint64_t deadline, __unused uint64_t interval, __unused uint64_t leeway)
-{
-	if (telemetry_needs_timer_arming_record == TRUE) {
-		telemetry_needs_timer_arming_record = FALSE;
-		telemetry_take_sample(current_thread(), (enum micro_snapshot_flags)(kTimerArmingRecord | kUserMode));
-	}
-
-	return 0;
+	return telemetry_sample_pmis;
 }
 
 #if CONFIG_CPU_COUNTERS
@@ -412,8 +332,7 @@ int
 telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 {
 #if CONFIG_CPU_COUNTERS
-	static bool sample_all_tasks_aside = false;
-	static uint32_t active_tasks_aside = false;
+	enum telemetry_source source = TMSRC_NONE;
 	int error = 0;
 	const char *name = "?";
 
@@ -429,22 +348,28 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 		}
 
 		telemetry_sample_pmis = false;
-		telemetry_sample_all_tasks = sample_all_tasks_aside;
-		telemetry_active_tasks = active_tasks_aside;
 		error = mt_microstackshot_stop();
 		if (!error) {
 			printf("telemetry: disabling ustackshot on PMI\n");
+			int intrs_en = ml_set_interrupts_enabled(FALSE);
+			lck_spin_lock(&telemetry_metadata_lck);
+			telemetry_metadata.tm_period = 0;
+			telemetry_metadata.tm_source = TMSRC_NONE;
+			lck_spin_unlock(&telemetry_metadata_lck);
+			ml_set_interrupts_enabled(intrs_en);
 		}
 		goto out;
 
 	case TELEMETRY_PMI_INSTRS:
 		ctr = MT_CORE_INSTRS;
 		name = "instructions";
+		source = TMSRC_INSTRUCTIONS;
 		break;
 
 	case TELEMETRY_PMI_CYCLES:
 		ctr = MT_CORE_CYCLES;
 		name = "cycles";
+		source = TMSRC_CYCLES;
 		break;
 
 	default:
@@ -453,14 +378,18 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 	}
 
 	telemetry_sample_pmis = true;
-	sample_all_tasks_aside = telemetry_sample_all_tasks;
-	active_tasks_aside = telemetry_active_tasks;
-	telemetry_sample_all_tasks = false;
-	telemetry_active_tasks = 0;
 
 	error = mt_microstackshot_start(ctr, period, telemetry_pmi_handler, NULL);
 	if (!error) {
 		printf("telemetry: ustackshot every %llu %s\n", period, name);
+
+		int intrs_en = ml_set_interrupts_enabled(FALSE);
+		lck_spin_lock(&telemetry_metadata_lck);
+		telemetry_metadata.tm_period = period;
+		telemetry_metadata.tm_source = source;
+		telemetry_metadata.tm_generation += 1;
+		lck_spin_unlock(&telemetry_metadata_lck);
+		ml_set_interrupts_enabled(intrs_en);
 	}
 
 out:
@@ -487,6 +416,13 @@ telemetry_mark_curthread(boolean_t interrupted_userspace, boolean_t pmi)
 	 * again next time.
 	 */
 	if (telemetry_is_active(thread) == false) {
+		if (pmi) {
+			int intrs_en = ml_set_interrupts_enabled(FALSE);
+			lck_spin_lock(&telemetry_metadata_lck);
+			telemetry_metadata.tm_samples_skipped += 1;
+			lck_spin_unlock(&telemetry_metadata_lck);
+			ml_set_interrupts_enabled(intrs_en);
+		}
 		return;
 	}
 
@@ -498,17 +434,6 @@ telemetry_mark_curthread(boolean_t interrupted_userspace, boolean_t pmi)
 	telemetry_needs_record = FALSE;
 	thread_ast_set(thread, ast_bits);
 	ast_propagate(thread);
-}
-
-void
-compute_telemetry(void *arg __unused)
-{
-	if (telemetry_sample_all_tasks || (telemetry_active_tasks > 0)) {
-		if ((++telemetry_timestamp) % telemetry_sample_rate == 0) {
-			telemetry_needs_record = TRUE;
-			telemetry_needs_timer_arming_record = TRUE;
-		}
-	}
 }
 
 /*
@@ -640,6 +565,7 @@ telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 		.frames_count = btcount,
 		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
 		.microsnapshot_flags = flags,
+		.include_metadata = flags & kPMIRecord,
 		.buffer = &telemetry_buffer,
 		.buffer_mtx = &telemetry_mtx,
 		.async_start_index = async_start_index,
@@ -755,6 +681,7 @@ telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 		.frames_count = btcount,
 		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
 		.microsnapshot_flags = flags,
+		.include_metadata = false,
 		.buffer = telbuf,
 		.buffer_mtx = &telemetry_macf_mtx
 	};
@@ -909,6 +836,14 @@ telemetry_process_sample(const struct telemetry_target *target,
 
 	lck_mtx_lock(buffer_mtx);
 
+	if (target->include_metadata) {
+		int intrs_en = ml_set_interrupts_enabled(FALSE);
+		lck_spin_lock(&telemetry_metadata_lck);
+		telemetry_metadata.tm_samples_recorded += 1;
+		lck_spin_unlock(&telemetry_metadata_lck);
+		ml_set_interrupts_enabled(intrs_en);
+	}
+
 	/*
 	 * If our buffer is not backed by anything,
 	 * then we cannot take the sample.  Meant to allow us to deallocate the window
@@ -1036,6 +971,16 @@ copytobuffer:
 		 * XXX Stash the rest of the process's name in some unused fields.
 		 */
 		strlcpy((char *)tsnap->io_priority_count, &longname[16], sizeof(tsnap->io_priority_count));
+	}
+	if (target->include_metadata) {
+		int intrs_en = ml_set_interrupts_enabled(FALSE);
+		lck_spin_lock(&telemetry_metadata_lck);
+		tsnap->io_priority_size[0] = ((uint64_t)telemetry_metadata.tm_source << 32) | telemetry_metadata.tm_generation;
+		tsnap->io_priority_size[1] = telemetry_metadata.tm_period;
+		tsnap->io_priority_size[2] = telemetry_metadata.tm_samples_recorded;
+		tsnap->io_priority_size[3] = telemetry_metadata.tm_samples_skipped;
+		lck_spin_unlock(&telemetry_metadata_lck);
+		ml_set_interrupts_enabled(intrs_en);
 	}
 	if (user64_va) {
 		tsnap->ss_flags |= kUser64_p;

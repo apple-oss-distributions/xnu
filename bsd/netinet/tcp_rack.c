@@ -368,7 +368,7 @@ tcp_rack_adjust(struct tcpcb *tp, uint32_t cwin)
 			    SEQ_GEQ(tp->snd_nxt, seg->start_seq)) {
 				tp->snd_nxt = seg->end_seq;
 			}
-			continue;
+			break;
 		}
 		if (SEQ_LT(tp->snd_nxt, seg->end_seq)) {
 			max_len += tcp_seg_len(seg);

@@ -11,15 +11,31 @@ MIG_DEFS =	\
 
 MIG_HDRS = \
 
-DATAFILES = \
-	device_types.h device_port.h device_types.defs \
+# Files that are public on macOS, but private on embedded
+EMBEDDED_PRIVATE_DATAFILES = \
+	device_types.defs \
 	${MIG_DEFS}
+
+ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
+EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+else
+# Temporarily install some private defs in both usr/include and usr/local/include.
+# They belong in usr/local/include, but installing them in both locations will allow
+# clients that compile them by full path to switch without lock-step submissions.
+EXTRA_DATAFILES = device.defs device_types.defs
+EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+endif
+
+DATAFILES = $(sort \
+	device_types.h device_port.h \
+	${EXTRA_DATAFILES})
 
 MODULEMAPFILES = \
 	device.modulemap
 
-PRIVATE_DATAFILES = \
-	device_types.h
+PRIVATE_DATAFILES = $(sort \
+	device_types.h \
+	${EXTRA_PRIVATE_DATAFILES})
 
 # device_types.h has some userspace IOKit types that are used by
 # IOTypes.h clients. The types are guarded by `IOKIT` because they
@@ -35,6 +51,8 @@ MIGINCLUDES = \
 INSTALL_MI_LIST	= ${DATAFILES} ${_MIG_HDRS_} ${MIGINCLUDES}
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
+INSTALL_MI_LCL_LIST = ${EXTRA_PRIVATE_DATAFILES}
 
 INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES} ${_MIG_HDRS_} ${MIGINCLUDES}
 

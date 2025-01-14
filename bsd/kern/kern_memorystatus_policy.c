@@ -80,8 +80,10 @@ memorystatus_health_check(memorystatus_system_health_t *status)
 {
 	memset(status, 0, sizeof(memorystatus_system_health_t));
 #if CONFIG_JETSAM
-	status->msh_available_pages_below_pressure = memorystatus_avail_pages_below_pressure();
-	status->msh_available_pages_below_critical = memorystatus_avail_pages_below_critical();
+	memstat_evaluate_page_shortage(
+		&status->msh_available_pages_below_soft,
+		&status->msh_available_pages_below_idle,
+		&status->msh_available_pages_below_critical);
 	status->msh_compressor_is_low_on_space = (vm_compressor_low_on_space() == TRUE);
 	status->msh_compressed_pages_nearing_limit = vm_compressor_compressed_pages_nearing_limit();
 	status->msh_compressor_is_thrashing = !memorystatus_swap_all_apps && vm_compressor_is_thrashing();
@@ -150,7 +152,7 @@ memorystatus_pick_action(jetsam_state_t state,
 	bool is_system_healthy = memorystatus_is_system_healthy(&status);
 
 #if CONFIG_JETSAM
-	if (status.msh_available_pages_below_pressure || !is_system_healthy) {
+	if (status.msh_available_pages_below_soft || !is_system_healthy) {
 		/*
 		 * If swap is enabled, first check if we're running low or are out of swap space.
 		 */
@@ -188,9 +190,18 @@ memorystatus_pick_action(jetsam_state_t state,
 
 		if (highwater_remaining) {
 			*kill_cause = kMemorystatusKilledHiwat;
-			memorystatus_log("memorystatus: Looking for highwatermark kills.\n");
 			return MEMORYSTATUS_KILL_HIWATER;
 		}
+	}
+
+	if (status.msh_available_pages_below_idle &&
+	    os_atomic_load(&memstat_bucket[JETSAM_PRIORITY_IDLE].count, relaxed) > 0 &&
+	    is_system_healthy) {
+		/*
+		 * The system is below the idle threshold but otherwise healthy.
+		 */
+		*kill_cause = kMemorystatusKilledIdleExit;
+		return MEMORYSTATUS_KILL_IDLE;
 	}
 
 	if (is_system_healthy) {
@@ -210,6 +221,7 @@ memorystatus_pick_action(jetsam_state_t state,
 			return MEMORYSTATUS_KILL_AGGRESSIVE;
 		}
 	}
+
 	/*
 	 * The system is unhealthy and we either don't need aggressive jetsam
 	 * or are not allowed to deploy it.

@@ -1339,7 +1339,7 @@ tcp_detect_bad_rexmt(struct tcpcb *tp, struct tcphdr *th,
 			return 1;
 		}
 	} else {
-		if ((tp->t_rxtshift == 1 || (tp->t_flagsext & TF_SENT_TLPROBE)) &&
+		if ((tp->t_rxtshift == 1 || tcp_sent_tlp_retrans(tp)) &&
 		    rxtime > 0) {
 			tdiff = (int32_t)(tcp_now - rxtime);
 			if (tdiff < bad_rexmt_win) {
@@ -1414,7 +1414,7 @@ tcp_bad_rexmt_restore_state(struct tcpcb *tp, struct tcphdr *th)
  * not needed, then restore the congestion window to the state before that
  * transmission.
  *
- * If the last packet was sent in tail loss probe timeout, check if that
+ * If the last packet was sent as a tail loss probe retransmission, check if that
  * recovered the last packet. If so, that will indicate a real loss and
  * the congestion window needs to be lowered.
  */
@@ -1426,7 +1426,7 @@ tcp_bad_rexmt_check(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to)
 		++tcpstat.tcps_sndrexmitbad;
 		tcp_bad_rexmt_restore_state(tp, th);
 		tcp_ccdbg_trace(tp, th, TCP_CC_BAD_REXMT_RECOVERY);
-	} else if ((tp->t_flagsext & TF_SENT_TLPROBE) && tp->t_tlphighrxt > 0 &&
+	} else if (tcp_sent_tlp_retrans(tp) && tp->t_tlphighrxt > 0 &&
 	    SEQ_GEQ(th->th_ack, tp->t_tlphighrxt) &&
 	    !tcp_detect_bad_rexmt(tp, th, to, tp->t_tlpstart)) {
 		/*
@@ -2846,7 +2846,7 @@ findpcb:
 			TCP_LOG_STATE(tp, TCPS_LISTEN);
 			tp->t_state = TCPS_LISTEN;
 			tp->t_flags |= tp0->t_flags & (TF_NOPUSH | TF_NOOPT | TF_NODELAY);
-			tp->t_flagsext |= (tp0->t_flagsext & (TF_RXTFINDROP | TF_NOTIMEWAIT | TF_FASTOPEN));
+			tp->t_flagsext |= (tp0->t_flagsext & (TF_RXTFINDROP | TF_NOTIMEWAIT | TF_FASTOPEN | TF_L4S_ENABLED | TF_L4S_DISABLED));
 			tp->t_keepinit = tp0->t_keepinit;
 			tp->t_keepcnt = tp0->t_keepcnt;
 			tp->t_keepintvl = tp0->t_keepintvl;
@@ -2855,6 +2855,9 @@ findpcb:
 			tp->t_inpcb->inp_ip_ttl = tp0->t_inpcb->inp_ip_ttl;
 			if ((so->so_flags & SOF_NOTSENT_LOWAT) != 0) {
 				tp->t_notsent_lowat = tp0->t_notsent_lowat;
+			}
+			if (tp->t_flagsext & (TF_L4S_ENABLED | TF_L4S_DISABLED)) {
+				tcp_set_foreground_cc(so);
 			}
 			tp->t_inpcb->inp_flags2 |=
 			    tp0->t_inpcb->inp_flags2 & INP2_KEEPALIVE_OFFLOAD;
@@ -3490,6 +3493,7 @@ findpcb:
 	case TCPS_LISTEN: {
 		struct sockaddr_in *sin;
 		struct sockaddr_in6 *sin6;
+		int error = 0;
 
 		socket_lock_assert_owned(so);
 
@@ -3497,11 +3501,18 @@ findpcb:
 		inp->inp_log_flags = 0;
 		inp->inp_flags2 |= INP2_LOGGED_SUMMARY;
 
+		if (__improbable(inp->inp_flags2 & INP2_BIND_IN_PROGRESS)) {
+			TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, "LISTEN bind in progress");
+			goto drop;
+		}
+		inp_enter_bind_in_progress(so);
+
 		if (isipv6) {
 			sin6 = kalloc_type(struct sockaddr_in6, Z_NOWAIT | Z_ZERO);
 			if (sin6 == NULL) {
+				error = ENOMEM;
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, "LISTEN kalloc_type failed");
-				goto drop;
+				goto pcbconnect_done;
 			}
 			sin6->sin6_family = AF_INET6;
 			sin6->sin6_len = sizeof(*sin6);
@@ -3517,21 +3528,22 @@ findpcb:
 				inp->inp_lifscope = in6_addr2scopeid(ifp, &inp->in6p_laddr);
 				in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
 			}
-			if (in6_pcbconnect(inp, SA(sin6), kernel_proc)) {
+			if ((error = in6_pcbconnect(inp, SA(sin6), kernel_proc)) != 0) {
 				inp->in6p_laddr = laddr6;
 				kfree_type(struct sockaddr_in6, sin6);
 				inp->inp_lifscope = lifscope;
 				in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, " LISTEN in6_pcbconnect failed");
-				goto drop;
+				goto pcbconnect_done;
 			}
 			kfree_type(struct sockaddr_in6, sin6);
 		} else {
 			socket_lock_assert_owned(so);
 			sin = kalloc_type(struct sockaddr_in, Z_NOWAIT);
 			if (sin == NULL) {
+				error = ENOMEM;
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, "LISTEN kalloc_type failed");
-				goto drop;
+				goto pcbconnect_done;
 			}
 			sin->sin_family = AF_INET;
 			sin->sin_len = sizeof(*sin);
@@ -3542,13 +3554,18 @@ findpcb:
 			if (inp->inp_laddr.s_addr == INADDR_ANY) {
 				inp->inp_laddr = ip->ip_dst;
 			}
-			if (in_pcbconnect(inp, SA(sin), kernel_proc, IFSCOPE_NONE, NULL)) {
+			if ((error = in_pcbconnect(inp, SA(sin), kernel_proc, IFSCOPE_NONE, NULL)) != 0) {
 				inp->inp_laddr = laddr;
 				kfree_type(struct sockaddr_in, sin);
 				TCP_LOG_DROP_PCB(TCP_LOG_HDR, th, tp, false, " LISTEN in_pcbconnect failed");
-				goto drop;
+				goto pcbconnect_done;
 			}
 			kfree_type(struct sockaddr_in, sin);
+		}
+pcbconnect_done:
+		inp_exit_bind_in_progress(so);
+		if (error != 0) {
+			goto drop;
 		}
 
 		tcp_dooptions(tp, optp, optlen, th, &to);
@@ -6826,7 +6843,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	struct inpcb *inp;
 	struct socket *so;
 	int origoffer = offer;
-	int isnetlocal = 0;
 	int isipv6;
 	int min_protoh;
 
@@ -6849,7 +6865,6 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	} else {
 		rt = tcp_rtlookup(inp, input_ifscope);
 	}
-	isnetlocal = (tp->t_flags & TF_LOCAL);
 
 	if (rt == NULL) {
 		tp->t_maxopd = tp->t_maxseg = isipv6 ? tcp_v6mssdflt : tcp_mssdflt;
@@ -6904,11 +6919,12 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 	if (tp->t_srtt == 0 && (rtt = rt->rt_rmx.rmx_rtt) != 0) {
 		tcp_getrt_rtt(tp, rt);
 	} else {
-		tp->t_rttmin = isnetlocal ? tcp_TCPTV_MIN : TCPTV_REXMTMIN;
+		tp->t_rttmin = TCPTV_REXMTMIN;
 	}
 
 	mss = (isipv6 ? tcp_maxmtu6(rt) : tcp_maxmtu(rt));
 
+	mss = tcp_get_effective_mtu(rt, mss);
 #if NECP
 	// At this point, the mss is just the MTU. Adjust if necessary.
 	mss = necp_socket_get_effective_mtu(inp, mss);
@@ -6918,10 +6934,8 @@ tcp_mss(struct tcpcb *tp, int offer, unsigned int input_ifscope)
 
 	if (rt->rt_rmx.rmx_mtu == 0) {
 		if (isipv6) {
-			if (!isnetlocal) {
-				mss = min(mss, tcp_v6mssdflt);
-			}
-		} else if (!isnetlocal) {
+			mss = min(mss, tcp_v6mssdflt);
+		} else {
 			mss = min(mss, tcp_mssdflt);
 		}
 	}
@@ -7057,6 +7071,9 @@ tcp_mssopt(struct tcpcb *tp)
 	}
 
 	mss = (isipv6 ? tcp_maxmtu6(rt) : tcp_maxmtu(rt));
+
+	mss = tcp_get_effective_mtu(rt, mss);
+
 	/* Route locked during lookup above */
 	RT_UNLOCK(rt);
 

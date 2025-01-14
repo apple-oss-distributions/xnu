@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2022, 2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2192,7 +2192,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	socket_lock(so, 1);
 
 	if (NEED_DGRAM_FLOW_TRACKING(so)) {
-		dgram_flow_entry = soflow_get_flow(so, NULL, addr, control, resid, true, 0);
+		dgram_flow_entry = soflow_get_flow(so, NULL, addr, control, resid, SOFLOW_DIRECTION_OUTBOUND, 0);
 	}
 
 	/*
@@ -2756,7 +2756,7 @@ sosend_list(struct socket *so, struct mbuf *pktlist, size_t total_len, u_int *pk
 	so_update_policy(so);
 
 	if (NEED_DGRAM_FLOW_TRACKING(so)) {
-		dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, total_len, true, 0);
+		dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, total_len, SOFLOW_DIRECTION_OUTBOUND, 0);
 	}
 
 #if NECP

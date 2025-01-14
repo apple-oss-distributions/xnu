@@ -36,6 +36,9 @@
 /* Availability macros to check for support */
 #define XNU_HAS_TRUST_CACHE_LOADING 1
 #define XNU_HAS_TRUST_CACHE_CHECK_RUNTIME_FOR_UUID 1
+#if kLibTrustCacheHasQueryForREM
+#define XNU_HAS_TRUST_CACHE_QUERY_FOR_REM 1
+#endif
 
 #ifdef XNU_PLATFORM_BridgeOS
 #define XNU_HAS_LEGACY_TRUST_CACHE_LOADING 1
@@ -145,13 +148,25 @@ load_legacy_trust_cache(
  * Query a trust cache based on the type passed in.
  *
  * Based on the system environment, the trust cache may be queried from kernel memory, or it may
- * be queried from memory controller by the kernel monitor environment.
+ * be queried from memory controlled by the kernel monitor environment.
  */
 kern_return_t
 query_trust_cache(
 	TCQueryType_t query_type,
 	const uint8_t cdhash[kTCEntryHashSize],
 	TrustCacheQueryToken_t *query_token);
+
+/**
+ * Query the set of loaded trust caches to find the most relevant REM permissions for a given
+ * CDHash.
+ *
+ * Based on the system environment, the trust cache may be queried from kernel memory, or it may
+ * be queried from memory controlled by the kernel monitor environment.
+ */
+kern_return_t
+query_trust_cache_for_rem(
+	const uint8_t cdhash[kTCEntryHashSize],
+	uint8_t *rem_perms);
 
 __END_DECLS
 

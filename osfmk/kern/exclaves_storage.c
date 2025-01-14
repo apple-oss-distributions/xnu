@@ -46,7 +46,6 @@
 #include "exclaves_storage.h"
 #include "exclaves_boot.h"
 
-static const char *STORAGE_EXCLAVE_BUF_ID = "com.apple.named_buffer.6";
 #define STORAGE_EXCLAVE_BUF_SIZE (4 * 1024 * 1024)
 
 static int
@@ -70,12 +69,33 @@ verify_storage_buf_offset(uint64_t buf, uint64_t length)
 	return 0;
 }
 
+static int
+consolidate_storage_error(int error)
+{
+	switch (error) {
+	case XNUUPCALLS_STORAGEUPCALLSERROR_NOSUCHFILE:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_IOERROR:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_OUTOFMEMORY:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_ACCESSERROR:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_INVALIDARG:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_NOSPACELEFT:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_NOTSUPPORTED:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_BUFFERTOOSMALL:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_NAMETOOLONG:
+	case XNUUPCALLS_STORAGEUPCALLSERROR_UNKNOWN:
+		return error;
+	default:
+		return XNUUPCALLS_STORAGEUPCALLSERROR_UNKNOWN;
+	}
+}
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Upcalls
 
+/* Legacy upcall handlers */
+
 tb_error_t
-exclaves_storage_upcall_root(const uint8_t exclaveid[_Nonnull 32],
+exclaves_storage_upcall_legacy_root(const uint8_t exclaveid[_Nonnull 32],
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_root__result_s))
 {
 	exclaves_debug_printf(show_storage_upcalls,
@@ -86,7 +106,7 @@ exclaves_storage_upcall_root(const uint8_t exclaveid[_Nonnull 32],
 	xnuupcalls_xnuupcalls_root__result_s result = {};
 
 	if ((error = verify_string_length((const char *)&exclaveid[0], 32))) {
-		xnuupcalls_xnuupcalls_root__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_root__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 	error = vfs_exclave_fs_root((const char *)&exclaveid[0], &rootid);
@@ -94,7 +114,7 @@ exclaves_storage_upcall_root(const uint8_t exclaveid[_Nonnull 32],
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_root failed with %d\n",
 		    error);
-		xnuupcalls_xnuupcalls_root__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_root__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_root return "
@@ -106,7 +126,7 @@ exclaves_storage_upcall_root(const uint8_t exclaveid[_Nonnull 32],
 }
 
 tb_error_t
-exclaves_storage_upcall_open(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_open(const enum xnuupcalls_fstag_s fstag,
     const uint64_t rootid, const uint8_t name[_Nonnull 256],
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_open__result_s))
 {
@@ -117,7 +137,7 @@ exclaves_storage_upcall_open(const enum xnuupcalls_fstag_s fstag,
 	xnuupcalls_xnuupcalls_open__result_s result = {};
 
 	if ((error = verify_string_length((const char *)&name[0], 256))) {
-		xnuupcalls_xnuupcalls_open__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_open__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 	error = vfs_exclave_fs_open((uint32_t)fstag, rootid,
@@ -126,7 +146,7 @@ exclaves_storage_upcall_open(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_open failed with %d\n",
 		    error);
-		xnuupcalls_xnuupcalls_open__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_open__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_open return "
@@ -138,7 +158,7 @@ exclaves_storage_upcall_open(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_close(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_close(const enum xnuupcalls_fstag_s fstag,
     const uint64_t fileid, tb_error_t (^completion)(xnuupcalls_xnuupcalls_close__result_s))
 {
 	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
@@ -151,7 +171,7 @@ exclaves_storage_upcall_close(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_close failed with "
 		    "%d\n", error);
-		xnuupcalls_xnuupcalls_close__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_close__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_close succeeded\n");
@@ -162,7 +182,7 @@ exclaves_storage_upcall_close(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_create(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_create(const enum xnuupcalls_fstag_s fstag,
     const uint64_t rootid, const uint8_t name[_Nonnull 256],
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_create__result_s))
 {
@@ -173,7 +193,7 @@ exclaves_storage_upcall_create(const enum xnuupcalls_fstag_s fstag,
 	xnuupcalls_xnuupcalls_create__result_s result = {};
 
 	if ((error = verify_string_length((const char *)&name[0], 256))) {
-		xnuupcalls_xnuupcalls_create__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_create__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 	error = vfs_exclave_fs_create((uint32_t)fstag, rootid,
@@ -182,7 +202,7 @@ exclaves_storage_upcall_create(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_create failed with"
 		    " %d\n", error);
-		xnuupcalls_xnuupcalls_create__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_create__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_create return "
@@ -234,13 +254,13 @@ is_recovery_environment(void)
 	       dt_string_is_equal(&chosen, "osenvironment", environment);
 }
 
-static exclaves_resource_t *storage_resource = NULL;
-static int use_shared_mem_vers = 0;
+static char *storage_buffer = NULL;
 
 static kern_return_t
 exclaves_storage_init(void)
 {
 	const char *v2_seg_name = "com.apple.storage.backend";
+	exclaves_resource_t *storage_resource = NULL;
 
 	kern_return_t kr = exclaves_resource_shared_memory_map(
 		EXCLAVES_DOMAIN_KERNEL, v2_seg_name,
@@ -249,9 +269,11 @@ exclaves_storage_init(void)
 		&storage_resource);
 
 	if (kr == KERN_SUCCESS) {
-		use_shared_mem_vers = 2;
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls] Using SharedMemory V2 segment for IO");
+		storage_buffer =
+		    exclaves_resource_shared_memory_get_buffer(storage_resource,
+		    NULL);
 		return kr;
 	}
 
@@ -261,51 +283,24 @@ exclaves_storage_init(void)
 		    v2_seg_name, kr);
 	}
 
-	kr = exclaves_named_buffer_map(
-		EXCLAVES_DOMAIN_KERNEL, STORAGE_EXCLAVE_BUF_ID,
-		STORAGE_EXCLAVE_BUF_SIZE,
-		EXCLAVES_BUFFER_PERM_READ | EXCLAVES_BUFFER_PERM_WRITE,
-		&storage_resource);
-	if (kr != KERN_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "[storage_upcalls] exclaves_named_buffer_map failed with %d\n", kr);
-		if (is_restore() || bsd_rooted_ramdisk() || is_recovery_environment()) {
-			// Don't fail boot here. Fail the upcalls that try to use the sharemem buffer instead.
-			// This is to prevent panic during boot-time when xnu-proxy was initialized before StorageExclave
-			// This can be reverted once Storage switched to V2
-			storage_resource = NULL;
-			kr = KERN_SUCCESS;
-		}
-	} else {
-		use_shared_mem_vers = 1;
-		exclaves_debug_printf(show_storage_upcalls,
-		    "[storage_upcalls] Using legacy SharedMemory segment for IO");
+	if (is_restore() || bsd_rooted_ramdisk() || is_recovery_environment() ||
+	    exclaves_requirement_is_relaxed(EXCLAVES_R_STORAGE)) {
+		// Set the relaxed bit so the rest of the system can know that
+		// it's expected that storage is not available.
+		exclaves_requirement_relax(EXCLAVES_R_STORAGE);
+
+		// Don't fail boot here. Fail the upcalls that try to use the
+		// storage buffer instead.
+		storage_resource = NULL;
+		kr = KERN_SUCCESS;
 	}
 
 	return kr;
 }
 EXCLAVES_BOOT_TASK(exclaves_storage_init, EXCLAVES_BOOT_RANK_SECOND);
 
-static int
-storage_resource_io(exclaves_resource_t *resource, off_t offset,
-    size_t len, int (^cb)(char *, size_t))
-{
-	if (resource == NULL) {
-		return ENOMEM;
-	}
-
-	switch (use_shared_mem_vers) {
-	case 1:
-		return exclaves_named_buffer_io(resource, offset, len, cb);
-	case 2:
-		return exclaves_resource_shared_memory_io(resource, offset, len, cb);
-	default:
-		return ENOMEM;
-	}
-}
-
 tb_error_t
-exclaves_storage_upcall_read(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_read(const enum xnuupcalls_fstag_s fstag,
     const uint64_t fileid, const struct xnuupcalls_iodesc_s *descriptor,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_read__result_s))
 {
@@ -316,7 +311,7 @@ exclaves_storage_upcall_read(const enum xnuupcalls_fstag_s fstag,
 
 	xnuupcalls_xnuupcalls_read__result_s result = {};
 
-	if (!storage_resource) {
+	if (!storage_buffer) {
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls] shared memory buffer not initialized\n");
 		xnuupcalls_xnuupcalls_read__result_init_failure(&result, ENOMEM);
@@ -325,25 +320,19 @@ exclaves_storage_upcall_read(const enum xnuupcalls_fstag_s fstag,
 
 	error = verify_storage_buf_offset(descriptor->buf, descriptor->length);
 	if (error != 0) {
-		xnuupcalls_xnuupcalls_read__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_read__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 
-	__block uint64_t off = descriptor->fileoffset;
-	error = storage_resource_io(storage_resource, descriptor->buf,
-	    descriptor->length, ^(char *buffer, size_t size) {
-		int ret = vfs_exclave_fs_read((uint32_t)fstag,
-		fileid, off, size, buffer);
-		off += size;
-		return ret;
-	});
-
+	error = vfs_exclave_fs_read((uint32_t)fstag, fileid,
+	    descriptor->fileoffset, descriptor->length,
+	    storage_buffer + descriptor->buf);
 	if (error) {
 		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
 		    "read %d %lld %lld %lld %lld failed with errno %d",
 		    fstag, fileid, descriptor->buf,
 		    descriptor->fileoffset, descriptor->length, error);
-		xnuupcalls_xnuupcalls_read__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_read__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_read succeeded\n");
@@ -354,7 +343,7 @@ exclaves_storage_upcall_read(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_write(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_write(const enum xnuupcalls_fstag_s fstag,
     const uint64_t fileid, const struct xnuupcalls_iodesc_s *descriptor,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_write__result_s))
 {
@@ -365,7 +354,7 @@ exclaves_storage_upcall_write(const enum xnuupcalls_fstag_s fstag,
 
 	xnuupcalls_xnuupcalls_write__result_s result = {};
 
-	if (!storage_resource) {
+	if (!storage_buffer) {
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls] shared memory buffer not initialized\n");
 		xnuupcalls_xnuupcalls_write__result_init_failure(&result, ENOMEM);
@@ -374,26 +363,19 @@ exclaves_storage_upcall_write(const enum xnuupcalls_fstag_s fstag,
 
 	error = verify_storage_buf_offset(descriptor->buf, descriptor->length);
 	if (error != 0) {
-		xnuupcalls_xnuupcalls_write__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_write__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 
-
-	__block uint64_t off = descriptor->fileoffset;
-	error = storage_resource_io(storage_resource, descriptor->buf,
-	    descriptor->length, ^(char *buffer, size_t size) {
-		int ret = vfs_exclave_fs_write((uint32_t)fstag,
-		fileid, off, size, buffer);
-		off += size;
-		return ret;
-	});
-
+	error = vfs_exclave_fs_write((uint32_t)fstag, fileid,
+	    descriptor->fileoffset, descriptor->length,
+	    storage_buffer + descriptor->buf);
 	if (error) {
 		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
 		    "write %d %lld %lld %lld %lld failed with errno %d\n",
 		    fstag, fileid, descriptor->buf, descriptor->fileoffset,
 		    descriptor->length, error);
-		xnuupcalls_xnuupcalls_write__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_write__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_write succeeded\n");
@@ -404,7 +386,7 @@ exclaves_storage_upcall_write(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_remove(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_remove(const enum xnuupcalls_fstag_s fstag,
     const uint64_t rootid, const uint8_t name[_Nonnull 256],
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_remove__result_s))
 {
@@ -414,7 +396,7 @@ exclaves_storage_upcall_remove(const enum xnuupcalls_fstag_s fstag,
 	xnuupcalls_xnuupcalls_remove__result_s result = {};
 
 	if ((error = verify_string_length((const char *)&name[0], 256))) {
-		xnuupcalls_xnuupcalls_remove__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_remove__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 	error = vfs_exclave_fs_remove((uint32_t)fstag, rootid,
@@ -423,7 +405,7 @@ exclaves_storage_upcall_remove(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_remove failed with "
 		    "%d\n", error);
-		xnuupcalls_xnuupcalls_remove__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_remove__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_remove succeeded\n");
@@ -434,7 +416,7 @@ exclaves_storage_upcall_remove(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_sync(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_sync(const enum xnuupcalls_fstag_s fstag,
     const enum xnuupcalls_syncop_s op,
     const uint64_t fileid, tb_error_t (^completion)(xnuupcalls_xnuupcalls_sync__result_s))
 {
@@ -448,7 +430,7 @@ exclaves_storage_upcall_sync(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_sync failed with %d\n",
 		    error);
-		xnuupcalls_xnuupcalls_sync__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_sync__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_sync succeeded\n");
@@ -459,7 +441,7 @@ exclaves_storage_upcall_sync(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_readdir(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_readdir(const enum xnuupcalls_fstag_s fstag,
     const uint64_t fileid, const uint64_t buf,
     const uint32_t length, tb_error_t (^completion)(xnuupcalls_xnuupcalls_readdir__result_s))
 {
@@ -471,7 +453,7 @@ exclaves_storage_upcall_readdir(const enum xnuupcalls_fstag_s fstag,
 
 	xnuupcalls_xnuupcalls_readdir__result_s result = {};
 
-	if (!storage_resource) {
+	if (!storage_buffer) {
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls] shared memory buffer not initialized\n");
 		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, ENOMEM);
@@ -479,46 +461,29 @@ exclaves_storage_upcall_readdir(const enum xnuupcalls_fstag_s fstag,
 	}
 
 	if ((error = verify_storage_buf_offset(buf, length))) {
-		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, consolidate_storage_error(error));
 		return completion(result);
 	}
 
-	/*
-	 * When we are able to map exclaves shared memory into kernel
-	 * virtual address space, this temporary buffer will no longer
-	 * be required.
-	 */
-	char *tmpbuf = kalloc_data(length, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	error = vfs_exclave_fs_readdir((uint32_t)fstag, fileid,
-	    tmpbuf, length, &count);
-	assert3u(error, ==, 0);
-
-	__block char *p = tmpbuf;
-	error = storage_resource_io(storage_resource, buf, length,
-	    ^(char *buffer, size_t size) {
-		memcpy(buffer, p, size);
-		p += size;
-		return 0;
-	});
-	assert3u(error, ==, 0);
-	kfree_data(tmpbuf, length);
-
+	    storage_buffer, length, &count);
 	if (error) {
 		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
-		    "readdir %d %lld %lld %d failed with errno %d\n",
+		    "vfs_exclave_fs_readdir %d %lld %lld %d failed with errno %d\n",
 		    fstag, fileid, buf, length, error);
-		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, error);
-	} else {
-		exclaves_debug_printf(show_storage_upcalls,
-		    "[storage_upcalls_server] vfs_exclave_fs_readdir succeeded\n");
-		xnuupcalls_xnuupcalls_readdir__result_init_success(&result, count);
+		xnuupcalls_xnuupcalls_readdir__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
 	}
+
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] readdir succeeded\n");
+	xnuupcalls_xnuupcalls_readdir__result_init_success(&result, count);
 
 	return completion(result);
 }
 
 tb_error_t
-exclaves_storage_upcall_getsize(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_getsize(const enum xnuupcalls_fstag_s fstag,
     const uint64_t fileid,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_getsize__result_s result))
 {
@@ -534,7 +499,7 @@ exclaves_storage_upcall_getsize(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_getsize(%d, %lld) "
 		    "failed with %d\n", fstag, fileid, error);
-		xnuupcalls_xnuupcalls_getsize__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_getsize__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_getsize succeeded\n");
@@ -545,7 +510,7 @@ exclaves_storage_upcall_getsize(const enum xnuupcalls_fstag_s fstag,
 }
 
 tb_error_t
-exclaves_storage_upcall_sealstate(const enum xnuupcalls_fstag_s fstag,
+exclaves_storage_upcall_legacy_sealstate(const enum xnuupcalls_fstag_s fstag,
     tb_error_t (^completion)(xnuupcalls_xnuupcalls_sealstate__result_s result))
 {
 	exclaves_debug_printf(show_storage_upcalls,
@@ -560,11 +525,383 @@ exclaves_storage_upcall_sealstate(const enum xnuupcalls_fstag_s fstag,
 		exclaves_debug_printf(show_errors,
 		    "[storage_upcalls_server] vfs_exclave_fs_sealstate(%d) "
 		    "failed with %d\n", fstag, error);
-		xnuupcalls_xnuupcalls_sealstate__result_init_failure(&result, error);
+		xnuupcalls_xnuupcalls_sealstate__result_init_failure(&result, consolidate_storage_error(error));
 	} else {
 		exclaves_debug_printf(show_storage_upcalls,
 		    "[storage_upcalls_server] vfs_exclave_fs_sealstate succeeded\n");
 		xnuupcalls_xnuupcalls_sealstate__result_init_success(&result, sealed);
+	}
+
+	return completion(result);
+}
+
+/* Upcall handlers */
+
+tb_error_t
+exclaves_storage_upcall_root(const uint8_t exclaveid[_Nonnull 32],
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_root__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] root %s\n", exclaveid);
+
+	int error;
+	uint64_t rootid;
+	xnuupcallsv2_storageupcallsprivate_root__result_s result = {};
+
+	if ((error = verify_string_length((const char *)&exclaveid[0], 32))) {
+		xnuupcallsv2_storageupcallsprivate_root__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+	error = vfs_exclave_fs_root((const char *)&exclaveid[0], &rootid);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_root failed with %d\n",
+		    error);
+		xnuupcallsv2_storageupcallsprivate_root__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_root return "
+		    "rootId %lld\n", rootid);
+		xnuupcallsv2_storageupcallsprivate_root__result_init_success(&result, rootid);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_open(const uint32_t fstag,
+    const uint64_t rootid, const uint8_t name[_Nonnull 256],
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_open__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "open %d %lld %s\n", fstag, rootid, name);
+	int error;
+	uint64_t fileid;
+	xnuupcallsv2_storageupcallsprivate_open__result_s result = {};
+
+	if ((error = verify_string_length((const char *)&name[0], 256))) {
+		xnuupcallsv2_storageupcallsprivate_open__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+	error = vfs_exclave_fs_open(fstag, rootid,
+	    (const char *)&name[0], &fileid);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_open failed with %d\n",
+		    error);
+		xnuupcallsv2_storageupcallsprivate_open__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_open return "
+		    "fileId %lld\n", fileid);
+		xnuupcallsv2_storageupcallsprivate_open__result_init_success(&result, fileid);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_close(const uint32_t fstag,
+    const uint64_t fileid, tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_close__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "close %d %lld\n", fstag, fileid);
+	int error;
+	xnuupcallsv2_storageupcallsprivate_close__result_s result = {};
+
+	error = vfs_exclave_fs_close(fstag, fileid);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_close failed with "
+		    "%d\n", error);
+		xnuupcallsv2_storageupcallsprivate_close__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_close succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_close__result_init_success(&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_create(const uint32_t fstag,
+    const uint64_t rootid, const uint8_t name[_Nonnull 256],
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_create__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server]"
+	    " create %d %lld %s\n", fstag, rootid, name);
+	int error;
+	uint64_t fileid;
+	xnuupcallsv2_storageupcallsprivate_create__result_s result = {};
+
+	if ((error = verify_string_length((const char *)&name[0], 256))) {
+		xnuupcallsv2_storageupcallsprivate_create__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+	error = vfs_exclave_fs_create(fstag, rootid,
+	    (const char *)&name[0], &fileid);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_create failed with"
+		    " %d\n", error);
+		xnuupcallsv2_storageupcallsprivate_create__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_create return "
+		    "fileId %lld\n", fileid);
+		xnuupcallsv2_storageupcallsprivate_create__result_init_success(&result, fileid);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_read(const uint32_t fstag,
+    const uint64_t fileid, const struct xnuupcallsv2_iodesc_s *descriptor,
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_read__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "read %d %lld %lld %lld %lld\n", fstag, fileid, descriptor->bufferoffset,
+	    descriptor->fileoffset, descriptor->length);
+	int error;
+
+	xnuupcallsv2_storageupcallsprivate_read__result_s result = {};
+
+	if (!storage_buffer) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcallsv2_storageupcallsprivate_read__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
+
+	error = verify_storage_buf_offset(descriptor->bufferoffset, descriptor->length);
+	if (error != 0) {
+		xnuupcallsv2_storageupcallsprivate_read__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+
+	error = vfs_exclave_fs_read((uint32_t)fstag, fileid,
+	    descriptor->fileoffset, descriptor->length,
+	    storage_buffer + descriptor->bufferoffset);
+	if (error) {
+		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
+		    "read %d %lld %lld %lld %lld failed with errno %d",
+		    fstag, fileid, descriptor->bufferoffset,
+		    descriptor->fileoffset, descriptor->length, error);
+		xnuupcallsv2_storageupcallsprivate_read__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_read succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_read__result_init_success(&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_write(const uint32_t fstag,
+    const uint64_t fileid, const struct xnuupcallsv2_iodesc_s *descriptor,
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_write__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "write %d %lld %lld %lld %lld\n", fstag, fileid, descriptor->bufferoffset,
+	    descriptor->fileoffset, descriptor->length);
+	int error;
+
+	xnuupcallsv2_storageupcallsprivate_write__result_s result = {};
+
+	if (!storage_buffer) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcallsv2_storageupcallsprivate_write__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
+
+	error = verify_storage_buf_offset(descriptor->bufferoffset, descriptor->length);
+	if (error != 0) {
+		xnuupcallsv2_storageupcallsprivate_write__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+
+
+	error = vfs_exclave_fs_write((uint32_t)fstag, fileid,
+	    descriptor->fileoffset, descriptor->length,
+	    storage_buffer + descriptor->bufferoffset);
+	if (error) {
+		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
+		    "write %d %lld %lld %lld %lld failed with errno %d\n",
+		    fstag, fileid, descriptor->bufferoffset, descriptor->fileoffset,
+		    descriptor->length, error);
+		xnuupcallsv2_storageupcallsprivate_write__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_write succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_write__result_init_success(&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_remove(const uint32_t fstag,
+    const uint64_t rootid, const uint8_t name[_Nonnull 256],
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_remove__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "remove %d %lld %s\n", fstag, rootid, name);
+	int error;
+	xnuupcallsv2_storageupcallsprivate_remove__result_s result = {};
+
+	if ((error = verify_string_length((const char *)&name[0], 256))) {
+		xnuupcallsv2_storageupcallsprivate_remove__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+	error = vfs_exclave_fs_remove(fstag, rootid,
+	    (const char *)&name[0]);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_remove failed with "
+		    "%d\n", error);
+		xnuupcallsv2_storageupcallsprivate_remove__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_remove succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_remove__result_init_success(&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_sync(const uint32_t fstag,
+    const xnuupcallsv2_syncop_s *op,
+    const uint64_t fileid, tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_sync__result_s))
+{
+	int error;
+	uint64_t _op;
+	xnuupcallsv2_storageupcallsprivate_sync__result_s result = {};
+
+	switch (op->tag) {
+	case XNUUPCALLSV2_SYNCOP__BARRIER:
+		_op = EXCLAVE_FS_SYNC_OP_BARRIER;
+		break;
+	case XNUUPCALLSV2_SYNCOP__FULL:
+		_op = EXCLAVE_FS_SYNC_OP_FULL;
+		break;
+	default:
+		// unknown op, set to selector value for debug
+		_op = op->tag;
+	}
+
+	exclaves_debug_printf(show_storage_upcalls, "[storage_upcalls_server] "
+	    "sync %d %lld %llu\n", fstag, fileid, _op);
+
+	error = vfs_exclave_fs_sync(fstag, fileid, _op);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_sync (op: %llu) failed with %d\n",
+		    _op, error);
+		xnuupcallsv2_storageupcallsprivate_sync__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_sync succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_sync__result_init_success(&result);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_readdir(const uint32_t fstag,
+    const uint64_t fileid, const uint64_t buf,
+    const uint32_t length, tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_readdir__result_s))
+{
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] readdir %d %lld %lld %d\n",
+	    fstag, fileid, buf, length);
+	int error;
+	int32_t count;
+
+	xnuupcallsv2_storageupcallsprivate_readdir__result_s result = {};
+
+	if (!storage_buffer) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls] shared memory buffer not initialized\n");
+		xnuupcallsv2_storageupcallsprivate_readdir__result_init_failure(&result, ENOMEM);
+		return completion(result);
+	}
+
+	if ((error = verify_storage_buf_offset(buf, length))) {
+		xnuupcallsv2_storageupcallsprivate_readdir__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+
+	error = vfs_exclave_fs_readdir((uint32_t)fstag, fileid, storage_buffer,
+	    length, &count);
+	if (error) {
+		exclaves_debug_printf(show_errors, "[storage_upcalls_server] "
+		    "vfs_exclave_fs_readdir %d %lld %lld %d failed with errno %d\n",
+		    fstag, fileid, buf, length, error);
+		xnuupcallsv2_storageupcallsprivate_readdir__result_init_failure(&result, consolidate_storage_error(error));
+		return completion(result);
+	}
+
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] readdir succeeded\n");
+	xnuupcallsv2_storageupcallsprivate_readdir__result_init_success(&result, count);
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_getsize(const uint32_t fstag,
+    const uint64_t fileid,
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_getsize__result_s result))
+{
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] getsize %d %lld\n",
+	    fstag, fileid);
+	int error;
+	uint64_t size;
+	xnuupcallsv2_storageupcallsprivate_getsize__result_s result = {};
+
+	error = vfs_exclave_fs_getsize(fstag, fileid, &size);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_getsize(%d, %lld) "
+		    "failed with %d\n", fstag, fileid, error);
+		xnuupcallsv2_storageupcallsprivate_getsize__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_getsize succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_getsize__result_init_success(&result, size);
+	}
+
+	return completion(result);
+}
+
+tb_error_t
+exclaves_storage_upcall_sealstate(const uint32_t fstag,
+    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_sealstate__result_s result))
+{
+	exclaves_debug_printf(show_storage_upcalls,
+	    "[storage_upcalls_server] sealstate %d\n",
+	    fstag);
+	int error;
+	bool sealed;
+	xnuupcallsv2_storageupcallsprivate_sealstate__result_s result = {};
+
+	error = vfs_exclave_fs_sealstate(fstag, &sealed);
+	if (error) {
+		exclaves_debug_printf(show_errors,
+		    "[storage_upcalls_server] vfs_exclave_fs_sealstate(%d) "
+		    "failed with %d\n", fstag, error);
+		xnuupcallsv2_storageupcallsprivate_sealstate__result_init_failure(&result, consolidate_storage_error(error));
+	} else {
+		exclaves_debug_printf(show_storage_upcalls,
+		    "[storage_upcalls_server] vfs_exclave_fs_sealstate succeeded\n");
+		xnuupcallsv2_storageupcallsprivate_sealstate__result_init_success(&result, sealed);
 	}
 
 	return completion(result);

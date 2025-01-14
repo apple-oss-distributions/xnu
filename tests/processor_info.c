@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2019 Apple Inc. All rights reserved.
+ */
+
 #include <darwintest.h>
 #include <inttypes.h>
 #if __arm64__
@@ -15,8 +19,9 @@ T_DECL(processor_cpu_stat64,
     T_META_NAMESPACE("xnu.arm"),
     T_META_RADAR_COMPONENT_NAME("xnu"),
     T_META_RADAR_COMPONENT_VERSION("arm"),
-    T_META_OWNER("mwm"),
-    T_META_TAG_VM_PREFERRED)
+    T_META_OWNER("mwidmann"),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133956573 */))
 {
 #if !__arm64__
 	T_SKIP("processor statistics only available on ARM");

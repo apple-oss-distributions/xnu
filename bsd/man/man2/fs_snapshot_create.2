@@ -69,9 +69,6 @@ Available snapshots along with their attributes can be listed by calling
 which is to be used in exactly the same way as
 .Xr getattrlistbulk 2 .
 .
-The
-.Fa flags
-parameter specifies the options that can be passed. No options are currently defined.
 .Pp
 Snapshots may be useful for backing up the Filesystem and to restore the Filesystem to a previous state.
 Snapshots are expected to consume no additional storage on creation but  might consume additional storage as the active
@@ -89,6 +86,20 @@ changes made to the filesystem (including snapshots created after the snapshot b
 .Pp
 All snapshot functions  require superuser privileges and also require an additional entitlement.
 .
+.Pp
+The
+.Fa flags
+parameter specifies the options that can be passed. only
+.Fn fs_snapshot_mount
+options are currently defined:
+.Bl -tag -width SNAPSHOT_MNT_IGNORE_OWNERSHIP
+.It Dv SNAPSHOT_MNT_DONTBROWSE
+File system is not appropriate path to user data.
+.It Dv SNAPSHOT_MNT_IGNORE_OWNERSHIP
+Treats all files on the disk as though they are owned by the current user, no matter who actually owns them.
+.It Dv SNAPSHOT_MNT_NOFOLLOW
+Don't follow symlink when resolving mount point.
+.El
 .Sh RETURN VALUES
 Upon successful completion,
 .Fn fs_snapshot_create

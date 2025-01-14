@@ -56,7 +56,7 @@ __enum_closed_decl(exclaves_boot_status_t, uint32_t, {
 	EXCLAVES_BS_NOT_DEFINED = 0,
 	EXCLAVES_BS_NOT_SUPPORTED = 1,
 	EXCLAVES_BS_NOT_STARTED = 2,
-	EXCLAVES_BS_BOOTED_STAGE_2 = 3,
+	EXCLAVES_BS_BOOTED_EXCLAVECORE = 3,
 	EXCLAVES_BS_BOOTED_EXCLAVEKIT = 4,
 	EXCLAVES_BS_BOOTED_FAILURE = 5,
 });
@@ -197,7 +197,7 @@ exclaves_boot_status_is_supported(exclaves_boot_status_t status)
 }
 
 static kern_return_t
-exclaves_boot_stage_2(void)
+exclaves_boot_exclavecore(void)
 {
 	lck_mtx_assert(&exclaves_boot_lock, LCK_MTX_ASSERT_OWNED);
 
@@ -231,7 +231,7 @@ exclaves_boot_stage_2(void)
 		 * If exclaves failed to boot, there's not much that can be done other
 		 * than panic.
 		 */
-		panic("Exclaves stage2 boot failed");
+		panic("exclaves early boot failed");
 	}
 
 	/*
@@ -242,7 +242,7 @@ exclaves_boot_stage_2(void)
 	exclaves_boot_tasks();
 	exclaves_boot_thread = THREAD_NULL;
 
-	exclaves_boot_status_set(EXCLAVES_BS_BOOTED_STAGE_2);
+	exclaves_boot_status_set(EXCLAVES_BS_BOOTED_EXCLAVECORE);
 
 	return kr;
 }
@@ -261,8 +261,17 @@ exclaves_boot_exclavekit(void)
 		return KERN_NOT_SUPPORTED;
 	}
 
-	/* Should only be called after stage2 boot. */
-	if (status != EXCLAVES_BS_BOOTED_STAGE_2) {
+	switch (status) {
+	case EXCLAVES_BS_BOOTED_EXCLAVEKIT:
+		return KERN_SUCCESS;
+
+	case EXCLAVES_BS_BOOTED_FAILURE:
+		return KERN_FAILURE;
+
+	case EXCLAVES_BS_BOOTED_EXCLAVECORE:
+		break;
+
+	default:
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -292,8 +301,8 @@ exclaves_boot(exclaves_boot_stage_t boot_stage)
 	kern_return_t kr = KERN_FAILURE;
 
 	switch (boot_stage) {
-	case EXCLAVES_BOOT_STAGE_2:
-		kr = exclaves_boot_stage_2();
+	case EXCLAVES_BOOT_STAGE_EXCLAVECORE:
+		kr = exclaves_boot_exclavecore();
 		break;
 
 	case EXCLAVES_BOOT_STAGE_EXCLAVEKIT:
@@ -318,13 +327,13 @@ exclaves_boot(exclaves_boot_stage_t boot_stage)
 kern_return_t OS_NOINLINE
 exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 {
-	assert(desired_boot_stage == EXCLAVES_BOOT_STAGE_2 ||
+	assert(desired_boot_stage == EXCLAVES_BOOT_STAGE_EXCLAVECORE ||
 	    desired_boot_stage == EXCLAVES_BOOT_STAGE_EXCLAVEKIT);
 
 	/* Look up the equivalent status for the specified boot stage. */
 	const exclaves_boot_status_t desired_boot_status =
-	    desired_boot_stage == EXCLAVES_BOOT_STAGE_2 ?
-	    EXCLAVES_BS_BOOTED_STAGE_2 : EXCLAVES_BS_BOOTED_EXCLAVEKIT;
+	    desired_boot_stage == EXCLAVES_BOOT_STAGE_EXCLAVECORE ?
+	    EXCLAVES_BS_BOOTED_EXCLAVECORE: EXCLAVES_BS_BOOTED_EXCLAVEKIT;
 
 	/*
 	 * See comment in exclaves_boot_status_set() for why this is an acquire.
@@ -336,7 +345,7 @@ exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 		/*
 		 * Special-case the situation where the request is to wait for
 		 * EXCLAVES_BOOT_STAGE_EXCLAVEKIT. EXCLAVEKIT boot can fail
-		 * (unlike STAGE_2 boot which will panic on failure). If
+		 * (unlike EXCLAVECORE boot which will panic on failure). If
 		 * EXCLAVEKIT has failed, just return KERN_NOT_SUPPORTED.
 		 */
 		if (desired_boot_status == EXCLAVES_BS_BOOTED_EXCLAVEKIT &&
@@ -352,11 +361,11 @@ exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 	}
 
 	/*
-	 * Allow the exclaves boot thread to pass this check during stage2
+	 * Allow the exclaves boot thread to pass this check during exclavecore
 	 * boot. This allows exclaves boot tasks to make TB calls etc during
-	 * stage2 boot.
+	 * exclavecore boot.
 	 */
-	if (desired_boot_status == EXCLAVES_BS_BOOTED_STAGE_2 &&
+	if (desired_boot_status == EXCLAVES_BS_BOOTED_EXCLAVECORE &&
 	    current_thread() == exclaves_boot_thread) {
 		return KERN_SUCCESS;
 	}
@@ -371,7 +380,7 @@ exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 
 	/*
 	 * At this point there are two possibilities. Success or EXCLAVEKIT has
-	 * failed (STAGE_2 can never fail as it panics on failure).
+	 * failed (EXCLAVECORE can never fail as it panics on failure).
 	 */
 	if (desired_boot_status == EXCLAVES_BS_BOOTED_EXCLAVEKIT &&
 	    current_boot_status == EXCLAVES_BS_BOOTED_FAILURE) {
@@ -382,13 +391,13 @@ exclaves_boot_wait(const exclaves_boot_stage_t desired_boot_stage)
 }
 
 /*
- * This returns AVAILABLE once EXCLAVES_BOOT_STAGE_2 has completed. This is to
+ * This returns AVAILABLE once EXCLAVES_BOOT_STAGE_EXCLAVECORE has completed. This is to
  * maintain backwards compatibility with existing code.
  */
 exclaves_status_t
 exclaves_get_status(void)
 {
-	kern_return_t kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_2);
+	kern_return_t kr = exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVECORE);
 	assert(kr == KERN_SUCCESS || kr == KERN_NOT_SUPPORTED);
 
 	if (kr == KERN_SUCCESS) {
@@ -410,8 +419,8 @@ exclaves_get_boot_status_string(void)
 		return "NOT_SUPPORTED";
 	case EXCLAVES_BS_NOT_STARTED:
 		return "NOT_STARTED";
-	case EXCLAVES_BS_BOOTED_STAGE_2:
-		return "BOOTED_STAGE_2";
+	case EXCLAVES_BS_BOOTED_EXCLAVECORE:
+		return "BOOTED_EXCLAVECORE";
 	case EXCLAVES_BS_BOOTED_EXCLAVEKIT:
 		return "BOOTED_EXCLAVEKIT";
 	case EXCLAVES_BS_BOOTED_FAILURE:
@@ -434,8 +443,8 @@ exclaves_get_boot_stage(void)
 	case EXCLAVES_BS_NOT_DEFINED:
 		return EXCLAVES_BOOT_STAGE_NONE;
 
-	case EXCLAVES_BS_BOOTED_STAGE_2:
-		return EXCLAVES_BOOT_STAGE_2;
+	case EXCLAVES_BS_BOOTED_EXCLAVECORE:
+		return EXCLAVES_BOOT_STAGE_EXCLAVECORE;
 
 	case EXCLAVES_BS_BOOTED_EXCLAVEKIT:
 		return EXCLAVES_BOOT_STAGE_EXCLAVEKIT;

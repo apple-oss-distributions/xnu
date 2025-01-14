@@ -3270,7 +3270,7 @@ ip6_getpcbopt(struct ip6_pktopts *pktopt, int optname, struct sockopt *sopt)
 	switch (optname) {
 	case IPV6_PKTINFO:
 		if (pktopt && pktopt->ip6po_pktinfo) {
-			return sooptcopyout(sopt, &pktopt->ip6po_pktinfo, sizeof(struct in6_pktinfo));
+			return sooptcopyout(sopt, pktopt->ip6po_pktinfo, sizeof(struct in6_pktinfo));
 		} else {
 			return sooptcopyout(sopt, &null_pktinfo_bytes, sizeof(struct in6_pktinfo));
 		}
@@ -3286,30 +3286,30 @@ ip6_getpcbopt(struct ip6_pktopts *pktopt, int optname, struct sockopt *sopt)
 	case IPV6_HOPOPTS:
 		if (pktopt && pktopt->ip6po_hbh) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_hbh;
-			return sooptcopyout(sopt, &pktopt->ip6po_hbh, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_rthdr *__indexable)pktopt->ip6po_hbh, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_RTHDR:
 		if (pktopt && pktopt->ip6po_rthdr) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_rthdr;
-			return sooptcopyout(sopt, &pktopt->ip6po_rthdr, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_rthdr *__indexable)pktopt->ip6po_rthdr, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_RTHDRDSTOPTS:
 		if (pktopt && pktopt->ip6po_dest1) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_dest1;
-			return sooptcopyout(sopt, &pktopt->ip6po_dest1, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_dest *__indexable)pktopt->ip6po_dest1, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_DSTOPTS:
 		if (pktopt && pktopt->ip6po_dest2) {
 			ip6e = (struct ip6_ext *)pktopt->ip6po_dest2;
-			return sooptcopyout(sopt, &pktopt->ip6po_dest2, IP6_EXT_LEN(ip6e));
+			return sooptcopyout(sopt, (struct ip6_dest *__indexable)pktopt->ip6po_dest2, IP6_EXT_LEN(ip6e));
 		}
 		break;
 	case IPV6_NEXTHOP:
 		if (pktopt && pktopt->ip6po_nexthop) {
-			return sooptcopyout(sopt, &pktopt->ip6po_nexthop, pktopt->ip6po_nexthop->sa_len);
+			return sooptcopyout(sopt, (struct sockaddr *__indexable)pktopt->ip6po_nexthop, pktopt->ip6po_nexthop->sa_len);
 		}
 		break;
 	case IPV6_USE_MIN_MTU: {

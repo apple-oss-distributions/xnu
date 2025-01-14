@@ -448,7 +448,7 @@ get_arm_cpu_version(void)
 }
 
 bool
-ml_feature_supported(uint32_t feature_bit)
+ml_feature_supported(uint64_t feature_bit)
 {
 	uint64_t aidr_el1_value = 0;
 

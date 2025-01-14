@@ -41,14 +41,6 @@ typedef uint64_t pmap_paddr_t __kernel_ptr_semantics;
 extern vm_map_address_t phystokv(pmap_paddr_t pa);
 extern pmap_paddr_t kvtophys_nofail(vm_offset_t va);
 
-/*
- * The runtime lock used to enforce concurrency on all trust cache operations
- * within the kernel for TXM. This is needed because TXM only enforces concurrency
- * through try-locks, which means the kernel also needs to enforce concurrency
- * on its side in order to ensure the try-locks within TXM never fail.
- */
-extern decl_lck_rw_data(, txm_trust_cache_lck);
-
 /* Global read-only data of TXM */
 extern const TXMReadOnlyData_t *txm_ro_data;
 

@@ -378,8 +378,12 @@ void
 thread_hold(thread_t thread)
 {
 	if (thread->suspend_count++ == 0) {
+		task_t task = get_threadtask(thread);
 		thread_set_apc_ast(thread);
 		assert(thread->suspend_parked == FALSE);
+
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SUSPENSION, MACH_THREAD_SUSPEND) | DBG_FUNC_NONE,
+		    thread->thread_id, thread->user_stop_count, task->pidsuspended);
 	}
 }
 
@@ -409,6 +413,7 @@ thread_release(thread_t thread)
 			thread->suspend_parked = FALSE;
 			thread_wakeup_thread(&thread->suspend_count, thread);
 		}
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SUSPENSION, MACH_THREAD_RESUME) | DBG_FUNC_NONE, thread->thread_id);
 	}
 }
 
@@ -416,7 +421,6 @@ kern_return_t
 thread_suspend(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
-	int32_t thread_user_stop_count;
 
 	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -431,14 +435,8 @@ thread_suspend(thread_t thread)
 	} else {
 		result = KERN_TERMINATED;
 	}
-	thread_user_stop_count = thread->user_stop_count;
 
 	thread_mtx_unlock(thread);
-
-	if (result == KERN_SUCCESS) {
-		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_IPC, MACH_THREAD_SUSPEND) | DBG_FUNC_NONE,
-		    thread->thread_id, thread_user_stop_count);
-	}
 
 	if (thread != current_thread() && result == KERN_SUCCESS) {
 		thread_wait(thread, FALSE);
@@ -451,7 +449,6 @@ kern_return_t
 thread_resume(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
-	int32_t thread_user_stop_count;
 
 	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
@@ -470,12 +467,8 @@ thread_resume(thread_t thread)
 	} else {
 		result = KERN_TERMINATED;
 	}
-	thread_user_stop_count = thread->user_stop_count;
 
 	thread_mtx_unlock(thread);
-
-	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_IPC, MACH_THREAD_RESUME) | DBG_FUNC_NONE,
-	    thread->thread_id, thread_user_stop_count, result);
 
 	return result;
 }

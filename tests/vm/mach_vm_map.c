@@ -252,3 +252,83 @@ T_DECL(mach_vm_map_unaligned,
 		T_LOG("");
 	}
 }
+
+T_DECL(vm_map_enter_mem_object_overflow,
+    "Test overflow cases in vm_map_enter_mem_object",
+    T_META_RUN_CONCURRENTLY(true), T_META_TAG_VM_PREFERRED)
+{
+	kern_return_t kr;
+
+	mach_vm_address_t alloced_addr;
+	mach_vm_size_t size_16kb, entry_size;
+	vm_map_offset_t entry_offset;
+	mach_port_t entry_handle;
+	vm_map_offset_t target_addr, target_offset;
+	int vmflags;
+
+	size_16kb = 16 * 1024;
+	/*
+	 * Create an allocation in the source map, then get a non-page-aligned
+	 * copy entry causing data_offset to be nonzero.
+	 */
+	kr = mach_vm_allocate(mach_task_self(), &alloced_addr, 2 * size_16kb, VM_FLAGS_ANYWHERE);
+	T_ASSERT_MACH_SUCCESS(kr, "set up allocation");
+
+	entry_size = size_16kb;
+	entry_offset = alloced_addr + (size_16kb / 2);
+	kr = mach_make_memory_entry_64(mach_task_self(), &entry_size, entry_offset,
+	    MAP_MEM_VM_COPY | MAP_MEM_USE_DATA_ADDR | VM_PROT_ALL,
+	    &entry_handle, MACH_PORT_NULL);
+
+	T_ASSERT_MACH_SUCCESS(kr, "set up copy memory entry");
+
+	/*
+	 * note: currently, the next three cases below are caught early by
+	 * vm_map_enter_mem_object_sanitize and thus don't give any extra coverage
+	 */
+
+	/*
+	 * In vm_map_enter_mem_object_sanitize, attempt to overflow obj_size by
+	 * having size round up to 0.
+	 */
+	vmflags = VM_FLAGS_ANYWHERE;
+	kr = mach_vm_map(mach_task_self(), &target_addr, (mach_vm_size_t) -1, 0,
+	    vmflags, entry_handle, 0, true, VM_PROT_ALL, VM_PROT_ALL,
+	    VM_INHERIT_DEFAULT);
+	T_EXPECT_MACH_ERROR(kr, KERN_INVALID_ARGUMENT, "obj_size overflow case");
+
+	/*
+	 * In vm_map_enter_adjust_offset, attempt to overflow obj_offs + quantity
+	 * note: quantity = data_offset, which was set to a nonzero value
+	 */
+	vmflags = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR;
+	target_offset = (vm_map_offset_t) -1;
+	kr = mach_vm_map(mach_task_self(), &target_addr, size_16kb, 0, vmflags,
+	    entry_handle, target_offset, true, VM_PROT_ALL, VM_PROT_ALL,
+	    VM_INHERIT_DEFAULT);
+	T_EXPECT_MACH_ERROR(kr, KERN_INVALID_ARGUMENT, "obj_offs overflow case");
+
+	/*
+	 * Attempt to overflow obj_end + quantity
+	 */
+	vmflags = VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR;
+	target_offset = (vm_map_offset_t) -(size_16kb + 1);
+	kr = mach_vm_map(mach_task_self(), &target_addr, size_16kb, 0, vmflags,
+	    entry_handle, target_offset, true, VM_PROT_ALL, VM_PROT_ALL,
+	    VM_INHERIT_DEFAULT);
+	T_EXPECT_MACH_ERROR(kr, KERN_INVALID_ARGUMENT, "obj_end overflow case");
+
+	/*
+	 * Because target_offset points to the second-to-last page and the
+	 * size of the entry is one page (size_16kb), obj_end will point to the
+	 * last page.
+	 *
+	 * In vm_map_enter_adjust_offset, this means obj_end + data_offset gets
+	 * rounded up to 0
+	 */
+	target_offset = (vm_map_offset_t) -(2 * size_16kb);
+	kr = mach_vm_map(mach_task_self(), &target_addr, size_16kb, 0, vmflags,
+	    entry_handle, target_offset, true, VM_PROT_ALL, VM_PROT_ALL,
+	    VM_INHERIT_DEFAULT);
+	T_EXPECT_MACH_ERROR(kr, KERN_INVALID_ARGUMENT, "round-to-0 case should be detected");
+}

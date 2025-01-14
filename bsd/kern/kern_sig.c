@@ -2632,6 +2632,12 @@ psignal_thread_with_reason(proc_t p, thread_t thread, int signum, struct os_reas
 	psignal_internal(p, TASK_NULL, thread, PSIG_THREAD, signum, signal_reason);
 }
 
+void
+psignal_sigkill_try_thread_with_reason(proc_t p, thread_t thread, struct os_reason *signal_reason)
+{
+	psignal_try_thread_with_reason(p, thread, SIGKILL, signal_reason);
+}
+
 /*
  * If the current process has received a signal (should be caught or cause
  * termination, should interrupt current syscall), return the signal number.
@@ -3553,7 +3559,7 @@ sig_lock_to_exit(proc_t p)
 	p->exit_thread = self;
 	proc_unlock(p);
 
-	task_hold_and_wait(proc_task(p));
+	task_hold_and_wait(proc_task(p), true);
 
 	proc_lock(p);
 }

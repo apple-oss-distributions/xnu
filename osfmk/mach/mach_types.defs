@@ -71,8 +71,8 @@
 
 #include <mach/std_types.defs>
 
-type memory_object_offset_t 	= uint64_t;
-type memory_object_size_t 	= uint64_t;
+type memory_object_offset_t 	= uint64_t VM_UNSAFE_TYPE(memory_object_offset_ut);
+type memory_object_size_t 	= uint64_t VM_UNSAFE_TYPE(memory_object_size_ut);
 type memory_object_cluster_size_t = uint32_t;
 type memory_object_fault_info_t = array[16] of integer_t;
 
@@ -295,11 +295,11 @@ type kcdata_object_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
-type vm_prot_t = int;
-type vm_inherit_t = int;
+type vm_prot_t = int VM_UNSAFE_TYPE(vm_prot_ut);
+type vm_inherit_t = int VM_UNSAFE_TYPE(vm_inherit_ut);
 type vm_purgable_t = int;
 type xxx_vm_statistics_data_t = struct[13] of integer_t;
-type vm_behavior_t = int;
+type vm_behavior_t = int VM_UNSAFE_TYPE(vm_behavior_ut);
 type vm_statistics_data_t = struct[15] of integer_t;
 type vm_machine_attribute_t = int;
 type vm_machine_attribute_val_t = int;

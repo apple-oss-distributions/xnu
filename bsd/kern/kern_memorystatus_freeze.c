@@ -84,22 +84,6 @@
 #include <sys/kern_memorystatus_notify.h>
 #include <sys/ubc.h>
 
-#if CONFIG_JETSAM
-
-extern unsigned int memorystatus_available_pages;
-extern unsigned int memorystatus_available_pages_pressure;
-extern unsigned int memorystatus_available_pages_critical;
-extern unsigned int memorystatus_available_pages_critical_base;
-extern unsigned int memorystatus_available_pages_critical_idle_offset;
-
-#else /* CONFIG_JETSAM */
-
-extern uint64_t memorystatus_available_pages;
-extern uint64_t memorystatus_available_pages_pressure;
-extern uint64_t memorystatus_available_pages_critical;
-
-#endif /* CONFIG_JETSAM */
-
 unsigned int memorystatus_frozen_count = 0;
 unsigned int memorystatus_frozen_count_webcontent = 0;
 unsigned int memorystatus_frozen_count_xpc_service = 0;

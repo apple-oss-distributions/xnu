@@ -203,6 +203,8 @@ osfmk/kern/thread_act.c		standard
 osfmk/kern/thread_call.c	standard
 osfmk/kern/thread_group.c	standard
 osfmk/kern/thread_policy.c	standard
+osfmk/kern/thread_test_context.c	optional development
+osfmk/kern/thread_test_context.c	optional debug
 osfmk/kern/timer.c			standard
 osfmk/kern/timer_call.c		standard
 osfmk/kern/turnstile.c  	standard
@@ -253,6 +255,7 @@ osfmk/tests/bitmap_test.c		optional config_xnupost
 osfmk/tests/test_thread_call.c          optional config_xnupost
 osfmk/tests/vfp_state_test.c		optional config_xnupost
 osfmk/tests/vm_parameter_validation_kern.c	optional development
+osfmk/tests/bcopy_test.c	    optional development
 ./mach/telemetry_notification_user.c optional config_telemetry
 osfmk/bank/bank.c			standard
 osfmk/atm/atm.c			optional config_atm

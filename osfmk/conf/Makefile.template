@@ -74,6 +74,53 @@ COMP_SUBDIRS = \
 
 vm_tests.o_CFLAGS_ADD += -O0 -g
 
+#
+# vm_sanitize/vm_sanitize_error_compat use the UBSan verifier to detect
+# potential undefined behavior at compile time. The verifier inspects the
+# compiled object files to detect calls to the UBSan minimal runtime.
+#
+# False positives are possible if checks are generated where UB is not actually
+# possible. If possible, code should be re-architected to allow the compiler
+# to optimize out the checks; if not __attribute__((nosanitize)) can be used.
+#
+# As of the time of writing, we enable all checks except the following:
+#   `alignment` since it generates checks for calls to os_xyz_overflow()
+#   `bool` since it generates checks most times bools are used
+#   `function` since it generates checks for any non-trivial usage of function
+#		pointers, and there is no way to do runtime type checking to eliminate
+# 		these checks.
+#   `null` since it generates NULL checks on typically non-null arguments.
+#   	Marking these arguments using __attribute__(nonnull) may have an
+#		undesired effect of optimizing out explicitly written NULL checks.
+#   `unreachable` since it generates a check after each panic()
+#   `obj-cast`,`return`,`vptr` since they are not relevant to C code
+#
+VM_UBSAN_CHECKS = bounds, builtin, enum, float-cast-overflow, \
+	float-divide-by-zero, implicit-signed-integer-truncation, \
+	implicit-unsigned-integer-truncation, integer-divide-by-zero, \
+	nonnull-attribute, nullability-arg, nullability-assign, nullability-return, \
+	object-size, pointer-overflow, returns-nonnull-attribute, shift, \
+	signed-integer-overflow, unsigned-integer-overflow, unsigned-shift-base, \
+	vla-bound
+VM_UBSAN_FLAGS = -fsanitize=$(subst ${} ${},,${VM_UBSAN_CHECKS})
+
+#
+# KASAN and coverage configurations have different code generation than customer
+# release kernels, and are not frequently built at desk like development kernels.
+# Build-time UBSan "violations" that affect only these kernels are likely to be
+# false positives and have no real-world security impact regardless.
+#
+ifeq ($(KASAN),1)
+# UBSan build-time validations disabled on KASAN builds
+else ifeq ($(BUILD_CODE_COVERAGE),1)
+# UBSan build-time validations disabled on code coverage builds
+else
+	vm_sanitize.o_CFLAGS_ADD += ${VM_UBSAN_FLAGS}
+	vm_sanitize.o_VERIFIER = VERIFIER_NO_UBSAN_CHECKS
+	vm_sanitize_error_compat.o_CFLAGS_ADD += ${VM_UBSAN_FLAGS}
+	vm_sanitize_error_compat.o_VERIFIER = VERIFIER_NO_UBSAN_CHECKS
+endif
+
 cccbc.o_INCFLAGS += -I${SRCROOT}/EXTERNAL_HEADERS/corecrypto
 ccdrbg.o_INCFLAGS += -I${SRCROOT}/EXTERNAL_HEADERS/corecrypto
 ccgcm.o_INCFLAGS += -I${SRCROOT}/EXTERNAL_HEADERS/corecrypto

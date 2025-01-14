@@ -157,7 +157,7 @@ struct vm_object {
 	} vo_un1;
 
 	struct vm_page          *memq_hint;
-	int                     ref_count;      /* Number of references */
+	os_ref_atomic_t         ref_count;        /* Number of references */
 	unsigned int            resident_page_count;
 	/* number of resident pages */
 	unsigned int            wired_page_count; /* number of wired pages
@@ -424,6 +424,9 @@ extern const vm_object_t exclaves_object;        /* holds VM pages owned by excl
 extern lck_grp_t                vm_map_lck_grp;
 extern lck_attr_t               vm_map_lck_attr;
 
+/** os_refgrp_t for vm_objects */
+os_refgrp_decl_extern(vm_object_refgrp);
+
 #ifndef VM_TAG_ACTIVE_UPDATE
 #error VM_TAG_ACTIVE_UPDATE
 #endif
@@ -558,6 +561,8 @@ typedef struct io_reprioritize_req *io_reprioritize_req_t;
 
 extern void vm_io_reprioritize_init(void);
 #endif
+
+extern void page_worker_init(void);
 
 
 #endif /* XNU_KERNEL_PRIVATE */

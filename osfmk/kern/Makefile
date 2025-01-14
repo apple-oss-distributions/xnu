@@ -7,16 +7,31 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-DATAFILES = \
+# Files that are public on macOS, but private on embedded
+EMBEDDED_PRIVATE_DATAFILES = \
 	exc_guard.h \
 	exc_resource.h \
 	kern_cdata.h \
 	kcdata.h
 
-MODULEMAPFILES = \
+EMBEDDED_PRIVATE_MODULEMAPFILES = \
 	kcdata.modulemap
 
-PRIVATE_DATAFILES = \
+ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
+EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+EXTRA_MODULEMAPFILES = $(EMBEDDED_PRIVATE_MODULEMAPFILES)
+else
+EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+EXTRA_PRIVATE_MODULEMAPFILES = $(EMBEDDED_PRIVATE_MODULEMAPFILES)
+endif
+
+DATAFILES = $(sort \
+	$(EXTRA_DATAFILES))
+
+MODULEMAPFILES = $(sort \
+	$(EXTRA_MODULEMAPFILES))
+
+PRIVATE_DATAFILES = $(sort \
 	arithmetic_128.h  \
 	block_hint.h \
 	cambria_layout.h \
@@ -29,11 +44,13 @@ PRIVATE_DATAFILES = \
 	restartable.h \
 	trustcache.h \
 	turnstile.h \
-	socd_client.h
+	socd_client.h \
+	$(EXTRA_PRIVATE_DATAFILES))
 
-PRIVATE_MODULEMAPFILES = \
+PRIVATE_MODULEMAPFILES = $(sort \
 	kern_debug.modulemap \
-	kern_private.modulemap
+	kern_private.modulemap \
+	$(EXTRA_PRIVATE_MODULEMAPFILES))
 
 EXPORT_FILES = \
 	affinity.h \
@@ -127,14 +144,15 @@ XNU_ONLY_EXPORTS = \
 	sync_sema.h \
 	ux_handler.h \
 	workload_config.h \
-	kern_stackshot.h
+	kern_stackshot.h \
+	thread_test_context.h
 
 
 INSTALL_MI_LIST = ${DATAFILES}
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
-INSTALL_MI_LCL_LIST = cs_blobs.h debug.h ext_paniclog.h
+INSTALL_MI_LCL_LIST = $(sort cs_blobs.h debug.h ext_paniclog.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
@@ -158,6 +176,7 @@ TIGHTBEAM_FILES := \
 	exclaves_eic.tightbeam \
 	exclaves_log.tightbeam \
 	exclaves_upcalls.tightbeam \
+	exclaves_upcalls_v2.tightbeam \
 	exclaves_frame_mint.tightbeam \
 	exclaves_xnuproxy.tightbeam
 
@@ -165,7 +184,9 @@ TIGHTBEAM_MODULES := \
 	StackshotTypes.tbmodule \
 	Stackshot.tbmodule \
 	SharedMemoryBase.tbmodule \
-	ExclavesCHelloServer.tbmodule
+	ExclavesCHelloServer.tbmodule \
+	StackshotPanicSetup.tbmodule \
+	ExclaveAudioArbiter.tbmodule
 
 endif
 

@@ -1576,7 +1576,10 @@ static void stackshot_verify_current_proc_uuid_info(void **ssbuf, size_t sslen, 
 	T_FAIL("failed to find matching UUID in stackshot data");
 }
 
-T_DECL(translated, "tests translated bit is set correctly", T_META_TAG_VM_PREFERRED)
+T_DECL(translated,
+    "tests translated bit is set correctly",
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133956022 */))
 {
 #if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 	T_SKIP("Only valid on Apple silicon Macs")

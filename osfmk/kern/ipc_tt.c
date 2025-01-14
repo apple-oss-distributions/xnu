@@ -4773,6 +4773,13 @@ thread_get_exception_ports_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * Allocate a save area for FP state before taking thread lock,
+	 * if necessary, to ensure that VM_KERNEL_ADDRHASH() doesn't cause
+	 * an FP state allocation while holding thread locks.
+	 */
+	ml_fp_save_area_prealloc();
+
 	tro = get_thread_ro(thread);
 	thread_mtx_lock(thread);
 
@@ -4817,8 +4824,8 @@ thread_get_exception_ports_internal(
 					} else {
 						uintptr_t receiver;
 						(void)ipc_port_get_receiver_task(exc_port, &receiver);
-						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRPERM(exc_port);
-						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRPERM(receiver) : 0;
+						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRHASH(exc_port);
+						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRHASH(receiver) : 0;
 					}
 				} else {
 					ports[j] = exception_port_copy_send(exc_port);
@@ -4928,6 +4935,13 @@ task_get_exception_ports_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * Allocate a save area for FP state before taking task lock,
+	 * if necessary, to ensure that VM_KERNEL_ADDRHASH() doesn't cause
+	 * an FP state allocation while holding task locks.
+	 */
+	ml_fp_save_area_prealloc();
+
 	itk_lock(task);
 
 	if (!task->ipc_active) {
@@ -4966,8 +4980,8 @@ task_get_exception_ports_internal(
 					} else {
 						uintptr_t receiver;
 						(void)ipc_port_get_receiver_task(exc_port, &receiver);
-						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRPERM(exc_port);
-						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRPERM(receiver) : 0;
+						ports_info[j].iip_port_object = (natural_t)VM_KERNEL_ADDRHASH(exc_port);
+						ports_info[j].iip_receiver_object = receiver ? (natural_t)VM_KERNEL_ADDRHASH(receiver) : 0;
 					}
 				} else {
 					ports[j] = exception_port_copy_send(exc_port);

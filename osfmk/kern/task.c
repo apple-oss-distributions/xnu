@@ -145,7 +145,7 @@
 #include "exclaves_resource.h"
 #include "exclaves_boot.h"
 #include "exclaves_inspection.h"
-#include "kern/exclaves.tightbeam.h"
+#include "exclaves_conclave.h"
 #endif /* CONFIG_EXCLAVES */
 
 #include <os/log.h>
@@ -227,7 +227,7 @@ static bool task_should_panic_on_exit_due_to_conclave_taint(task_t task);
 static bool task_is_conclave_tainted(task_t task);
 static void task_set_conclave_taint(task_t task);
 kern_return_t task_crash_info_conclave_upcall(task_t task,
-    const xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
+    const struct conclave_sharedbuffer_t *shared_buf, uint32_t length);
 #endif /* CONFIG_EXCLAVES */
 
 IPC_KOBJECT_DEFINE(IKOT_TASK_NAME);
@@ -573,7 +573,7 @@ static struct task_exc_guard_named_default task_exc_guard_named_defaults[] = {};
 
 /* Forwards */
 
-static void task_hold_locked(task_t task);
+static bool task_hold_locked(task_t task);
 static void task_wait_locked(task_t task, boolean_t until_not_runnable);
 static void task_release_locked(task_t task);
 extern task_t proc_get_task_raw(void *proc);
@@ -1236,7 +1236,7 @@ init_task_ledgers(void)
 	    "bytes");
 	task_ledgers.wired_mem = ledger_entry_add(t, "wired_mem", "physmem",
 	    "bytes");
-	task_ledgers.conclave_mem = ledger_entry_add_with_flags(t, "conclave_mem", "physmem", "count",
+	task_ledgers.conclave_mem = ledger_entry_add_with_flags(t, "conclave_mem", "physmem", "bytes",
 	    LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE | LEDGER_ENTRY_ALLOW_DEBIT);
 	task_ledgers.internal = ledger_entry_add(t, "internal", "physmem",
 	    "bytes");
@@ -3072,20 +3072,18 @@ task_terminate_internal(
 	 *	The vm_map and ipc_space must exist until this function returns,
 	 *	convert_port_to_{map,space}_with_flavor relies on this behavior.
 	 */
-	task_hold_locked(task);
+	bool first_suspension __unused = task_hold_locked(task);
 	task->active = FALSE;
 	ipc_task_disable(task);
 
 #if CONFIG_EXCLAVES
-	task_stop_conclave(task, false);
+	if (first_suspension) {
+		task_unlock(task);
+		task_suspend_conclave(task);
+		task_lock(task);
+	}
 #endif /* CONFIG_EXCLAVES */
 
-#if CONFIG_TELEMETRY
-	/*
-	 * Notify telemetry that this task is going away.
-	 */
-	telemetry_task_ctl_locked(task, TF_TELEMETRY, 0);
-#endif
 
 	/*
 	 *	Terminate each thread in the task.
@@ -3102,6 +3100,10 @@ task_terminate_internal(
 #endif /* MACH_BSD */
 
 	task_unlock(task);
+
+#if CONFIG_EXCLAVES
+	task_stop_conclave(task, false);
+#endif /* CONFIG_EXCLAVES */
 
 	proc_set_task_policy(task, TASK_POLICY_ATTRIBUTE,
 	    TASK_POLICY_TERMINATED, TASK_POLICY_ENABLE);
@@ -3328,7 +3330,7 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 	 * would do this on a thread by thread basis anyway, but this
 	 * gives us a better chance of not having to wait there.
 	 */
-	task_hold_locked(task);
+	bool first_suspension __unused = task_hold_locked(task);
 
 #if CONFIG_EXCLAVES
 	if (should_mark_corpse) {
@@ -3346,9 +3348,17 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 				    sizeof(struct thread_crash_exclaves_info), &info);
 			}
 		}
+	}
 
+	if (first_suspension || should_mark_corpse) {
 		task_unlock(task);
-		task_stop_conclave(task, true);
+		if (first_suspension) {
+			task_suspend_conclave(task);
+		}
+
+		if (should_mark_corpse) {
+			task_stop_conclave(task, true);
+		}
 		task_lock(task);
 	}
 #endif /* CONFIG_EXCLAVES */
@@ -3614,8 +3624,9 @@ task_get_suspend_sources_kdp(task_t task, task_suspend_source_array_t sources)
  *	suspends is maintained.
  *
  *	CONDITIONS: the task is locked and active.
+ *	Returns true if this was first suspension
  */
-void
+bool
 task_hold_locked(
 	task_t          task)
 {
@@ -3625,8 +3636,11 @@ task_hold_locked(
 	assert(task->active);
 
 	if (task->suspend_count++ > 0) {
-		return;
+		return false;
 	}
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SUSPENSION, MACH_TASK_SUSPEND),
+	    task_pid(task), task->user_stop_count, task->pidsuspended);
 
 	if (bsd_info) {
 		workq_proc_suspended(bsd_info);
@@ -3644,6 +3658,7 @@ task_hold_locked(
 #ifdef CONFIG_TASK_SUSPEND_STATS
 	_task_mark_suspend_start(task);
 #endif
+	return true;
 }
 
 /*
@@ -3659,7 +3674,8 @@ task_hold_locked(
  */
 kern_return_t
 task_hold_and_wait(
-	task_t          task)
+	task_t          task,
+	bool            suspend_conclave __unused)
 {
 	if (task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -3675,7 +3691,25 @@ task_hold_and_wait(
 	_task_mark_suspend_source(task);
 #endif /* CONFIG_TASK_SUSPEND_STATS */
 
-	task_hold_locked(task);
+	bool first_suspension __unused = task_hold_locked(task);
+
+#if CONFIG_EXCLAVES
+	if (suspend_conclave && first_suspension) {
+		task_unlock(task);
+		task_suspend_conclave(task);
+		task_lock(task);
+		/*
+		 * If task terminated/resumed before we could wait on threads, then
+		 * it is a race we lost and we could treat that as termination/resume
+		 * happened after the wait and return SUCCESS.
+		 */
+		if (!task->active || task->suspend_count <= 0) {
+			task_unlock(task);
+			return KERN_SUCCESS;
+		}
+	}
+#endif /* CONFIG_EXCLAVES */
+
 	task_wait_locked(task, FALSE);
 	task_unlock(task);
 
@@ -3751,9 +3785,17 @@ task_release_locked(
 		thread_mtx_unlock(thread);
 	}
 
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_SUSPENSION, MACH_TASK_RESUME) | DBG_FUNC_NONE, task_pid(task));
+
 #if CONFIG_TASK_SUSPEND_STATS
 	_task_mark_suspend_end(task);
 #endif
+
+#if CONFIG_EXCLAVES
+	task_unlock(task);
+	task_resume_conclave(task);
+	task_lock(task);
+#endif /* CONFIG_EXCLAVES */
 }
 
 /*
@@ -3937,11 +3979,6 @@ place_task_hold(
 		return KERN_SUCCESS;
 	}
 
-	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_IPC, MACH_TASK_SUSPEND),
-	    task_pid(task),
-	    task->thread_count > 0 ?((thread_t)queue_first(&task->threads))->thread_id : 0,
-	    task->user_stop_count, task->user_stop_count + 1);
-
 #if MACH_ASSERT
 	current_task()->suspends_outstanding++;
 #endif
@@ -3968,7 +4005,25 @@ place_task_hold(
 	 * single kernel-level hold).  We then wait for the threads
 	 * to stop executing user code.
 	 */
-	task_hold_locked(task);
+	bool first_suspension __unused = task_hold_locked(task);
+
+#if CONFIG_EXCLAVES
+	if (first_suspension) {
+		task_unlock(task);
+		task_suspend_conclave(task);
+
+		/*
+		 * If task terminated/resumed before we could wait on threads, then
+		 * it is a race we lost and we could treat that as termination/resume
+		 * happened after the wait and return SUCCESS.
+		 */
+		task_lock(task);
+		if (!task->active || task->suspend_count <= 0) {
+			return KERN_SUCCESS;
+		}
+	}
+#endif /* CONFIG_EXCLAVES */
+
 	task_wait_locked(task, FALSE);
 
 	return KERN_SUCCESS;
@@ -3998,11 +4053,6 @@ release_task_hold(
 	}
 
 	if (task->user_stop_count > (task->pidsuspended ? 1 : 0)) {
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    MACHDBG_CODE(DBG_MACH_IPC, MACH_TASK_RESUME) | DBG_FUNC_NONE,
-		    task_pid(task), ((thread_t)queue_first(&task->threads))->thread_id,
-		    task->user_stop_count, mode, task->legacy_stop_count);
-
 #if MACH_ASSERT
 		/*
 		 * This is obviously not robust; if we suspend one task and then resume a different one,
@@ -8014,12 +8064,8 @@ task_wakeups_monitor_ctl(task_t task, uint32_t *flags, int32_t *rate_hz)
 		/*
 		 * Caller wishes to disable wakeups monitor on the task.
 		 *
-		 * Disable telemetry if it was triggered by the wakeups monitor, and
-		 * remove the limit & callback on the wakeups ledger entry.
+		 * Remove the limit & callback on the wakeups ledger entry.
 		 */
-#if CONFIG_TELEMETRY
-		telemetry_task_ctl_locked(task, TF_WAKEMON_WARNING, 0);
-#endif
 		ledger_disable_refill(ledger, task_ledgers.interrupt_wakeups);
 		ledger_disable_callback(ledger, task_ledgers.interrupt_wakeups);
 	}
@@ -8031,25 +8077,6 @@ task_wakeups_monitor_ctl(task_t task, uint32_t *flags, int32_t *rate_hz)
 void
 task_wakeups_rate_exceeded(int warning, __unused const void *param0, __unused const void *param1)
 {
-	if (warning == LEDGER_WARNING_ROSE_ABOVE) {
-#if CONFIG_TELEMETRY
-		/*
-		 * This task is in danger of violating the wakeups monitor. Enable telemetry on this task
-		 * so there are micro-stackshots available if and when EXC_RESOURCE is triggered.
-		 */
-		telemetry_task_ctl(current_task(), TF_WAKEMON_WARNING, 1);
-#endif
-		return;
-	}
-
-#if CONFIG_TELEMETRY
-	/*
-	 * If the balance has dipped below the warning level (LEDGER_WARNING_DIPPED_BELOW) or
-	 * exceeded the limit, turn telemetry off for the task.
-	 */
-	telemetry_task_ctl(current_task(), TF_WAKEMON_WARNING, 0);
-#endif
-
 	if (warning == 0) {
 		SENDING_NOTIFICATION__THIS_PROCESS_IS_CAUSING_TOO_MANY_WAKEUPS();
 	}
@@ -10182,6 +10209,46 @@ task_stop_conclave(task_t task, bool gather_crash_bt)
 	assert3u(ret, ==, KERN_SUCCESS);
 }
 
+void
+task_suspend_conclave(task_t task)
+{
+	thread_t thread = current_thread();
+
+	if (task->conclave == NULL) {
+		return;
+	}
+
+	/* Stash the task on current thread for conclave teardown */
+	thread->conclave_stop_task = task;
+
+	__assert_only kern_return_t ret =
+	    exclaves_conclave_suspend(task->conclave);
+
+	thread->conclave_stop_task = TASK_NULL;
+
+	assert3u(ret, ==, KERN_SUCCESS);
+}
+
+void
+task_resume_conclave(task_t task)
+{
+	thread_t thread = current_thread();
+
+	if (task->conclave == NULL) {
+		return;
+	}
+
+	/* Stash the task on current thread for conclave teardown */
+	thread->conclave_stop_task = task;
+
+	__assert_only kern_return_t ret =
+	    exclaves_conclave_resume(task->conclave);
+
+	thread->conclave_stop_task = TASK_NULL;
+
+	assert3u(ret, ==, KERN_SUCCESS);
+}
+
 kern_return_t
 task_stop_conclave_upcall(void)
 {
@@ -10219,7 +10286,7 @@ task_suspend_conclave_upcall(uint64_t *scid_list, size_t scid_list_count)
 		return KERN_INVALID_TASK;
 	}
 
-	kr = task_hold_and_wait(task);
+	kr = task_hold_and_wait(task, false);
 
 	task_lock(task);
 	queue_iterate(&task->threads, thread, thread_t, task_threads)
@@ -10237,7 +10304,7 @@ task_suspend_conclave_upcall(uint64_t *scid_list, size_t scid_list_count)
 }
 
 kern_return_t
-task_crash_info_conclave_upcall(task_t task, const xnuupcalls_conclavesharedbuffer_s *shared_buf,
+task_crash_info_conclave_upcall(task_t task, const struct conclave_sharedbuffer_t *shared_buf,
     uint32_t length)
 {
 	if (task->conclave == NULL) {

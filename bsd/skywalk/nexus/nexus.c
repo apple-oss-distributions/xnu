@@ -2009,6 +2009,8 @@ nx_destroy(struct nxctl *nxctl, const uuid_t nx_uuid)
 	if (nx == NULL) {
 		err = ENOENT;
 	} else {
+		/* prevent any opens */
+		os_atomic_or(&nx->nx_flags, NXF_INVALIDATED, relaxed);
 		err = nx_close(nx, TRUE);
 		(void) nx_release_locked(nx);
 	}

@@ -1102,19 +1102,8 @@ txm_verify_code_signature(
 		.selector = kTXMKernelSelectorValidateCodeSignature,
 		.num_input_args = 1,
 	};
-	kern_return_t ret = KERN_DENIED;
 
-	/*
-	 * Verification of the code signature may perform a trust cache look up.
-	 * In order to avoid any collisions with threads which may be loading a
-	 * trust cache, we take a reader lock on the trust cache runtime.
-	 */
-
-	lck_rw_lock_shared(&txm_trust_cache_lck);
-	ret = txm_kernel_call(&txm_call, sig_obj);
-	lck_rw_unlock_shared(&txm_trust_cache_lck);
-
-	return ret;
+	return txm_kernel_call(&txm_call, sig_obj);
 }
 
 kern_return_t

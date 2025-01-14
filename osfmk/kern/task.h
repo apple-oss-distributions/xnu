@@ -782,7 +782,8 @@ extern bool task_is_alien(task_t task);
 
 /* Hold all threads in a task, Wait for task to stop running, just to get off CPU */
 extern kern_return_t task_hold_and_wait(
-	task_t          task);
+	task_t          task,
+	bool            suspend_conclave);
 
 /* Release hold on all threads in a task */
 extern kern_return_t    task_release(
@@ -1362,12 +1363,14 @@ kern_return_t task_inherit_conclave(task_t old_task, task_t new_task, void *vnod
 kern_return_t task_launch_conclave(mach_port_name_t port);
 void task_clear_conclave(task_t task);
 void task_stop_conclave(task_t task, bool gather_crash_bt);
+void task_suspend_conclave(task_t task);
+void task_resume_conclave(task_t task);
 kern_return_t task_stop_conclave_upcall(void);
 kern_return_t task_stop_conclave_upcall_complete(void);
 kern_return_t task_suspend_conclave_upcall(uint64_t *, size_t);
-struct xnuupcalls_conclavesharedbuffer_s;
+struct conclave_sharedbuffer_t;
 kern_return_t task_crash_info_conclave_upcall(task_t task,
-    const struct xnuupcalls_conclavesharedbuffer_s *shared_buf, uint32_t length);
+    const struct conclave_sharedbuffer_t *shared_buf, uint32_t length);
 typedef struct exclaves_resource exclaves_resource_t;
 exclaves_resource_t *task_get_conclave(task_t task);
 void task_set_conclave_untaintable(task_t task);

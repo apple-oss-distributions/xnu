@@ -35,8 +35,12 @@
 
 extern void * exclaves_enter_start_label __asm__("EXCLAVES_ENTRY_START");
 extern void * exclaves_enter_end_label   __asm__("EXCLAVES_ENTRY_END");
+
 extern void * exclaves_upcall_start_label __asm__("EXCLAVES_UPCALL_START");
 extern void * exclaves_upcall_end_label   __asm__("EXCLAVES_UPCALL_END");
+
+extern void * exclaves_scheduler_request_start_label __asm__("EXCLAVES_SCHEDULER_REQUEST_START");
+extern void * exclaves_scheduler_request_end_label   __asm__("EXCLAVES_SCHEDULER_REQUEST_END");
 
 extern uintptr_t exclaves_enter_range_start;
 extern uintptr_t exclaves_enter_range_end;

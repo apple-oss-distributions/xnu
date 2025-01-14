@@ -166,6 +166,9 @@ mach_port_space_info(
 	/* start with in-line memory */
 	table_size = 0;
 
+	ipc_object_t *port_pointers = NULL;
+	ipc_entry_num_t pptrsize = 0;
+
 	is_read_lock(space);
 
 allocate_loop:
@@ -175,6 +178,8 @@ allocate_loop:
 			if (table_size != 0) {
 				kmem_free(ipc_kernel_map,
 				    table_addr, table_size);
+				kfree_type(ipc_object_t, pptrsize, port_pointers);
+				port_pointers = NULL;
 			}
 			return KERN_INVALID_TASK;
 		}
@@ -186,7 +191,8 @@ allocate_loop:
 		    vm_map_round_page(tsize * sizeof(ipc_info_name_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		if (table_size_needed <= table_size) {
+		if ((table_size_needed <= table_size) &&
+		    (pptrsize == tsize)) {
 			break;
 		}
 
@@ -194,13 +200,22 @@ allocate_loop:
 
 		if (table_size != 0) {
 			kmem_free(ipc_kernel_map, table_addr, table_size);
+			kfree_type(ipc_object_t, pptrsize, port_pointers);
 		}
 		kr = kmem_alloc(ipc_kernel_map, &table_addr, table_size_needed,
 		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
+
+		port_pointers = kalloc_type(ipc_object_t, tsize, Z_WAITOK | Z_ZERO);
+		if (port_pointers == NULL) {
+			kmem_free(ipc_kernel_map, table_addr, table_size);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+
 		table_size = table_size_needed;
+		pptrsize = tsize;
 
 		is_read_lock(space);
 	}
@@ -232,7 +247,7 @@ allocate_loop:
 		}
 
 		iin->iin_urefs = IE_BITS_UREFS(bits);
-		iin->iin_object = (natural_t)VM_KERNEL_ADDRPERM((uintptr_t)entry->ie_object);
+		port_pointers[index] = entry->ie_object;
 		iin->iin_next = entry->ie_next;
 		iin->iin_hash = entry->ie_index;
 
@@ -266,6 +281,14 @@ allocate_loop:
 		vm_map_size_t used = tsize * sizeof(ipc_info_name_t);
 		vm_map_size_t keep = vm_map_round_page(used,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
+
+		assert(pptrsize >= tsize);
+		for (int index = 0; index < tsize; index++) {
+			ipc_info_name_t *iin = &table_info[index];
+			iin->iin_object = (natural_t)VM_KERNEL_ADDRHASH((uintptr_t)port_pointers[index]);
+			port_pointers[index] = MACH_PORT_NULL;
+		}
+		kfree_type(ipc_object_t, pptrsize, port_pointers);
 
 		if (keep < table_size) {
 			kmem_free(ipc_kernel_map, table_addr + keep,
@@ -498,11 +521,12 @@ mach_port_kobject_description(
 			break;
 		}
 	}
-#if (DEVELOPMENT || DEBUG)
-	*addrp = VM_KERNEL_UNSLIDE_OR_PERM(kaddr);
-#endif
 
 	io_unlock(object);
+
+#if (DEVELOPMENT || DEBUG)
+	*addrp = VM_KERNEL_ADDRHASH(kaddr);
+#endif
 	if (kobj) {
 		// IKOT_IOKIT_OBJECT since iokit_remove_reference() follows
 		obj = iokit_copy_object_for_consumed_kobject(kobj, IKOT_IOKIT_OBJECT);

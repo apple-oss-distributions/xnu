@@ -61,6 +61,7 @@
 #include <vm/vm_kern_xnu.h>
 #include <mach/vm_types_unsafe.h>
 #include <vm/vm_sanitize_internal.h>
+#include <kern/thread_test_context.h>
 #ifdef MACH_KERNEL_PRIVATE
 #include <vm/vm_object_internal.h>
 #endif /* MACH_KERNEL_PRIVATE */
@@ -72,9 +73,10 @@ __BEGIN_DECLS
 /* Check protection */
 extern boolean_t vm_map_check_protection(
 	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
-	vm_prot_t               protection);
+	vm_map_offset_ut        start_u,
+	vm_map_offset_ut        end_u,
+	vm_prot_ut              protection_u,
+	vm_sanitize_caller_t    vm_sanitize_caller);
 
 extern kern_return_t vm_map_wire_impl(
 	vm_map_t                map,
@@ -310,6 +312,21 @@ extern void kmem_free_space(
 ppnum_t vm_map_get_phys_page(
 	vm_map_t        map,
 	vm_offset_t     offset);
+
+/* Change inheritance */
+extern kern_return_t    vm_map_inherit(
+	vm_map_t                map,
+	vm_map_offset_ut        start,
+	vm_map_offset_ut        end,
+	vm_inherit_ut           new_inheritance);
+
+/* Change protection */
+extern kern_return_t    vm_map_protect(
+	vm_map_t                map,
+	vm_map_offset_ut        start_u,
+	vm_map_offset_ut        end_u,
+	boolean_t               set_max,
+	vm_prot_ut              new_prot_u);
 
 #pragma GCC visibility pop
 
@@ -567,15 +584,15 @@ extern kern_return_t    vm_map_remap(
 /* Add or remove machine-dependent attributes from map regions */
 extern kern_return_t    vm_map_machine_attribute(
 	vm_map_t                map,
-	vm_map_offset_t         start,
-	vm_map_offset_t         end,
+	vm_map_offset_ut        start,
+	vm_map_offset_ut        end,
 	vm_machine_attribute_t  attribute,
-	vm_machine_attribute_val_t* value);                         /* IN/OUT */
+	vm_machine_attribute_val_t *value); /* IN/OUT */
 
 extern kern_return_t    vm_map_msync(
 	vm_map_t                map,
-	vm_map_address_t        address,
-	vm_map_size_t           size,
+	vm_map_address_ut       address,
+	vm_map_size_ut          size,
 	vm_sync_t               sync_flags);
 
 /* Set paging behavior */
@@ -587,8 +604,8 @@ extern kern_return_t    vm_map_behavior_set(
 
 extern kern_return_t vm_map_region(
 	vm_map_t                 map,
-	vm_map_offset_t         *address,
-	vm_map_size_t           *size,
+	vm_map_offset_ut        *address,
+	vm_map_size_ut          *size,
 	vm_region_flavor_t       flavor,
 	vm_region_info_t         info,
 	mach_msg_type_number_t  *count,
@@ -596,17 +613,11 @@ extern kern_return_t vm_map_region(
 
 extern kern_return_t vm_map_region_recurse_64(
 	vm_map_t                 map,
-	vm_map_offset_t         *address,
-	vm_map_size_t           *size,
+	vm_map_offset_ut        *address,
+	vm_map_size_ut          *size,
 	natural_t               *nesting_depth,
 	vm_region_submap_info_64_t info,
 	mach_msg_type_number_t  *count);
-
-extern kern_return_t vm_map_page_query_internal(
-	vm_map_t                map,
-	vm_map_offset_t         offset,
-	int                     *disposition,
-	int                     *ref_count);
 
 /* definitions related to overriding the NX behavior */
 

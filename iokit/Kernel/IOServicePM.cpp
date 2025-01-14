@@ -6098,41 +6098,88 @@ logAppTimeouts( OSObject * object, void * arg )
 	}
 }
 
+static void
+logClientTimeouts( OSObject * object, void * arg )
+{
+	IOPMInterestContext * context = (IOPMInterestContext *) arg;
+	unsigned int          clientIndex, startIndex = 0;
+	OSObject *            flag;
+	bool                  isPriorityClient;
+
+	isPriorityClient = (context->notifyType == kNotifyPriority) || (context->notifyType == kNotifyCapabilityChangePriority);
+
+	// notifyClients can contain multiple instances of a client if we have notified
+	// them multiple times in one tellClientsWithResponse cycle.
+	while ((clientIndex = context->notifyClients->getNextIndexOfObject(object, startIndex)) != (unsigned int) -1) {
+		// Check for client timeouts
+		bool timeout = (flag = context->responseArray->getObject(clientIndex)) && (flag != kOSBooleanTrue);
+		if (timeout) {
+			if (context->us == IOService::getPMRootDomain()) {
+				// Root domain clients
+				PM_ERROR("PM %snotification timeout (%s)\n",
+				    isPriorityClient ? "priority " : "",
+				    IOService::getPMRootDomain()->getNotificationClientName(object));
+			} else {
+				// Non root domain clients
+				char id[30];
+				IOService * clientService;
+				_IOServiceInterestNotifier * notifier;
+
+				if ((notifier = OSDynamicCast(_IOServiceInterestNotifier, object))) {
+					// _IOServiceInterestNotifier clients
+					snprintf(id, sizeof(id), "%p", OBFUSCATE(notifier->handler));
+				} else if ((clientService = OSDynamicCast(IOService, object))) {
+					// IOService clients (e.g. power plane children)
+					snprintf(id, sizeof(id), "%s", clientService->getName());
+				} else {
+					snprintf(id, sizeof(id), "%p", OBFUSCATE(object));
+				}
+
+				PM_ERROR("PM %snotification timeout (service: %s, client: %s)\n",
+				    isPriorityClient ? "priority " : "", context->us->getName(), id);
+			}
+		}
+
+		startIndex = clientIndex + 1;
+	}
+}
+
 void
 IOService::cleanClientResponses( bool logErrors )
 {
 	if (logErrors && fResponseArray) {
-		switch (fOutOfBandParameter) {
-		case kNotifyApps:
-		case kNotifyCapabilityChangeApps:
-			if (fNotifyClientArray) {
-				IOPMInterestContext context;
+		if (fNotifyClientArray) {
+			IOPMInterestContext context;
 
-				context.responseArray    = fResponseArray;
-				context.notifyClients    = fNotifyClientArray;
-				context.serialNumber     = fSerialNumber;
-				context.messageType      = kIOMessageCopyClientID;
-				context.notifyType       = kNotifyApps;
-				context.isPreChange      = fIsPreChange;
-				context.enableTracing    = false;
-				context.us               = this;
-				context.maxTimeRequested = 0;
-				context.stateNumber      = fHeadNotePowerState;
-				context.stateFlags       = fHeadNotePowerArrayEntry->capabilityFlags;
-				context.changeFlags      = fHeadNoteChangeFlags;
+			context.responseArray    = fResponseArray;
+			context.notifyClients    = fNotifyClientArray;
+			context.serialNumber     = fSerialNumber;
+			context.messageType      = kIOMessageCopyClientID;
+			context.notifyType       = fOutOfBandParameter;
+			context.isPreChange      = fIsPreChange;
+			context.enableTracing    = false;
+			context.us               = this;
+			context.maxTimeRequested = 0;
+			context.stateNumber      = fHeadNotePowerState;
+			context.stateFlags       = fHeadNotePowerArrayEntry->capabilityFlags;
+			context.changeFlags      = fHeadNoteChangeFlags;
 
+			switch (fOutOfBandParameter) {
+			case kNotifyApps:
+				// kNotifyApps informs in-kernel clients as well
+				applyToInterested(gIOGeneralInterest, logClientTimeouts, (void *) &context);
+				OS_FALLTHROUGH;
+			case kNotifyCapabilityChangeApps:
 				applyToInterested(gIOAppPowerStateInterest, logAppTimeouts, (void *) &context);
+				break;
+			case kNotifyPriority:
+				OS_FALLTHROUGH;
+			case kNotifyCapabilityChangePriority:
+				applyToInterested(gIOPriorityPowerStateInterest, logClientTimeouts, (void *) &context);
+				break;
+			default:
+				break;
 			}
-			break;
-
-		default:
-			// kNotifyPriority, kNotifyCapabilityChangePriority
-			// TODO: identify the priority client that has not acked
-			PM_ERROR("PM priority notification timeout\n");
-			if (gIOKitDebug & kIOLogDebugPower) {
-				panic("PM priority notification timeout");
-			}
-			break;
 		}
 	}
 

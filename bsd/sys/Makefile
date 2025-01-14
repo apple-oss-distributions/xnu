@@ -14,7 +14,8 @@ EXPINC_SUBDIRS = \
 
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
-	disk.h ioctl_compat.h kdebug.h kern_control.h kernel_types.h proc_info.h reboot.h ttychars.h ttydev.h vnode.h
+	disk.h dtrace.h dtrace_glue.h dtrace_impl.h fasttrap.h fasttrap_isa.h ioctl_compat.h kdebug.h \
+	kern_control.h kernel_types.h proc_info.h protosw.h reboot.h ttychars.h ttydev.h ubc.h vnode.h
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
@@ -31,8 +32,8 @@ endif
 DATAFILES = $(sort \
 	appleapiopts.h	acct.h aio.h attr.h \
 	buf.h cdefs.h clonefile.h conf.h constrained_ctypes.h \
-	dir.h dirent.h dkstat.h dtrace.h dtrace_glue.h dtrace_impl.h \
-	errno.h ev.h event.h fasttrap.h fasttrap_isa.h fcntl.h file.h filedesc.h filio.h fsgetpath.h gmon.h \
+	dir.h dirent.h dkstat.h \
+	errno.h ev.h event.h fcntl.h file.h filedesc.h filio.h fsgetpath.h gmon.h \
 	ioccom.h ioctl.h \
 	ipc.h kernel.h kern_event.h lctx.h loadable_fs.h lock.h lockf.h \
 	kauth.h kdebug_signpost.h lockstat.h malloc.h \
@@ -42,10 +43,10 @@ DATAFILES = $(sort \
 	select.h sem.h semaphore.h shm.h signal.h signalvar.h snapshot.h socket.h socketvar.h sockio.h stat.h stdio.h \
 	sysctl.h syslimits.h syslog.h sys_domain.h termios.h  time.h \
 	timeb.h times.h trace.h tty.h ttycom.h \
-	ttydefaults.h types.h ubc.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
+	ttydefaults.h types.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
 	user.h utfconv.h utsname.h vadvise.h vcmd.h \
 	vm.h vmmeter.h vmparam.h vnode_if.h vsock.h vstat.h wait.h xattr.h \
-	_select.h _structs.h _types.h _endian.h __endian.h domain.h protosw.h \
+	_select.h _structs.h _types.h _endian.h __endian.h domain.h \
 	spawn.h timex.h commpage.h log_data.h \
 	$(EXTRA_DATAFILES))
 
@@ -239,6 +240,7 @@ XNU_ONLY_EXPORTS = \
 	file_internal.h \
 	filedesc.h \
 	guarded.h \
+	kern_memorystatus_xnu.h \
 	mount_internal.h \
 	munge.h \
 	pipe.h \

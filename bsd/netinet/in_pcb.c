@@ -881,10 +881,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 	struct in_addr laddr;
 	struct ifnet *outif = NULL;
 
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		return EINVAL;
-	}
-	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	ASSERT((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0);
 
 	if (TAILQ_EMPTY(&in_ifaddrhead)) { /* XXX broken! */
 		error = EADDRNOTAVAIL;
@@ -1383,7 +1380,6 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct sockaddr *remote, str
 	in_pcb_check_management_entitled(inp);
 	in_pcb_check_ultra_constrained_entitled(inp);
 done:
-	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
 	return error;
 }
 
@@ -4471,4 +4467,53 @@ in_management_interface_check(void)
 	nwk_item->func = in_management_interface_event_callback;
 
 	nwk_wq_enqueue(nwk_item);
+}
+
+void
+inp_enter_bind_in_progress(struct socket *so)
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+#if (DEBUG || DEVELOPMENT)
+	socket_lock_assert_owned(so);
+#endif /* (DEBUG || DEVELOPMENT) */
+
+	VERIFY(inp->inp_bind_in_progress_waiters != UINT16_MAX);
+
+	while ((inp->inp_flags2 & INP2_BIND_IN_PROGRESS) != 0) {
+		lck_mtx_t *mutex_held;
+
+		inp->inp_bind_in_progress_waiters++;
+		inp->inp_bind_in_progress_last_waiter_thread = current_thread();
+
+		if (so->so_proto->pr_getlock != NULL) {
+			mutex_held = (*so->so_proto->pr_getlock)(so, PR_F_WILLUNLOCK);
+		} else {
+			mutex_held = so->so_proto->pr_domain->dom_mtx;
+		}
+		msleep(&inp->inp_bind_in_progress_waiters, mutex_held,
+		    PSOCK | PCATCH, "inp_enter_bind_in_progress", NULL);
+
+		inp->inp_bind_in_progress_last_waiter_thread = NULL;
+
+		inp->inp_bind_in_progress_waiters--;
+	}
+	inp->inp_flags2 |= INP2_BIND_IN_PROGRESS;
+	inp->inp_bind_in_progress_thread = current_thread();
+}
+
+void
+inp_exit_bind_in_progress(struct socket *so)
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+#if (DEBUG || DEVELOPMENT)
+	socket_lock_assert_owned(so);
+#endif /* (DEBUG || DEVELOPMENT) */
+
+	inp->inp_flags2 &= ~INP2_BIND_IN_PROGRESS;
+	inp->inp_bind_in_progress_thread = NULL;
+	if (__improbable(inp->inp_bind_in_progress_waiters > 0)) {
+		wakeup_one((caddr_t)&inp->inp_bind_in_progress_waiters);
+	}
 }

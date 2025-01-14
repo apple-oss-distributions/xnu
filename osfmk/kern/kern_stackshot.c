@@ -59,6 +59,7 @@
 #include <kern/kern_stackshot.h>
 #include <kern/backtrace.h>
 #include <kern/coalition.h>
+#include <kern/epoch_sync.h>
 #include <kern/exclaves_stackshot.h>
 #include <kern/exclaves_inspection.h>
 #include <kern/processor.h>
@@ -1323,12 +1324,10 @@ stack_microstackshot(user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t flag
 	 * Control related operations
 	 */
 	if (flags & STACKSHOT_GLOBAL_MICROSTACKSHOT_ENABLE) {
-		telemetry_global_ctl(1);
-		*retval = 0;
+		*retval = ENOTSUP;
 		goto exit;
 	} else if (flags & STACKSHOT_GLOBAL_MICROSTACKSHOT_DISABLE) {
-		telemetry_global_ctl(0);
-		*retval = 0;
+		*retval = ENOTSUP;
 		goto exit;
 	}
 
@@ -2142,13 +2141,13 @@ error_exit:
 }
 
 static kern_return_t
-stackshot_exclaves_process_textlayout(uint64_t index, const stackshottypes_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
+stackshot_exclaves_process_textlayout(const stackshottypes_textlayout_s *_Nonnull tl, void *kcdata_ptr, bool want_raw_addresses)
 {
 	kern_return_t error = KERN_SUCCESS;
 	__block struct exclave_textlayout_info info = { 0 };
 
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_BEGIN,
-	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
+	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, tl->textlayoutid));
 
 	info.layout_id = tl->textlayoutid;
 
@@ -2157,7 +2156,7 @@ stackshot_exclaves_process_textlayout(uint64_t index, const stackshottypes_textl
 	kcd_exit_on_error(kcdata_push_data(kcdata_ptr, STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_INFO, sizeof(struct exclave_textlayout_info), &info));
 	kcd_exit_on_error(stackshot_exclaves_process_textlayout_segments(tl, kcdata_ptr, want_raw_addresses));
 	kcd_exit_on_error(kcdata_add_container_marker(kcdata_ptr, KCDATA_TYPE_CONTAINER_END,
-	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, index));
+	    STACKSHOT_KCCONTAINER_EXCLAVE_TEXTLAYOUT, tl->textlayoutid));
 error_exit:
 	return error;
 }
@@ -2229,9 +2228,9 @@ stackshot_exclaves_process_stackshot(const stackshot_stackshotresult_s *result, 
 		}
 	});
 
-	stackshottypes_textlayout__v_visit(&result->textlayouts, ^(size_t i, const stackshottypes_textlayout_s *_Nonnull item) {
+	stackshottypes_textlayout__v_visit(&result->textlayouts, ^(size_t __unused i, const stackshottypes_textlayout_s *_Nonnull item) {
 		if (kr == KERN_SUCCESS) {
-		        kr = stackshot_exclaves_process_textlayout(i, item, kcdata_ptr, want_raw_addresses);
+		        kr = stackshot_exclaves_process_textlayout(item, kcdata_ptr, want_raw_addresses);
 		}
 	});
 
@@ -2451,6 +2450,9 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	snapshot_args.buffer_size = stackshot_estimate =
 	    get_stackshot_estsize(size_hint, stackshot_initial_estimate_adj, snapshot_args.flags, snapshot_args.pid);
 	stackshot_initial_estimate = stackshot_estimate;
+
+	// ensure at least one attempt, even if the initial size from estimate was too big
+	snapshot_args.buffer_size = MIN(snapshot_args.buffer_size, max_tracebuf_size);
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_START,
 	    snapshot_args.flags, snapshot_args.buffer_size, snapshot_args.pid, snapshot_args.since_timestamp);
@@ -5411,7 +5413,7 @@ kdp_stackshot_kcdata_format(void)
 			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
 			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
 			tberr = stackshot_stackshotresult__unmarshal(excl_ss.stackshot_buffer, excl_ss.stackshot_buffer_size, ^(stackshot_stackshotresult_s result){
-				*error_in_block = stackshot_exclaves_process_stackshot(&result, stackshot_kcdata_p, true);
+				*error_in_block = stackshot_exclaves_process_stackshot(&result, stackshot_kcdata_p, false);
 			});
 			kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
 			    STACKSHOT_KCCONTAINER_EXCLAVES, 0);
@@ -6097,6 +6099,12 @@ stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_v2_t *waitinfo
 	case kThreadWaitCompressor:
 		kdp_compressor_busy_find_owner(thread->wait_event, waitinfo_v1);
 		break;
+#ifdef CONFIG_EXCLAVES
+	case kThreadWaitExclaveCore:
+	case kThreadWaitExclaveKit:
+		kdp_esync_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
+		break;
+#endif /* CONFIG_EXCLAVES */
 	case kThreadWaitPageBusy:
 		kdp_vm_page_sleep_find_owner(thread->wait_event, waitinfo_v1);
 		break;

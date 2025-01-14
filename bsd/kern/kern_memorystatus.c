@@ -84,6 +84,7 @@
 
 #include <kern/kern_memorystatus_internal.h>
 #include <sys/kern_memorystatus.h>
+#include <sys/kern_memorystatus_xnu.h>
 #include <sys/kern_memorystatus_freeze.h>
 #include <sys/kern_memorystatus_notify.h>
 #include <sys/kdebug_triage.h>
@@ -277,7 +278,8 @@ _memstat_write_memlimit_to_ledger_locked(proc_t p, bool is_active, bool drop_loc
 #define MEMORYSTATUS_SMALL_MEMORY_THRESHOLD (3UL * (1UL << 30))
 #define MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD (6UL * (1UL << 30))
 
-#define MEMORYSTATUS_MORE_FREE_OFFSET_PERCENTAGE 5UL
+#define MEMORYSTATUS_CLEAR_THE_DECKS_OFFSET_PERCENTAGE 5UL
+#define MEMORYSTATUS_BALLAST_OFFSET_PERCENTAGE 5UL
 #define MEMORYSTATUS_AGGR_SYSPROC_AGING_PERCENTAGE 7UL
 #define MEMORYSTATUS_DELTA_PERCENTAGE_LARGE 4UL
 #define MEMORYSTATUS_DELTA_PERCENTAGE_SMALL 5UL
@@ -290,11 +292,11 @@ _memstat_write_memlimit_to_ledger_locked(proc_t p, bool is_active, bool drop_loc
  *  (6,∞)     | 4%       | 8%   | 12%      | 50%
  */
 
-#define MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_SMALL 5UL
-#define MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_LARGE 4UL
+#define MEMORYSTATUS_CRITICAL_PERCENTAGE_SMALL 5UL
+#define MEMORYSTATUS_CRITICAL_PERCENTAGE_LARGE 4UL
 
-#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM 2UL
-#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM 1UL
+#define MEMORYSTATUS_IDLE_RATIO_NUM 2UL
+#define MEMORYSTATUS_IDLE_RATIO_DENOM 1UL
 #define MEMORYSTATUS_PRESSURE_RATIO_NUM 3UL
 #define MEMORYSTATUS_PRESSURE_RATIO_DENOM 1UL
 
@@ -303,8 +305,8 @@ _memstat_write_memlimit_to_ledger_locked(proc_t p, bool is_active, bool drop_loc
  * 4:9:15. This ratio is preserved for these devices when a fixed-mb base value has not been provided by EDT/boot-arg;
  * all other devices use a 1:2:3 ratio.
  */
-#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM_MEDIUM 9UL
-#define MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM_MEDIUM 4UL
+#define MEMORYSTATUS_IDLE_RATIO_NUM_MEDIUM 9UL
+#define MEMORYSTATUS_IDLE_RATIO_DENOM_MEDIUM 4UL
 #define MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM  15UL
 #define MEMORYSTATUS_PRESSURE_RATIO_DENOM_MEDIUM  4UL
 
@@ -375,6 +377,16 @@ static void memorystatus_init_jetsam_snapshot_header(memorystatus_jetsam_snapsho
 
 /* General memorystatus stuff */
 
+/*
+ * Daemons: The actual idle deferred time for the daemon is based on
+ * the relaunch behavior of the daemon. The relaunch behavior determines
+ * the scaling factor applied to memorystatus_sysprocs_idle_delay_time. See
+ * kJetsamSysProcsIdleDelayTime* ratios defined in kern_memorystatus.c
+ *
+ * Apps: The apps are aged for memorystatus_apps_idle_delay_time factored
+ * by kJetsamAppsIdleDelayTimeRatio.
+ */
+TUNABLE(uint64_t, memstat_idle_deferral_time_s, "memorystatus_idle_deferral_time_s", 10);
 uint64_t memorystatus_sysprocs_idle_delay_time = 0;
 uint64_t memorystatus_apps_idle_delay_time = 0;
 /* 2GB devices support an entitlement for a higher app memory limit of "almost 2GB". */
@@ -442,6 +454,11 @@ boolean_t memorystatus_kill_elevated_process(uint32_t cause, os_reason_t jetsam_
     uint32_t *errors, uint64_t *memory_reclaimed);
 uint64_t memorystatus_available_memory_internal(proc_t p);
 void memorystatus_thread_wake(void);
+static bool _memstat_consider_waking_jetsam_thread(void);
+#if CONFIG_JETSAM
+static void memorystatus_thread_pool_default(void);
+static void memorystatus_thread_pool_max(void);
+#endif /* CONFIG_JETSAM */
 
 unsigned int memorystatus_level = 0;
 static int memorystatus_list_count = 0;
@@ -498,6 +515,9 @@ boolean_t memorystatus_allowed_vm_map_fork(task_t, bool *);
 void memorystatus_abort_vm_map_fork(task_t);
 #endif
 
+SYSCTL_NODE(_kern, OID_AUTO, memorystatus,
+    CTLFLAG_RW | CTLFLAG_LOCKED, 0, "memorystatus subsystem");
+
 /*
  * Idle delay timeout factors for daemons based on relaunch behavior. Only used in
  * kJetsamAgingPolicySysProcsReclaimedFirst aging policy.
@@ -505,7 +525,6 @@ void memorystatus_abort_vm_map_fork(task_t);
 #define kJetsamSysProcsIdleDelayTimeLowRatio    (5)
 #define kJetsamSysProcsIdleDelayTimeMedRatio    (2)
 #define kJetsamSysProcsIdleDelayTimeHighRatio   (1)
-static_assert(kJetsamSysProcsIdleDelayTimeLowRatio <= DEFERRED_IDLE_EXIT_TIME_SECS, "sysproc idle delay time for low relaunch daemons would be 0");
 
 /*
  * For the kJetsamAgingPolicySysProcsReclaimedFirst aging policy, treat apps as well
@@ -574,7 +593,7 @@ sysctl_jetsam_set_sysprocs_idle_delay_time SYSCTL_HANDLER_ARGS
 	return 0;
 }
 
-SYSCTL_PROC(_kern, OID_AUTO, memorystatus_sysprocs_idle_delay_time, CTLTYPE_INT | CTLFLAG_RW,
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, sysprocs_idle_delay_time_ns, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_jetsam_set_sysprocs_idle_delay_time, "I", "Aging window for system processes");
 
 
@@ -604,7 +623,7 @@ sysctl_jetsam_set_apps_idle_delay_time SYSCTL_HANDLER_ARGS
 	return 0;
 }
 
-SYSCTL_PROC(_kern, OID_AUTO, memorystatus_apps_idle_delay_time, CTLTYPE_INT | CTLFLAG_RW,
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, apps_idle_delay_time_ns, CTLTYPE_INT | CTLFLAG_RW,
     0, 0, sysctl_jetsam_set_apps_idle_delay_time, "I", "Aging window for applications");
 
 SYSCTL_INT(_kern, OID_AUTO, max_task_pmem, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED | CTLFLAG_KERN, &max_task_footprint_mb, 0, "");
@@ -904,31 +923,49 @@ extern unsigned int     vm_page_secluded_count_over_target;
 /* Aggressive jetsam pages threshold for sysproc aging policy */
 unsigned int memorystatus_sysproc_aging_aggr_pages = 0;
 
-#if CONFIG_JETSAM
+uint32_t memorystatus_available_pages = UINT32_MAX;
 
-/* Jetsam Thresholds in MB */
+__options_closed_decl(memorystatus_policy_t, uint8_t, {
+	kPolicyDefault        = 0x00,
+	kPolicyClearTheDecks  = 0x01,
+	kPolicyBallastDrain   = 0x02,
+});
+
+static memorystatus_policy_t memstat_policy_config = kPolicyDefault;
+
+#define MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX ((uint32_t)(atop_64(max_mem) / 2))
+
+/*
+ * Jetsam Page Shortage Thresholds (PSTs):
+ *  - critical: jetsam above the idle band
+ *  - idle: jetsam in the idle band
+ *  - pressure: jetsam soft memory limit violators
+ *  - ballast: offset applied to non-critical thresholds upon request
+ *    from userspace
+ *  - ctd (clear-the-decks): offset applied to non-critical thresholds upon request
+ *    from userspace
+ */
+uint32_t memstat_critical_threshold = 0;
+uint32_t memstat_idle_threshold = 0;
+uint32_t memstat_soft_threshold = 0;
+uint32_t memstat_ballast_offset = 0;
+uint32_t memstat_ctd_offset = 0;
+
+/*
+ * NB: These MiB thresholds are only read at boot and may become out of sync
+ * with the PSTs above.
+ */
 TUNABLE_DT(uint32_t, memorystatus_critical_threshold_mb, "/defaults",
     "kern.memstat_critical_mb", "memorystatus_critical_threshold_mb", 0, TUNABLE_DT_NONE);
 TUNABLE_DT(uint32_t, memorystatus_idle_threshold_mb, "/defaults",
     "kern.memstat_idle_mb", "memorystatus_idle_threshold_mb", 0, TUNABLE_DT_NONE);
 TUNABLE_DT(uint32_t, memorystatus_pressure_threshold_mb, "/defaults",
     "kern.memstat_pressure_mb", "memorystatus_pressure_threshold_mb", 0, TUNABLE_DT_NONE);
-TUNABLE_DT(uint32_t, memorystatus_more_free_offset_mb, "/defaults",
-    "kern.memstat_more_free_mb", "memorystatus_more_free_offset_mb", 0, TUNABLE_DT_NONE);
+TUNABLE_DT(uint32_t, memstat_ballast_offset_mb, "/defaults",
+    "kern.memstat_ballast_mb", "memstat_ballast_offset_mb", 0, TUNABLE_DT_NONE);
+TUNABLE(uint32_t, memstat_ctd_offset_mb, "memstat_ballast_offset_mb", 0);
 
-/*
- * Available Pages Thresholds
- *     critical_base: jetsam above the idle band
- *     critical_idle: jetsam in the idle band
- *     more_free_offset: offset applied to critical/idle upon request from userspace
- *     sysproc_aging_aggr: allow aggressive jetsam due to sysproc aging
- *     pressure: jetsam hwm violators
- */
-unsigned int memorystatus_available_pages = (unsigned int)-1;
-unsigned int memorystatus_available_pages_pressure = 0;
-unsigned int memorystatus_available_pages_critical = 0;
-unsigned int memorystatus_available_pages_critical_base = 0;
-unsigned int memorystatus_available_pages_critical_idle = 0;
+#if CONFIG_JETSAM
 TUNABLE_DT_WRITEABLE(unsigned int, memorystatus_swap_all_apps, "/defaults", "kern.swap_all_apps", "kern.swap_all_apps", false, TUNABLE_DT_NONE);
 /* Will compact the early swapin queue if there are >= this many csegs on it. */
 static unsigned int memorystatus_swapin_trigger_segments = 10;
@@ -942,10 +979,6 @@ SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages, CTLFLAG_RD | CTLFLAG_
 #endif /* DEVELOPMENT || DEBUG */
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_swap_all_apps, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_swap_all_apps, 0, "");
 
-static unsigned int memorystatus_jetsam_policy = kPolicyDefault;
-unsigned int memorystatus_policy_more_free_offset_pages = 0;
-static void memorystatus_update_levels_locked(void);
-
 static int memorystatus_cmd_set_jetsam_memory_limit(pid_t pid, int32_t high_water_mark, __unused int32_t *retval, boolean_t is_fatal_limit);
 
 int32_t max_kill_priority = JETSAM_PRIORITY_MAX;
@@ -956,12 +989,17 @@ uint32_t    memorystatus_jetsam_proc_size_panic = 0; /* If specified, panic only
 
 /* If set, kill swappable processes when we're low on swap space. Currently off until we can allocate more swap space (rdar://87800902) */
 uint32_t jetsam_kill_on_low_swap = 0;
+
+/*
+ * Global switch for enabling fast jetsam. Fast jetsam is
+ * hooked up via the system_override() system call. When
+ * enabled, the following features can be toggled:
+ * - clear-the-decks jetsam
+ * - ballast-drain jetsam
+ */
+TUNABLE_WRITEABLE(bool, fast_jetsam_enabled, "fast_jetsam_enabled", true);
+
 #else /* CONFIG_JETSAM */
-
-uint64_t memorystatus_available_pages = (uint64_t)-1;
-uint64_t memorystatus_available_pages_pressure = (uint64_t)-1;
-uint64_t memorystatus_available_pages_critical = (uint64_t)-1;
-
 int32_t max_kill_priority = JETSAM_PRIORITY_IDLE;
 #endif /* CONFIG_JETSAM */
 
@@ -1146,22 +1184,320 @@ SYSCTL_PROC(_kern, OID_AUTO, memorystatus_highwater_enabled, CTLTYPE_INT | CTLFL
 
 SYSCTL_INT(_kern, OID_AUTO, memorystatus_idle_snapshot, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_idle_snapshot, 0, "");
 
-#if CONFIG_JETSAM
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_base, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_base, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_critical_idle, CTLFLAG_RD | CTLFLAG_LOCKED, &memorystatus_available_pages_critical_idle, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_policy_more_free_offset_pages, CTLFLAG_RD, &memorystatus_policy_more_free_offset_pages, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_aggr_sysproc_aging, CTLFLAG_RD, &memorystatus_sysproc_aging_aggr_pages, 0, "");
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_kill_on_low_swap, CTLFLAG_RW, &jetsam_kill_on_low_swap, 0, "");
-#if VM_PRESSURE_EVENTS
-
-SYSCTL_UINT(_kern, OID_AUTO, memorystatus_available_pages_pressure, CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_available_pages_pressure, 0, "");
-
-#endif /* VM_PRESSURE_EVENTS */
-
-#endif /* CONFIG_JETSAM */
-
 #endif /* DEVELOPMENT || DEBUG */
+
+#if CONFIG_JETSAM
+#if DEVELOPMENT || DEBUG
+static int
+memstat_page_shortage_threshold_sysctl_handler SYSCTL_HANDLER_ARGS
+{
+	uint32_t threshold;
+	if (arg1 == &memstat_idle_threshold) {
+		threshold = memorystatus_get_idle_exit_page_shortage_threshold();
+	} else if (arg1 == &memstat_soft_threshold) {
+		threshold = memorystatus_get_soft_memlimit_page_shortage_threshold();
+	} else if (arg1 == &memstat_critical_threshold) {
+		threshold = memorystatus_get_critical_page_shortage_threshold();
+	} else {
+		return EINVAL;
+	}
+	return sysctl_handle_int(oidp, NULL, threshold, req);
+}
+
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, available_pages_critical,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &memstat_critical_threshold, 0,
+    memstat_page_shortage_threshold_sysctl_handler, "IU",
+    "");
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, available_pages_idle,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &memstat_idle_threshold, 0,
+    memstat_page_shortage_threshold_sysctl_handler, "IU",
+    "");
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, available_pages_soft,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &memstat_soft_threshold, 0,
+    memstat_page_shortage_threshold_sysctl_handler, "IU",
+    "");
+
+SYSCTL_INT(_kern_memorystatus, OID_AUTO, ballast_offset_pages,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    &memstat_ballast_offset, 0, "");
+SYSCTL_INT(_kern_memorystatus, OID_AUTO, ctd_offset_pages,
+    CTLFLAG_RD | CTLFLAG_LOCKED,
+    &memstat_ctd_offset, 0, "");
+#endif /* DEVELOPMENT || DEBUG */
+
+static int
+memstat_page_shortage_threshold_experiment_handler SYSCTL_HANDLER_ARGS
+{
+	uint32_t threshold_mb;
+	int error;
+
+	assert3p(arg1, !=, NULL);
+	threshold_mb = ptoa_32(os_atomic_load((uint32_t *)arg1, relaxed)) >> 20;
+
+	error = sysctl_handle_int(oidp, &threshold_mb, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	if (threshold_mb > UINT32_MAX >> 20) {
+		/* Converting to bytes would overflow */
+		return EINVAL;
+	}
+
+	uint32_t new_threshold_pages = atop_32(threshold_mb << 20);
+	/*
+	 * Page shortage thresholds may not exceed 1/2 max_mem
+	 */
+	if (new_threshold_pages > MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX) {
+		return EINVAL;
+	}
+	if ((arg1 == &memstat_soft_threshold ||
+	    arg1 == &memstat_idle_threshold ||
+	    arg1 == &memstat_critical_threshold) &&
+	    new_threshold_pages == 0) {
+		return EINVAL;
+	}
+
+	if (arg1 == &memstat_soft_threshold) {
+		memorystatus_log("memorystatus: setting soft memory limit "
+		    "page shortage threshold to %u MiB\n", threshold_mb);
+	} else if (arg1 == &memstat_idle_threshold) {
+		memorystatus_log("memorystatus: setting idle exit page "
+		    "shortage threshold to %u MiB\n", threshold_mb);
+	} else if (arg1 == &memstat_critical_threshold) {
+		memorystatus_log("memorystatus: setting critical page shortage"
+		    " threshold to %u MiB\n", threshold_mb);
+	} else if (arg1 == &memstat_ctd_offset) {
+		memorystatus_log("memorystatus: setting clear-the-decks page shortage"
+		    " offset to %u MiB\n", threshold_mb);
+	} else if (arg1 == &memstat_ballast_offset) {
+		memorystatus_log("memorystatus: setting ballast page shortage"
+		    " offset to %u MiB\n", threshold_mb);
+	} else {
+		return EINVAL;
+	}
+	os_atomic_store((uint32_t *)arg1, new_threshold_pages, relaxed);
+
+	return 0;
+}
+
+#if DEVELOPMENT || DEBUG
+#define MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS (CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED)
+#else /* RELEASE */
+#define MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS (CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED | CTLFLAG_MASKED)
+#endif /* DEVELOPMENT || DEBUG */
+
+EXPERIMENT_FACTOR_PROC(_kern_memorystatus, soft_threshold_mb,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    &memstat_soft_threshold, 0, memstat_page_shortage_threshold_experiment_handler,
+    "IU",
+    "The minimum amount of available memory to maintain before killing "
+    "processes which have violated there soft memory limit");
+
+EXPERIMENT_FACTOR_PROC(_kern_memorystatus, idle_threshold_mb,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    &memstat_idle_threshold, 0, memstat_page_shortage_threshold_experiment_handler,
+    "IU",
+    "The minimum amount of available memory to maintain before exiting idle "
+    "processes");
+EXPERIMENT_FACTOR_PROC(_kern_memorystatus, critical_threshold_mb,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    &memstat_critical_threshold, 0, memstat_page_shortage_threshold_experiment_handler,
+    "IU",
+    "The minimum amount of available memory to maintain before killing non-idle "
+    "processes");
+EXPERIMENT_FACTOR_PROC(_kern_memorystatus, ballast_offset_mb,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    &memstat_ballast_offset, 0, memstat_page_shortage_threshold_experiment_handler,
+    "IU",
+    "An offset to apply to all non-critical page shortage thresholds when "
+    "ballast is filling");
+EXPERIMENT_FACTOR_PROC(_kern_memorystatus, clear_the_decks_offset_mb,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    &memstat_ctd_offset, 0, memstat_page_shortage_threshold_experiment_handler,
+    "IU",
+    "An offset to apply to all non-critical page shortage thresholds when "
+    "clear-the-decks is engaged");
+
+int
+memorystatus_ballast_control(bool drain)
+{
+	if (!fast_jetsam_enabled) {
+		memorystatus_log_error("memorystatus: fast-jetsam "
+		    "has been disabled on this system. denying request to %s ballast\n",
+		    drain ? "drain" : "flood");
+		return ENOTSUP;
+	}
+	if (memstat_ballast_offset == 0) {
+		/* nothing to do */
+		return 0;
+	}
+	if (drain) {
+		/*
+		 * Drain the ballast tanks, providing additional buoyancy by requiring that
+		 * they only be used to store "available" memory.
+		 */
+		memorystatus_policy_t orig_policy = os_atomic_or_orig(
+			&memstat_policy_config,
+			(memorystatus_policy_t)kPolicyBallastDrain, relaxed);
+		if (orig_policy & kPolicyBallastDrain) {
+			return 0;
+		}
+		memorystatus_log("memorystatus: draining ballast "
+		    "-- will add %u MiB to non-critical page shortage "
+		    "thresholds\n", ptoa_32(memstat_ballast_offset) >> 20);
+		memorystatus_thread_pool_max();
+		_memstat_consider_waking_jetsam_thread();
+	} else {
+		/*
+		 * Flood the ballast tanks, removing the extra buoyancy by allowing them to be
+		 * filled with "unavailable" memory.
+		 */
+		memorystatus_policy_t orig_policy = os_atomic_andnot_orig(
+			&memstat_policy_config,
+			(memorystatus_policy_t)kPolicyBallastDrain, relaxed);
+		if (!(orig_policy & kPolicyBallastDrain)) {
+			/* already disabled */
+			return 0;
+		}
+		assertf(fast_jetsam_enabled, "ballast was drained while fast-jetsam was disabled");
+		memorystatus_log("memorystatus: flooding ballast "
+		    "-- will subtract %u MiB from non-critical page shortage "
+		    "thresholds\n", ptoa_32(memstat_ballast_offset) >> 20);
+		memorystatus_thread_pool_default();
+		_memstat_consider_waking_jetsam_thread();
+	}
+	return 0;
+}
+
+static int
+sysctl_kern_memorystatus_ballast_drain SYSCTL_HANDLER_ARGS
+{
+	int error = 0;
+
+	boolean_t drained = os_atomic_load(&memstat_policy_config, relaxed) & kPolicyBallastDrain ? TRUE : FALSE;
+
+	error = sysctl_handle_int(oidp, &drained, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	/*
+	 * Writers must be root or have the com.apple.private.kernel.jetsam entitlement
+	 */
+	error = priv_check_cred(kauth_cred_get(), PRIV_VM_JETSAM, 0);
+	if (error) {
+		return error;
+	}
+
+	return memorystatus_ballast_control(drained);
+}
+
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, ballast_drained,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS, 0, 0,
+    sysctl_kern_memorystatus_ballast_drain, "IU",
+    "If true, apply an offset (kern.memorystatus.ballast_offset_mb) to "
+    "all non-critical page shortage thresholds");
+
+#if DEVELOPMENT || DEBUG
+/*
+ * In preparation for a storm, sailors may "clear the decks" of non-essential
+ * cargo to increase the seaworthiness of a vessel. In our analogy, the
+ * non-essential cargo is idle processes or processes which have exceeded
+ * their memory limit. The storm may be any foreseeable user activity that will
+ * require significant memory demand.
+ *
+ * Mechanically, clearing the decks involves adding a configurable offset to
+ * the idle and soft available page shortage thresholds.
+ *
+ * Readers may note that the clear-the-decks policy is mechanically identical
+ * the ballast-draining policy. Their difference lies in intended use.
+ * Clear-the-decks is intended to address imminent memory demand and may be
+ * configured with an offset that wouldn't be sustainable for long-term system
+ * use. The interface is generally intended to allow clients to hint to the
+ * system that they will need a significant amount of memory in the near future,
+ * and the system should proactively try to free unneeded reserves to satisfy
+ * to be able to better satisfy the demand.
+ *
+ * This policy is currently only exposed on development kernels for prototyping
+ * until a productized use case emerges
+ *
+ * TODO: If adopted on production systems, this mechanism should use a
+ * dedicated system-call / memorystatus-command
+ */
+static int
+memstat_clear_the_decks(bool clear)
+{
+	if (!fast_jetsam_enabled) {
+		memorystatus_log_error("memorystatus: fast-jetsam "
+		    "has been disabled on this system\n");
+		return ENOTSUP;
+	}
+	if (clear) {
+		/*
+		 * Clear the decks of non-essential cargo.
+		 */
+		memorystatus_policy_t orig_policy = os_atomic_or_orig(
+			&memstat_policy_config,
+			(memorystatus_policy_t)kPolicyClearTheDecks, relaxed);
+		if (orig_policy & kPolicyClearTheDecks) {
+			return EALREADY;
+		}
+		memorystatus_log("memorystatus: clear-the-decks engaged "
+		    "-- will add %u MiB to non-critical page shortage "
+		    "thresholds\n", ptoa_32(memstat_ctd_offset) >> 20);
+		memorystatus_thread_pool_max();
+		_memstat_consider_waking_jetsam_thread();
+	} else {
+		/*
+		 * Allow the decks to be reloaded with non-essential cargo.
+		 */
+		memorystatus_policy_t orig_policy = os_atomic_andnot_orig(
+			&memstat_policy_config,
+			(memorystatus_policy_t)kPolicyClearTheDecks, relaxed);
+		if (!(orig_policy & kPolicyClearTheDecks)) {
+			return EALREADY;
+		}
+		assertf(fast_jetsam_enabled, "clear the decks was set while fast-jetsam was disabled");
+		memorystatus_log("memorystatus: clear-the-decks disengaged "
+		    "-- will subtract %u MiB from non-critical page shortage "
+		    "thresholds\n", ptoa_32(memstat_ctd_offset) >> 20);
+		memorystatus_thread_pool_default();
+		_memstat_consider_waking_jetsam_thread();
+	}
+	return 0;
+}
+
+static int
+sysctl_kern_memorystatus_decks_cleared SYSCTL_HANDLER_ARGS
+{
+	int error = 0;
+
+	boolean_t cleared = os_atomic_load(&memstat_policy_config, relaxed) & kPolicyClearTheDecks ? TRUE : FALSE;
+
+	error = sysctl_handle_int(oidp, &cleared, 0, req);
+	if (error || !req->newptr) {
+		return error;
+	}
+
+	/*
+	 * Writers must be root or have the com.apple.private.kernel.jetsam entitlement
+	 */
+	error = priv_check_cred(kauth_cred_get(), PRIV_VM_JETSAM, 0);
+	if (error) {
+		return error;
+	}
+
+	return memstat_clear_the_decks(cleared);
+}
+
+SYSCTL_PROC(_kern_memorystatus, OID_AUTO, decks_cleared,
+    MEMSTAT_PAGE_SHORTAGE_EXPERIMENT_FLAGS,
+    0, 0, sysctl_kern_memorystatus_decks_cleared, "I",
+    "If true, apply an offset (kern.memorystatus_ctd_offset_mb) to "
+    "all non-critical page shortage thresholds");
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_JETSAM */
 
 extern kern_return_t kernel_thread_start_priority(thread_continue_t continuation,
     void *parameter,
@@ -1392,23 +1728,9 @@ jetsam_state_t jetsam_threads;
 #define JETSAM_THREADS_LIMIT   3
 
 /* Number of active jetsam threads */
-_Atomic int active_jetsam_threads = 1;
-
+_Atomic unsigned int active_jetsam_threads = 1;
 /* Number of maximum jetsam threads configured */
-int max_jetsam_threads = JETSAM_THREADS_LIMIT;
-
-/*
- * Global switch for enabling fast jetsam. Fast jetsam is
- * hooked up via the system_override() system call. It has the
- * following effects:
- * - Raise the jetsam threshold ("clear-the-deck")
- * - Enabled parallel jetsam on eligible devices
- */
-#if __AMP__
-int fast_jetsam_enabled = 1;
-#else /* __AMP__ */
-int fast_jetsam_enabled = 0;
-#endif /* __AMP__ */
+unsigned int max_jetsam_threads = 1;
 
 static jetsam_state_t
 jetsam_current_thread()
@@ -1507,8 +1829,9 @@ memorystatus_init(void)
 	}
 	memorystatus_idle_demotion_call = thread_call_allocate((thread_call_func_t)memorystatus_perform_idle_demotion, NULL);
 
-	nanoseconds_to_absolutetime((uint64_t)DEFERRED_IDLE_EXIT_TIME_SECS * NSEC_PER_SEC, &memorystatus_sysprocs_idle_delay_time);
-	nanoseconds_to_absolutetime((uint64_t)DEFERRED_IDLE_EXIT_TIME_SECS * NSEC_PER_SEC, &memorystatus_apps_idle_delay_time);
+	nanoseconds_to_absolutetime(memstat_idle_deferral_time_s * NSEC_PER_SEC, &memorystatus_sysprocs_idle_delay_time);
+	nanoseconds_to_absolutetime(memstat_idle_deferral_time_s * NSEC_PER_SEC, &memorystatus_apps_idle_delay_time);
+	assert3u(memstat_idle_deferral_time_s, >=, kJetsamSysProcsIdleDelayTimeLowRatio);
 
 #if CONFIG_JETSAM
 	bzero(memorystatus_jetsam_proc_name_panic, sizeof(memorystatus_jetsam_proc_name_panic));
@@ -1550,51 +1873,56 @@ memorystatus_init(void)
 	}
 
 	if (memorystatus_critical_threshold_mb != 0) {
-		memorystatus_available_pages_critical_base = (unsigned int)atop_64((uint64_t)memorystatus_critical_threshold_mb << 20);
-	} else if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
-		memorystatus_available_pages_critical_base = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_SMALL);
+		memstat_critical_threshold = atop_32(memorystatus_critical_threshold_mb << 20);
 	} else {
-		memorystatus_available_pages_critical_base = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_BASE_PERCENTAGE_LARGE);
-	}
-	assert(memorystatus_available_pages_critical_base < (unsigned int)atop_64(max_mem));
-
-	/*
-	 * For historical reasons, devices with "medium"-sized memory configs have a different critical:idle:pressure ratio
-	 */
-	if ((memorystatus_idle_threshold_mb != 0)) {
-		memorystatus_available_pages_critical_idle = (unsigned int)atop_64((uint64_t)memorystatus_idle_threshold_mb << 20);
-	} else {
-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
-			memorystatus_available_pages_critical_idle = (MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM_MEDIUM * memorystatus_available_pages_critical_base) /
-			    MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM_MEDIUM;
+		if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
+			memstat_critical_threshold = MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_PERCENTAGE_SMALL);
 		} else {
-			memorystatus_available_pages_critical_idle = (MEMORYSTATUS_CRITICAL_IDLE_RATIO_NUM * memorystatus_available_pages_critical_base) /
-			    MEMORYSTATUS_CRITICAL_IDLE_RATIO_DENOM;
+			memstat_critical_threshold = MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_PERCENTAGE_LARGE);
 		}
 	}
-	assert(memorystatus_available_pages_critical_idle < (unsigned int)atop_64(max_mem));
+	assert3u(memstat_critical_threshold, <, MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX);
+
+	if (memorystatus_idle_threshold_mb != 0) {
+		memstat_idle_threshold = atop_32(memorystatus_idle_threshold_mb << 20);
+	} else {
+		/*
+		 * For historical reasons, devices with "medium"-sized memory configs have a different critical:idle:pressure ratio
+		 */
+		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+			memstat_idle_threshold = (MEMORYSTATUS_IDLE_RATIO_NUM_MEDIUM * memstat_critical_threshold) /
+			    MEMORYSTATUS_IDLE_RATIO_DENOM_MEDIUM;
+		} else {
+			memstat_idle_threshold = (MEMORYSTATUS_IDLE_RATIO_NUM * memstat_critical_threshold) /
+			    MEMORYSTATUS_IDLE_RATIO_DENOM;
+		}
+	}
+	assert3u(memstat_idle_threshold, <, MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX);
 
 	if (memorystatus_pressure_threshold_mb != 0) {
-		memorystatus_available_pages_pressure = (unsigned int)atop_64((uint64_t)memorystatus_pressure_threshold_mb << 20);
+		memstat_soft_threshold = atop_32(memorystatus_pressure_threshold_mb << 20);
 	} else {
 		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
 		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
-			memorystatus_available_pages_pressure = (MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM * memorystatus_available_pages_critical_base) /
+			memstat_soft_threshold = (MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM * memstat_critical_threshold) /
 			    MEMORYSTATUS_PRESSURE_RATIO_DENOM_MEDIUM;
 		} else {
-			memorystatus_available_pages_pressure = (MEMORYSTATUS_PRESSURE_RATIO_NUM * memorystatus_available_pages_critical_base) /
+			memstat_soft_threshold = (MEMORYSTATUS_PRESSURE_RATIO_NUM * memstat_critical_threshold) /
 			    MEMORYSTATUS_PRESSURE_RATIO_DENOM;
 		}
 	}
-	assert(memorystatus_available_pages_pressure < (unsigned int)atop_64(max_mem));
+	assert3u(memstat_soft_threshold, <, MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX);
 
-	if (memorystatus_more_free_offset_mb != 0) {
-		memorystatus_policy_more_free_offset_pages = (unsigned int)atop_64((uint64_t)memorystatus_more_free_offset_mb);
-	} else {
-		memorystatus_policy_more_free_offset_pages = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_MORE_FREE_OFFSET_PERCENTAGE);
+	if (memstat_ballast_offset_mb != 0) {
+		memstat_ballast_offset = atop_32(memstat_ballast_offset_mb << 20);
 	}
-	assert(memorystatus_policy_more_free_offset_pages < (unsigned int)atop_64(max_mem));
+	assert3u(memstat_ballast_offset, <, MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX);
+
+	if (memstat_ctd_offset_mb != 0) {
+		memstat_ctd_offset = atop_32(memstat_ctd_offset_mb << 20);
+	}
+	assert3u(memstat_ctd_offset, <, MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX);
 
 	/* Set the swapin trigger in pages based on the maximum size allocated for each c_seg */
 	memorystatus_swapin_trigger_pages = (unsigned int) atop_64(memorystatus_swapin_trigger_segments * c_seg_allocsize);
@@ -1609,9 +1937,6 @@ memorystatus_init(void)
 	}
 
 	memorystatus_jld_enabled = TRUE;
-
-	/* No contention at this point */
-	memorystatus_update_levels_locked();
 
 	initialize_entitled_max_task_limit();
 #endif /* CONFIG_JETSAM */
@@ -1656,11 +1981,6 @@ memorystatus_init(void)
 	}
 #endif
 
-	/* Check the boot-arg to see if fast jetsam is allowed */
-	if (!PE_parse_boot_argn("fast_jetsam_enabled", &fast_jetsam_enabled, sizeof(fast_jetsam_enabled))) {
-		fast_jetsam_enabled = 0;
-	}
-
 	/* Check the boot-arg to configure the maximum number of jetsam threads */
 	if (!PE_parse_boot_argn("max_jetsam_threads", &max_jetsam_threads, sizeof(max_jetsam_threads))) {
 		max_jetsam_threads = JETSAM_THREADS_LIMIT;
@@ -1671,11 +1991,12 @@ memorystatus_init(void)
 		max_jetsam_threads = JETSAM_THREADS_LIMIT;
 	}
 
+#if CONFIG_JETSAM
 	/* For low CPU systems disable fast jetsam mechanism */
 	if (vm_pageout_state.vm_restricted_to_single_processor == TRUE) {
 		max_jetsam_threads = 1;
-		fast_jetsam_enabled = 0;
 	}
+#endif /* CONFIG_JETSAM */
 
 #if DEVELOPMENT || DEBUG
 	if (PE_parse_boot_argn("-memorystatus-skip-fg-notify", &i, sizeof(i))) {
@@ -1836,25 +2157,6 @@ memorystatus_do_kill(proc_t p, uint32_t cause, os_reason_t jetsam_reason, uint64
 
 	os_reason_free(jetsam_reason);
 	return error == 0;
-}
-
-/*
- * Node manipulation
- */
-
-static void
-memorystatus_check_levels_locked(void)
-{
-	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_OWNED);
-#if CONFIG_JETSAM
-	/* Update levels */
-	memorystatus_update_levels_locked();
-#else /* CONFIG_JETSAM */
-	/*
-	 * Nothing to do here currently since we update
-	 * memorystatus_available_pages in vm_pressure_response.
-	 */
-#endif /* CONFIG_JETSAM */
 }
 
 /*
@@ -2198,7 +2500,7 @@ memorystatus_add(proc_t p, boolean_t locked)
 		_memstat_proc_set_suspended(p);
 	}
 
-	memorystatus_check_levels_locked();
+	_memstat_consider_waking_jetsam_thread();
 
 exit:
 	if (!locked) {
@@ -2234,6 +2536,8 @@ _memstat_record_idle_transition(proc_t p, int new_priority)
 		 * So mark it eligible for freeze-considerations next time around.
 		 */
 		p->p_memstat_state &= ~P_MEMSTAT_FREEZE_IGNORE;
+
+		_memstat_consider_waking_jetsam_thread();
 	} else if (new_priority == JETSAM_PRIORITY_IDLE) {
 		/*
 		 * Transitioning into the idle priority bucket.
@@ -2392,7 +2696,7 @@ memstat_update_priority_locked(proc_t p,
 	}
 #endif /* CONFIG_SECLUDED_MEMORY */
 
-	memorystatus_check_levels_locked();
+	_memstat_consider_waking_jetsam_thread();
 }
 
 int
@@ -2695,8 +2999,6 @@ memorystatus_remove(proc_t p)
 	if (reschedule) {
 		_memstat_reschedule_idle_demotion_locked();
 	}
-
-	memorystatus_check_levels_locked();
 
 #if CONFIG_FREEZE
 	if (_memstat_proc_is_frozen(p)) {
@@ -3345,6 +3647,21 @@ kill_idle_exit_proc(void)
 	return killed;
 }
 
+/*
+ * Consider waking the jetsam thread. Returns true if the thread was awoken.
+ */
+static bool
+_memstat_consider_waking_jetsam_thread(void)
+{
+#if CONFIG_JETSAM
+	if (memstat_evaluate_page_shortage(NULL, NULL, NULL)) {
+		memorystatus_thread_wake();
+		return true;
+	}
+#endif /* CONFIG_JETSAM */
+	return false;
+}
+
 void
 memorystatus_thread_wake()
 {
@@ -3359,14 +3676,13 @@ memorystatus_thread_wake()
 }
 
 #if CONFIG_JETSAM
-
 static void
 memorystatus_thread_pool_max()
 {
 	/* Increase the jetsam thread pool to max_jetsam_threads */
 	int max_threads = max_jetsam_threads;
-	memorystatus_log_info("Expanding memorystatus pool to %d!\n", max_threads);
-	atomic_store(&active_jetsam_threads, max_threads);
+	memorystatus_log_info("Expanding memorystatus pool to %d\n", max_threads);
+	os_atomic_store(&active_jetsam_threads, max_threads, relaxed);
 }
 
 static void
@@ -3374,30 +3690,98 @@ memorystatus_thread_pool_default()
 {
 	/* Restore the jetsam thread pool to a single thread */
 	memorystatus_log_info("Reverting memorystatus pool back to 1\n");
-	atomic_store(&active_jetsam_threads, 1);
+	os_atomic_store(&active_jetsam_threads, 1, relaxed);
+}
+#endif /* CONFIG_JETSAM */
+
+/*
+ * An offset applied to non-critical page shortage thresholds.
+ */
+static uint32_t
+_memstat_page_shortage_offset(void)
+{
+	uint32_t offset = 0;
+	if (os_atomic_load(&memstat_policy_config, acquire) & kPolicyClearTheDecks) {
+		offset += memstat_ctd_offset;
+	}
+	if (os_atomic_load(&memstat_policy_config, acquire) & kPolicyBallastDrain) {
+		offset += memstat_ballast_offset;
+	}
+	return offset;
 }
 
-#endif /* CONFIG_JETSAM */
-
-
-bool
-memorystatus_avail_pages_below_pressure(void)
+uint32_t
+memorystatus_get_critical_page_shortage_threshold(void)
 {
-#if CONFIG_JETSAM
-	return memorystatus_available_pages <= memorystatus_available_pages_pressure;
-#else /* CONFIG_JETSAM */
-	return false;
-#endif /* CONFIG_JETSAM */
+	return memstat_critical_threshold;
+}
+
+uint32_t
+memorystatus_get_idle_exit_page_shortage_threshold(void)
+{
+	uint32_t offset = _memstat_page_shortage_offset();
+	return memstat_idle_threshold + offset;
+}
+
+uint32_t
+memorystatus_get_soft_memlimit_page_shortage_threshold(void)
+{
+	uint32_t offset = _memstat_page_shortage_offset();
+	return memstat_soft_threshold + offset;
 }
 
 bool
-memorystatus_avail_pages_below_critical(void)
+memstat_evaluate_page_shortage(
+	bool *should_enforce_memlimits,
+	bool *should_idle_exit,
+	bool *should_jetsam)
 {
+	bool requires_action = false;
+	if (should_enforce_memlimits) {
+		*should_enforce_memlimits = false;
+	}
+	if (should_idle_exit) {
+		*should_idle_exit = false;
+	}
+	if (should_jetsam) {
+		*should_jetsam = false;
+	}
 #if CONFIG_JETSAM
-	return memorystatus_available_pages <= memorystatus_available_pages_critical;
-#else /* CONFIG_JETSAM */
-	return false;
+	uint32_t available_page_count = os_atomic_load(&memorystatus_available_pages, relaxed);
+#if VM_PRESSURE_EVENTS
+	if (available_page_count <
+	    memorystatus_get_soft_memlimit_page_shortage_threshold()) {
+		/*
+		 * Only wake the jetsam thread if there are hwm violators to
+		 * kill
+		 */
+		bool hwm_candidates = os_atomic_load(&memorystatus_hwm_candidates, acquire);
+		requires_action = requires_action || hwm_candidates;
+		if (should_enforce_memlimits) {
+			*should_enforce_memlimits = true;
+		}
+	}
+#endif /* VM_PRESSURE_EVENTS */
+	if (available_page_count < memorystatus_get_idle_exit_page_shortage_threshold()) {
+		/*
+		 * Only wake the jetsam thread if there are idle processes that
+		 * could exit.
+		 */
+		uint32_t idle_proc_count = os_atomic_load(
+			&memstat_bucket[JETSAM_PRIORITY_IDLE].count, relaxed);
+		requires_action = requires_action || (idle_proc_count > 0);
+		if (should_idle_exit) {
+			*should_idle_exit = true;
+		}
+	}
+	if (available_page_count < memorystatus_get_critical_page_shortage_threshold()) {
+		if (should_jetsam) {
+			*should_jetsam = true;
+		}
+		requires_action = true;
+	}
 #endif /* CONFIG_JETSAM */
+	return requires_action;
 }
 
 #if CONFIG_JETSAM
@@ -3511,7 +3895,7 @@ memorystatus_act_on_hiwat_processes(uint32_t *errors, uint32_t *hwm_kill, bool *
 	} else {
 		if (purged == FALSE) {
 			/* couldn't purge and couldn't kill */
-			memorystatus_hwm_candidates = FALSE;
+			os_atomic_store(&memorystatus_hwm_candidates, false, relaxed);
 		}
 	}
 
@@ -3636,7 +4020,7 @@ memorystatus_act_aggressive(jetsam_state_t state, uint32_t cause, os_reason_t je
 		if (killed) {
 			state->post_snapshot = true;
 			state->memory_reclaimed += footprint_of_killed_proc;
-			if (!memorystatus_avail_pages_below_pressure()) {
+			if (!memstat_evaluate_page_shortage(NULL, NULL, NULL)) {
 				/*
 				 * System is no longer under pressure --
 				 * bail early because the pressure was
@@ -3818,6 +4202,9 @@ memorystatus_do_action(jetsam_state_t state, memorystatus_action_t action, uint3
 	case MEMORYSTATUS_KILL_SWAPPABLE:
 		killed = memorystatus_do_priority_kill(state, kill_cause, max_kill_priority, true);
 		break;
+	case MEMORYSTATUS_KILL_IDLE:
+		killed = memorystatus_do_priority_kill(state, kill_cause, JETSAM_PRIORITY_IDLE, false);
+		break;
 	case MEMORYSTATUS_KILL_NONE:
 		panic("memorystatus_do_action: Impossible! memorystatus_do_action called with action = NONE\n");
 	}
@@ -3977,24 +4364,29 @@ memorystatus_thread_internal(jetsam_state_t state)
 			suspended_swappable_apps_remaining = true;
 		}
 
-		if ((action == MEMORYSTATUS_KILL_TOP_PROCESS || action == MEMORYSTATUS_KILL_AGGRESSIVE) && !killed && total_memory_reclaimed == 0 && memorystatus_avail_pages_below_critical()) {
-			/*
-			 * Still under pressure and unable to kill a process - purge corpse memory
-			 * and get everything back from the pmap.
-			 */
-			memorystatus_log("memorystatus: ran out of %sprocesses to kill but "
-			    "system is still in critical condition\n",
-			    state->limit_to_low_bands ? "low-band " : "");
-			memstat_purge_caches(state);
-
-			if (!state->limit_to_low_bands && memorystatus_avail_pages_below_critical()) {
+		if (!killed && total_memory_reclaimed == 0) {
+			memorystatus_log("memorystatus: failed to kill a process and no memory was reclaimed\n");
+			if ((action == MEMORYSTATUS_KILL_TOP_PROCESS || action == MEMORYSTATUS_KILL_AGGRESSIVE) &&
+			    memorystatus_get_available_page_count() < memorystatus_get_critical_page_shortage_threshold()) {
 				/*
-				 * Still under pressure and unable to kill a process
+				 * Still under pressure and unable to kill a process - purge corpse memory
+				 * and get everything back from the pmap.
 				 */
-				memorystatus_log_fault("memorystatus: attempting full drain of kernel zone allocator\n");
-				zone_gc_drain();
-				if (memorystatus_avail_pages_below_critical()) {
-					panic("memorystatus_jetsam_thread: no victim! available pages:%llu", (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES);
+				memorystatus_log("memorystatus: ran out of %sprocesses to kill but "
+				    "system is still in critical condition\n",
+				    state->limit_to_low_bands ? "low-band " : "");
+				memstat_purge_caches(state);
+
+				if (!state->limit_to_low_bands &&
+				    memorystatus_get_available_page_count() < memorystatus_get_critical_page_shortage_threshold()) {
+					/*
+					 * Still under pressure and unable to kill a process
+					 */
+					memorystatus_log_fault("memorystatus: attempting full drain of kernel zone allocator\n");
+					zone_gc_drain();
+					if (memorystatus_get_available_page_count() < memorystatus_get_critical_page_shortage_threshold()) {
+						panic("memorystatus_jetsam_thread: no victim! available pages:%llu", (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES);
+					}
 				}
 			}
 		}
@@ -4127,7 +4519,8 @@ memorystatus_on_ledger_footprint_exceeded(boolean_t warning, boolean_t memlimit_
 		 * HWM offender exists. Done without locks or synchronization.
 		 * See comment near its declaration for more details.
 		 */
-		memorystatus_hwm_candidates = TRUE;
+		os_atomic_store(&memorystatus_hwm_candidates, true, release);
+		_memstat_consider_waking_jetsam_thread();
 
 #if VM_PRESSURE_EVENTS
 		/*
@@ -4931,13 +5324,17 @@ exit:
 	return;
 }
 
-#if CONFIG_JETSAM
+uint32_t
+memorystatus_get_available_page_count(void)
+{
+	return os_atomic_load(&memorystatus_available_pages, relaxed);
+}
 
 void
-memorystatus_pages_update(unsigned int pages_avail)
+memorystatus_update_available_page_count(uint32_t available_page_count)
 {
-	memorystatus_available_pages = pages_avail;
-
+	os_atomic_store(&memorystatus_available_pages, available_page_count,
+	    relaxed);
 #if VM_PRESSURE_EVENTS
 	/*
 	 * Since memorystatus_available_pages changes, we should
@@ -4946,12 +5343,7 @@ memorystatus_pages_update(unsigned int pages_avail)
 	 * We also update memorystatus_level in that routine.
 	 */
 	vm_pressure_response();
-
-	if (memorystatus_available_pages <= memorystatus_available_pages_pressure) {
-		if (memorystatus_hwm_candidates || (memorystatus_available_pages <= memorystatus_available_pages_critical)) {
-			memorystatus_thread_wake();
-		}
-	}
+#endif /* VM_PRESSURE_EVENTS */
 #if CONFIG_FREEZE
 	/*
 	 * We can't grab the freezer_mutex here even though that synchronization would be correct to inspect
@@ -4970,32 +5362,8 @@ memorystatus_pages_update(unsigned int pages_avail)
 		}
 	}
 #endif /* CONFIG_FREEZE */
-
-#else /* VM_PRESSURE_EVENTS */
-
-	boolean_t critical, delta;
-
-	if (!memorystatus_delta) {
-		return;
-	}
-
-	critical = (pages_avail < memorystatus_available_pages_critical) ? TRUE : FALSE;
-	delta = ((pages_avail >= (memorystatus_available_pages + memorystatus_delta))
-	    || (memorystatus_available_pages >= (pages_avail + memorystatus_delta))) ? TRUE : FALSE;
-
-	if (critical || delta) {
-		unsigned int total_pages;
-
-		total_pages = (unsigned int) atop_64(max_mem);
-#if CONFIG_SECLUDED_MEMORY
-		total_pages -= vm_page_secluded_count;
-#endif /* CONFIG_SECLUDED_MEMORY */
-		memorystatus_level = memorystatus_available_pages * 100 / total_pages;
-		memorystatus_thread_wake();
-	}
-#endif /* VM_PRESSURE_EVENTS */
+	_memstat_consider_waking_jetsam_thread();
 }
-#endif /* CONFIG_JETSAM */
 
 static boolean_t
 memorystatus_init_jetsam_snapshot_entry_locked(proc_t p, memorystatus_jetsam_snapshot_entry_t *entry, uint64_t gencount)
@@ -5442,7 +5810,7 @@ memorystatus_kill_proc(proc_t p, uint32_t cause, os_reason_t jetsam_reason, bool
 				uint64_t memlimit_in_bytes  = (((uint64_t)p->p_memstat_memlimit) * 1024ULL * 1024ULL);  /* convert MB to bytes */
 				success = (footprint_in_bytes <= memlimit_in_bytes);
 			} else {
-				success = !memorystatus_avail_pages_below_pressure();
+				success = !(memorystatus_get_available_page_count() < memorystatus_get_soft_memlimit_page_shortage_threshold());
 #if CONFIG_SECLUDED_MEMORY
 				if (!success && num_pages_unsecluded) {
 					/*
@@ -5457,7 +5825,9 @@ memorystatus_kill_proc(proc_t p, uint32_t cause, os_reason_t jetsam_reason, bool
 					 * "pressure" level but still got
 					 * us out of the "critical" level.
 					 */
-					success = !memorystatus_avail_pages_below_critical();
+					success = !(
+						memorystatus_get_available_page_count() <
+						memorystatus_get_critical_page_shortage_threshold());
 				}
 #endif /* CONFIG_SECLUDED_MEMORY */
 			}
@@ -5506,9 +5876,9 @@ memorystatus_kill_proc(proc_t p, uint32_t cause, os_reason_t jetsam_reason, bool
 	retval = memorystatus_do_kill(p, cause, jetsam_reason, footprint_of_killed_proc);
 	*killed = retval;
 
-	memorystatus_log("%lu.%03d memorystatus: %s pid %d [%s] (%s %d) %lluKB - memorystatus_available_pages: %llu compressor_size:%u\n",
-	    (unsigned long)tv_sec, tv_msec, kill_reason_string,
-	    aPid, ((p && *p->p_name) ? p->p_name : "unknown"),
+	memorystatus_log("memorystatus: %s pid %d [%s] (%s %d) %lluKB - memorystatus_available_pages: %llu compressor_size:%u\n",
+	    kill_reason_string,
+	    aPid, proc_best_name(p),
 	    memorystatus_kill_cause_name[cause], aPid_ep,
 	    (*footprint_of_killed_proc) >> 10, (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
 
@@ -6530,93 +6900,21 @@ memorystatus_clear_errors(void)
 	KDBG(MEMSTAT_CODE(BSD_MEMSTAT_CLEAR_ERRORS) | DBG_FUNC_END);
 }
 
-#if CONFIG_JETSAM
-static void
-memorystatus_update_levels_locked(void)
-{
-	/*
-	 * If there's an entry in the first bucket, we have idle processes.
-	 */
-	memstat_bucket_t *first_bucket = &memstat_bucket[JETSAM_PRIORITY_IDLE];
-	if (first_bucket->count) {
-		memorystatus_available_pages_critical = memorystatus_available_pages_critical_idle;
-	} else {
-		memorystatus_available_pages_critical = memorystatus_available_pages_critical_base;
-	}
-
-	if (memorystatus_available_pages_critical > memorystatus_available_pages_pressure) {
-		/*
-		 * The critical threshold must never exceed the pressure threshold
-		 */
-		memorystatus_available_pages_critical = memorystatus_available_pages_pressure;
-	}
-
-	if (memorystatus_jetsam_policy & kPolicyMoreFree) {
-		memorystatus_available_pages_critical += memorystatus_policy_more_free_offset_pages;
-	}
-}
-
 void
-memorystatus_fast_jetsam_override(boolean_t enable_override)
+memorystatus_fast_jetsam_override(bool enable_override)
 {
-	/* If fast jetsam is not enabled, simply return */
+#if CONFIG_JETSAM
+	fast_jetsam_enabled = !enable_override;
 	if (!fast_jetsam_enabled) {
-		return;
-	}
-
-	if (enable_override) {
-		if ((memorystatus_jetsam_policy & kPolicyMoreFree) == kPolicyMoreFree) {
-			return;
-		}
-		proc_list_lock();
-		memorystatus_jetsam_policy |= kPolicyMoreFree;
-		memorystatus_thread_pool_max();
-		memorystatus_update_levels_locked();
-		proc_list_unlock();
-	} else {
-		if ((memorystatus_jetsam_policy & kPolicyMoreFree) == 0) {
-			return;
-		}
-		proc_list_lock();
-		memorystatus_jetsam_policy &= ~kPolicyMoreFree;
+		/* Disable any pre-configured policies */
+		os_atomic_store(&memstat_policy_config, kPolicyDefault, relaxed);
 		memorystatus_thread_pool_default();
-		memorystatus_update_levels_locked();
-		proc_list_unlock();
+		_memstat_consider_waking_jetsam_thread();
 	}
-}
-
-
-static int
-sysctl_kern_memorystatus_policy_more_free SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2, oidp)
-	int error = 0, more_free = 0;
-
-	/*
-	 * TODO: Enable this privilege check?
-	 *
-	 * error = priv_check_cred(kauth_cred_get(), PRIV_VM_JETSAM, 0);
-	 * if (error)
-	 *	return (error);
-	 */
-
-	error = sysctl_handle_int(oidp, &more_free, 0, req);
-	if (error || !req->newptr) {
-		return error;
-	}
-
-	if (more_free) {
-		memorystatus_fast_jetsam_override(true);
-	} else {
-		memorystatus_fast_jetsam_override(false);
-	}
-
-	return 0;
-}
-SYSCTL_PROC(_kern, OID_AUTO, memorystatus_policy_more_free, CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED | CTLFLAG_MASKED,
-    0, 0, &sysctl_kern_memorystatus_policy_more_free, "I", "");
-
+#else /* CONFIG_JETSAM */
+	(void)enable_override;
 #endif /* CONFIG_JETSAM */
+}
 
 /*
  * Get the at_boot snapshot
@@ -8161,7 +8459,6 @@ memorystatus_control(struct proc *p, struct memorystatus_control_args *args, int
 		error = memorystatus_cmd_get_diag_memlimit_properties(args->pid, args->buffer, args->buffersize, ret);
 		break;
 #endif /* DEVELOPMENT || DEBUG */
-
 	default:
 		error = EINVAL;
 		break;
@@ -8593,40 +8890,92 @@ memorystatus_available_memory(struct proc *p, __unused struct memorystatus_avail
 void
 memorystatus_log_system_health(const memorystatus_system_health_t *status)
 {
-	static bool healthy = true;
-	bool prev_healthy = healthy;
+	static struct memorystatus_system_health prev_status = {0};
 
-	healthy = memorystatus_is_system_healthy(status);
+	bool healthy = memorystatus_is_system_healthy(status);
 
 	/*
-	 * Avoid spamming logs by only logging when the health level has changed
+	 * Avoid spamming logs by only logging when the system status has changed.
 	 */
-	if (prev_healthy == healthy) {
+	if (prev_status.msh_zone_map_is_exhausted == status->msh_zone_map_is_exhausted
+#if CONFIG_JETSAM
+	    &&
+	    prev_status.msh_available_pages_below_idle == status->msh_available_pages_below_idle &&
+	    prev_status.msh_available_pages_below_soft == status->msh_available_pages_below_soft &&
+	    prev_status.msh_available_pages_below_critical == status->msh_available_pages_below_critical &&
+	    prev_status.msh_compressor_needs_to_swap == status->msh_compressor_needs_to_swap &&
+	    prev_status.msh_compressor_is_low_on_space == status->msh_compressor_is_low_on_space &&
+	    prev_status.msh_compressor_is_thrashing == status->msh_compressor_is_thrashing &&
+	    prev_status.msh_compressed_pages_nearing_limit == status->msh_compressed_pages_nearing_limit &&
+	    prev_status.msh_filecache_is_thrashing == status->msh_filecache_is_thrashing &&
+	    prev_status.msh_phantom_cache_pressure == status->msh_phantom_cache_pressure &&
+	    prev_status.msh_swappable_compressor_segments_over_limit == status->msh_swappable_compressor_segments_over_limit &&
+	    prev_status.msh_swapin_queue_over_limit == status->msh_swapin_queue_over_limit &&
+	    prev_status.msh_swap_low_on_space == status->msh_swap_low_on_space &&
+	    prev_status.msh_swap_out_of_space == status->msh_swap_out_of_space &&
+	    prev_status.msh_pageout_starved == status->msh_pageout_starved
+#endif /* CONFIG_JETSAM */
+	    ) {
+		/* No change */
 		return;
 	}
 
 #if CONFIG_JETSAM
-	if (healthy && !status->msh_available_pages_below_pressure) {
-		memorystatus_log("memorystatus: System is healthy. memorystatus_available_pages: %llu compressor_size:%u\n",
+	if (healthy) {
+		if (status->msh_available_pages_below_soft) {
+			memorystatus_log(
+				"memorystatus: System will begin enforcing "
+				"soft memory limits. "
+				"memorystatus_available_pages: %llu compressor_size: %u\n",
+				(uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
+		} else if (status->msh_available_pages_below_idle) {
+			memorystatus_log(
+				"memorystatus: System will begin enacting "
+				"idle-exits. "
+				"memorystatus_available_pages: %llu compressor_size: %u\n",
+				(uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
+		} else {
+			memorystatus_log(
+				"memorystatus: System is healthy. "
+				"memorystatus_available_pages: %llu compressor_size:%u\n",
+				(uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
+		}
+	} else {
+		/* Unhealthy */
+		memorystatus_log("memorystatus: System is unhealthy! memorystatus_available_pages: %llu compressor_size:%u\n",
 		    (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
-		return;
-	}
-	if (healthy && status->msh_available_pages_below_pressure) {
 		memorystatus_log(
-			"memorystatus: System is below pressure level, but otherwise healthy. memorystatus_available_pages: %llu compressor_size:%u\n",
-			(uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
-		return;
+			"memorystatus: {"
+			"\"available_pages_below_critical\": %d, "
+			"\"available_pages_below_idle\": %d, "
+			"\"available_pages_below_soft\": %d, "
+			"\"compressor_needs_to_swap\": %d, "
+			"\"compressor_is_low_on_space\": %d, "
+			"\"compressor_is_thrashing\": %d, "
+			"\"compressed_pages_nearing_limit\": %d, "
+			"\"filecache_is_thrashing\": %d, "
+			"\"zone_map_is_exhausted\": %d, "
+			"\"phantom_cache_pressure\": %d, "
+			"\"swappable_compressor_segments_over_limit\": %d, "
+			"\"swapin_queue_over_limit\": %d, "
+			"\"swap_low\": %d, "
+			"\"swap_full\": %d"
+			"}\n",
+			status->msh_available_pages_below_critical,
+			status->msh_available_pages_below_idle,
+			status->msh_available_pages_below_soft,
+			status->msh_compressor_needs_to_swap,
+			status->msh_compressor_is_low_on_space,
+			status->msh_compressor_is_thrashing,
+			status->msh_compressed_pages_nearing_limit,
+			status->msh_filecache_is_thrashing,
+			status->msh_zone_map_is_exhausted,
+			status->msh_phantom_cache_pressure,
+			status->msh_swappable_compressor_segments_over_limit,
+			status->msh_swapin_queue_over_limit,
+			status->msh_swap_low_on_space,
+			status->msh_swap_out_of_space);
 	}
-	memorystatus_log("memorystatus: System is unhealthy!  memorystatus_available_pages: %llu compressor_size:%u\n",
-	    (uint64_t)MEMORYSTATUS_LOG_AVAILABLE_PAGES, vm_compressor_pool_size());
-	memorystatus_log(
-		"memorystatus: available_pages_below_critical=%d, compressor_needs_to_swap=%d, compressor_is_low_on_space=%d compressor_is_thrashing=%d compressed_pages_nearing_limit=%d filecache_is_thrashing=%d zone_map_is_exhausted=%d phantom_cache_pressure=%d swappable_compressor_segments_over_limit=%d swapin_queue_over_limit=%d swap_low=%d swap_full=%d\n",
-		status->msh_available_pages_below_critical, status->msh_compressor_needs_to_swap,
-		status->msh_compressor_is_low_on_space, status->msh_compressor_is_thrashing,
-		status->msh_compressed_pages_nearing_limit, status->msh_filecache_is_thrashing,
-		status->msh_zone_map_is_exhausted, status->msh_phantom_cache_pressure,
-		status->msh_swappable_compressor_segments_over_limit, status->msh_swapin_queue_over_limit,
-		status->msh_swap_low_on_space, status->msh_swap_out_of_space);
 #else /* CONFIG_JETSAM */
 	memorystatus_log("memorystatus: System is %s. memorystatus_available_pages: %llu compressor_size:%u\n",
 	    healthy ? "healthy" : "unhealthy",
@@ -8636,6 +8985,7 @@ memorystatus_log_system_health(const memorystatus_system_health_t *status)
 		    status->msh_zone_map_is_exhausted);
 	}
 #endif /* CONFIG_JETSAM */
+	prev_status = *status;
 }
 
 uint32_t

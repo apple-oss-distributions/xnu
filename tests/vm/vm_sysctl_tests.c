@@ -8,7 +8,8 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("VM"),
 	T_META_ASROOT(YES),
-	T_META_RUN_CONCURRENTLY(true));
+	T_META_RUN_CONCURRENTLY(true),
+	T_META_TAG_VM_PREFERRED);
 
 static int64_t
 run_sysctl_test(const char *t, int64_t value)
@@ -48,4 +49,35 @@ T_DECL(vm_memory_entry_pgz,
 		T_SKIP("Unable to pgz_protect allocation. Pgz slots might be full.");
 	}
 	T_EXPECT_EQ(1ull, result, "vm_memory_entry_pgz");
+}
+
+T_DECL(vm_map_copy_entry_subrange,
+    "Test mapping a subrange of a copy entry")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("vm_map_copy_entry_subrange", 0), "vm_map_copy_entry_subrange");
+}
+
+T_DECL(vm_memory_entry_map_size_null,
+    "Test mach_memory_entry_map_size with NULL memory entry")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("vm_memory_entry_map_size_null", 0), "vm_memory_entry_map_size_null");
+}
+
+
+T_DECL(vm_memory_entry_map_size_overflow,
+    "Test overflow cases in mach_memory_entry_map_size sanitization")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("vm_memory_entry_map_size_overflow", 0), "vm_memory_entry_map_size_overflow");
+}
+
+T_DECL(vm_memory_entry_map_size_copy,
+    "Test mach_memory_entry_map_size with copy memory entries and 4k/16k combinations")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("vm_memory_entry_map_size_copy", 0), "vm_memory_entry_map_size_copy");
+}
+
+T_DECL(vm_memory_entry_parent_submap,
+    "Test mach_make_memory_entry cases where parent is a submap")
+{
+	T_EXPECT_EQ(1ull, run_sysctl_test("vm_memory_entry_parent_submap", 0), "vm_memory_entry_parent_submap");
 }

@@ -1386,7 +1386,7 @@ uint8_t user_timebase_type(void);
 boolean_t ml_thread_is64bit(thread_t thread);
 
 #ifdef __arm64__
-bool ml_feature_supported(uint32_t feature_bit);
+bool ml_feature_supported(uint64_t feature_bit);
 void ml_set_align_checking(void);
 extern void wfe_timeout_configure(void);
 extern void wfe_timeout_init(void);

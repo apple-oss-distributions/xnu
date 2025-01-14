@@ -236,6 +236,7 @@ struct kern_nexus {
 
 #define NXF_ATTACHED    0x1
 #define NXF_CLOSED      0x2             /* attached but closed */
+#define NXF_INVALIDATED 0x4             /* no longer allow opens */
 #define NXF_REJECT      (1U << 31)      /* not accepting channel activities */
 
 #define NXF_BITS        \

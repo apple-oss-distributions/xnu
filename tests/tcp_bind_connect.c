@@ -182,6 +182,149 @@ tcp_connect_v6(int client_fd, struct sockaddr_in6 *sin6_to, int expected_error)
 }
 
 static int
+tcp_connectx_v4(int client_fd, struct sockaddr_in *sin_to, struct sockaddr_in *sin_from, int expected_error)
+{
+	int listen_fd = -1;
+	socklen_t socklen;
+	int val = 30;
+	struct sockaddr_in sin_listener;
+	sa_endpoints_t sae = { 0 };
+
+	init_sin_address(&sin_listener);
+
+	T_ASSERT_POSIX_SUCCESS(listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(bind(listen_fd, (struct sockaddr *)&sin_listener, sizeof(sin_listener)), NULL);
+
+	socklen = sizeof(sin_listener);
+	T_ASSERT_POSIX_SUCCESS(getsockname(listen_fd, (struct sockaddr *)&sin_listener, &socklen), NULL);
+
+	T_LOG("listening on port: %u", ntohs(sin_listener.sin_port));
+	sin_to->sin_port = sin_listener.sin_port;
+
+	T_ASSERT_POSIX_SUCCESS(listen(listen_fd, 10), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(setsockopt(client_fd, IPPROTO_TCP, TCP_CONNECTIONTIMEOUT, &val, sizeof(val)), NULL);
+
+	if (sin_from != NULL) {
+		(void)inet_ntop(AF_INET, &sin_from->sin_addr, l_addr_str, sizeof(l_addr_str));
+		sae.sae_srcaddr = (struct sockaddr *)sin_from;
+		sae.sae_srcaddrlen = sin_from->sin_len;
+	} else {
+		snprintf(l_addr_str, sizeof(l_addr_str), "");
+	}
+	(void)inet_ntop(AF_INET, &sin_to->sin_addr, f_addr_str, sizeof(f_addr_str));
+	sae.sae_dstaddr = (struct sockaddr *)sin_to;
+	sae.sae_dstaddrlen = sin_to->sin_len;
+
+	T_LOG("connectx expected_error: %d from %s:%u (len: %u fam: %u) to %s:%u (len: %u fam: %u)",
+	    expected_error,
+	    l_addr_str, sin_from != NULL ? ntohs(sin_from->sin_port) : 0,
+	    sin_from != NULL ? sin_from->sin_len : 0, sin_from != NULL ? sin_from->sin_family : 0,
+	    f_addr_str, ntohs(sin_to->sin_port), sin_to->sin_len, sin_to->sin_family);
+
+	if (expected_error == 0) {
+		struct sockaddr_in sin_local = { 0 };
+		struct sockaddr_in sin_peer = { 0 };
+
+		init_sin_address(&sin_local);
+		init_sin_address(&sin_peer);
+
+		T_EXPECT_POSIX_SUCCESS(connectx(client_fd, &sae, SAE_ASSOCID_ANY, 0, NULL, 0, 0, NULL), NULL);
+
+		socklen = sizeof(sin_local);
+		T_ASSERT_POSIX_SUCCESS(getsockname(client_fd, (struct sockaddr *)&sin_local, &socklen), NULL);
+		(void)inet_ntop(AF_INET, &sin_local.sin_addr, l_addr_str, sizeof(l_addr_str));
+
+		socklen = sizeof(sin_peer);
+		T_ASSERT_POSIX_SUCCESS(getpeername(client_fd, (struct sockaddr *)&sin_peer, &socklen), NULL);
+		(void)inet_ntop(AF_INET, &sin_peer.sin_addr, f_addr_str, sizeof(f_addr_str));
+
+		T_LOG("connected from %s:%u to %s:%u",
+		    l_addr_str, ntohs(sin_local.sin_port),
+		    f_addr_str, ntohs(sin_peer.sin_port));
+	} else {
+		T_EXPECT_POSIX_FAILURE(connectx(client_fd, &sae, SAE_ASSOCID_ANY, 0, NULL, 0, 0, NULL), expected_error, NULL);
+	}
+	T_ASSERT_POSIX_SUCCESS(close(listen_fd), NULL);
+
+	return 0;
+}
+
+static int
+tcp_connectx_v6(int client_fd, struct sockaddr_in6 *sin6_to, struct sockaddr_in6 *sin6_from, int expected_error)
+{
+	int listen_fd = -1;
+	socklen_t socklen;
+	int off = 0;
+	int val = 30;
+	struct sockaddr_in6 sin6_listener;
+	sa_endpoints_t sae = { 0 };
+
+	init_sin6_address(&sin6_listener);
+
+	T_ASSERT_POSIX_SUCCESS(listen_fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(setsockopt(listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(bind(listen_fd, (struct sockaddr *)&sin6_listener, sizeof(sin6_listener)), NULL);
+
+	socklen = sizeof(sin6_listener);
+	T_ASSERT_POSIX_SUCCESS(getsockname(listen_fd, (struct sockaddr *)&sin6_listener, &socklen), NULL);
+
+	T_LOG("listening on port: %u", ntohs(sin6_listener.sin6_port));
+	sin6_to->sin6_port = sin6_listener.sin6_port;
+
+	T_ASSERT_POSIX_SUCCESS(listen(listen_fd, 10), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(setsockopt(client_fd, IPPROTO_TCP, TCP_CONNECTIONTIMEOUT, &val, sizeof(val)), NULL);
+
+	if (sin6_from != NULL) {
+		(void)inet_ntop(AF_INET6, &sin6_from->sin6_addr, l_addr_str, sizeof(l_addr_str));
+		sae.sae_srcaddr = (struct sockaddr *)sin6_from;
+		sae.sae_srcaddrlen = sin6_from->sin6_len;
+	} else {
+		snprintf(l_addr_str, sizeof(l_addr_str), "");
+	}
+	(void)inet_ntop(AF_INET6, &sin6_to->sin6_addr, f_addr_str, sizeof(f_addr_str));
+	sae.sae_dstaddr = (struct sockaddr *)sin6_to;
+	sae.sae_dstaddrlen = sin6_to->sin6_len;
+
+	T_LOG("connectx expected_error: %d from %s:%u (len: %u fam: %u) to %s:%u (len: %u fam: %u)",
+	    expected_error,
+	    l_addr_str, sin6_from != NULL ? ntohs(sin6_from->sin6_port) : 0,
+	    sin6_from != NULL ? sin6_from->sin6_len : 0, sin6_from != NULL ? sin6_from->sin6_family : 0,
+	    f_addr_str, ntohs(sin6_to->sin6_port), sin6_to->sin6_len, sin6_to->sin6_family);
+
+	if (expected_error == 0) {
+		struct sockaddr_in6 sin6_local = { 0 };
+		struct sockaddr_in6 sin6_peer = { 0 };
+
+		init_sin6_address(&sin6_local);
+		init_sin6_address(&sin6_peer);
+
+		T_EXPECT_POSIX_SUCCESS(connectx(client_fd, &sae, SAE_ASSOCID_ANY, 0, NULL, 0, 0, NULL), NULL);
+
+		socklen = sizeof(sin6_local);
+		T_ASSERT_POSIX_SUCCESS(getsockname(client_fd, (struct sockaddr *)&sin6_local, &socklen), NULL);
+		(void)inet_ntop(AF_INET6, &sin6_local.sin6_addr, l_addr_str, sizeof(l_addr_str));
+
+		socklen = sizeof(sin6_peer);
+		T_ASSERT_POSIX_SUCCESS(getpeername(client_fd, (struct sockaddr *)&sin6_peer, &socklen), NULL);
+		(void)inet_ntop(AF_INET6, &sin6_peer.sin6_addr, f_addr_str, sizeof(f_addr_str));
+
+		T_LOG("connected from %s:%u to %s:%u",
+		    l_addr_str, ntohs(sin6_local.sin6_port),
+		    f_addr_str, ntohs(sin6_peer.sin6_port));
+	} else {
+		T_EXPECT_POSIX_FAILURE(connectx(client_fd, &sae, SAE_ASSOCID_ANY, 0, NULL, 0, 0, NULL), expected_error, NULL);
+	}
+	T_ASSERT_POSIX_SUCCESS(close(listen_fd), NULL);
+
+	return 0;
+}
+
+static int
 tcp_bind_v4(int client_fd, struct sockaddr_in *sin, int expected_error)
 {
 	int retval = bind(client_fd, (const struct sockaddr *)sin, sin->sin_len);
@@ -509,6 +652,36 @@ T_DECL(tcp_connect_ipv4_broadcast_mapped_ipv6, "TCP connect with IPv4 broadcast 
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }
 
+T_DECL(tcp_bind_ipv4_loobpack_mapped_ipv6, "TCP bind with IPv4 loopback mapped IPv6 address")
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connect_ipv4_loobpack_mapped_ipv6, "TCP connect with IPv4 loopback mapped IPv6 address")
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
 T_DECL(tcp_bind_ipv4_null_mapped_ipv6, "TCP bind with IPv4 null mapped IPv6 address", T_META_TAG_VM_PREFERRED)
 {
 	int s = -1;
@@ -647,5 +820,134 @@ T_DECL(tcp_connect_ipv4_mapped_ipv6_r77991079, "rdar://77991079", T_META_TAG_VM_
 	sin6.sin6_scope_id = 0xff;
 
 	connect(s, (struct sockaddr *)&sin6, sizeof(struct sockaddr_in6));
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connectx_ipv4_loopback, "TCP connectx with the IPv6 loopback address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in sin_dst = { 0 };
+
+	init_sin_address(&sin_dst);
+	T_ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &sin_dst.sin_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connectx_v4(s, &sin_dst, NULL, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connectx_ipv6_loopback, "TCP connectx with the IPv6 loopback address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6_dst = { 0 };
+
+	init_sin6_address(&sin6_dst);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6_dst.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connectx_v6(s, &sin6_dst, NULL, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_connectx_ipv6_loopback_src_port, "TCP connectx with the IPv6 loopback address with a source port", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6_dst = { 0 };
+	struct sockaddr_in6 sin6_src = { 0 };
+
+	init_sin6_address(&sin6_dst);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6_dst.sin6_addr), 1, NULL);
+
+	init_sin6_address(&sin6_src);
+	sin6_src.sin6_port = htons(12345);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_connectx_v6(s, &sin6_dst, &sin6_src, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_bind_ipv4_mapped_connect_pv4_mapped, "TCP bind IPv4 mapped IPv6 address and connect to IPv4 mapped IPv6 address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_bind_ipv6_connect_pv6, "TCP bind IPv6 address and connect IPv6 address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, 0), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_bind_ipv4_mapped_connect_ipv6, "TCP bind IPv4 mapped IPv6 address and connect IPv6 address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, EAFNOSUPPORT), NULL);
+
+	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
+}
+
+T_DECL(tcp_bind_ipv6_connect_ipv4_mapped, "TCP bind Pv6 address and connect IPv4 mapped IPv6 address", T_META_TAG_VM_PREFERRED)
+{
+	int s = -1;
+	struct sockaddr_in6 sin6 = { 0 };
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::1", &sin6.sin6_addr), 1, NULL);
+
+	T_ASSERT_POSIX_SUCCESS(s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP), NULL);
+
+	T_EXPECT_NULL(tcp_bind_v6(s, &sin6, 0), NULL);
+
+	init_sin6_address(&sin6);
+	T_ASSERT_EQ(inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr), 1, NULL);
+
+	T_EXPECT_NULL(tcp_connect_v6(s, &sin6, EAFNOSUPPORT), NULL);
+
 	T_ASSERT_POSIX_SUCCESS(close(s), NULL);
 }

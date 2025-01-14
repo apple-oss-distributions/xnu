@@ -2242,9 +2242,9 @@ typedef enum {
 /*
  * Apple-ISA-Extensions ID Register.
  */
-#define AIDR_MUL53            (1 << 0)
-#define AIDR_WKDM             (1 << 1)
-#define AIDR_ARCHRETENTION    (1 << 2)
+#define AIDR_MUL53            (1ULL << 0)
+#define AIDR_WKDM             (1ULL << 1)
+#define AIDR_ARCHRETENTION    (1ULL << 2)
 
 
 

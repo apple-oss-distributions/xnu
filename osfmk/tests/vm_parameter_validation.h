@@ -9,16 +9,25 @@
  * test_* functions are used to call the call_ functions. They iterate through possibilities of interesting parameters
  * and provide those as arguments to the call_ functions.
  *
+ * test_* functions are named in the following way:
+ * Arguments under test are put at the end of the name. e.g. (test_mach_vm_prot) tests a vm_prot_t
+ * test_mach_... functions test a function with the first argument being a MAP_T.
+ * test_unix_... functions test a unix-y function. This means it doesn't take a MAP_T.
+ * In kernel context, it means it operates on current_map instead of an arbitrary vm_map_t
+ * test_..._with_allocated_... means an allocation has already been created, and some parameters referring to that allocation are passed in.
+ *
  * Common Abbreviations:
  * ssz: Start + Start + Size
  * ssoo: Start + Size + Offset + Object
  * sso: Start + Start + Offset
  */
 
+#include <sys/mman.h>
 #if KERNEL
 
 #include <mach/vm_map.h>
 #include <mach/mach_vm.h>
+#include <mach/vm_reclaim.h>
 #include <mach/mach_types.h>
 #include <mach/mach_host.h>
 #include <mach/memory_object.h>
@@ -42,22 +51,11 @@
 #include <kern/ledger.h>
 extern ledger_template_t        task_ledger_template;
 
-// Temporary bridging of vm header rearrangement.
-// Remove this after integration is complete.
-#if 0  /* old style */
-
-#define FLAGS_AND_TAG(f, t) f, t
-#define vm_map_wire_and_extract vm_map_wire_and_extract_external
-
-#else /* new style */
-
 #define FLAGS_AND_TAG(f, t) ({                             \
 	vm_map_kernel_flags_t vmk_flags;                   \
 	vm_map_kernel_flags_set_vmflags(&vmk_flags, f, t); \
 	vmk_flags;                                         \
 })
-
-#endif
 
 #else  // KERNEL
 
@@ -65,8 +63,6 @@ extern ledger_template_t        task_ledger_template;
 
 #endif // KERNEL
 
-// fixme re-enable -Wunused-function when we're done writing new tests
-#pragma clang diagnostic ignored "-Wunused-function"
 
 // ignore some warnings inside this file
 #pragma clang diagnostic push
@@ -76,19 +72,39 @@ extern ledger_template_t        task_ledger_template;
 #pragma clang diagnostic ignored "-Wpedantic"
 #pragma clang diagnostic ignored "-Wgcc-compat"
 
+/*
+ * Invalid values for various types. These are used by the outparameter tests.
+ * UNLIKELY_ means the value is not 100% guaranteed to be invalid for that type,
+ * and is just a very unlikely value for it. Tests should not rely on them to compare against UNLIKELY_
+ * values without explicit reason it cannot be possible.
+ *
+ * INVALID_* means the value is 100% guaranteed to be invalid. They can be relied on to be compared against.
+ */
 
-#define INVALID_INITIAL_ADDRESS 0xabababab
+#define UNLIKELY_INITIAL_ADDRESS 0xabababab
 /*
  * It's important for us to never have a test with a size like
- * INVALID_INITIAL_SIZE, and for this to stay non page aligned.
+ * UNLIKELY_INITIAL_SIZE, and for this to stay non page aligned.
  * See comment in call_mach_memory_entry_map_size__start_size for more info
  */
-#define INVALID_INITIAL_SIZE 0xabababab
-#define INVALID_INITIAL_PPNUM 0xabababab
-#define INVALID_INITIAL_MACH_PORT (mach_port_t) 0xbabababa
+#define UNLIKELY_INITIAL_SIZE 0xabababab
+#define UNLIKELY_INITIAL_PPNUM 0xabababab
+#define UNLIKELY_INITIAL_MACH_PORT ((mach_port_t) 0xbabababa)
+#define UNLIKELY_INITIAL_VID 0xbabababa
+// This cannot possibly be a valid vnode pointer as they are pointers
+#define INVALID_VNODE_PTR ((void *) -1)
 // This cannot possibly be a valid vm_map_copy_t as they are pointers
-#define INVALID_INITIAL_COPY (vm_map_copy_t) (void *) -1
+#define INVALID_VM_MAP_COPY ((vm_map_copy_t) (void *) -1)
+// This cannot be a purgable state (see vm_purgable.h) It's way above the last valid state
+#define INVALID_PURGABLE_STATE 0xababab
+static_assert(INVALID_PURGABLE_STATE > VM_PURGABLE_STATE_MAX, "This test requires a purgable state above the max");
+// Disposition values are generated via the VM_PAGE_QUERY_ values being ored.
+// This cannot be a valid one as it's above the greatest possible or
+#define INVALID_DISPOSITION_VALUE 0xffffff0
+#define INVALID_INHERIT 0xbaba
+static_assert(INVALID_INHERIT > VM_INHERIT_LAST_VALID, "This test requires an inheritance above the max");
 
+#define INVALID_INITIAL_VID 0xbabababa
 // output buffer size for kext/xnu sysctl tests
 // note: 1 GB is too big for watchOS
 static const int64_t SYSCTL_OUTPUT_BUFFER_SIZE = 512 * 1024 * 1024;  // 512 MB
@@ -240,7 +256,7 @@ VM_MAP_PAGE_MASK(MAP_T map __unused)
 	/* Round up to the given page mask. */                          \
 	__attribute__((overloadable, used))                             \
 	static inline T                                                 \
-	round_up_mask(T addr, uint64_t pagemask) {                      \
+	vm_sanitize_map_round_page_mask(T addr, uint64_t pagemask) {                      \
 	        return (addr + (T)pagemask) & ~((T)pagemask);           \
 	}                                                               \
                                                                         \
@@ -248,20 +264,20 @@ VM_MAP_PAGE_MASK(MAP_T map __unused)
 	__attribute__((overloadable, used))                             \
 	static inline T                                                 \
 	round_up_page(T addr, uint64_t pagesize) {                      \
-	        return round_up_mask(addr, pagesize - 1);               \
+	        return vm_sanitize_map_round_page_mask(addr, pagesize - 1);               \
 	}                                                               \
                                                                         \
 	/* Round up to the given map's page size. */                    \
 	__attribute__((overloadable, used))                             \
 	static inline T                                                 \
 	round_up_map(MAP_T map, T addr) {                               \
-	        return round_up_mask(addr, VM_MAP_PAGE_MASK(map));      \
+	        return vm_sanitize_map_round_page_mask(addr, VM_MAP_PAGE_MASK(map));      \
 	}                                                               \
                                                                         \
 	/* Truncate to the given page mask. */                          \
 	__attribute__((overloadable, used))                             \
 	static inline T                                                 \
-	trunc_down_mask(T addr, uint64_t pagemask)                      \
+	vm_sanitize_map_trunc_page_mask(T addr, uint64_t pagemask)                      \
 	{                                                               \
 	        return addr & ~((T)pagemask);                           \
 	}                                                               \
@@ -271,7 +287,7 @@ VM_MAP_PAGE_MASK(MAP_T map __unused)
 	static inline T                                                 \
 	trunc_down_page(T addr, uint64_t pagesize)                      \
 	{                                                               \
-	        return trunc_down_mask(addr, pagesize - 1);             \
+	        return vm_sanitize_map_trunc_page_mask(addr, pagesize - 1);             \
 	}                                                               \
                                                                         \
 	/* Truncate to the given map's page size. */                    \
@@ -279,7 +295,7 @@ VM_MAP_PAGE_MASK(MAP_T map __unused)
 	static inline T                                                 \
 	trunc_down_map(MAP_T map, T addr)                               \
 	{                                                               \
-	        return trunc_down_mask(addr, VM_MAP_PAGE_MASK(map));    \
+	        return vm_sanitize_map_trunc_page_mask(addr, VM_MAP_PAGE_MASK(map));    \
 	}                                                               \
                                                                         \
 	__attribute__((overloadable, unavailable("use round_up_page instead"))) \
@@ -299,7 +315,7 @@ IMPL(uint32_t)
 #define IMPL(T)                                                         \
 	__attribute__((overloadable, used))                             \
 	static bool                                                     \
-	range_overflows_allow_zero(T start, T size, T pgmask)           \
+	vm_sanitize_range_overflows_allow_zero(T start, T size, T pgmask)           \
 	{                                                               \
 	        if (size == 0) {                                        \
 	                return false;                                   \
@@ -310,8 +326,8 @@ IMPL(uint32_t)
 	                return true;                                    \
 	        }                                                       \
                                                                         \
-	        T aligned_start = trunc_down_mask(start, pgmask);       \
-	        T aligned_end = round_up_mask(start + size, pgmask);    \
+	        T aligned_start = vm_sanitize_map_trunc_page_mask(start, pgmask);       \
+	        T aligned_end = vm_sanitize_map_round_page_mask(start + size, pgmask);    \
 	        if (aligned_end <= aligned_start) {                     \
 	                return true;                                    \
 	        }                                                       \
@@ -319,19 +335,19 @@ IMPL(uint32_t)
 	        return false;                                           \
 	}                                                               \
                                                                         \
-	/* like range_overflows_allow_zero(), but without the */        \
+	/* like vm_sanitize_range_overflows_allow_zero(), but without the */        \
 	/* unconditional approval of size==0 */                         \
 	__attribute__((overloadable, used))                             \
 	static bool                                                     \
-	range_overflows_strict_zero(T start, T size, T pgmask)                      \
+	vm_sanitize_range_overflows_strict_zero(T start, T size, T pgmask)                      \
 	{                                                               \
 	        T sum;                                                  \
 	        if (__builtin_add_overflow(start, size, &sum)) {        \
 	                return true;                                    \
 	        }                                                       \
                                                                         \
-	        T aligned_start = trunc_down_mask(start, pgmask);       \
-	        T aligned_end = round_up_mask(start + size, pgmask);    \
+	        T aligned_start = vm_sanitize_map_trunc_page_mask(start, pgmask);       \
+	        T aligned_end = vm_sanitize_map_round_page_mask(start + size, pgmask);    \
 	        if (aligned_end <= aligned_start) {                     \
 	                return true;                                    \
 	        }                                                       \
@@ -362,29 +378,46 @@ isRosetta()
 #endif
 }
 
+// Needed to distinguish between rosetta kernel runs and generating trials names from kern golden files.
 #if KERNEL
-// Knobs controlled by boot arguments
-extern bool kernel_generate_golden;
-static void
-init_kernel_generate_golden()
+#define kern_trialname_generation FALSE
+#else
+static bool kern_trialname_generation = FALSE;
+#endif
+static addr_t trial_page_size = 0;
+
+static inline addr_t
+adjust_page_size()
 {
-	kernel_generate_golden = FALSE;
-	uint32_t kern_golden_arg;
-	if (PE_parse_boot_argn("vm_parameter_validation_kern_golden", &kern_golden_arg, sizeof(kern_golden_arg))) {
-		kernel_generate_golden = (kern_golden_arg == 1);
+	addr_t test_page_size = PAGE_SIZE;
+#if !KERNEL && __x86_64__
+	// Handle kernel page size variation while recreating trials names for golden files in userspace.
+	if (kern_trialname_generation && isRosetta()) {
+		test_page_size = trial_page_size;
 	}
+#endif //  !KERNEL && __x86_64__
+	return test_page_size;
 }
+
+#if KERNEL
+// Knobs controlled from userspace (and passed in MSB of the file_descriptor)
+extern bool kernel_generate_golden;
 #else
 // Knobs controlled by environment variables
 extern bool dump;
 extern bool generate_golden;
-extern bool test_results;
+extern bool dump_golden;
+extern int out_param_bad_count;
+extern bool should_test_results;
 static void
 read_env()
 {
 	dump = (getenv("DUMP_RESULTS") != NULL);
-	generate_golden = (getenv("GENERATE_GOLDEN_IMAGE") != NULL);
-	test_results = (getenv("SKIP_TESTS") == NULL) && !generate_golden; // Shouldn't do both
+	dump_golden = (getenv("DUMP_GOLDEN_IMAGE") != NULL);
+	// Shouldn't do both
+	generate_golden = (getenv("GENERATE_GOLDEN_IMAGE") != NULL) && !dump_golden;
+	// Only test when no other golden image flag is set
+	should_test_results = (getenv("SKIP_TESTS") == NULL) && !dump_golden && !generate_golden;
 }
 #endif
 
@@ -394,10 +427,13 @@ read_env()
 
 // Test output function.
 // This prints either to stdout (userspace tests) or to a userspace buffer (kernel sysctl tests)
+// Golden tests generation in userspace also writes to a buffer (GOLDEN_OUTPUT_BUF)
 #if KERNEL
 extern void testprintf(const char *, ...) __printflike(1, 2);
+#define goldenprintf testprintf
 #else
 #define testprintf printf
+extern void goldenprintf(const char *, ...) __printflike(1, 2);
 #endif
 
 // kstrdup() is like strdup() but in the kernel it uses kalloc_data()
@@ -468,6 +504,73 @@ kasprintf(char ** __restrict out_str, const char * __restrict format, ...) __pri
 /////////////////////////////////////////////////////
 // Record trials and return values from tested functions (BSD int or Mach kern_return_t)
 
+// Maintain list of known trials "smart" generator functions (trial formulae) as
+// these are included in the golden result list (keeping the enum forces people to
+// maintain the list up-to-date when adding new functions).
+#define TRIALSFORMULA_ENUM(VARIANT) \
+	VARIANT(eUNKNOWN_TRIALS) \
+	VARIANT(eSMART_VM_MAP_KERNEL_FLAGS_TRIALS) \
+	VARIANT(eSMART_VM_INHERIT_TRIALS) \
+	VARIANT(eSMART_MMAP_KERNEL_FLAGS_TRIALS) \
+	VARIANT(eSMART_MMAP_FLAGS_TRIALS) \
+	VARIANT(eSMART_GENERIC_FLAG_TRIALS) \
+	VARIANT(eSMART_VM_TAG_TRIALS) \
+	VARIANT(eSMART_VM_PROT_TRIALS) \
+	VARIANT(eSMART_VM_PROT_PAIR_TRIALS) \
+	VARIANT(eSMART_LEDGER_TAG_TRIALS) \
+	VARIANT(eSMART_LEDGER_FLAG_TRIALS) \
+	VARIANT(eSMART_ADDR_TRIALS) \
+	VARIANT(eSMART_SIZE_TRIALS) \
+	VARIANT(eSMART_START_SIZE_TRIALS) \
+	VARIANT(eSMART_START_SIZE_OFFSET_OBJECT_TRIALS) \
+	VARIANT(eSMART_START_SIZE_OFFSET_TRIALS) \
+	VARIANT(eSMART_SIZE_SIZE_TRIALS) \
+	VARIANT(eSMART_SRC_DST_SIZE_TRIALS) \
+	VARIANT(eSMART_FILEOFF_DST_SIZE_TRIALS) \
+	VARIANT(eSMART_VM_BEHAVIOR_TRIALS) \
+	VARIANT(eSMART_VM_ADVISE_TRIALS) \
+	VARIANT(eSMART_VM_SYNC_TRIALS) \
+	VARIANT(eSMART_VM_MSYNC_TRIALS) \
+	VARIANT(eSMART_VM_MACHINE_ATTRIBUTE_TRIALS) \
+	VARIANT(eSMART_VM_PURGEABLE_AND_STATE_TRIALS) \
+	VARIANT(eSMART_START_SIZE_START_SIZE_TRIALS) \
+	VARIANT(eSMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS) \
+	VARIANT(eSMART_RECLAMATION_BUFFER_INIT_TRIALS)
+
+#define TRIALSFORMULA_ENUM_VARIANT(NAME) NAME,
+typedef enum {
+	TRIALSFORMULA_ENUM(TRIALSFORMULA_ENUM_VARIANT)
+} trialsformula_t;
+
+#define TRIALSARGUMENTS_NONE 0
+#define TRIALSARGUMENTS_SIZE 2
+
+// formula enum id to string
+#define TRIALSFORMULA_ENUM_STRING(NAME) case NAME: return #NAME;
+const char *
+trialsformula_name(trialsformula_t formula)
+{
+	switch (formula) {
+		TRIALSFORMULA_ENUM(TRIALSFORMULA_ENUM_STRING)
+	default:
+		testprintf("Unknown formula_t %d\n", formula);
+		assert(false);
+	}
+}
+
+#define TRIALSFORMULA_ENUM_FROM_STRING(NAME)    \
+	if (strncmp(string, #NAME, strlen(#NAME)) == 0) return NAME;
+
+// formula name to enum id
+trialsformula_t
+trialsformula_from_string(const char *string)
+{
+	TRIALSFORMULA_ENUM(TRIALSFORMULA_ENUM_FROM_STRING)
+	// else
+	testprintf("Unknown formula %s\n", string);
+	assert(false);
+}
+
 // ret: return value of this trial
 // name: name of this trial, including the input values passed in
 typedef struct {
@@ -478,8 +581,11 @@ typedef struct {
 typedef struct {
 	const char *testname;
 	char *testconfig;
+	trialsformula_t trialsformula;
+	uint64_t trialsargs[TRIALSARGUMENTS_SIZE];
 	unsigned capacity;
 	unsigned count;
+	unsigned tested_count;
 	result_t list[];
 } results_t;
 
@@ -490,7 +596,9 @@ static uint32_t num_kern_tests = 0; // num of tests in kernel results list
 
 static __attribute__((overloadable))
 results_t *
-alloc_results(const char *testname, char *testconfig, unsigned capacity)
+alloc_results(const char *testname, char *testconfig,
+    trialsformula_t trialsformula, uint64_t trialsargs[static TRIALSARGUMENTS_SIZE],
+    unsigned capacity)
 {
 	results_t *results;
 #if KERNEL
@@ -501,8 +609,13 @@ alloc_results(const char *testname, char *testconfig, unsigned capacity)
 	assert(results != NULL);
 	results->testname = testname;
 	results->testconfig = testconfig;
+	results->trialsformula = trialsformula;
+	for (unsigned i = 0; i < TRIALSARGUMENTS_SIZE; i++) {
+		results->trialsargs[i] = trialsargs[i];
+	}
 	results->capacity = capacity;
 	results->count = 0;
+	results->tested_count = 0;
 	return results;
 }
 
@@ -511,15 +624,36 @@ alloc_default_testconfig(void)
 {
 	char *result;
 	kasprintf(&result, "%s %s %s%s",
-	    OS_NAME, ARCH_NAME, CALLER_NAME, isRosetta() ? " rosetta" : "");
+	    OS_NAME, ARCH_NAME,
+	    kern_trialname_generation ? "kernel" : CALLER_NAME,
+	    !kern_trialname_generation && isRosetta() ? " rosetta" : "");
 	return result;
 }
 
 static __attribute__((overloadable))
 results_t *
-alloc_results(const char *testname, unsigned capacity)
+alloc_results(const char *testname,
+    trialsformula_t trialsformula, uint64_t *trialsargs, size_t trialsargs_count,
+    unsigned capacity)
 {
-	return alloc_results(testname, alloc_default_testconfig(), capacity);
+	assert(trialsargs_count == TRIALSARGUMENTS_SIZE);
+	return alloc_results(testname, alloc_default_testconfig(), trialsformula, trialsargs, capacity);
+}
+
+static __attribute__((overloadable))
+results_t *
+alloc_results(const char *testname, trialsformula_t trialsformula, uint64_t trialsarg0, unsigned capacity)
+{
+	uint64_t trialsargs[TRIALSARGUMENTS_SIZE] = {trialsarg0, TRIALSARGUMENTS_NONE};
+	return alloc_results(testname, trialsformula, trialsargs, TRIALSARGUMENTS_SIZE, capacity);
+}
+
+static __attribute__((overloadable))
+results_t *
+alloc_results(const char *testname, trialsformula_t trialsformula, unsigned capacity)
+{
+	uint64_t trialsargs[TRIALSARGUMENTS_SIZE] = {TRIALSARGUMENTS_NONE, TRIALSARGUMENTS_NONE};
+	return alloc_results(testname, trialsformula, trialsargs, TRIALSARGUMENTS_SIZE, capacity);
 }
 
 static void __unused
@@ -550,54 +684,13 @@ append_result(results_t *results, int ret, const char *name)
 	    (result_t){.ret = ret, .name = name_cpy};
 }
 
-static results_t *
-test_name_to_golden_results(const char* testname)
-{
-	results_t *golden_results = NULL;
-	results_t *golden_results_found = NULL;
-
-	for (uint32_t x = 0; x < num_tests; x++) {
-		golden_results = golden_list[x];
-		if (strncmp(golden_results->testname, testname, strlen(testname)) == 0) {
-			golden_results_found = golden_results;
-			break;
-		}
-	}
-
-	return golden_results_found;
-}
-
-static void
-dump_results_list(results_t *res_list[], uint32_t res_num_tests)
-{
-	for (uint32_t x = 0; x < res_num_tests; x++) {
-		results_t *results = res_list[x];
-		testprintf("\t[%u] %s (%u)\n", x, results->testname, results->count);
-	}
-}
-
-static void
-dump_golden_list()
-{
-	testprintf("======\n");
-	testprintf("golden_list %p, num_tests %u\n", golden_list, num_tests);
-	dump_results_list(golden_list, num_tests);
-	testprintf("======\n");
-}
-
-static void
-dump_kernel_results_list()
-{
-	testprintf("======\n");
-	testprintf("kernel_results_list %p, num_tests %u\n", kern_list, num_kern_tests);
-	dump_results_list(kern_list, num_kern_tests);
-	testprintf("======\n");
-}
 
 #define TESTNAME_DELIMITER        "TESTNAME "
 #define RESULTCOUNT_DELIMITER     "RESULT COUNT "
 #define TESTRESULT_DELIMITER      " "
 #define TESTCONFIG_DELIMITER      "  TESTCONFIG "
+#define TRIALSFORMULA_DELIMITER   "TRIALSFORMULA "
+#define TRIALSARGUMENTS_DELIMITER "TRIALSARGUMENTS"
 #define KERN_TESTRESULT_DELIMITER "  RESULT "
 
 // print results, unformatted
@@ -607,12 +700,14 @@ static results_t *
 __dump_results(results_t *results)
 {
 	testprintf(TESTNAME_DELIMITER "%s\n", results->testname);
+	testprintf(RESULTCOUNT_DELIMITER "%d\n", results->count);
 	testprintf(TESTCONFIG_DELIMITER "%s\n", results->testconfig);
 
 	for (unsigned i = 0; i < results->count; i++) {
 		testprintf(KERN_TESTRESULT_DELIMITER "%d, %s\n", results->list[i].ret, results->list[i].name);
 	}
 
+	results->tested_count += 1;
 	return results;
 }
 
@@ -620,50 +715,148 @@ __dump_results(results_t *results)
 static results_t *
 dump_golden_results(results_t *results)
 {
-	testprintf(TESTNAME_DELIMITER "%s\n", results->testname);
-	testprintf(RESULTCOUNT_DELIMITER "%d\n", results->count);
+	trial_page_size = PAGE_SIZE;
+	goldenprintf(TESTNAME_DELIMITER "%s\n", results->testname);
+	goldenprintf(TRIALSFORMULA_DELIMITER "%s %s %llu,%llu,%llu\n",
+	    trialsformula_name(results->trialsformula), TRIALSARGUMENTS_DELIMITER,
+	    results->trialsargs[0], results->trialsargs[1], trial_page_size);
+	goldenprintf(RESULTCOUNT_DELIMITER "%d\n", results->count);
 
 	for (unsigned i = 0; i < results->count; i++) {
-		testprintf(TESTRESULT_DELIMITER "%d: %d\n", i, results->list[i].ret);
+		goldenprintf(TESTRESULT_DELIMITER "%d: %d\n", i, results->list[i].ret);
+#if !KERNEL
+		if (results->list[i].ret == OUT_PARAM_BAD) {
+			out_param_bad_count += 1;
+			T_FAIL("Out parameter violation in test %s - %s\n", results->testname, results->list[i].name);
+		}
+#endif
 	}
 
 	return results;
 }
 
 #if !KERNEL
+// Comparator function for sorting result_t list by name
+static int
+compare_names(const void *a, const void *b)
+{
+	assert(((const result_t *)a)->name);
+	assert(((const result_t *)b)->name);
+	return strcmp(((const result_t *)a)->name, ((const result_t *)b)->name);
+}
+
+static unsigned
+binary_search(result_t *list, unsigned count, const result_t *trial)
+{
+	assert(count > 0);
+	const char *name = trial->name;
+	unsigned left = 0, right = count - 1;
+	while (left <= right) {
+		unsigned mid = left + (right - left) / 2;
+		int cmp = strcmp(list[mid].name, name);
+		if (cmp == 0) {
+			return mid;
+		} else if (cmp < 0) {
+			left = mid + 1;
+		} else {
+			right = mid - 1;
+		}
+	}
+	return UINT_MAX; // Not found
+}
+
+static inline bool
+trial_name_equals(const result_t *a, const result_t *b)
+{
+	// NB: strlen match need to handle cases where a shorter 'bname' would match a longer 'aname'.
+	if (strlen(a->name) == strlen(b->name) && compare_names(a, b) == 0) {
+		return true;
+	}
+	return false;
+}
+
+static const result_t *
+get_golden_result(results_t *golden_results, const result_t *trial, unsigned trial_idx)
+{
+	if (golden_results->trialsformula == eUNKNOWN_TRIALS) {
+		// golden results don't contain trials names
+		T_LOG("%s: update test's alloc_results to have a valid trialsformula_t\n", golden_results->testname);
+		return NULL;
+	}
+
+	if (trial_idx < golden_results->count &&
+	    golden_results->list[trial_idx].name &&
+	    trial_name_equals(&golden_results->list[trial_idx], trial)) {
+		// "fast search" path taken when golden file is in sync to test.
+		return &golden_results->list[trial_idx];
+	}
+
+	// "slow search" path taken when tests idxs are not aligned. Sort the array
+	// by name and do binary search.
+	qsort(golden_results->list, golden_results->count, sizeof(result_t), compare_names);
+	unsigned g_idx = binary_search(golden_results->list, golden_results->count, trial);
+	if (g_idx < golden_results->count) {
+		return &golden_results->list[g_idx];
+	}
+
+	return NULL;
+}
+
 static void
-do_tests(results_t *golden_results, results_t *results)
+test_results(results_t *golden_results, results_t *results)
 {
 	bool passed = TRUE;
-	unsigned result_count = golden_results->count;
+	unsigned result_count = results->count;
+	unsigned acceptable_count = 0;
+	const unsigned acceptable_max = 16;  // log up to this many ACCEPTABLE results
+	const result_t *golden_result = NULL;
 	if (golden_results->count != results->count) {
 		T_LOG("%s: number of iterations mismatch (%u vs %u)",
 		    results->testname, golden_results->count, results->count);
-		result_count = golden_results->count < results->count ? golden_results->count : results->count;
 	}
 	for (unsigned i = 0; i < result_count; i++) {
-		if (results->list[i].ret == ACCEPTABLE) {
-			// trial has declared itself to be correct
-			// no matter what the golden result is
-			T_LOG("%s RESULT ACCEPTABLE (expected %d), %s\n",
-			    results->testname,
-			    golden_results->list[i].ret, results->list[i].name);
-		} else if (results->list[i].ret != golden_results->list[i].ret) {
-			T_FAIL("%s RESULT %d (expected %d), %s\n",
-			    results->testname, results->list[i].ret,
-			    golden_results->list[i].ret, results->list[i].name);
+		golden_result = get_golden_result(golden_results, &results->list[i], i);
+		if (golden_result) {
+			if (results->list[i].ret == ACCEPTABLE) {
+				// trial has declared itself to be correct
+				// no matter what the golden result is
+				acceptable_count++;
+				if (acceptable_count <= acceptable_max) {
+					T_LOG("%s RESULT ACCEPTABLE (expected %d), %s\n",
+					    results->testname,
+					    golden_result->ret, results->list[i].name);
+				}
+			} else if (results->list[i].ret != golden_result->ret) {
+				T_FAIL("%s RESULT %d (expected %d), %s\n",
+				    results->testname, results->list[i].ret,
+				    golden_result->ret, results->list[i].name);
+				passed = FALSE;
+			}
+		} else {
+			// new trial not present in golden results
+			T_FAIL("%s NEW RESULT %d, %s - (regenerate golden files to fix this)\n",
+			    results->testname, results->list[i].ret, results->list[i].name);
 			passed = FALSE;
 		}
 	}
 
+	if (acceptable_count > acceptable_max) {
+		T_LOG("%s %u more RESULT ACCEPTABLE trials not logged\n",
+		    results->testname, acceptable_count - acceptable_max);
+	}
 	if (passed) {
 		T_PASS("%s passed\n", results->testname);
 	}
 }
 #endif
 
+#if !KERNEL
 static results_t *
-dump_results(results_t *results)
+test_name_to_golden_results(const char* testname);
+#endif
+
+static results_t *
+process_results(results_t *results)
 {
 #if KERNEL
 	if (kernel_generate_golden) {
@@ -682,11 +875,11 @@ dump_results(results_t *results)
 		dump_golden_results(results);
 	}
 
-	if (test_results) {
+	if (should_test_results) {
 		golden_results = test_name_to_golden_results(results->testname);
 
 		if (golden_results) {
-			do_tests(golden_results, results);
+			test_results(golden_results, results);
 		} else {
 			T_FAIL("New test %s found, update golden list to allow return code testing", results->testname);
 			// Dump results if not done previously
@@ -774,16 +967,6 @@ append_offset(offset_list_t *offsets, bool is_absolute, addr_t offset)
 	offsets->count++;
 }
 
-static void
-free_offsets(offset_list_t *offsets)
-{
-#if KERNEL
-	kfree_type(offset_list_t, absolute_or_relative_offset_t, offsets->capacity, offsets);
-#else
-	free(offsets);
-#endif
-}
-
 
 /////////////////////////////////////////////////////
 // Generation of trials and their parameter values
@@ -804,6 +987,7 @@ free_offsets(offset_list_t *offsets)
 
 #define TRIALS_IMPL(NAME)                                               \
 	static NAME ## _trials_t *                                      \
+	__attribute__((used))                                       \
 	allocate_ ## NAME ## _trials(unsigned capacity)                 \
 	{                                                               \
 	        NAME ## _trials_t *trials = ALLOC_TRIALS(NAME, capacity); \
@@ -855,15 +1039,19 @@ typedef struct {
 
 
 #define VM_INHERIT_TRIAL(new_value) \
-	(vm_inherit_trial_t) {.value = (vm_inherit_t)new_value, .name ="vm_inherit " #new_value}
+	(vm_inherit_trial_t) {.value = (vm_inherit_t)(new_value), .name = "vm_inherit " #new_value}
 
+static_assert(VM_INHERIT_LAST_VALID == VM_INHERIT_NONE,
+    "Update this test with new vm_inherit_t values");
 static vm_inherit_trial_t vm_inherit_trials_values[] = {
 	VM_INHERIT_TRIAL(VM_INHERIT_SHARE),
 	VM_INHERIT_TRIAL(VM_INHERIT_COPY),
 	VM_INHERIT_TRIAL(VM_INHERIT_NONE),
 	// end valid ones
-	VM_INHERIT_TRIAL(VM_INHERIT_DONATE_COPY), // yes this is invalid
-	VM_INHERIT_TRIAL(0x12345),
+	// note: VM_INHERIT_DONATE_COPY is invalid and unimplemented
+	// VM_INHERIT_LAST_VALID correctly excludes VM_INHERIT_DONATE_COPY
+	VM_INHERIT_TRIAL(VM_INHERIT_LAST_VALID + 1),
+	VM_INHERIT_TRIAL(VM_INHERIT_LAST_VALID + 2),
 	VM_INHERIT_TRIAL(0xffffffff),
 };
 
@@ -875,14 +1063,327 @@ cleanup_vm_inherit_trials(vm_inherit_trials_t **trials)
 	free_trials(*trials);
 }
 
+// allocate vm_behavior_t trials, and deallocate it at end of scope
+#define SMART_VM_BEHAVIOR_TRIALS()                                               \
+	__attribute__((cleanup(cleanup_vm_behavior_trials)))             \
+	= allocate_vm_behavior_trials(countof(vm_behavior_trials_values));        \
+	append_trials(trials, vm_behavior_trials_values, countof(vm_behavior_trials_values))
+
+// generate vm_behavior_t trials
+
+typedef struct {
+	vm_behavior_t value;
+	const char * name;
+} vm_behavior_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_behavior_trial_t list[];
+} vm_behavior_trials_t;
+
+
+#define VM_BEHAVIOR_TRIAL(new_value) \
+	(vm_behavior_trial_t) {.value = (vm_behavior_t)(new_value), .name = "vm_behavior " #new_value}
+
+static vm_behavior_trial_t vm_behavior_trials_values[] = {
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_DEFAULT),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_RANDOM),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_SEQUENTIAL),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_RSEQNTL),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_WILLNEED),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_DONTNEED),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_FREE),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_ZERO_WIRED_PAGES),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_REUSABLE),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_REUSE),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_CAN_REUSE),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_PAGEOUT),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_ZERO),
+	// end valid ones
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_LAST_VALID + 1),
+	VM_BEHAVIOR_TRIAL(VM_BEHAVIOR_LAST_VALID + 2),
+	VM_BEHAVIOR_TRIAL(0x12345),
+	VM_BEHAVIOR_TRIAL(0xffffffff),
+};
+
+TRIALS_IMPL(vm_behavior)
+
+static void
+cleanup_vm_behavior_trials(vm_behavior_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
+// allocate vm_sync_t trials, and deallocate it at end of scope
+#define SMART_VM_SYNC_TRIALS()                                               \
+	__attribute__((cleanup(cleanup_vm_sync_trials)))             \
+	= allocate_vm_sync_trials(countof(vm_sync_trials_values));        \
+	append_trials(trials, vm_sync_trials_values, countof(vm_sync_trials_values))
+
+// generate vm_sync_t trials
+
+typedef struct {
+	vm_sync_t value;
+	const char * name;
+} vm_sync_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_sync_trial_t list[];
+} vm_sync_trials_t;
+
+
+#define VM_SYNC_TRIAL(new_value) \
+	(vm_sync_trial_t) {.value = (vm_sync_t)(new_value), .name = "vm_sync_t " #new_value}
+
+static vm_sync_trial_t vm_sync_trials_values[] = {
+	VM_SYNC_TRIAL(0),
+	// start valid values
+	VM_SYNC_TRIAL(VM_SYNC_ASYNCHRONOUS),
+	VM_SYNC_TRIAL(VM_SYNC_SYNCHRONOUS),
+	VM_SYNC_TRIAL(VM_SYNC_INVALIDATE),
+	VM_SYNC_TRIAL(VM_SYNC_KILLPAGES),
+	VM_SYNC_TRIAL(VM_SYNC_DEACTIVATE),
+	VM_SYNC_TRIAL(VM_SYNC_CONTIGUOUS),
+	VM_SYNC_TRIAL(VM_SYNC_REUSABLEPAGES),
+	// end valid values
+	VM_SYNC_TRIAL(1u << 7),
+	VM_SYNC_TRIAL(1u << 8),
+	VM_SYNC_TRIAL(1u << 9),
+	VM_SYNC_TRIAL(1u << 10),
+	VM_SYNC_TRIAL(1u << 11),
+	VM_SYNC_TRIAL(1u << 12),
+	VM_SYNC_TRIAL(1u << 13),
+	VM_SYNC_TRIAL(1u << 14),
+	VM_SYNC_TRIAL(1u << 15),
+	VM_SYNC_TRIAL(1u << 16),
+	VM_SYNC_TRIAL(1u << 17),
+	VM_SYNC_TRIAL(1u << 18),
+	VM_SYNC_TRIAL(1u << 19),
+	VM_SYNC_TRIAL(1u << 20),
+	VM_SYNC_TRIAL(1u << 21),
+	VM_SYNC_TRIAL(1u << 22),
+	VM_SYNC_TRIAL(1u << 23),
+	VM_SYNC_TRIAL(1u << 24),
+	VM_SYNC_TRIAL(1u << 25),
+	VM_SYNC_TRIAL(1u << 26),
+	VM_SYNC_TRIAL(1u << 27),
+	VM_SYNC_TRIAL(1u << 28),
+	VM_SYNC_TRIAL(1u << 29),
+	VM_SYNC_TRIAL(1u << 30),
+	VM_SYNC_TRIAL(1u << 31),
+	VM_SYNC_TRIAL(VM_SYNC_ASYNCHRONOUS | VM_SYNC_SYNCHRONOUS),
+	VM_SYNC_TRIAL(VM_SYNC_ASYNCHRONOUS | (1u << 7)),
+	VM_SYNC_TRIAL(0xffffffff),
+};
+
+TRIALS_IMPL(vm_sync)
+
+static void
+cleanup_vm_sync_trials(vm_sync_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
+// allocate vm_msync_t trials, and deallocate it at end of scope
+#define SMART_VM_MSYNC_TRIALS()                                               \
+	__attribute__((cleanup(cleanup_vm_msync_trials)))             \
+	= allocate_vm_msync_trials(countof(vm_msync_trials_values));        \
+	append_trials(trials, vm_msync_trials_values, countof(vm_msync_trials_values))
+
+// generate vm_msync_t trials
+
+typedef struct {
+	int value;
+	const char * name;
+} vm_msync_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_msync_trial_t list[];
+} vm_msync_trials_t;
+
+
+#define VM_MSYNC_TRIAL(new_value) \
+	(vm_msync_trial_t) {.value = (int)(new_value), .name = "vm_msync_t " #new_value}
+
+static vm_msync_trial_t vm_msync_trials_values[] = {
+	VM_MSYNC_TRIAL(0),
+	// start valid values
+	VM_MSYNC_TRIAL(MS_ASYNC),
+	VM_MSYNC_TRIAL(MS_INVALIDATE),
+	VM_MSYNC_TRIAL(MS_KILLPAGES),
+	VM_MSYNC_TRIAL(MS_DEACTIVATE),
+	VM_MSYNC_TRIAL(MS_SYNC),
+	VM_MSYNC_TRIAL(MS_ASYNC | MS_INVALIDATE),
+	// end valid values
+	VM_MSYNC_TRIAL(1u << 5),
+	VM_MSYNC_TRIAL(1u << 6),
+	VM_MSYNC_TRIAL(1u << 7),
+	VM_MSYNC_TRIAL(1u << 8),
+	VM_MSYNC_TRIAL(1u << 9),
+	VM_MSYNC_TRIAL(1u << 10),
+	VM_MSYNC_TRIAL(1u << 11),
+	VM_MSYNC_TRIAL(1u << 12),
+	VM_MSYNC_TRIAL(1u << 13),
+	VM_MSYNC_TRIAL(1u << 14),
+	VM_MSYNC_TRIAL(1u << 15),
+	VM_MSYNC_TRIAL(1u << 16),
+	VM_MSYNC_TRIAL(1u << 17),
+	VM_MSYNC_TRIAL(1u << 18),
+	VM_MSYNC_TRIAL(1u << 19),
+	VM_MSYNC_TRIAL(1u << 20),
+	VM_MSYNC_TRIAL(1u << 21),
+	VM_MSYNC_TRIAL(1u << 22),
+	VM_MSYNC_TRIAL(1u << 23),
+	VM_MSYNC_TRIAL(1u << 24),
+	VM_MSYNC_TRIAL(1u << 25),
+	VM_MSYNC_TRIAL(1u << 26),
+	VM_MSYNC_TRIAL(1u << 27),
+	VM_MSYNC_TRIAL(1u << 28),
+	VM_MSYNC_TRIAL(1u << 29),
+	VM_MSYNC_TRIAL(1u << 30),
+	VM_MSYNC_TRIAL(1u << 31),
+	VM_MSYNC_TRIAL(MS_ASYNC | MS_SYNC),
+	VM_MSYNC_TRIAL(0xffffffff),
+};
+
+TRIALS_IMPL(vm_msync)
+
+static void __attribute__((used))
+cleanup_vm_msync_trials(vm_msync_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
+
+// allocate advise_t trials, and deallocate it at end of scope
+#define SMART_VM_ADVISE_TRIALS()                                           \
+	__attribute__((cleanup(cleanup_advise_trials)))                 \
+	= allocate_vm_advise_trials(countof(vm_advise_trials_values));        \
+	append_trials(trials, vm_advise_trials_values, countof(vm_advise_trials_values))
+
+// generate advise_t trials
+
+typedef struct {
+	int value;
+	const char * name;
+} vm_advise_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_advise_trial_t list[];
+} vm_advise_trials_t;
+
+
+#define ADVISE_TRIAL(new_value) \
+	(vm_advise_trial_t) {.value = (int)(new_value), .name = "advise " #new_value}
+
+static vm_advise_trial_t vm_advise_trials_values[] = {
+	ADVISE_TRIAL(MADV_NORMAL),
+	ADVISE_TRIAL(MADV_RANDOM),
+	ADVISE_TRIAL(MADV_SEQUENTIAL),
+	ADVISE_TRIAL(MADV_WILLNEED),
+	ADVISE_TRIAL(MADV_DONTNEED),
+	ADVISE_TRIAL(MADV_FREE),
+	ADVISE_TRIAL(MADV_ZERO_WIRED_PAGES),
+	ADVISE_TRIAL(MADV_FREE_REUSABLE),
+	ADVISE_TRIAL(MADV_FREE_REUSE),
+	ADVISE_TRIAL(MADV_CAN_REUSE),
+	ADVISE_TRIAL(MADV_PAGEOUT),
+	ADVISE_TRIAL(MADV_ZERO),
+	// end valid ones
+	ADVISE_TRIAL(MADV_ZERO + 1),
+	ADVISE_TRIAL(MADV_ZERO + 2),
+	ADVISE_TRIAL(0xffffffff),
+};
+
+TRIALS_IMPL(vm_advise)
+
+static void __attribute__((used))
+cleanup_advise_trials(vm_advise_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
+// allocate machine_attribute_t trials, and deallocate it at end of scope
+#define SMART_VM_MACHINE_ATTRIBUTE_TRIALS()                                           \
+	__attribute__((cleanup(cleanup_vm_machine_attribute_trials)))                 \
+	= allocate_vm_machine_attribute_trials(countof(vm_machine_attribute_trials_values));        \
+	append_trials(trials, vm_machine_attribute_trials_values, countof(vm_machine_attribute_trials_values))
+
+// generate advise_t trials
+
+typedef struct {
+	vm_machine_attribute_t value;
+	const char * name;
+} vm_machine_attribute_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_machine_attribute_trial_t list[];
+} vm_machine_attribute_trials_t;
+
+
+#define VM_MACHINE_ATTRIBUTE_TRIAL(new_value) \
+	(vm_machine_attribute_trial_t) {.value = (vm_machine_attribute_t)(new_value), .name = "vm_machine_attribute_t " #new_value}
+
+static vm_machine_attribute_trial_t vm_machine_attribute_trials_values[] = {
+	VM_MACHINE_ATTRIBUTE_TRIAL(0),
+	// start valid ones
+	VM_MACHINE_ATTRIBUTE_TRIAL(MATTR_CACHE),
+	VM_MACHINE_ATTRIBUTE_TRIAL(MATTR_MIGRATE),
+	VM_MACHINE_ATTRIBUTE_TRIAL(MATTR_REPLICATE),
+	// end valid ones
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 3),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 4),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 5),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 6),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 7),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 8),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 9),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 10),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 11),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 12),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 13),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 14),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 15),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 16),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 17),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 18),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 19),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 20),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 21),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 22),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 23),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 24),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 25),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 26),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 27),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 28),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 29),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 30),
+	VM_MACHINE_ATTRIBUTE_TRIAL(1u << 31),
+};
+
+TRIALS_IMPL(vm_machine_attribute)
+
+static void
+cleanup_vm_machine_attribute_trials(vm_machine_attribute_trials_t **trials)
+{
+	free_trials(*trials);
+}
+
 // allocate vm_map_kernel_flags trials, and deallocate it at end of scope
 #define SMART_VM_MAP_KERNEL_FLAGS_TRIALS()                              \
 	__attribute__((cleanup(cleanup_vm_map_kernel_flags_trials)))    \
 	= generate_vm_map_kernel_flags_trials()
 
-#define SMART_MMAP_KERNEL_FLAGS_TRIALS()                                \
-	__attribute__((cleanup(cleanup_vm_map_kernel_flags_trials)))    \
-	= generate_mmap_kernel_flags_trials()
 
 // generate vm_map_kernel_flags_t trials
 
@@ -967,14 +1468,6 @@ generate_vm_map_kernel_flags_trials()
 	free_trials(anywhere);
 
 	return trials;
-}
-
-static vm_map_kernel_flags_trials_t *
-generate_mmap_kernel_flags_trials()
-{
-	// mmap rejects both ANYWHERE and FIXED | OVERWRITE
-	// so don't set any prefix flags.
-	return generate_prefixed_vm_map_kernel_flags_trials(0, "");
 }
 
 static void
@@ -1157,11 +1650,19 @@ typedef struct {
 	vm_tag_trial_t list[];
 } vm_tag_trials_t;
 
-#define VM_TAG_TRIAL(new_tag)                                           \
+#if KERNEL
+#define KERNEL_VM_TAG_TRIAL(new_tag)     \
 	(vm_tag_trial_t){ .tag = (vm_tag_t)(new_tag), .name = "vm_tag "#new_tag }
 
+#define VM_TAG_TRIAL KERNEL_VM_TAG_TRIAL
+#else
+#define USER_VM_TAG_TRIAL(new_tag)      \
+	(vm_tag_trial_t){ .tag = (vm_tag_t)0, .name = "vm_tag "#new_tag }
+
+#define VM_TAG_TRIAL USER_VM_TAG_TRIAL
+#endif
+
 static vm_tag_trial_t vm_tag_trials_values[] = {
-	#ifdef KERNEL
 	VM_TAG_TRIAL(VM_KERN_MEMORY_NONE),
 	VM_TAG_TRIAL(VM_KERN_MEMORY_OSFMK),
 	VM_TAG_TRIAL(VM_KERN_MEMORY_BSD),
@@ -1196,7 +1697,6 @@ static vm_tag_trial_t vm_tag_trials_values[] = {
 	VM_TAG_TRIAL(VM_KERN_MEMORY_KALLOC_TYPE),
 	VM_TAG_TRIAL(VM_KERN_MEMORY_TRIAGE),
 	VM_TAG_TRIAL(VM_KERN_MEMORY_RECOUNT),
-	#endif /* KERNEL */
 };
 
 TRIALS_IMPL(vm_tag)
@@ -1268,6 +1768,7 @@ static vm_prot_trial_t vm_prot_trials_values[] = {
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 21),
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 22),
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 23),
+	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_WRITE | 1u << 23),
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 24),
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 25),
 	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_WRITE | 1u << 25),
@@ -1280,6 +1781,19 @@ static vm_prot_trial_t vm_prot_trials_values[] = {
 	VM_PROT_TRIAL(VM_PROT_READ | 1u << 31),
 	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_WRITE | 1u << 31),
 	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_EXECUTE | 1u << 31),
+
+	// error case coverage in specific subfunctions
+	VM_PROT_TRIAL(VM_PROT_READ | MAP_MEM_ONLY | MAP_MEM_USE_DATA_ADDR),
+	VM_PROT_TRIAL(VM_PROT_READ | MAP_MEM_ONLY | MAP_MEM_4K_DATA_ADDR),
+	VM_PROT_TRIAL(VM_PROT_READ | MAP_MEM_NAMED_CREATE | MAP_MEM_USE_DATA_ADDR),
+	VM_PROT_TRIAL(VM_PROT_READ | MAP_MEM_NAMED_CREATE | MAP_MEM_4K_DATA_ADDR),
+	VM_PROT_TRIAL(VM_PROT_READ | MAP_MEM_NAMED_CREATE | MAP_MEM_PURGABLE),
+	VM_PROT_TRIAL(VM_PROT_NONE | MAP_MEM_VM_SHARE | VM_PROT_IS_MASK),
+
+	// interesting non-error cases for additional test coverage
+	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_WRITE | MAP_MEM_NAMED_CREATE | MAP_MEM_PURGABLE),
+	VM_PROT_TRIAL(VM_PROT_READ | VM_PROT_WRITE | MAP_MEM_NAMED_CREATE |
+    MAP_MEM_PURGABLE | MAP_MEM_PURGABLE_KERNEL_ONLY),
 };
 
 TRIALS_IMPL(vm_prot)
@@ -1342,6 +1856,104 @@ generate_vm_prot_pair_trials()
 
 static void
 cleanup_vm_prot_pair_trials(vm_prot_pair_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count; i++) {
+		kfree_str((*trials)->list[i].name);
+	}
+	free_trials(*trials);
+}
+
+
+// vm_purgeable_t trial contents.
+typedef struct {
+	vm_purgable_t value;
+	char * name;
+} vm_purgeable_trial_t;
+
+#define VM_PURGEABLE_TRIAL(new_value) \
+	(vm_purgeable_trial_t) {.value = (vm_purgable_t)(new_value), .name = "vm_purgeable_t " #new_value}
+
+static vm_purgeable_trial_t vm_purgeable_trials_values[] = {
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_SET_STATE),
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_GET_STATE),
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_PURGE_ALL),
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_SET_STATE_FROM_KERNEL),
+	// end valid values
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_SET_STATE_FROM_KERNEL + 1),
+	VM_PURGEABLE_TRIAL(VM_PURGABLE_SET_STATE_FROM_KERNEL + 2),
+	VM_PURGEABLE_TRIAL(0x12345),
+	VM_PURGEABLE_TRIAL(0xffffffff),
+};
+
+typedef struct {
+	int value;
+	char * name;
+} vm_purgeable_state_trial_t;
+
+#define VM_PURGEABLE_STATE_TRIAL(new_value) \
+	(vm_purgeable_state_trial_t) {.value = (int)(new_value), .name = "state " #new_value}
+
+static vm_purgeable_state_trial_t vm_purgeable_state_trials_values[] = {
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_NO_AGING),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_DEBUG_EMPTY),
+	VM_PURGEABLE_STATE_TRIAL(VM_VOLATILE_GROUP_0),
+	VM_PURGEABLE_STATE_TRIAL(VM_VOLATILE_GROUP_7),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_BEHAVIOR_FIFO),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_ORDERING_NORMAL),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_EMPTY),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_DENY),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_NONVOLATILE),
+	VM_PURGEABLE_STATE_TRIAL(VM_PURGABLE_VOLATILE),
+	VM_PURGEABLE_STATE_TRIAL(0x12345),
+	VM_PURGEABLE_STATE_TRIAL(0xffffffff),
+};
+
+// Trials for vm_purgeable_t and state
+typedef struct {
+	vm_purgable_t control;
+	int state;
+	char * name;
+} vm_purgeable_and_state_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	vm_purgeable_and_state_trial_t list[];
+} vm_purgeable_and_state_trials_t;
+
+TRIALS_IMPL(vm_purgeable_and_state)
+
+#define VM_PURGEABLE_AND_STATE_TRIAL(new_control, new_state, new_name) \
+(vm_purgeable_and_state_trial_t){ .control = (vm_purgable_t)(new_control), \
+	        .state = (int)(new_state), \
+	        .name = new_name,}
+
+vm_purgeable_and_state_trials_t *
+generate_vm_purgeable_t_and_state_trials()
+{
+	const unsigned purgeable_trial_count = countof(vm_purgeable_trials_values);
+	const unsigned state_trial_count = countof(vm_purgeable_state_trials_values);
+	unsigned num_trials = purgeable_trial_count * state_trial_count;
+
+	vm_purgeable_and_state_trials_t * trials = allocate_vm_purgeable_and_state_trials(num_trials);
+	for (size_t i = 0; i < purgeable_trial_count; i++) {
+		for (size_t j = 0; j < state_trial_count; j++) {
+			vm_purgeable_trial_t control_trial = vm_purgeable_trials_values[i];
+			vm_purgeable_state_trial_t state_trial = vm_purgeable_state_trials_values[j];
+			char *str;
+			kasprintf(&str, "%s, %s", control_trial.name, state_trial.name);
+			append_trial(trials, VM_PURGEABLE_AND_STATE_TRIAL(control_trial.value, state_trial.value, str));
+		}
+	}
+	return trials;
+}
+
+#define SMART_VM_PURGEABLE_AND_STATE_TRIALS()                           \
+	__attribute__((cleanup(cleanup_vm_purgeable_t_and_state_trials))) \
+	= generate_vm_purgeable_t_and_state_trials();
+
+static void
+cleanup_vm_purgeable_t_and_state_trials(vm_purgeable_and_state_trials_t **trials)
 {
 	for (size_t i = 0; i < (*trials)->count; i++) {
 		kfree_str((*trials)->list[i].name);
@@ -1508,29 +2120,30 @@ static const offset_list_t *
 get_addr_trial_offsets(void)
 {
 	static offset_list_t *offsets;
+	addr_t test_page_size = adjust_page_size();
 	if (!offsets) {
 		offsets = allocate_offsets(20);
 		append_offset(offsets, true, 0);
 		append_offset(offsets, true, 1);
 		append_offset(offsets, true, 2);
-		append_offset(offsets, true, PAGE_SIZE - 2);
-		append_offset(offsets, true, PAGE_SIZE - 1);
-		append_offset(offsets, true, PAGE_SIZE);
-		append_offset(offsets, true, PAGE_SIZE + 1);
-		append_offset(offsets, true, PAGE_SIZE + 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 2);
+		append_offset(offsets, true, test_page_size - 2);
+		append_offset(offsets, true, test_page_size - 1);
+		append_offset(offsets, true, test_page_size);
+		append_offset(offsets, true, test_page_size + 1);
+		append_offset(offsets, true, test_page_size + 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 2);
 		append_offset(offsets, true, -(mach_vm_address_t)2);
 		append_offset(offsets, true, -(mach_vm_address_t)1);
 
 		append_offset(offsets, false, 0);
 		append_offset(offsets, false, 1);
 		append_offset(offsets, false, 2);
-		append_offset(offsets, false, PAGE_SIZE - 2);
-		append_offset(offsets, false, PAGE_SIZE - 1);
+		append_offset(offsets, false, test_page_size - 2);
+		append_offset(offsets, false, test_page_size - 1);
 	}
 	return offsets;
 }
@@ -1599,21 +2212,22 @@ static const offset_list_t *
 get_size_trial_offsets(void)
 {
 	static offset_list_t *offsets;
+	addr_t test_page_size = adjust_page_size();
 	if (!offsets) {
 		offsets = allocate_offsets(15);
 		append_offset(offsets, true, 0);
 		append_offset(offsets, true, 1);
 		append_offset(offsets, true, 2);
-		append_offset(offsets, true, PAGE_SIZE - 2);
-		append_offset(offsets, true, PAGE_SIZE - 1);
-		append_offset(offsets, true, PAGE_SIZE);
-		append_offset(offsets, true, PAGE_SIZE + 1);
-		append_offset(offsets, true, PAGE_SIZE + 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 2);
+		append_offset(offsets, true, test_page_size - 2);
+		append_offset(offsets, true, test_page_size - 1);
+		append_offset(offsets, true, test_page_size);
+		append_offset(offsets, true, test_page_size + 1);
+		append_offset(offsets, true, test_page_size + 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 2);
 		append_offset(offsets, true, -(mach_vm_address_t)2);
 		append_offset(offsets, true, -(mach_vm_address_t)1);
 	}
@@ -1805,11 +2419,12 @@ TRIALS_IMPL(start_size_offset_object)
 bool
 obj_size_is_ok(mach_vm_size_t obj_size)
 {
-	if (round_up_page(obj_size, PAGE_SIZE) == 0) {
+	addr_t test_page_size = adjust_page_size();
+	if (round_up_page(obj_size, test_page_size) == 0) {
 		return false;
 	}
 	/* in rosetta, PAGE_SIZE is 4K but rounding to 16K also panics */ \
-	if (isRosetta() && round_up_page(obj_size, KB16) == 0) {
+	if (!kern_trialname_generation && isRosetta() && round_up_page(obj_size, KB16) == 0) {
 		return false;
 	}
 	return true;
@@ -1833,21 +2448,22 @@ static offset_list_t *
 get_ssoo_absolute_offsets()
 {
 	static offset_list_t *offsets;
+	addr_t test_page_size = adjust_page_size();
 	if (!offsets) {
 		offsets = allocate_offsets(20);
 		append_offset(offsets, true, 0);
 		append_offset(offsets, true, 1);
 		append_offset(offsets, true, 2);
-		append_offset(offsets, true, PAGE_SIZE - 2);
-		append_offset(offsets, true, PAGE_SIZE - 1);
-		append_offset(offsets, true, PAGE_SIZE);
-		append_offset(offsets, true, PAGE_SIZE + 1);
-		append_offset(offsets, true, PAGE_SIZE + 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 2);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE - 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 1);
-		append_offset(offsets, true, -(mach_vm_address_t)PAGE_SIZE + 2);
+		append_offset(offsets, true, test_page_size - 2);
+		append_offset(offsets, true, test_page_size - 1);
+		append_offset(offsets, true, test_page_size);
+		append_offset(offsets, true, test_page_size + 1);
+		append_offset(offsets, true, test_page_size + 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 2);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size - 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 1);
+		append_offset(offsets, true, -(mach_vm_address_t)test_page_size + 2);
 		append_offset(offsets, true, -(mach_vm_address_t)2);
 		append_offset(offsets, true, -(mach_vm_address_t)1);
 	}
@@ -1858,6 +2474,7 @@ static offset_list_t *
 get_ssoo_absolute_and_relative_offsets()
 {
 	static offset_list_t *offsets;
+	addr_t test_page_size = adjust_page_size();
 	if (!offsets) {
 		const offset_list_t *old_offsets = get_ssoo_absolute_offsets();
 		offsets = allocate_offsets(old_offsets->count + 5);
@@ -1869,8 +2486,8 @@ get_ssoo_absolute_and_relative_offsets()
 		append_offset(offsets, false, 0);
 		append_offset(offsets, false, 1);
 		append_offset(offsets, false, 2);
-		append_offset(offsets, false, PAGE_SIZE - 2);
-		append_offset(offsets, false, PAGE_SIZE - 1);
+		append_offset(offsets, false, test_page_size - 2);
+		append_offset(offsets, false, test_page_size - 1);
 	}
 	return offsets;
 }
@@ -1927,6 +2544,118 @@ generate_start_size_offset_object_trials()
 
 static void
 cleanup_start_size_offset_object_trials(start_size_offset_object_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count; i++) {
+		kfree_str((*trials)->list[i].name);
+	}
+	free_trials(*trials);
+}
+
+
+// Trials for start/size/start/size tuples
+
+typedef struct {
+	mach_vm_address_t start;
+	mach_vm_size_t size;
+	mach_vm_address_t second_start;
+	mach_vm_size_t second_size;
+	bool start_is_absolute;
+	bool size_is_absolute;
+	bool second_start_is_absolute;
+	bool second_size_is_absolute;
+	char * name;
+} start_size_start_size_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	start_size_start_size_trial_t list[];
+} start_size_start_size_trials_t;
+
+TRIALS_IMPL(start_size_start_size)
+
+#define START_SIZE_START_SIZE_TRIAL(new_start, new_size, new_second_start, new_second_size, new_start_is_absolute, \
+	    new_size_is_absolute, new_second_start_is_absolute, new_second_size_is_absolute, new_name) \
+(start_size_start_size_trial_t){ .start = (mach_vm_address_t)(new_start), \
+	        .size = (mach_vm_size_t)(new_size), \
+	        .second_start = (mach_vm_address_t)(new_second_start), \
+	        .second_size = (mach_vm_size_t)(new_second_size), \
+	        .start_is_absolute = (bool)(new_start_is_absolute), \
+	        .size_is_absolute = (bool)(new_size_is_absolute), \
+	        .second_start_is_absolute = (bool)(new_second_start_is_absolute), \
+	        .second_size_is_absolute = (bool)(new_second_size_is_absolute),\
+	        .name = new_name,}
+
+static start_size_start_size_trial_t __attribute__((overloadable, used))
+slide_trial(start_size_start_size_trial_t trial, mach_vm_address_t slide, mach_vm_address_t second_slide)
+{
+	start_size_start_size_trial_t result = trial;
+
+	if (!trial.start_is_absolute) {
+		result.start += slide;
+		if (!trial.size_is_absolute) {
+			result.size -= slide;
+		}
+	}
+	if (!trial.second_start_is_absolute) {
+		result.second_start += second_slide;
+		if (!trial.second_size_is_absolute) {
+			result.second_size -= second_slide;
+		}
+	}
+	return result;
+}
+
+start_size_start_size_trials_t *
+generate_start_size_start_size_trials()
+{
+	/*
+	 * Reuse the starts/sizes from start/size/offset/object
+	 */
+	const offset_list_t *start_offsets        = get_ssoo_absolute_and_relative_offsets();
+	const offset_list_t *size_offsets         = get_ssoo_absolute_and_relative_offsets();
+	const offset_list_t *second_start_offsets = get_ssoo_absolute_and_relative_offsets();
+	const offset_list_t *second_size_offsets  = get_ssoo_absolute_and_relative_offsets();
+
+	unsigned num_trials = start_offsets->count * size_offsets->count
+	    * second_start_offsets->count * second_start_offsets->count;
+
+	start_size_start_size_trials_t * trials = allocate_start_size_start_size_trials(num_trials);
+	for (size_t a = 0; a < start_offsets->count; a++) {
+		for (size_t b = 0; b < size_offsets->count; b++) {
+			for (size_t c = 0; c < second_start_offsets->count; c++) {
+				for (size_t d = 0; d < second_size_offsets->count; d++) {
+					bool start_is_absolute = start_offsets->list[a].is_absolute;
+					bool size_is_absolute = size_offsets->list[b].is_absolute;
+					bool second_start_is_absolute = second_start_offsets->list[c].is_absolute;
+					bool second_size_is_absolute = second_size_offsets->list[d].is_absolute;
+					mach_vm_address_t start = start_offsets->list[a].offset;
+					mach_vm_size_t size = size_offsets->list[b].offset;
+					mach_vm_address_t second_start = second_start_offsets->list[c].offset;
+					mach_vm_size_t second_size = second_size_offsets->list[d].offset;
+
+					char *str;
+					kasprintf(&str, "start: %s0x%llx, size: %s0x%llx, second_start: %s0x%llx, second_size: %s0x%llx",
+					    start_is_absolute ? "" : "base+", start,
+					    size_is_absolute ? "" :"-start+", size,
+					    second_start_is_absolute ? "" : "base+", second_start,
+					    second_size_is_absolute ? "" : "-start+", second_size);
+					append_trial(trials, START_SIZE_START_SIZE_TRIAL(start, size, second_start, second_size,
+					    start_is_absolute, size_is_absolute,
+					    second_start_is_absolute, second_size_is_absolute, str));
+				}
+			}
+		}
+	}
+	return trials;
+}
+
+#define SMART_START_SIZE_START_SIZE_TRIALS()                                            \
+	__attribute__((cleanup(cleanup_start_size_start_size_trials)))                  \
+	= generate_start_size_start_size_trials();
+
+static void __attribute__((used))
+cleanup_start_size_start_size_trials(start_size_start_size_trials_t **trials)
 {
 	for (size_t i = 0; i < (*trials)->count; i++) {
 		kfree_str((*trials)->list[i].name);
@@ -2022,60 +2751,6 @@ cleanup_start_size_offset_trials(start_size_offset_trials_t **trials)
 	}
 	free_trials(*trials);
 }
-
-
-// size/size: test two independent sizes
-
-typedef struct {
-	addr_t size;
-	addr_t size_2;
-	const char *name;
-} size_size_trial_t;
-
-typedef struct {
-	unsigned count;
-	unsigned capacity;
-	size_size_trial_t list[];
-} size_size_trials_t;
-
-TRIALS_IMPL(size_size)
-
-#define SIZE_SIZE_TRIAL(new_size, new_size_2, new_name) \
-(size_size_trial_t){ .size = (addr_t)(new_size), \
-	        .size_2 = (addr_t) (new_size_2), \
-	        .name = new_name }
-
-size_size_trials_t *
-generate_size_size_trials()
-{
-	const offset_list_t *size_offsets = get_size_trial_offsets();
-	unsigned SIZES = size_offsets->count;
-	size_size_trials_t * trials = allocate_size_size_trials(SIZES * SIZES);
-
-	for (size_t i = 0; i < SIZES; i++) {
-		for (size_t j = 0; j < SIZES; j++) {
-			addr_t size = size_offsets->list[i].offset;
-			addr_t size_2 = size_offsets->list[j].offset;
-
-			char *buf;
-			kasprintf(&buf, "size:%lli, size2:%lli", (int64_t) size, size_2);
-			append_trial(trials, SIZE_SIZE_TRIAL(size, size_2, buf));
-		}
-	}
-	return trials;
-}
-
-#define SMART_SIZE_SIZE_TRIALS()                                                \
-	__attribute__((cleanup(cleanup_size_size_trials)))              \
-	= generate_size_size_trials();
-
-static void
-cleanup_size_size_trials(size_size_trials_t **trials)
-{
-	// TODO free strings in trials
-	free_trials(*trials);
-}
-
 
 // src/dst/size: test a source address, a dest address,
 // and a common size that may be added to both addresses
@@ -2230,6 +2905,329 @@ slide_trial_dst(src_dst_size_trial_t trial, mach_vm_address_t slide)
 	return result;
 }
 
+#if !KERNEL
+// shared_file_np / shared_file_mapping_slide_np tests
+
+// copied from bsd/vm/vm_unix.c
+#define _SR_FILE_MAPPINGS_MAX_FILES     256
+#define SFM_MAX (_SR_FILE_MAPPINGS_MAX_FILES * 8)
+
+// From Rosetta dyld
+#define kNumSharedCacheMappings 4
+#define kMaxSubcaches 16
+
+typedef struct {
+	uint32_t files_count;
+	struct shared_file_np *files;
+	char *name;
+} shared_file_np_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	shared_file_np_trial_t list[];
+} shared_file_np_trials_t;
+
+TRIALS_IMPL(shared_file_np)
+
+#define SHARED_FILE_NP_TRIAL(new_files_count, new_files, new_name) \
+(shared_file_np_trial_t){ .files_count = (uint32_t)(new_files_count), \
+	    .files = (struct shared_file_np *)(new_files), \
+	    .name = "files_count="#new_files_count new_name }
+
+struct shared_file_np *
+alloc_shared_file_np(uint32_t files_count)
+{
+	struct shared_file_np *files;
+#if KERNEL
+	files = kalloc_type(struct shared_file_np, files_count, Z_WAITOK | Z_ZERO);
+#else
+	files = calloc(files_count, sizeof(struct shared_file_np));
+#endif
+	return files;
+}
+
+void
+free_shared_file_np(shared_file_np_trial_t *trial)
+{
+#if KERNEL
+	// some trials have files_count > 0 but null files.
+	if (trial->files) {
+		kfree_type(struct shared_file_np, trial->files_count, trial->files);
+	}
+#else
+	free(trial->files);
+#endif
+}
+
+static int get_fd();
+
+shared_file_np_trials_t *
+get_shared_file_np_trials(uint64_t dyld_fd)
+{
+	struct shared_file_np * files = NULL;
+	shared_file_np_trials_t *trials = allocate_shared_file_np_trials(11);
+	append_trial(trials, SHARED_FILE_NP_TRIAL(0, NULL, " (NULL files)"));
+	append_trial(trials, SHARED_FILE_NP_TRIAL(1, NULL, " (NULL files)"));
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES - 1, NULL, " (NULL files)"));
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES, NULL, " (NULL files)"));
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES + 1, NULL, " (NULL files)"));
+	files = alloc_shared_file_np(1);
+	append_trial(trials, SHARED_FILE_NP_TRIAL(1, files, ""));
+	files = alloc_shared_file_np(_SR_FILE_MAPPINGS_MAX_FILES - 1);
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES - 1, files, ""));
+	files = alloc_shared_file_np(_SR_FILE_MAPPINGS_MAX_FILES);
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES, files, ""));
+	files = alloc_shared_file_np(_SR_FILE_MAPPINGS_MAX_FILES + 1);
+	append_trial(trials, SHARED_FILE_NP_TRIAL(_SR_FILE_MAPPINGS_MAX_FILES + 1, files, ""));
+	files = alloc_shared_file_np(1);
+	files->sf_fd = get_fd();
+	files->sf_slide = 4096;
+	files->sf_mappings_count = 1;
+	append_trial(trials, SHARED_FILE_NP_TRIAL(1, files, " non-zero shared_file_np"));
+	files = alloc_shared_file_np(2);
+	files[0].sf_fd = (int)dyld_fd;
+	files[0].sf_mappings_count = 1;
+	files[1].sf_fd = files[0].sf_fd;
+	files[1].sf_mappings_count = 4;
+	append_trial(trials, SHARED_FILE_NP_TRIAL(2, files, " checks shared_file_np"));
+	return trials;
+}
+
+static void
+cleanup_shared_file_np_trials(shared_file_np_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count; i++) {
+		free_shared_file_np(&(*trials)->list[i]);
+	}
+	free_trials(*trials);
+}
+
+typedef struct {
+	uint32_t mappings_count;
+	struct shared_file_mapping_slide_np *mappings;
+	char *name;
+} shared_file_mapping_slide_np_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	shared_file_mapping_slide_np_trial_t list[];
+} shared_file_mapping_slide_np_trials_t;
+
+TRIALS_IMPL(shared_file_mapping_slide_np)
+
+#define SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(new_mappings_count, new_mappings, new_name) \
+(shared_file_mapping_slide_np_trial_t){ .mappings_count = (uint32_t)(new_mappings_count), \
+	    .mappings = (struct shared_file_mapping_slide_np *)(new_mappings), \
+	    .name = "mappings_count="#new_mappings_count new_name }
+
+struct shared_file_mapping_slide_np *
+alloc_shared_file_mapping_slide_np(uint32_t mappings_count)
+{
+	struct shared_file_mapping_slide_np *mappings;
+#if KERNEL
+	mappings = kalloc_type(struct shared_file_mapping_slide_np, mappings_count, Z_WAITOK | Z_ZERO);
+#else
+	mappings = calloc(mappings_count, sizeof(struct shared_file_mapping_slide_np));
+#endif
+	return mappings;
+}
+
+void
+free_shared_file_mapping_slide_np(shared_file_mapping_slide_np_trial_t *trial)
+{
+#if KERNEL
+	// some trials have files_count > 0 but null files.
+	if (trial->mappings) {
+		kfree_type(struct shared_file_mapping_slide_np, trial->mappings_count, trial->mappings);
+	}
+#else
+	free(trial->mappings);
+#endif
+}
+
+typedef enum { MP_NORMAL = 0, MP_ADDR_SIZE = 1, MP_OFFSET_SIZE, MP_PROTS } mapping_slide_np_test_style_t;
+
+static inline struct shared_file_mapping_slide_np *
+alloc_and_fill_shared_file_mappings(uint32_t num_mappings, mapping_slide_np_test_style_t style)
+{
+	assert(num_mappings > 0);
+	struct shared_file_mapping_slide_np *mappings = alloc_shared_file_mapping_slide_np(num_mappings);
+
+	// Checks happen in a for-loop so is desirable to differentiate the first mapping.
+	switch (style) {
+	case MP_NORMAL:
+		mappings[0].sms_slide_size = KB4;
+		mappings[0].sms_slide_start = KB4;
+		mappings[0].sms_max_prot = VM_PROT_DEFAULT;
+		mappings[0].sms_init_prot = VM_PROT_DEFAULT;
+		break;
+	case MP_ADDR_SIZE:
+		mappings[0].sms_address = 1;
+		mappings[0].sms_size = UINT64_MAX;
+		mappings[0].sms_file_offset = 0;
+		mappings[0].sms_slide_size = KB4;
+		mappings[0].sms_slide_start = KB4;
+		mappings[0].sms_max_prot = VM_PROT_DEFAULT;
+		mappings[0].sms_init_prot = VM_PROT_DEFAULT;
+		break;
+	case MP_OFFSET_SIZE:
+		mappings[0].sms_size = 0;
+		mappings[0].sms_file_offset = UINT64_MAX;
+		mappings[0].sms_slide_size = KB4;
+		mappings[0].sms_slide_start = KB4;
+		mappings[0].sms_max_prot = VM_PROT_DEFAULT;
+		mappings[0].sms_init_prot = VM_PROT_DEFAULT;
+		break;
+	case MP_PROTS:
+		mappings[0].sms_slide_size = KB4;
+		mappings[0].sms_slide_start = KB4;
+		mappings[0].sms_max_prot = VM_PROT_DEFAULT;
+		mappings[0].sms_init_prot = INT_MAX;
+		break;
+	default:
+		assert(0);
+		break;
+	}
+
+	for (size_t idx = 1; idx < num_mappings; idx++) {
+		size_t i = idx % 4;
+		switch (i) {
+		case 0:
+			mappings[idx].sms_slide_size = KB4;
+			mappings[idx].sms_slide_start = KB4;
+			mappings[idx].sms_max_prot = VM_PROT_DEFAULT;
+			mappings[idx].sms_init_prot = VM_PROT_DEFAULT;
+			break;
+		case 1:
+			mappings[idx].sms_slide_size = KB4;
+			mappings[idx].sms_slide_start = UINT64_MAX;
+			mappings[idx].sms_max_prot = VM_PROT_DEFAULT;
+			mappings[idx].sms_init_prot = VM_PROT_DEFAULT;
+			break;
+		case 2:
+			mappings[idx].sms_slide_size = 0;
+			mappings[idx].sms_slide_start = UINT64_MAX;
+			mappings[idx].sms_max_prot = VM_PROT_DEFAULT;
+			mappings[idx].sms_init_prot = INT_MAX;
+			break;
+		case 3:
+			mappings[idx].sms_slide_size = KB4;
+			mappings[idx].sms_slide_start = 0;
+			mappings[idx].sms_max_prot = INT_MAX;
+			mappings[idx].sms_init_prot = VM_PROT_DEFAULT;
+			break;
+		default:
+			assert(0);
+			break;
+		}
+	}
+	return mappings;
+}
+
+shared_file_mapping_slide_np_trials_t*
+get_shared_file_mapping_slide_np_trials(void)
+{
+	struct shared_file_mapping_slide_np *mappings = NULL;
+	shared_file_mapping_slide_np_trials_t *trials = allocate_shared_file_mapping_slide_np_trials(14);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(0, NULL, " (NULL mappings)"));
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(1, NULL, " (NULL mappings)"));
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX - 1, NULL, " (NULL mappings)"));
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX, NULL, " (NULL mappings)"));
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX + 1, NULL, " (NULL mappings)"));
+	mappings = alloc_and_fill_shared_file_mappings(1, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(1, mappings, " (normal)"));
+	mappings = alloc_and_fill_shared_file_mappings(1, MP_ADDR_SIZE);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(1, mappings, " (sms_address+sms_size check)"));
+	mappings = alloc_and_fill_shared_file_mappings(1, MP_OFFSET_SIZE);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(1, mappings, " (sms_file_offset+sms_size check)"));
+	mappings = alloc_and_fill_shared_file_mappings(1, MP_PROTS);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(1, mappings, " (sms_init_prot check)"));
+	mappings = alloc_and_fill_shared_file_mappings(SFM_MAX - 1, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX - 1, mappings, ""));
+	mappings = alloc_and_fill_shared_file_mappings(SFM_MAX, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX, mappings, ""));
+	mappings = alloc_and_fill_shared_file_mappings(SFM_MAX + 1, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(SFM_MAX + 1, mappings, ""));
+	mappings = alloc_and_fill_shared_file_mappings(kNumSharedCacheMappings, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(kNumSharedCacheMappings, mappings, ""));
+	mappings = alloc_and_fill_shared_file_mappings(2 * kNumSharedCacheMappings, MP_NORMAL);
+	append_trial(trials, SHARED_FILE_MAPPING_SLIDE_NP_TRIAL(2 * kNumSharedCacheMappings, mappings, ""));
+
+	return trials;
+}
+
+static void
+cleanup_shared_file_mapping_slide_np_trials(shared_file_mapping_slide_np_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count; i++) {
+		free_shared_file_mapping_slide_np(&(*trials)->list[i]);
+	}
+	free_trials(*trials);
+}
+
+typedef struct {
+	uint32_t files_count;
+	struct shared_file_np *files;
+	uint32_t mappings_count;
+	struct shared_file_mapping_slide_np *mappings;
+	char *name;
+} shared_region_map_and_slide_2_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	shared_file_np_trials_t *shared_files_trials;
+	shared_file_mapping_slide_np_trials_t *shared_mappings_trials;
+	shared_region_map_and_slide_2_trial_t list[];
+} shared_region_map_and_slide_2_trials_t;
+
+TRIALS_IMPL(shared_region_map_and_slide_2)
+
+#define SHARED_REGION_MAP_AND_SLIDE_2_TRIAL(new_files_count, new_files, new_mappings_count, new_mappings, new_name) \
+(shared_region_map_and_slide_2_trial_t){ .files_count = (uint32_t)(new_files_count), \
+	    .files = (struct shared_file_np *)(new_files), \
+	    .mappings_count = (uint32_t)(new_mappings_count), \
+	    .mappings = (struct shared_file_mapping_slide_np *)(new_mappings), \
+	    .name = new_name }
+
+shared_region_map_and_slide_2_trials_t *
+generate_shared_region_map_and_slide_2_trials(uint64_t dyld_fd)
+{
+	shared_file_np_trials_t *shared_files = get_shared_file_np_trials(dyld_fd);
+	shared_file_mapping_slide_np_trials_t *shared_mappings = get_shared_file_mapping_slide_np_trials();
+	unsigned num_trials = shared_files->count * shared_mappings->count;
+	shared_region_map_and_slide_2_trials_t *trials = allocate_shared_region_map_and_slide_2_trials(num_trials);
+	trials->shared_files_trials = shared_files;
+	trials->shared_mappings_trials = shared_mappings;
+	for (size_t i = 0; i < shared_files->count; i++) {
+		for (size_t j = 0; j < shared_mappings->count; j++) {
+			char *buf;
+			shared_file_np_trial_t shared_file = shared_files->list[i];
+			shared_file_mapping_slide_np_trial_t shared_mapping = shared_mappings->list[j];
+			kasprintf(&buf, "%s, %s", shared_file.name, shared_mapping.name);
+			append_trial(trials, SHARED_REGION_MAP_AND_SLIDE_2_TRIAL(shared_file.files_count, shared_file.files, shared_mapping.mappings_count, shared_mapping.mappings, buf));
+		}
+	}
+	return trials;
+}
+
+#define SMART_SHARED_REGION_MAP_AND_SLIDE_2_TRIALS(dyld_fd)    \
+	__attribute__((cleanup(cleanup_shared_region_map_and_slide_2_trials))) \
+	= generate_shared_region_map_and_slide_2_trials(dyld_fd);
+
+static void __attribute__((used))
+cleanup_shared_region_map_and_slide_2_trials(shared_region_map_and_slide_2_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count; i++) {
+		kfree_str((*trials)->list[i].name);
+	}
+	cleanup_shared_file_np_trials(&(*trials)->shared_files_trials);
+	cleanup_shared_file_mapping_slide_np_trials(&(*trials)->shared_mappings_trials);
+	free_trials(*trials);
+}
+#endif // !KERNEL
 
 /////////////////////////////////////////////////////
 // utility code
@@ -2278,10 +3276,37 @@ deallocate_if_not_fixed_overwrite(kern_return_t allocator_kr, MAP_T map,
 	}
 }
 
+// PPL is inefficient at deallocations of very large address ranges.
+// Skip those trials to avoid test timeouts.
+// We assume that tests on other devices will cover any testing gaps.
+static inline bool
+dealloc_would_time_out(
+	mach_vm_address_t addr __unused,
+	mach_vm_size_t size __unused,
+	vm_map_t map __unused)
+{
+#if CONFIG_SPTM
+	/* not PPL - okay */
+	return false;
+#elif !(__ARM_42BIT_PA_SPACE__ || ARM_LARGE_MEMORY)
+	/* PPL but small pmap address space - okay */
+	return false;
+#else
+	/*
+	 * PPL with large pmap address space - bad
+	 * Pre-empt trials of very large allocations.
+	 */
+	return size > 0x8000000000;
+#endif
+}
+
 #if !KERNEL
 
-// userspace: use the test task's own vm_map
+// SMART_MAP is mach_task_self() in userspace and a new empty map in kernel
 #define SMART_MAP = mach_task_self()
+
+// CURRENT_MAP is mach_task_self() in userspace and current_map() in kernel
+#define CURRENT_MAP = mach_task_self()
 
 #else
 
@@ -2312,6 +3337,13 @@ cleanup_map(vm_map_t *map)
 #define SMART_MAP                                                       \
 	__attribute__((cleanup(cleanup_map))) = create_map(0, 0xffffffffffffffff)
 
+// This map has a map_offset that matches what a user would get. This allows
+// vm_map_user_ranges to work properly when tested from the kernel
+#define SMART_RANGE_MAP                                                       \
+	__attribute__((cleanup(cleanup_map))) = create_map(0, vm_compute_max_offset(true))
+
+#define CURRENT_MAP = current_map()
+
 #endif
 
 // Allocate with an address hint.
@@ -2321,53 +3353,69 @@ static kern_return_t
 allocate_away_from_zero(
 	MAP_T               map,
 	mach_vm_address_t  *address,
-	mach_vm_size_t      size)
+	mach_vm_size_t      size,
+	mach_vm_size_t      align_mask,
+	int                 additional_map_flags)
 {
 	*address = 2ull * 1024 * 1024 * 1024; // 2 GB address hint
-	return mach_vm_map(map, address, size,
-	           0, VM_FLAGS_ANYWHERE, 0, 0, 0,
+	return mach_vm_map(map, address, size, align_mask,
+	           VM_FLAGS_ANYWHERE | additional_map_flags, 0, 0, 0,
 	           VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
 }
+
+// allocate a purgeable VM region with size and permissions
+// and deallocate it at end of scope
+#define SMART_ALLOCATE_PURGEABLE_VM(map, size, perm)                              \
+    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, 0, perm, false, VM_FLAGS_PURGABLE)
 
 // allocate a VM region with size and permissions
 // and deallocate it at end of scope
 #define SMART_ALLOCATE_VM(map, size, perm)                              \
-    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, perm, false)
+    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, 0, perm, false, 0)
+
+// allocate a VM region with size and permissions and alignment
+// and deallocate it at end of scope
+#define SMART_ALLOCATE_ALIGNED_VM(map, size, align_mask, perm)          \
+    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, align_mask, perm, false, 0)
 
 // allocate a VM region with size and permissions
 // and deallocate it at end of scope
 // If no such region could be allocated, return {.addr = 0}
 #define SMART_TRY_ALLOCATE_VM(map, size, perm)                              \
-    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, perm, true)
+    __attribute__((cleanup(cleanup_allocation))) = create_allocation(map, size, 0, perm, true, 0)
 
 // a VM allocation with unallocated pages around it
 typedef struct {
 	MAP_T map;
 	addr_t guard_size;
-	addr_t guard_prefix;        // page-sized
-	addr_t unallocated_prefix;  // page-sized
+	addr_t guard_prefix;        // guard_size bytes
+	addr_t unallocated_prefix;  // guard_size bytes
 	addr_t addr;
 	addr_t size;
-	addr_t unallocated_suffix;  // page-sized
-	addr_t guard_suffix;        // page-sized
+	addr_t unallocated_suffix;  // guard_size bytes
+	addr_t guard_suffix;        // guard_size bytes
 } allocation_t;
 
 static allocation_t
-create_allocation(MAP_T new_map, mach_vm_address_t new_size, vm_prot_t perm, bool allow_failure)
+create_allocation(MAP_T new_map, mach_vm_address_t new_size, mach_vm_size_t align_mask,
+    vm_prot_t perm, bool allow_failure, int additional_map_flags)
 {
 	// allocations in address order:
-	// 1 page guard_prefix (allocated, prot none)
-	// 1 page unallocated_prefix (unallocated)
-	// N pages addr..addr+size
-	// 1 page unallocated_suffix (unallocated)
-	// 1 page guard_suffix (allocated, prot none)
+	// 16K guard_prefix (allocated, prot none)
+	// 16K unallocated_prefix (unallocated)
+	// N   addr..addr+size
+	// 16K unallocated_suffix (unallocated)
+	// 16K guard_suffix (allocated, prot none)
 
-	// allocate new_size plus 4 pages
+	// allocate new_size + 4 * 16K bytes
 	// then carve it up into our regions
 
 	allocation_t result;
 
 	result.map = new_map;
+
+	// this implementation only works with some alignment values
+	assert(align_mask == 0 || align_mask == KB4 - 1 || align_mask == KB16 - 1);
 
 	result.guard_size = KB16;
 	result.size = round_up_page(new_size, KB16);
@@ -2387,7 +3435,8 @@ create_allocation(MAP_T new_map, mach_vm_address_t new_size, vm_prot_t perm, boo
 	}
 
 	kern_return_t kr;
-	kr = allocate_away_from_zero(result.map, &allocated_base, allocated_size);
+	kr = allocate_away_from_zero(result.map, &allocated_base, allocated_size,
+	    align_mask, additional_map_flags);
 	if (kr != 0 && allow_failure) {
 		return (allocation_t){new_map, 0, 0, 0, 0, 0, 0, 0};
 	}
@@ -2452,21 +3501,21 @@ cleanup_allocation(allocation_t *allocation)
 typedef struct {
 	MAP_T map;
 	addr_t guard_size;
-	addr_t guard_prefix;        // page-sized
+	addr_t guard_prefix;  // 16K
 	addr_t addr;
 	addr_t size;
-	addr_t guard_suffix;        // page-sized
+	addr_t guard_suffix;  // 16K
 } unallocation_t;
 
 static unallocation_t __attribute__((overloadable))
 create_unallocation(MAP_T new_map, mach_vm_address_t new_size, bool allow_failure)
 {
 	// allocations in address order:
-	// 1 page guard_prefix (allocated, prot none)
-	// N pages addr..addr+size (unallocated)
-	// 1 page guard_suffix (allocated, prot none)
+	// 16K guard_prefix (allocated, prot none)
+	// N   addr..addr+size (unallocated)
+	// 16K guard_suffix (allocated, prot none)
 
-	// allocate new_size plus 2 pages
+	// allocate new_size + 2 * 16K bytes
 	// then carve it up into our regions
 
 	unallocation_t result;
@@ -2490,7 +3539,7 @@ create_unallocation(MAP_T new_map, mach_vm_address_t new_size, bool allow_failur
 		}
 	}
 	kern_return_t kr;
-	kr = allocate_away_from_zero(result.map, &allocated_base, allocated_size);
+	kr = allocate_away_from_zero(result.map, &allocated_base, allocated_size, 0, 0);
 	if (kr != 0 && allow_failure) {
 		return (unallocation_t){new_map, 0, 0, 0, 0, 0};
 	}
@@ -2527,8 +3576,161 @@ cleanup_unallocation(unallocation_t *unallocation)
 }
 
 
+// vm_deferred_reclamation_buffer_init_internal tests
+typedef struct {
+	task_t task;
+	mach_vm_address_t address;
+	mach_vm_size_t size;
+	char *name;
+} reclamation_buffer_init_trial_t;
+
+typedef struct {
+	unsigned count;
+	unsigned capacity;
+	reclamation_buffer_init_trial_t list[];
+} reclamation_buffer_init_trials_t;
+
+TRIALS_IMPL(reclamation_buffer_init)
+
+#define RECLAMATION_BUFFER_INIT_TRIAL(new_task, new_address, new_size, new_name) \
+(reclamation_buffer_init_trial_t){ .task = (task_t)(new_task), \
+	    .address = (mach_vm_address_t)(new_address), \
+	    .size = (mach_vm_size_t)(new_size), \
+	    .name = new_name }
+
+/* fixme reclaim struct declarations unavailable outside __LP64__ */
+#if __LP64__
+#define VM_TEST_RECLAIM_BUFFER_SIZE sizeof(struct mach_vm_reclaim_buffer_v1_s) + 2 * sizeof(struct mach_vm_reclaim_entry_v1_s)
+#else
+#define VM_TEST_RECLAIM_BUFFER_SIZE     64
+#endif
+/* __LP64__ */
+
+#define RECLAMATION_BUFFER_INIT_EXTRA_TRIALS   7
+
+reclamation_buffer_init_trials_t *
+generate_reclamation_buffer_init_trials(void)
+{
+	MAP_T map SMART_MAP;
+	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	addr_trials_t *addr_trials SMART_ADDR_TRIALS(0);
+	reclamation_buffer_init_trials_t *trials = allocate_reclamation_buffer_init_trials(addr_trials->count + RECLAMATION_BUFFER_INIT_EXTRA_TRIALS);
+	for (size_t i = 0; i < addr_trials->count; i++) {
+		char *buf;
+		mach_vm_size_t size = VM_TEST_RECLAIM_BUFFER_SIZE * i * PAGE_SIZE;
+		kasprintf(&buf, "%s, size: 0x%llu", addr_trials->list[i].name, size);
+		append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), addr_trials->list[i].addr, size, buf));
+	}
+
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), base.addr, 0, "size: 0"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), base.addr, UINT64_MAX - 1, "size: UINT64_MAX - 1"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), base.addr, UINT64_MAX, "size: UINT64_MAX"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), base.addr, UINT64_MAX - PAGE_SIZE + 1, "size: UINT64_MAX - PAGE_SIZE + 1"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(NULL, NULL, 0, "null task, null address, size: 0"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), NULL, 0, "null address, size: 0"));
+	append_trial(trials, RECLAMATION_BUFFER_INIT_TRIAL(current_task(), base.addr, VM_TEST_RECLAIM_BUFFER_SIZE, "valid arguments to test KERN_NOT_SUPPORTED"));
+
+	return trials;
+}
+
+#define SMART_RECLAMATION_BUFFER_INIT_TRIALS()    \
+	__attribute__((cleanup(cleanup_reclamation_buffer_init_trials))) \
+	= generate_reclamation_buffer_init_trials();
+
+static void __attribute__((used))
+cleanup_reclamation_buffer_init_trials(reclamation_buffer_init_trials_t **trials)
+{
+	for (size_t i = 0; i < (*trials)->count - RECLAMATION_BUFFER_INIT_EXTRA_TRIALS; i++) {
+		kfree_str((*trials)->list[i].name);
+	}
+	free_trials(*trials);
+}
+
+static kern_return_t
+call_mach_vm_deferred_reclamation_buffer_init(task_t task, mach_vm_address_t address, mach_vm_size_t size)
+{
+	kern_return_t kr = 0;
+	mach_vm_address_t saved_address = address;
+	if (task && size > 0 && address == 0) {
+		// prevent assert3u(*address, !=, 0)
+		return PANIC;
+	}
+
+	kr = mach_vm_deferred_reclamation_buffer_init(task, &address, size);
+
+	//Out-param validation, failure shouldn't change inout address.
+	if (kr != KERN_SUCCESS && saved_address != address) {
+		kr = OUT_PARAM_BAD;
+	}
+	if (kr == KERN_SUCCESS && saved_address == address) {
+		kr = OUT_PARAM_BAD;
+	}
+
+	return kr;
+}
+
+
 // mach_vm_remap_external/vm_remap_external/vm32_remap/mach_vm_remap_new_external infra
 // mach_vm_remap/mach_vm_remap_new_kernel infra
+
+/*
+ * This comment describes the testing approach that was fleshed out through
+ * writing the tests for the map family of functions, and more fully realized
+ * for the remap family of functions.
+ *
+ * This method attempts to radically minimize code reuse, at the expense of
+ * decreased navigability (cmd+click is unlikely to work for you for this code)
+ * and increased upfront costs for understanding this code. Maintainability
+ * should be better in most cases: if a fix needs to happen, it can be
+ * implemented in the right place once and doesn’t need to be copy-and-pasted
+ * in multiple duplicated functions. There may however be cases where the
+ * change you want to make doesn’t fit the spirit of this approach (for
+ * instance changing the behavior of the test for only one function in the
+ * family).
+ *
+ * The framework is built around the idea that there are three types of
+ * parameters:
+ * 1. Parameters that will be fixed for all calls to the function (e.g. some
+ *    uncommon type specific to the function that doesn’t impact the input
+ *    validation flow)
+ * 2. Parameters that cause input validation to change significantly (typically
+ *    flags, e.g. fixed vs anywhere). For those we basically want to treat
+ *    different values of the flags as calling into different functions (for
+ *    the purpose of input validation).
+ * 3. Parameters that can be tested. For every test this is further broken down
+ *    into 2 subtypes:
+ *        A. Parameters being iterated over during the test (e.g. start+size)
+ *        B. Parameters that should stay fixed during this test (e.g. pick a
+ *           sane value of prot and pass that same value for all values of
+ *           start/size)
+ *
+ * Often, many functions have very similar signatures (they are in the same
+ * function family). We want to avoid copy/pasting tests for each function in
+ * the family.
+ *
+ * Here is the flow used for the remap family of functions:
+ * 1. Typedef a function type with shared parameters (see remap_fn_t)
+ * 2. Define function wrappers that fit the above typedef for each function
+ *    in the family (see e.g. mach_vm_remap_new_kernel_wrapped). These might
+ *    set values for “type 1” params.
+ * 3. Define “helper” functions that take in parameters of types 2 and 3.A.,
+ *    and call the wrapper, filling in type 3.B. params. See, e.g.,
+ *    help_call_remap_fn__src_size. For remap, all helpers can easily be
+ *    implemented as a single call to a core helper function
+ *    help_call_remap_fn__src_size_etc.
+ * 4. Define generic “caller” functions that take in a wrapper and parameters
+ *    of type 3.A. and call the helper. Macros are used to mass implement these
+ *    for all values of type 2 parameters and for all functions in the family.
+ *    See, e.g., `IMPL_FROM_HELPER(dst_size);`.
+ * 5. Specialize the above "caller" functions for each wrapper in the family,
+ *    again using macros. See `#define IMPL(remap_fn)` and its uses below.
+ *    This results in a number of specialized caller functions that is the
+ *    product of the number of functions in the family by the number of
+ *    variants induced by type 2 parameters.
+ * 6. Use macros to call test harnesses on caller functions en masse at test
+ *    time for all functions. See the call sites in `vm_parameter_validation.c`
+ *    e.g. `RUN_ALL(mach_vm_remap_new_user, , mach_vm_remap_new);`.
+ */
 
 typedef kern_return_t (*remap_fn_t)(vm_map_t target_task,
     mach_vm_address_t *target_address,
@@ -2753,9 +3955,6 @@ check_mach_vm_remap_outparam_changes(kern_return_t * kr, mach_vm_address_t addr,
 
 #if KERNEL
 
-static bool
-dealloc_would_panic(mach_vm_address_t start, mach_vm_size_t size);
-
 static inline kern_return_t
 mach_vm_remap_wrapped_kern(vm_map_t target_task,
     mach_vm_address_t *target_address,
@@ -2769,9 +3968,10 @@ mach_vm_remap_wrapped_kern(vm_map_t target_task,
     vm_prot_t *max_protection,
     vm_inherit_t inheritance)
 {
-	if (dealloc_would_panic(*target_address, size)) {
-		return PANIC;
+	if (dealloc_would_time_out(*target_address, size, target_task)) {
+		return ACCEPTABLE;
 	}
+
 	mach_vm_address_t saved_addr = *target_address;
 	vm_prot_t saved_cur_prot = *cur_protection;
 	vm_prot_t saved_max_prot = *max_protection;
@@ -2795,9 +3995,10 @@ mach_vm_remap_new_kernel_wrapped(vm_map_t target_task,
     vm_prot_t *max_protection,
     vm_inherit_t inheritance)
 {
-	if (dealloc_would_panic(*target_address, size)) {
-		return PANIC;
+	if (dealloc_would_time_out(*target_address, size, target_task)) {
+		return ACCEPTABLE;
 	}
+
 	mach_vm_address_t saved_addr = *target_address;
 	vm_prot_t saved_cur_prot = *cur_protection;
 	vm_prot_t saved_max_prot = *max_protection;
@@ -2905,13 +4106,14 @@ IMPL(vm_remap_retyped)
 	/* Run each trial with an allocated vm region and start/size parameters that reference it. */ \
 	typedef kern_return_t (*NAME ## mach_with_start_size_fn)(MAP_T map, T start, T size); \
                                                                         \
+	/* ...and the allocation has a specified minimum alignment */   \
 	static results_t * __attribute__((used))                        \
-	     test_ ## NAME ## mach_with_allocated_start_size(NAME ## mach_with_start_size_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_aligned_start_size(NAME ## mach_with_start_size_fn fn, T align_mask, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
-	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
+	        allocation_t base SMART_ALLOCATE_ALIGNED_VM(map, TEST_ALLOC_SIZE, align_mask, VM_PROT_DEFAULT); \
 	        start_size_trials_t *trials SMART_START_SIZE_TRIALS(base.addr); \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, base.addr, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                T start = (T)trials->list[i].start;             \
@@ -2921,18 +4123,27 @@ IMPL(vm_remap_retyped)
 	        }                                                       \
 	        return results;                                         \
 	}                                                               \
+                                                                        \
+	/* ...and the allocation gets default alignment */              \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_start_size(NAME ## mach_with_start_size_fn fn, const char *testname) \
+	{                                                               \
+	        return test_ ## NAME ## mach_with_allocated_aligned_start_size(fn, 0, testname); \
+	}                                                               \
+                                                                        \
 	/* Test a Mach function. */                                     \
 	/* Run each trial with an allocated vm region and an addr parameter that reference it. */ \
 	typedef kern_return_t (*NAME ## mach_with_addr_fn)(MAP_T map, T addr); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## mach_with_allocated_addr_of_size_n(NAME ## mach_with_addr_fn fn, size_t obj_size, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_addr_of_size_n(NAME ## mach_with_addr_fn fn, size_t obj_size, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        addr_trials_t *trials SMART_ADDR_TRIALS(base.addr);     \
 	/* Do all the addr trials and an additional trial such that obj_size + addr == 0 */ \
-	        results_t *results = alloc_results(testname, trials->count+1); \
+	        uint64_t trial_args[TRIALSARGUMENTS_SIZE] = {base.addr, obj_size}; \
+	        results_t *results = alloc_results(testname, eSMART_ADDR_TRIALS, trial_args, TRIALSARGUMENTS_SIZE, trials->count+1); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                T addr = (T)trials->list[i].addr;               \
@@ -2952,12 +4163,28 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## mach_with_addr_fn)(MAP_T map, T addr); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## mach_with_allocated_addr(NAME ## mach_with_addr_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_addr(NAME ## mach_with_addr_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        addr_trials_t *trials SMART_ADDR_TRIALS(base.addr);     \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_ADDR_TRIALS, base.addr, trials->count); \
+                                                                        \
+	        for (unsigned i = 0; i < trials->count; i++) {          \
+	                T addr = (T)trials->list[i].addr;               \
+	                kern_return_t ret = fn(map, addr);              \
+	                append_result(results, ret, trials->list[i].name); \
+	        }                                                       \
+	        return results;                                         \
+	}                                                               \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_purgeable_addr(NAME ## mach_with_addr_fn fn, const char *testname) \
+	{                                                               \
+	        MAP_T map SMART_MAP;                                    \
+	        allocation_t base SMART_ALLOCATE_PURGEABLE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
+	        addr_trials_t *trials SMART_ADDR_TRIALS(base.addr);     \
+	        results_t *results = alloc_results(testname, eSMART_ADDR_TRIALS, base.addr, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                T addr = (T)trials->list[i].addr;               \
@@ -2972,11 +4199,11 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## mach_with_size_fn)(MAP_T map, T size); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## mach_with_size(NAME ## mach_with_size_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_size(NAME ## mach_with_size_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        size_trials_t *trials SMART_SIZE_TRIALS();              \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_SIZE_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                T size = (T)trials->list[i].size;               \
@@ -2991,12 +4218,12 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## mach_with_start_size_offset_object_fn)(MAP_T map, T addr, T size, T offset, T obj_size); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## mach_with_start_size_offset_object(NAME ## mach_with_start_size_offset_object_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_start_size_offset_object(NAME ## mach_with_start_size_offset_object_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        start_size_offset_object_trials_t *trials SMART_START_SIZE_OFFSET_OBJECT_TRIALS(); \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_START_SIZE_OFFSET_OBJECT_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                start_size_offset_object_trial_t trial = slide_trial(trials->list[i], base.addr); \
@@ -3014,12 +4241,12 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## mach_with_start_size_offset_fn)(MAP_T map, T addr, T size, T offset, T obj_size); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## mach_with_start_size_offset(NAME ## mach_with_start_size_offset_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_start_size_offset(NAME ## mach_with_start_size_offset_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        start_size_offset_trials_t *trials SMART_START_SIZE_OFFSET_TRIALS(); \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_START_SIZE_OFFSET_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                start_size_offset_trial_t trial = slide_trial(trials->list[i], base.addr); \
@@ -3042,7 +4269,7 @@ IMPL(vm_remap_retyped)
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        mmap_flags_trials_t *trials SMART_MMAP_FLAGS_TRIALS();  \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_MMAP_FLAGS_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                int flags = trials->list[i].flags;              \
@@ -3062,7 +4289,7 @@ IMPL(vm_remap_retyped)
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        generic_flag_trials_t *trials SMART_GENERIC_FLAG_TRIALS();      \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_GENERIC_FLAG_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                int flag = trials->list[i].flag;                \
@@ -3081,7 +4308,7 @@ IMPL(vm_remap_retyped)
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        vm_prot_trials_t *trials SMART_VM_PROT_TRIALS();        \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_PROT_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                kern_return_t ret = fn(map, TEST_ALLOC_SIZE, trials->list[i].prot); \
@@ -3099,7 +4326,7 @@ IMPL(vm_remap_retyped)
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        vm_prot_pair_trials_t *trials SMART_VM_PROT_PAIR_TRIALS();      \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_PROT_PAIR_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                kern_return_t ret = fn(map, trials->list[i].cur, trials->list[i].max); \
@@ -3118,7 +4345,7 @@ IMPL(vm_remap_retyped)
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        vm_prot_pair_trials_t *trials SMART_VM_PROT_PAIR_TRIALS(); \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_PROT_PAIR_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                kern_return_t ret = fn(map, (T)base.addr, (T)base.size, trials->list[i].cur, trials->list[i].max); \
@@ -3137,7 +4364,7 @@ IMPL(vm_remap_retyped)
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        vm_prot_trials_t *trials SMART_VM_PROT_TRIALS();        \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_PROT_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                vm_prot_t prot = trials->list[i].prot;          \
@@ -3156,7 +4383,7 @@ IMPL(vm_remap_retyped)
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        ledger_flag_trials_t *trials SMART_LEDGER_FLAG_TRIALS();        \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_LEDGER_FLAG_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                kern_return_t ret = fn(map, trials->list[i].flag); \
@@ -3173,7 +4400,7 @@ IMPL(vm_remap_retyped)
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        ledger_tag_trials_t *trials SMART_LEDGER_TAG_TRIALS();  \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_LEDGER_TAG_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                kern_return_t ret = fn(map, trials->list[i].tag); \
@@ -3191,7 +4418,7 @@ IMPL(vm_remap_retyped)
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        vm_inherit_trials_t *trials SMART_VM_INHERIT_TRIALS();  \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_INHERIT_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                vm_inherit_trial_t trial = trials->list[i];     \
@@ -3205,12 +4432,12 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## with_start_end_fn)(MAP_T map, T addr, T end); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## with_start_end(NAME ## with_start_end_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_start_end(NAME ## with_start_end_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        start_size_trials_t *trials SMART_START_SIZE_TRIALS(base.addr); \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, base.addr, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
 	                T start = (T)trials->list[i].start;             \
@@ -3225,16 +4452,94 @@ IMPL(vm_remap_retyped)
 	typedef kern_return_t (*NAME ## with_tag_fn)(MAP_T map, T addr, T end, vm_tag_t tag); \
                                                                         \
 	static results_t * __attribute__((used))                        \
-	        test_ ## NAME ## with_tag(NAME ## with_tag_fn fn, const char *testname) \
+	test_ ## NAME ## mach_with_allocated_tag(NAME ## with_tag_fn fn, const char *testname) \
 	{                                                               \
 	        MAP_T map SMART_MAP;                                    \
 	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
 	        vm_tag_trials_t *trials SMART_VM_TAG_TRIALS();  \
-	        results_t *results = alloc_results(testname, trials->count); \
+	        results_t *results = alloc_results(testname, eSMART_VM_TAG_TRIALS, trials->count); \
                                                                         \
 	        for (unsigned i = 0; i < trials->count; i++) {          \
-	                kern_return_t ret = fn(map, base.addr, base.addr + base.size, trials->list[i].tag); \
+	                kern_return_t ret = fn(map, (T)base.addr, (T)(base.addr + base.size), trials->list[i].tag); \
 	                append_result(results, ret, trials->list[i].name); \
+	        }                                                       \
+	        return results;                                         \
+	}                                                               \
+	/* Test a Mach function. */                                     \
+	/* Run each trial with an allocated region and a vm_behavior_t. */ \
+	typedef kern_return_t (*NAME ## mach_behavior_fn)(MAP_T map, T addr, T size, vm_behavior_t behavior); \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_aligned_vm_behavior_t(NAME ## mach_behavior_fn fn, mach_vm_size_t align_mask, const char * testname) { \
+	        MAP_T map SMART_MAP;                                    \
+	        allocation_t base SMART_ALLOCATE_ALIGNED_VM(map, TEST_ALLOC_SIZE, align_mask, VM_PROT_DEFAULT); \
+	        vm_behavior_trials_t *trials SMART_VM_BEHAVIOR_TRIALS();  \
+	        results_t *results = alloc_results(testname, eSMART_VM_BEHAVIOR_TRIALS, trials->count); \
+                                                                        \
+	        for (unsigned i = 0; i < trials->count; i++) {          \
+	                vm_behavior_trial_t trial = trials->list[i];     \
+	                int ret = fn(map, (T)base.addr, (T)base.size, trial.value); \
+	                append_result(results, ret, trial.name); \
+	        }                                                       \
+	        return results;                                         \
+	}                                                               \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_vm_behavior_t(NAME ## mach_behavior_fn fn, const char * testname) { \
+	        return test_ ## NAME ## mach_with_allocated_aligned_vm_behavior_t(fn, 0, testname); \
+	}                                                               \
+                                                                        \
+	/* Test a Mach function. */                                     \
+	/* Run each trial with an allocated region and a vm_sync_t. */ \
+	typedef kern_return_t (*NAME ## mach_sync_fn)(MAP_T map, T addr, T size, vm_sync_t behavior); \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_vm_sync_t(NAME ## mach_sync_fn fn, const char * testname) { \
+	        MAP_T map SMART_MAP;                                    \
+	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
+	        vm_sync_trials_t *trials SMART_VM_SYNC_TRIALS(); \
+	        results_t *results = alloc_results(testname, eSMART_VM_SYNC_TRIALS, trials->count); \
+                                                                        \
+	        for (unsigned i = 0; i < trials->count; i++) {          \
+	                vm_sync_trial_t trial = trials->list[i];    \
+	                int ret = fn(map, (T)base.addr, (T)base.size, trial.value); \
+	                append_result(results, ret, trial.name);        \
+	        }                                                       \
+	        return results;                                         \
+	}                                                               \
+	/* Test a Mach function. */                                     \
+	/* Run each trial with an allocated region and a vm_machine_attribute_t. */ \
+	typedef kern_return_t (*NAME ## mach_attribute_fn)(MAP_T map, T addr, T size, vm_machine_attribute_t attr); \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_vm_machine_attribute_t(NAME ## mach_attribute_fn fn, const char * testname) { \
+	        MAP_T map SMART_MAP;                                    \
+	        allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
+	        vm_machine_attribute_trials_t *trials SMART_VM_MACHINE_ATTRIBUTE_TRIALS(); \
+	        results_t *results = alloc_results(testname, eSMART_VM_MACHINE_ATTRIBUTE_TRIALS, trials->count); \
+                                                                        \
+	        for (unsigned i = 0; i < trials->count; i++) {          \
+	                vm_machine_attribute_trial_t trial = trials->list[i];    \
+	                int ret = fn(map, (T)base.addr, (T)base.size, trial.value); \
+	                append_result(results, ret, trial.name);        \
+	        }                                                       \
+	        return results;                                         \
+	}                                                               \
+	/* Test a Mach function. */                                     \
+	/* Run each trial with an allocated region and a purgeable trial. */ \
+	typedef kern_return_t (*NAME ## mach_purgable_fn)(MAP_T map, T addr, vm_purgable_t control, int state); \
+                                                                        \
+	static results_t * __attribute__((used))                        \
+	test_ ## NAME ## mach_with_allocated_purgeable_and_state(NAME ## mach_purgable_fn fn, const char * testname) { \
+	        MAP_T map SMART_MAP;                                    \
+	        vm_purgeable_and_state_trials_t *trials SMART_VM_PURGEABLE_AND_STATE_TRIALS(); \
+	        results_t *results = alloc_results(testname, eSMART_VM_PURGEABLE_AND_STATE_TRIALS, trials->count); \
+                                                                        \
+	        for (unsigned i = 0; i < trials->count; i++) {          \
+	                allocation_t base SMART_ALLOCATE_PURGEABLE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT); \
+	                vm_purgeable_and_state_trial_t trial = trials->list[i];    \
+	                int ret = fn(map, (T)base.addr, trial.control, trial.state); \
+	                append_result(results, ret, trial.name);        \
 	        }                                                       \
 	        return results;                                         \
 	}
@@ -3245,13 +4550,94 @@ IMPL(old, uint32_t)
 #endif
 #undef IMPL
 
+#if KERNEL && CONFIG_MAP_RANGES
+/*
+ * The vm_range_create tests assume we don't ever do range_creates that should succeed
+ * that take more than 2 * PAGE_SIZE. This enforces that.
+ */
+void
+verify_largest_valid_trial_size_fits(start_size_start_size_trial_t trial)
+{
+	if (trial.size > 2 * PAGE_SIZE) {
+		assert(trial.size > 0xfffffffffffffff);
+	}
+	if (trial.second_size > 2 * PAGE_SIZE) {
+		assert(trial.second_size > 0xfffffffffffffff);
+	}
+}
+
+/* Run each trial with start/size/start/size parameters. */
+typedef kern_return_t (mach_with_start_size_start_size_fn)(MAP_T map, mach_vm_address_t addr,
+    mach_vm_size_t size, mach_vm_address_t second_addr, mach_vm_size_t second_size);
+
+static results_t * __attribute__((used))
+test_mach_vm_range_create(mach_with_start_size_start_size_fn fn, const char *testname)
+{
+	start_size_start_size_trials_t *trials SMART_START_SIZE_START_SIZE_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_START_SIZE_TRIALS, trials->count);
+
+	for (unsigned i = 0; i < trials->count; i++) {
+		/*
+		 * Allocate and configure a new map for every trial so that the map has no user ranges.
+		 */
+		MAP_T map SMART_RANGE_MAP;
+		bool has_ranges = vm_map_range_configure(map, false) == KERN_SUCCESS;
+		bool has_space_in_ranges = false;
+
+		struct mach_vm_range void1 = {
+			.min_address = map->default_range.max_address,
+			.max_address = map->data_range.min_address,
+		};
+		struct mach_vm_range void2 = {
+			.min_address = map->data_range.max_address,
+			.max_address = vm_map_max(map),
+		};
+		struct mach_vm_range range_to_test;
+
+		/*
+		 * For our tests to succeed for good cases, but also trigger failures
+		 * when overlap occurs we need:
+		 * range1 = {.start = addr}, range2 = {.start = addr + PAGE_SIZE * 2}.
+		 * We also want at least 2 * PAGE_SIZE memory available after the start of range2.
+		 * We additionally start our first range 2 PAGE_SIZE away from the start.
+		 */
+		if (void1.min_address + (PAGE_SIZE * 6) < void1.max_address) {
+			range_to_test = void1;
+			has_space_in_ranges = true;
+		} else if (void2.min_address + (PAGE_SIZE * 6) < void2.max_address) {
+			range_to_test = void2;
+			has_space_in_ranges = true;
+		}
+
+		mach_vm_address_t addr_base = range_to_test.min_address + PAGE_SIZE * 2;
+		if (has_ranges && has_space_in_ranges) {
+			mach_vm_address_t second_addr_base = addr_base + PAGE_SIZE * 2;
+
+			start_size_start_size_trial_t trial = slide_trial(trials->list[i], addr_base, second_addr_base);
+
+			verify_largest_valid_trial_size_fits(trial);
+
+			mach_vm_address_t start = trial.start;
+			mach_vm_size_t size = trial.size;
+			mach_vm_address_t second_start = trial.second_start;
+			mach_vm_size_t second_size = trial.second_size;
+			kern_return_t ret = fn(map, start, size, second_start, second_size);
+			append_result(results, ret, trials->list[i].name);
+		} else {
+			append_result(results, IGNORED, trials->list[i].name);
+		}
+	}
+	return results;
+}
+#endif /* KERNEL && CONFIG_MAP_RANGES */
+
 // Test a mach allocation function with a start/size
 static results_t *
 test_mach_allocation_func_with_start_size(kern_return_t (*func)(MAP_T map, mach_vm_address_t * start, mach_vm_size_t size), const char * testname)
 {
 	MAP_T map SMART_MAP;
 	start_size_trials_t *trials SMART_START_SIZE_TRIALS(0);
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, 0, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		unallocation_t dst SMART_UNALLOCATE_VM(map, TEST_ALLOC_SIZE);
@@ -3272,7 +4658,7 @@ test_mach_allocation_func_with_vm_map_kernel_flags_t(kern_return_t (*func)(MAP_T
 {
 	MAP_T map SMART_MAP;
 	vm_map_kernel_flags_trials_t * trials SMART_VM_MAP_KERNEL_FLAGS_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_VM_MAP_KERNEL_FLAGS_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		allocation_t fixed_overwrite_dst SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
@@ -3303,7 +4689,7 @@ test_mach_with_allocated_vm_map_kernel_flags_t(kern_return_t (*func)(MAP_T map, 
 
 	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
 	vm_map_kernel_flags_trials_t * trials SMART_VM_MAP_KERNEL_FLAGS_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_VM_MAP_KERNEL_FLAGS_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		kern_return_t ret = func(map, base.addr, base.size, trials->list[i].flags);
@@ -3313,33 +4699,31 @@ test_mach_with_allocated_vm_map_kernel_flags_t(kern_return_t (*func)(MAP_T map, 
 }
 
 static results_t *
-test_mmap_with_allocated_vm_map_kernel_flags_t(kern_return_t (*func)(MAP_T map, mach_vm_address_t src, mach_vm_size_t size, int flags), const char * testname)
+test_unix_with_allocated_vm_prot_t(int (*func)(void * start, size_t size, int flags), const char * testname)
 {
-	MAP_T map SMART_MAP;
-
+	MAP_T map CURRENT_MAP;
 	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	vm_map_kernel_flags_trials_t * trials SMART_MMAP_KERNEL_FLAGS_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	vm_prot_trials_t * trials SMART_VM_PROT_TRIALS();
+	results_t *results = alloc_results(testname, eSMART_VM_PROT_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
-		kern_return_t ret = func(map, base.addr, base.size, trials->list[i].flags);
+		int ret = func((void *) base.addr, (size_t) base.size, (int) trials->list[i].prot);
 		append_result(results, ret, trials->list[i].name);
 	}
 	return results;
 }
-
 
 // Test a Unix function.
 // Run each trial with an allocated vm region and start/size parameters that reference it.
 typedef int (*unix_with_start_size_fn)(void *start, size_t size);
 
 static results_t * __unused
-test_unix_with_allocated_start_size(unix_with_start_size_fn fn, const char *testname)
+test_unix_with_allocated_aligned_start_size(unix_with_start_size_fn fn, mach_vm_size_t align_mask, const char *testname)
 {
-	MAP_T map SMART_MAP;
-	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	MAP_T map CURRENT_MAP;
+	allocation_t base SMART_ALLOCATE_ALIGNED_VM(map, TEST_ALLOC_SIZE, align_mask, VM_PROT_DEFAULT);
 	start_size_trials_t *trials SMART_START_SIZE_TRIALS(base.addr);
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, base.addr, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		addr_t start = trials->list[i].start;
@@ -3350,34 +4734,20 @@ test_unix_with_allocated_start_size(unix_with_start_size_fn fn, const char *test
 	return results;
 }
 
-// Test a Unix function.
-// Run each trial with an allocated vm region and a vm_inherit_t
-typedef int (*unix_with_inherit_fn)(void *start, size_t size, int inherit);
-
-static results_t *
-test_unix_with_allocated_vm_inherit_t(unix_with_inherit_fn fn, const char * testname)
+static results_t * __unused
+test_unix_with_allocated_start_size(unix_with_start_size_fn fn, const char *testname)
 {
-	MAP_T map SMART_MAP;
-	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	vm_inherit_trials_t *trials SMART_VM_INHERIT_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
-
-	for (unsigned i = 0; i < trials->count; i++) {
-		vm_inherit_trial_t trial = trials->list[i];
-		int ret = fn((void*)(uintptr_t)base.addr, (size_t)base.size, (int)trial.value);
-		append_result(results, ret, trial.name);
-	}
-	return results;
+	return test_unix_with_allocated_aligned_start_size(fn, 0, testname);
 }
 
-
-#ifdef KERNEL
+#if KERNEL
 static results_t * __unused
 test_kext_unix_with_allocated_start_size(unix_with_start_size_fn fn, const char *testname)
 {
-	allocation_t base SMART_ALLOCATE_VM(current_map(), TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	MAP_T map CURRENT_MAP;
+	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
 	start_size_trials_t *trials SMART_START_SIZE_TRIALS(base.addr);
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, base.addr, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		addr_t start = trials->list[i].start;
@@ -3394,13 +4764,14 @@ test_kext_unix_with_allocated_start_size(unix_with_start_size_fn fn, const char 
 static results_t * __attribute__((used))
 test_kext_tagged_with_allocated_addr(kern_return_t (*func)(MAP_T map, mach_vm_address_t addr), const char *testname)
 {
-	allocation_t base SMART_ALLOCATE_VM(current_map(), TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
+	MAP_T map CURRENT_MAP;
+	allocation_t base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
 	addr_trials_t *trials SMART_ADDR_TRIALS(base.addr);
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_ADDR_TRIALS, base.addr, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		mach_vm_address_t addr = (mach_vm_address_t)trials->list[i].addr;
-		kern_return_t ret = func(current_map(), addr);
+		kern_return_t ret = func(map, addr);
 		append_result(results, ret, trials->list[i].name);
 	}
 	return results;
@@ -3411,7 +4782,7 @@ static results_t * __attribute__((used))
 test_with_int64(kern_return_t (*func)(int64_t), const char *testname)
 {
 	size_trials_t *trials SMART_SIZE_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_SIZE_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		int64_t val = (int64_t)trials->list[i].size;
@@ -3458,7 +4829,7 @@ test_deallocator(kern_return_t (*func)(MAP_T map, mach_vm_address_t start, mach_
 	// later we slide them to each allocation's address
 	start_size_trials_t *trials SMART_START_SIZE_TRIALS(0);
 
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_START_SIZE_TRIALS, 0, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		start_size_trial_t trial = trials->list[i];
@@ -3489,7 +4860,7 @@ test_allocated_src_unallocated_dst_size(kern_return_t (*func)(MAP_T map, mach_vm
 	MAP_T map SMART_MAP;
 	allocation_t src_base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
 	src_dst_size_trials_t * trials SMART_SRC_DST_SIZE_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
+	results_t *results = alloc_results(testname, eSMART_SRC_DST_SIZE_TRIALS, trials->count);
 
 	for (unsigned i = 0; i < trials->count; i++) {
 		src_dst_size_trial_t trial = trials->list[i];
@@ -3503,196 +4874,6 @@ test_allocated_src_unallocated_dst_size(kern_return_t (*func)(MAP_T map, mach_vm
 	return results;
 }
 
-static results_t *
-test_allocated_src_allocated_dst_size(kern_return_t (*func)(MAP_T map, mach_vm_address_t src, mach_vm_size_t size, mach_vm_address_t dst), const char * testname)
-{
-	MAP_T map SMART_MAP;
-	allocation_t src_base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	allocation_t dst_base SMART_ALLOCATE_VM(map, TEST_ALLOC_SIZE, VM_PROT_DEFAULT);
-	src_dst_size_trials_t * trials SMART_SRC_DST_SIZE_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
-
-	for (unsigned i = 0; i < trials->count; i++) {
-		src_dst_size_trial_t trial = trials->list[i];
-		trial = slide_trial_src(trial, src_base.addr);
-		trial = slide_trial_dst(trial, dst_base.addr);
-		int ret = func(map, trial.src, trial.size, trial.dst);
-		// func should be fixed-overwrite, nothing new to deallocate
-		append_result(results, ret, trial.name);
-	}
-	return results;
-}
-
-static results_t *
-test_dst_size_fileoff(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size, mach_vm_address_t fileoff), const char * testname)
-{
-	MAP_T map SMART_MAP;
-	src_dst_size_trials_t * trials SMART_FILEOFF_DST_SIZE_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
-
-	for (unsigned i = 0; i < trials->count; i++) {
-		src_dst_size_trial_t trial = trials->list[i];
-		unallocation_t dst_base SMART_UNALLOCATE_VM(map, TEST_ALLOC_SIZE);
-		// src a.k.a. mmap fileoff doesn't slide
-		trial = slide_trial_dst(trial, dst_base.addr);
-		int ret = func(map, trial.dst, trial.size, trial.src);
-		append_result(results, ret, trial.name);
-	}
-	return results;
-}
-
-// Try to allocate a destination for mmap(MAP_FIXED) to overwrite.
-// On exit:
-// *out_dst *out_size are the allocation, or 0
-// *out_panic is true if the trial should stop and record PANIC
-// (because the trial specifies an absolute address that is already occupied)
-// *out_slide is true if the trial should slide by *out_dst
-static __attribute__((overloadable)) void
-allocate_for_mmap_fixed(MAP_T map, mach_vm_address_t trial_dst, mach_vm_size_t trial_size, bool trial_dst_is_absolute, bool trial_size_is_absolute, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
-{
-	*out_panic = false;
-	*out_slide = false;
-
-	if (trial_dst_is_absolute && trial_size_is_absolute) {
-		// known dst addr, known size
-		*out_dst = trial_dst;
-		*out_size = trial_size;
-		kern_return_t kr = mach_vm_allocate(map, out_dst, *out_size, VM_FLAGS_FIXED);
-		if (kr == KERN_NO_SPACE) {
-			// this space is in use, we can't allow mmap to try to overwrite it
-			*out_panic = true;
-			*out_dst = 0;
-			*out_size = 0;
-		} else if (kr != 0) {
-			// some other error, assume mmap will also fail
-			*out_dst = 0;
-			*out_size = 0;
-		}
-		// no slide, trial and allocation are already at the same place
-		*out_slide = false;
-	} else {
-		// other cases either fit in a small allocation or fail
-		*out_dst = 0;
-		*out_size = TEST_ALLOC_SIZE;
-		kern_return_t kr = mach_vm_allocate(map, out_dst, *out_size, VM_FLAGS_ANYWHERE);
-		if (kr != 0) {
-			// allocation error, assume mmap will also fail
-			*out_dst = 0;
-			*out_size = 0;
-		}
-		*out_slide = true;
-	}
-}
-
-static __attribute__((overloadable)) void
-allocate_for_mmap_fixed(MAP_T map, start_size_trial_t trial, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
-{
-	allocate_for_mmap_fixed(map, trial.start, trial.size, trial.start_is_absolute, trial.size_is_absolute,
-	    out_dst, out_size, out_panic, out_slide);
-}
-static __attribute__((overloadable)) void
-allocate_for_mmap_fixed(MAP_T map, src_dst_size_trial_t trial, mach_vm_address_t *out_dst, mach_vm_size_t *out_size, bool *out_panic, bool *out_slide)
-{
-	allocate_for_mmap_fixed(map, trial.dst, trial.size, trial.dst_is_absolute, !trial.size_is_dst_relative,
-	    out_dst, out_size, out_panic, out_slide);
-}
-
-// Like test_dst_size_fileoff, but specialized for mmap(MAP_FIXED).
-// mmap(MAP_FIXED) is destructive, forcibly unmapping anything
-// already at that address.
-// We must ensure that each trial is either obviously invalid and caught
-// by the sanitizers, or is valid and overwrites an allocation we control.
-static results_t *
-test_fixed_dst_size_fileoff(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size, mach_vm_address_t fileoff), const char * testname)
-{
-	MAP_T map SMART_MAP;
-	src_dst_size_trials_t * trials SMART_FILEOFF_DST_SIZE_TRIALS();
-	results_t *results = alloc_results(testname, trials->count);
-	for (unsigned i = 0; i < trials->count; i++) {
-		src_dst_size_trial_t trial = trials->list[i];
-		// Try to create an allocation for mmap to overwrite.
-		mach_vm_address_t dst_alloc;
-		mach_vm_size_t dst_size;
-		bool should_panic;
-		bool should_slide_trial;
-		allocate_for_mmap_fixed(map, trial, &dst_alloc, &dst_size, &should_panic, &should_slide_trial);
-		if (should_panic) {
-			append_result(results, PANIC, trial.name);
-			continue;
-		}
-		if (should_slide_trial) {
-			// src a.k.a. mmap fileoff doesn't slide
-			trial = slide_trial_dst(trial, dst_alloc);
-		}
-
-		kern_return_t ret = func(map, trial.dst, trial.size, trial.src);
-
-		if (dst_alloc != 0) {
-			(void)mach_vm_deallocate(map, dst_alloc, dst_size);
-		}
-		append_result(results, ret, trial.name);
-	}
-	return results;
-}
-
-// Like test_mach_with_allocated_start_size, but specialized for mmap(MAP_FIXED).
-// See test_fixed_dst_size_fileoff for more.
-static results_t *
-test_fixed_dst_size(kern_return_t (*func)(MAP_T map, mach_vm_address_t dst, mach_vm_size_t size), const char *testname)
-{
-	MAP_T map SMART_MAP;
-	start_size_trials_t *trials SMART_START_SIZE_TRIALS(0);  // no base addr
-	results_t *results = alloc_results(testname, trials->count);
-	for (unsigned i = 0; i < trials->count; i++) {
-		start_size_trial_t trial = trials->list[i];
-		// Try to create an allocation for mmap to overwrite.
-		mach_vm_address_t dst_alloc;
-		mach_vm_size_t dst_size;
-		bool should_panic;
-		bool should_slide_trial;
-		allocate_for_mmap_fixed(map, trial, &dst_alloc, &dst_size, &should_panic, &should_slide_trial);
-		if (should_panic) {
-			append_result(results, PANIC, trial.name);
-			continue;
-		}
-		if (should_slide_trial) {
-			trial = slide_trial(trial, dst_alloc);
-		}
-
-		kern_return_t ret = func(map, trial.start, trial.size);
-
-		if (dst_alloc != 0) {
-			(void)mach_vm_deallocate(map, dst_alloc, dst_size);
-		}
-		append_result(results, ret, trial.name);
-	}
-	return results;
-}
-
-
-static bool
-will_wire_function_panic_due_to_alignment(mach_vm_address_t start, mach_vm_address_t end)
-{
-	// Start and end must be page aligned
-	if (start & PAGE_MASK) {
-		return true;
-	}
-	if (end & PAGE_MASK) {
-		return true;
-	}
-	return false;
-}
-
-/*
- * This function is basically trying to determine if this address is one vm_wire would find in the vm_map and attempt to wire.
- * This is because due to the environment in which our test runs, vm_tag_bt() returns VM_KERN_MEMORY_NONE.
- * Trying to wire with VM_KERN_MEMORY_NONE results in a panic due to asserts in VM_OBJECT_WIRED_PAGE_UPDATE_END.
- */
-static bool
-will_wire_function_panic_due_to_vm_tag(mach_vm_address_t addr)
-{
-	return (addr > (KB16 * 2)) && (addr < (-KB16 * 2));
-}
 
 static inline void
 check_mach_vm_allocate_outparam_changes(kern_return_t * kr, mach_vm_address_t addr, mach_vm_size_t size,
@@ -3714,6 +4895,139 @@ check_mach_vm_allocate_outparam_changes(kern_return_t * kr, mach_vm_address_t ad
 		if (saved_start != addr) {
 			*kr = OUT_PARAM_BAD;
 		}
+	}
+}
+
+static kern_return_t
+call_mach_vm_behavior_set__start_size__default(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	kern_return_t kr = mach_vm_behavior_set(map, start, size, VM_BEHAVIOR_DEFAULT);
+	return kr;
+}
+
+/*
+ * VM_BEHAVIOR_CAN_REUSE is additionally tested as it uses slightly different page rounding semantics
+ */
+static kern_return_t
+call_mach_vm_behavior_set__start_size__can_reuse(MAP_T map, mach_vm_address_t start, mach_vm_size_t size)
+{
+	kern_return_t kr = mach_vm_behavior_set(map, start, size, VM_BEHAVIOR_CAN_REUSE);
+	return kr;
+}
+
+static kern_return_t
+call_mach_vm_behavior_set__vm_behavior(MAP_T map, mach_vm_address_t start, mach_vm_size_t size, vm_behavior_t behavior)
+{
+	kern_return_t kr = mach_vm_behavior_set(map, start, size, behavior);
+	return kr;
+}
+
+static void
+check_mach_vm_purgable_control_outparam_changes(kern_return_t * kr, int state, int saved_state, int control)
+{
+	if (*kr == KERN_SUCCESS) {
+		if (control == VM_PURGABLE_PURGE_ALL || VM_PURGABLE_SET_STATE) {
+			if (state != saved_state) {
+				*kr = OUT_PARAM_BAD;
+			}
+		}
+		if (control == VM_PURGABLE_GET_STATE) {
+			/*
+			 * The default state is VM_PURGABLE_NONVOLATILE for a newly created region
+			 */
+			if (state != VM_PURGABLE_NONVOLATILE) {
+				*kr = OUT_PARAM_BAD;
+			}
+		}
+	} else {
+		if (state != saved_state) {
+			*kr = OUT_PARAM_BAD;
+		}
+	}
+}
+
+static void
+check_mach_vm_region_outparam_changes(kern_return_t * kr, MAP_T map, void * info, void * saved_info, size_t info_size,
+    mach_port_t object_name, mach_port_t saved_object_name, mach_vm_address_t addr, mach_vm_address_t saved_addr,
+    mach_vm_size_t size, mach_vm_size_t saved_size)
+{
+	if (*kr == KERN_SUCCESS) {
+		if (object_name != 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (addr < trunc_down_map(map, saved_addr)) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (size == saved_size) {
+			*kr = OUT_PARAM_BAD;
+		}
+		if (memcmp(info, saved_info, info_size) == 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	} else {
+		if (object_name != saved_object_name || addr != saved_addr || size != saved_size || memcmp(info, saved_info, info_size) != 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	}
+}
+
+static int
+call_mach_vm_region(MAP_T map, mach_vm_address_t addr)
+{
+	mach_vm_address_t addr_cpy = addr;
+	mach_vm_size_t size_out = UNLIKELY_INITIAL_SIZE;
+	mach_vm_size_t saved_size = size_out;
+	mach_port_t object_name_out = UNLIKELY_INITIAL_MACH_PORT;
+	mach_port_t saved_name = object_name_out;
+	vm_region_basic_info_data_64_t info;
+	info.inheritance = INVALID_INHERIT;
+	vm_region_basic_info_data_64_t saved_info = info;
+
+	mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+	kern_return_t kr = mach_vm_region(map, &addr_cpy, &size_out, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+	    &infoCnt, &object_name_out);
+	check_mach_vm_region_outparam_changes(&kr, map, &info, &saved_info, sizeof(info), object_name_out, saved_name, addr_cpy, addr, size_out, saved_size);
+
+	return kr;
+}
+
+#if TEST_OLD_STYLE_MACH || KERNEL
+static int
+call_vm_region(MAP_T map, vm_address_t addr)
+{
+	vm_address_t addr_cpy = addr;
+	vm_size_t size_out = UNLIKELY_INITIAL_SIZE;
+	vm_size_t saved_size = size_out;
+	mach_port_t object_name_out = UNLIKELY_INITIAL_MACH_PORT;
+	mach_port_t saved_name = object_name_out;
+	vm_region_basic_info_data_64_t info;
+	info.inheritance = INVALID_INHERIT;
+	vm_region_basic_info_data_64_t saved_info = info;
+
+	mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+	kern_return_t kr = vm_region(map, &addr_cpy, &size_out, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+	    &infoCnt, &object_name_out);
+	check_mach_vm_region_outparam_changes(&kr, map, &info, &saved_info, sizeof(info), object_name_out, saved_name, addr_cpy, addr, size_out, saved_size);
+
+	return kr;
+}
+#endif /* TEST_OLD_STYLE_MACH || KERNEL */
+
+static void
+check_mach_vm_page_info_outparam_changes(kern_return_t * kr, vm_page_info_basic_data_t info, vm_page_info_basic_data_t saved_info,
+    mach_msg_type_number_t count, mach_msg_type_number_t saved_count)
+{
+	if (*kr == KERN_SUCCESS) {
+		if (memcmp(&info, &saved_info, sizeof(vm_page_info_basic_data_t)) == 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	} else {
+		if (memcmp(&info, &saved_info, sizeof(vm_page_info_basic_data_t)) != 0) {
+			*kr = OUT_PARAM_BAD;
+		}
+	}
+	if (count != saved_count) {
+		*kr = OUT_PARAM_BAD;
 	}
 }
 

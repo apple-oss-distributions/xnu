@@ -64,6 +64,28 @@ typedef struct {
 	uid_t               persona_id;
 } necp_application_id_t;
 
+#define NECP_DOMAIN_TRIE_SUPPORT 1
+
+/*
+ * Request sent from user-space to create a domain trie
+ */
+#define NECP_DOMAIN_TRIE_FLAG_REVERSE_SEARCH        0x1
+#define NECP_DOMAIN_TRIE_FLAG_ALLOW_PARTIAL_MATCH   0x2
+
+typedef struct necp_domain_trie_request {
+	uint32_t id;
+	uint32_t total_mem_size;
+	uint32_t nodes_mem_size;
+	uint32_t maps_mem_size;
+	uint32_t bytes_mem_size;
+	uint32_t nodes_count;
+	uint32_t maps_count;
+	uint32_t bytes_count;
+	uint32_t partial_match_terminator;
+	uint32_t flags;
+	uint8_t  data[__counted_by(total_mem_size)];
+} necp_domain_trie_request_t;
+
 /*
  * Control message commands
  */
@@ -96,6 +118,10 @@ typedef struct {
 #define NECP_SESSION_ACTION_ADD_DOMAIN_FILTER           12      // In: struct net_bloom_filter  Out: uint32_t, ID
 #define NECP_SESSION_ACTION_REMOVE_DOMAIN_FILTER        13      // In: uint32_t, ID             Out: None
 #define NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_FILTERS   14      // In: None                     Out: None
+#define NECP_SESSION_ACTION_ADD_DOMAIN_TRIE             15      // In: struct necp_domain_trie_request  Out: uint32_t, ID
+#define NECP_SESSION_ACTION_REMOVE_DOMAIN_TRIE          16      // In: uint32_t, ID             Out: None
+#define NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_TRIES     17      // In: None                     Out: None
+#define NECP_SESSION_ACTION_TRIE_DUMP_ALL               18      // In: None                     Out: uint8_t, count, then array of struct necp_domain_trie_request with no 'data'
 
 /*
  * Control message flags
@@ -1206,6 +1232,7 @@ necp_buffer_get_tlv_value(u_int8_t * __counted_by(buffer_length)buffer, size_t b
 #define NECPCTL_CLIENT_TRACING_LEVEL                    22      /* Client tracing level */
 #define NECPCTL_CLIENT_TRACING_PID                      23      /* Apply client tracing only to specified pid */
 #define NECPCTL_DROP_MANAGEMENT_LEVEL                   24      /* Drop management traffic at this level */
+#define NECPCTL_TRIE_COUNT                              25      /* Count of tries */
 
 #define NECP_LOOPBACK_PASS_ALL         1  // Pass all loopback traffic
 #define NECP_LOOPBACK_PASS_WITH_FILTER 2  // Pass all loopback traffic, but activate content filter and/or flow divert if applicable

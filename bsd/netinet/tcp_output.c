@@ -645,7 +645,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e0b & 0xff) << 24) | (TCPOPT_NOP << 16) | (TCPOPT_NOP << 8) | TCPOPT_NOP);
 		}
 		*optlen += len + 3; /* 3 NOPs */
-		TCP_LOG(tp, "add single counter for AccECN option, optlen=%u", *optlen);
 	} else if (max_len < (TCPOLEN_ACCECN_EMPTY + 3 * TCPOLEN_ACCECN_COUNTER)) {
 		/* Can carry two options */
 		len += 2 * TCPOLEN_ACCECN_COUNTER;
@@ -657,7 +656,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e0b & 0xff) << 24) | (ceb & 0xffffff));
 		}
 		*optlen += len; /* 0 NOPs */
-		TCP_LOG(tp, "add 2 counters for AccECN option, optlen=%u", *optlen);
 	} else {
 		/*
 		 * TCP option sufficient to hold full AccECN option
@@ -675,7 +673,6 @@ tcp_add_accecn_option(struct tcpcb *tp, uint16_t flags, uint32_t *__indexable lp
 			*lp++ = htonl(((e1b & 0xffffff) << 8) | TCPOPT_NOP);
 		}
 		*optlen += len + 1; /* 1 NOP */
-		TCP_LOG(tp, "add all 3 counters for AccECN option, optlen=%u", *optlen);
 	}
 }
 
@@ -1190,8 +1187,10 @@ after_sack_rexmit:
 		len = min(len, max_len);
 	}
 	if (tp->tcp_cc_index == TCP_CC_ALGO_PRAGUE_INDEX &&
-	    tp->t_pacer.tso_burst_size != 0 && len > 0) {
-		len = min(len, tp->t_pacer.tso_burst_size);
+	    tp->t_pacer.tso_burst_size != 0 && len > 0 &&
+	    (uint32_t)len > tp->t_pacer.tso_burst_size) {
+		len = tp->t_pacer.tso_burst_size;
+		sendalot = 1;
 	}
 
 	/*

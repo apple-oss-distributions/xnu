@@ -131,15 +131,15 @@
 	msr		SSBS, x$1
 1:
 #endif // HAS_ARM_FEAT_SSBS2
-#if __ARM_ARCH_8_4__
-	ldrb	w$1, [$0, SS64_KERNEL_DIT]
-	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
-	msr		DIT, x$1
-#endif //__ARM_ARCH_8_4__
 #if __ARM_ARCH_8_2__
 	ldrb	w$1, [$0, SS64_KERNEL_UAO]
 	lsl     x$1, x$1, #0 + PSR64_UAO_SHIFT
 	msr		UAO, x$1
+#endif //__ARM_ARCH_8_2__
+#if __ARM_ARCH_8_4__
+	ldrb	w$1, [$0, SS64_KERNEL_DIT]
+	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
+	msr		DIT, x$1
 #endif //__ARM_ARCH_8_4__
 
 	ldr		d8,	[$0, NS64_KERNEL_D8]

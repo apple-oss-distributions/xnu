@@ -43,12 +43,12 @@
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
 
+#include <sys/kern_memorystatus_xnu.h>
 #include <sys/kern_overrides.h>
 #include <sys/bsdtask_info.h>
 #include <sys/kdebug.h>
 #include <sys/sysproto.h>
 #include <sys/msgbuf.h>
-#include <sys/kern_memorystatus.h>
 
 /* Mutex for global system override state */
 static LCK_GRP_DECLARE(sys_override_mtx_grp, "system_override");
@@ -181,9 +181,7 @@ system_override_callouts(uint64_t flags, boolean_t enable_override)
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_MEMSTAT, BSD_MEMSTAT_FAST_JETSAM) | DBG_FUNC_END,
 			    proc_getpid(current_proc()), 0, 0, 0, 0);
 		}
-#if CONFIG_JETSAM
 		memorystatus_fast_jetsam_override(enable_override);
-#endif /* CONFIG_JETSAM */
 		break;
 
 	default:

@@ -64,6 +64,7 @@
 #  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
 #  PERF_DBG_DEV =   [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
 #  PERF_DBG_DEBUG = [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
+#  PERF_DBG_KASAN = [ PERF_DBG_BASE lock_stats zleaks alternate_debugger config_debug_syscall_rejection config_iotrace ]
 #if SOC_IS_VIRTUALIZED
 #  PARAVIRT_BASE =  [ config_pv_ticket ]
 #else
@@ -90,7 +91,7 @@
 #  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE    PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE SECURITY_RELEASE ]
 #  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
 #  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG      PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   SECURITY_DEBUG   ]
-#  KASAN =          [ BASE KERNEL_DEV_PPL BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEBUG   LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
+#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEBUG   LIBKERN_DEV        PERF_DBG_KASAN   MACH_DEV     SCHED_DEV     VM_KASAN   SECURITY_DEV     ]
 #  SPTM =           [ BASE KERNEL_SPTM    BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     SECURITY_DEV     ]
 #
 ######################################################################

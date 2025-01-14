@@ -147,7 +147,6 @@ configure_late_apple_regs(bool cold_boot)
 #endif /* APPLEAVALANCHE */
 
 #if defined(APPLEEVEREST)
-
 #endif /* APPLEEVEREST */
 }
 #endif /* APPLE_ARM64_ARCH_FAMILY */

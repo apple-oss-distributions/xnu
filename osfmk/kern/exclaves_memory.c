@@ -28,8 +28,23 @@
 
 #if CONFIG_EXCLAVES
 
+#include <vm/pmap.h>
+#include <vm/vm_kern_xnu.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_memory_entry_xnu.h>
+#include <vm/vm_page.h>
 #include <vm/vm_page_internal.h>
+#include <vm/vm_pageout.h>
 #include <vm/vm_pageout_internal.h>
+#include <vm/vm_protos.h>
+
+#include <mach/mach_vm.h>
+#include <mach/mach_host.h>
+
+#include <device/device_port.h>
+
+#include <kern/ipc_kobject.h>
+
 #include <libkern/coreanalytics/coreanalytics.h>
 #include <kern/ledger.h>
 
@@ -100,15 +115,24 @@ exclaves_memory_report_accounting(void)
 	CA_EVENT_SEND(event);
 }
 
+static_assert(
+	(EXCLAVES_MEMORY_PAGEKIND_ROOTDOMAIN == XNUUPCALLS_PAGEKIND_ROOTDOMAIN) &&
+	(EXCLAVES_MEMORY_PAGEKIND_CONCLAVE == XNUUPCALLS_PAGEKIND_CONCLAVE),
+	"xnuupcalls_pagekind_s mismatch");
+static_assert(
+	(EXCLAVES_MEMORY_PAGEKIND_ROOTDOMAIN == XNUUPCALLSV2_PAGEKIND_ROOTDOMAIN) &&
+	(EXCLAVES_MEMORY_PAGEKIND_CONCLAVE == XNUUPCALLSV2_PAGEKIND_CONCLAVE),
+	"xnuupcallsv2_pagekind_s mismatch");
+
 static ledger_t
-get_conclave_mem_ledger(xnuupcalls_pagekind_s kind)
+get_conclave_mem_ledger(exclaves_memory_pagekind_t kind)
 {
 	ledger_t ledger;
 	switch (kind) {
-	case XNUUPCALLS_PAGEKIND_ROOTDOMAIN:
+	case EXCLAVES_MEMORY_PAGEKIND_ROOTDOMAIN:
 		ledger = kernel_task->ledger;
 		break;
-	case XNUUPCALLS_PAGEKIND_CONCLAVE:
+	case EXCLAVES_MEMORY_PAGEKIND_CONCLAVE:
 		if (current_thread()->conclave_stop_task != NULL) {
 			ledger = current_thread()->conclave_stop_task->ledger;
 		} else {
@@ -127,7 +151,7 @@ get_conclave_mem_ledger(xnuupcalls_pagekind_s kind)
 #pragma mark Allocation/Free
 
 void
-exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const xnuupcalls_pagekind_s kind)
+exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const exclaves_memory_pagekind_t kind)
 {
 	uint32_t pages_left = npages;
 	vm_page_t page_list = NULL;
@@ -138,7 +162,7 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const xnuupcalls_p
 
 	while (pages_left) {
 		vm_page_t next;
-		vm_page_alloc_list(npages, KMA_ZERO | KMA_NOFAIL, &page_list);
+		vm_page_alloc_list(pages_left, KMA_ZERO | KMA_NOFAIL, &page_list);
 
 		vm_object_lock(exclaves_object);
 		for (vm_page_t mem = page_list; mem != VM_PAGE_NULL; mem = next) {
@@ -184,7 +208,7 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const xnuupcalls_p
 	ledger_t ledger = get_conclave_mem_ledger(kind);
 	kern_return_t ledger_ret = ledger_credit(ledger,
 	    task_ledgers.conclave_mem,
-	    (ledger_amount_t) npages);
+	    (ledger_amount_t) (npages * PAGE_SIZE));
 	if (ledger_ret != KERN_SUCCESS) {
 		panic("Ledger credit failed. count %u error code %d",
 		    npages,
@@ -193,7 +217,7 @@ exclaves_memory_alloc(const uint32_t npages, uint32_t *pages, const xnuupcalls_p
 }
 
 void
-exclaves_memory_free(const uint32_t npages, const uint32_t *pages, const xnuupcalls_pagekind_s kind)
+exclaves_memory_free(const uint32_t npages, const uint32_t *pages, const exclaves_memory_pagekind_t kind)
 {
 	vm_object_lock(exclaves_object);
 	for (size_t p = 0; p < npages; p++) {
@@ -220,7 +244,7 @@ exclaves_memory_free(const uint32_t npages, const uint32_t *pages, const xnuupca
 	ledger_t ledger = get_conclave_mem_ledger(kind);
 	kern_return_t ledger_ret = ledger_debit(ledger,
 	    task_ledgers.conclave_mem,
-	    (ledger_amount_t) npages);
+	    (ledger_amount_t) (npages * PAGE_SIZE));
 	if (ledger_ret != KERN_SUCCESS) {
 		panic("Ledger debit failed. count %u error code %d",
 		    npages,
@@ -228,12 +252,116 @@ exclaves_memory_free(const uint32_t npages, const uint32_t *pages, const xnuupca
 	}
 }
 
+static void
+validate_for_mapping(uint32_t page, vm_prot_t prot)
+{
+	const sptm_frame_type_t type = sptm_get_frame_type(ptoa(page));
+
+	// Mapping RW and type is SK_SHARED_RW.
+	if (type == SK_SHARED_RW && (prot & VM_PROT_WRITE) != 0) {
+		return;
+	}
+
+	// Mapping RO and type is SK_SHARED_RW or SH_SHARED_RO
+	if ((type == SK_SHARED_RW || type == SK_SHARED_RO) &&
+	    (prot & VM_PROT_WRITE) == 0) {
+		return;
+	}
+
+	// Mismatch of type and prot
+	panic("trying to map exclaves memory (prot: %u) "
+	    "but memory is of the wrong type (%u)", prot, type);
+}
+
+kern_return_t
+exclaves_memory_map(uint32_t npages, const uint32_t *pages, vm_prot_t prot,
+    char **address)
+{
+	assert3u(npages, >, 0);
+
+	kern_return_t kr = KERN_FAILURE;
+	const vm_map_kernel_flags_t vmk_flags = {
+		.vmf_fixed = false,
+		.vm_tag    = VM_KERN_MEMORY_EXCLAVES_SHARED,
+	};
+	const vm_size_t size = npages * PAGE_SIZE;
+
+	memory_object_t pager = device_pager_setup((memory_object_t)NULL,
+	    (uintptr_t)NULL, size, DEVICE_PAGER_COHERENT);
+	assert3p(pager, !=, NULL);
+
+	for (uint32_t i = 0; i < npages; i++) {
+		validate_for_mapping(pages[i], prot);
+
+		kr = device_pager_populate_object(pager, ptoa(i), pages[i],
+		    PAGE_SIZE);
+		if (kr != KERN_SUCCESS) {
+			device_pager_deallocate(pager);
+			return kr;
+		}
+	}
+
+	ipc_port_t entry = IPC_PORT_NULL;
+	kr = mach_memory_object_memory_entry_64((host_t)1, false, size,
+	    prot, pager, &entry);
+	if (kr != KERN_SUCCESS) {
+		device_pager_deallocate(pager);
+		return kr;
+	}
+
+	kr = mach_vm_map_kernel(kernel_map, (mach_vm_offset_ut *)address, size, 0, vmk_flags, entry,
+	    0, FALSE, prot, prot, VM_INHERIT_DEFAULT);
+
+	mach_memory_entry_port_release(entry);
+
+	if (kr != KERN_SUCCESS) {
+		device_pager_deallocate(pager);
+		return kr;
+	}
+
+	device_pager_deallocate(pager);
+
+	/*
+	 * Wire the memory so that it's paged-in up-front. This memory is
+	 * already wired via exclaves_memory_alloc.
+	 */
+	const vm_map_offset_ut start = *(vm_map_offset_ut *)address;
+	kr = vm_map_wire_kernel(kernel_map, start, start + size, prot,
+	    VM_KERN_MEMORY_EXCLAVES_SHARED, false);
+	if (kr != KERN_SUCCESS) {
+		mach_vm_deallocate(kernel_map, start, size);
+		return kr;
+	}
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+exclaves_memory_unmap(char *address, size_t size)
+{
+	kern_return_t kr = KERN_FAILURE;
+
+	const vm_map_offset_ut start = (vm_map_offset_ut)address;
+	kr = vm_map_unwire(kernel_map, start, start + size, false);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	kr = mach_vm_deallocate(kernel_map, (mach_vm_address_t)address, size);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
+
+	return KERN_SUCCESS;
+}
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Upcalls
 
+/* Legacy upcall handlers */
+
 tb_error_t
-exclaves_memory_upcall_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
+exclaves_memory_upcall_legacy_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
     tb_error_t (^completion)(xnuupcalls_pagelist_s))
 {
 	xnuupcalls_pagelist_s pagelist = {};
@@ -243,13 +371,14 @@ exclaves_memory_upcall_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
 		panic("npages");
 	}
 
-	exclaves_memory_alloc(npages, pagelist.pages, kind);
+	exclaves_memory_alloc(npages, pagelist.pages,
+	    (exclaves_memory_pagekind_t) kind);
 	return completion(pagelist);
 }
 
 
 tb_error_t
-exclaves_memory_upcall_free(const uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST],
+exclaves_memory_upcall_legacy_free(const uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST],
     uint32_t npages, const xnuupcalls_pagekind_s kind,
     tb_error_t (^completion)(void))
 {
@@ -259,7 +388,53 @@ exclaves_memory_upcall_free(const uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST],
 		panic("npages");
 	}
 
-	exclaves_memory_free(npages, pages, kind);
+	exclaves_memory_free(npages, pages, (exclaves_memory_pagekind_t) kind);
+
+	return completion();
+}
+
+/* Upcall handlers */
+
+tb_error_t
+exclaves_memory_upcall_alloc(uint32_t npages, xnuupcallsv2_pagekind_s kind,
+    tb_error_t (^completion)(xnuupcallsv2_pagelist_s))
+{
+	uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST];
+	xnuupcallsv2_pagelist_s pagelist = {};
+
+	assert3u(npages, <=, EXCLAVES_MEMORY_MAX_REQUEST);
+	if (npages > EXCLAVES_MEMORY_MAX_REQUEST) {
+		panic("npages");
+	}
+
+	exclaves_memory_alloc(npages, pages,
+	    (exclaves_memory_pagekind_t) kind);
+
+	tb_error_t err = u32__v_assign_copy(&pagelist, pages, npages);
+	if (err != TB_ERROR_SUCCESS) {
+		panic("u32__v_assign_copy err %u", err);
+	}
+
+	return completion(pagelist);
+}
+
+
+tb_error_t
+exclaves_memory_upcall_free(const xnuupcallsv2_pagelist_s pages,
+    const xnuupcallsv2_pagekind_s kind, tb_error_t (^completion)(void))
+{
+	uint32_t _pages[EXCLAVES_MEMORY_MAX_REQUEST];
+	uint32_t *pages_ptr = _pages;
+	uint32_t __block npages = 0;
+
+	u32__v_visit(&pages, ^(size_t i, const uint32_t page) {
+		if (++npages > EXCLAVES_MEMORY_MAX_REQUEST) {
+		        panic("npages");
+		}
+		pages_ptr[i] = page;
+	});
+
+	exclaves_memory_free(npages, _pages, (exclaves_memory_pagekind_t) kind);
 
 	return completion();
 }

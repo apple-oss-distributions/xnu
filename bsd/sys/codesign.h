@@ -101,7 +101,7 @@ int     cs_entitlements_blob_get(struct proc *, void **, size_t *);
 int     cs_entitlements_dictionary_copy(struct proc *, void **);
 #endif
 int     cs_restricted(struct proc *);
-uint8_t * cs_get_cdhash(struct proc *);
+uint8_t *__counted_by_or_null(CS_CDHASH_LEN) cs_get_cdhash(struct proc *);
 cs_launch_type_t launch_constraint_data_get_launch_type(launch_constraint_data_t lcd);
 
 struct cs_blob * csproc_get_blob(struct proc *);

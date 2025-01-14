@@ -123,6 +123,9 @@ volatile char pan_fault_value = 0;
 kern_return_t arm64_panic_lockdown_test(void);
 #endif /* CONFIG_SPTM */
 
+#include <arm64/speculation.h>
+kern_return_t arm64_speculation_guard_test(void);
+
 #include <libkern/OSAtomic.h>
 #define LOCK_TEST_ITERATIONS 50
 #define LOCK_TEST_SETUP_TIMEOUT_SEC 15
@@ -1057,7 +1060,8 @@ struct munger_test {
 	{MT_FUNC(munge_wl), 3, 2, {MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwl), 4, 3, {MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwlll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
-	{MT_FUNC(munge_wwlllll), 8, 5, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
+	{MT_FUNC(munge_wwlllll), 12, 7, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
+	{MT_FUNC(munge_wwllllll), 14, 8, {MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlw), 4, 3, {MT_W_VAL, MT_L_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wlwwwll), 10, 7, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wlwwwllw), 11, 8, {MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_W_VAL}},
@@ -1663,6 +1667,10 @@ extern panic_lockdown_helper_fcn_t arm64_panic_lockdown_test_sp1_exception_in_ve
 extern panic_lockdown_helper_fcn_t el1_sp1_synchronous_raise_exception_in_vector;
 extern bool arm64_panic_lockdown_test_sp1_exception_in_vector_handler(arm_saved_state_t *);
 
+#if DEVELOPMENT || DEBUG
+extern struct panic_lockdown_initiator_state debug_panic_lockdown_initiator_state;
+#endif /* DEVELOPMENT || DEBUG */
+
 typedef struct arm64_panic_lockdown_test_case {
 	const char *func_str;
 	panic_lockdown_helper_fcn_t *func;
@@ -1752,6 +1760,20 @@ panic_lockdown_expect_test(const char *treatment,
 			expect_lockdown, xnu_post_panic_lockdown_did_fire,
 			arm64_panic_lockdown_caught_exception);
 	}
+
+#if DEVELOPMENT || DEBUG
+	/* Check that the debug info is minimally functional */
+	if (expect_lockdown) {
+		T_EXPECT_NE_ULLONG(debug_panic_lockdown_initiator_state.initiator_pc,
+		    0ULL, "Initiator PC set");
+	} else {
+		T_EXPECT_EQ_ULLONG(debug_panic_lockdown_initiator_state.initiator_pc,
+		    0ULL, "Initiator PC not set");
+	}
+
+	/* Reset the debug data so it can be filled later if needed */
+	debug_panic_lockdown_initiator_state.initiator_pc = 0;
+#endif /* DEVELOPMENT || DEBUG */
 }
 
 static void
@@ -2413,3 +2435,89 @@ arm64_bti_test(void)
 }
 #endif /* BTI_ENFORCED */
 
+
+/**
+ * Test the speculation guards
+ * We can't easily ensure that the guards actually behave correctly under
+ * speculation, but we can at least ensure that the guards are non-speculatively
+ * correct.
+ */
+kern_return_t
+arm64_speculation_guard_test(void)
+{
+	uint64_t cookie1_64 = 0x5350454354524521ULL; /* SPECTRE! */
+	uint64_t cookie2_64 = 0x5941592043505553ULL; /* YAY CPUS */
+	uint32_t cookie1_32 = (uint32_t)cookie1_64;
+	uint32_t cookie2_32 = (uint32_t)cookie2_64;
+	uint64_t result64 = 0;
+	uint32_t result32 = 0;
+
+	/*
+	 * Test the zeroing guard
+	 * Since failing the guard triggers a panic, we don't actually test that
+	 * part as part of the automated tests.
+	 */
+
+	result64 = 0;
+	SPECULATION_GUARD_ZEROING_XXX(
+		/* out */ result64, /* value */ cookie1_64,
+		/* cmp_1 */ 0ULL, /* cmp_2 */ 1ULL, /* cc */ "NE");
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 64 zeroing guard works");
+
+	result64 = 0;
+	SPECULATION_GUARD_ZEROING_XWW(
+		/* out */ result64, /* value */ cookie1_64,
+		/* cmp_1 */ 1U, /* cmp_2 */ 0U, /* cc */ "HI");
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 32 zeroing guard works");
+
+	result32 = 0;
+	SPECULATION_GUARD_ZEROING_WXX(
+		/* out */ result32, /* value */ cookie1_32,
+		/* cmp_1 */ -1LL, /* cmp_2 */ 4LL, /* cc */ "LT");
+	T_ASSERT_EQ_UINT(result32, cookie1_32, "32, 64 zeroing guard works");
+
+	result32 = 0;
+	SPECULATION_GUARD_ZEROING_WWW(
+		/* out */ result32, /* value */ cookie1_32,
+		/* cmp_1 */ 1, /* cmp_2 */ -4, /* cc */ "GT");
+	T_ASSERT_EQ_UINT(result32, cookie1_32, "32, 32 zeroing guard works");
+
+	/*
+	 * Test the selection guard
+	 */
+
+	result64 = 0;
+	SPECULATION_GUARD_SELECT_XXX(
+		/* out */ result64,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "EQ", /* sel_1 */ cookie1_64,
+		/* n_cc */ "NE", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result64, cookie2_64, "64, 64 select guard works (1)");
+
+	result64 = 0;
+	SPECULATION_GUARD_SELECT_XXX(
+		/* out */ result64,
+		/* cmp_1 */ 32ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "EQ", /* sel_1 */ cookie1_64,
+		/* n_cc */ "NE", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result64, cookie1_64, "64, 64 select guard works (2)");
+
+
+	result32 = 0;
+	SPECULATION_GUARD_SELECT_WXX(
+		/* out */ result32,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 32ULL,
+		/* cc   */ "HI", /* sel_1 */ cookie1_64,
+		/* n_cc */ "LS", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result32, cookie2_32, "32, 64 select guard works (1)");
+
+	result32 = 0;
+	SPECULATION_GUARD_SELECT_WXX(
+		/* out */ result32,
+		/* cmp_1 */ 16ULL, /* cmp_2 */ 2ULL,
+		/* cc   */ "HI", /* sel_1 */ cookie1_64,
+		/* n_cc */ "LS", /* sel_2 */ cookie2_64);
+	T_EXPECT_EQ_ULLONG(result32, cookie1_32, "32, 64 select guard works (2)");
+
+	return KERN_SUCCESS;
+}

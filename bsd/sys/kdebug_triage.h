@@ -181,22 +181,8 @@ enum apple_protect_pager_subsys_error_codes {
 
 /****** APPLE_PROTECT pager Codes End ******/
 
-/****** Kext ktriage Begin ******/
-/*
- * kexts can define their own strings and augment them with an argument.
- * ktriage only needs to know the subsystem id, and expects that the first
- * string will be the subsystem prefix string.
- *
- * Right now we don't support dynamically adding or removing subsystems.
- */
-
-#define KDBG_TRIAGE_SUBSYS_APFS    (7)
-#define KDBG_TRIAGE_SUBSYS_DECMPFS (8)
-
-/****** Kext ktriage End ******/
-
 /****** Corpse pager Codes Begin ******/
-#define KDBG_TRIAGE_SUBSYS_CORPSE   (9)
+#define KDBG_TRIAGE_SUBSYS_CORPSE   (6)
 
 enum corpse_subsys_error_codes {
 	KDBG_TRIAGE_CORPSE_PREFIX = 0,
@@ -212,64 +198,21 @@ enum corpse_subsys_error_codes {
 
 /****** Corpse pager Codes End ******/
 
-/****** VM API Sanitization Codes Begin ******/
-#define KDBG_TRIAGE_SUBSYS_VM_SANITIZE   (10)
+/****** Dynamic ktriage Begin ******/
+/*
+ * kexts and kernel modules can define their own strings and augment them with
+ * an argument.
+ * ktriage only needs to know the subsystem id, and expects that the first
+ * string will be the subsystem prefix string.
+ *
+ * Right now we don't support dynamically adding or removing subsystems.
+ */
 
-enum vm_sanitize_subsys_error_codes {
-	KDBG_TRIAGE_VM_SANITIZE_PREFIX = 0,
+#define KDBG_TRIAGE_SUBSYS_APFS    (7)
+#define KDBG_TRIAGE_SUBSYS_DECMPFS (8)
+#define KDBG_TRIAGE_SUBSYS_VM_SANITIZE (9)
 
-	// value 0 is also used for skipping ktriage
-	KDBG_TRIAGE_VM_SANITIZE_SKIP = KDBG_TRIAGE_VM_SANITIZE_PREFIX,
-
-	KDBG_TRIAGE_VM_SANITIZE_MACH_MAKE_MEMORY_ENTRY = 1,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_PAGE_OP,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_RANGE_OP,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_ENTRY_MAP_SIZE,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_MEMORY_OBJECT_MEMORY_ENTRY,
-	KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_FIXED,
-	KDBG_TRIAGE_VM_SANITIZE_VM_ALLOCATE_ANYWHERE,
-	KDBG_TRIAGE_VM_SANITIZE_VM_DEALLOCATE,
-	KDBG_TRIAGE_VM_SANITIZE_MUNMAP,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_REMAP,
-	KDBG_TRIAGE_VM_SANITIZE_MMAP,
-	KDBG_TRIAGE_VM_SANITIZE_MAP_WITH_LINKING_NP,
-	KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ,
-	KDBG_TRIAGE_VM_SANITIZE_ENTER_MEM_OBJ_CTL,
-	KDBG_TRIAGE_VM_SANITIZE_MREMAP_ENCRYPTED,
-	KDBG_TRIAGE_VM_SANITIZE_VM_WIRE_USER,
-	KDBG_TRIAGE_VM_SANITIZE_VM_UNWIRE_USER,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WIRE,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_UNWIRE,
-	KDBG_TRIAGE_VM_SANITIZE_VSLOCK,
-	KDBG_TRIAGE_VM_SANITIZE_VSUNLOCK,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPY_OVERWRITE,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_COPYIN,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_READ_USER,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_WRITE_USER,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_VM_INHERIT,
-	KDBG_TRIAGE_VM_SANITIZE_VM_INHERIT,
-	KDBG_TRIAGE_VM_SANITIZE_VM32_INHERIT,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_INHERIT,
-	KDBG_TRIAGE_VM_SANITIZE_MINHERIT,
-	KDBG_TRIAGE_VM_SANITIZE_MACH_VM_PROTECT,
-	KDBG_TRIAGE_VM_SANITIZE_VM_PROTECT,
-	KDBG_TRIAGE_VM_SANITIZE_VM32_PROTECT,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PROTECT,
-	KDBG_TRIAGE_VM_SANITIZE_MPROTECT,
-	KDBG_TRIAGE_VM_SANITIZE_USERACC,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MSYNC,
-	KDBG_TRIAGE_VM_SANITIZE_MSYNC,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_MACHINE_ATTRIBUTE,
-	KDBG_TRIAGE_VM_SANITIZE_MINCORE,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_INFO,
-	KDBG_TRIAGE_VM_SANITIZE_VM_MAP_PAGE_RANGE_QUERY,
-	KDBG_TRIAGE_VM_SANITIZE_TEST,
-
-	KDBG_TRIAGE_VM_SANITIZE_MAX
-};
-#define VM_SANITIZE_MAX_TRIAGE_STRINGS (KDBG_TRIAGE_VM_SANITIZE_MAX)
-
-/****** VM API Sanitization Codes End ******/
+/****** Dynamic ktriage End ******/
 
 /* please update KDBG_TRIAGE_SUBSYS_MAX when adding a new subsystem */
 

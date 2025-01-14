@@ -400,7 +400,8 @@ again:
 	if (VATTR_IS_ACTIVE(vap, va_dataprotect_flags)) {
 		if ((authvp != NULLVP)
 		    && !ISSET(vap->va_dataprotect_flags, VA_DP_AUTHENTICATE)) {
-			return EINVAL;
+			error = EINVAL;
+			goto out;
 		}
 		// If raw encrypted mode is requested, handle that here
 		if (ISSET(vap->va_dataprotect_flags, VA_DP_RAWENCRYPTED)) {
@@ -412,6 +413,11 @@ again:
 		error = EINVAL;
 		goto out;
 	}
+
+	/*
+	 * We only call nameidone when exiting the function because we may
+	 * end up needing the pathname buffer in the component structure.
+	 */
 
 	/*
 	 * O_CREAT
@@ -471,10 +477,7 @@ continue_create_lookup:
 			dvp = ndp->ni_dvp;
 			vp = ndp->ni_vp;
 
-			/*
-			 * Detected a node that the filesystem couldn't handle.  Don't call
-			 * nameidone() yet, because we need that path buffer.
-			 */
+			/* Detected a node that the filesystem couldn't handle */
 			if (error == EKEEPLOOKING) {
 				if (!batched) {
 					panic("EKEEPLOOKING from a filesystem that doesn't support compound VNOPs?");
@@ -482,7 +485,6 @@ continue_create_lookup:
 				goto continue_create_lookup;
 			}
 
-			nameidone(ndp);
 			if (dvp) {
 				panic("Shouldn't have a dvp here.");
 			}
@@ -495,6 +497,7 @@ continue_create_lookup:
 					if (vp) {
 						vnode_put(vp);
 					}
+					nameidone(ndp);
 					goto again;
 				}
 				goto bad;
@@ -525,7 +528,6 @@ continue_create_lookup:
 					goto continue_create_lookup;
 				}
 			}
-			nameidone(ndp);
 			vnode_put(dvp);
 			ndp->ni_dvp = NULLVP;
 
@@ -600,7 +602,6 @@ continue_create_lookup:
 			}
 		} while (error == EKEEPLOOKING);
 
-		nameidone(ndp);
 		vnode_put(dvp);
 		ndp->ni_dvp = NULLVP;
 
@@ -610,8 +611,7 @@ continue_create_lookup:
 	}
 
 	/*
-	 * By this point, nameidone() is called, dvp iocount is dropped,
-	 * and dvp pointer is cleared.
+	 * By this point, dvp iocount is dropped and dvp pointer is cleared.
 	 */
 	if (ndp->ni_dvp != NULLVP) {
 		panic("Haven't cleaned up adequately in vn_open_auth()");
@@ -702,6 +702,7 @@ continue_create_lookup:
 	}
 
 	*fmodep = fmode;
+	nameidone(ndp);
 	return 0;
 
 bad:
@@ -750,11 +751,13 @@ bad:
 				tsleep(&nretries, PVFS, "vn_open_auth_retry",
 				    MIN((nretries * (hz / 100)), hz));
 			}
+			nameidone(ndp);
 			goto again;
 		}
 	}
 
 out:
+	nameidone(ndp);
 	return error;
 }
 

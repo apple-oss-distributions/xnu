@@ -554,6 +554,11 @@ kernel_bootstrap(void)
 	kernel_bootstrap_log("turnstiles_init");
 	turnstiles_init();
 
+#if PAGE_SLEEP_WITH_INHERITOR
+	kernel_bootstrap_log("page_worker_init");
+	page_worker_init();
+#endif /* PAGE_SLEEP_WITH_INHERITOR */
+
 	kernel_bootstrap_log("mach_init_activity_id");
 	mach_init_activity_id();
 

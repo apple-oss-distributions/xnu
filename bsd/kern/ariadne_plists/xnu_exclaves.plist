@@ -97,7 +97,7 @@
 			<array>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Yield</string>
+					<string>Exclaves Scheduler Yield Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -114,7 +114,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Spawned</string>
+					<string>Exclaves Scheduler Spawned Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -129,7 +129,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Terminated</string>
+					<string>Exclaves Scheduler Terminated Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -144,7 +144,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Wait</string>
+					<string>Exclaves Scheduler Wait Response</string>
 					<key>Type</key>
 					<string>Interval</string>
 					<key>KTraceCodeBegin</key>
@@ -203,7 +203,7 @@
 
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Wake</string>
+					<string>Exclaves Scheduler Wake Response</string>
 					<key>Type</key>
 					<string>Interval</string>
 					<key>KTraceCodeBegin</key>
@@ -266,7 +266,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Suspended</string>
+					<string>Exclaves Scheduler Suspended Response</string>
 					<key>Type</key>
 					<string>Interval</string>
 					<key>KTraceCodeBegin</key>
@@ -290,7 +290,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Resumed</string>
+					<string>Exclaves Scheduler Resumed Response</string>
 					<key>Type</key>
 					<string>Interval</string>
 					<key>KTraceCodeBegin</key>
@@ -305,7 +305,7 @@
 						<string>Queue ID</string>
 						<key>Arg2</key>
 						<string>Epoch</string>
-						<key>Arg2</key>
+						<key>Arg3</key>
 						<string>Target CTID</string>
 					</dict>
 					<key>ArgNamesEnd</key>
@@ -334,7 +334,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Interrupted</string>
+					<string>Exclaves Scheduler Interrupted Response</string>
 					<key>Type</key>
 					<string>Interval</string>
 					<key>KTraceCodeBegin</key>
@@ -349,7 +349,7 @@
 						<string>Queue ID</string>
 						<key>Arg2</key>
 						<string>Epoch</string>
-						<key>Arg2</key>
+						<key>Arg3</key>
 						<string>Target CTID</string>
 					</dict>
 					<key>ArgNamesEnd</key>
@@ -378,7 +378,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Nothing Scheduled</string>
+					<string>Exclaves Scheduler Nothing Scheduled Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -388,7 +388,7 @@
 				</dict>
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler All Exclaves Booted</string>
+					<string>Exclaves Scheduler All Exclaves Booted Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -396,10 +396,9 @@
 					<key>EventsMatchedBy</key>
 					<string>Thread</string>
 				</dict>
-
 				<dict>
 					<key>Name</key>
-					<string>Exclaves Scheduler Early Alloc</string>
+					<string>Exclaves Scheduler Early Alloc Response</string>
 					<key>Type</key>
 					<string>Impulse</string>
 					<key>KTraceCode</key>
@@ -412,9 +411,138 @@
 						<string>Number of Pages</string>
 						<key>Arg2</key>
 						<string>Flags</string>
-						<key>Arg2</key>
+						<key>Arg3</key>
 						<string>Target CTID</string>
 					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Watchdog Panic Complete Response</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b002c</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Panicking Response</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x12b0030</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Resume With Host ID Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0035</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b0036</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Host ID</string>
+						<key>Arg2</key>
+						<string>SCID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Interrupt With Host ID Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0039</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b003a</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Host ID</string>
+						<key>Arg2</key>
+						<string>SCID</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Update Timer Offset Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b003d</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b003e</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Timer</string>
+						<key>Arg2</key>
+						<string>Offset</string>
+					</dict>
+
+					<key>ArgValueLabelsBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<dict>
+							<key>1</key>
+							<string>Absolute</string>
+							<key>2</key>
+							<string>Continuous</string>
+						</dict>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Boot Exclaves Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0041</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b0042</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler PMM Early Alloc Response Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0045</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b0046</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Physical Address</string>
+					</dict>
+				</dict>
+				<dict>
+					<key>Name</key>
+					<string>Exclaves Scheduler Watchdog Panic Request</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x12b0049</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x12b004a</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
 				</dict>
 			</array>
 		</dict>

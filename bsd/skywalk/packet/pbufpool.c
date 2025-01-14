@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2023 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,7 +68,9 @@ pp_alloc_buflet_common(struct kern_pbufpool *pp,
     bool large);
 
 #define KERN_PBUFPOOL_U_HASH_SIZE       64      /* hash table size */
-#define KERN_BUF_MIN_STRIDING_SIZE      256 * 1024
+
+#define KERN_BUF_MIN_STRIDING_SIZE      32 * 1024
+static uint32_t kern_buf_min_striding_size = KERN_BUF_MIN_STRIDING_SIZE;
 
 /*
  * Since the inputs are small (indices to the metadata region), we can use
@@ -221,6 +223,9 @@ pp_init(void)
 	pp_compl_cache = skmem_cache_create("pkt.compl",
 	    sizeof(struct __packet_compl), sizeof(uint64_t),
 	    NULL, NULL, NULL, NULL, NULL, 0);
+
+	PE_parse_boot_argn("sk_pp_min_striding_size", &kern_buf_min_striding_size,
+	    sizeof(kern_buf_min_striding_size));
 
 	return 0;
 }
@@ -439,9 +444,9 @@ pp_regions_params_adjust(struct skmem_region_params srp_array[SKMEM_REGIONS],
 		buf_srp->srp_cflags |= SKMEM_REGION_CR_PERSISTENT;
 	}
 	ASSERT((buf_srp->srp_cflags & SKMEM_REGION_CR_NOMAGAZINES) != 0);
-	if (buf_srp->srp_r_obj_size >= KERN_BUF_MIN_STRIDING_SIZE) {
+	if (buf_srp->srp_r_obj_size >= kern_buf_min_striding_size) {
 		/*
-		 * A buffer size larger than 256K indicates striding is in use, which
+		 * A buffer size larger than 32K indicates striding is in use, which
 		 * means a buffer could be detached from a buflet. In this case, magzine
 		 * layer should be enabled.
 		 */

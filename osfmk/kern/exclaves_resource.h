@@ -60,67 +60,62 @@ __BEGIN_DECLS
  *
  *                 Launch Syscall
  *       +---------+         +--------------+
- *       |Attached | ------->|  Launching   |
+ *       |Attached | ------->|   Running    |
  *       |         |         |              |
  *       +---------+         +--------------+
- *          ^ |                 |       |
- *    Spawn | |proc_exit   Exit |       |   Start IPC
- *          | |                 |       |  to Conclave Manager
- *          | v                 v       v
- *      +---------+   +-----------+   +----------+
- * *--> |  None   |   |    Stop   |   | Launched |
- *      |         |   | Requested |   |          |
- *      +---------+   +-----------+   +----------+
+ *          ^ |                 |       ^
+ *    Spawn | |proc_exit        |       |
+ *          | |                 |       |
+ *          | v                 |       |
+ *      +---------+    Suspend  |       | Unsuspend
+ * *--> |  None   |     IPC to  |       |   IPC to
+ *      |         |    Conclave |       | Conclave
+ *      +---------+    Manager  |       | Manager
  *           ^                  |       |
- *  proc_exit|          Launch  |       |  Exit
- *           |        Completion|       |
- *           |                  v       v
+ *  proc_exit|                  |       |
+ *           |                  |       |
+ *           |                  v       |
  *         +---------+       +------------+
- *         | Stopped |<------|  Stopping  |
+ *         | Stopped |<------|  Suspended |
  *         |         |       |            |
  *         +---------+       +------------+
  *                    Stop IPC
  *                   to Conclave Manager
  */
-typedef enum  {
+typedef enum {
 	CONCLAVE_S_NONE = 0,
-	CONCLAVE_S_ATTACHED,
-	CONCLAVE_S_LAUNCHING,
-	CONCLAVE_S_LAUNCHED,
-	CONCLAVE_S_STOP_REQUESTED,
-	CONCLAVE_S_STOPPING,
-	CONCLAVE_S_STOPPED,
+	CONCLAVE_S_ATTACHED = 0x1,
+	CONCLAVE_S_RUNNING = 0x2,
+	CONCLAVE_S_STOPPED = 0x3,
+	CONCLAVE_S_SUSPENDED = 0x4,
 } conclave_state_t;
 
+typedef enum __attribute__((flag_enum)) {
+	CONCLAVE_R_NONE = 0,
+	CONCLAVE_R_LAUNCH_REQUESTED = 0x1,
+	CONCLAVE_R_SUSPEND_REQUESTED = 0x2,
+	CONCLAVE_R_STOP_REQUESTED = 0x4,
+} conclave_request_t;
+
 /* The maximum number of services available in any conclave. */
-#define CONCLAVE_SERVICE_MAX 128
+#define CONCLAVE_SERVICE_MAX 192
 
 typedef struct {
 	conclave_state_t       c_state;
+	conclave_request_t     c_request;
+	bool                   c_active_downcall;
+	bool                   c_active_stopcall;
+	bool                   c_active_detach;
 	tb_client_connection_t c_control;
 	task_t XNU_PTRAUTH_SIGNED_PTR("conclave.task") c_task;
+	thread_t XNU_PTRAUTH_SIGNED_PTR("conclave.thread") c_downcall_thread;
 	bitmap_t               c_service_bitmap[BITMAP_LEN(CONCLAVE_SERVICE_MAX)];
 } conclave_resource_t;
-
-#define EXCLAVES_SHARED_BUFFER_MAX_RANGES 256
-
-typedef struct {
-	char *address;
-	size_t npages;
-} named_buffer_range_t;
-
-typedef struct {
-	size_t nb_size;
-	exclaves_buffer_perm_t nb_perm;
-	size_t nb_nranges;
-	named_buffer_range_t nb_range[EXCLAVES_SHARED_BUFFER_MAX_RANGES];
-} named_buffer_resource_t;
 
 typedef struct {
 	size_t sm_size;
 	exclaves_buffer_perm_t sm_perm;
-	size_t sm_nranges;
-	named_buffer_range_t sm_range[EXCLAVES_SHARED_BUFFER_MAX_RANGES];
+	char *sm_addr;
 	sharedmemorybase_mapping_s sm_mapping;
 	sharedmemorybase_segxnuaccess_s sm_client;
 } shared_memory_resource_t;
@@ -152,7 +147,6 @@ typedef struct exclaves_resource {
 
 	union {
 		conclave_resource_t     r_conclave;
-		named_buffer_resource_t r_named_buffer;
 		sensor_resource_t       r_sensor;
 		exclaves_notification_t r_notification;
 		shared_memory_resource_t r_shared_memory;
@@ -272,201 +266,6 @@ exclaves_resource_from_port_name(ipc_space_t space, mach_port_name_t name,
 extern kern_return_t
 exclaves_resource_create_port_name(exclaves_resource_t *resource, ipc_space_t space,
     mach_port_name_t *name);
-
-
-
-
-/* -------------------------------------------------------------------------- */
-#pragma mark Named Buffers
-
-/*!
- * @function exclaves_named_buffer_map
- *
- * @abstract
- * Map a named buffer resource.
- *
- * @param domain
- * The domain to search.
- *
- * @param name
- * The name of the named buffer resource.
- *
- * @param size
- * Size of named buffer region to map.
- *
- * @param perm
- * The permissions of the named buffer.
- *
- * @param resource
- * Out parameter which holds the resource on success.
- *
- * @return
- * KERN_SUCCESS or an error code.
- *
- * @discussion
- * Returns with a +1 use-count on the resource which must be dropped with
- * exclaves_resource_release().
- */
-extern kern_return_t
-exclaves_named_buffer_map(const char *domain, const char *name, size_t size,
-    exclaves_buffer_perm_t perm, exclaves_resource_t **resource);
-
-/*!
- * @function exclaves_named_buffer_copyin
- *
- * @abstract
- * Copy user data into a named buffer.
- *
- * @param resource
- * Named buffer resource.
- *
- * @param ubuffer
- * Source of data to copy.
- *
- * @param usize1
- * Size of data to copy.
- *
- * @param uoffset1
- * Offset into the named buffer.
- *
- * @param usize2
- * Size of 2nd range of data to copy (can be 0).
- *
- * @param uoffset2
- * Offset of 2nd range into the named buffer.
- *
- * @return
- * KERN_SUCCESS or error code on failure.
- */
-extern kern_return_t
-exclaves_named_buffer_copyin(exclaves_resource_t *resource,
-    user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
-    mach_vm_size_t usize2, mach_vm_size_t uoffset2);
-
-/*!
- * @function exclaves_named_buffer_copyout
- *
- * @abstract
- * Copy user data into a named buffer.
- *
- * @param resource
- * Named buffer resource.
- *
- * @param ubuffer
- * Destination to copy data to.
- *
- * @param usize1
- * Size of data to copy.
- *
- * @param uoffset1
- * Offset into the named buffer.
- *
- * @param usize2
- * Size of 2nd range of data to copy (can be 0).
- *
- * @param uoffset2
- * Offset of 2nd range into the named buffer.
- *
- * @return
- * KERN_SUCCESS or error code on failure.
- */
-extern kern_return_t
-exclaves_named_buffer_copyout(exclaves_resource_t *resource,
-    user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
-    mach_vm_size_t usize2, mach_vm_size_t uoffset2);
-
-
-/*!
- * @function exclaves_named_buffer_io
- *
- * @abstract
- * Perform IO on a named buffer
- *
- * @param resource
- * Named buffer resource.
- *
- * @param offset
- * Offset into the named buffer
- *
- * @param len
- * Size of the IO
- *
- * @param cb
- * A block which is called (potentially) multiple times to perform the IO.
- *
- * @return
- * 0 on success. If cb returns a non-zero value, exclaves_named_buffer_io()
- * immediately returns with that non-zero value.
- */
-extern int
-    exclaves_named_buffer_io(exclaves_resource_t * resource, off_t offset,
-    size_t len, int (^cb)(char *buffer, size_t size));
-
-/* -------------------------------------------------------------------------- */
-#pragma mark Audio buffers
-
-/*!
- * @function exclaves_audio_buffer_map
- *
- * @abstract
- * Map an audio buffer resource.
- *
- * @param domain
- * The domain to search.
- *
- * @param name
- * The name of audio buffer resource.
- *
- * @param size
- * Size of named buffer region to map.
- *
- * @param resource
- * Out parameter which holds the resource on success.
- *
- * @return
- * KERN_SUCCESS or error code on failure.
- *
- * @discussion
- * Returns with a +1 use-count on the resource which must be dropped with
- * exclaves_resource_release().
- */
-extern kern_return_t
-exclaves_audio_buffer_map(const char *domain, const char *name, size_t size,
-    exclaves_resource_t **resource);
-
-/*!
- * @function exclaves_audio_buffer_copyout
- *
- * @abstract
- * Copy user data into a audio buffer.
- *
- * @param resource
- * audio buffer resource.
- *
- * @param ubuffer
- * Destination to copy data to.
- *
- * @param usize1
- * Size of data to copy.
- *
- * @param uoffset1
- * Offset into the audio buffer.
- *
- * @param usize2
- * Size of 2nd range of data to copy (can be 0).
- *
- * @param uoffset2
- * Offset of 2nd range into the audio buffer.
- *
- * @return
- * KERN_SUCCESS or error code on failure.
- */
-extern kern_return_t
-exclaves_audio_buffer_copyout(exclaves_resource_t *resource,
-    user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
-    mach_vm_size_t usize2, mach_vm_size_t uoffset2);
-
-
 
 
 /* -------------------------------------------------------------------------- */
@@ -604,6 +403,36 @@ exclaves_conclave_lookup_resources(exclaves_resource_t *resource,
  */
 extern kern_return_t
 exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt);
+
+/*!
+ * @function exclaves_conclave_suspend
+ *
+ * @abstract
+ * Suspend a conclave. The conclave must be attached.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
+ * @return
+ * KERN_SUCCESS on success, error code otherwise.
+ */
+extern kern_return_t
+exclaves_conclave_suspend(exclaves_resource_t *resource);
+
+/*!
+ * @function exclaves_conclave_resume
+ *
+ * @abstract
+ * Resume a conclave. The conclave must be attached.
+ *
+ * @param resource
+ * Conclave Manager resource.
+ *
+ * @return
+ * KERN_SUCCESS on success, error code otherwise.
+ */
+extern kern_return_t
+exclaves_conclave_resume(exclaves_resource_t *resource);
 
 /*!
  * @function exclaves_conclave_stop_upcall
@@ -901,7 +730,7 @@ exclaves_resource_shared_memory_map(const char *domain, const char *name,
  * Copy user data into a shared memory.
  *
  * @param resource
- * Named buffer resource.
+ * Shared memory resource.
  *
  * @param ubuffer
  * Source of data to copy.
@@ -933,7 +762,7 @@ exclaves_resource_shared_memory_copyin(exclaves_resource_t *resource,
  * Copy user data into a shared memory.
  *
  * @param resource
- * Named buffer resource.
+ * Shared memory resource.
  *
  * @param ubuffer
  * Destination to copy data to.
@@ -958,33 +787,24 @@ exclaves_resource_shared_memory_copyout(exclaves_resource_t *resource,
     user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
     mach_vm_size_t usize2, mach_vm_size_t uoffset2);
 
-
 /*!
- * @function exclaves_resource_shared_memory_io
+ * @function exclaves_resource_shared_memory_get_buffer
  *
  * @abstract
- * Perform IO on a shared memory
+ * Return a pointer to the shared memory buffer. Must already be mapped.
  *
  * @param resource
- * Named buffer resource.
+ * Shared memory resource.
  *
- * @param offset
- * Offset into the shared memory
- *
- * @param len
- * Size of the IO
- *
- * @param cb
- * A block which is called (potentially) multiple times to perform the IO.
+ * @param buffer_len
+ * Returns the length of the returned buffer.
  *
  * @return
- * 0 on success. If cb returns a non-zero value, exclaves_resource_shared_memory_io()
- * immediately returns with that non-zero value.
+ * Pointer to shared memory.
  */
-extern int
-    exclaves_resource_shared_memory_io(exclaves_resource_t * resource, off_t offset,
-    size_t len, int (^cb)(char *buffer, size_t size));
-
+extern char *
+exclaves_resource_shared_memory_get_buffer(exclaves_resource_t *resource,
+    size_t *buffer_len);
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Arbitrated Audio Memory
@@ -1042,13 +862,16 @@ exclaves_resource_audio_memory_map(const char *domain, const char *name, size_t 
  * @param uoffset2
  * Offset of 2nd range into the audio memory.
  *
+ * @param ustatus
+ * Destination to copy status to.
+ *
  * @return
  * KERN_SUCCESS or error code on failure.
  */
 extern kern_return_t
 exclaves_resource_audio_memory_copyout(exclaves_resource_t *resource,
     user_addr_t ubuffer, mach_vm_size_t usize1, mach_vm_size_t uoffset1,
-    mach_vm_size_t usize2, mach_vm_size_t uoffset2);
+    mach_vm_size_t usize2, mach_vm_size_t uoffset2, user_addr_t ustatus);
 
 extern exclaves_resource_t *
 exclaves_resource_lookup_by_name(const char *domain_name, const char *name,

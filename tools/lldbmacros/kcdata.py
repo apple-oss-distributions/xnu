@@ -1642,6 +1642,8 @@ kThreadWaitMappingInProgress    = 0x1a
 kThreadWaitMemoryBlocked        = 0x1b
 kThreadWaitPagingInProgress     = 0x1c
 kThreadWaitPageInThrottle       = 0x1d
+kThreadWaitExclaveCore          = 0x1e
+kThreadWaitExclaveKit           = 0x1f
 
 
 UINT64_MAX = 0xffffffffffffffff
@@ -1815,6 +1817,16 @@ def formatWaitInfo(info, wantHex, portlabels):
             s += "eventlink, signaled by thread %s" % ownerThread
     elif type == kThreadWaitCompressor:
         s += "in compressor segment %x, busy for thread %s" % (context, ownerThread)
+    elif type == kThreadWaitExclaveCore:
+        if owner == 0:
+            s += "exclavecore wait, id 0x%x" % context
+        else:
+            s += "exclavecore wait, id 0x%x, owner thread %s" % (context, ownerThread)
+    elif type == kThreadWaitExclaveKit:
+        if owner == 0:
+            s += "exclavekit wait, id 0x%x" % context
+        else:
+            s += "exclavekit wait, id 0x%x, owner thread %s" % (context, ownerThread)
     elif type == kThreadWaitPageBusy:
         s += f"busy page 0x{context:x}"
     elif type == kThreadWaitPagerInit:
@@ -1893,7 +1905,13 @@ def FindTextLayout(text_layouts, text_layout_id):
 
 def GetExclaveLibs(text_layouts, text_layout_id):
     from operator import itemgetter
-    textlayout = FindTextLayout(text_layouts, text_layout_id)
+    textlayout = text_layouts.get(str(text_layout_id))
+
+    # This fallback is needed to preserve compatibility with kcdata generated before rdar://123838752
+    # FindTextLayout function should be removed in future
+    if not textlayout or textlayout['exclave_textlayout_info']['layout_id'] != text_layout_id:
+        textlayout = FindTextLayout(text_layouts, text_layout_id) 
+
     exclave_libs = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
     exclave_libs.sort(key=itemgetter(1))
     return exclave_libs

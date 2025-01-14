@@ -113,11 +113,18 @@ MIGINCLUDES = ${MIG_UUHDRS} ${MIG_USHDRS}
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
 	shared_region.h \
-	dyld_pager.h
+	dyld_pager.h \
+	${MIG_TYPES} \
+	${MIG_DEFS}
 
 ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
 EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
 else
+# Temporarily install some private defs in both usr/include and usr/local/include.
+# They belong in usr/local/include, but installing them in both locations will allow
+# clients that compile them by full path to switch without lock-step submissions.
+EXTRA_DATAFILES = mach_exc.defs memory_error_notification.defs notify.defs \
+	telemetry_notification.defs
 EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
 endif
 
@@ -181,9 +188,7 @@ DATAFILES = $(sort \
 	vm_statistics.h \
 	vm_sync.h \
 	vm_types.h \
-	${EXTRA_DATAFILES} \
-	${MIG_TYPES} \
-	${MIG_DEFS})
+	${EXTRA_DATAFILES})
 
 KERNELFILES = \
 	mach_interface.h \
@@ -384,9 +389,9 @@ MIG_KSHDRS = \
 MIG_KSSRC = \
 	arcade_register_server.c \
 	clock_server.c \
-	mach_eventlink_server.c \
 	exc_server.c \
 	host_priv_server.c \
+	mach_eventlink_server.c \
 	mach_exc_server.c \
 	mach_host_server.c \
 	mach_notify_server.c \
@@ -421,7 +426,7 @@ MIG_KSSRC = \
 #
 COMP_FILES = ${MIG_KUSRC} ${MIG_KSSRC}
 
-do_build_all:: $(COMP_FILES)
+do_build_all:: $(COMP_FILES) checked
 
 ${COMP_FILES} : ${MIG_TYPES}
 
@@ -444,6 +449,13 @@ ${MIG_KSSRC}: \
 		-server  $*_server.c		\
 		-sheader $*_server.h		\
 		$<
+
+# Empty target for making sure the build doesn't succeed unless
+# VM sanitization adoption has been enforced.
+checked: ${MIG_KSSRC}
+	@$(LOG_MIG) $@
+	$(PYTHON) $(VM_SANITIZE_ADOPTION_CHECK) ${MIG_KSSRC}
+	touch $@
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

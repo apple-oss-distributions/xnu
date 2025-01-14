@@ -245,6 +245,12 @@ struct inpcb {
 	struct inp_necp_attributes inp_necp_attributes;
 	struct necp_inpcb_result inp_policyresult;
 	uuid_t necp_client_uuid;
+
+	uint32_t inp_bind_in_progress_waiters;
+	thread_t inp_bind_in_progress_last_waiter_thread;
+
+	thread_t inp_bind_in_progress_thread;
+
 	necp_client_flow_cb necp_cb;
 	size_t inp_resolver_signature_length;
 	uint8_t *inp_resolver_signature __sized_by(inp_resolver_signature_length);
@@ -926,6 +932,8 @@ extern void inp_set_activity_bitmap(struct inpcb *inp);
 extern void inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *b);
 extern void inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep);
 extern void inp_copy_last_owner(struct socket *so, struct socket *head);
+extern void inp_enter_bind_in_progress(struct socket *so);
+extern void inp_exit_bind_in_progress(struct socket *so);
 #if SKYWALK
 extern void inp_update_netns_flags(struct socket *so);
 #endif /* SKYWALK */

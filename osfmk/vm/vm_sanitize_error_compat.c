@@ -31,6 +31,13 @@
  * Error code rewriting functions to preserve historical error values.
  */
 
+/* avoid includes here; we want these pragmas to also affect included inline functions */
+/* Disabling optimizations makes it impossible to optimize out UBSan checks */
+#if !__OPTIMIZE__
+#pragma clang attribute push (__attribute__((no_sanitize("undefined", \
+        "integer", "unsigned-shift-base", "nullability", "bounds"))), apply_to=function)
+#endif
+
 #include <vm/vm_map_xnu.h>
 #include <vm/vm_sanitize_internal.h>
 
@@ -55,6 +62,14 @@
 #undef KERN_SUCCESS
 #define KERN_SUCCESS DONT_USE_KERN_SUCCESS
 #define VM_SANITIZE_FALLTHROUGH 0
+
+/*
+ * For compatibility reasons, vm_sanitize_err_compat functions deliberately
+ * contain the same checks as the old source code did, which frequently used
+ * unsigned overflow intentionally. Since we want to replicate the same behavior
+ * here, we don't want UBSan to generate checks for these functions.
+ */
+#define NO_SANITIZE_UNSIGNED_OVERFLOW __attribute__((no_sanitize("unsigned-integer-overflow")))
 
 /* Don't rewrite this result or telemeter anything. */
 static inline __result_use_check
@@ -164,7 +179,8 @@ vm_sanitize_err_compat_addr_size_vm_allocate_fixed(
 	kern_return_t           initial_kr,
 	vm_address_t            start,
 	vm_size_t               size,
-	vm_offset_t             pgmask)
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
 {
 	/*
 	 * vm_allocate(VM_FLAGS_FIXED) historically returned
@@ -183,12 +199,14 @@ VM_SANITIZE_DEFINE_CALLER(VM_ALLOCATE_FIXED,
 
 VM_SANITIZE_DEFINE_CALLER(VM_ALLOCATE_ANYWHERE, /* no error compat needed */);
 
+NO_SANITIZE_UNSIGNED_OVERFLOW
 static vm_sanitize_compat_rewrite_t
 vm_sanitize_err_compat_addr_size_vm_deallocate(
 	kern_return_t           initial_kr,
 	vm_address_t            start,
 	vm_size_t               size,
-	vm_offset_t             pgmask)
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
 {
 	/*
 	 * vm_deallocate historically did nothing and
@@ -261,12 +279,14 @@ VM_SANITIZE_DEFINE_CALLER(ENTER_MEM_OBJ_CTL,
 
 /* wire/unwire */
 
+NO_SANITIZE_UNSIGNED_OVERFLOW
 static vm_sanitize_compat_rewrite_t
 vm_sanitize_err_compat_addr_size_vm_wire_user(
 	kern_return_t           initial_kr,
 	vm_address_t            start,
 	vm_size_t               size,
-	vm_offset_t             pgmask)
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
 {
 	/*
 	 * vm_wire historically did nothing and
@@ -297,12 +317,13 @@ vm_sanitize_err_compat_addr_size_vslock(
 	kern_return_t           initial_kr __unused,
 	vm_address_t            start __unused,
 	vm_size_t               size __unused,
-	vm_offset_t             pgmask __unused)
+	vm_offset_t             pgmask __unused,
+	vm_map_t                map_or_null __unused)
 {
 	/*
 	 * vslock and vsunlock historically did nothing
 	 * and returned success for every start/size value.
-	 * We telemeter bogus values and early return success.
+	 * We telemeter unsanitary values and early-return success.
 	 */
 	return vm_sanitize_make_policy_telemeter_and_rewrite_err(VM_ERR_RETURN_NOW);
 }
@@ -323,7 +344,8 @@ vm_sanitize_err_compat_addr_size_vm_map_copyio(
 	kern_return_t           initial_kr,
 	vm_address_t            start,
 	vm_size_t               size,
-	vm_offset_t             pgmask)
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
 {
 	/*
 	 * vm_map_copyin and vm_map_copyout (and functions based on them)
@@ -349,15 +371,279 @@ VM_SANITIZE_DEFINE_CALLER(VM_MAP_WRITE_USER,
 
 /* inherit */
 
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_map_inherit(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * vm_inherit historically did nothing and
+	 * returned success for some invalid input ranges.
+	 * We currently telemeter this case but
+	 * return an error without rewriting it to success.
+	 * If we did rewrite it, we would use VM_ERR_RETURN_NOW to return
+	 * success immediately and bypass the rest of vm_inherit.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask) &&
+	    start + size >= start) {
+		return vm_sanitize_make_policy_telemeter_dont_rewrite_err(VM_ERR_RETURN_NOW);
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_INHERIT,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_map_inherit);
+VM_SANITIZE_DEFINE_CALLER(MINHERIT, /* no error compat needed */);
+
 /* protect */
+
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_protect(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * vm_protect historically returned KERN_INVALID_ADDRESS
+	 * instead of KERN_INVALID_ARGUMENT for some invalid input ranges.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask)) {
+		vm_address_t aligned_start = vm_map_trunc_page(start, pgmask);
+		vm_address_t aligned_end = vm_map_round_page(start + size, pgmask);
+		if (start + size < start) {
+			/* fall through - this was KERN_INVALID_ARGUMENT historically too */
+		} else if (vm_sanitize_range_overflows_allow_zero(aligned_start, aligned_end - aligned_start, pgmask)) {
+			/* fall through - this was KERN_INVALID_ARGUMENT historically too */
+		} else {
+			return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_INVALID_ADDRESS);
+		}
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_PROTECT,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_protect);
+VM_SANITIZE_DEFINE_CALLER(MPROTECT, /* no error compat needed */);
+
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_useracc(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null)
+{
+	/*
+	 * We require the map be passed in from
+	 * VM_SANITIZE_CALLER_USERACC call sites.
+	 */
+	assert(map_or_null);
+
+	/*
+	 * useracc historically returned TRUE (success) for some
+	 * invalid input ranges. We currently telemeter this case but
+	 * return an error without rewriting it.
+	 * If we did rewrite it, we would use VM_ERR_RETURN_NOW to return
+	 * success immediately and bypass the rest of useracc.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask)) {
+		vm_address_t aligned_start = vm_map_trunc_page(start, pgmask);
+		vm_address_t aligned_end = vm_map_round_page(start + size, pgmask);
+		vm_map_entry_t tmp_entry;
+		bool have_entry;
+
+		vm_map_lock(map_or_null);
+		have_entry = vm_map_lookup_entry(map_or_null, aligned_start, &tmp_entry);
+		vm_map_unlock(map_or_null);
+
+		if (vm_sanitize_range_overflows_allow_zero(aligned_start, aligned_end - aligned_start, pgmask) ||
+		    aligned_start < vm_map_min(map_or_null) ||
+		    aligned_end > vm_map_max(map_or_null) ||
+		    aligned_start > aligned_end ||
+		    !have_entry) {
+			/* fall through - these were errors historically too */
+		} else {
+			/* this was a possible success historically */
+			return vm_sanitize_make_policy_telemeter_dont_rewrite_err(VM_ERR_RETURN_NOW);
+		}
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(USERACC,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_useracc);
 
 /* behavior */
 
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_behavior_set(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null)
+{
+	/*
+	 * We require the map be passed in from
+	 * VM_SANITIZE_CALLER_VM_BEHAVIOR_SET call sites.
+	 */
+	assert(map_or_null);
+
+	/*
+	 * vm_behavior_set historically returned KERN_NO_SPACE
+	 * or KERN_INVALID_ADDRESS for some invalid input ranges.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask)) {
+		vm_address_t aligned_start = vm_map_trunc_page(start, pgmask);
+		vm_address_t aligned_end = vm_map_round_page(start + size, pgmask);
+		if (start + size < start) {
+			/* fall through - this was KERN_INVALID_ARGUMENT historically too */
+		} else if (aligned_start > aligned_end ||
+		    aligned_start < vm_map_min(map_or_null) ||
+		    aligned_end > vm_map_max(map_or_null)) {
+			return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_NO_SPACE);
+		} else {
+			return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_INVALID_ADDRESS);
+		}
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_BEHAVIOR_SET,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_behavior_set);
+VM_SANITIZE_DEFINE_CALLER(MADVISE);
+
 /* msync */
+
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_msync(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * vm_msync historically returned KERN_INVALID_ADDRESS
+	 * instead of KERN_INVALID_ARGUMENT.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask) &&
+	    initial_kr == KERN_INVALID_ARGUMENT) {
+		return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_INVALID_ADDRESS);
+	}
+
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_MSYNC,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_msync);
+
+VM_SANITIZE_DEFINE_CALLER(MSYNC);
 
 /* machine attribute */
 
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_machine_attribute(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * vm_machine_attribute historically returned KERN_INVALID_ADDRESS
+	 * instead of KERN_INVALID_ARGUMENT for some invalid input ranges.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask) &&
+	    start + size >= start) {
+		return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_INVALID_ADDRESS);
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_MACHINE_ATTRIBUTE,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_machine_attribute);
+
 /* page info */
+
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_vm_map_page_range_info(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * vm_map_page_range_info (and functions based on it)
+	 * historically returned KERN_INVALID_ADDRESS
+	 * instead of KERN_INVALID_ARGUMENT.
+	 */
+	if (vm_sanitize_range_overflows_allow_zero(start, size, pgmask) &&
+	    initial_kr == KERN_INVALID_ARGUMENT) {
+		return vm_sanitize_make_policy_telemeter_and_rewrite_err(KERN_INVALID_ADDRESS);
+	}
+
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_PAGE_RANGE_INFO,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_vm_map_page_range_info);
+
+/*
+ * mach_vm_page_range_query now returns success in a few size==0 cases that
+ * were historically failures. We do not telemeter or rewrite them.
+ */
+VM_SANITIZE_DEFINE_CALLER(VM_MAP_PAGE_RANGE_QUERY, /* no error compat */);
+
+NO_SANITIZE_UNSIGNED_OVERFLOW
+static vm_sanitize_compat_rewrite_t
+vm_sanitize_err_compat_addr_size_mincore(
+	kern_return_t           initial_kr,
+	vm_address_t            start,
+	vm_size_t               size,
+	vm_offset_t             pgmask,
+	vm_map_t                map_or_null __unused)
+{
+	/*
+	 * mincore historically did nothing and
+	 * returned success for some invalid input ranges.
+	 * We currently telemeter this case but
+	 * return an error without rewriting it to success.
+	 * If we did rewrite it, we would use VM_ERR_RETURN_NOW to return
+	 * success immediately and bypass the rest of vm_wire.
+	 */
+	if (vm_sanitize_range_overflows_strict_zero(start, size, pgmask)) {
+		vm_address_t aligned_start = vm_map_trunc_page(start, pgmask);
+		vm_address_t aligned_end = vm_map_round_page(start + size, pgmask);
+		if (aligned_end == aligned_start) {
+			return vm_sanitize_make_policy_telemeter_dont_rewrite_err(VM_ERR_RETURN_NOW);
+		}
+	}
+	return vm_sanitize_make_policy_dont_rewrite_err(initial_kr);
+}
+
+VM_SANITIZE_DEFINE_CALLER(MINCORE,
+    .err_compat_addr_size = &vm_sanitize_err_compat_addr_size_mincore);
+
+/* single */
+VM_SANITIZE_DEFINE_CALLER(MACH_VM_DEFERRED_RECLAMATION_BUFFER_INIT);
+VM_SANITIZE_DEFINE_CALLER(MACH_VM_RANGE_CREATE);
+VM_SANITIZE_DEFINE_CALLER(SHARED_REGION_MAP_AND_SLIDE_2_NP);
 
 /* test */
 VM_SANITIZE_DEFINE_CALLER(TEST);
+
+#if !__OPTIMIZE__
+#pragma clang attribute pop
+#endif

@@ -657,7 +657,6 @@ machine_thread_matrix_state_dup(thread_t target)
 void
 machine_thread_init(void)
 {
-
 #if HAS_ARM_FEAT_SME
 	if (arm_sme_version()) {
 		sme_svl_b = arm_sme_svl_b();
@@ -1257,6 +1256,13 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 void
 arm_debug_set(arm_debug_state_t *debug_state)
 {
+	// Non-developers should never need to have hardware break/watchpoints
+	// set on their phones.
+	extern bool developer_mode_state(void);
+	if (!developer_mode_state()) {
+		return;
+	}
+
 	if (debug_state) {
 		switch (debug_state->dsh.flavor) {
 		case ARM_DEBUG_STATE32:

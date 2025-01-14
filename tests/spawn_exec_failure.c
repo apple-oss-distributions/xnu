@@ -126,7 +126,10 @@ T_DECL(spawn_exec_double_set_sid, "exec fails upon trying to set SID twice")
 	setup_child_and_wait_for_exit(bad_spawnattr_helper, OS_REASON_EXEC, EXEC_EXIT_REASON_BAD_PSATTR);
 }
 
-T_DECL(spawn_exec_invalid_cs, "exec fails due to invalid code signature")
+T_DECL(spawn_exec_invalid_cs,
+    "exec fails due to invalid code signature",
+    T_META_ENABLED(false /* rdar://133462284 */)
+    )
 {
 	if (!is_cs_enforcement_enabled()) {
 		T_SKIP("cs enforcement is disabled.");

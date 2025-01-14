@@ -176,7 +176,8 @@ vm_allocate_external(
 	return mach_vm_allocate_external(map, addr, size, flags);
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_vm_deallocate_sanitize(
 	vm_map_t                map,
 	mach_vm_offset_ut       start_u,
@@ -185,8 +186,9 @@ mach_vm_deallocate_sanitize(
 	mach_vm_offset_t       *end,
 	mach_vm_size_t         *size)
 {
-	return vm_sanitize_addr_size(start_u, size_u, VM_SANITIZE_CALLER_VM_DEALLOCATE,
-	           map, VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, start,
+	return vm_sanitize_addr_size(start_u, size_u,
+	           VM_SANITIZE_CALLER_VM_DEALLOCATE, map,
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS, start,
 	           end, size);
 }
 
@@ -247,25 +249,22 @@ vm_deallocate(
 kern_return_t
 mach_vm_inherit(
 	vm_map_t                map,
-	mach_vm_offset_t        start,
-	mach_vm_size_t  size,
-	vm_inherit_t            new_inheritance)
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u,
+	vm_inherit_ut           new_inheritance_u)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start) ||
-	    (new_inheritance > VM_INHERIT_LAST_VALID)) {
+	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (size == 0) {
+	if (VM_SANITIZE_UNSAFE_IS_ZERO(size_u)) {
 		return KERN_SUCCESS;
 	}
 
 	return vm_map_inherit(map,
-	           vm_map_trunc_page(start,
-	           VM_MAP_PAGE_MASK(map)),
-	           vm_map_round_page(start + size,
-	           VM_MAP_PAGE_MASK(map)),
-	           new_inheritance);
+	           start_u,
+	           vm_sanitize_compute_ut_end(start_u, size_u),
+	           new_inheritance_u);
 }
 
 /*
@@ -276,25 +275,11 @@ mach_vm_inherit(
 kern_return_t
 vm_inherit(
 	vm_map_t                map,
-	vm_offset_t             start,
-	vm_size_t               size,
-	vm_inherit_t            new_inheritance)
+	vm_offset_ut            start_u,
+	vm_size_ut              size_u,
+	vm_inherit_ut           new_inheritance_u)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start) ||
-	    (new_inheritance > VM_INHERIT_LAST_VALID)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (size == 0) {
-		return KERN_SUCCESS;
-	}
-
-	return vm_map_inherit(map,
-	           vm_map_trunc_page(start,
-	           VM_MAP_PAGE_MASK(map)),
-	           vm_map_round_page(start + size,
-	           VM_MAP_PAGE_MASK(map)),
-	           new_inheritance);
+	return mach_vm_inherit(map, start_u, size_u, new_inheritance_u);
 }
 
 /*
@@ -306,27 +291,24 @@ vm_inherit(
 kern_return_t
 mach_vm_protect(
 	vm_map_t                map,
-	mach_vm_offset_t        start,
-	mach_vm_size_t  size,
+	mach_vm_address_ut      start_u,
+	mach_vm_size_ut         size_u,
 	boolean_t               set_maximum,
-	vm_prot_t               new_protection)
+	vm_prot_ut              new_protection_u)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start) ||
-	    (new_protection & ~(VM_PROT_ALL | VM_PROT_COPY))) {
+	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (size == 0) {
+	if (VM_SANITIZE_UNSAFE_IS_ZERO(size_u)) {
 		return KERN_SUCCESS;
 	}
 
 	return vm_map_protect(map,
-	           vm_map_trunc_page(start,
-	           VM_MAP_PAGE_MASK(map)),
-	           vm_map_round_page(start + size,
-	           VM_MAP_PAGE_MASK(map)),
-	           new_protection,
-	           set_maximum);
+	           start_u,
+	           vm_sanitize_compute_ut_end(start_u, size_u),
+	           set_maximum,
+	           new_protection_u);
 }
 
 /*
@@ -339,31 +321,12 @@ mach_vm_protect(
 kern_return_t
 vm_protect(
 	vm_map_t                map,
-	vm_offset_t             start,
-	vm_size_t               size,
+	vm_offset_ut            start_u,
+	vm_size_ut              size_u,
 	boolean_t               set_maximum,
-	vm_prot_t               new_protection)
+	vm_prot_ut              new_protection_u)
 {
-	if ((map == VM_MAP_NULL) || (start + size < start) ||
-	    (new_protection & ~VM_VALID_VMPROTECT_FLAGS)
-#if defined(__x86_64__)
-	    || ((new_protection & VM_PROT_UEXEC) && !pmap_supported_feature(map->pmap, PMAP_FEAT_UEXEC))
-#endif
-	    ) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (size == 0) {
-		return KERN_SUCCESS;
-	}
-
-	return vm_map_protect(map,
-	           vm_map_trunc_page(start,
-	           VM_MAP_PAGE_MASK(map)),
-	           vm_map_round_page(start + size,
-	           VM_MAP_PAGE_MASK(map)),
-	           new_protection,
-	           set_maximum);
+	return mach_vm_protect(map, start_u, size_u, set_maximum, new_protection_u);
 }
 
 /*
@@ -373,28 +336,25 @@ vm_protect(
  */
 kern_return_t
 mach_vm_machine_attribute(
-	vm_map_t                        map,
-	mach_vm_address_t               addr,
-	mach_vm_size_t          size,
+	vm_map_t                map,
+	mach_vm_address_ut      addr_u,
+	mach_vm_size_ut         size_u,
 	vm_machine_attribute_t  attribute,
-	vm_machine_attribute_val_t* value)              /* IN/OUT */
+	vm_machine_attribute_val_t *value) /* IN/OUT */
 {
-	if ((map == VM_MAP_NULL) || (addr + size < addr)) {
+	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (size == 0) {
+	if (VM_SANITIZE_UNSAFE_IS_ZERO(size_u)) {
 		return KERN_SUCCESS;
 	}
 
-	return vm_map_machine_attribute(
-		map,
-		vm_map_trunc_page(addr,
-		VM_MAP_PAGE_MASK(map)),
-		vm_map_round_page(addr + size,
-		VM_MAP_PAGE_MASK(map)),
-		attribute,
-		value);
+	return vm_map_machine_attribute(map,
+	           addr_u,
+	           vm_sanitize_compute_ut_end(addr_u, size_u),
+	           attribute,
+	           value);
 }
 
 /*
@@ -405,28 +365,13 @@ mach_vm_machine_attribute(
  */
 kern_return_t
 vm_machine_attribute(
-	vm_map_t        map,
-	vm_address_t    addr,
-	vm_size_t       size,
+	vm_map_t                map,
+	vm_address_ut           addr_u,
+	vm_size_ut              size_u,
 	vm_machine_attribute_t  attribute,
-	vm_machine_attribute_val_t* value)              /* IN/OUT */
+	vm_machine_attribute_val_t *value) /* IN/OUT */
 {
-	if ((map == VM_MAP_NULL) || (addr + size < addr)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (size == 0) {
-		return KERN_SUCCESS;
-	}
-
-	return vm_map_machine_attribute(
-		map,
-		vm_map_trunc_page(addr,
-		VM_MAP_PAGE_MASK(map)),
-		vm_map_round_page(addr + size,
-		VM_MAP_PAGE_MASK(map)),
-		attribute,
-		value);
+	return mach_vm_machine_attribute(map, addr_u, size_u, attribute, value);
 }
 
 /*
@@ -447,7 +392,7 @@ mach_vm_read(
 	vm_map_t                map,
 	mach_vm_address_ut      addr,
 	mach_vm_size_ut         size,
-	pointer_t              *data,
+	pointer_ut             *data,
 	mach_msg_type_number_t *data_size)
 {
 	kern_return_t   error;
@@ -468,8 +413,10 @@ mach_vm_read(
 	error = vm_map_copyin(map, addr, size, FALSE, &ipc_address);
 
 	if (KERN_SUCCESS == error) {
-		*data = (pointer_t) ipc_address;
-		*data_size = (mach_msg_type_number_t)VM_SANITIZE_UNSAFE_UNWRAP(size);
+		VM_SANITIZE_UT_SET(*data, (pointer_t) ipc_address);
+		/* On success we know size was validated by vm_map_copyin. */
+		*data_size =
+		    (mach_msg_type_number_t)VM_SANITIZE_UNSAFE_UNWRAP(size);
 	}
 	return error;
 }
@@ -489,7 +436,7 @@ vm_read(
 	vm_map_t                map,
 	vm_address_ut           addr,
 	vm_size_ut              size,
-	pointer_t              *data,
+	pointer_ut             *data,
 	mach_msg_type_number_t *data_size)
 {
 	return mach_vm_read(map, addr, size, data, data_size);
@@ -692,15 +639,21 @@ kern_return_t
 mach_vm_write(
 	vm_map_t                map,
 	mach_vm_address_ut      address,
-	pointer_t               data,
+	pointer_ut              data_u,
 	mach_msg_type_number_t  size)
 {
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/*
+	 * data is created by the kernel's MIG server from a userspace buffer,
+	 * so it is safe to unwrap.
+	 */
+	vm_map_copy_t data = (vm_map_copy_t) VM_SANITIZE_UNSAFE_UNWRAP(data_u);
+
 	return vm_map_copy_overwrite(map, address,
-	           (vm_map_copy_t) data, size, FALSE /* interruptible XXX */);
+	           data, size, FALSE /* interruptible XXX */);
 }
 
 /*
@@ -717,7 +670,7 @@ kern_return_t
 vm_write(
 	vm_map_t                map,
 	vm_address_ut           address,
-	pointer_t               data,
+	pointer_ut              data,
 	mach_msg_type_number_t  size)
 {
 	return mach_vm_write(map, address, data, size);
@@ -852,7 +805,8 @@ vm_map_external(
 	           cur_protection, max_protection, inheritance);
 }
 
-static inline kern_return_t
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
 mach_vm_remap_new_external_sanitize(
 	vm_map_t                target_map,
 	vm_prot_ut              cur_protection_u,
@@ -982,6 +936,7 @@ mach_vm_remap_external(
 
 	*cur_protection = vm_sanitize_wrap_prot(VM_PROT_NONE);
 	*max_protection = vm_sanitize_wrap_prot(VM_PROT_NONE);
+	vmk_flags.vmkf_remap_legacy_mode = true;
 
 	/* range_id is set by vm_map_remap */
 	return vm_map_remap(target_map,
@@ -1091,7 +1046,7 @@ mach_vm_wire_external(
 		return KERN_INVALID_TASK;
 	}
 
-	end = vm_sanitize_compute_unsafe_end(start, size);
+	end = vm_sanitize_compute_ut_end(start, size);
 	if (VM_SANITIZE_UNSAFE_IS_ZERO(access)) {
 		rc = vm_map_unwire_impl(map, start, end, true,
 		    VM_SANITIZE_CALLER_VM_UNWIRE_USER);
@@ -1156,16 +1111,19 @@ vm_wire(
 kern_return_t
 mach_vm_msync(
 	vm_map_t                map,
-	mach_vm_address_t       address,
-	mach_vm_size_t  size,
+	mach_vm_address_ut      address_u,
+	mach_vm_size_ut         size_u,
 	vm_sync_t               sync_flags)
 {
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_TASK;
 	}
 
-	return vm_map_msync(map, (vm_map_address_t)address,
-	           (vm_map_size_t)size, sync_flags);
+	if (VM_SANITIZE_UNSAFE_IS_ZERO(size_u)) {
+		return KERN_SUCCESS;
+	}
+
+	return vm_map_msync(map, address_u, size_u, sync_flags);
 }
 
 /*
@@ -1205,16 +1163,11 @@ mach_vm_msync(
 kern_return_t
 vm_msync(
 	vm_map_t        map,
-	vm_address_t    address,
-	vm_size_t       size,
+	vm_address_ut   address_u,
+	vm_size_ut      size_u,
 	vm_sync_t       sync_flags)
 {
-	if (map == VM_MAP_NULL) {
-		return KERN_INVALID_TASK;
-	}
-
-	return vm_map_msync(map, (vm_map_address_t)address,
-	           (vm_map_size_t)size, sync_flags);
+	return mach_vm_msync(map, address_u, size_u, sync_flags);
 }
 
 
@@ -1250,33 +1203,29 @@ vm_toggle_entry_reuse(int toggle, int *old_value)
 	return KERN_SUCCESS;
 }
 
-/*
- *	mach_vm_behavior_set
- *
- *	Sets the paging behavior attribute for the  specified range
- *	in the specified map.
- *
- *	This routine will fail with KERN_INVALID_ADDRESS if any address
- *	in [start,start+size) is not a valid allocated memory region.
- */
+
+static __attribute__((always_inline, warn_unused_result))
 kern_return_t
-mach_vm_behavior_set(
+mach_vm_behavior_set_sanitize(
 	vm_map_t                map,
-	mach_vm_offset_t        start,
-	mach_vm_size_t          size,
-	vm_behavior_t           new_behavior)
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u,
+	vm_behavior_ut          new_behavior_u,
+	mach_vm_offset_t       *start,
+	mach_vm_offset_t       *end,
+	mach_vm_size_t         *size,
+	vm_behavior_t          *new_behavior)
 {
-	vm_map_offset_t align_mask;
+	mach_vm_offset_t align_mask;
+	kern_return_t    kr;
 
-	if ((map == VM_MAP_NULL) || (start + size < start)) {
-		return KERN_INVALID_ARGUMENT;
+	kr = vm_sanitize_behavior(new_behavior_u, VM_SANITIZE_CALLER_VM_BEHAVIOR_SET, new_behavior);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
 	}
 
-	if (size == 0) {
-		return KERN_SUCCESS;
-	}
-
-	switch (new_behavior) {
+	/* Choose alignment of addr/size based on the behavior being set. */
+	switch (*new_behavior) {
 	case VM_BEHAVIOR_REUSABLE:
 	case VM_BEHAVIOR_REUSE:
 	case VM_BEHAVIOR_CAN_REUSE:
@@ -1293,9 +1242,52 @@ mach_vm_behavior_set(
 		break;
 	}
 
+	kr = vm_sanitize_addr_size(start_u, size_u, VM_SANITIZE_CALLER_VM_BEHAVIOR_SET,
+	    align_mask, map,
+	    VM_SANITIZE_FLAGS_SIZE_ZERO_SUCCEEDS,
+	    start, end, size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return kr;
+	}
+
+	return KERN_SUCCESS;
+}
+
+/*
+ *	mach_vm_behavior_set
+ *
+ *	Sets the paging behavior attribute for the  specified range
+ *	in the specified map.
+ *
+ *	This routine will fail with KERN_INVALID_ADDRESS if any address
+ *	in [start,start+size) is not a valid allocated memory region.
+ */
+kern_return_t
+mach_vm_behavior_set(
+	vm_map_t                map,
+	mach_vm_offset_ut       start_u,
+	mach_vm_size_ut         size_u,
+	vm_behavior_ut          new_behavior_u)
+{
+	kern_return_t    kr;
+	mach_vm_offset_t start, end;
+	mach_vm_size_t   size;
+	vm_behavior_t    new_behavior;
+
+	if (map == VM_MAP_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	kr = mach_vm_behavior_set_sanitize(map,
+	    start_u, size_u, new_behavior_u,
+	    &start, &end, &size, &new_behavior);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr);
+	}
+
 	return vm_map_behavior_set(map,
-	           vm_map_trunc_page(start, align_mask),
-	           vm_map_round_page(start + size, align_mask),
+	           start,
+	           end,
 	           new_behavior);
 }
 
@@ -1315,17 +1307,13 @@ mach_vm_behavior_set(
 kern_return_t
 vm_behavior_set(
 	vm_map_t                map,
-	vm_offset_t             start,
-	vm_size_t               size,
-	vm_behavior_t           new_behavior)
+	vm_offset_ut            start,
+	vm_size_ut              size,
+	vm_behavior_ut          new_behavior)
 {
-	if (start + size < start) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
 	return mach_vm_behavior_set(map,
-	           (mach_vm_offset_t) start,
-	           (mach_vm_size_t) size,
+	           start,
+	           size,
 	           new_behavior);
 }
 
@@ -1345,37 +1333,38 @@ vm_behavior_set(
 
 kern_return_t
 mach_vm_region(
-	vm_map_t                 map,
-	mach_vm_offset_t        *address,               /* IN/OUT */
-	mach_vm_size_t          *size,                  /* OUT */
-	vm_region_flavor_t       flavor,                /* IN */
-	vm_region_info_t         info,                  /* OUT */
-	mach_msg_type_number_t  *count,                 /* IN/OUT */
-	mach_port_t             *object_name)           /* OUT */
+	vm_map_t                map,
+	mach_vm_offset_ut      *address_u,      /* IN/OUT */
+	mach_vm_size_ut        *size_u,         /* OUT */
+	vm_region_flavor_t      flavor,         /* IN */
+	vm_region_info_t        info,           /* OUT */
+	mach_msg_type_number_t *count,          /* IN/OUT */
+	mach_port_t            *object_name)    /* OUT */
 {
-	vm_map_offset_t         map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
-
 	if (VM_MAP_NULL == map) {
 		return KERN_INVALID_ARGUMENT;
 	}
-
-	map_addr = (vm_map_offset_t)*address;
-	map_size = (vm_map_size_t)*size;
 
 	/* legacy conversion */
 	if (VM_REGION_BASIC_INFO == flavor) {
 		flavor = VM_REGION_BASIC_INFO_64;
 	}
 
-	kr = vm_map_region(map,
-	    &map_addr, &map_size,
-	    flavor, info, count,
-	    object_name);
+	return vm_map_region(map, address_u, size_u, flavor, info, count,
+	           object_name);
+}
 
-	*address = map_addr;
-	*size = map_size;
+static inline kern_return_t
+vm_region_get_kern_return(
+	kern_return_t           kr,
+	vm_offset_ut            addr_u,
+	vm_size_ut              size_u)
+{
+	vm_offset_ut end_u = vm_sanitize_compute_ut_end(addr_u, size_u);
+
+	if (KERN_SUCCESS == kr && VM_SANITIZE_UNSAFE_UNWRAP(end_u) > VM_MAX_ADDRESS) {
+		return KERN_INVALID_ADDRESS;
+	}
 	return kr;
 }
 
@@ -1395,77 +1384,42 @@ mach_vm_region(
 
 kern_return_t
 vm_region_64(
-	vm_map_t                 map,
-	vm_offset_t             *address,               /* IN/OUT */
-	vm_size_t               *size,                  /* OUT */
-	vm_region_flavor_t       flavor,                /* IN */
-	vm_region_info_t         info,                  /* OUT */
-	mach_msg_type_number_t  *count,                 /* IN/OUT */
-	mach_port_t             *object_name)           /* OUT */
+	vm_map_t                map,
+	vm_offset_ut           *address_u,      /* IN/OUT */
+	vm_size_ut             *size_u,         /* OUT */
+	vm_region_flavor_t      flavor,         /* IN */
+	vm_region_info_t        info,           /* OUT */
+	mach_msg_type_number_t *count,          /* IN/OUT */
+	mach_port_t            *object_name)    /* OUT */
 {
-	vm_map_offset_t         map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
+	kern_return_t kr;
 
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	map_addr = (vm_map_offset_t)*address;
-	map_size = (vm_map_size_t)*size;
-
-	/* legacy conversion */
-	if (VM_REGION_BASIC_INFO == flavor) {
-		flavor = VM_REGION_BASIC_INFO_64;
-	}
-
-	kr = vm_map_region(map,
-	    &map_addr, &map_size,
-	    flavor, info, count,
+	kr = mach_vm_region(map, address_u, size_u, flavor, info, count,
 	    object_name);
 
-	*address = CAST_DOWN(vm_offset_t, map_addr);
-	*size = CAST_DOWN(vm_size_t, map_size);
-
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM_MAX_ADDRESS) {
-		return KERN_INVALID_ADDRESS;
-	}
-	return kr;
+	return vm_region_get_kern_return(kr, *address_u, *size_u);
 }
 
 kern_return_t
 vm_region(
-	vm_map_t                        map,
-	vm_address_t                    *address,       /* IN/OUT */
-	vm_size_t                       *size,          /* OUT */
-	vm_region_flavor_t              flavor, /* IN */
-	vm_region_info_t                info,           /* OUT */
-	mach_msg_type_number_t  *count, /* IN/OUT */
-	mach_port_t                     *object_name)   /* OUT */
+	vm_map_t                map,
+	vm_address_ut          *address_u,      /* IN/OUT */
+	vm_size_ut             *size_u,         /* OUT */
+	vm_region_flavor_t      flavor,         /* IN */
+	vm_region_info_t        info,           /* OUT */
+	mach_msg_type_number_t *count,          /* IN/OUT */
+	mach_port_t            *object_name)    /* OUT */
 {
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
+	kern_return_t kr;
 
 	if (VM_MAP_NULL == map) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
-
-	kr = vm_map_region(map,
-	    &map_addr, &map_size,
-	    flavor, info, count,
+	kr = vm_map_region(map, address_u, size_u, flavor, info, count,
 	    object_name);
 
-	*address = CAST_DOWN(vm_address_t, map_addr);
-	*size = CAST_DOWN(vm_size_t, map_size);
-
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM_MAX_ADDRESS) {
-		return KERN_INVALID_ADDRESS;
-	}
-	return kr;
+	return vm_region_get_kern_return(kr, *address_u, *size_u);
 }
 
 /*
@@ -1475,35 +1429,19 @@ vm_region(
  */
 kern_return_t
 mach_vm_region_recurse(
-	vm_map_t                        map,
-	mach_vm_address_t               *address,
-	mach_vm_size_t          *size,
-	uint32_t                        *depth,
-	vm_region_recurse_info_t        info,
-	mach_msg_type_number_t  *infoCnt)
+	vm_map_t                map,
+	mach_vm_address_ut     *address_u,
+	mach_vm_size_ut        *size_u,
+	uint32_t               *depth,
+	vm_region_recurse_info_t info,
+	mach_msg_type_number_t *infoCnt)
 {
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
-
 	if (VM_MAP_NULL == map) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
-
-	kr = vm_map_region_recurse_64(
-		map,
-		&map_addr,
-		&map_size,
-		depth,
-		(vm_region_submap_info_64_t)info,
-		infoCnt);
-
-	*address = map_addr;
-	*size = map_size;
-	return kr;
+	return vm_map_region_recurse_64(map, address_u, size_u, depth,
+	           (vm_region_submap_info_64_t)info, infoCnt);
 }
 
 /*
@@ -1513,67 +1451,42 @@ mach_vm_region_recurse(
  */
 kern_return_t
 vm_region_recurse_64(
-	vm_map_t                        map,
-	vm_address_t                    *address,
-	vm_size_t                       *size,
-	uint32_t                        *depth,
-	vm_region_recurse_info_64_t     info,
-	mach_msg_type_number_t  *infoCnt)
+	vm_map_t                map,
+	vm_address_ut          *address_u,
+	vm_size_ut             *size_u,
+	uint32_t               *depth,
+	vm_region_recurse_info_64_t info,
+	mach_msg_type_number_t *infoCnt)
 {
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
-	kern_return_t           kr;
+	kern_return_t kr;
 
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
+	kr = mach_vm_region_recurse(map, address_u, size_u, depth,
+	    (vm_region_recurse_info_t)info, infoCnt);
 
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
-
-	kr = vm_map_region_recurse_64(
-		map,
-		&map_addr,
-		&map_size,
-		depth,
-		(vm_region_submap_info_64_t)info,
-		infoCnt);
-
-	*address = CAST_DOWN(vm_address_t, map_addr);
-	*size = CAST_DOWN(vm_size_t, map_size);
-
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM_MAX_ADDRESS) {
-		return KERN_INVALID_ADDRESS;
-	}
-	return kr;
+	return vm_region_get_kern_return(kr, *address_u, *size_u);
 }
 
 kern_return_t
 vm_region_recurse(
-	vm_map_t                        map,
-	vm_offset_t             *address,       /* IN/OUT */
-	vm_size_t                       *size,          /* OUT */
-	natural_t                       *depth, /* IN/OUT */
-	vm_region_recurse_info_t        info32, /* IN/OUT */
-	mach_msg_type_number_t  *infoCnt)       /* IN/OUT */
+	vm_map_t                map,
+	vm_offset_ut           *address_u,      /* IN/OUT */
+	vm_size_ut             *size_u,         /* OUT */
+	natural_t              *depth,          /* IN/OUT */
+	vm_region_recurse_info_t info32,        /* IN/OUT */
+	mach_msg_type_number_t *infoCnt)        /* IN/OUT */
 {
 	vm_region_submap_info_data_64_t info64;
 	vm_region_submap_info_t info;
-	vm_map_address_t        map_addr;
-	vm_map_size_t           map_size;
 	kern_return_t           kr;
 
 	if (VM_MAP_NULL == map || *infoCnt < VM_REGION_SUBMAP_INFO_COUNT) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-
-	map_addr = (vm_map_address_t)*address;
-	map_size = (vm_map_size_t)*size;
 	info = (vm_region_submap_info_t)info32;
 	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT_64;
 
-	kr = vm_map_region_recurse_64(map, &map_addr, &map_size,
+	kr = vm_map_region_recurse_64(map, address_u, size_u,
 	    depth, &info64, infoCnt);
 
 	info->protection = info64.protection;
@@ -1594,44 +1507,42 @@ vm_region_recurse(
 	info->object_id = info64.object_id;
 	info->user_wired_count = info64.user_wired_count;
 
-	*address = CAST_DOWN(vm_address_t, map_addr);
-	*size = CAST_DOWN(vm_size_t, map_size);
 	*infoCnt = VM_REGION_SUBMAP_INFO_COUNT;
 
-	if (KERN_SUCCESS == kr && map_addr + map_size > VM_MAX_ADDRESS) {
-		return KERN_INVALID_ADDRESS;
-	}
-	return kr;
+	return vm_region_get_kern_return(kr, *address_u, *size_u);
 }
 
 kern_return_t
 mach_vm_purgable_control(
 	vm_map_t                map,
-	mach_vm_offset_t        address,
+	mach_vm_offset_ut       address_u,
 	vm_purgable_t           control,
-	int                     *state)
+	int                    *state)
 {
 	if (VM_MAP_NULL == map) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (control == VM_PURGABLE_SET_STATE_FROM_KERNEL) {
+	switch (control) {
+	case VM_PURGABLE_SET_STATE:
+	case VM_PURGABLE_GET_STATE:
+	case VM_PURGABLE_PURGE_ALL:
+		break;
+	case VM_PURGABLE_SET_STATE_FROM_KERNEL:
+	default:
 		/* not allowed from user-space */
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return vm_map_purgable_control(map,
-	           vm_map_trunc_page(address, VM_MAP_PAGE_MASK(map)),
-	           control,
-	           state);
+	return vm_map_purgable_control(map, address_u, control, state);
 }
 
 kern_return_t
 mach_vm_purgable_control_external(
 	mach_port_t             target_tport,
-	mach_vm_offset_t        address,
+	mach_vm_offset_ut       address_u,
 	vm_purgable_t           control,
-	int                     *state)
+	int                    *state)
 {
 	vm_map_t map;
 	kern_return_t kr;
@@ -1642,112 +1553,131 @@ mach_vm_purgable_control_external(
 		map = convert_port_to_map(target_tport);
 	}
 
-	kr = mach_vm_purgable_control(map, address, control, state);
+	kr = mach_vm_purgable_control(map, address_u, control, state);
 	vm_map_deallocate(map);
 
 	return kr;
-}
-
-kern_return_t
-vm_purgable_control(
-	vm_map_t                map,
-	vm_offset_t             address,
-	vm_purgable_t           control,
-	int                     *state)
-{
-	if (VM_MAP_NULL == map) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (control == VM_PURGABLE_SET_STATE_FROM_KERNEL) {
-		/* not allowed from user-space */
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	return vm_map_purgable_control(map,
-	           vm_map_trunc_page(address, VM_MAP_PAGE_MASK(map)),
-	           control,
-	           state);
 }
 
 kern_return_t
 vm_purgable_control_external(
 	mach_port_t             target_tport,
-	vm_offset_t             address,
+	vm_offset_ut            address,
 	vm_purgable_t           control,
 	int                     *state)
 {
-	vm_map_t map;
-	kern_return_t kr;
-
-	if (control == VM_PURGABLE_GET_STATE) {
-		map = convert_port_to_map_read(target_tport);
-	} else {
-		map = convert_port_to_map(target_tport);
-	}
-
-	kr = vm_purgable_control(map, address, control, state);
-	vm_map_deallocate(map);
-
-	return kr;
+	return mach_vm_purgable_control_external(target_tport, address, control, state);
 }
 
 
 kern_return_t
 mach_vm_page_query(
 	vm_map_t                map,
-	mach_vm_offset_t        offset,
-	int                     *disposition,
-	int                     *ref_count)
+	mach_vm_offset_ut       offset_u,
+	int                    *disposition,
+	int                    *ref_count)
 {
+	kern_return_t                   kr;
+	vm_page_info_basic_data_t       info;
+	mach_msg_type_number_t          count;
+
 	if (VM_MAP_NULL == map) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return vm_map_page_query_internal(
-		map,
-		vm_map_trunc_page(offset, PAGE_MASK),
-		disposition, ref_count);
+	count = VM_PAGE_INFO_BASIC_COUNT;
+	kr = vm_map_page_info(map, offset_u, VM_PAGE_INFO_BASIC,
+	    (vm_page_info_t) &info, &count);
+	if (kr == KERN_SUCCESS) {
+		*disposition = info.disposition;
+		*ref_count = info.ref_count;
+	} else {
+		*disposition = 0;
+		*ref_count = 0;
+	}
+
+	return kr;
 }
 
 kern_return_t
 vm_map_page_query(
 	vm_map_t                map,
-	vm_offset_t             offset,
-	int                     *disposition,
-	int                     *ref_count)
+	vm_offset_ut            offset,
+	int                    *disposition,
+	int                    *ref_count)
 {
-	if (VM_MAP_NULL == map) {
+	return mach_vm_page_query(map, offset, disposition, ref_count);
+}
+
+static __attribute__((always_inline, warn_unused_result))
+kern_return_t
+mach_vm_page_range_query_sanitize(
+	mach_vm_offset_ut       address_u,
+	mach_vm_size_ut         size_u,
+	int                     effective_page_mask,
+	mach_vm_address_ut      dispositions_addr_u,
+	mach_vm_size_ut         dispositions_count_u,
+	mach_vm_offset_t       *start,
+	mach_vm_size_t         *size,
+	mach_vm_address_t      *dispositions_addr,
+	mach_vm_size_t         *disp_buf_req_size)
+{
+	mach_vm_offset_t  end;
+	mach_vm_size_t    dispositions_count;
+	mach_vm_address_t discard;
+
+	/*
+	 * There are no alignment requirements on
+	 * dispositions_addr_u/dispositions_count_u, those are derived into
+	 * inputs into copyout. So it is safe to unwrap them. We do want to
+	 * check that the range starting at dispositions_addr_u and ending
+	 * after dispositions_count_u integers is sound (i.e., doesn't wrap
+	 * around due to integer overflow).
+	 */
+	*dispositions_addr = VM_SANITIZE_UNSAFE_UNWRAP(dispositions_addr_u);
+	dispositions_count = VM_SANITIZE_UNSAFE_UNWRAP(dispositions_count_u);
+	if (
+		os_mul_overflow(
+			dispositions_count,
+			sizeof(int),
+			disp_buf_req_size) ||
+		os_add_overflow(
+			*dispositions_addr,
+			*disp_buf_req_size,
+			&discard)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return vm_map_page_query_internal(
-		map,
-		vm_map_trunc_page(offset, PAGE_MASK),
-		disposition, ref_count);
+	return vm_sanitize_addr_size(address_u, size_u,
+	           VM_SANITIZE_CALLER_VM_MAP_PAGE_RANGE_QUERY,
+	           effective_page_mask,
+	           VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, start,
+	           &end, size);
 }
 
 kern_return_t
 mach_vm_page_range_query(
 	vm_map_t                map,
-	mach_vm_offset_t        address,
-	mach_vm_size_t          size,
-	mach_vm_address_t       dispositions_addr,
-	mach_vm_size_t          *dispositions_count)
+	mach_vm_offset_ut       address_u,
+	mach_vm_size_ut         size_u,
+	mach_vm_address_ut      dispositions_addr_u,
+	mach_vm_size_ut        *dispositions_count_u)
 {
-	kern_return_t           kr = KERN_SUCCESS;
+	kern_return_t           kr;
 	int                     num_pages = 0, i = 0;
 	mach_vm_size_t          curr_sz = 0, copy_sz = 0;
 	mach_vm_size_t          disp_buf_req_size = 0, disp_buf_total_size = 0;
 	mach_msg_type_number_t  count = 0;
+	mach_vm_address_t       dispositions_addr;
 
 	void                    *info = NULL;
 	void                    *local_disp = NULL;
 	vm_map_size_t           info_size = 0, local_disp_size = 0;
-	mach_vm_offset_t        start = 0, end = 0;
+	mach_vm_offset_t        start = 0;
+	vm_map_size_t           size;
 	int                     effective_page_shift, effective_page_size, effective_page_mask;
 
-	if (map == VM_MAP_NULL || dispositions_count == NULL) {
+	if (map == VM_MAP_NULL || dispositions_count_u == NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -1758,25 +1688,20 @@ mach_vm_page_range_query(
 	effective_page_size = (1 << effective_page_shift);
 	effective_page_mask = effective_page_size - 1;
 
-	if (os_mul_overflow(*dispositions_count, sizeof(int), &disp_buf_req_size)) {
-		return KERN_INVALID_ARGUMENT;
+	kr = mach_vm_page_range_query_sanitize(address_u,
+	    size_u,
+	    effective_page_mask,
+	    dispositions_addr_u,
+	    *dispositions_count_u,
+	    &start,
+	    &size,
+	    &dispositions_addr,
+	    &disp_buf_req_size);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr);
 	}
 
-	start = vm_map_trunc_page(address, effective_page_mask);
-	end = vm_map_round_page(address + size, effective_page_mask);
-
-	if (end < start) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if ((end - start) < size) {
-		/*
-		 * Aligned size is less than unaligned size.
-		 */
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (disp_buf_req_size == 0 || (end == start)) {
+	if (disp_buf_req_size == 0 || size == 0) {
 		return KERN_SUCCESS;
 	}
 
@@ -1785,7 +1710,7 @@ mach_vm_page_range_query(
 	 * MAX_PAGE_RANGE_QUERY chunk at a time.
 	 */
 
-	curr_sz = MIN(end - start, MAX_PAGE_RANGE_QUERY);
+	curr_sz = MIN(size, MAX_PAGE_RANGE_QUERY);
 	num_pages = (int) (curr_sz >> effective_page_shift);
 
 	info_size = num_pages * sizeof(vm_page_info_basic_data_t);
@@ -1846,7 +1771,9 @@ mach_vm_page_range_query(
 		}
 	}
 
-	*dispositions_count = disp_buf_total_size / sizeof(int);
+	VM_SANITIZE_UT_SET(
+		*dispositions_count_u,
+		disp_buf_total_size / sizeof(int));
 
 out:
 	kfree_data(local_disp, local_disp_size);
@@ -1857,7 +1784,7 @@ out:
 kern_return_t
 mach_vm_page_info(
 	vm_map_t                map,
-	mach_vm_address_t       address,
+	mach_vm_address_ut      address,
 	vm_page_info_flavor_t   flavor,
 	vm_page_info_t          info,
 	mach_msg_type_number_t  *count)
@@ -1945,9 +1872,9 @@ vm_region_object_create(
 
 kern_return_t
 mach_vm_deferred_reclamation_buffer_init(
-	task_t           task,
-	mach_vm_offset_t *address,
-	mach_vm_size_t   size)
+	task_t            task,
+	mach_vm_offset_ut *address,
+	mach_vm_size_ut   size)
 {
 #if CONFIG_DEFERRED_RECLAIM
 	return vm_deferred_reclamation_buffer_init_internal(task, address, size);
@@ -1963,9 +1890,15 @@ mach_vm_deferred_reclamation_buffer_init(
 kern_return_t
 mach_vm_deferred_reclamation_buffer_synchronize(
 	task_t task,
-	mach_vm_size_t num_entries_to_reclaim)
+	mach_vm_size_ut num_entries_to_reclaim_u)
 {
 #if CONFIG_DEFERRED_RECLAIM
+	/*
+	 * This unwrapping is safe as num_entries_to_reclaim is not to be
+	 * interpreted as the size of range of addresses.
+	 */
+	mach_vm_size_t num_entries_to_reclaim =
+	    VM_SANITIZE_UNSAFE_UNWRAP(num_entries_to_reclaim_u);
 	return vm_deferred_reclamation_buffer_synchronize_internal(task, num_entries_to_reclaim);
 #else
 	(void) task;
@@ -1975,9 +1908,17 @@ mach_vm_deferred_reclamation_buffer_synchronize(
 }
 
 kern_return_t
-mach_vm_deferred_reclamation_buffer_update_reclaimable_bytes(task_t task, mach_vm_size_t reclaimable_bytes)
+mach_vm_deferred_reclamation_buffer_update_reclaimable_bytes(
+	task_t task,
+	mach_vm_size_ut reclaimable_bytes_u)
 {
 #if CONFIG_DEFERRED_RECLAIM
+	/*
+	 * This unwrapping is safe as reclaimable_bytes is not to be
+	 * interpreted as the size of range of addresses.
+	 */
+	mach_vm_size_t reclaimable_bytes =
+	    VM_SANITIZE_UNSAFE_UNWRAP(reclaimable_bytes_u);
 	return vm_deferred_reclamation_buffer_update_reclaimable_bytes_internal(task, reclaimable_bytes);
 #else
 	(void) task;
@@ -2016,6 +1957,43 @@ mach_vm_range_recipe_v1_cmp(const void *e1, const void *e2)
 	return 0;
 }
 
+static inline __result_use_check kern_return_t
+mach_vm_range_create_v1_sanitize(
+	vm_map_t                map,
+	mach_vm_range_recipe_v1_ut *recipe_u,
+	uint32_t count,
+	mach_vm_range_recipe_v1_t **recipe_p)
+{
+	kern_return_t kr;
+
+	for (size_t i = 0; i < count; i++) {
+		vm_map_offset_t start, end;
+		vm_map_size_t size;
+		mach_vm_range_ut * range_u = &recipe_u[i].range_u;
+		kr = vm_sanitize_addr_end(
+			range_u->min_address_u,
+			range_u->max_address_u,
+			VM_SANITIZE_CALLER_MACH_VM_RANGE_CREATE,
+			map,
+			VM_SANITIZE_FLAGS_SIZE_ZERO_FAILS
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_START
+			| VM_SANITIZE_FLAGS_CHECK_ALIGNED_SIZE,
+			&start, &end, &size); // Ignore return values
+		if (__improbable(kr != KERN_SUCCESS)) {
+			return kr;
+		}
+	}
+	/*
+	 * Sanitization only checked properties of recipe_u.
+	 * We can now see it through the lens of the safe type.
+	 * The cast is undefined behavior, but of the kind VM sanitization
+	 * relies on anyway, so we don't expect this to cause issues.
+	 */
+	*recipe_p = (mach_vm_range_recipe_v1_t *)recipe_u;
+
+	return KERN_SUCCESS;
+}
+
 /*!
  * @function mach_vm_range_create_v1()
  *
@@ -2037,11 +2015,11 @@ mach_vm_range_recipe_v1_cmp(const void *e1, const void *e2)
  */
 static kern_return_t
 mach_vm_range_create_v1(
-	vm_map_t                map,
-	mach_vm_range_recipe_v1_t *recipe,
-	uint32_t                new_count)
+	vm_map_t                   map,
+	mach_vm_range_recipe_v1_ut *recipe_u,
+	uint32_t                   new_count)
 {
-	const vm_offset_t mask = VM_MAP_PAGE_MASK(map);
+	mach_vm_range_recipe_v1_t *recipe;
 	vm_map_user_range_t table;
 	kern_return_t kr = KERN_SUCCESS;
 	uint16_t count;
@@ -2058,6 +2036,11 @@ mach_vm_range_create_v1(
 		.max_address = vm_map_max(map),
 #endif /* XNU_TARGET_OS_IOS && EXTENDED_USER_VA_SUPPORT */
 	};
+
+	kr = mach_vm_range_create_v1_sanitize(map, recipe_u, new_count, &recipe);
+	if (__improbable(kr != KERN_SUCCESS)) {
+		return vm_sanitize_get_kr(kr);
+	}
 
 	qsort(recipe, new_count, sizeof(mach_vm_range_recipe_v1_t),
 	    mach_vm_range_recipe_v1_cmp);
@@ -2079,12 +2062,6 @@ mach_vm_range_create_v1(
 		case MACH_VM_RANGE_FIXED:
 			break;
 		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-
-		if (!VM_MAP_PAGE_ALIGNED(r->min_address, mask) ||
-		    !VM_MAP_PAGE_ALIGNED(r->max_address, mask) ||
-		    r->min_address >= r->max_address) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -2129,7 +2106,7 @@ mach_vm_range_create_v1(
 	}
 
 	/*
-	 * Step 4: commit the new ranges.
+	 * Step 3: commit the new ranges.
 	 */
 
 	static_assert(VM_MAP_EXTRA_RANGES_MAX * sizeof(struct vm_map_user_range) <=
@@ -2200,18 +2177,18 @@ mach_vm_range_create(
 	}
 
 	if (flavor == MACH_VM_RANGE_FLAVOR_V1) {
-		mach_vm_range_recipe_v1_t *array;
+		mach_vm_range_recipe_v1_ut *array;
 
-		if (size % sizeof(mach_vm_range_recipe_v1_t)) {
+		if (size % sizeof(mach_vm_range_recipe_v1_ut)) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
-		size /= sizeof(mach_vm_range_recipe_v1_t);
+		size /= sizeof(mach_vm_range_recipe_v1_ut);
 		if (size > VM_MAP_EXTRA_RANGES_MAX) {
 			return KERN_NO_SPACE;
 		}
 
-		array = (mach_vm_range_recipe_v1_t *)recipe;
+		array = (mach_vm_range_recipe_v1_ut *)recipe;
 		return mach_vm_range_create_v1(map, array, size);
 	}
 

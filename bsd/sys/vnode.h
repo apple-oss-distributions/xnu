@@ -842,6 +842,7 @@ extern int              vttoif_tab[];
 #ifdef BSD_KERNEL_PRIVATE
 #define VNODE_REMOVE_NOFOLLOW_ANY               0x0010
 #endif
+#define VNODE_REMOVE_SYSTEM_DISCARDED           0x0020 /* Update speculative telemetry with SYSTEM_DISCARDED use state (Default USER_DISCARDED use state) */
 
 /* VNOP_READDIR flags: */
 #define VNODE_READDIR_EXTENDED    0x0001   /* use extended directory entries */

@@ -875,13 +875,7 @@ common:
 
 			fprintf(f, "\t${%c_RULE_2%s}%s\n", och_upper, extras, nl);
 			fprintf(f, "\t${%c_RULE_3%s}%s\n", och_upper, extras, nl);
-			fprintf(f, "\t$(if ${%c_RULE_4A%s},${%c_RULE_4A%s}",
-			    och_upper, extras, och_upper, extras);
-			if (ftp->f_extra) {
-				fprintf(f, "%s", ftp->f_extra);
-			}
-			fprintf(f, "%s%.*s${%c_RULE_4B%s}%s)\n",
-			    source_dir, (int)(tp - np), np, och_upper, extras, nl);
+			fprintf(f, "\t${%c_RULE_4%s}%s\n", och_upper, extras, nl);
 			break;
 
 		default:

@@ -38,25 +38,49 @@
 /* The maximum number of pages in a memory request. */
 #define EXCLAVES_MEMORY_MAX_REQUEST (64)
 
+typedef enum : uint32_t {
+	EXCLAVES_MEMORY_PAGEKIND_ROOTDOMAIN = 1,
+	EXCLAVES_MEMORY_PAGEKIND_CONCLAVE = 2,
+} exclaves_memory_pagekind_t;
+
 __BEGIN_DECLS
 
 extern void
-exclaves_memory_alloc(uint32_t npages, uint32_t *pages, const xnuupcalls_pagekind_s kind);
+exclaves_memory_alloc(uint32_t npages, uint32_t * _Nonnull pages, const exclaves_memory_pagekind_t kind);
 
 extern void
-exclaves_memory_free(uint32_t npages, const uint32_t *pages, const xnuupcalls_pagekind_s kind);
+exclaves_memory_free(uint32_t npages, const uint32_t * _Nonnull pages, const exclaves_memory_pagekind_t kind);
+
+extern kern_return_t
+exclaves_memory_map(uint32_t npages, const uint32_t * _Nonnull pages, vm_prot_t prot,
+    char * _Nullable * _Nonnull address);
+
+extern kern_return_t
+exclaves_memory_unmap(char * _Nonnull address, size_t size);
 
 /* BEGIN IGNORE CODESTYLE */
-extern tb_error_t
-exclaves_memory_upcall_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
-    tb_error_t (^completion)(xnuupcalls_pagelist_s));
-/* END IGNORE CODESTYLE */
 
-/* BEGIN IGNORE CODESTYLE */
+/* Legacy upcall handlers */
+
 extern tb_error_t
-exclaves_memory_upcall_free(const uint32_t pages[EXCLAVES_MEMORY_MAX_REQUEST],
+exclaves_memory_upcall_legacy_alloc(uint32_t npages, xnuupcalls_pagekind_s kind,
+    tb_error_t (^_Nonnull completion)(xnuupcalls_pagelist_s));
+
+extern tb_error_t
+exclaves_memory_upcall_legacy_free(const uint32_t pages[_Nonnull EXCLAVES_MEMORY_MAX_REQUEST],
     uint32_t npages, const xnuupcalls_pagekind_s kind,
-    tb_error_t (^completion)(void));
+    tb_error_t (^_Nonnull completion)(void));
+
+/* Upcall handlers */
+
+extern tb_error_t
+exclaves_memory_upcall_alloc(uint32_t npages, xnuupcallsv2_pagekind_s kind,
+    tb_error_t (^_Nonnull completion)(xnuupcallsv2_pagelist_s));
+
+extern tb_error_t
+exclaves_memory_upcall_free(const xnuupcallsv2_pagelist_s pages,
+    const xnuupcallsv2_pagekind_s kind, tb_error_t (^_Nonnull completion)(void));
+
 /* END IGNORE CODESTYLE */
 
 extern void

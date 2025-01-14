@@ -10,18 +10,21 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <ptrauth.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include <sys/mman.h>
+#include <sys/proc.h>
 
 #include <mach/mach_error.h>
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_map.h>
+#include <mach/vm_param.h>
 #include <mach/task.h>
 #include <mach/task_info.h>
 #include <mach/shared_region.h>
@@ -48,12 +51,12 @@ test_memory_entry_tagging(int override_tag)
 	mach_vm_offset_t        vmoff;
 	mach_port_t             mem_entry_copied, mem_entry_shared;
 	mach_port_t             *mem_entry_ptr;
-	int                     i;
+	unsigned int            i;
 	vm_region_submap_short_info_data_64_t ri;
 	mach_msg_type_number_t  ri_count;
 	unsigned int            depth;
 	int                     vm_flags;
-	int                     expected_tag;
+	unsigned int            expected_tag;
 
 	vmaddr_copied = 0;
 	vmaddr_shared = 0;
@@ -86,7 +89,7 @@ test_memory_entry_tagging(int override_tag)
 		    vmsize_chunk,
 		    (VM_FLAGS_FIXED |
 		    VM_FLAGS_OVERWRITE |
-		    VM_MAKE_TAG(100 + i)));
+		    VM_MAKE_TAG(100 + (int)i)));
 		T_QUIET;
 		T_EXPECT_MACH_SUCCESS(kr, "[override_tag:%d] vm_allocate(%lld)",
 		    override_tag, vmsize_chunk);
@@ -224,7 +227,7 @@ again:
 			expected_tag = 100 + i;
 		}
 		T_QUIET;
-		T_EXPECT_EQ(ri.user_tag, expected_tag, "[override_tag:%d][do_copy:%d] i=%d tag=%d expected %d",
+		T_EXPECT_EQ(ri.user_tag, expected_tag, "[override_tag:%d][do_copy:%d] i=%u tag=%u expected %u",
 		    override_tag, do_copy, i, ri.user_tag, expected_tag);
 		if (T_RESULT == T_RESULT_FAIL) {
 			goto done;
@@ -557,7 +560,7 @@ T_DECL(purgeable_empty_to_volatile, "test task physical footprint when \
 	}
 }
 
-kern_return_t
+static kern_return_t
 get_reusable_size(uint64_t *reusable)
 {
 	task_vm_info_data_t     ti;
@@ -812,7 +815,7 @@ T_DECL(madvise_zero, "test madvise zero", T_META_TAG_VM_PREFERRED)
 
 	T_QUIET;
 	T_EXPECT_EQ(validate_memory_is_zero(vmaddr, vmsize, &non_zero_addr), true,
-	    "madvise(%p, %llu, MADV_ZERO) returned non zero mem at %p",
+	    "madvise(%p, %lu, MADV_ZERO) returned non zero mem at %p",
 	    (void *)vmaddr, vmsize, (void *)non_zero_addr);
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
@@ -829,7 +832,7 @@ T_DECL(madvise_zero, "test madvise zero", T_META_TAG_VM_PREFERRED)
 	/* wait for the pages to be (asynchronously) compressed */
 	T_QUIET; T_LOG("waiting for first page to be paged out");
 	do {
-		ret = mincore((void*)vmaddr, 1, &vec);
+		ret = mincore((void*)vmaddr, 1, (char *)&vec);
 		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "mincore(1st)");
 	} while (vec & MINCORE_INCORE);
 	T_QUIET; T_LOG("waiting for last page to be paged out");
@@ -846,7 +849,7 @@ T_DECL(madvise_zero, "test madvise zero", T_META_TAG_VM_PREFERRED)
 	}
 	T_QUIET;
 	T_EXPECT_EQ(validate_memory_is_zero(vmaddr, vmsize, &non_zero_addr), true,
-	    "madvise(%p, %llu, MADV_ZERO) returned non zero mem at %p",
+	    "madvise(%p, %lu, MADV_ZERO) returned non zero mem at %p",
 	    (void *)vmaddr, vmsize, (void *)non_zero_addr);
 	if (T_RESULT == T_RESULT_FAIL) {
 		goto done;
@@ -869,8 +872,8 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 	kern_return_t           kr;
 	mach_vm_address_t       vmaddr1, vmaddr2;
 	mach_vm_size_t          vmsize1, vmsize2;
-	int                     *ip;
-	int                     i;
+	unsigned int            *ip;
+	unsigned int            i;
 
 	vmaddr1 = 0;
 	vmsize1 = 4 * 4096;
@@ -880,7 +883,7 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 	    VM_FLAGS_ANYWHERE);
 	T_ASSERT_MACH_SUCCESS(kr, "vm_allocate()");
 
-	ip = (int *)(uintptr_t)vmaddr1;
+	ip = (unsigned int *)(uintptr_t)vmaddr1;
 	for (i = 0; i < vmsize1 / sizeof(*ip); i++) {
 		ip[i] = i;
 	}
@@ -892,7 +895,7 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 	    VM_FLAGS_ANYWHERE);
 	T_ASSERT_MACH_SUCCESS(kr, "vm_allocate()");
 
-	ip = (int *)(uintptr_t)vmaddr2;
+	ip = (unsigned int *)(uintptr_t)vmaddr2;
 	for (i = 0; i < vmsize1 / sizeof(*ip); i++) {
 		ip[i] = DEST_PATTERN;
 	}
@@ -905,7 +908,7 @@ T_DECL(map_read_overwrite, "test overwriting vm map from other map - \
 	    &vmsize2);
 	T_ASSERT_MACH_SUCCESS(kr, "vm_read_overwrite()");
 
-	ip = (int *)(uintptr_t)vmaddr2;
+	ip = (unsigned int *)(uintptr_t)vmaddr2;
 	for (i = 0; i < 1; i++) {
 		T_QUIET;
 		T_ASSERT_EQ(ip[i], DEST_PATTERN, "vmaddr2[%d] = 0x%x instead of 0x%x",
@@ -1970,7 +1973,7 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 		T_ASSERT_EQ(saved_errno, EPERM, "wire shared text error %d (%s), expected: %d",
 		    saved_errno, strerror(saved_errno), EPERM);
 	} else if (after != before) {
-		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
+		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", (void *)addr, before, after);
 	} else {
 		T_PASS("wire shared text");
 	}
@@ -1984,7 +1987,7 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 		T_ASSERT_EQ(saved_errno, EPERM, "wire shared text error %d (%s), expected: %d",
 		    saved_errno, strerror(saved_errno), EPERM);
 	} else if (after != before) {
-		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
+		T_ASSERT_FAIL("shared text changed by wiring at %p 0x%x -> 0x%x", (void *)addr, before, after);
 	} else {
 		T_PASS("wire shared text");
 	}
@@ -1998,7 +2001,7 @@ T_DECL(wire_text, "test wired text for rdar://problem/16783546 Wiring code in \
 		T_ASSERT_EQ(saved_errno, EPERM, "wire text error return error %d (%s)",
 		    saved_errno, strerror(saved_errno));
 	} else if (after != before) {
-		T_ASSERT_FAIL("text changed by wiring at %p 0x%x -> 0x%x", addr, before, after);
+		T_ASSERT_FAIL("text changed by wiring at %p 0x%x -> 0x%x", (void *)addr, before, after);
 	} else {
 		T_PASS("wire text");
 	}
@@ -2041,4 +2044,104 @@ T_DECL(remap_comm_page, "test remapping of the commpage - rdar://93177124",
 		return;
 	}
 	T_ASSERT_MACH_SUCCESS(kr, "vm_remap() of commpage from 0x%llx", commpage_addr);
+}
+
+/* rdar://132439059 */
+T_DECL(mach_vm_remap_new_task_read_port,
+    "Ensure shared, writable mappings cannot be created with a process's task read port using mach_vm_remap_new",
+    T_META_TAG_VM_PREFERRED,
+    T_META_RUN_CONCURRENTLY(true))
+{
+	mach_vm_address_t private_data = 0;
+	pid_t pid = -1;
+	int fds[2];
+	uint32_t depth = 9999;
+	mach_vm_size_t size = PAGE_SIZE;
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	vm_region_submap_info_data_64_t info;
+	kern_return_t kr = KERN_FAILURE;
+	int ret = -1;
+
+	kr = mach_vm_allocate(mach_task_self(), &private_data, size, VM_FLAGS_ANYWHERE);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_vm_allocate");
+
+	ret = pipe(fds);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "pipe");
+
+	pid = fork();
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(pid, "fork");
+
+	if (pid == 0) {
+		char data[2];
+		ssize_t nbytes_read = -1;
+
+		/* Close write end of the pipe */
+		ret = close(fds[1]);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "child: close write end");
+
+		/* Check that the permissions are VM_PROT_DEFAULT/VM_PROT_ALL */
+		kr = mach_vm_region_recurse(mach_task_self(),
+		    &private_data,
+		    &size,
+		    &depth,
+		    (vm_region_recurse_info_t)&info,
+		    &count);
+		T_ASSERT_MACH_SUCCESS(kr, "child: mach_vm_region_recurse");
+		T_EXPECT_EQ_INT(info.protection, VM_PROT_DEFAULT, "child: current protection is VM_PROT_DEFAULT");
+		T_EXPECT_EQ_INT(info.max_protection, VM_PROT_ALL, "child: maximum protextion is VM_PROT_ALL");
+
+		/* The child tries to read data from the pipe (that never comes) */
+		nbytes_read = read(fds[0], data, 2);
+		T_QUIET; T_EXPECT_EQ_LONG(nbytes_read, 0L, "child: read 0 bytes");
+
+		exit(0);
+	} else {
+		mach_port_t read_port = MACH_PORT_NULL;
+		mach_vm_address_t remap_addr = 0;
+		int status;
+
+		/* Close read end of the pipe */
+		ret = close(fds[0]);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "close read end");
+
+		/* Get a read port */
+		ret = task_read_for_pid(mach_task_self(), pid, &read_port);
+		T_ASSERT_POSIX_SUCCESS(ret, "parent: task_read_for_pid");
+
+		/* Make a shared mapping with the child's data */
+		vm_prot_t cur_prot = VM_PROT_NONE;
+		vm_prot_t max_prot = VM_PROT_NONE;
+		kr = mach_vm_remap_new(
+			mach_task_self(),
+			&remap_addr,
+			size,
+			0, /* mask */
+			VM_FLAGS_ANYWHERE,
+			read_port,
+			private_data,
+			FALSE, /* copy */
+			&cur_prot,
+			&max_prot,
+			VM_INHERIT_DEFAULT);
+		T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "parent: mach_vm_remap_new");
+
+		/* Check that permissions of the remapped region are VM_PROT_NONE */
+		kr = mach_vm_region_recurse(mach_task_self(),
+		    &remap_addr,
+		    &size,
+		    &depth,
+		    (vm_region_recurse_info_t)&info,
+		    &count);
+		T_ASSERT_MACH_SUCCESS(kr, "parent: mach_vm_region_recurse");
+		T_EXPECT_EQ_INT(info.protection, VM_PROT_NONE, "parent: current protection is VM_PROT_NONE");
+		T_EXPECT_EQ_INT(info.max_protection, VM_PROT_NONE, "parent: maximum protextion is VM_PROT_NONE");
+
+		/* Tell the child it is done and can exit. */
+		ret = close(fds[1]);
+		T_QUIET; T_ASSERT_POSIX_SUCCESS(ret, "parent: close write end");
+
+		/* Clean up the child */
+		ret = waitpid(pid, &status, 0);
+		T_EXPECT_EQ_INT(ret, pid, "waitpid: child was stopped or terminated");
+	}
 }

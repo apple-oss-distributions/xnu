@@ -6013,11 +6013,10 @@ simple_free:
  * DROPTAP_FLAG_DIR_IN), or the packet will not be captured.
  */
 void
-m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
+m_drop_list(mbuf_t m, struct ifnet *ifp, uint16_t flags, uint32_t reason, const char *funcname,
     uint16_t linenum)
 {
 	struct mbuf *nextpkt;
-	struct ifnet *ifp = NULL;
 
 	if (m == NULL) {
 		return;
@@ -6046,7 +6045,6 @@ m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
 			uint16_t tmp_flags = flags;
 
 			nextpkt = m->m_nextpkt;
-			ifp = m->m_pkthdr.rcvif;
 
 			if ((flags & DROPTAP_FLAG_L2_MISSING) == 0 &&
 			    m->m_pkthdr.pkt_hdr != NULL) {
@@ -6057,7 +6055,7 @@ m_drop_list(mbuf_t m, uint16_t flags, uint32_t reason, const char *funcname,
 			}
 
 			droptap_input_mbuf(m, reason, funcname, linenum, tmp_flags,
-			    ifp, frame_header);
+			    m->m_pkthdr.rcvif, frame_header);
 			m = nextpkt;
 		}
 	}

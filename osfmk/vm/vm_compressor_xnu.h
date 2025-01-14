@@ -355,8 +355,7 @@ extern int vm_compressor_test_seg_wp;
 	        vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
-	                       VM_PROT_READ | VM_PROT_WRITE,    \
-	                       0);                              \
+	                       0, VM_PROT_READ | VM_PROT_WRITE);    \
 	}                               \
 	MACRO_END
 
@@ -366,8 +365,7 @@ extern int vm_compressor_test_seg_wp;
 	        vm_map_protect(compressor_map,                  \
 	                       (vm_map_offset_t)cseg->c_store.c_buffer,         \
 	                       (vm_map_offset_t)&cseg->c_store.c_buffer[C_SEG_BYTES_TO_OFFSET(c_seg_allocsize)],\
-	                       VM_PROT_READ,                    \
-	                       0);                              \
+	                       0, VM_PROT_READ);                    \
 	}                                                       \
 	if (vm_compressor_test_seg_wp) {                                \
 	        volatile uint32_t vmtstmp = *(volatile uint32_t *)cseg->c_store.c_buffer; \
@@ -422,9 +420,6 @@ extern struct vm_compressor_kdp_state vm_compressor_kdp_state;
 extern void kdp_compressor_busy_find_owner(event64_t wait_event, thread_waitinfo_t *waitinfo);
 extern kern_return_t vm_compressor_kdp_init(void);
 extern void vm_compressor_kdp_teardown(void);
-
-#define AVAILABLE_NON_COMPRESSED_MEMORY         (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
-#define AVAILABLE_MEMORY                        (AVAILABLE_NON_COMPRESSED_MEMORY + VM_PAGE_COMPRESSOR_COUNT)
 
 /*
  * TODO, there may be a minor optimisation opportunity to replace these divisions

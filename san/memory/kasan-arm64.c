@@ -92,7 +92,11 @@ extern vm_offset_t excepstack, excepstack_top;
 static lck_grp_t kasan_vm_lock_grp;
 static lck_ticket_t kasan_vm_lock;
 
+#if CONFIG_SPTM
+void kasan_bootstrap(boot_args *, vm_offset_t pgtable, sptm_bootstrap_args_xnu_t *sptm_boot_args);
+#else
 void kasan_bootstrap(boot_args *, vm_offset_t pgtable);
+#endif /* CONFIG_SPTM */
 
 _Static_assert(KASAN_OFFSET == KASAN_OFFSET_ARM64, "KASan inconsistent shadow offset");
 _Static_assert(VM_MAX_KERNEL_ADDRESS < KASAN_SHADOW_MIN, "KASan shadow overlaps with kernel VM");
@@ -117,10 +121,27 @@ _Static_assert((VM_MAX_KERNEL_ADDRESS >> KASAN_SCALE) + KASAN_OFFSET_ARM64 < KAS
  * physmap.
  */
 static vm_map_address_t
-kasan_arm64_phystokv(uintptr_t pa, bool early)
+kasan_arm64_phystokv(uintptr_t pa, __unused bool early)
 {
+#if CONFIG_SPTM
+	return phystokv(pa);
+#else
 	return early ? (pa) : phystokv(pa);
+#endif /* CONFIG_SPTM */
 }
+
+#if CONFIG_SPTM
+static uintptr_t
+kasan_arm64_kvtophys(vm_map_address_t va)
+{
+	sptm_paddr_t pa;
+	if (sptm_kvtophys(va, &pa) != LIBSPTM_SUCCESS) {
+		return 0;
+	}
+
+	return (vm_map_address_t)pa;
+}
+#endif /* CONFIG_SPTM */
 
 /*
  * Physical pages used to back up the shadow table are stolen early on at
@@ -145,6 +166,13 @@ kasan_arm64_alloc_zero_page(bool early)
 {
 	uintptr_t mem = kasan_arm64_alloc_page();
 	__nosan_bzero((void *)kasan_arm64_phystokv(mem, early), ARM_PGBYTES);
+
+#if CONFIG_SPTM
+	/* Retype the frame so that we can later map it via the SPTM */
+	sptm_retype_params_t retype_params = { .level = 3 };
+	sptm_retype((sptm_paddr_t)mem, XNU_DEFAULT, XNU_PAGE_TABLE, retype_params);
+#endif /* CONFIG_SPTM */
+
 	return mem;
 }
 
@@ -196,17 +224,26 @@ kasan_arm64_lookup_l3(uint64_t *base, vm_offset_t address)
 static void
 kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 {
+#if CONFIG_SPTM
+	const sptm_paddr_t root_pt_paddr = (sptm_paddr_t)kasan_arm64_kvtophys((vm_map_address_t)base);
+	const sptm_vaddr_t vaddr = (sptm_vaddr_t)(shadow_base & ~PAGE_MASK);
+#endif /* CONFIG_SPTM */
+
 	bool early = options & KASAN_ARM64_NO_PHYSMAP;
 	uint64_t *pte;
 
 	/* lookup L1 entry */
 	pte = kasan_arm64_lookup_l1(base, shadow_base);
+#if CONFIG_SPTM
+	assert((*pte & ARM_TTE_VALID) && ((*pte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE));
+#else
 	if (*pte & ARM_TTE_VALID) {
 		assert((*pte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE);
 	} else {
 		*pte = ((uint64_t)kasan_arm64_alloc_zero_page(early)
 		    & ARM_TTE_TABLE_MASK) | ARM_TTE_VALID | ARM_TTE_TYPE_TABLE;
 	}
+#endif /* CONFIG_SPTM */
 
 	base = (uint64_t *)kasan_arm64_phystokv(*pte & ARM_TTE_TABLE_MASK, early);
 
@@ -215,8 +252,15 @@ kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 	if (*pte & ARM_TTE_VALID) {
 		assert((*pte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE);
 	} else {
+#if CONFIG_SPTM
+		const sptm_tte_t tte = (sptm_tte_t)((uint64_t)kasan_arm64_alloc_zero_page(early)
+		    & ARM_TTE_TABLE_MASK) | ARM_TTE_VALID | ARM_TTE_TYPE_TABLE;
+
+		sptm_map_table(root_pt_paddr, vaddr, 2, tte);
+#else
 		*pte = ((uint64_t)kasan_arm64_alloc_zero_page(early)
 		    & ARM_TTE_TABLE_MASK) | ARM_TTE_VALID | ARM_TTE_TYPE_TABLE;
+#endif /* CONFIG_SPTM */
 	}
 
 	base = (uint64_t *)kasan_arm64_phystokv(*pte & ARM_TTE_TABLE_MASK, early);
@@ -252,7 +296,19 @@ kasan_arm64_pte_map(vm_offset_t shadow_base, uint64_t *base, uint8_t options)
 	    | ARM_PTE_ATTRINDX(CACHE_ATTRINDX_DEFAULT)
 	    | ARM_PTE_NX
 	    | ARM_PTE_PNX;
+
+#if CONFIG_SPTM
+	/* Unmap the page first if the valid page was previously mapped */
+	if (*pte & ARM_PTE_TYPE_VALID) {
+		sptm_unmap_region(root_pt_paddr, vaddr, 1, 0);
+	}
+
+	/* Perform the new mapping */
+	sptm_return_t ret = sptm_map_page(root_pt_paddr, vaddr, newpte);
+	assert(ret == SPTM_SUCCESS);
+#else
 	*pte = newpte;
+#endif /* CONFIG_SPTM */
 }
 
 static void
@@ -335,6 +391,70 @@ kasan_arch_init(void)
 #endif
 }
 
+#if CONFIG_SPTM
+/*
+ * Steal memory for the shadow, and shadow map the bootstrap page tables so we can
+ * run until kasan_init().
+ */
+void
+kasan_bootstrap(boot_args *args, vm_offset_t pgtable, sptm_bootstrap_args_xnu_t *sptm_boot_args)
+{
+	uintptr_t tosteal;
+	vm_address_t pbase = args->physBase;
+	kernel_vbase = sptm_boot_args->executables_papt_start;
+	kernel_vtop = sptm_boot_args->executables_papt_end;
+
+	/* Reserve physical memory at the end for KASAN shadow table and quarantines */
+	extern uint64_t memSize;
+	tosteal = (memSize * STOLEN_MEM_PERCENT) / 100 + STOLEN_MEM_BYTES;
+	tosteal = vm_map_trunc_page(tosteal, ARM_PGMASK);
+
+	/* Make it disappear from xnu view */
+	memSize -= tosteal;
+	shadow_pbase = vm_map_round_page(pbase + memSize, ARM_PGMASK);
+	shadow_ptop = shadow_pbase + tosteal;
+	shadow_pnext = shadow_pbase;
+	shadow_pages_total = (uint32_t)((shadow_ptop - shadow_pbase) / ARM_PGBYTES);
+
+	/*
+	 * Set aside a page to represent all those regions that allow any
+	 * access and that won't mutate over their lifetime.
+	 */
+	unmutable_valid_access_page = kasan_arm64_alloc_page();
+	kasan_impl_fill_valid_range(kasan_arm64_phystokv(unmutable_valid_access_page, false), ARM_PGBYTES);
+
+	/* Shadow the KVA bootstrap mapping: start of kernel Mach-O to end of physical */
+	bootstrap_pgtable_phys = pgtable;
+
+	/* Blanket map all of what we got from iBoot, as we'd later do in kasan_init() */
+	const size_t size_to_map = phystokv(sptm_boot_args->first_avail_phys) - sptm_boot_args->physmap_base;
+	kasan_map_shadow_static_early(sptm_boot_args->physmap_base, size_to_map);
+
+#if ARM_LARGE_MEMORY
+	/*
+	 * Large memory systems map available memory first, everything else after.
+	 * Due to this, the above call to kasan_map_shadow_static_early() will only
+	 * cover memory allocated during early bootstrap, and not all of the iBoot-loaded
+	 * images. Map the rest here.
+	 */
+	kasan_map_shadow_static_early(sptm_boot_args->executables_papt_start,
+	    sptm_boot_args->executables_papt_end - sptm_boot_args->executables_papt_start);
+#endif /* ARM_LARGE_MEMORY */
+
+	vm_offset_t intstack_virt = (vm_offset_t)&intstack;
+	vm_offset_t excepstack_virt = (vm_offset_t)&excepstack;
+	vm_offset_t intstack_size = (vm_offset_t)&intstack_top - (vm_offset_t)&intstack;
+	vm_offset_t excepstack_size = (vm_offset_t)&excepstack_top - (vm_offset_t)&excepstack;
+
+	kasan_map_shadow_early(intstack_virt, intstack_size);
+	kasan_map_shadow_early(excepstack_virt, excepstack_size);
+
+	/* Upgrade the deviceTree mapping if necessary */
+	if ((vm_offset_t)args->deviceTreeP < (vm_offset_t)&_mh_execute_header) {
+		kasan_map_shadow_early((vm_offset_t)args->deviceTreeP, args->deviceTreeLength);
+	}
+}
+#else
 /*
  * Steal memory for the shadow, and shadow map the bootstrap page tables so we can
  * run until kasan_init(). Called while running with identity (V=P) map active.
@@ -388,6 +508,7 @@ kasan_bootstrap(boot_args *args, vm_offset_t pgtable)
 		kasan_map_shadow_early((vm_offset_t)args->deviceTreeP, args->deviceTreeLength);
 	}
 }
+#endif /* CONFIG_SPTM */
 
 bool
 kasan_is_shadow_mapped(uintptr_t shadowp)

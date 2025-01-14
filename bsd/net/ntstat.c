@@ -409,7 +409,6 @@ static void         nstat_client_cleanup_source(nstat_client *client, nstat_src 
 static bool         nstat_client_reporting_allowed(nstat_client *client, nstat_src *src, u_int64_t suppression_flags);
 static boolean_t    nstat_client_begin_query(nstat_client *client, const nstat_msg_hdr *hdrp);
 static u_int16_t    nstat_client_end_query(nstat_client *client, nstat_src *last_src, boolean_t partial);
-static void         nstat_ifnet_report_ecn_stats(void);
 static void         nstat_ifnet_report_lim_stats(void);
 static void         nstat_net_api_report_stats(void);
 static errno_t      nstat_set_provider_filter( nstat_client  *client, nstat_msg_add_all_srcs *req);
@@ -496,7 +495,6 @@ static void         nstat_client_cleanup_source(nstat_client *client, nstat_src 
 static bool         nstat_client_reporting_allowed(nstat_client *client, nstat_src *src, u_int64_t suppression_flags);
 static boolean_t    nstat_client_begin_query(nstat_client *client, const nstat_msg_hdr *hdrp);
 static u_int16_t    nstat_client_end_query(nstat_client *client, nstat_src *last_src, boolean_t partial);
-static void         nstat_ifnet_report_ecn_stats(void);
 static void         nstat_ifnet_report_lim_stats(void);
 static void         nstat_net_api_report_stats(void);
 static errno_t      nstat_set_provider_filter( nstat_client  *client, nstat_msg_add_all_srcs *req);
@@ -4281,171 +4279,7 @@ done:
 	lck_rw_done(&ifp->if_link_status_lock);
 }
 
-static u_int64_t nstat_ifnet_last_report_time = 0;
-extern int tcp_report_stats_interval;
-
-static void
-nstat_ifnet_compute_percentages(struct if_tcp_ecn_perf_stat *ifst)
-{
-	/* Retransmit percentage */
-	if (ifst->total_rxmitpkts > 0 && ifst->total_txpkts > 0) {
-		/* shift by 10 for precision */
-		ifst->rxmit_percent =
-		    ((ifst->total_rxmitpkts << 10) * 100) / ifst->total_txpkts;
-	} else {
-		ifst->rxmit_percent = 0;
-	}
-
-	/* Out-of-order percentage */
-	if (ifst->total_oopkts > 0 && ifst->total_rxpkts > 0) {
-		/* shift by 10 for precision */
-		ifst->oo_percent =
-		    ((ifst->total_oopkts << 10) * 100) / ifst->total_rxpkts;
-	} else {
-		ifst->oo_percent = 0;
-	}
-
-	/* Reorder percentage */
-	if (ifst->total_reorderpkts > 0 &&
-	    (ifst->total_txpkts + ifst->total_rxpkts) > 0) {
-		/* shift by 10 for precision */
-		ifst->reorder_percent =
-		    ((ifst->total_reorderpkts << 10) * 100) /
-		    (ifst->total_txpkts + ifst->total_rxpkts);
-	} else {
-		ifst->reorder_percent = 0;
-	}
-}
-
-static void
-nstat_ifnet_normalize_counter(struct if_tcp_ecn_stat *if_st)
-{
-	u_int64_t ecn_on_conn, ecn_off_conn;
-
-	if (if_st == NULL) {
-		return;
-	}
-	ecn_on_conn = if_st->ecn_client_success +
-	    if_st->ecn_server_success;
-	ecn_off_conn = if_st->ecn_off_conn +
-	    (if_st->ecn_client_setup - if_st->ecn_client_success) +
-	    (if_st->ecn_server_setup - if_st->ecn_server_success);
-
-	/*
-	 * report sack episodes, rst_drop and rxmit_drop
-	 *  as a ratio per connection, shift by 10 for precision
-	 */
-	if (ecn_on_conn > 0) {
-		if_st->ecn_on.sack_episodes =
-		    (if_st->ecn_on.sack_episodes << 10) / ecn_on_conn;
-		if_st->ecn_on.rst_drop =
-		    (if_st->ecn_on.rst_drop << 10) * 100 / ecn_on_conn;
-		if_st->ecn_on.rxmit_drop =
-		    (if_st->ecn_on.rxmit_drop << 10) * 100 / ecn_on_conn;
-	} else {
-		/* set to zero, just in case */
-		if_st->ecn_on.sack_episodes = 0;
-		if_st->ecn_on.rst_drop = 0;
-		if_st->ecn_on.rxmit_drop = 0;
-	}
-
-	if (ecn_off_conn > 0) {
-		if_st->ecn_off.sack_episodes =
-		    (if_st->ecn_off.sack_episodes << 10) / ecn_off_conn;
-		if_st->ecn_off.rst_drop =
-		    (if_st->ecn_off.rst_drop << 10) * 100 / ecn_off_conn;
-		if_st->ecn_off.rxmit_drop =
-		    (if_st->ecn_off.rxmit_drop << 10) * 100 / ecn_off_conn;
-	} else {
-		if_st->ecn_off.sack_episodes = 0;
-		if_st->ecn_off.rst_drop = 0;
-		if_st->ecn_off.rxmit_drop = 0;
-	}
-	if_st->ecn_total_conn = ecn_off_conn + ecn_on_conn;
-}
-
-static void
-nstat_ifnet_report_ecn_stats(void)
-{
-	u_int64_t uptime, last_report_time;
-	struct nstat_sysinfo_data data;
-	struct nstat_sysinfo_ifnet_ecn_stats *st;
-	struct ifnet *ifp;
-
-	uptime = net_uptime();
-
-	if ((int)(uptime - nstat_ifnet_last_report_time) <
-	    tcp_report_stats_interval) {
-		return;
-	}
-
-	last_report_time = nstat_ifnet_last_report_time;
-	nstat_ifnet_last_report_time = uptime;
-	data.flags = NSTAT_SYSINFO_IFNET_ECN_STATS;
-	st = &data.u.ifnet_ecn_stats;
-
-	ifnet_head_lock_shared();
-	TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
-		if (ifp->if_ipv4_stat == NULL || ifp->if_ipv6_stat == NULL) {
-			continue;
-		}
-
-		if (!IF_FULLY_ATTACHED(ifp)) {
-			continue;
-		}
-
-		/* Limit reporting to Wifi, Ethernet and cellular. */
-		if (!(IFNET_IS_ETHERNET(ifp) || IFNET_IS_CELLULAR(ifp))) {
-			continue;
-		}
-
-		bzero(st, sizeof(*st));
-		if (IFNET_IS_CELLULAR(ifp)) {
-			st->ifnet_type = NSTAT_IFNET_ECN_TYPE_CELLULAR;
-		} else if (IFNET_IS_WIFI(ifp)) {
-			st->ifnet_type = NSTAT_IFNET_ECN_TYPE_WIFI;
-		} else {
-			st->ifnet_type = NSTAT_IFNET_ECN_TYPE_ETHERNET;
-		}
-		data.unsent_data_cnt = ifp->if_unsent_data_cnt;
-		/* skip if there was no update since last report */
-		if (ifp->if_ipv4_stat->timestamp <= 0 ||
-		    ifp->if_ipv4_stat->timestamp < last_report_time) {
-			goto v6;
-		}
-		st->ifnet_proto = NSTAT_IFNET_ECN_PROTO_IPV4;
-		/* compute percentages using packet counts */
-		nstat_ifnet_compute_percentages(&ifp->if_ipv4_stat->ecn_on);
-		nstat_ifnet_compute_percentages(&ifp->if_ipv4_stat->ecn_off);
-		nstat_ifnet_normalize_counter(ifp->if_ipv4_stat);
-		bcopy(ifp->if_ipv4_stat, &st->ecn_stat,
-		    sizeof(st->ecn_stat));
-		nstat_sysinfo_send_data(&data);
-		bzero(ifp->if_ipv4_stat, sizeof(*ifp->if_ipv4_stat));
-
-v6:
-		/* skip if there was no update since last report */
-		if (ifp->if_ipv6_stat->timestamp <= 0 ||
-		    ifp->if_ipv6_stat->timestamp < last_report_time) {
-			continue;
-		}
-		st->ifnet_proto = NSTAT_IFNET_ECN_PROTO_IPV6;
-
-		/* compute percentages using packet counts */
-		nstat_ifnet_compute_percentages(&ifp->if_ipv6_stat->ecn_on);
-		nstat_ifnet_compute_percentages(&ifp->if_ipv6_stat->ecn_off);
-		nstat_ifnet_normalize_counter(ifp->if_ipv6_stat);
-		bcopy(ifp->if_ipv6_stat, &st->ecn_stat,
-		    sizeof(st->ecn_stat));
-		nstat_sysinfo_send_data(&data);
-
-		/* Zero the stats in ifp */
-		bzero(ifp->if_ipv6_stat, sizeof(*ifp->if_ipv6_stat));
-	}
-	ifnet_head_done();
-}
-
-/* Some thresholds to determine Low Iternet mode */
+/* Some thresholds to determine Low Internet mode */
 #define NSTAT_LIM_DL_MAX_BANDWIDTH_THRESHOLD    1000000 /* 1 Mbps */
 #define NSTAT_LIM_UL_MAX_BANDWIDTH_THRESHOLD    500000  /* 500 Kbps */
 #define NSTAT_LIM_UL_MIN_RTT_THRESHOLD          1000    /* 1 second */
@@ -4576,6 +4410,9 @@ nstat_ifnet_report_lim_stats(void)
 
 		/* Zero the stats in ifp */
 		bzero(&ifp->if_lim_stat, sizeof(ifp->if_lim_stat));
+		if (nstat_debug != 0) {
+			NSTAT_LOG_DEBUG("Reporting LIM stats for ifindex %u", ifp->if_index);
+		}
 		ifnet_lock_done(ifp);
 		nstat_sysinfo_send_data(&data);
 	}
@@ -4719,16 +4556,6 @@ nstat_sysinfo_send_data_internal(
 	switch (data->flags) {
 	case NSTAT_SYSINFO_TCP_STATS:
 		nkeyvals = NSTAT_SYSINFO_TCP_STATS_COUNT;
-		break;
-	case NSTAT_SYSINFO_IFNET_ECN_STATS:
-		nkeyvals = (sizeof(struct if_tcp_ecn_stat) /
-		    sizeof(u_int64_t));
-
-		/* Two more keys for ifnet type and proto */
-		nkeyvals += 2;
-
-		/* One key for unsent data. */
-		nkeyvals++;
 		break;
 	case NSTAT_SYSINFO_LIM_STATS:
 		nkeyvals = NSTAT_LIM_STAT_KEYVAL_COUNT;
@@ -4969,154 +4796,6 @@ nstat_sysinfo_send_data_internal(
 		VERIFY(i == nkeyvals);
 		break;
 	}
-	case NSTAT_SYSINFO_IFNET_ECN_STATS:
-	{
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_TYPE,
-		    data->u.ifnet_ecn_stats.ifnet_type);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_PROTO,
-		    data->u.ifnet_ecn_stats.ifnet_proto);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CLIENT_SETUP,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_client_setup);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_SERVER_SETUP,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_server_setup);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CLIENT_SUCCESS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_client_success);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_SERVER_SUCCESS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_server_success);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_PEER_NOSUPPORT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_peer_nosupport);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_SYN_LOST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_syn_lost);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_SYNACK_LOST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_synack_lost);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_RECV_CE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_recv_ce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_RECV_ECE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_recv_ece);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CONN_RECV_CE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_conn_recv_ce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CONN_RECV_ECE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_conn_recv_ece);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CONN_PLNOCE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_conn_plnoce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CONN_PLCE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_conn_plce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_CONN_NOPLCE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_conn_noplce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_SYNLOSS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_synloss);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_REORDER,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_reorder);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_CE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_ce);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_RTT_AVG,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.rtt_avg);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_RTT_VAR,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.rtt_var);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_OOPERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.oo_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_SACK_EPISODE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.sack_episodes);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_REORDER_PERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.reorder_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_RXMIT_PERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.rxmit_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_RXMIT_DROP,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.rxmit_drop);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_RTT_AVG,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.rtt_avg);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_RTT_VAR,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.rtt_var);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_OOPERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.oo_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_SACK_EPISODE,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.sack_episodes);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_REORDER_PERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.reorder_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_RXMIT_PERCENT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.rxmit_percent);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_RXMIT_DROP,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.rxmit_drop);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_TOTAL_TXPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.total_txpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_TOTAL_RXMTPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.total_rxmitpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_TOTAL_RXPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.total_rxpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_TOTAL_OOPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.total_oopkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_ON_DROP_RST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_on.rst_drop);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_TOTAL_TXPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.total_txpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_TOTAL_RXMTPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.total_rxmitpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_TOTAL_RXPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.total_rxpkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_TOTAL_OOPKTS,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.total_oopkts);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_OFF_DROP_RST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_off.rst_drop);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_TOTAL_CONN,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_total_conn);
-		nstat_set_keyval_scalar(&kv[i++],
-		    NSTAT_SYSINFO_IFNET_UNSENT_DATA,
-		    data->unsent_data_cnt);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_DROPRST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_droprst);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_DROPRXMT,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_droprxmt);
-		nstat_set_keyval_u64_scalar(&kv[i++],
-		    NSTAT_SYSINFO_ECN_IFNET_FALLBACK_SYNRST,
-		    data->u.ifnet_ecn_stats.ecn_stat.ecn_fallback_synrst);
-		break;
-	}
 	case NSTAT_SYSINFO_LIM_STATS:
 	{
 		nstat_set_keyval_string(&kv[i++],
@@ -5330,6 +5009,10 @@ __private_extern__ void
 nstat_sysinfo_send_data(
 	nstat_sysinfo_data *data)
 {
+	if (nstat_debug != 0) {
+		NSTAT_LOG_DEBUG("Sending stats report for %x", data->flags);
+	}
+
 	nstat_client *client;
 
 	NSTAT_LOCK_EXCLUSIVE();
@@ -5345,7 +5028,6 @@ static void
 nstat_sysinfo_generate_report(void)
 {
 	tcp_report_stats();
-	nstat_ifnet_report_ecn_stats();
 	nstat_ifnet_report_lim_stats();
 	nstat_net_api_report_stats();
 }
@@ -7322,6 +7004,10 @@ progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_maxd
 	}
 
 #if SKYWALK
+	u_int32_t locality_flags = (filter_flags & (NSTAT_IFNET_IS_LOCAL | NSTAT_IFNET_IS_NON_LOCAL));
+	u_int32_t flag_mask = (NSTAT_FILTER_IFNET_FLAGS & ~(NSTAT_IFNET_IS_NON_LOCAL | NSTAT_IFNET_IS_LOCAL));
+	u_int32_t interface_flags = (filter_flags & flag_mask);
+
 	NSTAT_LOCK_SHARED();
 
 	TAILQ_FOREACH(shad, &nstat_userprot_shad_head, shad_link) {
@@ -7338,41 +7024,30 @@ progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_maxd
 
 		if (consider_shad) {
 			u_int32_t ifflags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
-			if (filter_flags != 0) {
-				bool result = (*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, NULL, NULL, NULL);
-				error = (result)? 0 : EIO;
-				if (error) {
-					NSTAT_LOG_ERROR("nstat get ifflags %d", error);
-					continue;
-				}
-
-				if ((ifflags & filter_flags) == 0) {
-					continue;
-				}
-				// Skywalk locality flags are not yet in place, see <rdar://problem/35607563>
-				// Instead of checking flags with a simple logical and, check the inverse.
-				// This allows for default action of fallthrough if the flags are not set.
-				if ((filter_flags & NSTAT_IFNET_IS_NON_LOCAL) && (ifflags & NSTAT_IFNET_IS_LOCAL)) {
-					continue;
-				}
-				if ((filter_flags & NSTAT_IFNET_IS_LOCAL) && (ifflags & NSTAT_IFNET_IS_NON_LOCAL)) {
-					continue;
-				}
-			}
-
 			nstat_progress_digest digest;
 			bzero(&digest, sizeof(digest));
-			bool result = (*shad->shad_getvals_fn)(shad->shad_provider_context, NULL, &digest, NULL, NULL);
 
+			// fetch ifflags and digest from necp_client
+			bool result = (*shad->shad_getvals_fn)(shad->shad_provider_context, &ifflags, &digest, NULL, NULL);
 			error = (result)? 0 : EIO;
 			if (error) {
-				NSTAT_LOG_ERROR("nstat get progressdigest returned %d", error);
+				NSTAT_LOG_ERROR("nstat get ifflags and progressdigest returned %d", error);
 				continue;
 			}
+			if (ifflags & (NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE | NSTAT_IFNET_ROUTE_VALUE_UNOBTAINABLE)) {
+				NSTAT_LOG_ERROR("nstat get ifflags and progressdigest resulted in Skywalk error, ifflags=%x", ifflags);
+				continue;
+			}
+
 			if ((digest.ifindex == (u_int32_t)ifindex) ||
-			    (filter_flags & ifflags)) {
+			    ((ifindex == UINT_MAX) && ((ifflags & interface_flags) != 0))) {
+				// a match on either a requested interface index or on interface type
+				if ((locality_flags != 0) && ((locality_flags & ifflags) == 0)) {
+					continue;
+				}
+
 				if (nstat_debug != 0) {
-					NSTAT_LOG_DEBUG("*matched Skywalk* [filter match: %x %x]", filter_flags, ifflags);
+					NSTAT_LOG_DEBUG("*matched Skywalk* [ifindex=%u digest.ifindex=%u filter_flags=%x ifflags=%x]", ifindex, digest.ifindex, filter_flags, ifflags);
 				}
 
 				indicators->np_numflows++;

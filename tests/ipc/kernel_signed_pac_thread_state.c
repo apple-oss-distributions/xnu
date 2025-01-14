@@ -53,6 +53,12 @@
 #error Unsupported architecture
 #endif
 
+#if __arm64e__
+#define TARGET_CPU_ARM64E true
+#else
+#define TARGET_CPU_ARM64E false
+#endif
+
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
@@ -241,6 +247,7 @@ catch_mach_exception_raise_state_identity(
 	void *pc = (void*)(arm_thread_state64_get_pc(*state) + 4);
 	/* Have to sign the new PC value when pointer authentication is enabled. */
 	T_LOG("Userland diversifier for thread state is 0x%x\n", userland_diversifier);
+	T_LOG("pc for thread state is 0x%p\n", pc);
 	T_QUIET; T_ASSERT_NE(userland_diversifier, 0, "Userland diversifier is non zero");
 
 	pc = ptrauth_sign_unauthenticated(pc, ptrauth_key_function_pointer, 0);
@@ -265,6 +272,7 @@ catch_mach_exception_raise_state_identity(
 			T_LOG("Not clearing the kernel signed bit, this should be the last exception");
 		} else {
 			T_FAIL("Received more than 2 exceptions, failing the test");
+			return KERN_FAILURE;
 		}
 	} else {
 		if (exception_count == 1) {
@@ -277,7 +285,10 @@ catch_mach_exception_raise_state_identity(
 			T_LOG("Not on arm64, Not doing anything");
 #endif
 		} else {
+			/* Avoid crash looping by propagating the child crash to report crash */
 			T_FAIL("Received more than 2 exceptions, failing the test");
+			T_ASSERT_MACH_SUCCESS(semaphore_signal(semaphore), "semaphore_signal");
+			return KERN_FAILURE;
 		}
 	}
 
@@ -363,14 +374,14 @@ run_exception_handler(mach_port_t exc_port)
 	pthread_detach(exc_thread);
 }
 
-T_DECL(kernel_signed_pac_thread_state, "Test that kernel signed thread state given to exception ignores the pc")
+T_DECL(kernel_signed_pac_thread_state, "Test that kernel signed thread state given to exception ignores the pc",
+    T_META_ENABLED(TARGET_CPU_ARM64E)
+    )
 {
-#if !__arm64e__
-	T_SKIP("Running on non-arm64e target, skipping...");
-#else
 	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
 
 	int expected_exception = 2;
+	exception_count = 0;
 
 	run_exception_handler(exc_port);
 	*(void *volatile*)0 = 0;
@@ -381,14 +392,12 @@ T_DECL(kernel_signed_pac_thread_state, "Test that kernel signed thread state giv
 		T_LOG("TEST PASSED");
 	}
 	T_END;
-#endif
 }
 
-T_DECL(user_signed_pac_thread_state, "Test that user signed thread state given to exception works with correct diversifier")
+T_DECL(user_signed_pac_thread_state,
+    "Test that user signed thread state given to exception works with correct diversifier",
+    T_META_ENABLED(false && TARGET_CPU_ARM64E /* rdar://133955889 */))
 {
-#if !__arm64e__
-	T_SKIP("Running on non-arm64e target, skipping...");
-#else
 	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS | EXC_MASK_CRASH);
 	T_ASSERT_MACH_SUCCESS(semaphore_create(mach_task_self(), &semaphore,
 	    SYNC_POLICY_FIFO, 0), "semaphore_create");
@@ -415,5 +424,4 @@ T_DECL(user_signed_pac_thread_state, "Test that user signed thread state given t
 		T_LOG("TEST PASSED");
 	}
 	T_END;
-#endif
 }

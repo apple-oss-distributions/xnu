@@ -1693,7 +1693,7 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		 */
 create_cached_upl:
 		ubc_create_upl_kernel(vp, cached_upl_f_offset, cached_upl_size, &cached_upl,
-		    &cached_pl, UPL_SET_LITE, VM_KERN_MEMORY_FILE);
+		    &cached_pl, UPL_SET_LITE | UPL_WILL_MODIFY, VM_KERN_MEMORY_FILE);
 
 		/*
 		 * If we are not overwriting the first and last pages completely

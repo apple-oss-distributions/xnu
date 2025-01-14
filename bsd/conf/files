@@ -205,6 +205,7 @@ bsd/net/necp.c				optional necp
 bsd/net/necp_client.c			optional necp bound-checks
 bsd/net/network_agent.c			optional networking bound-checks
 bsd/net/bloom_filter.c			optional networking bound-checks
+bsd/net/trie_utility.c                  optional networking bound-checks
 bsd/net/if_pflog.c			optional pflog bound-checks
 bsd/net/nat464_utils.c			optional networking bound-checks
 bsd/net/pf.c				optional pf bound-checks

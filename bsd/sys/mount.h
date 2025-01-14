@@ -1342,6 +1342,7 @@ int vfs_nativexattrs(mount_t mp);  /* whether or not the FS supports EAs nativel
 void *  vfs_mntlabel(mount_t mp); /* Safe to cast to "struct label*"; returns "void*" to limit dependence of mount.h on security headers.  */
 void    vfs_setcompoundopen(mount_t mp);
 void    vfs_setfskit(mount_t mp);
+uint32_t vfs_getextflags(mount_t mp);
 char *  vfs_getfstypenameref_locked(mount_t mp, size_t *lenp);
 void    vfs_getfstypename(mount_t mp, char *buf, size_t buflen);
 void    vfs_setfstypename_locked(mount_t mp, const char *name);

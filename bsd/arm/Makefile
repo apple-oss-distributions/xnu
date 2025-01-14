@@ -6,17 +6,29 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-DATAFILES = \
-	endian.h fasttrap_isa.h param.h \
+# Files that are public on macOS, but private on embedded
+EMBEDDED_PRIVATE_DATAFILES = \
+	fasttrap_isa.h
+
+ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
+EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+else
+EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+endif
+
+DATAFILES = $(sort \
+	endian.h param.h \
 	profile.h signal.h limits.h _limits.h \
 	types.h vmparam.h _types.h _param.h \
-	_mcontext.h _endian.h
+	_mcontext.h _endian.h \
+	$(EXTRA_DATAFILES))
 
 DRIVERKIT_DATAFILES = \
 	limits.h _limits.h types.h _types.h endian.h _endian.h
 
-PRIVATE_DATAFILES = \
-	disklabel.h
+PRIVATE_DATAFILES = $(sort \
+	disklabel.h \
+	$(EXTRA_PRIVATE_DATAFILES))
 
 KERNELFILES = \
 	endian.h param.h \
@@ -27,6 +39,7 @@ KERNELFILES = \
 # These are covered by ../machine/machine.modulemap.
 INSTALL_MD_LIST = ${DATAFILES}
 INSTALL_DRIVERKIT_MD_LIST = ${DRIVERKIT_DATAFILES}
+INSTALL_MD_LCL_LIST = ${EXTRA_PRIVATE_DATAFILES}
 INSTALL_SF_MD_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
 INSTALL_MD_DIR = arm

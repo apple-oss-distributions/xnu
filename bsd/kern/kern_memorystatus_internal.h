@@ -42,6 +42,7 @@
 
 #include <mach/boolean.h>
 #include <stdbool.h>
+#include <os/atomic_private.h>
 #include <os/base.h>
 #include <os/log.h>
 #include <os/overflow.h>
@@ -59,15 +60,9 @@
 /*
  * memorystatus subsystem globals
  */
+extern uint32_t memorystatus_available_pages;
 #if CONFIG_JETSAM
-extern unsigned int memorystatus_available_pages;
-extern unsigned int memorystatus_available_pages_pressure;
-extern unsigned int memorystatus_available_pages_critical;
 extern uint32_t jetsam_kill_on_low_swap;
-#else /* CONFIG_JETSAM */
-extern uint64_t memorystatus_available_pages;
-extern uint64_t memorystatus_available_pages_pressure;
-extern uint64_t memorystatus_available_pages_critical;
 #endif /* CONFIG_JETSAM */
 extern int block_corpses; /* counter to block new corpses if jetsam purges them */
 extern int system_procs_aging_band;
@@ -77,6 +72,8 @@ extern int memorystatus_freeze_jetsam_band;
 #if CONFIG_FREEZE
 extern unsigned int memorystatus_suspended_count;
 #endif /* CONFIG_FREEZE */
+extern uint64_t memorystatus_sysprocs_idle_delay_time;
+extern uint64_t memorystatus_apps_idle_delay_time;
 
 /*
  * TODO(jason): This should really be calculated dynamically by the zalloc
@@ -121,6 +118,7 @@ OS_CLOSED_ENUM(memorystatus_action, uint32_t,
     MEMORYSTATUS_PROCESS_SWAPIN_QUEUE, // Compact the swapin queue and move segments to the swapout queue
     MEMORYSTATUS_KILL_SUSPENDED_SWAPPABLE, // Kill a suspended swap-eligible processes based on jetsam priority
     MEMORYSTATUS_KILL_SWAPPABLE, // Kill a swap-eligible process (even if it's running)  based on jetsam priority
+    MEMORYSTATUS_KILL_IDLE, // Kill an idle process
     MEMORYSTATUS_KILL_NONE,     // Do nothing
     );
 
@@ -151,7 +149,8 @@ typedef struct jetsam_state_s {
  */
 typedef struct memorystatus_system_health {
 #if CONFIG_JETSAM
-	bool msh_available_pages_below_pressure;
+	bool msh_available_pages_below_soft;
+	bool msh_available_pages_below_idle;
 	bool msh_available_pages_below_critical;
 	bool msh_compressor_needs_to_swap;
 	bool msh_compressor_is_low_on_space;
@@ -207,7 +206,7 @@ extern _Atomic bool    vm_swapout_wake_pending;
 extern uint32_t vm_page_donate_mode;
 
 #if CONFIG_JETSAM
-#define MEMORYSTATUS_LOG_AVAILABLE_PAGES memorystatus_available_pages
+#define MEMORYSTATUS_LOG_AVAILABLE_PAGES os_atomic_load(&memorystatus_available_pages, relaxed)
 #else /* CONFIG_JETSAM */
 #define MEMORYSTATUS_LOG_AVAILABLE_PAGES (vm_page_active_count + vm_page_inactive_count + vm_page_free_count + vm_page_speculative_count)
 #endif /* CONFIG_JETSAM */
@@ -229,7 +228,7 @@ memorystatus_action_t memorystatus_pick_action(jetsam_state_t state,
     bool suspended_swappable_apps_remaining,
     bool swappable_apps_remaining, int *jld_idle_kills);
 
-#define MEMSTAT_PERCENT_TOTAL_PAGES(p) (p * atop_64(max_mem) / 100)
+#define MEMSTAT_PERCENT_TOTAL_PAGES(p) ((uint32_t)(p * atop_64(max_mem) / 100))
 
 /*
  * Take a (redacted) zprint snapshot along with the jetsam snapshot.
@@ -398,6 +397,56 @@ _memstat_proc_inactive_memlimit_is_fatal(proc_t p)
 {
 	return _memstat_proc_memlimit_is_fatal(p, false);
 }
+
+#pragma mark Jetsam
+
+/*
+ * @func memstat_evaluate_page_shortage
+ *
+ * @brief
+ * Evaluate page shortage conditions. Returns true if the jetsam thread should be woken up.
+ *
+ * @param should_enforce_memlimits
+ * Set to true if soft memory limits should be enforced
+ *
+ * @param should_idle_exit
+ * Set to true if idle processes should begin exiting
+ *
+ * @param should_jetsam
+ * Set to true if non-idle processes should be jetsammed
+ */
+bool memstat_evaluate_page_shortage(
+	bool *should_enforce_memlimits,
+	bool *should_idle_exit,
+	bool *should_jetsam);
+
+/*
+ * In nautical applications, ballast tanks are tanks on boats or submarines
+ * which can be filled with water. When flooded, they provide stability and
+ * reduce buoyancy. When drained (and filled with air), they provide buoyancy.
+ *
+ * In our analogy, the ballast tanks may be drained of unneeded weight (as
+ * occupied by idle processes or processes who have exceeded their memory
+ * limit) and filled with air (available memory). Userspace may toggle between
+ * these two states (filled/drained) depending on system requirements. For
+ * example, drained ballast tanks (i.e. evelated available memory pools) may
+ * have benefits to power and latency. However, applications with large
+ * working sets may need to flood the ballast tanks (i.e. with
+ * anonymous/wired memory) to avoid issues like jetsam loops of daemons that it
+ * has IPC relationships with.
+ *
+ * Mechanically, "draining" the ballast tanks means applying a configurable
+ * offset to the idle and soft available page shortage thresholds. This offset
+ * is then removed when the policy is disengaged.
+ *
+ * The ballast mechanism is intended to be used over long time periods and the
+ * ballast_offset should be sustainable for general applications. If response to
+ * transient spikes in memory demand is desired, the clear-the-decks policy
+ * should be used instead.
+ *
+ * Clients may toggle this behavior via sysctl: kern.memorystatus.ballast_drained
+ */
+int memorystatus_ballast_control(bool drain);
 
 #pragma mark Freezer
 #if CONFIG_FREEZE

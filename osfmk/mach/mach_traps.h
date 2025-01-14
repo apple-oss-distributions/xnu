@@ -638,6 +638,7 @@ struct exclaves_ctl_trap_args {
 	PAD_ARG_(mach_vm_size_t, size);
 	PAD_ARG_(mach_vm_size_t, size2);
 	PAD_ARG_(mach_vm_size_t, offset);
+	PAD_ARG_(mach_vm_address_t, status);
 };
 extern kern_return_t _exclaves_ctl_trap(
 	struct exclaves_ctl_trap_args *args);
@@ -717,10 +718,10 @@ extern kern_return_t task_dyld_process_info_notify_get_trap(
 
 struct _kernelrpc_mach_vm_protect_args {
 	PAD_ARG_(mach_port_name_t, target);     /* 1 word */
-	PAD_ARG_(mach_vm_address_t, address);   /* 2 words */
-	PAD_ARG_(mach_vm_size_t, size);         /* 2 words */
+	PAD_ARG_(mach_vm_address_ut, address);  /* 2 words */
+	PAD_ARG_(mach_vm_size_ut, size);        /* 2 words */
 	PAD_ARG_(boolean_t, set_maximum);       /* 1 word */
-	PAD_ARG_(vm_prot_t, new_protection);    /* 1 word */
+	PAD_ARG_(vm_prot_ut, new_protection);   /* 1 word */
 };                                              /* Total: 7 */
 extern kern_return_t _kernelrpc_mach_vm_protect_trap(
 	struct _kernelrpc_mach_vm_protect_args *args);

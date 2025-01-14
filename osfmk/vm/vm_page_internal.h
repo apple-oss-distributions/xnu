@@ -495,6 +495,20 @@ extern void             vm_page_wakeup_done(
 	vm_object_t        object,
 	vm_page_t          m);
 
+typedef struct page_worker_token {
+	thread_pri_floor_t pwt_floor_token;
+	bool pwt_did_register_inheritor;
+} page_worker_token_t;
+
+extern void             vm_page_wakeup_done_with_inheritor(
+	vm_object_t        object,
+	vm_page_t          m,
+	page_worker_token_t *token);
+
+extern void             page_worker_register_worker(
+	event_t            event,
+	page_worker_token_t *out_token);
+
 /*
  * Functions implemented as macros. m->vmp_wanted and m->vmp_busy are
  * protected by the object lock.

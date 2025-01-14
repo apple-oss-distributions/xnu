@@ -3246,12 +3246,15 @@ lookup:
 		} else {
 			lf.l_type = F_RDLCK;
 		}
-		if ((error = VNOP_ADVLOCK(xvp, (caddr_t)fg, F_SETLK,
-		    &lf, F_FLOCK | F_WAIT, context, NULL))) {
+		error = VNOP_ADVLOCK(xvp, (caddr_t)fg, F_SETLK, &lf, F_FLOCK | F_WAIT, context, NULL);
+		if (error == ENOTSUP) {
+			error = 0;
+		} else if (error) {
 			error = ENOATTR;
 			goto out;
+		} else { // error == 0
+			fg->fg_flag |= FWASLOCKED;
 		}
-		fg->fg_flag |= FWASLOCKED;
 	}
 
 	if (file_sizep != NULL) {

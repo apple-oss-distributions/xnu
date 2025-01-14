@@ -223,7 +223,13 @@ struct _dyld_cache_image_text_info {
 
 
 enum micro_snapshot_flags {
+	/*
+	 * (Timer) interrupt records are no longer supported.
+	 */
 	kInterruptRecord        = 0x1,
+	/*
+	 * Timer arming records are no longer supported.
+	 */
 	kTimerArmingRecord      = 0x2,
 	kUserMode               = 0x4, /* interrupted usermode, or armed by usermode */
 	kIORecord               = 0x8,
@@ -577,6 +583,7 @@ enum {
 #define DEBUGGER_OPTION_SYNC_ON_PANIC_UNSAFE              0x1000ULL /* sync() early in Panic - Can add unbounded delay, may be unsafe for some panic scenarios. Intended for userspace, watchdogs and RTBuddy panics */
 #define DEBUGGER_OPTION_USERSPACE_INITIATED_PANIC         0x2000ULL /* panic initiated by userspace */
 #define DEBUGGER_OPTION_INTEGRATED_COPROC_INITIATED_PANIC 0x4000ULL /* panic initiated by an SOC-integrated coprocessor */
+#define DEBUGGER_OPTION_USER_WATCHDOG                     0x8000ULL /* A watchdog panic caused by an unresponsive user daemon */
 
 #define DEBUGGER_INTERNAL_OPTIONS_MASK              (DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE)
 
@@ -724,7 +731,7 @@ extern size_t   panic_disk_error_description_size;
 
 extern unsigned char    *__counted_by(sizeof(uuid_t)) kernel_uuid;
 extern unsigned int     debug_boot_arg;
-extern int     verbose_panic_flow_logging;
+extern unsigned int     verbose_panic_flow_logging;
 
 extern boolean_t kernelcache_uuid_valid;
 extern uuid_t kernelcache_uuid;
@@ -867,6 +874,7 @@ zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32
 #define PANIC_TEST_CASE_RECURPANIC_POSTLOG          0x8    // recursive panic after paniclog has been written
 #define PANIC_TEST_CASE_RECURPANIC_POSTCORE         0x10   // recursive panic after corefile has been written
 #define PANIC_TEST_CASE_COREFILE_IO_ERR             0x20   // single IO error in the corefile write path
+#define PANIC_TEST_CASE_HIBERNATION_ENTRY           0x40   // panic on hibernation entry
 extern unsigned int    panic_test_case;
 
 #define PANIC_TEST_FAILURE_MODE_BADPTR 0x1                 // dereference a bad pointer
@@ -939,6 +947,32 @@ extern lbr_modes_t last_branch_enabled_modes;
 
 /* Exclaves stackshot tests support */
 #define STACKSHOT_EXCLAVES_TESTING ((DEVELOPMENT || DEBUG) && CONFIG_EXCLAVES)
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+struct panic_lockdown_initiator_state {
+	/** The PC from which panic lockdown was initiated. */
+	uint64_t initiator_pc;
+	/** The SP from which panic lockdown was initiated. */
+	uint64_t initiator_sp;
+	/** The TPIDR of the initiating CPU. */
+	uint64_t initiator_tpidr;
+	/** The MPIDR of the initating CPU. */
+	uint64_t initiator_mpidr;
+
+	/** The timestamp (from CNTVCT_EL0) at which panic lockdown was initiated. */
+	uint64_t timestamp;
+
+	/*
+	 * Misc. exception information.
+	 */
+	uint64_t esr;
+	uint64_t elr;
+	uint64_t far;
+};
+
+/** Attempt to record debug state for a panic lockdown event */
+extern void panic_lockdown_record_debug_data(void);
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 #endif  /* XNU_KERNEL_PRIVATE */
 

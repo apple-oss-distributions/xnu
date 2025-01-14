@@ -508,6 +508,7 @@ IOService::initialize( void )
 	gIOUserUserClientKey   = OSSymbol::withCStringNoCopy(kIOUserUserClientKey);
 
 	gIOUserServerOneProcessKey = OSSymbol::withCStringNoCopy(kIOUserServerOneProcessKey);
+
 	gIOUserServerPreserveUserspaceRebootKey = OSSymbol::withCStringNoCopy(kIOUserServerPreserveUserspaceRebootKey);
 
 	gIOResourcesKey       = OSSymbol::withCStringNoCopy( kIOResourcesClass );
@@ -3930,6 +3931,9 @@ IOService::probeCandidates( OSOrderedSet * matches )
 			if (isDext && !gIODextRelaunchMax && rematchCountProp) {
 				continue;
 			}
+			if (isDext && isInactive()) {
+				continue;
+			}
 			newIsBoot = gIOCatalogue->personalityIsBoot(match);
 
 			category = OSDynamicCast( OSSymbol,
@@ -4863,6 +4867,10 @@ IOService::startCandidate( IOService * service )
 
 			sym = OSSymbol::withString(serverName);
 			bool reuse = service->propertyExists(gIOUserServerOneProcessKey);
+			bool reuseRequired = false;
+			if (propertyExists(gIOUserServerNameKey)) {
+				reuseRequired = reuse && service->propertyHasValue(gIOUserServerNameKey, getProperty(gIOUserServerNameKey));
+			}
 			serverDUI = OSDynamicCast(OSData, service->getProperty(kOSBundleDextUniqueIdentifierKey));
 			userServer = IOUserServer::launchUserServer(bundleID, sym, serverTag, reuse, &token, serverDUI);
 			OSSafeReleaseNULL(sym);
@@ -4870,7 +4878,7 @@ IOService::startCandidate( IOService * service )
 			OSSafeReleaseNULL(serverName);
 			if (userServer) {
 				DKLOG(DKS " using existing server " DKS "\n", DKN(service), DKN(userServer));
-			} else if (token != NULL) {
+			} else if (!reuseRequired && token != NULL) {
 				const OSSymbol * tokenServerName = token->copyServerName();
 				OSNumber * tokenServerTag = token->copyServerTag();
 				assert(tokenServerName && tokenServerTag);
@@ -4878,6 +4886,8 @@ IOService::startCandidate( IOService * service )
 				userServer = __WAITING_FOR_USER_SERVER__(token);
 				OSSafeReleaseNULL(tokenServerName);
 				OSSafeReleaseNULL(tokenServerTag);
+			} else if (reuseRequired) {
+				DKLOG(DKS " failed to reuse server\n", DKN(service));
 			} else {
 				DKLOG(DKS " failed to launch server\n", DKN(service));
 			}
@@ -5592,7 +5602,7 @@ IOReturn
 IOService::waitForState( UInt32 mask, UInt32 value,
     uint64_t timeout )
 {
-	bool            wait;
+	bool            wait, done;
 	int             waitResult = THREAD_AWAKENED;
 	bool            computeDeadline = true;
 	AbsoluteTime    abstime;
@@ -5600,7 +5610,8 @@ IOService::waitForState( UInt32 mask, UInt32 value,
 	do {
 		lockForArbitration();
 		IOLockLock( gIOServiceBusyLock );
-		wait = (value != (__state[1] & mask));
+		done = (value == (__state[1] & mask));
+		wait = (waitResult != THREAD_TIMED_OUT) && !done;
 		if (wait) {
 			__state[1] |= kIOServiceBusyWaiterState;
 			unlockForArbitration();
@@ -5622,12 +5633,12 @@ IOService::waitForState( UInt32 mask, UInt32 value,
 		if (wait) {
 			waitResult = thread_block(THREAD_CONTINUE_NULL);
 		}
-	} while (wait && (waitResult != THREAD_TIMED_OUT));
+	} while (wait);
 
-	if (waitResult == THREAD_TIMED_OUT) {
-		return kIOReturnTimeout;
-	} else {
+	if (done) {
 		return kIOReturnSuccess;
+	} else {
+		return kIOReturnTimeout;
 	}
 }
 

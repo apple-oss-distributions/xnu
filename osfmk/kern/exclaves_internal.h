@@ -48,9 +48,11 @@ exclaves_in_range(uintptr_t addr, uintptr_t start, uintptr_t end)
 
 extern lck_grp_t exclaves_lck_grp;
 
+/*
+ * Run the specified thread's scheduling context in exclaves.
+ */
 extern kern_return_t
-exclaves_scheduler_resume_scheduling_context(const exclaves_ctx_t *ctx,
-    bool interrupted);
+exclaves_run(thread_t thread, bool interrupted);
 
 __END_DECLS
 

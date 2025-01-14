@@ -68,6 +68,9 @@
 #define EXCLAVES_ID_TIGHTBEAM_UPCALL \
     ((exclaves_id_t)XNUPROXY_UPCALL_TIGHTBEAM)
 
+#define EXCLAVES_ID_TIGHTBEAM_UPCALL_V2 \
+    ((exclaves_id_t)XNUPROXY_UPCALL_TIGHTBEAM_V2)
+
 extern lck_mtx_t exclaves_boot_lock;
 
 typedef struct exclaves_upcall_handler_registration {
@@ -108,206 +111,418 @@ static const xnuupcalls_xnuupcalls__server_s exclaves_tightbeam_upcalls = {
 
 	.alloc = ^(const uint32_t npages, xnuupcalls_pagekind_s kind,
 	    tb_error_t (^completion)(xnuupcalls_pagelist_s)) {
-		return exclaves_memory_upcall_alloc(npages, kind, completion);
+		return exclaves_memory_upcall_legacy_alloc(npages, kind, completion);
 	},
 
 	.free = ^(const uint32_t pages[_Nonnull EXCLAVES_MEMORY_MAX_REQUEST],
 	    const uint32_t npages, const xnuupcalls_pagekind_s kind,
 	    tb_error_t (^completion)(void)) {
-		return exclaves_memory_upcall_free(pages, npages, kind, completion);
+		return exclaves_memory_upcall_legacy_free(pages, npages, kind, completion);
 	},
 
 	.root = ^(const uint8_t exclaveid[_Nonnull 32],
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_root__result_s)) {
-		return exclaves_storage_upcall_root(exclaveid, completion);
+		return exclaves_storage_upcall_legacy_root(exclaveid, completion);
 	},
 
 	.open = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t rootid,
 	    const uint8_t name[_Nonnull 256],
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_open__result_s)) {
-		return exclaves_storage_upcall_open(fstag, rootid, name, completion);
+		return exclaves_storage_upcall_legacy_open(fstag, rootid, name, completion);
 	},
 
 	.close = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t fileid,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_close__result_s)) {
-		return exclaves_storage_upcall_close(fstag, fileid, completion);
+		return exclaves_storage_upcall_legacy_close(fstag, fileid, completion);
 	},
 
 	.create = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t rootid,
 	    const uint8_t name[_Nonnull 256],
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_create__result_s)) {
-		return exclaves_storage_upcall_create(fstag, rootid, name, completion);
+		return exclaves_storage_upcall_legacy_create(fstag, rootid, name, completion);
 	},
 
 	.read = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t fileid,
 	    const struct xnuupcalls_iodesc_s *descriptor,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_read__result_s)) {
-		return exclaves_storage_upcall_read(fstag, fileid, descriptor, completion);
+		return exclaves_storage_upcall_legacy_read(fstag, fileid, descriptor, completion);
 	},
 
 	.write = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t fileid,
 	    const struct xnuupcalls_iodesc_s *descriptor,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_write__result_s)) {
-		return exclaves_storage_upcall_write(fstag, fileid, descriptor, completion);
+		return exclaves_storage_upcall_legacy_write(fstag, fileid, descriptor, completion);
 	},
 
 	.remove = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t rootid,
 	    const uint8_t name[_Nonnull 256],
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_remove__result_s)) {
-		return exclaves_storage_upcall_remove(fstag, rootid, name, completion);
+		return exclaves_storage_upcall_legacy_remove(fstag, rootid, name, completion);
 	},
 
 	.sync = ^(const enum xnuupcalls_fstag_s fstag,
 	    const enum xnuupcalls_syncop_s op,
 	    const uint64_t fileid,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_sync__result_s)) {
-		return exclaves_storage_upcall_sync(fstag, op, fileid, completion);
+		return exclaves_storage_upcall_legacy_sync(fstag, op, fileid, completion);
 	},
 
 	.readdir = ^(const enum xnuupcalls_fstag_s fstag,
 	    const uint64_t fileid, const uint64_t buf,
 	    const uint32_t length,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_readdir__result_s)) {
-		return exclaves_storage_upcall_readdir(fstag, fileid, buf, length, completion);
+		return exclaves_storage_upcall_legacy_readdir(fstag, fileid, buf, length, completion);
 	},
 
 	.getsize = ^(const enum xnuupcalls_fstag_s fstag, const uint64_t fileid,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_getsize__result_s)) {
-		return exclaves_storage_upcall_getsize(fstag, fileid, completion);
+		return exclaves_storage_upcall_legacy_getsize(fstag, fileid, completion);
 	},
 
 	.sealstate = ^(const enum xnuupcalls_fstag_s fstag,
 		tb_error_t (^completion)(xnuupcalls_xnuupcalls_sealstate__result_s)) {
-		return exclaves_storage_upcall_sealstate(fstag, completion);
+		return exclaves_storage_upcall_legacy_sealstate(fstag, completion);
 	},
 
 	.irq_register = ^(const uint64_t id, const int32_t index,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_irq_register__result_s)) {
-		return exclaves_driverkit_upcall_irq_register(id, index, completion);
+		return exclaves_driverkit_upcall_legacy_irq_register(id, index, completion);
 	},
 
 	.irq_remove = ^(const uint64_t id, const int32_t index,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_irq_remove__result_s)) {
-		return exclaves_driverkit_upcall_irq_remove(id, index, completion);
+		return exclaves_driverkit_upcall_legacy_irq_remove(id, index, completion);
 	},
 
 	.irq_enable = ^(const uint64_t id, const int32_t index,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_irq_enable__result_s)) {
-		return exclaves_driverkit_upcall_irq_enable(id, index, completion);
+		return exclaves_driverkit_upcall_legacy_irq_enable(id, index, completion);
 	},
 
 	.irq_disable = ^(const uint64_t id, const int32_t index,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_irq_disable__result_s)) {
-		return exclaves_driverkit_upcall_irq_disable(id, index, completion);
+		return exclaves_driverkit_upcall_legacy_irq_disable(id, index, completion);
 	},
 
 	.timer_register = ^(const uint64_t id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_register__result_s)) {
-		return exclaves_driverkit_upcall_timer_register(id, completion);
+		return exclaves_driverkit_upcall_legacy_timer_register(id, completion);
 	},
 
 	.timer_remove = ^(const uint64_t id, const uint32_t timer_id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_remove__result_s)) {
-		return exclaves_driverkit_upcall_timer_remove(id, timer_id, completion);
+		return exclaves_driverkit_upcall_legacy_timer_remove(id, timer_id, completion);
 	},
 
 	.timer_enable = ^(const uint64_t id, const uint32_t timer_id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_enable__result_s)) {
-		return exclaves_driverkit_upcall_timer_enable(id, timer_id, completion);
+		return exclaves_driverkit_upcall_legacy_timer_enable(id, timer_id, completion);
 	},
 
 	.timer_disable = ^(const uint64_t id, const uint32_t timer_id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_disable__result_s)) {
-		return exclaves_driverkit_upcall_timer_disable(id, timer_id, completion);
+		return exclaves_driverkit_upcall_legacy_timer_disable(id, timer_id, completion);
 	},
 
 	.timer_set_timeout = ^(const uint64_t id, const uint32_t timer_id,
 	    const struct xnuupcalls_drivertimerspecification_s *duration,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_set_timeout__result_s)) {
-		return exclaves_driverkit_upcall_timer_set_timeout(id, timer_id, duration, completion);
+		return exclaves_driverkit_upcall_legacy_timer_set_timeout(id, timer_id, duration, completion);
 	},
 
 	.timer_cancel_timeout = ^(const uint64_t id, const uint32_t timer_id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_timer_cancel_timeout__result_s)) {
-		return exclaves_driverkit_upcall_timer_cancel_timeout(id, timer_id, completion);
+		return exclaves_driverkit_upcall_legacy_timer_cancel_timeout(id, timer_id, completion);
 	},
 
 	.lock_wl = ^(const uint64_t id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_lock_wl__result_s)) {
-		return exclaves_driverkit_upcall_lock_wl(id, completion);
+		return exclaves_driverkit_upcall_legacy_lock_wl(id, completion);
 	},
 
 	.unlock_wl = ^(const uint64_t id,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_unlock_wl__result_s)) {
-		return exclaves_driverkit_upcall_unlock_wl(id, completion);
+		return exclaves_driverkit_upcall_legacy_unlock_wl(id, completion);
 	},
 
 	.async_notification_signal = ^(const uint64_t id,
 	    const uint32_t notificationID,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_async_notification_signal__result_s)) {
-		return exclaves_driverkit_upcall_async_notification_signal(id,
+		return exclaves_driverkit_upcall_legacy_async_notification_signal(id,
 		    notificationID, completion);
 	},
 
 	.mapper_activate = ^(const uint64_t id, const uint32_t mapperIndex,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_mapper_activate__result_s)) {
-		return exclaves_driverkit_upcall_mapper_activate(id,
+		return exclaves_driverkit_upcall_legacy_mapper_activate(id,
 		    mapperIndex, completion);
 	},
 
 	.mapper_deactivate = ^(const uint64_t id, const uint32_t mapperIndex,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_mapper_deactivate__result_s)) {
-		return exclaves_driverkit_upcall_mapper_deactivate(id,
+		return exclaves_driverkit_upcall_legacy_mapper_deactivate(id,
 		    mapperIndex, completion);
 	},
 
 	.notification_signal = ^(const uint64_t id, const uint32_t mask,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_notification_signal__result_s)) {
-		return exclaves_driverkit_upcall_notification_signal(id, mask,
+		return exclaves_driverkit_upcall_legacy_notification_signal(id, mask,
 		    completion);
 	},
 
 	.ane_setpowerstate = ^(const uint64_t id, const uint32_t desiredState,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_ane_setpowerstate__result_s)) {
-		return exclaves_driverkit_upcall_ane_setpowerstate(id, desiredState,
+		return exclaves_driverkit_upcall_legacy_ane_setpowerstate(id, desiredState,
 			completion);
 	},
 
 	.ane_worksubmit = ^(const uint64_t id, const uint64_t requestID,
 	    const uint32_t taskDescriptorCount, const uint64_t submitTimestamp,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_ane_worksubmit__result_s)) {
-		return exclaves_driverkit_upcall_ane_worksubmit(id, requestID,
+		return exclaves_driverkit_upcall_legacy_ane_worksubmit(id, requestID,
 			taskDescriptorCount, submitTimestamp, completion);
 	},
 
 	.ane_workbegin = ^(const uint64_t id, const uint64_t requestID,
 	    const uint64_t beginTimestamp,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_ane_workbegin__result_s)) {
-		return exclaves_driverkit_upcall_ane_workbegin(id, requestID,
+		return exclaves_driverkit_upcall_legacy_ane_workbegin(id, requestID,
 			beginTimestamp, completion);
 	},
 
 	.ane_workend = ^(const uint64_t id, const uint64_t requestID,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_ane_workend__result_s)) {
-		return exclaves_driverkit_upcall_ane_workend(id, requestID, completion);
+		return exclaves_driverkit_upcall_legacy_ane_workend(id, requestID, completion);
 	},
 
 	.conclave_suspend = ^(const uint32_t flags,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_suspend__result_s)) {
-		return exclaves_conclave_upcall_suspend(flags, completion);
+		return exclaves_conclave_upcall_legacy_suspend(flags, completion);
 	},
 
 	.conclave_stop = ^(const uint32_t flags,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_stop__result_s)) {
-		return exclaves_conclave_upcall_stop(flags, completion);
+		return exclaves_conclave_upcall_legacy_stop(flags, completion);
 	},
 	.conclave_crash_info = ^(const xnuupcalls_conclavesharedbuffer_s *shared_buf,
 	    const uint32_t length,
 	    tb_error_t (^completion)(xnuupcalls_xnuupcalls_conclave_crash_info__result_s)) {
+		return exclaves_conclave_upcall_legacy_crash_info(shared_buf, length, completion);
+	},
+	/* END IGNORE CODESTYLE */
+};
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+static const xnuupcallsv2_xnuupcalls__server_s exclaves_tightbeam_upcalls_v2 = {
+	/* BEGIN IGNORE CODESTYLE */
+	/* Uncrustify doesn't deal well with Blocks. */
+	.helloupcall = ^(const uint64_t arg, tb_error_t (^completion)(uint64_t)) {
+		return exclaves_helloupcall(arg, completion);
+	},
+
+	.alloc = ^(const uint32_t npages, xnuupcallsv2_pagekind_s kind,
+	    tb_error_t (^completion)(xnuupcallsv2_pagelist_s)) {
+		return exclaves_memory_upcall_alloc(npages, kind, completion);
+	},
+
+	.free = ^(const xnuupcallsv2_pagelist_s pages, const xnuupcallsv2_pagekind_s kind,
+	    tb_error_t (^completion)(void)) {
+		return exclaves_memory_upcall_free(pages, kind, completion);
+	},
+
+	.root = ^(const uint8_t exclaveid[_Nonnull 32],
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_root__result_s)) {
+		return exclaves_storage_upcall_root(exclaveid, completion);
+	},
+
+	.open = ^(const uint32_t fstag, const uint64_t rootid,
+	    const uint8_t name[_Nonnull 256],
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_open__result_s)) {
+		return exclaves_storage_upcall_open(fstag, rootid, name, completion);
+	},
+
+	.close = ^(const uint32_t fstag, const uint64_t fileid,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_close__result_s)) {
+		return exclaves_storage_upcall_close(fstag, fileid, completion);
+	},
+
+	.create = ^(const uint32_t fstag, const uint64_t rootid,
+	    const uint8_t name[_Nonnull 256],
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_create__result_s)) {
+		return exclaves_storage_upcall_create(fstag, rootid, name, completion);
+	},
+
+	.read = ^(const uint32_t fstag, const uint64_t fileid,
+	    const struct xnuupcallsv2_iodesc_s *descriptor,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_read__result_s)) {
+		return exclaves_storage_upcall_read(fstag, fileid, descriptor, completion);
+	},
+
+	.write = ^(const uint32_t fstag, const uint64_t fileid,
+	    const struct xnuupcallsv2_iodesc_s *descriptor,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_write__result_s)) {
+		return exclaves_storage_upcall_write(fstag, fileid, descriptor, completion);
+	},
+
+	.remove = ^(const uint32_t fstag, const uint64_t rootid,
+	    const uint8_t name[_Nonnull 256],
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_remove__result_s)) {
+		return exclaves_storage_upcall_remove(fstag, rootid, name, completion);
+	},
+
+	.sync = ^(const uint32_t fstag,
+	    const xnuupcallsv2_syncop_s * _Nonnull op,
+	    const uint64_t fileid,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_sync__result_s)) {
+		return exclaves_storage_upcall_sync(fstag, op, fileid, completion);
+	},
+
+	.readdir = ^(const uint32_t fstag,
+	    const uint64_t fileid, const uint64_t buf,
+	    const uint32_t length,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_readdir__result_s)) {
+		return exclaves_storage_upcall_readdir(fstag, fileid, buf, length, completion);
+	},
+
+	.getsize = ^(const uint32_t fstag, const uint64_t fileid,
+	    tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_getsize__result_s)) {
+		return exclaves_storage_upcall_getsize(fstag, fileid, completion);
+	},
+
+	.sealstate = ^(const uint32_t fstag,
+		tb_error_t (^completion)(xnuupcallsv2_storageupcallsprivate_sealstate__result_s)) {
+		return exclaves_storage_upcall_sealstate(fstag, completion);
+	},
+
+	.irqregister = ^(const uint64_t id, const int32_t index,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_irqregister__result_s)) {
+		return exclaves_driverkit_upcall_irq_register(id, index, completion);
+	},
+
+	.irqremove = ^(const uint64_t id, const int32_t index,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_irqremove__result_s)) {
+		return exclaves_driverkit_upcall_irq_remove(id, index, completion);
+	},
+
+	.irqenable = ^(const uint64_t id, const int32_t index,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_irqenable__result_s)) {
+		return exclaves_driverkit_upcall_irq_enable(id, index, completion);
+	},
+
+	.irqdisable = ^(const uint64_t id, const int32_t index,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_irqdisable__result_s)) {
+		return exclaves_driverkit_upcall_irq_disable(id, index, completion);
+	},
+
+	.timerregister = ^(const uint64_t id,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timerregister__result_s)) {
+		return exclaves_driverkit_upcall_timer_register(id, completion);
+	},
+
+	.timerremove = ^(const uint64_t id, const uint32_t timerid,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timerremove__result_s)) {
+		return exclaves_driverkit_upcall_timer_remove(id, timerid, completion);
+	},
+
+	.timerenable = ^(const uint64_t id, const uint32_t timerid,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timerenable__result_s)) {
+		return exclaves_driverkit_upcall_timer_enable(id, timerid, completion);
+	},
+
+	.timerdisable = ^(const uint64_t id, const uint32_t timerid,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timerdisable__result_s)) {
+		return exclaves_driverkit_upcall_timer_disable(id, timerid, completion);
+	},
+
+	.timersettimeout = ^(const uint64_t id, const uint32_t timerid,
+	    const struct xnuupcallsv2_drivertimerspecification_s *duration,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timersettimeout__result_s)) {
+		return exclaves_driverkit_upcall_timer_set_timeout(id, timerid, duration, completion);
+	},
+
+	.timercanceltimeout = ^(const uint64_t id, const uint32_t timerid,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_timercanceltimeout__result_s)) {
+		return exclaves_driverkit_upcall_timer_cancel_timeout(id, timerid, completion);
+	},
+
+	.lockworkloop = ^(const uint64_t id,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_lockworkloop__result_s)) {
+		return exclaves_driverkit_upcall_lock_workloop(id, completion);
+	},
+
+	.unlockworkloop = ^(const uint64_t id,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_unlockworkloop__result_s)) {
+		return exclaves_driverkit_upcall_unlock_workloop(id, completion);
+	},
+
+	.asyncnotificationsignal = ^(const uint64_t id,
+	    const uint32_t notificationID,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_asyncnotificationsignal__result_s)) {
+		return exclaves_driverkit_upcall_async_notification_signal(id,
+		    notificationID, completion);
+	},
+
+	.mapperactivate = ^(const uint64_t id, const uint32_t mapperIndex,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_mapperactivate__result_s)) {
+		return exclaves_driverkit_upcall_mapper_activate(id,
+		    mapperIndex, completion);
+	},
+
+	.mapperdeactivate = ^(const uint64_t id, const uint32_t mapperIndex,
+	    tb_error_t (^completion)(xnuupcallsv2_driverupcallsprivate_mapperdeactivate__result_s)) {
+		return exclaves_driverkit_upcall_mapper_deactivate(id,
+		    mapperIndex, completion);
+	},
+
+	.anesetpowerstate = ^(const uint64_t id, const uint32_t desiredState,
+	    tb_error_t (^completion)(xnuupcallsv2_aneupcallsprivate_anesetpowerstate__result_s)) {
+		return exclaves_driverkit_upcall_ane_setpowerstate(id, desiredState,
+			completion);
+	},
+
+	.aneworksubmit = ^(const uint64_t id, const uint64_t requestID,
+	    const uint32_t taskDescriptorCount, const uint64_t submitTimestamp,
+	    tb_error_t (^completion)(xnuupcallsv2_aneupcallsprivate_aneworksubmit__result_s)) {
+		return exclaves_driverkit_upcall_ane_worksubmit(id, requestID,
+			taskDescriptorCount, submitTimestamp, completion);
+	},
+
+	.aneworkbegin = ^(const uint64_t id, const uint64_t requestID,
+	    const uint64_t beginTimestamp,
+	    tb_error_t (^completion)(xnuupcallsv2_aneupcallsprivate_aneworkbegin__result_s)) {
+		return exclaves_driverkit_upcall_ane_workbegin(id, requestID,
+			beginTimestamp, completion);
+	},
+
+	.aneworkend = ^(const uint64_t id, const uint64_t requestID,
+	    tb_error_t (^completion)(xnuupcallsv2_aneupcallsprivate_aneworkend__result_s)) {
+		return exclaves_driverkit_upcall_ane_workend(id, requestID, completion);
+	},
+
+	.notificationsignal = ^(const uint64_t id, const uint32_t mask,
+	    tb_error_t (^completion)(xnuupcallsv2_notificationupcallsprivate_notificationsignal__result_s)) {
+		return exclaves_driverkit_upcall_notification_signal(id, mask,
+		    completion);
+	},
+
+	.suspend = ^(const uint32_t flags,
+	    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_suspend__result_s)) {
+		return exclaves_conclave_upcall_suspend(flags, completion);
+	},
+
+	.stop = ^(const uint32_t flags,
+	    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_stop__result_s)) {
+		return exclaves_conclave_upcall_stop(flags, completion);
+	},
+	.crashinfo = ^(const xnuupcallsv2_conclavesharedbuffer_s *shared_buf,
+	    const uint32_t length,
+	    tb_error_t (^completion)(xnuupcallsv2_conclaveupcallsprivate_crashinfo__result_s)) {
 		return exclaves_conclave_upcall_crash_info(shared_buf, length, completion);
 	},
 	/* END IGNORE CODESTYLE */
 };
+#pragma clang diagnostic pop
 
 kern_return_t
 exclaves_register_upcall_handler(exclaves_id_t upcall_id, void *upcall_context,
@@ -346,13 +561,20 @@ exclaves_upcall_init(void)
 	tb_endpoint_t tb_upcall_ep = tb_endpoint_create_with_value(
 		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_TIGHTBEAM_UPCALL,
 		TB_ENDPOINT_OPTIONS_NONE);
+
+	tb_endpoint_t tb_upcall_v2_ep = tb_endpoint_create_with_value(
+		TB_TRANSPORT_TYPE_XNU, EXCLAVES_ID_TIGHTBEAM_UPCALL_V2,
+		TB_ENDPOINT_OPTIONS_NONE);
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wcast-qual" /* FIXME: rdar://103647654 */
 	tb_error_t error = xnuupcalls_xnuupcalls__server_start(tb_upcall_ep,
 	    (xnuupcalls_xnuupcalls__server_s *)&exclaves_tightbeam_upcalls);
+	tb_error_t error2 = xnuupcallsv2_xnuupcalls__server_start(tb_upcall_v2_ep,
+	    (xnuupcallsv2_xnuupcalls__server_s *)&exclaves_tightbeam_upcalls_v2);
 #pragma clang diagnostic pop
 
-	return error == TB_ERROR_SUCCESS ? KERN_SUCCESS : KERN_FAILURE;
+	return (error == TB_ERROR_SUCCESS && error2 == TB_ERROR_SUCCESS) ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 /* Unslid pointers defining the range of code which triggers upcall handlers */
@@ -398,9 +620,9 @@ exclaves_call_upcall_handler(exclaves_id_t upcall_id)
 		upcall_handler = exclaves_upcall_handlers[upcall_id];
 	}
 	if (upcall_handler.handler) {
-		__asm__ volatile ( "EXCLAVES_UPCALL_START: nop\n\t");
+		__asm__ volatile ( "EXCLAVES_UPCALL_START:\n\t");
 		kr = upcall_handler.handler(upcall_handler.context, &tag, badge);
-		__asm__ volatile ("EXCLAVES_UPCALL_END: nop\n\t");
+		__asm__ volatile ("EXCLAVES_UPCALL_END:\n\t");
 		Exclaves_L4_SetMessageTag(tag);
 	}
 

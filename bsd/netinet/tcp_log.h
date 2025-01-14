@@ -153,6 +153,20 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 	       (tcp_log_enable_flags & (req_flags & ~TLEF_MASK_DST));
 }
 
+
+static inline bool
+tcp_log_summary_needed(struct tcpcb *tp)
+{
+	struct inpcb *inp;
+
+	if (tp == NULL || tp->t_inpcb == NULL) {
+		return false;
+	}
+	inp = tp->t_inpcb;
+
+	return (inp->inp_flags2 & INP2_LOGGING_ENABLED) ? true: false;
+}
+
 #define TCP_LOG_RTT_INFO(tp) if (tcp_is_log_enabled(tp, TLEF_RTT)) \
     tcp_log_rtt_info(__func__, __LINE__, (tp))
 
@@ -177,7 +191,7 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG_ACCEPT(tp, error) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
     tcp_log_connection((tp), "accept", (error))
 
-#define TCP_LOG_CONNECTION_SUMMARY(tp) if (tcp_is_log_enabled(tp, TLEF_CONNECTION)) \
+#define TCP_LOG_CONNECTION_SUMMARY(tp) if (tcp_log_summary_needed(tp)) \
     tcp_log_connection_summary((tp))
 
 #define TCP_LOG_DROP_NECP(hdr, th, tp, outgoing) if (tcp_is_log_enabled(tp, TLEF_DROP_NECP)) \

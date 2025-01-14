@@ -38,6 +38,7 @@ typedef enum {
 	TEST_SADB_EXT_MIGRATE_BAD_ADDRESS = 11,
 	TEST_TCP_INPUT_IPSEC_COPY_POLICY = 12,
 	TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570 = 13,
+	TEST_SADB_EXT_MIGRATE_AFTER_EXPIRY_134671927 = 14,
 } test_identifier;
 
 static test_identifier test_id = TEST_INVALID;
@@ -58,6 +59,7 @@ static void pfkey_process_message_test_60687183(uint8_t **mhp, int pfkey_socket)
 static void pfkey_process_message_test_60687183_1(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket);
 static void pfkey_process_message_test_78944570(uint8_t **mhp, int pfkey_socket);
+static void pfkey_process_message_test_134671927(uint8_t **mhp, int pfkey_socket);
 
 static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_socket) =
 {
@@ -75,6 +77,7 @@ static void(*const process_pfkey_message_tests[])(uint8_t * *mhp, int pfkey_sock
 	pfkey_process_message_test_60687183_2,  // TEST_SADB_EXT_MIGRATE_BAD_ADDRESS
 	NULL,                                   // TEST_TCP_INPUT_IPSEC_COPY_POLICY
 	pfkey_process_message_test_78944570,    // TEST_SADB_X_SPDADD_MEMORY_LEAK_78944570
+	pfkey_process_message_test_134671927,   // TEST_SADB_EXT_MIGRATE_AFTER_EXPIRY_134671927
 };
 
 static void
@@ -439,6 +442,29 @@ send_pfkey_flush_sp(int pfkey_socket)
 }
 
 static void
+send_pfkey_register(int pfkey_socket)
+{
+	uint8_t payload[MCLBYTES] __attribute__ ((aligned(32)));
+	bzero(payload, sizeof(payload));
+	uint16_t tlen = 0;
+
+	struct sadb_msg *msg_payload = (struct sadb_msg *)payload;
+	msg_payload->sadb_msg_version = PF_KEY_V2;
+	msg_payload->sadb_msg_type = SADB_REGISTER;
+	msg_payload->sadb_msg_errno = 0;
+	msg_payload->sadb_msg_satype = SADB_SATYPE_ESP;
+	msg_payload->sadb_msg_len = PFKEY_UNIT64(tlen);
+	msg_payload->sadb_msg_reserved = 0;
+	msg_payload->sadb_msg_seq = 0;
+	msg_payload->sadb_msg_pid = (u_int32_t)getpid();
+	tlen += sizeof(*msg_payload);
+
+	// Update the total length
+	msg_payload->sadb_msg_len = PFKEY_UNIT64(tlen);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(send(pfkey_socket, payload, (size_t)PFKEY_UNUNIT64(msg_payload->sadb_msg_len), 0), "pfkey flush security policies");
+}
+
+static void
 send_pkey_get_spi(int pfkey_socket)
 {
 	uint8_t payload[MCLBYTES] __attribute__ ((aligned(32)));
@@ -536,6 +562,9 @@ send_pkey_add_sa(int pfkey_socket, uint32_t spi, const char *src, const char *ds
 	sa2_x_payload->sadb_x_sa2_exttype = SADB_X_EXT_SA2;
 	sa2_x_payload->sadb_x_sa2_mode = IPSEC_MODE_TRANSPORT;
 	sa2_x_payload->sadb_x_sa2_reqid = 0;
+	if (test_id == TEST_SADB_EXT_MIGRATE_AFTER_EXPIRY_134671927) {
+		sa2_x_payload->sadb_x_sa2_alwaysexpire = 1;
+	}
 	tlen += sizeof(*sa2_x_payload);
 
 	uint8_t prefixlen = (family == AF_INET) ? (sizeof(struct in_addr) << 3) : (sizeof(struct in6_addr) << 3);
@@ -618,6 +647,9 @@ send_pkey_add_sa(int pfkey_socket, uint32_t spi, const char *src, const char *ds
 	struct sadb_lifetime *soft_lifetime_payload = (struct sadb_lifetime *)(void *)(payload + tlen);
 	soft_lifetime_payload->sadb_lifetime_len = PFKEY_UNIT64(sizeof(*soft_lifetime_payload));
 	soft_lifetime_payload->sadb_lifetime_exttype = SADB_EXT_LIFETIME_SOFT;
+	if (test_id == TEST_SADB_EXT_MIGRATE_AFTER_EXPIRY_134671927) {
+		soft_lifetime_payload->sadb_lifetime_addtime = 1;
+	}
 	tlen += sizeof(*soft_lifetime_payload);
 
 	// Update the total length
@@ -1685,6 +1717,60 @@ pfkey_process_message_test_78944570(uint8_t **mhp, __unused int pfkey_socket)
 	return;
 }
 
+static void
+pfkey_process_message_test_134671927(uint8_t **mhp, int pfkey_socket)
+{
+	struct sadb_msg *message = (struct sadb_msg *)(void *)mhp[0];
+	static uint32_t spi = 0;
+
+	if (message->sadb_msg_type != SADB_EXPIRE && message->sadb_msg_pid != (uint32_t)getpid()) {
+		return;
+	}
+
+	T_QUIET; T_ASSERT_EQ(message->sadb_msg_errno, 0, "SADB error for type %u error %d", message->sadb_msg_type, message->sadb_msg_errno);
+
+	switch (message->sadb_msg_type) {
+	case SADB_REGISTER:
+	{
+		T_LOG("registered for SA updates");
+		send_pkey_add_sa(pfkey_socket, 0x12345678, TEST_SRC_ADDRESS_IPv6, TEST_DST_ADDRESS_IPv6, AF_INET6);
+		break;
+	}
+	case SADB_ADD:
+	{
+		struct sadb_sa *sa_message = (struct sadb_sa *)(void *)mhp[SADB_EXT_SA];
+		T_QUIET; T_ASSERT_NOTNULL(sa_message, "add sa message is NULL");
+		spi = ntohl(sa_message->sadb_sa_spi);
+		T_LOG("added sa 0x%x", spi);
+		break;
+	}
+	case SADB_EXPIRE:
+	{
+		struct sadb_sa *sa_message = (struct sadb_sa *)(void *)mhp[SADB_EXT_SA];
+		T_QUIET; T_ASSERT_NOTNULL(sa_message, "expire sa message is NULL");
+		if (spi == 0 || spi != ntohl(sa_message->sadb_sa_spi)) {
+			break;
+		}
+		T_LOG("expire sa 0x%x", spi);
+		send_pkey_migrate_sa(pfkey_socket, spi, TEST_SRC_ADDRESS_IPv6, TEST_DST_ADDRESS_IPv6, AF_INET6,
+		    TEST_MIGRATE_SRC_ADDRESS_IPv6, TEST_MIGRATE_DST_ADDRESS_IPv6, AF_INET6);
+		break;
+	}
+	case SADB_MIGRATE:
+	{
+		T_PASS("migrate SA success");
+		T_END;
+	}
+	case SADB_FLUSH:
+	case SADB_X_SPDFLUSH:
+		break;
+	default:
+		T_FAIL("bad SADB message type %u", message->sadb_msg_type);
+		T_END;
+	}
+	return;
+}
+
 static int
 setup_tcp_server(uint16_t port)
 {
@@ -1923,6 +2009,19 @@ T_DECL(sadb_x_spd_add_78944570, "security policy add failure", T_META_TAG_VM_PRE
 	send_pfkey_flush_sa(pfkey_socket);
 	send_pfkey_flush_sp(pfkey_socket);
 	send_pfkey_spd_add_message(pfkey_socket, IPSEC_ULPROTO_ANY);
+
+	dispatch_main();
+}
+
+T_DECL(sadb_key_migrate_after_expiry_134671927, "security association migrate after expiry", T_META_TAG_VM_PREFERRED)
+{
+	test_id = TEST_SADB_EXT_MIGRATE_AFTER_EXPIRY_134671927;
+
+	int pfkey_socket = pfkey_setup_socket();
+	T_ATEND(pfkey_cleanup);
+	send_pfkey_flush_sa(pfkey_socket);
+	send_pfkey_flush_sp(pfkey_socket);
+	send_pfkey_register(pfkey_socket);
 
 	dispatch_main();
 }

@@ -79,7 +79,6 @@ T_GLOBAL_META(
 	X(writecfd, "test writing to channel fd") \
 	X(readcfd, "test reading from channel fd") \
 	X(closenfd, "test closing guarded nexus fd") \
-	X(writenfd, "test writing to a guarded nexus fd") \
 	X(readnfd, "test reading from a guarded nexus fd") \
 	X(writeif, "test writes to the read only channel if") \
 	X(writering, "test writes to the writeable ring") \
@@ -154,6 +153,11 @@ T_GLOBAL_META(
 	X(steering, "Test steering rules") \
 	X(listen_stress, "Test stress posix socket listen") \
 	X(pllutxk, "Test send 10000000 slots to upipe sink using kqueue")
+
+/*
+ *  The following tetsts are disabled:
+ *       X(writenfd, "test writing to a guarded nexus fd") due to rdar://133461652
+ */
 
 #define BATSPLL_TESTS \
 	X(noop, "test just returns true") \

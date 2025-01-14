@@ -112,7 +112,11 @@ T_HELPER_DECL(coalition_member, "Mock coalition member") {
  * is sorted properly by role.
  */
 T_DECL(memorystatus_sort_coalition, "Coalition sort order",
-    T_META_ASROOT(true), T_META_TAG_VM_PREFERRED) {
+    T_META_ASROOT(true),
+    T_META_TAG_VM_PREFERRED,
+    T_META_ENABLED(false /* rdar://133461319 */)
+    )
+{
 	int ret;
 	sig_t res;
 	coalition_info_t coalition;

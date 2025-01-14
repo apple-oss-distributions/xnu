@@ -158,7 +158,11 @@ start_cold:
 	/* Jump to handler */
 	mov		x0, x26
 	mov		x1, x27
+#if KASAN
+	b		EXT(arm_init_kasan)
+#else
 	b		EXT(arm_init)
+#endif /* KASAN */
 
 /**
  * Secondary CPU boot path.

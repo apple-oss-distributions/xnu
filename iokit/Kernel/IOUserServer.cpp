@@ -1620,6 +1620,11 @@ IOInterruptDispatchSource::SetEnableWithCompletion_Impl(
 		return kIOReturnSuccess;
 	}
 
+	if (ivars->canceled) {
+		return kIOReturnUnsupported;
+	}
+	assert(ivars->provider != NULL);
+
 	if (enable) {
 		is = IOSimpleLockLockDisableInterrupt(ivars->lock);
 		ivars->enable = enable;
@@ -4006,6 +4011,9 @@ IOUserServer::consumeObjects(IORPCMessageMach *mach, IORPCMessage * message, siz
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+static kern_return_t
+acknowledgeSetPowerState(IOService * service);
+
 bool
 IOUserServer::finalize(IOOptionBits options)
 {
@@ -4056,6 +4064,7 @@ IOUserServer::finalize(IOOptionBits options)
 			        if (nextUserClient) {
 			                nextUserClient->setTerminateDefer(provider, false);
 				}
+			        (void)::acknowledgeSetPowerState(nextService);
 			        started = nextService->reserved->uvars->started;
 			        nextService->reserved->uvars->serverDied = true;
 
@@ -4158,6 +4167,7 @@ IOUserClient * IOUserServer::withTask(task_t owningTask)
 	if (csproc_get_validation_category(current_proc(), &inst->fCSValidationCategory) != KERN_SUCCESS) {
 		inst->fCSValidationCategory = CS_VALIDATION_CATEGORY_INVALID;
 	}
+	inst->fWorkLoop = IOWorkLoop::workLoop();
 
 	inst->setProperty(kIOUserClientDefaultLockingKey, kOSBooleanTrue);
 	inst->setProperty(kIOUserClientDefaultLockingSetPropertiesKey, kOSBooleanTrue);
@@ -4322,6 +4332,12 @@ IOUserServer::stop(IOService * provider)
 	}
 }
 
+IOWorkLoop *
+IOUserServer::getWorkLoop() const
+{
+	return fWorkLoop;
+}
+
 void
 IOUserServer::free()
 {
@@ -4345,6 +4361,7 @@ IOUserServer::free()
 	if (fTaskCrashReason != OS_REASON_NULL) {
 		os_reason_free(fTaskCrashReason);
 	}
+	OSSafeReleaseNULL(fWorkLoop);
 	IOUserClient::free();
 }
 
@@ -4707,9 +4724,11 @@ IOUserServer::serviceNewUserClient(IOService * service, task_t owningTask, void 
 	}
 	userUC = OSDynamicCast(IOUserUserClient, uc);
 	if (!userUC) {
-		uc->terminate(kIOServiceTerminateNeedWillTerminate);
-		uc->setTerminateDefer(service, false);
-		OSSafeReleaseNULL(uc);
+		if (uc) {
+			uc->terminate(kIOServiceTerminateNeedWillTerminate);
+			uc->setTerminateDefer(service, false);
+			OSSafeReleaseNULL(uc);
+		}
 		OSSafeReleaseNULL(entitlements);
 		return kIOReturnUnsupported;
 	}
@@ -5078,6 +5097,23 @@ IOService::JoinPMTree_Impl(void)
 	return reserved->uvars->userServer->serviceJoinPMTree(this);
 }
 
+static kern_return_t
+acknowledgeSetPowerState(IOService * service)
+{
+	if (service->reserved->uvars
+	    && service->reserved->uvars->userServer
+	    && service->reserved->uvars->willPower) {
+		IOReturn ret;
+		service->reserved->uvars->willPower = false;
+		ret = service->reserved->uvars->controllingDriver->setPowerState(service->reserved->uvars->willPowerState, service);
+		if (kIOPMAckImplied == ret) {
+			service->acknowledgeSetPowerState();
+		}
+		return kIOReturnSuccess;
+	}
+	return kIOReturnNotReady;
+}
+
 kern_return_t
 IOService::SetPowerState_Impl(
 	uint32_t powerFlags)
@@ -5085,18 +5121,7 @@ IOService::SetPowerState_Impl(
 	if (kIODKLogPM & gIODKDebug) {
 		DKLOG(DKS "::SetPowerState(%d), %d\n", DKN(this), powerFlags, reserved->uvars->willPower);
 	}
-	if (reserved->uvars
-	    && reserved->uvars->userServer
-	    && reserved->uvars->willPower) {
-		IOReturn ret;
-		reserved->uvars->willPower = false;
-		ret = reserved->uvars->controllingDriver->setPowerState(reserved->uvars->willPowerState, this);
-		if (kIOPMAckImplied == ret) {
-			acknowledgeSetPowerState();
-		}
-		return kIOReturnSuccess;
-	}
-	return kIOReturnNotReady;
+	return ::acknowledgeSetPowerState(this);
 }
 
 kern_return_t
@@ -5118,6 +5143,21 @@ IOService::ChangePowerState_Impl(
 	}
 
 	return kIOReturnSuccess;
+}
+
+kern_return_t
+IOService::SetPowerOverride_Impl(
+	bool enable)
+{
+	kern_return_t ret;
+
+	if (enable) {
+		ret = powerOverrideOnPriv();
+	} else {
+		ret = powerOverrideOffPriv();
+	}
+
+	return ret == IOPMNoErr ? kIOReturnSuccess : kIOReturnError;
 }
 
 kern_return_t
@@ -5738,6 +5778,7 @@ IOUserServer::serviceStop(IOService * service, IOService *)
 	(void) service->deRegisterInterestedDriver(this);
 	if (uvars->userServerPM) {
 		service->PMstop();
+		service->acknowledgeSetPowerState();
 	}
 
 	ret = kIOReturnSuccess;

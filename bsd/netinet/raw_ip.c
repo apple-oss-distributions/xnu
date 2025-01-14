@@ -204,6 +204,7 @@ rip_inp_input(struct inpcb *inp, struct mbuf *m, int iphlen)
 	if (!necp_socket_is_allowed_to_send_recv_v4(inp, 0, 0,
 	    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 		/* do not inject data to pcb */
+		m_freem(m);
 		goto done;
 	}
 #endif /* NECP */
@@ -218,6 +219,7 @@ rip_inp_input(struct inpcb *inp, struct mbuf *m, int iphlen)
 	    SOFLOW_ENABLED(inp->inp_socket) ||
 	    SO_RECV_CONTROL_OPTS(inp->inp_socket)) {
 		if (ip_savecontrol(inp, &opts, ip, m) != 0) {
+			m_freem(m);
 			m_freem(opts);
 			goto done;
 		}

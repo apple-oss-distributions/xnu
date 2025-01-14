@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <kern/assert.h>
 #include <kern/thread.h>
 
 #include <os/atomic.h>
@@ -88,7 +89,10 @@ typedef enum __enum_closed {
 	ESYNC_SPACE_TEST       = 0,
 	ESYNC_SPACE_EXCLAVES_Q = 1,
 	ESYNC_SPACE_EXCLAVES_T = 2,
+
+	ESYNC_SPACE_MAX = ESYNC_SPACE_EXCLAVES_T
 } esync_space_t;
+static_assert(ESYNC_SPACE_MAX < (1 << 8));
 
 /*!
  * @enum esync_policy_t

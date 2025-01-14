@@ -321,6 +321,8 @@ boolean_t extended_debug_log_enabled = FALSE;
 #define KDBG_TRACE_PANIC_FILENAME "/var/log/panic.trace"
 #endif
 
+static inline void debug_fatal_panic_begin(void);
+
 /* Debugger state */
 atomic_int     debugger_cpu = DEBUGGER_NO_CPU;
 boolean_t      debugger_allcpus_halted = FALSE;
@@ -354,7 +356,7 @@ static boolean_t debugger_is_panic = TRUE;
 
 TUNABLE(unsigned int, debug_boot_arg, "debug", 0);
 
-TUNABLE(int, verbose_panic_flow_logging, "verbose_panic_flow_logging", 0);
+TUNABLE_DEV_WRITEABLE(unsigned int, verbose_panic_flow_logging, "verbose_panic_flow_logging", 0);
 
 char kernel_uuid_string[37]; /* uuid_string_t */
 char kernelcache_uuid_string[37]; /* uuid_string_t */
@@ -383,6 +385,15 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) phys_carveout = 0;
 SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_pa = 0;
 SECURITY_READ_ONLY_LATE(size_t) phys_carveout_size = 0;
 
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+/**
+ * Extra debug state which is set when panic lockdown is initiated.
+ * This information is intended to help when debugging issues with the panic
+ * path.
+ */
+struct panic_lockdown_initiator_state debug_panic_lockdown_initiator_state;
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 /*
  * Returns whether kernel debugging is expected to be restricted
@@ -1035,14 +1046,26 @@ panic(const char *str, ...)
 }
 
 void
-panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *str, ...)
+panic_with_data(uuid_t uuid, void *addr, uint32_t len, uint64_t debugger_options_mask, const char *str, ...)
 {
 	va_list panic_str_args;
 
 	ext_paniclog_panic_with_data(uuid, addr, len);
 
+#if CONFIG_EXCLAVES
+	/*
+	 * Before trapping, inform the exclaves scheduler that we're going down
+	 * so it can grab an exclaves stackshot.
+	 */
+	if ((debugger_options_mask & DEBUGGER_OPTION_USER_WATCHDOG) != 0 &&
+	    exclaves_get_boot_stage() != EXCLAVES_BOOT_STAGE_NONE) {
+		(void) exclaves_scheduler_request_watchdog_panic();
+	}
+#endif /* CONFIG_EXCLAVES */
+
 	va_start(panic_str_args, str);
-	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0), NULL);
+	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, (debugger_options_mask & ~DEBUGGER_INTERNAL_OPTIONS_MASK),
+	    NULL, (unsigned long)(char *)__builtin_return_address(0), NULL);
 	va_end(panic_str_args);
 }
 
@@ -1050,6 +1073,17 @@ void
 panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mask, const char *str, ...)
 {
 	va_list panic_str_args;
+
+#if CONFIG_EXCLAVES
+	/*
+	 * Before trapping, inform the exclaves scheduler that we're going down
+	 * so it can grab an exclaves stackshot.
+	 */
+	if ((debugger_options_mask & DEBUGGER_OPTION_USER_WATCHDOG) != 0 &&
+	    exclaves_get_boot_stage() != EXCLAVES_BOOT_STAGE_NONE) {
+		(void) exclaves_scheduler_request_watchdog_panic();
+	}
+#endif /* CONFIG_EXCLAVES */
 
 	va_start(panic_str_args, str);
 	panic_trap_to_debugger(str, &panic_str_args, reason, ctx, (debugger_options_mask & ~DEBUGGER_INTERNAL_OPTIONS_MASK),
@@ -1203,24 +1237,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	ml_set_interrupts_enabled(FALSE);
 	disable_preemption();
 
-#if CONFIG_SPTM
-	/*
-	 * If SPTM has not itself already panicked, trigger a panic lockdown. This
-	 * check is necessary since attempting to re-enter the SPTM after it calls
-	 * panic will lead to a hang, which harms kernel field debugability.
-	 *
-	 * Whether or not this check can be subverted is murky. This doesn't really
-	 * matter, however, because any security critical panics events will have
-	 * already initiated lockdown before calling panic. Thus, lockdown from
-	 * panic itself is merely a "best effort".
-	 */
-	libsptm_error_t sptm_error = LIBSPTM_SUCCESS;
-	bool sptm_has_panicked = false;
-	if (((sptm_error = sptm_triggered_panic(&sptm_has_panicked)) == LIBSPTM_SUCCESS) &&
-	    !sptm_has_panicked) {
-		sptm_xnu_panic_begin();
-	}
-#endif /* CONFIG_SPTM */
+	debug_fatal_panic_begin();
 
 #if defined (__x86_64__)
 	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE);
@@ -1686,19 +1703,7 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 #endif
 	} else {
 		/* note: this is the panic path...  */
-#if CONFIG_SPTM
-		/*
-		 * Debug trap panics do not go through the standard panic flows so we
-		 * have to notify the SPTM that we're going down now. This is not so
-		 * much for security (critical cases are handled elsewhere) but rather
-		 * to just keep the SPTM bit in sync with the actual XNU state.
-		 */
-		bool sptm_has_panicked = false;
-		if (sptm_triggered_panic(&sptm_has_panicked) == LIBSPTM_SUCCESS &&
-		    !sptm_has_panicked) {
-			sptm_xnu_panic_begin();
-		}
-#endif /* CONFIG_SPTM */
+		debug_fatal_panic_begin();
 #if defined(__arm64__) && (DEBUG || DEVELOPMENT)
 		if (!PE_arm_debug_and_trace_initialized()) {
 			paniclog_append_noflush("kernel panicked before debug and trace infrastructure initialized!\n"
@@ -2324,3 +2329,26 @@ set_awl_scratch_exists_flag_and_subscribe_for_pm(void)
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, set_awl_scratch_exists_flag_and_subscribe_for_pm);
+
+/**
+ * Signal that the system is going down for a panic
+ */
+static inline void
+debug_fatal_panic_begin(void)
+{
+#if CONFIG_SPTM
+	/*
+	 * Since we're going down, initiate panic lockdown.
+	 *
+	 * Whether or not this call to panic lockdown can be subverted is murky.
+	 * This doesn't really matter, however, because any security critical panics
+	 * events will have already initiated lockdown from the exception vector
+	 * before calling panic. Thus, lockdown from panic itself is fine as merely
+	 * a "best effort".
+	 */
+#if DEVELOPMENT || DEBUG
+	panic_lockdown_record_debug_data();
+#endif /* DEVELOPMENT || DEBUG */
+	sptm_xnu_panic_begin();
+#endif /* CONFIG_SPTM */
+}

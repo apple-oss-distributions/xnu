@@ -61,6 +61,7 @@
 #include <kern/assert.h>
 #include <kern/policy_internal.h>
 #include <kern/exc_guard.h>
+#include <kern/task.h>
 
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>

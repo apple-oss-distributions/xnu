@@ -34,13 +34,17 @@
 #define SET_MEMLIMIT_TESTNAME     entitlement_debugging_increased_memory_limit_set_memlimit
 #define CONVERT_MEMLIMIT_TESTNAME entitlement_debugging_increased_memory_limit_convert_memlimit_mb
 #define LIMIT_WITH_SWAP_TESTNAME  entitlement_debugging_increased_memory_limit_with_swap
+#define EXTRA_META
 #elif ENTITLED
 #define TESTNAME                  entitlement_increased_memory_limit_entitled
 #define SET_MEMLIMIT_TESTNAME     entitlement_increased_memory_limit_set_memlimit
 #define CONVERT_MEMLIMIT_TESTNAME entitlement_increased_memory_limit_convert_memlimit_mb
 #define LIMIT_WITH_SWAP_TESTNAME  entitlement_increased_memory_limit_with_swap
+#define EXTRA_META
 #else /* ENTITLED, ENTITLED_DEBUGGING */
 #define TESTNAME entitlement_increased_memory_limit_unentitled
+/* rdar://133954365 */
+#define EXTRA_META , T_META_ENABLED(false)
 #endif /* ENTITLED */
 
 T_GLOBAL_META(
@@ -139,7 +143,7 @@ resume_child_and_verify_exit(pid_t pid)
 
 T_DECL(TESTNAME,
     "Verify that entitled processes can allocate up to the entitled memory limit",
-    T_META_CHECK_LEAKS(false))
+    T_META_CHECK_LEAKS(false) EXTRA_META)
 {
 	int32_t entitled_max_task_pmem = MAX_TASK_MEM_ENTITLED_VALUE, max_task_pmem = 0, expected_limit;
 	size_t size_entitled_max_task_pmem = sizeof(entitled_max_task_pmem);

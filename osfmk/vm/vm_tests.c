@@ -50,6 +50,7 @@
 #include <vm/vm_kern_xnu.h>
 #include <vm/vm_iokit.h>
 #include <vm/vm_page_internal.h>
+#include <vm/vm_shared_region_xnu.h>
 
 #include <kern/zalloc.h>
 #include <kern/zalloc_internal.h>
@@ -463,9 +464,9 @@ vm_test_device_pager_transpose(void)
 	device_object->blocked_access = TRUE;
 	vm_object_unlock(device_object);
 
-	assert(anon_object->ref_count == 1);
+	assert(os_ref_get_count_raw(&anon_object->ref_count) == 1);
 	assert(!anon_object->named);
-	assert(device_object->ref_count == 2);
+	assert(os_ref_get_count_raw(&device_object->ref_count) == 2);
 	assert(device_object->named);
 
 	kr = vm_object_transpose(device_object, anon_object, size);
@@ -480,13 +481,13 @@ vm_test_device_pager_transpose(void)
 	device_object->blocked_access = FALSE;
 	vm_object_unlock(device_object);
 
-	assert(anon_object->ref_count == 2);
+	assert(os_ref_get_count_raw(&anon_object->ref_count) == 2);
 	assert(anon_object->named);
 #if 0
 	kr = vm_deallocate(kernel_map, anon_mapping, size);
 	assert(kr == KERN_SUCCESS);
 #endif
-	assert(device_object->ref_count == 1);
+	assert(os_ref_get_count_raw(&device_object->ref_count) == 1);
 	assert(!device_object->named);
 	kr = vm_deallocate(kernel_map, device_mapping, size);
 	assert(kr == KERN_SUCCESS);
@@ -854,6 +855,7 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_map_size_t size4k, size16k;
 	vm_map_copy_t copy4k, copy16k;
 	vm_prot_t curprot, maxprot;
+	vm_map_kernel_flags_t vmk_flags;
 
 	/* create a 4k map */
 	map4k = vm_map_create_options(PMAP_NULL, 0, (uint32_t)-1,
@@ -910,12 +912,15 @@ vm_test_map_copy_adjust_to_target(void)
 	assertf(map_size == 0x3000, "mem_entry %p map_size 0x%llx\n", mem_entry, (uint64_t)map_size);
 	mach_memory_entry_port_release(mem_entry);
 
+	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+	vmk_flags.vmkf_remap_legacy_mode = true;
+
 	/* create 4k copy map */
 	curprot = VM_PROT_NONE;
 	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map4k, addr4k, 0x3000,
 	    FALSE, &copy4k, &curprot, &maxprot,
-	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
+	    VM_INHERIT_DEFAULT, vmk_flags);
 	assert(kr == KERN_SUCCESS);
 	assert(copy4k->size == 0x3000);
 
@@ -924,7 +929,7 @@ vm_test_map_copy_adjust_to_target(void)
 	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map16k, addr16k, 0x4000,
 	    FALSE, &copy16k, &curprot, &maxprot,
-	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
+	    VM_INHERIT_DEFAULT, vmk_flags);
 	assert(kr == KERN_SUCCESS);
 	assert(copy16k->size == 0x4000);
 
@@ -946,10 +951,10 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_map_copy_discard(copy4k);
 	vm_map_copy_discard(copy16k);
 	/* assert 1 ref on all VM objects */
-	assert(obj1->ref_count == 1);
-	assert(obj2->ref_count == 1);
-	assert(obj3->ref_count == 1);
-	assert(obj4->ref_count == 1);
+	assert(os_ref_get_count_raw(&obj1->ref_count) == 1);
+	assert(os_ref_get_count_raw(&obj2->ref_count) == 1);
+	assert(os_ref_get_count_raw(&obj3->ref_count) == 1);
+	assert(os_ref_get_count_raw(&obj4->ref_count) == 1);
 	/* release all VM objects */
 	vm_object_deallocate(obj1);
 	vm_object_deallocate(obj2);
@@ -1350,13 +1355,16 @@ vm_test_address_canonicalization(void)
 	T_SKIP("System not designed to support this test, skipping...");
 }
 
-boolean_t vm_tests_in_progress = FALSE;
-
 kern_return_t
 vm_tests(void)
 {
 	kern_return_t kr = KERN_SUCCESS;
-	vm_tests_in_progress = TRUE;
+
+	/* Avoid VM panics because some of our test vm_maps don't have a pmap. */
+	thread_test_context_t ctx CLEANUP_THREAD_TEST_CONTEXT = {
+		.test_option_vm_map_allow_null_pmap = true,
+	};
+	thread_set_test_context(&ctx);
 
 	vm_test_collapse_compressor();
 	vm_test_wire_and_extract();
@@ -1376,8 +1384,6 @@ vm_tests(void)
 	vm_test_collapse_overflow();
 	vm_test_physical_size_overflow();
 	vm_test_address_canonicalization();
-
-	vm_tests_in_progress = FALSE;
 
 	return kr;
 }
@@ -1508,6 +1514,18 @@ mach_vm_wire_external(
 	mach_vm_address_ut      start,
 	mach_vm_size_ut         size,
 	vm_prot_ut              access);
+kern_return_t
+mach_vm_purgable_control_external(
+	mach_port_t             target_tport,
+	mach_vm_offset_ut       address_u,
+	vm_purgable_t           control,
+	int                    *state);
+kern_return_t
+vm_purgable_control_external(
+	mach_port_t             target_tport,
+	vm_offset_ut            address,
+	vm_purgable_t           control,
+	int                     *state);
 
 static int
 vm_map_null_tests(__unused int64_t in, int64_t *out)
@@ -1520,16 +1538,30 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	vm_address_ut vm_throwaway_addr_ut;
 	vm32_address_ut alloced_addr32, throwaway_addr32_u;
 	mach_vm_size_t throwaway_size, size_16kb, read_overwrite_data_size;
-	vm_size_t vm_size, vm_read_overwrite_data_size;
+	vm_size_t vm_size, vm_read_overwrite_data_size, vm_throwaway_size;
 	vm_size_ut throwaway_size_ut;
 	vm32_size_t data_size32, size32_16kb;
 	vm32_size_ut data_size32_u, throwaway_size32_u;
 	mach_msg_type_number_t read_data_size;
 	mach_port_t mem_entry_result;
 	pointer_t read_data;
+	pointer_ut read_data_u;
 	vm_prot_t prot_default;
 	vm_prot_ut prot_allexec_u, prot_default_ut;
 	vm_map_t map64, map32;
+	vm_machine_attribute_val_t vm_throwaway_attr_val;
+	vm_region_extended_info_data_t vm_throwaway_region_extended_info;
+	vm_region_recurse_info_t vm_throwaway_region_recurse_info;
+	vm_region_recurse_info_64_t vm_throwaway_region_recurse_info_64;
+	int throwaway_state;
+	uint32_t throwaway_depth;
+	vm_page_info_t page_info;
+
+	page_info = 0;
+	throwaway_state = VM_PURGABLE_STATE_MAX;
+	vm_throwaway_region_recurse_info_64 = 0;
+	vm_throwaway_region_recurse_info = 0;
+	vm_throwaway_attr_val = MATTR_VAL_OFF;
 
 	map64 = create_map(0, vm_compute_max_offset(true));
 	map32 = create_map(0, vm_compute_max_offset(false));
@@ -1547,7 +1579,7 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	 */
 	kr = mach_vm_allocate(map64, &alloced_addr, size_16kb, VM_FLAGS_ANYWHERE);
 	assert(kr == KERN_SUCCESS);
-	kr = vm32_allocate(map32, &alloced_addr32, size32_16kb, VM_FLAGS_ANYWHERE);
+	kr = vm32_vm_allocate(map32, &alloced_addr32, size32_16kb, VM_FLAGS_ANYWHERE);
 	assert(kr == KERN_SUCCESS);
 
 	/*
@@ -1558,10 +1590,10 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	kr = _mach_make_memory_entry(VM_MAP_NULL, &throwaway_size, alloced_addr, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
 	assert(kr != KERN_SUCCESS);
 	throwaway_size32_u = vm32_sanitize_wrap_size(size32_16kb);
-	kr = vm32_make_memory_entry(VM_MAP_NULL, &throwaway_size32_u, alloced_addr32, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
+	kr = vm32_mach_make_memory_entry(VM_MAP_NULL, &throwaway_size32_u, alloced_addr32, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
 	assert(kr != KERN_SUCCESS);
 	throwaway_size_ut = vm_sanitize_wrap_size(size_16kb);
-	kr = vm32_make_memory_entry_64(VM_MAP_NULL, &throwaway_size_ut, alloced_addr, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
+	kr = vm32_mach_make_memory_entry_64(VM_MAP_NULL, &throwaway_size_ut, alloced_addr, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
 	assert(kr != KERN_SUCCESS);
 	throwaway_size = size_16kb;
 	kr = mach_make_memory_entry_64(VM_MAP_NULL, &throwaway_size, alloced_addr, VM_PROT_DEFAULT, &mem_entry_result, IPC_PORT_NULL);
@@ -1579,7 +1611,7 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	kr = mach_vm_allocate(VM_MAP_NULL, &throwaway_addr, size_16kb, VM_FLAGS_ANYWHERE);
 	assert(kr != KERN_SUCCESS);
 	throwaway_addr32_u = alloced_addr32;
-	kr = vm32_allocate(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, VM_FLAGS_ANYWHERE);
+	kr = vm32_vm_allocate(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, VM_FLAGS_ANYWHERE);
 	assert(kr != KERN_SUCCESS);
 	kr = vm_allocate_external(VM_MAP_NULL, &vm_throwaway_addr, size_16kb, VM_FLAGS_ANYWHERE);
 	assert(kr != KERN_SUCCESS);
@@ -1588,7 +1620,7 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	assert(kr != KERN_SUCCESS);
 	kr = vm_deallocate(VM_MAP_NULL, alloced_addr, size_16kb);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_deallocate(VM_MAP_NULL, throwaway_addr32_u, size32_16kb);
+	kr = vm32_vm_deallocate(VM_MAP_NULL, throwaway_addr32_u, size32_16kb);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_map(VM_MAP_NULL, &throwaway_addr, size_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
@@ -1599,9 +1631,9 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	vm_throwaway_addr = alloced_addr;
 	kr = vm_map(VM_MAP_NULL, &vm_throwaway_addr, size_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_map(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
+	kr = vm32_vm_map(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_map_64(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
+	kr = vm32_vm_map_64(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, IPC_PORT_NULL, 0, false, VM_PROT_DEFAULT, VM_PROT_DEFAULT, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_remap(map64, &throwaway_addr, size_16kb, 0, VM_FLAGS_ANYWHERE, VM_MAP_NULL, 0, false, &prot_default, &prot_default, VM_INHERIT_DEFAULT);
@@ -1616,9 +1648,9 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	assert(kr != KERN_SUCCESS);
 	kr = vm_remap_external(VM_MAP_NULL, &vm_throwaway_addr, size_16kb, 0, VM_FLAGS_ANYWHERE, map64, 0, false, &prot_default, &prot_default, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_remap(map32, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, VM_MAP_NULL, 0, false, &prot_default_ut, &prot_default_ut, VM_INHERIT_DEFAULT);
+	kr = vm32_vm_remap(map32, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, VM_MAP_NULL, 0, false, &prot_default_ut, &prot_default_ut, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_remap(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, map32, 0, false, &prot_default_ut, &prot_default_ut, VM_INHERIT_DEFAULT);
+	kr = vm32_vm_remap(VM_MAP_NULL, &throwaway_addr32_u, size32_16kb, 0, VM_FLAGS_ANYWHERE, map32, 0, false, &prot_default_ut, &prot_default_ut, VM_INHERIT_DEFAULT);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_remap_new_external(VM_MAP_NULL, &throwaway_addr_ut, size_16kb, 0, VM_FLAGS_ANYWHERE, MACH_PORT_NULL, 0, false, &prot_default_ut, &prot_default_ut, VM_INHERIT_DEFAULT);
@@ -1648,14 +1680,14 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 
 	kr = task_wire(VM_MAP_NULL, false);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32__task_wire(VM_MAP_NULL, false);
+	kr = vm32_task_wire(VM_MAP_NULL, false);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_read(VM_MAP_NULL, alloced_addr, size_16kb, &read_data, &read_data_size);
 	assert(kr != KERN_SUCCESS);
 	kr = vm_read(VM_MAP_NULL, alloced_addr, size_16kb, &read_data, &read_data_size);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_read(VM_MAP_NULL, alloced_addr32, size32_16kb, &read_data, &data_size32);
+	kr = vm32_vm_read(VM_MAP_NULL, alloced_addr32, size32_16kb, &read_data_u, &data_size32);
 	assert(kr != KERN_SUCCESS);
 
 	mach_vm_read_entry_t * mach_re = kalloc_type(mach_vm_read_entry_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
@@ -1674,7 +1706,7 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	assert(kr != KERN_SUCCESS);
 	kr = vm_read_list(VM_MAP_NULL, *re, 1);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_read_list(VM_MAP_NULL, *re_32, 1);
+	kr = vm32_vm_read_list(VM_MAP_NULL, *re_32, 1);
 	assert(kr != KERN_SUCCESS);
 
 	kfree_type(mach_vm_read_entry_t, mach_re);
@@ -1685,21 +1717,93 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	assert(kr != KERN_SUCCESS);
 	kr = vm_read_overwrite(VM_MAP_NULL, alloced_addr, size_16kb, alloced_addr, &vm_read_overwrite_data_size);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_read_overwrite(VM_MAP_NULL, alloced_addr32, size32_16kb, alloced_addr32, &data_size32_u);
+	kr = vm32_vm_read_overwrite(VM_MAP_NULL, alloced_addr32, size32_16kb, alloced_addr32, &data_size32_u);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_copy(VM_MAP_NULL, alloced_addr, size_16kb, alloced_addr);
 	assert(kr != KERN_SUCCESS);
 	kr = vm_copy(VM_MAP_NULL, alloced_addr, size_16kb, alloced_addr);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_copy(VM_MAP_NULL, alloced_addr32, size32_16kb, alloced_addr32);
+	kr = vm32_vm_copy(VM_MAP_NULL, alloced_addr32, size32_16kb, alloced_addr32);
 	assert(kr != KERN_SUCCESS);
 
 	kr = mach_vm_write(VM_MAP_NULL, alloced_addr, alloced_addr, (mach_msg_type_number_t) size_16kb);
 	assert(kr != KERN_SUCCESS);
 	kr = vm_write(VM_MAP_NULL, alloced_addr, alloced_addr, (mach_msg_type_number_t) size_16kb);
 	assert(kr != KERN_SUCCESS);
-	kr = vm32_write(VM_MAP_NULL, alloced_addr32, alloced_addr, (mach_msg_type_number_t) size_16kb);
+	kr = vm32_vm_write(VM_MAP_NULL, alloced_addr32, alloced_addr, (mach_msg_type_number_t) size_16kb);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_inherit(VM_MAP_NULL, alloced_addr, size_16kb, VM_INHERIT_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_inherit(VM_MAP_NULL, alloced_addr, size_16kb, VM_INHERIT_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_inherit(VM_MAP_NULL, alloced_addr32, size32_16kb, VM_INHERIT_DEFAULT);
+
+	kr = mach_vm_protect(VM_MAP_NULL, alloced_addr, size_16kb, FALSE, VM_PROT_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_protect(VM_MAP_NULL, alloced_addr, size_16kb, FALSE, VM_PROT_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_protect(VM_MAP_NULL, alloced_addr32, size32_16kb, FALSE, VM_PROT_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_behavior_set(VM_MAP_NULL, alloced_addr, size_16kb, VM_BEHAVIOR_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_behavior_set(VM_MAP_NULL, alloced_addr, size_16kb, VM_BEHAVIOR_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_behavior_set(VM_MAP_NULL, alloced_addr32, size32_16kb, VM_BEHAVIOR_DEFAULT);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_msync(VM_MAP_NULL, alloced_addr, size_16kb, VM_SYNC_ASYNCHRONOUS);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_msync(VM_MAP_NULL, alloced_addr, size_16kb, VM_SYNC_ASYNCHRONOUS);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_msync(VM_MAP_NULL, alloced_addr32, size32_16kb, VM_SYNC_ASYNCHRONOUS);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_machine_attribute(VM_MAP_NULL, alloced_addr, size_16kb, MATTR_CACHE, &vm_throwaway_attr_val);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_machine_attribute(VM_MAP_NULL, alloced_addr, size_16kb, MATTR_CACHE, &vm_throwaway_attr_val);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_machine_attribute(VM_MAP_NULL, alloced_addr32, size32_16kb, MATTR_CACHE, &vm_throwaway_attr_val);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_purgable_control_external(MACH_PORT_NULL, throwaway_addr_ut, VM_PURGABLE_PURGE_ALL, &throwaway_state);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_purgable_control_external(MACH_PORT_NULL, throwaway_addr_ut, VM_PURGABLE_PURGE_ALL, &throwaway_state);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_purgable_control(VM_MAP_NULL, alloced_addr32, VM_PURGABLE_PURGE_ALL, &throwaway_state);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_region(VM_MAP_NULL, &throwaway_addr, &throwaway_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vm_throwaway_region_extended_info, &read_data_size, &mem_entry_result);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_region(VM_MAP_NULL, &vm_throwaway_addr, &vm_throwaway_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vm_throwaway_region_extended_info, &read_data_size, &mem_entry_result);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_region_64(VM_MAP_NULL, &vm_throwaway_addr, &vm_throwaway_size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vm_throwaway_region_extended_info, &read_data_size, &mem_entry_result);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_region(VM_MAP_NULL, &throwaway_addr32_u, &throwaway_size32_u, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vm_throwaway_region_extended_info, &read_data_size, &mem_entry_result);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_region_64(VM_MAP_NULL, &throwaway_addr32_u, &throwaway_size32_u, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vm_throwaway_region_extended_info, &read_data_size, &mem_entry_result);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_region_recurse(VM_MAP_NULL, &throwaway_addr, &throwaway_size, &throwaway_depth, vm_throwaway_region_recurse_info, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_region_recurse(VM_MAP_NULL, &vm_throwaway_addr, &vm_throwaway_size, &throwaway_depth, vm_throwaway_region_recurse_info, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_region_recurse_64(VM_MAP_NULL, &vm_throwaway_addr, &vm_throwaway_size, &throwaway_depth, vm_throwaway_region_recurse_info_64, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_region_recurse(VM_MAP_NULL, &throwaway_addr32_u, &throwaway_size32_u, &throwaway_depth, vm_throwaway_region_recurse_info, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_region_recurse_64(VM_MAP_NULL, &throwaway_addr32_u, &throwaway_size32_u, &throwaway_depth, vm_throwaway_region_recurse_info_64, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+
+	kr = mach_vm_page_info(VM_MAP_NULL, alloced_addr, VM_PAGE_INFO_BASIC, page_info, &read_data_size);
+	assert(kr != KERN_SUCCESS);
+	kr = mach_vm_page_query(VM_MAP_NULL, alloced_addr, &throwaway_state, &throwaway_state);
+	assert(kr != KERN_SUCCESS);
+	kr = vm_map_page_query(VM_MAP_NULL, vm_throwaway_addr, &throwaway_state, &throwaway_state);
+	assert(kr != KERN_SUCCESS);
+	kr = vm32_vm_map_page_query(VM_MAP_NULL, throwaway_addr32_u, &throwaway_state, &throwaway_state);
 	assert(kr != KERN_SUCCESS);
 
 	/*
@@ -1707,7 +1811,7 @@ vm_map_null_tests(__unused int64_t in, int64_t *out)
 	 */
 	kr = mach_vm_deallocate(map64, alloced_addr, size_16kb);
 	assert(kr == KERN_SUCCESS);
-	kr = vm32_deallocate(map32, alloced_addr32, size32_16kb);
+	kr = vm32_vm_deallocate(map32, alloced_addr32, size32_16kb);
 	assert(kr == KERN_SUCCESS);
 
 	cleanup_map(&map64);
@@ -1775,3 +1879,323 @@ vm_memory_entry_pgz_test(__unused int64_t in, int64_t *out)
 #endif /* CONFIG_PROB_GZALLOC */
 
 SYSCTL_TEST_REGISTER(vm_memory_entry_pgz, vm_memory_entry_pgz_test);
+
+#define PAGE_SHIFT_4K 12
+#define PAGE_SHIFT_16K 14
+static int
+vm_map_copy_entry_subrange_test(__unused int64_t in, int64_t *out)
+{
+	mach_vm_size_t size_4kb, size_16kb;
+	mach_vm_size_t mapped_size;
+	vm_map_t map_4k, map_16k;
+	mach_vm_address_t alloced_addr, mapped_addr;
+	mach_vm_size_t entry_size;
+	mach_port_t entry_handle;
+	vm_region_basic_info_data_64_t region_info;
+	mach_msg_type_number_t region_info_count;
+
+	kern_return_t kr;
+
+	size_4kb = 4 * 1024;
+	size_16kb = 16 * 1024;
+
+	map_4k = create_map(0, vm_compute_max_offset(true));
+	kr = vm_map_set_page_shift(map_4k, PAGE_SHIFT_4K);
+	map_16k = create_map(0, vm_compute_max_offset(true));
+	kr = vm_map_set_page_shift(map_16k, PAGE_SHIFT_16K);
+
+	/*
+	 * Test mapping a portion of a copy entry from a 4k map to a 16k one.
+	 * The result size should be aligned to the destination's page size (16k).
+	 */
+	// Get a copy entry to map into the system
+	kr = mach_vm_allocate(map_4k, &alloced_addr, size_16kb, VM_FLAGS_ANYWHERE);
+	assert(kr == KERN_SUCCESS);
+
+	entry_size = size_16kb;
+	kr = mach_make_memory_entry_64(map_4k, &entry_size, alloced_addr,
+	    MAP_MEM_VM_COPY | MAP_MEM_USE_DATA_ADDR | VM_PROT_DEFAULT,
+	    &entry_handle, MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+	assert(entry_size == size_16kb);
+
+	// Attempt to map a portion of the entry into the 16k map
+	kr = mach_vm_map(map_16k, &mapped_addr, size_4kb, 0, VM_FLAGS_ANYWHERE,
+	    entry_handle, 0, true, VM_PROT_DEFAULT, VM_PROT_DEFAULT,
+	    VM_INHERIT_DEFAULT);
+	assert(kr == KERN_SUCCESS);
+
+	// Ensure the entry is actually mapped whole
+	region_info_count = VM_REGION_BASIC_INFO_COUNT_64;
+	kr = mach_vm_region(map_16k, &mapped_addr, &mapped_size, VM_REGION_BASIC_INFO_64,
+	    (vm_region_info_t) &region_info, &region_info_count, NULL);
+	assert(kr == KERN_SUCCESS);
+	assert(mapped_size == entry_size);
+
+	// Cleanup
+	mach_memory_entry_port_release(entry_handle);
+	kr = mach_vm_deallocate(map_16k, mapped_addr, size_16kb);
+	assert(kr == KERN_SUCCESS);
+	kr = mach_vm_deallocate(map_4k, alloced_addr, size_16kb);
+	assert(kr == KERN_SUCCESS);
+	cleanup_map(&map_4k);
+	cleanup_map(&map_16k);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_map_copy_entry_subrange, vm_map_copy_entry_subrange_test);
+
+
+static int
+vm_memory_entry_map_size_null_test(__unused int64_t in, int64_t *out)
+{
+	mach_vm_size_t size_16kb, map_size;
+	vm_map_t map;
+
+	kern_return_t kr;
+
+	map = create_map(0, vm_compute_max_offset(true));
+	size_16kb = 16 * 1024;
+
+	map_size = 0xdeadbeef;
+	kr = mach_memory_entry_map_size(MACH_PORT_NULL, map, 0, size_16kb, &map_size);
+	assert(kr == KERN_INVALID_ARGUMENT);
+	assert(map_size == 0);
+
+	cleanup_map(&map);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_memory_entry_map_size_null, vm_memory_entry_map_size_null_test);
+
+static int
+vm_memory_entry_map_size_overflow_tests(__unused int64_t in, int64_t *out)
+{
+	mach_vm_size_t size_16kb, entry_size, map_size;
+	vm_map_t map;
+	mach_port_t parent_handle, entry_handle;
+	mach_vm_address_t alloced_addr;
+	vm_map_offset_t entry_offset;
+	memory_object_offset_t maximum_offset;
+
+	kern_return_t kr;
+
+	size_16kb = 16 * 1024;
+	map = create_map(0, vm_compute_max_offset(true));
+	/*
+	 * (1) Attempt to overflow offset + mem_entry->offset
+	 */
+	// Setup - create an entry with nonzero offset
+	kr = mach_memory_object_memory_entry_64((host_t) 1, 1,
+	    size_16kb * 2, VM_PROT_DEFAULT, 0, &parent_handle);
+	assert(kr == KERN_SUCCESS);
+
+	entry_size = size_16kb;
+	kr = mach_make_memory_entry_64(map, &entry_size, size_16kb,
+	    VM_PROT_DEFAULT, &entry_handle, parent_handle);
+	assert(kr == KERN_SUCCESS);
+
+	// Pass in maximum offset to attempt overflow
+	maximum_offset = (memory_object_offset_t) -1;
+	kr = mach_memory_entry_map_size(entry_handle, map, maximum_offset, size_16kb,
+	    &map_size);
+	assert(kr == KERN_INVALID_ARGUMENT);
+
+	// Cleanup
+	mach_memory_entry_port_release(parent_handle);
+	mach_memory_entry_port_release(entry_handle);
+
+	/*
+	 * (2) Attempt to overflow offset + mem_entry->data_offset
+	 */
+	// Setup - create an entry with nonzero data_offset
+	kr = mach_vm_allocate(map, &alloced_addr, 2 * size_16kb, VM_FLAGS_ANYWHERE);
+	assert(kr == KERN_SUCCESS);
+
+	entry_size = size_16kb;
+	entry_offset = alloced_addr + (size_16kb / 2);
+	kr = mach_make_memory_entry_64(map, &entry_size, entry_offset,
+	    MAP_MEM_VM_COPY | MAP_MEM_USE_DATA_ADDR | VM_PROT_DEFAULT,
+	    &entry_handle, MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+
+	// Pass in maximum offset to attempt overflow
+	kr = mach_memory_entry_map_size(entry_handle, map, maximum_offset, size_16kb,
+	    &map_size);
+	assert(kr == KERN_INVALID_ARGUMENT);
+
+	// Cleanup
+	mach_memory_entry_port_release(entry_handle);
+	kr = mach_vm_deallocate(map, alloced_addr, 2 * size_16kb);
+	assert(kr == KERN_SUCCESS);
+	cleanup_map(&map);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_memory_entry_map_size_overflow, vm_memory_entry_map_size_overflow_tests);
+
+static int
+vm_memory_entry_map_size_copy_tests(__unused int64_t in, int64_t *out)
+{
+	mach_vm_size_t size_2kb, size_4kb, size_16kb;
+	mach_vm_size_t entry_size_4k, entry_size_16k;
+	mach_vm_size_t map_size;
+	vm_map_t map_4k, map_16k;
+	mach_port_t entry_4k, entry_16k;
+	mach_vm_address_t alloced_addr_4k, alloced_addr_16k;
+
+	kern_return_t kr;
+
+	size_2kb = 2 * 1024;
+	size_4kb = 4 * 1024;
+	size_16kb = 16 * 1024;
+
+	/*
+	 * Setup - initialize maps and create copy entries for each
+	 */
+	// 4k map and entry
+	map_4k = create_map(0, vm_compute_max_offset(true));
+	kr = vm_map_set_page_shift(map_4k, PAGE_SHIFT_4K);
+	assert(kr == KERN_SUCCESS);
+
+	kr = mach_vm_allocate(map_4k, &alloced_addr_4k, size_16kb, VM_FLAGS_ANYWHERE);
+	assert(kr == KERN_SUCCESS);
+
+	entry_size_4k = size_16kb;
+	kr = mach_make_memory_entry_64(map_4k, &entry_size_4k, alloced_addr_4k,
+	    MAP_MEM_VM_COPY | VM_PROT_DEFAULT, &entry_4k, MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+	assert(entry_size_4k == size_16kb);
+
+	// 16k map and entry
+	map_16k = create_map(0, vm_compute_max_offset(true));
+	kr = vm_map_set_page_shift(map_16k, PAGE_SHIFT_16K);
+	assert(kr == KERN_SUCCESS);
+
+	kr = mach_vm_allocate(map_16k, &alloced_addr_16k, size_16kb, VM_FLAGS_ANYWHERE);
+	assert(kr == KERN_SUCCESS);
+
+	entry_size_16k = size_16kb;
+	kr = mach_make_memory_entry_64(map_16k, &entry_size_16k, alloced_addr_16k,
+	    MAP_MEM_VM_COPY | VM_PROT_DEFAULT, &entry_16k, MACH_PORT_NULL);
+	assert(kr == KERN_SUCCESS);
+	assert(entry_size_16k == size_16kb);
+
+	/*
+	 * (1) Test 4k map with 4k entry and 16k map with 16k entry. Page-aligned
+	 * ranges should have no size adjustment.
+	 */
+	for (mach_vm_size_t i = 1; i <= 4; i++) {
+		kr = mach_memory_entry_map_size(entry_4k, map_4k, 0, i * size_4kb, &map_size);
+		assert(kr == KERN_SUCCESS);
+		assert(map_size == (i * size_4kb));
+	}
+	kr = mach_memory_entry_map_size(entry_16k, map_16k, 0, size_16kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_16kb);
+
+	/*
+	 * (2) Test 4k map with 16k entry. Since we have a 4k map, we should be able
+	 * to map a 4k range of the entry, but to map a 2k range we will need to map
+	 * a full 4k page.
+	 */
+	kr = mach_memory_entry_map_size(entry_16k, map_4k, 0, size_16kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_16kb);
+	kr = mach_memory_entry_map_size(entry_16k, map_4k, 0, size_4kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_4kb);
+	kr = mach_memory_entry_map_size(entry_16k, map_4k, 0, size_2kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_4kb);
+
+	/*
+	 * (3) Test 16k map with 4k entry. Since we have a 16k map, we will need to
+	 * map the whole 16kb memory entry even if a smaller range is requested.
+	 */
+	kr = mach_memory_entry_map_size(entry_4k, map_16k, 0, size_16kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_16kb);
+	kr = mach_memory_entry_map_size(entry_4k, map_16k, 0, size_4kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_16kb);
+	kr = mach_memory_entry_map_size(entry_4k, map_16k, 0, size_2kb, &map_size);
+	assert(kr == KERN_SUCCESS);
+	assert(map_size == size_16kb);
+
+	/*
+	 * (4) Detect error in the case where the size requested is too large.
+	 */
+	map_size = 0xdeadbeef;
+	kr = mach_memory_entry_map_size(entry_4k, map_16k, 0, 2 * size_16kb, &map_size);
+	assert(kr == KERN_INVALID_ARGUMENT);
+	assert(map_size == 0);
+
+	/*
+	 * Clean up memory entries, allocations, and maps
+	 */
+	mach_memory_entry_port_release(entry_4k);
+	mach_memory_entry_port_release(entry_16k);
+	kr = mach_vm_deallocate(map_4k, alloced_addr_4k, size_16kb);
+	assert(kr == KERN_SUCCESS);
+	kr = mach_vm_deallocate(map_16k, alloced_addr_16k, size_16kb);
+	assert(kr == KERN_SUCCESS);
+	cleanup_map(&map_4k);
+	cleanup_map(&map_16k);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_memory_entry_map_size_copy, vm_memory_entry_map_size_copy_tests);
+
+static int
+vm_memory_entry_parent_submap_tests(__unused int64_t in, int64_t *out)
+{
+	vm_shared_region_t shared_region;
+	mach_port_t parent_handle, entry_handle;
+	vm_named_entry_t parent_entry;
+	mach_vm_size_t entry_size;
+	vm_prot_t vmflags;
+
+	kern_return_t kr;
+
+	/*
+	 * Use shared region to get a named_entry which refers to a submap
+	 */
+	shared_region = vm_shared_region_get(current_task());
+	parent_handle = shared_region->sr_mem_entry;
+	assert(parent_handle != NULL);
+	parent_entry = mach_memory_entry_from_port(parent_handle);
+	assert(parent_entry->is_sub_map);
+
+	/*
+	 * We should be able to create an entry using the submap entry as the parent
+	 */
+	entry_size = parent_entry->size;
+	vmflags = VM_PROT_DEFAULT;
+	kr = mach_make_memory_entry_64(VM_MAP_NULL, &entry_size, 0, vmflags,
+	    &entry_handle, parent_handle);
+	assert(kr == KERN_SUCCESS);
+	mach_memory_entry_port_release(entry_handle);
+
+	/*
+	 * Should fail if using mach_make_memory_entry_mem_only since the parent
+	 * entry is not an object
+	 */
+	vmflags |= MAP_MEM_ONLY;
+	kr = mach_make_memory_entry_64(VM_MAP_NULL, &entry_size, 0, vmflags,
+	    &entry_handle, parent_handle);
+	assert(kr == KERN_INVALID_ARGUMENT);
+
+	/*
+	 * Cleanup
+	 */
+	vm_shared_region_deallocate(shared_region);
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_memory_entry_parent_submap, vm_memory_entry_parent_submap_tests);

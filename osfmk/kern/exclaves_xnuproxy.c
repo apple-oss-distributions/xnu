@@ -42,6 +42,7 @@
 #include "exclaves_resource.h"
 #include "exclaves_upcalls.h"
 #include "exclaves_internal.h"
+#include "exclaves_inspection.h"
 
 #include "kern/exclaves.tightbeam.h"
 
@@ -456,345 +457,6 @@ exclaves_xnuproxy_pmm_usage(void)
 	return KERN_SUCCESS;
 }
 
-kern_return_t
-exclaves_xnuproxy_panic_setup(uint64_t *phys, uint64_t *scid)
-{
-	current_thread()->th_exclaves_state |= TH_EXCLAVES_SPAWN_EXPECTED;
-
-	tb_error_t ret = xnuproxy_cmd_panicsetup(&xnuproxy_cmd_client,
-	    ^(xnuproxy_panicinfo_s panic_data) {
-		*phys = panic_data.buffer;
-		*scid = panic_data.scid;
-	});
-
-	current_thread()->th_exclaves_state &= ~TH_EXCLAVES_SPAWN_EXPECTED;
-
-	if (ret != TB_ERROR_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "panic setup: failure %u\n", ret);
-		return KERN_FAILURE;
-	}
-
-	return KERN_SUCCESS;
-}
-
-
-/* -------------------------------------------------------------------------- */
-#pragma mark legacy xnu-proxy calls
-
-
-kern_return_t
-exclaves_xnuproxy_audio_buffer_copyout(uint64_t id,
-    uint64_t size1, uint64_t offset1, uint64_t size2, uint64_t offset2)
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_audiobuffercopyout(&xnuproxy_cmd_client,
-	    id, size1, offset1, size2, offset2,
-	    ^(xnuproxy_cmd_audiobuffercopyout__result_s result) {
-		if (xnuproxy_cmd_audiobuffercopyout__result_get_success(&result)) {
-			status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-			return;
-		}
-
-		xnuproxy_namedbufferstatus_s *status_p = NULL;
-		status_p = xnuproxy_cmd_audiobuffercopyout__result_get_failure(&result);
-		assert3p(status_p, !=, NULL);
-		status = *status_p;
-
-		exclaves_debug_printf(show_errors,
-		    "audio buffer copyout: failure %u\n", status);
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_audio_buffer_delete(uint64_t id)
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_audiobufferdelete(&xnuproxy_cmd_client, id,
-	    ^(xnuproxy_cmd_audiobufferdelete__result_s result) {
-		if (xnuproxy_cmd_audiobufferdelete__result_get_success(&result)) {
-			status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error = NULL;
-		error = xnuproxy_cmd_audiobufferdelete__result_get_failure(&result);
-
-		assert3p(error, !=, NULL);
-		exclaves_debug_printf(show_errors,
-		    "audio buffer delete: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_audio_buffer_map(uint64_t id, size_t size, bool *read_only)
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_audiobuffermap(&xnuproxy_cmd_client, id,
-	    size, ^(xnuproxy_cmd_audiobuffermap__result_s result) {
-		xnuproxy_mapinfo_s *map_info;
-		map_info = xnuproxy_cmd_audiobuffermap__result_get_success(&result);
-		if (map_info != NULL) {
-			*read_only = map_info->readonly;
-			status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error;
-		error = xnuproxy_cmd_audiobuffermap__result_get_failure(&result);
-		assert3p(error, !=, NULL);
-
-		exclaves_debug_printf(show_errors,
-		    "audio buffer map: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_audio_buffer_layout(uint64_t id, uint32_t start,
-    uint32_t npages, kern_return_t (^cb)(uint64_t base, uint32_t npages))
-{
-	__block xnuproxy_namedbufferstatus_s status = 0;
-	__block kern_return_t kret = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_audiobufferlayout(&xnuproxy_cmd_client,
-	    id, start, npages,
-	    ^(xnuproxy_cmd_audiobufferlayout__result_s result) {
-		xnuproxy_namedbufferrange_v_s *ranges;
-		ranges = xnuproxy_cmd_audiobufferlayout__result_get_success(&result);
-		status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-		if (ranges != NULL) {
-			xnuproxy_namedbufferrange__v_visit(ranges,
-			    ^(__unused size_t i, const xnuproxy_namedbufferrange_s *item) {
-				/*
-				 * Only fail once. TB want to iterate over the
-				 * entire array so we have to keep going but
-				 * once the first failure is seen, don't bother
-				 * calling cb.
-				 */
-				if (kret == KERN_SUCCESS) {
-					kret = cb(item->address, item->numpages);
-				}
-			});
-
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error;
-		error = xnuproxy_cmd_audiobufferlayout__result_get_failure(&result);
-		assert3p(error, !=, NULL);
-
-		exclaves_debug_printf(show_errors,
-		    "audio buffer layout: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (kret != KERN_SUCCESS) {
-		return kret;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_named_buffer_delete(uint64_t id)
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_namedbufferdelete(&xnuproxy_cmd_client, id,
-	    ^(xnuproxy_cmd_namedbufferdelete__result_s result) {
-		if (xnuproxy_cmd_namedbufferdelete__result_get_success(&result)) {
-			status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error = NULL;
-		error = xnuproxy_cmd_namedbufferdelete__result_get_failure(&result);
-
-		assert3p(error, !=, NULL);
-		exclaves_debug_printf(show_errors,
-		    "named buffer delete: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_named_buffer_map(uint64_t id, size_t size, bool *read_only)
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_namedbuffermap(&xnuproxy_cmd_client, id,
-	    size, ^(xnuproxy_cmd_namedbuffermap__result_s result) {
-		xnuproxy_mapinfo_s *map_info;
-		map_info = xnuproxy_cmd_namedbuffermap__result_get_success(&result);
-		if (map_info != NULL) {
-			*read_only = map_info->readonly;
-			status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error;
-		error = xnuproxy_cmd_namedbuffermap__result_get_failure(&result);
-		assert3p(error, !=, NULL);
-
-		exclaves_debug_printf(show_errors,
-		    "named buffer map: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_xnuproxy_named_buffer_layout(uint64_t id, uint32_t start,
-    uint32_t npages, kern_return_t (^cb)(uint64_t base, uint32_t npages))
-{
-	__block xnuproxy_namedbufferstatus_s status =
-	    XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-	__block kern_return_t kret = KERN_SUCCESS;
-
-	/* BEGIN IGNORE CODESTYLE */
-	tb_error_t ret = xnuproxy_cmd_namedbufferlayout(&xnuproxy_cmd_client,
-	    id, start, npages,
-	    ^(xnuproxy_cmd_namedbufferlayout__result_s result) {
-		xnuproxy_namedbufferrange_v_s *ranges;
-		ranges = xnuproxy_cmd_namedbufferlayout__result_get_success(&result);
-		status = XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS;
-		if (ranges != NULL) {
-			xnuproxy_namedbufferrange__v_visit(ranges,
-			    ^(__unused size_t i,
-			    const xnuproxy_namedbufferrange_s *item) {
-				/*
-				 * Only fail once. TB want to iterate over the
-				 * entire array so we have to keep going but
-				 * once the first failure is seen, don't bother
-				 * calling cb.
-				 */
-				if (kret == KERN_SUCCESS) {
-					kret = cb(item->address, item->numpages);
-				}
-			});
-
-			return;
-		}
-
-		xnuproxy_namedbuffererror_s *error;
-		error = xnuproxy_cmd_namedbufferlayout__result_get_failure(&result);
-		assert3p(error, !=, NULL);
-
-		exclaves_debug_printf(show_errors,
-		    "named buffer layout: failure %u, %u\n",
-		    error->status, error->substatus);
-		status = error->status;
-	});
-
-	if (ret != TB_ERROR_SUCCESS) {
-		return KERN_FAILURE;
-	}
-
-	if (kret != KERN_SUCCESS) {
-		return kret;
-	}
-
-	if (status != XNUPROXY_NAMEDBUFFERSTATUS_SUCCESS) {
-		return status == XNUPROXY_NAMEDBUFFERSTATUS_INVALIDARGUMENT ?
-		    KERN_INVALID_ARGUMENT : KERN_FAILURE;
-	}
-	/* END IGNORE CODESTYLE */
-
-	return KERN_SUCCESS;
-}
-
 /* -------------------------------------------------------------------------- */
 #pragma mark exclaves xnu-proxy downcall
 
@@ -829,8 +491,7 @@ exclaves_xnuproxy_endpoint_call(Exclaves_L4_Word_t endpoint_id)
 	    | DBG_FUNC_START, scid, endpoint_id);
 
 	while (1) {
-		kr = exclaves_scheduler_resume_scheduling_context(
-			&thread->th_exclaves_ipc_ctx, interrupted);
+		kr = exclaves_run(thread, interrupted);
 		assert(kr == KERN_SUCCESS || kr == KERN_ABORTED);
 
 		/* A wait was interrupted. */
@@ -886,6 +547,21 @@ exclaves_xnuproxy_endpoint_call(Exclaves_L4_Word_t endpoint_id)
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES, MACH_EXCLAVES_RPC)
 	    | DBG_FUNC_END);
 	thread->th_exclaves_state &= ~TH_EXCLAVES_RPC;
+
+	/* This condition provides fast path and also ensures that collection
+	 * thread will never block on AST (it does have only
+	 * TH_EXCLAVES_INSPECTION_NOINSPECT flag).
+	 *
+	 * The th_exclaves_inspection_state condition below has to be done after
+	 * cleanup of TH_EXCLAVES_RPC. Compiler must not reorder it.
+	 * With opposite order, Stackshot could put the thread with RPC flag on collection
+	 * list but the thread would be free to continue and to release its SCID.
+	 */
+	os_compiler_barrier();
+	if ((os_atomic_load(&thread->th_exclaves_inspection_state,
+	    relaxed) & ~TH_EXCLAVES_INSPECTION_NOINSPECT) != 0) {
+		exclaves_inspection_check_ast();
+	}
 
 	return kr;
 }

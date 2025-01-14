@@ -83,23 +83,6 @@
 /* Compatibility */
 #define DEFAULT_JETSAM_PRIORITY                  180
 
-/*
- * The deferral time used by default for apps and daemons in all aging
- * policies except kJetsamAgingPolicySysProcsReclaimedFirst is
- * DEFERRED_IDLE_EXIT_TIME_SECS.
- *
- * For kJetsamAgingPolicySysProcsReclaimedFirst,
- *
- * Daemons: The actual idle deferred time for the daemon is based on
- * the relaunch behavior of the daemon. The relaunch behavior determines
- * the scaling factor applied to DEFERRED_IDLE_EXIT_TIME_SECS. See
- * kJetsamSysProcsIdleDelayTime* ratios defined in kern_memorystatus.c
- *
- * Apps: The apps are aged for DEFERRED_IDLE_EXIT_TIME_SECS factored
- * by kJetsamAppsIdleDelayTimeRatio.
- */
-#define DEFERRED_IDLE_EXIT_TIME_SECS             10
-
 #define KEV_MEMORYSTATUS_SUBCLASS                 3
 
 enum {
@@ -266,11 +249,6 @@ extern uint64_t memorystatus_jetsam_snapshot_last_timestamp;
 extern uint64_t memorystatus_jetsam_snapshot_timeout;
 #define memorystatus_jetsam_snapshot_list memorystatus_jetsam_snapshot->entries
 #define JETSAM_SNAPSHOT_TIMEOUT_SECS 30
-
-/* General memorystatus stuff */
-
-extern uint64_t memorystatus_sysprocs_idle_delay_time;
-extern uint64_t memorystatus_apps_idle_delay_time;
 
 /* State */
 #define kMemorystatusSuspended        0x01
@@ -627,7 +605,7 @@ extern int memorystatus_set_memlimits(proc_t p, int32_t active_limit, int32_t in
 
 /* Remove this process from jetsam bands for killing or freezing.
  * The proc_list_lock is held by the caller.
- * @param p: The process to remove.
+ * @param p The process to remove.
  * @return: 0 if successful. EAGAIN if the process can't be removed right now (because it's being frozen) or ESRCH.
  */
 extern int memorystatus_remove(proc_t p);
@@ -676,10 +654,6 @@ int  memorystatus_get_proccnt_upto_priority(int32_t max_bucket_index);
 
 #if CONFIG_JETSAM
 
-typedef enum memorystatus_policy {
-	kPolicyDefault        = 0x0,
-	kPolicyMoreFree       = 0x1,
-} memorystatus_policy_t;
 extern unsigned int memorystatus_swap_all_apps;
 
 /*
@@ -704,7 +678,7 @@ void memorystatus_thread_wake(void);
 boolean_t memorystatus_kill_with_jetsam_reason_sync(pid_t pid, os_reason_t jetsam_reason);
 
 void jetsam_on_ledger_cpulimit_exceeded(void);
-void memorystatus_fast_jetsam_override(boolean_t enable_override);
+
 /*
  * Disable memorystatus_swap_all_apps.
  * Used by vm_pageout at boot if the swap volume is too small to support app swap.
@@ -719,7 +693,6 @@ bool memorystatus_disable_swap(void);
 boolean_t memorystatus_kill_on_zone_map_exhaustion(pid_t pid);
 boolean_t memorystatus_kill_on_VM_compressor_space_shortage(boolean_t async);
 void memorystatus_kill_on_vps_starvation(void);
-void memorystatus_pages_update(unsigned int pages_avail);
 boolean_t memorystatus_idle_exit_from_VM(void);
 proc_t memorystatus_get_first_proc_locked(unsigned int *bucket_index, boolean_t search);
 proc_t memorystatus_get_next_proc_locked(unsigned int *bucket_index, proc_t p, boolean_t search);

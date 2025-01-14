@@ -135,6 +135,21 @@ void kpc_pmi_handler(unsigned int ctr);
 	                               PMCR1_EL3_A64_ENABLE_MASK(PMC))
 #define PMCR1_EL_ALL_DISABLE_MASK(PMC) (~PMCR1_EL_ALL_ENABLE_MASK(PMC))
 
+#if KPC_MAX_COUNTERS > 8
+#define PMCR1_EL0_MASK \
+	(PMCR1_EL0_A64_ENABLE_MASK(0) | PMCR1_EL0_A64_ENABLE_MASK(1) | \
+	PMCR1_EL0_A64_ENABLE_MASK(2) | PMCR1_EL0_A64_ENABLE_MASK(3) | \
+	PMCR1_EL0_A64_ENABLE_MASK(4) | PMCR1_EL0_A64_ENABLE_MASK(5) | \
+	PMCR1_EL0_A64_ENABLE_MASK(6) | PMCR1_EL0_A64_ENABLE_MASK(7) | \
+	PMCR1_EL0_A64_ENABLE_MASK(8) | PMCR1_EL0_A64_ENABLE_MASK(9))
+#else /* KPC_MAX_COUNTERS > 8 */
+#define PMCR1_EL0_MASK \
+	(PMCR1_EL0_A64_ENABLE_MASK(0) | PMCR1_EL0_A64_ENABLE_MASK(1) | \
+	PMCR1_EL0_A64_ENABLE_MASK(2) | PMCR1_EL0_A64_ENABLE_MASK(3) | \
+	PMCR1_EL0_A64_ENABLE_MASK(4) | PMCR1_EL0_A64_ENABLE_MASK(5) | \
+	PMCR1_EL0_A64_ENABLE_MASK(6) | PMCR1_EL0_A64_ENABLE_MASK(7))
+#endif /* KPC_MAX_COUNTERS > 8 */
+
 /* PMESR0 and PMESR1 are event selection registers */
 
 /* PMESR0 selects which event is counted on PMCs 2, 3, 4, and 5 */
@@ -199,11 +214,15 @@ void kpc_pmi_handler(unsigned int ctr);
 #define PC_CAPTURE_PC(PCC_VAL) ((PCC_VAL) & ((UINT64_C(1) << 48) - 1))
 #endif /* HAS_CPMU_PC_CAPTURE */
 
-/* TODO: allocate dynamically */
-static uint64_t saved_PMCR[2];
-static uint64_t saved_PMESR[2];
-static uint64_t saved_RAWPMU[RAWPMU_CONFIG_COUNT];
-static uint64_t saved_counter[MAX_CPUS][KPC_MAX_COUNTERS];
+struct kpc_save_state {
+	uint64_t pmcr[2];
+	uint64_t pmesr[2];
+	uint64_t rawpmu[RAWPMU_CONFIG_COUNT];
+	uint64_t counter[MAX_CPUS][KPC_MAX_COUNTERS];
+};
+
+static __security_const_late struct kpc_save_state *kpc_state;
+
 static uint64_t kpc_running_cfg_pmc_mask = 0;
 static uint32_t kpc_running_classes = 0;
 static uint32_t kpc_configured = 0;
@@ -310,11 +329,11 @@ set_modes(uint32_t counter, kpc_config_t cfgword, bool secure)
 		    : PMCR1_EL0_A64_ENABLE_MASK(counter);
 	}
 
-	uint64_t pmcr1 = saved_PMCR[1];
+	uint64_t pmcr1 = kpc_state->pmcr[1];
 	pmcr1 &= PMCR1_EL_ALL_DISABLE_MASK(counter);
 	pmcr1 |= bits;
 	pmcr1 |= 0x30303; /* monotonic compatibility */
-	saved_PMCR[1] = pmcr1;
+	kpc_state->pmcr[1] = pmcr1;
 }
 
 static uint64_t
@@ -387,33 +406,34 @@ save_regs(void)
 	__builtin_arm_dmb(DMB_ISH);
 	assert(ml_get_interrupts_enabled() == FALSE);
 	for (int i = 2; i < KPC_ARM64_PMC_COUNT; i++) {
-		saved_counter[cpuid][i] = read_counter(i);
+		kpc_state->counter[cpuid][i] = read_counter(i);
 	}
 }
 
 static void
 restore_control_regs(uint32_t classes)
 {
-	SREG_WRITE("PMCR1_EL1", saved_PMCR[1] | 0x30303);
+	const uint64_t pmcr1_mask = kpc_allows_counting_system ? PMCR1_EL0_MASK : ~0ULL;
+	SREG_WRITE("PMCR1_EL1", (kpc_state->pmcr[1] & pmcr1_mask) | 0x30303);
 #if CONFIG_EXCLAVES
-	SREG_WRITE("PMCR1_EL12", saved_PMCR[1] | 0x30303);
+	SREG_WRITE("PMCR1_EL12", (kpc_state->pmcr[1] & pmcr1_mask) | 0x30303);
 #endif
-	SREG_WRITE("PMESR0_EL1", saved_PMESR[0]);
-	SREG_WRITE("PMESR1_EL1", saved_PMESR[1]);
+	SREG_WRITE("PMESR0_EL1", kpc_state->pmesr[0]);
+	SREG_WRITE("PMESR1_EL1", kpc_state->pmesr[1]);
 
 	if (classes & KPC_CLASS_RAWPMU_MASK) {
-		SREG_WRITE("PMCR2_EL1", saved_RAWPMU[0]);
-		SREG_WRITE("PMCR3_EL1", saved_RAWPMU[1]);
-		SREG_WRITE("PMCR4_EL1", saved_RAWPMU[2]);
-		SREG_WRITE("OPMAT0_EL1", saved_RAWPMU[3]);
-		SREG_WRITE("OPMAT1_EL1", saved_RAWPMU[4]);
-		SREG_WRITE("OPMSK0_EL1", saved_RAWPMU[5]);
-		SREG_WRITE("OPMSK1_EL1", saved_RAWPMU[6]);
+		SREG_WRITE("PMCR2_EL1", kpc_state->rawpmu[0]);
+		SREG_WRITE("PMCR3_EL1", kpc_state->rawpmu[1]);
+		SREG_WRITE("PMCR4_EL1", kpc_state->rawpmu[2]);
+		SREG_WRITE("OPMAT0_EL1", kpc_state->rawpmu[3]);
+		SREG_WRITE("OPMAT1_EL1", kpc_state->rawpmu[4]);
+		SREG_WRITE("OPMSK0_EL1", kpc_state->rawpmu[5]);
+		SREG_WRITE("OPMSK1_EL1", kpc_state->rawpmu[6]);
 #if RAWPMU_CONFIG_COUNT > 7
-		SREG_WRITE("PMMMAP_EL1", saved_RAWPMU[7]);
-		SREG_WRITE("PMTRHLD2_EL1", saved_RAWPMU[8]);
-		SREG_WRITE("PMTRHLD4_EL1", saved_RAWPMU[9]);
-		SREG_WRITE("PMTRHLD6_EL1", saved_RAWPMU[10]);
+		SREG_WRITE("PMMMAP_EL1", kpc_state->rawpmu[7]);
+		SREG_WRITE("PMTRHLD2_EL1", kpc_state->rawpmu[8]);
+		SREG_WRITE("PMTRHLD4_EL1", kpc_state->rawpmu[9]);
+		SREG_WRITE("PMTRHLD6_EL1", kpc_state->rawpmu[10]);
 #endif // RAWPMU_CONFIG_COUNT > 7
 	}
 }
@@ -423,7 +443,7 @@ restore_regs(void)
 {
 	int cpuid = cpu_number();
 	for (int i = 2; i < KPC_ARM64_PMC_COUNT; i++) {
-		write_counter(i, saved_counter[cpuid][i]);
+		write_counter(i, kpc_state->counter[cpuid][i]);
 	}
 	restore_control_regs(kpc_running_classes);
 }
@@ -506,6 +526,7 @@ kpc_cpu_callback(void * __unused param, enum cpu_event event,
 void
 kpc_arch_init(void)
 {
+	kpc_state = kalloc_type(struct kpc_save_state, Z_ZERO | Z_NOFAIL);
 	cpu_event_register_callback(kpc_cpu_callback, NULL);
 	kpc_allows_counting_system = PE_i_can_has_debugger(NULL);
 }
@@ -931,8 +952,8 @@ kpc_set_config_arch(struct kpc_config_remote *mp_config)
 
 		const int pmesr_idx = counter < 6 ? 0 : 1;
 		const int pmesr_off = counter < 6 ? 2 : 6;
-		saved_PMESR[pmesr_idx] &= PMESR_EVT_CLEAR(counter, pmesr_off);
-		saved_PMESR[pmesr_idx] |= PMESR_EVT_ENCODE(config_value, counter,
+		kpc_state->pmesr[pmesr_idx] &= PMESR_EVT_CLEAR(counter, pmesr_off);
+		kpc_state->pmesr[pmesr_idx] |= PMESR_EVT_ENCODE(config_value, counter,
 		    pmesr_off);
 		set_modes(counter, config_value, mp_config->secure);
 		config_index++;
@@ -940,8 +961,8 @@ kpc_set_config_arch(struct kpc_config_remote *mp_config)
 
 	if (mp_config->classes & KPC_CLASS_RAWPMU_MASK) {
 		unsigned int rawpmu_start = kpc_popcount(mp_config->pmc_mask);
-		memcpy(saved_RAWPMU, &mp_config->configv[rawpmu_start],
-		    sizeof(saved_RAWPMU));
+		memcpy(&kpc_state->rawpmu, &mp_config->configv[rawpmu_start],
+		    sizeof(kpc_state->rawpmu));
 	}
 
 	cpu_broadcast_xcall(&kpc_config_sync, TRUE, kpc_set_config_xcall, mp_config);

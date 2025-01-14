@@ -973,7 +973,7 @@ tcp_sack_process_dsack(struct tcpcb *tp, struct tcpopt *to,
 
 	/* Update the sender's retransmit segment state */
 	if (((tp->t_rxtshift == 1 && first_sack.start == tp->snd_una) ||
-	    ((tp->t_flagsext & TF_SENT_TLPROBE) &&
+	    (tcp_sent_tlp_retrans(tp) &&
 	    first_sack.end == tp->t_tlphighrxt)) &&
 	    TAILQ_EMPTY(&tp->snd_holes) &&
 	    SEQ_GT(th->th_ack, tp->snd_una)) {
@@ -981,7 +981,7 @@ tcp_sack_process_dsack(struct tcpcb *tp, struct tcpopt *to,
 		 * If the dsack is for a retransmitted packet and one of
 		 * the two cases is true, it indicates ack loss:
 		 * - retransmit timeout and first_sack.start == snd_una
-		 * - TLP probe and first_sack.end == tlphighrxt
+		 * - TLP retransmission and first_sack.end == tlphighrxt
 		 *
 		 * Ignore dsack and do not update state when there is
 		 * ack loss

@@ -234,7 +234,6 @@ do {                                                                    \
 #define COMMON_START() COMMON_START_ALLOW_FLOW_DIVERT(false)
 #define COMMON_END(req) out: return error; goto out
 
-
 /*
  * Give the socket an address.
  *
@@ -258,6 +257,8 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct sockaddr_in *sinp;
 
 	COMMON_START_ALLOW_FLOW_DIVERT(true);
+
+	inp_enter_bind_in_progress(so);
 
 	if (nam->sa_family != 0 && nam->sa_family != AF_INET) {
 		error = EAFNOSUPPORT;
@@ -293,6 +294,8 @@ tcp_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 out:
 	TCP_LOG_BIND(tp, error);
 
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 
@@ -306,6 +309,8 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct sockaddr_in6 *sin6p;
 
 	COMMON_START_ALLOW_FLOW_DIVERT(true);
+
+	inp_enter_bind_in_progress(so);
 
 	if (nam->sa_family != 0 && nam->sa_family != AF_INET6) {
 		error = EAFNOSUPPORT;
@@ -323,14 +328,6 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	    (IN_MULTICAST(ntohl(sin6p->sin6_addr.s6_addr32[3])) ||
 	    sin6p->sin6_addr.s6_addr32[3] == INADDR_BROADCAST)))) {
 		error = EAFNOSUPPORT;
-		goto out;
-	}
-
-	/*
-	 * Another thread won the binding race so do not change inp_vflag
-	 */
-	if (inp->inp_flags2 & INP2_BIND_IN_PROGRESS) {
-		error = EINVAL;
 		goto out;
 	}
 
@@ -360,9 +357,10 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		route_clear(&inp->inp_route);
 		goto out;
 	}
-
 out:
 	TCP_LOG_BIND(tp, error);
+
+	inp_exit_bind_in_progress(so);
 
 	return error;
 }
@@ -389,7 +387,11 @@ tcp_usr_listen(struct socket *so, struct proc *p)
 
 	COMMON_START_ALLOW_FLOW_DIVERT(true);
 	if (inp->inp_lport == 0) {
+		inp_enter_bind_in_progress(so);
+
 		error = in_pcbbind(inp, NULL, NULL, p);
+
+		inp_exit_bind_in_progress(so);
 	}
 	if (error == 0) {
 		TCP_LOG_STATE(tp, TCPS_LISTEN);
@@ -411,11 +413,15 @@ tcp6_usr_listen(struct socket *so, struct proc *p)
 
 	COMMON_START_ALLOW_FLOW_DIVERT(true);
 	if (inp->inp_lport == 0) {
+		inp_enter_bind_in_progress(so);
+
 		inp->inp_vflag &= ~INP_IPV4;
 		if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
 			inp->inp_vflag |= INP_IPV4;
 		}
 		error = in6_pcbbind(inp, NULL, NULL, p);
+
+		inp_exit_bind_in_progress(so);
 	}
 	if (error == 0) {
 		TCP_LOG_STATE(tp, TCPS_LISTEN);
@@ -466,7 +472,7 @@ tcp_connect_complete(struct socket *so)
 
 __attribute__((noinline))
 static void
-tcp_log_address_error(int error, struct sockaddr *nam, struct proc *p)
+tcp_log_address_error(struct tcpcb *tp, int error, struct sockaddr *nam)
 {
 	char buffer[MAX_IPv6_STR_LEN];
 
@@ -479,11 +485,7 @@ tcp_log_address_error(int error, struct sockaddr *nam, struct proc *p)
 
 		inet_ntop(AF_INET, &sinp->sin_addr, buffer, sizeof(buffer));
 	}
-	if (p == NULL) {
-		p = current_proc();
-	}
-	os_log(OS_LOG_DEFAULT, "connect address error %d for %s process %s:%u",
-	    error, buffer, proc_name_address(p), proc_pid(p));
+	TCP_LOG(tp, "connect address error %d for %s", error, buffer);
 }
 
 /*
@@ -496,6 +498,8 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 {
 	int error = 0;
 	struct inpcb *inp = sotoinpcb(so);
+
+	inp_enter_bind_in_progress(so);
 
 	if (isipv6 == 0) {
 		struct sockaddr_in *sinp;
@@ -522,6 +526,8 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 		struct sockaddr_in6 *sin6p;
 
 		if (nam->sa_family != 0 && nam->sa_family != AF_INET6) {
+			TCP_LOG(tp, "tcp_usr_connect_common v4 mapped error EAFNOSUPPORT: sa_family %u",
+			    nam->sa_family);
 			error = EAFNOSUPPORT;
 			goto out;
 		}
@@ -532,6 +538,7 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 		sin6p = SIN6(nam);
 		if (sin6p->sin6_family == AF_INET6 &&
 		    IN6_IS_ADDR_MULTICAST(&sin6p->sin6_addr)) {
+			TCP_LOG(tp, "tcp_usr_connect_common v6 error EAFNOSUPPORT: multicast");
 			error = EAFNOSUPPORT;
 			goto out;
 		}
@@ -540,7 +547,19 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 			struct sockaddr_in sin;
 
 			if ((inp->inp_flags & IN6P_IPV6_V6ONLY) != 0) {
-				error = EINVAL;
+				TCP_LOG(tp, "tcp_usr_connect_common v4 mapped error EAFNOSUPPORT: IPV6_V6ONLY");
+				error = EAFNOSUPPORT;
+				goto out;
+			}
+
+			/*
+			 * If bound to an IPv6 address, we cannot connect to
+			 * an IPv4 mapped address
+			 */
+			if (inp->inp_vflag == INP_IPV6 && !IN6_IS_ADDR_V4MAPPED(&inp->in6p_laddr) &&
+			    !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
+				TCP_LOG(tp, "tcp_usr_connect_common v4 mapped error EAFNOSUPPORT: inp_vflag == INP_IPV6");
+				error = EAFNOSUPPORT;
 				goto out;
 			}
 
@@ -550,12 +569,14 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 			 */
 			if (IN_MULTICAST(ntohl(sin.sin_addr.s_addr)) ||
 			    sin.sin_addr.s_addr == INADDR_BROADCAST) {
+				TCP_LOG(tp, "tcp_usr_connect_common v4 mapped error EAFNOSUPPORT: MULTICAST or BROADCAST");
 				error = EAFNOSUPPORT;
 				goto out;
 			}
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
 			if ((error = tcp_connect(tp, SA(&sin), p)) != 0) {
+				TCP_LOG(tp, "tcp_usr_connect_common v4 mapped tcp_connect() error %d", error);
 				goto out;
 			}
 
@@ -566,14 +587,26 @@ tcp_usr_connect_common(struct socket *so, struct tcpcb *tp, struct sockaddr *nam
 			 */
 			if (IN_MULTICAST(ntohl(sin6p->sin6_addr.s6_addr32[3])) ||
 			    sin6p->sin6_addr.s6_addr32[3] == INADDR_BROADCAST) {
+				TCP_LOG(tp, "tcp_usr_connect_common v4 compat error EAFNOSUPPORT: MULTICAST or BROADCAST");
 				error = EAFNOSUPPORT;
 				goto out;
 			}
 		}
 
+		/*
+		 * If bound to an IPv4 mapped address, we cannot connect to
+		 * an IPv6 address
+		 */
+		if (inp->inp_vflag == INP_IPV4) {
+			TCP_LOG(tp, "tcp_usr_connect_common v6 error EAFNOSUPPORT: inp_vflag == INP_IPV4");
+			error = EAFNOSUPPORT;
+			goto out;
+		}
+
 		inp->inp_vflag &= ~INP_IPV4;
 		inp->inp_vflag |= INP_IPV6;
 		if ((error = tcp6_connect(tp, nam, p)) != 0) {
+			TCP_LOG(tp, "tcp_usr_connect_common v6 tcp6_connect() error %d", error);
 			goto out;
 		}
 	}
@@ -582,9 +615,12 @@ out:
 		error = tcp_connect_complete(so);
 	}
 	TCP_LOG_CONNECT(tp, true, error);
-	if (error == EAFNOSUPPORT) {
-		tcp_log_address_error(error, nam, p);
+	if (error == EAFNOSUPPORT || error == EADDRINUSE) {
+		tcp_log_address_error(tp, error, nam);
 	}
+
+	inp_exit_bind_in_progress(so);
+
 	return error;
 }
 
@@ -1495,8 +1531,6 @@ tcp_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 		    (otp->t_flags & TF_RCVD_CC)) {
 			otp = tcp_close(otp);
 		} else {
-			printf("tcp_connect: inp=0x%llx err=EADDRINUSE\n",
-			    (uint64_t)VM_KERNEL_ADDRPERM(inp));
 			if (oinp != inp) {
 				socket_unlock(oinp->inp_socket, 1);
 			}
@@ -2705,10 +2739,6 @@ tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = EINVAL;
 				break;
 			}
-			if (tp->t_state != TCPS_CLOSED) {
-				error =  EINVAL;
-				break;
-			}
 			if (optval == 1) {
 				tp->t_flagsext |= TF_L4S_ENABLED;
 				tp->t_flagsext &= ~TF_L4S_DISABLED;
@@ -2716,6 +2746,7 @@ tcp_ctloutput(struct socket *so, struct sockopt *sopt)
 				tp->t_flagsext &= ~TF_L4S_ENABLED;
 				tp->t_flagsext |= TF_L4S_DISABLED;
 			}
+			tcp_set_foreground_cc(so);
 			break;
 		case TCP_NOTIFY_ACKNOWLEDGEMENT:
 			error = sooptcopyin(sopt, &optval,

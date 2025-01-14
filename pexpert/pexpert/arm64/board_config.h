@@ -181,6 +181,7 @@
 #define NO_CPU_OVRD                    1 /* CPU_OVRD register accesses are banned */
 
 
+
 #endif  /* ARM64_BOARD_CONFIG_T8132 */
 
 
@@ -250,6 +251,7 @@
 #if XNU_TARGET_OS_WATCH
 #define PREFER_ARM64_32_BINARIES       1
 #endif
+
 
 #endif  /* ARM64_BOARD_CONFIG_VMAPPLE */
 

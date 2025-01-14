@@ -2764,6 +2764,9 @@ out:
 	return error;
 }
 
+#define DISALLOW_RW_FOR_O_EVTONLY_ENTITLEMENT \
+	"com.apple.private.vfs.disallow-rw-for-o-evtonly"
+
 static int
 iopolicysys_vfs_disallow_rw_for_o_evtonly(struct proc *p, int cmd, int scope,
     int policy, __unused struct _iopol_param_t *iop_param)
@@ -2788,6 +2791,11 @@ iopolicysys_vfs_disallow_rw_for_o_evtonly(struct proc *p, int cmd, int scope,
 	case IOPOL_CMD_SET:
 		break;
 	default:
+		goto out;
+	}
+
+	if (!IOCurrentTaskHasEntitlement(DISALLOW_RW_FOR_O_EVTONLY_ENTITLEMENT)) {
+		error = EPERM;
 		goto out;
 	}
 
@@ -3042,7 +3050,6 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 {
 	proc_t  targetp;
 	int     error = 0;
-	struct  proc_rlimit_control_wakeupmon wakeupmon_args;
 	uint32_t cpumon_flags;
 	uint32_t cpulimits_flags;
 	kauth_cred_t my_cred, target_cred;
@@ -3076,14 +3083,8 @@ proc_rlimit_control(__unused struct proc *p, struct proc_rlimit_control_args *ua
 
 	switch (uap->flavor) {
 	case RLIMIT_WAKEUPS_MONITOR:
-		if ((error = copyin(uap->arg, &wakeupmon_args, sizeof(wakeupmon_args))) != 0) {
-			break;
-		}
-		if ((error = mach_to_bsd_rv(task_wakeups_monitor_ctl(proc_task(targetp), &wakeupmon_args.wm_flags,
-		    &wakeupmon_args.wm_rate))) != 0) {
-			break;
-		}
-		error = copyout(&wakeupmon_args, uap->arg, sizeof(wakeupmon_args));
+		// Ignore requests silently here, no longer supported.
+		error = 0;
 		break;
 	case RLIMIT_CPU_USAGE_MONITOR:
 		cpumon_flags = (uint32_t)uap->arg; // XXX temporarily stashing flags in argp (12592127)

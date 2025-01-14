@@ -52,6 +52,10 @@ uint32_t droptap_total_tap_count = 0;
 SYSCTL_UINT(_net_link_droptap, OID_AUTO, total_tap_count,
     CTLFLAG_RD | CTLFLAG_LOCKED, &droptap_total_tap_count, 0, "");
 
+uint32_t droptap_verbose = 0;
+SYSCTL_UINT(_net_link_droptap, OID_AUTO, verbose,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &droptap_verbose, 0, "");
+
 static LCK_GRP_DECLARE(droptap_lck_grp, "droptap");
 static LCK_ATTR_DECLARE(droptap_lck_attr, 0, 0);
 static LCK_RW_DECLARE_ATTR(droptap_lck_rw, &droptap_lck_grp, &droptap_lck_attr);

@@ -36,11 +36,11 @@
 #include <vm/vm_external.h>
 
 __options_decl(vm_compressor_options_t, uint32_t, {
-	C_DONT_BLOCK            = 0x00000001,
-	C_KEEP                  = 0x00000002,
-	C_KDP                   = 0x00000004,
+	C_DONT_BLOCK            = 0x00000001, /* vm_fault tells the compressor not to read from swap file */
+	C_KEEP                  = 0x00000002, /* vm_fault tells the compressor to not remove the data from the segment after decompress*/
+	C_KDP                   = 0x00000004, /* kdp fault tells the compressor to not do locking */
 	C_PAGE_UNMODIFIED       = 0x00000008,
-	C_KDP_MULTICPU          = 0x00000020,
+	C_KDP_MULTICPU          = 0x00000020, /* kdp fault tells the compressor to use per-cpu scratch buffer */
 });
 
 extern kern_return_t vm_compressor_pager_get(

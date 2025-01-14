@@ -101,11 +101,8 @@ check_exit_reason(int pid, uint64_t expected_reason_namespace, uint64_t expected
 	int ret, status;
 	struct proc_exitreasonbasicinfo exit_reason;
 
-	T_QUIET; T_ASSERT_POSIX_SUCCESS(
-		ret = proc_pidinfo(pid, PROC_PIDEXITREASONBASICINFO, 1, &exit_reason, PROC_PIDEXITREASONBASICINFOSIZE),
-		"verify proc_pidinfo success"
-		);
-	T_QUIET; T_ASSERT_EQ(ret, PROC_PIDEXITREASONBASICINFOSIZE, "retrieve basic exit reason info");
+	ret = proc_pidinfo(pid, PROC_PIDEXITREASONBASICINFO, 1, &exit_reason, PROC_PIDEXITREASONBASICINFOSIZE);
+	T_WITH_ERRNO; T_QUIET; T_ASSERT_EQ(ret, PROC_PIDEXITREASONBASICINFOSIZE, "retrieve basic exit reason info");
 
 	waitpid(pid, &status, 0);
 	T_QUIET; T_EXPECT_FALSE(WIFEXITED(status), "process did not exit normally");

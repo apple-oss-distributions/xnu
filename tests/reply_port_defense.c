@@ -32,6 +32,7 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.ipc"),
 	T_META_RADAR_COMPONENT_NAME("xnu"),
 	T_META_RADAR_COMPONENT_VERSION("IPC"),
+	T_META_TIMEOUT(10),
 	T_META_RUN_CONCURRENTLY(TRUE));
 
 static mach_port_t
@@ -299,10 +300,17 @@ T_DECL(test_unentitled_thread_set_exception_ports,
 T_DECL(test_unentitled_thread_set_state,
     "thread_set_state should fail without an entitlement",
     T_META_IGNORECRASHES(".*reply_port_defense_client.*"),
-    T_META_CHECK_LEAKS(false)) {
+    T_META_CHECK_LEAKS(false),
+    T_META_ENABLED(false /* rdar://133955889 */))
+{
 	int test_num = 6;
 	mach_exception_data_type_t expected_exception_code = (mach_exception_data_type_t)kGUARD_EXC_THREAD_SET_STATE;
 	bool triggers_exception = true;
+
+#if TARGET_OS_OSX
+	T_SKIP("Test disabled on macOS due to mach hardening opt out");
+#endif /* TARGET_OS_OSX */
+
 	reply_port_defense(true, test_num, expected_exception_code, triggers_exception);
 	reply_port_defense(false, test_num, expected_exception_code, triggers_exception);
 }

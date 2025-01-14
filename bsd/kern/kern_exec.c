@@ -3862,8 +3862,16 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			}
 		}
 #if CONFIG_EXCLAVES
+
+		/*
+		 * Calling exclaves_boot_wait() ensures that the conclave name
+		 * id will only be set when exclaves are actually
+		 * supported/enabled. In practice this will never actually block
+		 * as by the time this is called the system will have booted to
+		 * EXCLAVECORE if it's supported/enabled.
+		 */
 		if ((px_args.conclave_id_size > 0) && (px_args.conclave_id_size <= MAXCONCLAVENAME) &&
-		    (exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVEKIT) == KERN_SUCCESS)) {
+		    (exclaves_boot_wait(EXCLAVES_BOOT_STAGE_EXCLAVECORE) == KERN_SUCCESS)) {
 			if (px_args.conclave_id) {
 				if (imgp->ip_px_sa != NULL && (px_sa.psa_flags & POSIX_SPAWN_SETEXEC)) {
 					/* Conclave id could be set only for true spawn */
@@ -4587,12 +4595,6 @@ bad:
 			    (int)px_sa.psa_kqworkloop_hard_limit);
 		}
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
-
-		/* Disable wakeup monitoring for DriverKit processes */
-		if (px_sa.psa_apptype == POSIX_SPAWN_PROC_TYPE_DRIVER) {
-			uint32_t      flags = WAKEMON_DISABLE;
-			task_wakeups_monitor_ctl(new_task, &flags, NULL);
-		}
 	}
 
 
@@ -7391,7 +7393,8 @@ static kern_return_t
 execargs_purgeable_reference(void *execarg_address)
 {
 	int state = VM_PURGABLE_NONVOLATILE;
-	kern_return_t kr = vm_purgable_control(bsd_pageable_map, (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
+	kern_return_t kr = vm_map_purgable_control(bsd_pageable_map,
+	    (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
 
 	assert(kr == KERN_SUCCESS);
 	return kr;
@@ -7402,7 +7405,8 @@ execargs_purgeable_volatilize(void *execarg_address)
 {
 	int state = VM_PURGABLE_VOLATILE | VM_PURGABLE_ORDERING_OBSOLETE;
 	kern_return_t kr;
-	kr = vm_purgable_control(bsd_pageable_map, (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
+	kr = vm_map_purgable_control(bsd_pageable_map,
+	    (vm_offset_t) execarg_address, VM_PURGABLE_SET_STATE, &state);
 
 	assert(kr == KERN_SUCCESS);
 

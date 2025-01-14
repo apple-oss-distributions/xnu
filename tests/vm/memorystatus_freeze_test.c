@@ -679,7 +679,9 @@ T_DECL(assertion_test_demote_frozen, "demoted frozen process goes to asserted pr
 	T_META_BOOTARGS_SET("freeze_enabled=1"),
 	T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1),
 	T_META_ASROOT(true),
-	T_META_TAG_VM_NOT_PREFERRED) {
+	T_META_TAG_VM_NOT_PREFERRED,
+	T_META_ENABLED(false) /* rdar://133461319 */)
+{
 	memorystatus_assertion_test_demote_frozen();
 }
 

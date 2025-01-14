@@ -550,7 +550,12 @@ fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *head,
 		IFCQ_UNLOCK(ifq);
 		/* BK_SYS is currently throttled */
 		os_atomic_inc(&fq_cl->fcl_stat.fcl_throttle_drops, relaxed);
-		pktsched_free_pkt(&pkt);
+		if (__improbable(droptap_verbose > 0)) {
+			pktsched_drop_pkt(&pkt, ifq->ifcq_ifp, DROP_REASON_AQM_BK_SYS_THROTTLED,
+			    __func__, __LINE__, 0);
+		} else {
+			pktsched_free_pkt(&pkt);
+		}
 		*pdrop = TRUE;
 		ret = EQSUSPENDED;
 		goto done;
@@ -580,8 +585,8 @@ fq_if_enqueue_classq(struct ifclassq *ifq, classq_pkt_t *head,
 		} else {
 			IFCQ_UNLOCK(ifq);
 			*pdrop = TRUE;
-			pktsched_drop_pkt(&pkt, DROP_REASON_AQM_FULL, __func__,
-			    __LINE__, 0);
+			pktsched_drop_pkt(&pkt, ifq->ifcq_ifp, DROP_REASON_AQM_FULL,
+			    __func__, __LINE__, 0);
 			switch (ret) {
 			case CLASSQEQ_DROP:
 				ret = ENOBUFS;
@@ -1231,7 +1236,12 @@ fq_if_purge_flow(fq_if_t *fqs, fq_t *fq, uint32_t *pktsp,
 		}
 		pkts++;
 		bytes += pktsched_get_pkt_len(&pkt);
-		pktsched_free_pkt(&pkt);
+		if (__improbable(droptap_verbose > 0)) {
+			pktsched_drop_pkt(&pkt, fqs->fqs_ifq->ifcq_ifp, DROP_REASON_AQM_PURGE_FLOW,
+			    __func__, __LINE__, 0);
+		} else {
+			pktsched_free_pkt(&pkt);
+		}
 	}
 	KDBG(AQM_KTRACE_STATS_FLOW_DEQUEUE, fq->fq_flowhash,
 	    AQM_KTRACE_FQ_GRP_SC_IDX(fq), fq->fq_bytes, fq->fq_min_qdelay);
@@ -1991,7 +2001,12 @@ fq_if_drop_packet(fq_if_t *fqs, uint64_t now)
 	}
 	IFCQ_DROP_ADD(fqs->fqs_ifq, 1, pktsched_get_pkt_len(&pkt));
 
-	pktsched_free_pkt(&pkt);
+	if (__improbable(droptap_verbose > 0)) {
+		pktsched_drop_pkt(&pkt, fqs->fqs_ifq->ifcq_ifp, DROP_REASON_AQM_DROP,
+		    __func__, __LINE__, 0);
+	} else {
+		pktsched_free_pkt(&pkt);
+	}
 	fq_cl->fcl_stat.fcl_drop_overflow++;
 }
 

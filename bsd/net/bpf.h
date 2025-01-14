@@ -330,9 +330,11 @@ struct bpf_hdr_ext {
 	bpf_u_int32     bh_flowid;      /* kernel reserved; 0 in userland */
 	bpf_u_int32     bh_unsent_bytes; /* unsent bytes at interface */
 	bpf_u_int32     bh_unsent_snd; /* unsent bytes at socket buffer */
+	bpf_u_int32     bh_comp_gencnt; /* unsent bytes at socket buffer */
 };
 
 #define BPF_HDR_EXT_HAS_TRACE_TAG 1
+#define BPF_HDR_EXT_HAS_COMP_GENCNT 1
 
 /*
  * External representation of the bpf descriptor

@@ -116,6 +116,10 @@
 	mov		x16, #0
 	mov		x17, #0
 	mov		x18, #0
+
+	/* Attempt to record the debug trace */
+	bl		EXT(panic_lockdown_record_debug_data)
+
 #endif /* DEVELOPMENT || DEBUG */
 #if CONFIG_XNUPOST
 	mrs		x0, TPIDR_EL1
@@ -2535,6 +2539,68 @@ Lsptm_skip_ast_taken_sptmhook:
 	POP_FRAME
 	ARM64_STACK_EPILOG
 #endif /* CONFIG_SPTM */
+
+#if CONFIG_SPTM && (DEVELOPMENT || DEBUG)
+/**
+ * Record debug data for a panic lockdown event
+ * Clobbers x0, x1, x2
+ */
+	.text
+	.align 2
+	.global EXT(panic_lockdown_record_debug_data)
+LEXT(panic_lockdown_record_debug_data)
+	adrp	x0, EXT(debug_panic_lockdown_initiator_state)@page
+	add		x0, x0, EXT(debug_panic_lockdown_initiator_state)@pageoff
+
+	/*
+	 * To synchronize accesses to the debug state, we use the initiator PC as a
+	 * "lock". It starts out at zero and we try to swap in our initiator's PC
+	 * (which is trivially non-zero) to acquire the debug state and become the
+	 * initiator of record.
+	 *
+	 * Note that other CPUs which are not the initiator of record may still
+	 * initiate panic lockdown (potentially before the initiator of record does
+	 * so) and so this debug data should only be used as a hint for the
+	 * initiating CPU rather than a guarantee of which CPU initiated lockdown
+	 * first.
+	 */
+	mov		x1, #0
+	add		x2, x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_PC
+	cas		x1, lr, [x2]
+	/* If there's a non-zero value there already, we aren't the first. Skip. */
+	cbnz	x1, Lpanic_lockdown_record_debug_data_done
+
+	/*
+	 * We're the first and have exclusive access to the debug structure!
+	 * Record all our data.
+	 */
+	mov		x1, sp
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_SP]
+
+	mrs		x1, TPIDR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_TPIDR]
+
+	mrs		x1, MPIDR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_INITIATOR_MPIDR]
+
+	mrs		x1, ESR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_ESR]
+
+	mrs		x1, ELR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_ELR]
+
+	mrs		x1, FAR_EL1
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_FAR]
+
+	/* Sync and then read the timer */
+	dsb		sy
+	isb
+	mrs		x1, CNTVCT_EL0
+	str		x1, [x0, #PANIC_LOCKDOWN_INITIATOR_STATE_TIMESTAMP]
+
+Lpanic_lockdown_record_debug_data_done:
+	ret
+#endif /* CONFIG_SPTM && (DEVELOPMENT || DEBUG) */
 
 /* ARM64_TODO Is globals_asm.h needed? */
 //#include	"globals_asm.h"

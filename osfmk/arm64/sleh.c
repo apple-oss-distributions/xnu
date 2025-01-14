@@ -816,6 +816,18 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		thread_reset_pcs_will_fault(thread);
 	}
 
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown && current_thread() != NULL)) {
+		/*
+		 * If we initiated panic lockdown, we must disable preemption before
+		 * enabling interrupts. While unlikely, preempting the panicked thread
+		 * after lockdown has occurred may hang the system if all cores end up
+		 * blocked while attempting to return to user space.
+		 */
+		disable_preemption();
+	}
+#endif /* CONFIG_SPTM */
+
 	/* Inherit the interrupt masks from previous context */
 	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
 		ml_set_interrupts_enabled(TRUE);
@@ -1027,28 +1039,41 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, ARM64_KDBG_CODE_KERNEL | class) | DBG_FUNC_END,
 		    esr, VM_KERNEL_ADDRHIDE(far), VM_KERNEL_UNSLIDE(get_saved_state_pc(state)), 0, 0);
 	}
+
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown)) {
+#if CONFIG_XNUPOST
+		bool can_recover = !!(expected_fault_handler);
+#else
+		bool can_recover = false;
+#endif /* CONFIG_XNU_POST */
+
+		if (can_recover) {
+			/*
+			 * If we matched an exception handler, this was a simulated lockdown
+			 * and so we can recover. Re-enable preemption if we disabled it.
+			 */
+			if (current_thread() != NULL) {
+				enable_preemption();
+			}
+		} else {
+			/*
+			 * fleh already triggered a lockdown but we, for whatever reason,
+			 * didn't end up finding a reason to panic. Catch all panic in this
+			 * case.
+			 * Note that the panic here has no security benefit as the system is
+			 * already hosed, this is merely for telemetry.
+			 */
+			panic_with_thread_kernel_state("Panic lockdown initiated", state);
+		}
+	}
+#endif /* CONFIG_SPTM */
+
 #if MACH_ASSERT
 	if (preemption_level != sleh_get_preemption_level()) {
 		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
 	}
 #endif
-
-#if CONFIG_SPTM
-	if (did_initiate_panic_lockdown
-#if CONFIG_XNUPOST
-	    /* Do not engage the panic interlock if we matched a fault handler */
-	    && !expected_fault_handler
-#endif /* CONFIG_XNUPOST */
-	    ) {
-		/*
-		 *  fleh already triggered a lockdown but we, for whatever reason, didn't
-		 *  end up finding a reason to panic. Catch all panic in this case.
-		 *  Note that the panic here has no security benefit as the system is already
-		 *  hosed, this is merely for telemetry.
-		 */
-		panic_with_thread_kernel_state("Panic lockdown initiated", state);
-	}
-#endif /* CONFIG_SPTM */
 }
 
 /*

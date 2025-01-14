@@ -618,7 +618,7 @@ class SMRHash(_Hash):
     @property
     def buckets(self):
         hash_arr = self.hash_value.xGetScalarByName('smrh_array')
-        return 1 << (64 - ((hash_arr >> 48) & 0xffff))
+        return 1 << (64 - ((hash_arr >> 48) & 0x00ff))
 
     @property
     def count(self):
@@ -633,7 +633,7 @@ class SMRHash(_Hash):
         obj_ty   = obj_null.GetType().GetArrayElementType().GetPointeeType()
         lnk_offs = self.traits_value.xGetScalarByPath('.smrht.link_offset')
         hash_arr = self.hash_value.xGetScalarByName('smrh_array')
-        hash_sz  = 1 << (64 - ((hash_arr >> 48) & 0xffff))
+        hash_sz  = 1 << (64 - ((hash_arr >> 48) & 0x00ff))
         hash_arr = obj_null.xCreateValueFromAddress(None,
             hash_arr | 0xffff000000000000, gettype('struct smrq_slist_head'));
 

@@ -62,10 +62,13 @@
 #include "exclaves_sensor.h"
 #include "exclaves_shared_memory.h"
 #include "exclaves_xnuproxy.h"
+#include "exclaves_memory.h"
 
 #include "kern/exclaves.tightbeam.h"
 
 static LCK_GRP_DECLARE(resource_lck_grp, "exclaves_resource");
+static kern_return_t
+exclaves_update_state_machine_locked(exclaves_resource_t *resource);
 
 /*
  * A cache of service ids in the kernel domain
@@ -471,8 +474,6 @@ IPC_KOBJECT_DEFINE(IKOT_EXCLAVES_RESOURCE,
 
 static void exclaves_conclave_init(exclaves_resource_t *resource);
 static void exclaves_notification_init(exclaves_resource_t *resource);
-static void exclaves_named_buffer_unmap(exclaves_resource_t *resource);
-static void exclaves_audio_buffer_delete(exclaves_resource_t *resource);
 static void exclaves_resource_sensor_reset(exclaves_resource_t *resource);
 static void exclaves_resource_shared_memory_unmap(exclaves_resource_t *resource);
 static void exclaves_resource_audio_memory_unmap(exclaves_resource_t *resource);
@@ -680,14 +681,6 @@ exclaves_resource_release(exclaves_resource_t *resource)
 	}
 
 	switch (resource->r_type) {
-	case XNUPROXY_RESOURCETYPE_NAMEDBUFFER:
-		exclaves_named_buffer_unmap(resource);
-		break;
-
-	case XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER:
-		exclaves_audio_buffer_delete(resource);
-		break;
-
 	case XNUPROXY_RESOURCETYPE_SENSOR:
 		exclaves_resource_sensor_reset(resource);
 		break;
@@ -804,425 +797,6 @@ exclaves_resource_no_senders(ipc_port_t port,
 }
 
 /* -------------------------------------------------------------------------- */
-#pragma mark Named Buffers
-
-int
-exclaves_named_buffer_io(exclaves_resource_t *resource, off_t offset,
-    size_t len, int (^cb)(char *, size_t))
-{
-	assert(resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER ||
-	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
-
-	named_buffer_resource_t *nb = &resource->r_named_buffer;
-	assert3u(nb->nb_nranges, >, 0);
-	assert3u(nb->nb_size, !=, 0);
-	assert3u(offset + len, <=, nb->nb_size);
-
-	for (int i = 0; i < nb->nb_nranges; i++) {
-		/* Skip forward to the starting range. */
-		if (offset >= nb->nb_range[i].npages * PAGE_SIZE) {
-			offset -= nb->nb_range[i].npages * PAGE_SIZE;
-			continue;
-		}
-
-		size_t size = MIN((nb->nb_range[i].npages * PAGE_SIZE) - offset, len);
-		int ret = cb(nb->nb_range[i].address + offset, size);
-		if (ret != 0) {
-			return ret;
-		}
-
-		offset = 0;
-		len -= size;
-
-		if (len == 0) {
-			break;
-		}
-	}
-	assert3u(len, ==, 0);
-
-	return 0;
-}
-
-static kern_return_t
-exclaves_named_buffer_io_copyin(exclaves_resource_t *resource,
-    user_addr_t _src, off_t offset, size_t len)
-{
-	assert3u(resource->r_named_buffer.nb_perm & EXCLAVES_BUFFER_PERM_WRITE,
-	    !=, 0);
-
-	__block user_addr_t src = _src;
-	return exclaves_named_buffer_io(resource, offset, len,
-	           ^(char *buffer, size_t size) {
-		if (copyin(src, buffer, size) != 0) {
-		        return KERN_FAILURE;
-		}
-
-		src += size;
-		return KERN_SUCCESS;
-	});
-}
-
-kern_return_t
-exclaves_named_buffer_copyin(exclaves_resource_t *resource,
-    user_addr_t buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
-    mach_vm_size_t size2, mach_vm_size_t offset2)
-{
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-
-	mach_vm_size_t umax = 0;
-	kern_return_t kr = KERN_FAILURE;
-
-	if (buffer == USER_ADDR_NULL || size1 == 0) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	named_buffer_resource_t *nb = &resource->r_named_buffer;
-	assert3u(nb->nb_nranges, >, 0);
-	assert3u(nb->nb_size, !=, 0);
-
-	if (os_add_overflow(offset1, size1, &umax) || umax > nb->nb_size) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (os_add_overflow(offset2, size2, &umax) || umax > nb->nb_size) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if ((nb->nb_perm & EXCLAVES_BUFFER_PERM_WRITE) == 0) {
-		return KERN_PROTECTION_FAILURE;
-	}
-
-	kr = exclaves_named_buffer_io_copyin(resource, buffer, offset1, size1);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	kr = exclaves_named_buffer_io_copyin(resource, buffer + size1, offset2,
-	    size2);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	return KERN_SUCCESS;
-}
-
-static kern_return_t
-exclaves_named_buffer_io_copyout(exclaves_resource_t *resource,
-    user_addr_t _dst, off_t offset, size_t len)
-{
-	assert3u(resource->r_named_buffer.nb_perm & EXCLAVES_BUFFER_PERM_READ,
-	    !=, 0);
-
-	__block user_addr_t dst = _dst;
-	return exclaves_named_buffer_io(resource, offset, len,
-	           ^(char *buffer, size_t size) {
-		if (copyout(buffer, dst, size) != 0) {
-		        return KERN_FAILURE;
-		}
-
-		dst += size;
-		return KERN_SUCCESS;
-	});
-}
-
-kern_return_t
-exclaves_named_buffer_copyout(exclaves_resource_t *resource,
-    user_addr_t buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
-    mach_vm_size_t size2, mach_vm_size_t offset2)
-{
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
-	assert(resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER ||
-	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-
-	mach_vm_size_t umax = 0;
-	kern_return_t kr = KERN_FAILURE;
-
-	if (buffer == USER_ADDR_NULL || size1 == 0) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	named_buffer_resource_t *nb = &resource->r_named_buffer;
-	assert3u(nb->nb_nranges, >, 0);
-	assert3u(nb->nb_size, !=, 0);
-
-	if (os_add_overflow(offset1, size1, &umax) || umax > nb->nb_size) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (os_add_overflow(offset2, size2, &umax) || umax > nb->nb_size) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if ((nb->nb_perm & EXCLAVES_BUFFER_PERM_READ) == 0) {
-		return KERN_PROTECTION_FAILURE;
-	}
-
-	kr = exclaves_named_buffer_io_copyout(resource, buffer, offset1, size1);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	kr = exclaves_named_buffer_io_copyout(resource, buffer + size1,
-	    offset2, size2);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	return KERN_SUCCESS;
-}
-
-static void
-named_buffer_unmap(exclaves_resource_t *resource)
-{
-	assert(resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER ||
-	    resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-	LCK_MTX_ASSERT(&resource->r_mutex, LCK_MTX_ASSERT_OWNED);
-
-	/* BEGIN IGNORE CODESTYLE */
-	resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER ?
-	    exclaves_named_buffer_unmap(resource) :
-	    exclaves_audio_buffer_delete(resource);
-	/* END IGNORE CODESTYLE */
-}
-
-static kern_return_t
-named_buffer_map(exclaves_resource_t *resource, size_t size,
-    exclaves_buffer_perm_t perm)
-{
-	assert(resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER ||
-	    resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-	assert3u(perm & ~(EXCLAVES_BUFFER_PERM_READ | EXCLAVES_BUFFER_PERM_WRITE), ==, 0);
-
-	kern_return_t kr = KERN_FAILURE;
-
-	if (size == 0) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	/* round size up to nearest page */
-	mach_vm_offset_t rounded_size = 0;
-	if (mach_vm_round_page_overflow(size, &rounded_size)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	lck_mtx_lock(&resource->r_mutex);
-
-	/*
-	 * If already active, bump the use count, check that the perms and size
-	 * are compatible and return. Checking the use count is insufficient
-	 * here as this can race with with a non-locked use count release.
-	 */
-	if (resource->r_active) {
-		const named_buffer_resource_t *nb = &resource->r_named_buffer;
-
-		/*
-		 * When only inbound and outbound buffers are supported, the
-		 * perm check should be updated to ensure that the perms match
-		 * (rather than being a subset). */
-		if (nb->nb_size < rounded_size ||
-		    (nb->nb_perm & perm) == 0) {
-			lck_mtx_unlock(&resource->r_mutex);
-			return KERN_INVALID_ARGUMENT;
-		}
-
-		exclaves_resource_retain(resource);
-		lck_mtx_unlock(&resource->r_mutex);
-		return KERN_SUCCESS;
-	}
-
-	bool ro = true;
-	if (resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER) {
-		kr = exclaves_xnuproxy_audio_buffer_map(resource->r_id, rounded_size, &ro);
-	} else {
-		assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-		kr = exclaves_xnuproxy_named_buffer_map(resource->r_id, rounded_size, &ro);
-	}
-
-	if (kr != KERN_SUCCESS) {
-		lck_mtx_unlock(&resource->r_mutex);
-		return kr;
-	}
-
-	/*
-	 * From this point on named_buffer_unmap() must be called if
-	 * something goes wrong so that the buffer will be properly unmapped.
-	 */
-	switch (perm) {
-	case EXCLAVES_BUFFER_PERM_READ:
-		if (!ro) {
-			named_buffer_unmap(resource);
-			lck_mtx_unlock(&resource->r_mutex);
-			return KERN_PROTECTION_FAILURE;
-		}
-		break;
-	case EXCLAVES_BUFFER_PERM_WRITE:
-		if (ro) {
-			named_buffer_unmap(resource);
-			lck_mtx_unlock(&resource->r_mutex);
-			return KERN_PROTECTION_FAILURE;
-		}
-		break;
-	/* Maintain backwards compatibility for named buffers (READ|WRITE) */
-	case EXCLAVES_BUFFER_PERM_READ | EXCLAVES_BUFFER_PERM_WRITE:
-		if (ro) {
-			perm &= ~EXCLAVES_BUFFER_PERM_WRITE;
-		}
-		break;
-	}
-
-	named_buffer_resource_t *nb = &resource->r_named_buffer;
-	nb->nb_size = rounded_size;
-	nb->nb_perm = perm;
-	nb->nb_nranges = 0;
-
-	/*
-	 * The named buffer is now accessible by xnu. Discover the
-	 * layout of the memory.
-	 */
-	kern_return_t (*layout)(uint64_t, uint32_t, uint32_t, kern_return_t (^)(uint64_t, uint32_t)) =
-	    resource->r_type == XNUPROXY_RESOURCETYPE_NAMEDBUFFER ?
-	    exclaves_xnuproxy_named_buffer_layout :
-	    exclaves_xnuproxy_audio_buffer_layout;
-	kr = layout(resource->r_id, 0, (uint32_t) (rounded_size / PAGE_SIZE),
-	    ^(uint64_t base, uint32_t npages) {
-		if (nb->nb_nranges >= EXCLAVES_SHARED_BUFFER_MAX_RANGES) {
-		        exclaves_debug_printf(show_errors, "exclaves: "
-		        "fragmented named buffer can't fit\n");
-		        return KERN_NO_SPACE;
-		}
-
-		nb->nb_range[nb->nb_nranges].address = (char *)phystokv(base);
-		assert3p(nb->nb_range[nb->nb_nranges].address, !=, NULL);
-
-		nb->nb_range[nb->nb_nranges].npages = npages;
-		assert3u(nb->nb_range[nb->nb_nranges].npages, !=, 0);
-
-		nb->nb_nranges++;
-
-		return KERN_SUCCESS;
-	});
-
-	if (kr != KERN_SUCCESS) {
-		named_buffer_unmap(resource);
-		lck_mtx_unlock(&resource->r_mutex);
-		return kr;
-	}
-
-	exclaves_resource_retain(resource);
-	resource->r_active = true;
-
-	lck_mtx_unlock(&resource->r_mutex);
-
-	return KERN_SUCCESS;
-}
-
-kern_return_t
-exclaves_named_buffer_map(const char *domain, const char *name, size_t size,
-    exclaves_buffer_perm_t perm, exclaves_resource_t **out)
-{
-	assert3p(out, !=, NULL);
-
-	exclaves_resource_t *resource = exclaves_resource_lookup_by_name(domain,
-	    name, XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-	if (resource == NULL) {
-		return KERN_NOT_FOUND;
-	}
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-
-	kern_return_t kr = named_buffer_map(resource, size, perm);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	*out = resource;
-	return KERN_SUCCESS;
-}
-
-static void
-exclaves_named_buffer_unmap(exclaves_resource_t *resource)
-{
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_NAMEDBUFFER);
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), ==, 0);
-	LCK_MTX_ASSERT(&resource->r_mutex, LCK_MTX_ASSERT_OWNED);
-
-	kern_return_t kr = exclaves_xnuproxy_named_buffer_delete(resource->r_id);
-	if (kr != KERN_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "exclaves: failed to delete named buffer: %s\n",
-		    resource->r_name);
-		return;
-	}
-
-	bzero(&resource->r_named_buffer, sizeof(resource->r_named_buffer));
-
-	resource->r_active = false;
-}
-
-/* -------------------------------------------------------------------------- */
-#pragma mark Audio buffers
-
-kern_return_t
-exclaves_audio_buffer_map(const char *domain, const char *name, size_t size,
-    exclaves_resource_t **out)
-{
-	assert3p(out, !=, NULL);
-
-	exclaves_resource_t *resource = exclaves_resource_lookup_by_name(domain,
-	    name, XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-	if (resource == NULL) {
-		return KERN_NOT_FOUND;
-	}
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-
-	kern_return_t kr = named_buffer_map(resource, size,
-	    EXCLAVES_BUFFER_PERM_READ);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	*out = resource;
-	return KERN_SUCCESS;
-}
-
-static void
-exclaves_audio_buffer_delete(exclaves_resource_t *resource)
-{
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), ==, 0);
-	LCK_MTX_ASSERT(&resource->r_mutex, LCK_MTX_ASSERT_OWNED);
-
-	kern_return_t kr = exclaves_xnuproxy_audio_buffer_delete(resource->r_id);
-	if (kr != KERN_SUCCESS) {
-		exclaves_debug_printf(show_errors,
-		    "exclaves: failed to delete audio buffer: %s\n",
-		    resource->r_name);
-		return;
-	}
-
-	bzero(&resource->r_named_buffer, sizeof(resource->r_named_buffer));
-	resource->r_active = false;
-}
-
-kern_return_t
-exclaves_audio_buffer_copyout(exclaves_resource_t *resource,
-    user_addr_t buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
-    mach_vm_size_t size2, mach_vm_size_t offset2)
-{
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
-	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOBUFFER);
-
-	kern_return_t kr = exclaves_xnuproxy_audio_buffer_copyout(resource->r_id, size1, offset1, size2, offset2);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-	return exclaves_named_buffer_copyout(resource, buffer, size1, offset1,
-	           size2, offset2);
-}
-
-/* -------------------------------------------------------------------------- */
 #pragma mark Conclave Manager
 
 static void
@@ -1239,6 +813,10 @@ exclaves_conclave_init(exclaves_resource_t *resource)
 
 	conclave->c_control = connection;
 	conclave->c_state = CONCLAVE_S_NONE;
+	conclave->c_request = CONCLAVE_R_NONE;
+	conclave->c_active_downcall = false;
+	conclave->c_active_stopcall = false;
+	conclave->c_downcall_thread = THREAD_NULL;
 	conclave->c_task = TASK_NULL;
 }
 
@@ -1250,8 +828,7 @@ exclaves_conclave_attach(const char *name, task_t task)
 	exclaves_resource_t *resource = exclaves_resource_lookup_by_name(
 		EXCLAVES_DOMAIN_KERNEL, name, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
 	if (resource == NULL) {
-		exclaves_requirement_assert(EXCLAVES_R_CONCLAVE,
-		    "failed to find conclave manager (%s)", name);
+		/* Just return success here. The conclave launch will fail. */
 		return KERN_SUCCESS;
 	}
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
@@ -1286,12 +863,28 @@ exclaves_conclave_detach(exclaves_resource_t *resource, task_t task)
 
 	lck_mtx_lock(&resource->r_mutex);
 
+	while (conclave->c_active_downcall) {
+		conclave->c_active_detach = true;
+		assert3p(conclave->c_downcall_thread, !=, THREAD_NULL);
+		lck_mtx_sleep_with_inheritor(&resource->r_mutex,
+		    LCK_SLEEP_DEFAULT,
+		    (event_t)&conclave->c_active_downcall,
+		    conclave->c_downcall_thread,
+		    THREAD_UNINT,
+		    TIMEOUT_WAIT_FOREVER);
+		conclave->c_active_detach = false;
+	}
+
 	if (conclave->c_state != CONCLAVE_S_ATTACHED &&
 	    conclave->c_state != CONCLAVE_S_STOPPED) {
 		panic("Task %p trying to detach a conclave %p but it is in a "
 		    "weird state", task, conclave);
 	}
 
+	assert3u(conclave->c_active_downcall, ==, 0);
+	assert3u(conclave->c_active_stopcall, ==, 0);
+	assert3p(conclave->c_downcall_thread, ==, THREAD_NULL);
+	assert3u(conclave->c_request, ==, CONCLAVE_R_NONE);
 	assert3p(task->conclave, !=, NULL);
 	assert3p(resource, ==, task->conclave);
 
@@ -1324,7 +917,9 @@ exclaves_conclave_inherit(exclaves_resource_t *resource, task_t old_task,
 	assert3p(resource, ==, old_task->conclave);
 
 	/* Only allow inheriting the conclave if it has not yet started. */
-	if (conclave->c_state != CONCLAVE_S_ATTACHED) {
+	if (conclave->c_state != CONCLAVE_S_ATTACHED ||
+	    conclave->c_active_downcall ||
+	    conclave->c_active_stopcall) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_FAILURE;
 	}
@@ -1354,6 +949,7 @@ exclaves_conclave_is_attached(const exclaves_resource_t *resource)
 kern_return_t
 exclaves_conclave_launch(exclaves_resource_t *resource)
 {
+	kern_return_t kr;
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
 
 	conclave_resource_t *conclave = &resource->r_conclave;
@@ -1370,35 +966,113 @@ exclaves_conclave_launch(exclaves_resource_t *resource)
 
 	lck_mtx_lock(&resource->r_mutex);
 
-	if (conclave->c_state != CONCLAVE_S_ATTACHED) {
+	if (conclave->c_state != CONCLAVE_S_ATTACHED ||
+	    conclave->c_active_downcall ||
+	    conclave->c_active_stopcall) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_FAILURE;
 	}
 
-	conclave->c_state = CONCLAVE_S_LAUNCHING;
-	lck_mtx_unlock(&resource->r_mutex);
+	conclave->c_request |= CONCLAVE_R_LAUNCH_REQUESTED;
+	kr = exclaves_update_state_machine_locked(resource);
+	return kr;
+}
 
-	__assert_only kern_return_t ret =
-	    exclaves_conclave_launcher_launch(conclave->c_control);
-	assert3u(ret, ==, KERN_SUCCESS);
+static kern_return_t
+exclaves_update_state_machine_locked(exclaves_resource_t *resource)
+{
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
 
-	lck_mtx_lock(&resource->r_mutex);
-	/* Check if conclave stop is requested */
-	if (conclave->c_state == CONCLAVE_S_STOP_REQUESTED) {
-		conclave->c_state = CONCLAVE_S_STOPPING;
-		lck_mtx_unlock(&resource->r_mutex);
+	conclave_resource_t *conclave = &resource->r_conclave;
+	conclave_state_t pending_state = CONCLAVE_S_NONE;
+	kern_return_t ret;
 
-		ret = exclaves_conclave_launcher_stop(conclave->c_control,
-		    CONCLAVE_LAUNCHER_CONCLAVESTOPREASON_EXIT);
-		assert3u(ret, ==, KERN_SUCCESS);
+	while (1) {
+		bool stop_call = false;
+		/* Check if there are pending requests */
+		if (conclave->c_request & CONCLAVE_R_LAUNCH_REQUESTED) {
+			conclave->c_request &= ~CONCLAVE_R_LAUNCH_REQUESTED;
+			assert3u(conclave->c_active_downcall, ==, 0);
+			conclave->c_active_downcall = true;
+			conclave->c_downcall_thread = current_thread();
+			pending_state = CONCLAVE_S_RUNNING;
+			lck_mtx_unlock(&resource->r_mutex);
+
+			ret = exclaves_conclave_launcher_launch(conclave->c_control);
+			assert3u(ret, ==, KERN_SUCCESS);
+		} else if (conclave->c_request & CONCLAVE_R_SUSPEND_REQUESTED) {
+			task_t task = conclave->c_task;
+			int suspend_count;
+			bool suspend;
+
+			task_lock(task);
+			suspend_count = task->suspend_count;
+			task_unlock(task);
+
+			suspend = (suspend_count > 0) ? true : false;
+			conclave->c_request &= ~CONCLAVE_R_SUSPEND_REQUESTED;
+
+			/* Check the state to see if downcall is needed */
+			if (suspend && conclave->c_state != CONCLAVE_S_RUNNING) {
+				continue;
+			}
+
+			if (!suspend && conclave->c_state != CONCLAVE_S_SUSPENDED) {
+				continue;
+			}
+
+			assert3u(conclave->c_active_downcall, ==, 0);
+			conclave->c_active_downcall = true;
+			conclave->c_downcall_thread = current_thread();
+			pending_state = suspend ? CONCLAVE_S_SUSPENDED : CONCLAVE_S_RUNNING;
+			lck_mtx_unlock(&resource->r_mutex);
+
+			ret = exclaves_conclave_launcher_suspend(conclave->c_control,
+			    suspend);
+		} else if (conclave->c_request & CONCLAVE_R_STOP_REQUESTED) {
+			conclave->c_request &= ~CONCLAVE_R_STOP_REQUESTED;
+
+			/* Check the state to see if downcall is needed */
+			if (conclave->c_state != CONCLAVE_S_RUNNING &&
+			    conclave->c_state != CONCLAVE_S_SUSPENDED) {
+				continue;
+			}
+			assert3u(conclave->c_active_downcall, ==, 0);
+			conclave->c_active_downcall = true;
+			conclave->c_downcall_thread = current_thread();
+			conclave->c_active_stopcall = true;
+			stop_call = true;
+			pending_state = CONCLAVE_S_STOPPED;
+			lck_mtx_unlock(&resource->r_mutex);
+
+			ret = exclaves_conclave_launcher_stop(conclave->c_control,
+			    CONCLAVE_LAUNCHER_CONCLAVESTOPREASON_EXIT);
+			assert3u(ret, ==, KERN_SUCCESS);
+		} else {
+			lck_mtx_unlock(&resource->r_mutex);
+			break;
+		}
 
 		lck_mtx_lock(&resource->r_mutex);
-		conclave->c_state = CONCLAVE_S_STOPPED;
-	} else if (conclave->c_state == CONCLAVE_S_LAUNCHING) {
-		conclave->c_state = CONCLAVE_S_LAUNCHED;
-	}
-	lck_mtx_unlock(&resource->r_mutex);
+		assert3u(conclave->c_active_downcall, ==, 1);
+		assert3p(conclave->c_downcall_thread, ==, current_thread());
+		conclave->c_active_downcall = false;
+		conclave->c_downcall_thread = THREAD_NULL;
+		if (stop_call) {
+			conclave->c_active_stopcall = false;
+		}
+		if (conclave->c_active_detach) {
+			wakeup_all_with_inheritor((event_t)&conclave->c_active_downcall, THREAD_AWAKENED);
+		}
 
+		/* Bail out if active stopcall is going on */
+		if (conclave->c_active_stopcall || conclave->c_state == CONCLAVE_S_STOPPED) {
+			lck_mtx_unlock(&resource->r_mutex);
+			break;
+		}
+
+		conclave->c_state = pending_state;
+	}
 	return KERN_SUCCESS;
 }
 
@@ -1424,54 +1098,117 @@ exclaves_conclave_get_domain(exclaves_resource_t *resource)
 }
 
 kern_return_t
-exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt)
+exclaves_conclave_stop(exclaves_resource_t *resource, bool gather_crash_bt __unused)
 {
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
 
 	conclave_resource_t *conclave = &resource->r_conclave;
 
-	uint32_t conclave_stop_reason = gather_crash_bt ?
-	    CONCLAVE_LAUNCHER_CONCLAVESTOPREASON_KILLED :
-	    CONCLAVE_LAUNCHER_CONCLAVESTOPREASON_EXIT;
-
 	lck_mtx_lock(&resource->r_mutex);
 
-	/* TBD Call stop on the conclave manager endpoint. */
-	if (conclave->c_state == CONCLAVE_S_LAUNCHING) {
-		/* If another thread is launching, just request a stop */
-		conclave->c_state = CONCLAVE_S_STOP_REQUESTED;
+	/* Bailout if active stopcall in progress */
+	if (conclave->c_active_stopcall || conclave->c_state == CONCLAVE_S_STOPPED) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_SUCCESS;
-	} else if (conclave->c_state == CONCLAVE_S_ATTACHED) {
+	}
+
+	/* Arm stop requested if downcall in progress */
+	if (conclave->c_active_downcall) {
+		conclave->c_request |= CONCLAVE_R_STOP_REQUESTED;
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	if (conclave->c_state == CONCLAVE_S_ATTACHED) {
 		/* Change the state to stopped if the conclave was never started */
 		conclave->c_state = CONCLAVE_S_STOPPED;
-		lck_mtx_unlock(&resource->r_mutex);
-		return KERN_SUCCESS;
-	} else if (conclave->c_state == CONCLAVE_S_STOPPING ||
-	    conclave->c_state == CONCLAVE_S_STOPPED) {
-		/* Upcall to stop the conclave might be in progress, bail out */
+
+		/* Suspend might be requested, clear it as well */
+		conclave->c_request = CONCLAVE_R_NONE;
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_SUCCESS;
 	}
 
-	if (conclave->c_state != CONCLAVE_S_LAUNCHED) {
-		lck_mtx_unlock(&resource->r_mutex);
-		return KERN_FAILURE;
-	}
+	conclave->c_request |= CONCLAVE_R_STOP_REQUESTED;
+	kern_return_t kr = exclaves_update_state_machine_locked(resource);
 
-	conclave->c_state = CONCLAVE_S_STOPPING;
-	lck_mtx_unlock(&resource->r_mutex);
+	return kr;
+}
 
-	__assert_only kern_return_t kr =
-	    exclaves_conclave_launcher_stop(conclave->c_control,
-	    conclave_stop_reason);
-	assert3u(kr, ==, KERN_SUCCESS);
+kern_return_t
+exclaves_conclave_suspend(exclaves_resource_t *resource)
+{
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
+
+	conclave_resource_t *conclave = &resource->r_conclave;
 
 	lck_mtx_lock(&resource->r_mutex);
-	conclave->c_state = CONCLAVE_S_STOPPED;
-	lck_mtx_unlock(&resource->r_mutex);
 
-	return KERN_SUCCESS;
+	/* Bailout if active stopcall in progress */
+	if (conclave->c_active_stopcall || conclave->c_state == CONCLAVE_S_STOPPED) {
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	/* Arm suspend requested if downcall in progress */
+	if (conclave->c_active_downcall) {
+		conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	if (conclave->c_state == CONCLAVE_S_ATTACHED) {
+		/* Conclave is not yet launched, just arm suspend requested and bailout */
+		conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	} else if (conclave->c_state == CONCLAVE_S_SUSPENDED) {
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+	kern_return_t kr = exclaves_update_state_machine_locked(resource);
+
+	return kr;
+}
+
+kern_return_t
+exclaves_conclave_resume(exclaves_resource_t *resource)
+{
+	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_CONCLAVEMANAGER);
+
+	conclave_resource_t *conclave = &resource->r_conclave;
+
+	lck_mtx_lock(&resource->r_mutex);
+
+	/* Bailout if active stopcall in progress */
+	if (conclave->c_active_stopcall || conclave->c_state == CONCLAVE_S_STOPPED) {
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	/* Arm suspend requested if downcall in progress */
+	if (conclave->c_active_downcall) {
+		conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	if (conclave->c_state == CONCLAVE_S_ATTACHED) {
+		/* Conclave is not yet launched, just arm suspend requested and bailout */
+		conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	} else if (conclave->c_state == CONCLAVE_S_RUNNING) {
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_SUCCESS;
+	}
+
+	conclave->c_request |= CONCLAVE_R_SUSPEND_REQUESTED;
+	kern_return_t kr = exclaves_update_state_machine_locked(resource);
+
+	return kr;
 }
 
 kern_return_t
@@ -1485,20 +1222,12 @@ exclaves_conclave_stop_upcall(exclaves_resource_t *resource)
 
 	lck_mtx_lock(&resource->r_mutex);
 
-	if (conclave->c_state == CONCLAVE_S_STOPPING || conclave->c_state == CONCLAVE_S_STOPPED) {
-		/* Upcall to stop the conclave might be in progress, bail out */
+	if (conclave->c_state == CONCLAVE_S_STOPPED || conclave->c_active_stopcall) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_SUCCESS;
 	}
 
-	if (conclave->c_state != CONCLAVE_S_LAUNCHED && conclave->c_state != CONCLAVE_S_LAUNCHING
-	    && conclave->c_state != CONCLAVE_S_ATTACHED
-	    && conclave->c_state != CONCLAVE_S_STOP_REQUESTED) {
-		lck_mtx_unlock(&resource->r_mutex);
-		return KERN_FAILURE;
-	}
-
-	conclave->c_state = CONCLAVE_S_STOPPING;
+	conclave->c_active_stopcall = true;
 	thread->th_exclaves_state |= TH_EXCLAVES_STOP_UPCALL_PENDING;
 	lck_mtx_unlock(&resource->r_mutex);
 
@@ -1528,8 +1257,9 @@ exclaves_conclave_stop_upcall_complete(exclaves_resource_t *resource, task_t tas
 
 	lck_mtx_lock(&resource->r_mutex);
 
-	assert3u(conclave->c_state, ==, CONCLAVE_S_STOPPING);
+	conclave->c_active_stopcall = false;
 	conclave->c_state = CONCLAVE_S_STOPPED;
+	conclave->c_request = CONCLAVE_R_NONE;
 
 	lck_mtx_unlock(&resource->r_mutex);
 	return KERN_SUCCESS;
@@ -1556,7 +1286,6 @@ exclaves_conclave_has_service(exclaves_resource_t *resource, uint64_t id)
 
 	return bitmap_test(conclave->c_service_bitmap, (uint32_t)id);
 }
-
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Sensors
@@ -1854,63 +1583,6 @@ exclaves_service_lookup(const char *domain, const char *name)
 /* -------------------------------------------------------------------------- */
 #pragma mark Shared Memory
 
-int
-exclaves_resource_shared_memory_io(exclaves_resource_t *resource, off_t offset,
-    size_t len, int (^cb)(char *, size_t))
-{
-	assert(resource->r_type == XNUPROXY_RESOURCETYPE_SHAREDMEMORY ||
-	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY);
-	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
-
-	shared_memory_resource_t *sm = &resource->r_shared_memory;
-	assert3u(sm->sm_nranges, >, 0);
-	assert3u(sm->sm_size, !=, 0);
-	assert3u(offset + len, <=, sm->sm_size);
-
-	for (int i = 0; i < sm->sm_nranges; i++) {
-		/* Skip forward to the starting range. */
-		if (offset >= sm->sm_range[i].npages * PAGE_SIZE) {
-			offset -= sm->sm_range[i].npages * PAGE_SIZE;
-			continue;
-		}
-
-		size_t size = MIN((sm->sm_range[i].npages * PAGE_SIZE) - offset, len);
-		int ret = cb(sm->sm_range[i].address + offset, size);
-		if (ret != 0) {
-			return ret;
-		}
-
-		offset = 0;
-		len -= size;
-
-		if (len == 0) {
-			break;
-		}
-	}
-	assert3u(len, ==, 0);
-
-	return 0;
-}
-
-static kern_return_t
-exclaves_resource_shared_memory_io_copyin(exclaves_resource_t *resource,
-    user_addr_t _src, off_t offset, size_t len)
-{
-	assert3u(resource->r_shared_memory.sm_perm & EXCLAVES_BUFFER_PERM_WRITE,
-	    !=, 0);
-
-	__block user_addr_t src = _src;
-	return exclaves_resource_shared_memory_io(resource, offset, len,
-	           ^(char *buffer, size_t size) {
-		if (copyin(src, buffer, size) != 0) {
-		        return KERN_FAILURE;
-		}
-
-		src += size;
-		return KERN_SUCCESS;
-	});
-}
-
 kern_return_t
 exclaves_resource_shared_memory_copyin(exclaves_resource_t *resource,
     user_addr_t buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
@@ -1920,14 +1592,13 @@ exclaves_resource_shared_memory_copyin(exclaves_resource_t *resource,
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_SHAREDMEMORY);
 
 	mach_vm_size_t umax = 0;
-	kern_return_t kr = KERN_FAILURE;
 
 	if (buffer == USER_ADDR_NULL || size1 == 0) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	shared_memory_resource_t *sm = &resource->r_shared_memory;
-	assert3u(sm->sm_nranges, >, 0);
+	assert3p(sm->sm_addr, !=, NULL);
 	assert3u(sm->sm_size, !=, 0);
 
 	if (os_add_overflow(offset1, size1, &umax) || umax > sm->sm_size) {
@@ -1942,37 +1613,15 @@ exclaves_resource_shared_memory_copyin(exclaves_resource_t *resource,
 		return KERN_PROTECTION_FAILURE;
 	}
 
-	kr = exclaves_resource_shared_memory_io_copyin(resource, buffer, offset1, size1);
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (copyin(buffer, sm->sm_addr + offset1, size1) != 0) {
+		return KERN_FAILURE;
 	}
 
-	kr = exclaves_resource_shared_memory_io_copyin(resource, buffer + size1, offset2,
-	    size2);
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (copyin(buffer + size1, sm->sm_addr + offset2, size2) != 0) {
+		return KERN_FAILURE;
 	}
 
 	return KERN_SUCCESS;
-}
-
-static kern_return_t
-exclaves_resource_shared_memory_io_copyout(exclaves_resource_t *resource,
-    user_addr_t _dst, off_t offset, size_t len)
-{
-	assert3u(resource->r_shared_memory.sm_perm & EXCLAVES_BUFFER_PERM_READ,
-	    !=, 0);
-
-	__block user_addr_t dst = _dst;
-	return exclaves_resource_shared_memory_io(resource, offset, len,
-	           ^(char *buffer, size_t size) {
-		if (copyout(buffer, dst, size) != 0) {
-		        return KERN_FAILURE;
-		}
-
-		dst += size;
-		return KERN_SUCCESS;
-	});
 }
 
 kern_return_t
@@ -1985,14 +1634,13 @@ exclaves_resource_shared_memory_copyout(exclaves_resource_t *resource,
 	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY);
 
 	mach_vm_size_t umax = 0;
-	kern_return_t kr = KERN_FAILURE;
 
 	if (buffer == USER_ADDR_NULL || size1 == 0) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	shared_memory_resource_t *sm = &resource->r_shared_memory;
-	assert3u(sm->sm_nranges, >, 0);
+	assert3p(sm->sm_addr, !=, NULL);
 	assert3u(sm->sm_size, !=, 0);
 
 	if (os_add_overflow(offset1, size1, &umax) || umax > sm->sm_size) {
@@ -2007,15 +1655,12 @@ exclaves_resource_shared_memory_copyout(exclaves_resource_t *resource,
 		return KERN_PROTECTION_FAILURE;
 	}
 
-	kr = exclaves_resource_shared_memory_io_copyout(resource, buffer, offset1, size1);
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (copyout(sm->sm_addr + offset1, buffer, size1) != 0) {
+		return KERN_FAILURE;
 	}
 
-	kr = exclaves_resource_shared_memory_io_copyout(resource, buffer + size1,
-	    offset2, size2);
-	if (kr != KERN_SUCCESS) {
-		return kr;
+	if (copyout(sm->sm_addr + offset2, buffer + size1, size2) != 0) {
+		return KERN_FAILURE;
 	}
 
 	return KERN_SUCCESS;
@@ -2043,7 +1688,14 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 {
 	assert(resource->r_type == XNUPROXY_RESOURCETYPE_SHAREDMEMORY ||
 	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY);
-	assert3u(perm & ~(EXCLAVES_BUFFER_PERM_READ | EXCLAVES_BUFFER_PERM_WRITE), ==, 0);
+
+	/*
+	 * It is expected that shared memory is either write-only or read-only.
+	 * This is enforced through the userspace APIs (inbound or outbound buffers
+	 * respectively).
+	 */
+	assert(perm == EXCLAVES_BUFFER_PERM_READ ||
+	    perm == EXCLAVES_BUFFER_PERM_WRITE);
 
 	kern_return_t kr = KERN_FAILURE;
 
@@ -2052,6 +1704,7 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 	if (size == 0 || mach_vm_round_page_overflow(size, &rounded_size)) {
 		return KERN_INVALID_ARGUMENT;
 	}
+	const size_t page_count = rounded_size / PAGE_SIZE;
 
 	lck_mtx_lock(&resource->r_mutex);
 
@@ -2093,7 +1746,7 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 	    SHAREDMEMORYBASE_PERMS_READWRITE : SHAREDMEMORYBASE_PERMS_READONLY;
 	sharedmemorybase_mapping_s mapping = 0;
 	kr = exclaves_shared_memory_setup(&sm->sm_client, sm_perm, 0,
-	    rounded_size / PAGE_SIZE, &mapping);
+	    page_count, &mapping);
 	if (kr != KERN_SUCCESS) {
 		lck_mtx_unlock(&resource->r_mutex);
 		return kr;
@@ -2105,52 +1758,40 @@ shared_memory_map(exclaves_resource_t *resource, size_t size,
 	 */
 	sm->sm_size = rounded_size;
 	sm->sm_perm = perm;
-	sm->sm_nranges = 0;
+	sm->sm_addr = NULL;
 
 	/*
 	 * The shared buffer is now accessible by xnu. Discover the layout of
-	 * the memory.
+	 * the memory and map it into the kernel.
 	 */
-	__block bool success = true;
+	uint32_t *pages = kalloc_type(uint32_t, page_count,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	__block uint32_t idx = 0;
 	/* BEGIN IGNORE CODESTYLE */
 	kr = exclaves_shared_memory_iterate(&sm->sm_client, &mapping, 0,
-	    rounded_size / PAGE_SIZE, ^(uint64_t pa) {
-		char *vaddr = (char *)phystokv(pa);
-		assert3p(vaddr, !=, NULL);
+	    page_count, ^(uint64_t pa) {
+		assert3u(pa & PAGE_MASK, ==, 0);
+		assert3u(idx, <, page_count);
 
-		/*
-		 * If this virtual address is adjacent to the previous
-		 * one, just extend the current range.
-		 */
-		if (sm->sm_nranges > 0) {
-		        const size_t len = sm->sm_range[sm->sm_nranges - 1].npages * PAGE_SIZE;
-		        const char *addr = sm->sm_range[sm->sm_nranges - 1].address + len;
-
-		        if (vaddr == addr) {
-		                sm->sm_range[sm->sm_nranges - 1].npages++;
-		                return;
-			}
-
-		        if (sm->sm_nranges >= EXCLAVES_SHARED_BUFFER_MAX_RANGES) {
-				exclaves_debug_printf(show_errors,
-				    "exclaves: too many ranges, can't fit\n");
-				success = false;
-				return;
-			}
-		}
-
-		/*
-		 * Page is not virtually contiguous with the previous one -
-		 * stick it in a new range.
-		 */
-		sm->sm_range[sm->sm_nranges].npages = 1;
-		sm->sm_range[sm->sm_nranges].address = vaddr;
-		sm->sm_nranges++;
+		pages[idx++] = (uint32_t)atop(pa);
 	});
 	/* END IGNORE CODESTYLE */
 
+	if (kr != KERN_SUCCESS) {
+		kfree_type(uint32_t, page_count, pages);
+		exclaves_shared_memory_teardown(&sm->sm_client, &mapping);
+		lck_mtx_unlock(&resource->r_mutex);
+		return KERN_FAILURE;
+	}
 
-	if (kr != KERN_SUCCESS || !success) {
+	assert3u(idx, ==, page_count);
+
+	const vm_prot_t prot = (perm & EXCLAVES_BUFFER_PERM_WRITE) != 0 ?
+	    VM_PROT_READ | VM_PROT_WRITE :
+	    VM_PROT_READ;
+	kr = exclaves_memory_map((uint32_t)page_count, pages, prot, &sm->sm_addr);
+	kfree_type(uint32_t, page_count, pages);
+	if (kr != KERN_SUCCESS) {
 		exclaves_shared_memory_teardown(&sm->sm_client, &mapping);
 		lck_mtx_unlock(&resource->r_mutex);
 		return KERN_FAILURE;
@@ -2199,6 +1840,14 @@ exclaves_resource_shared_memory_unmap(exclaves_resource_t *resource)
 
 	shared_memory_resource_t *sm = &resource->r_shared_memory;
 
+	if (sm->sm_addr != NULL) {
+		__assert_only kern_return_t kr =
+		    exclaves_memory_unmap(sm->sm_addr, sm->sm_size);
+		assert3u(kr, ==, KERN_SUCCESS);
+		sm->sm_addr = NULL;
+		sm->sm_size = 0;
+	}
+
 	kern_return_t kr = exclaves_shared_memory_teardown(&sm->sm_client,
 	    &sm->sm_mapping);
 	if (kr != KERN_SUCCESS) {
@@ -2213,6 +1862,24 @@ exclaves_resource_shared_memory_unmap(exclaves_resource_t *resource)
 	resource->r_active = false;
 }
 
+char *
+exclaves_resource_shared_memory_get_buffer(exclaves_resource_t *resource,
+    size_t *buffer_len)
+{
+	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
+	assert(resource->r_type == XNUPROXY_RESOURCETYPE_SHAREDMEMORY ||
+	    resource->r_type == XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY);
+
+	shared_memory_resource_t *sm = &resource->r_shared_memory;
+	assert3p(sm->sm_addr, !=, NULL);
+	assert3u(sm->sm_size, !=, 0);
+
+	if (buffer_len != NULL) {
+		*buffer_len = sm->sm_size;
+	}
+
+	return sm->sm_addr;
+}
 
 /* -------------------------------------------------------------------------- */
 #pragma mark Arbitrated Audio Memory
@@ -2250,28 +1917,10 @@ exclaves_resource_audio_memory_unmap(exclaves_resource_t *resource)
 	exclaves_resource_shared_memory_unmap(resource);
 }
 
-static kern_return_t
-copyout_zero(user_addr_t buffer, mach_vm_size_t size, mach_vm_size_t offset)
-{
-	static const char zero[PAGE_SIZE] = {0};
-
-	while (size > 0) {
-		size_t copy_size = MIN(size, sizeof(zero));
-		if (copyout(zero, buffer + offset, copy_size) != 0) {
-			return KERN_FAILURE;
-		}
-
-		offset += copy_size;
-		size -= copy_size;
-	}
-
-	return KERN_SUCCESS;
-}
-
 kern_return_t
 exclaves_resource_audio_memory_copyout(exclaves_resource_t *resource,
     user_addr_t buffer, mach_vm_size_t size1, mach_vm_size_t offset1,
-    mach_vm_size_t size2, mach_vm_size_t offset2)
+    mach_vm_size_t size2, mach_vm_size_t offset2, user_addr_t ustatus)
 {
 	assert3u(os_atomic_load(&resource->r_usecnt, relaxed), >, 0);
 	assert3u(resource->r_type, ==, XNUPROXY_RESOURCETYPE_ARBITRATEDAUDIOMEMORY);
@@ -2285,28 +1934,15 @@ exclaves_resource_audio_memory_copyout(exclaves_resource_t *resource,
 		return kr;
 	}
 
-	if (status == EXCLAVES_SENSOR_STATUS_ALLOWED) {
-		kr = exclaves_resource_shared_memory_copyout(resource, buffer,
-		    size1, offset1, size2, offset2);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-	} else {
-		/*
-		 * This should be removed once the audio arbiter is properly
-		 * switching buffers and instead we should always rely on the
-		 * audio arbiter to do its job and make the data available or
-		 * not.
-		 */
-		kr = copyout_zero(buffer, size1, offset1);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
+	kr = exclaves_resource_shared_memory_copyout(resource, buffer,
+	    size1, offset1, size2, offset2);
+	if (kr != KERN_SUCCESS) {
+		return kr;
+	}
 
-		kr = copyout_zero(buffer, size2, offset2);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
+	if (ustatus != 0 &&
+	    copyout(&status, ustatus, sizeof(status)) != 0) {
+		return KERN_FAILURE;
 	}
 
 	return KERN_SUCCESS;

@@ -100,6 +100,9 @@ def PrettyPrintDictionary(d):
 
 # Macro: memstats
 
+kPolicyClearTheDecks = 0x01
+kPolicyBallastDrain = 0x02
+
 @lldb_command('memstats', 'J')
 def Memstats(cmd_args=None, cmd_options={}):
     """ Prints out a summary of various memory statistics. In particular vm_page_wire_count should be greater than 2K or you are under memory pressure.
@@ -135,12 +138,21 @@ def Memstats(cmd_args=None, cmd_options={}):
             memstats["compression_ratio"] = memstats["compressed_count"] / memstats["compressor_count"]
         else:
             memstats["compression_ratio"] = 0
+    memstats["memorystatus_level"] = int(kern.globals.memorystatus_level)
+    memstats["memorystatus_available_pages"] = int(kern.globals.memorystatus_available_pages)
+    memstats["memorystatus_available_pages_critical"] = int(kern.globals.memstat_critical_threshold)
+    memstats["memorystatus_available_pages_idle"] = int(kern.globals.memstat_idle_threshold)
+    memstats["memorystatus_available_pages_soft"] = int(kern.globals.memstat_soft_threshold)
+    if kern.globals.memstat_policy_config & kPolicyClearTheDecks:
+        memstats["memorystatus_clear_the_decks_offset"] = int(kern.globals.memstat_ctd_offset)
+    else:
+        memstats["memorystatus_clear_the_decks_offset"] = 0
+    if kern.globals.memstat_policy_config & kPolicyBallastDrain:
+        memstats["memorystatus_ballast_offset"] = int(kern.globals.memstat_ballast_offset)
+    else:
+        memstats["memorystatus_ballast_offset"] = 0
+
     try:
-        memstats["memorystatus_level"] = int(kern.globals.memorystatus_level)
-        memstats["memorystatus_available_pages"] = int(kern.globals.memorystatus_available_pages)
-        memstats["memorystatus_available_pages_critical"] = int(kern.globals.memorystatus_available_pages_critical_base)
-        memstats["memorystatus_available_pages_idle"] = int(kern.globals.memorystatus_available_pages_critical_idle)
-        memstats["memorystatus_available_pages_hwm"] = int(kern.globals.memorystatus_available_pages_pressure)
         memstats["inuse_ptepages_count"] = int(kern.globals.inuse_ptepages_count)
     except AttributeError:
         pass
@@ -3553,6 +3565,7 @@ FixedTags = {
     32: "VM_KERN_MEMORY_TRIAGE",
     33: "VM_KERN_MEMORY_RECOUNT",
     34: "VM_KERN_MEMORY_TAG",
+    35: "VM_KERN_MEMORY_EXCLAVES",
     255:"VM_KERN_MEMORY_ANY",
 }
 

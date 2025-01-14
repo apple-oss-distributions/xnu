@@ -4029,7 +4029,7 @@ static int
 key_migratesav(struct secasvar *sav,
     struct secashead *newsah)
 {
-	if (sav == NULL || newsah == NULL || sav->state != SADB_SASTATE_MATURE) {
+	if (sav == NULL || newsah == NULL || (sav->state != SADB_SASTATE_MATURE && sav->state != SADB_SASTATE_DYING)) {
 		return EINVAL;
 	}
 
@@ -4039,7 +4039,7 @@ key_migratesav(struct secasvar *sav,
 	}
 
 	sav->sah = newsah;
-	LIST_INSERT_TAIL(&newsah->savtree[SADB_SASTATE_MATURE], sav, secasvar, chain);
+	LIST_INSERT_TAIL(&newsah->savtree[sav->state], sav, secasvar, chain);
 	return 0;
 }
 
@@ -7107,7 +7107,7 @@ key_migrate(struct socket *so,
 		}
 
 		sav = key_getsavbyspi(sah, sa0->sadb_sa_spi);
-		if (sav && sav->state == SADB_SASTATE_MATURE) {
+		if (sav && (sav->state == SADB_SASTATE_MATURE || sav->state == SADB_SASTATE_DYING)) {
 			break;
 		}
 	}

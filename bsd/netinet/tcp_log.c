@@ -392,6 +392,8 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	inp = tp->t_inpcb;
 	so = inp->inp_socket;
 
+	inp->inp_flags2 |= INP2_LOGGING_ENABLED;
+
 	local_port = inp->inp_lport;
 	foreign_port = inp->inp_fport;
 
@@ -473,6 +475,8 @@ tcp_log_listen(struct tcpcb *tp, int error)
 	}
 	inp = tp->t_inpcb;
 	so = inp->inp_socket;
+
+	inp->inp_flags2 |= INP2_LOGGING_ENABLED;
 
 	local_port = inp->inp_lport;
 	foreign_port = inp->inp_fport;
@@ -587,6 +591,7 @@ tcp_log_connection_summary(struct tcpcb *tp)
 		return;
 	}
 	inp->inp_flags2 |= INP2_LOGGED_SUMMARY;
+	inp->inp_flags2 &= ~INP2_LOGGING_ENABLED;
 
 	/*
 	 * t_connect_time is the time when the connection started on

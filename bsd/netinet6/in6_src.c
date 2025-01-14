@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -179,13 +179,11 @@ static struct in6_addrpolicy *match_addrsel_policy(struct sockaddr_in6 *);
 void addrsel_policy_init(void);
 
 #define SASEL_DO_DBG(inp) \
-	(ip6_select_srcaddr_debug && (inp) != NULL && \
-	    (inp)->inp_socket != NULL && \
-	    ((inp)->inp_socket->so_options & SO_DEBUG))
+	(ip6_select_srcaddr_debug)
 
 #define SASEL_LOG(fmt, ...) \
 do { \
-	if (srcsel_debug) \
+	if (ip6_select_srcaddr_debug) \
 	        os_log(OS_LOG_DEFAULT, "%s:%d " fmt,\
 	            __FUNCTION__, __LINE__, ##__VA_ARGS__); \
 } while (0); \
@@ -218,7 +216,7 @@ do { \
 
 
 struct ifaddr *
-in6_selectsrc_core_ifa(struct sockaddr_in6 *addr, struct ifnet *ifp, int srcsel_debug)
+in6_selectsrc_core_ifa(struct sockaddr_in6 *addr, struct ifnet *ifp)
 {
 	int err = 0;
 	struct ifnet *__single src_ifp = NULL;
@@ -307,8 +305,7 @@ in6_selectsrc_core(struct sockaddr_in6 *dstsock, uint32_t hint_mask,
 
 		tmp = &in6addr_any;
 		(void) inet_ntop(AF_INET6, tmp, s_src, sizeof(s_src));
-		os_log(OS_LOG_DEFAULT, "%s out src %s dst %s ifp %s",
-		    __func__, s_src, s_dst, ifp->if_xname);
+		SASEL_LOG("in src %s dst %s ifp %s\n", s_src, s_dst, ifp->if_xname);
 	}
 
 	*errorp = in6_setscope(&dst, ifp, &odstzone);
@@ -373,7 +370,7 @@ addrloop:
 		if (ip6_select_src_strong_end &&
 		    ifp1 != ifp) {
 			SASEL_LOG("NEXT ia %s ifp1 %s address is not on outgoing "
-			    "interface \n", s_src, ifp1->if_xname);
+			    "interface\n", s_src, ifp1->if_xname);
 			goto next;
 		}
 
@@ -717,8 +714,8 @@ done:
 		tmp = (src_storage != NULL) ? src_storage : &in6addr_any;
 		(void) inet_ntop(AF_INET6, tmp, s_src, sizeof(s_src));
 
-		os_log(OS_LOG_DEFAULT, "%s out src %s dst %s dst_scope %d best_scope %d",
-		    __func__, s_src, s_dst, dst_scope, best_scope);
+		SASEL_LOG("out src %s dst %s dst_scope %d best_scope %d\n",
+		    s_src, s_dst, dst_scope, best_scope);
 	}
 
 	if (dr != NULL) {
@@ -1011,9 +1008,9 @@ selectroute(struct sockaddr_in6 *srcsock, struct sockaddr_in6 *dstsock,
 	}
 
 	if (ip6_select_srcif_debug) {
-		os_log(OS_LOG_DEFAULT, "%s src %s dst %s ifscope %d "
-		    "is_direct %d select_srcif %d",
-		    __func__, s_src, s_dst, ifscope, is_direct, select_srcif);
+		os_log(OS_LOG_DEFAULT, "%s:%d src %s dst %s ifscope %d "
+		    "is_direct %d select_srcif %d\n",
+		    __func__, __LINE__, s_src, s_dst, ifscope, is_direct, select_srcif);
 	}
 
 	/* If the caller specified the outgoing interface explicitly, use it */
@@ -1137,15 +1134,15 @@ getsrcif:
 
 		if (ip6_select_srcif_debug && ifa != NULL) {
 			if (ro->ro_rt != NULL) {
-				os_log(OS_LOG_DEFAULT, "%s %s->%s ifscope %d->%d ifa_if %s "
-				    "ro_if %s",
-				    __func__,
+				os_log(OS_LOG_DEFAULT, "%s:%d %s->%s ifscope %d->%d ifa_if %s "
+				    "ro_if %s\n",
+				    __func__, __LINE__,
 				    s_src, s_dst, ifscope,
 				    scope, if_name(ifa->ifa_ifp),
 				    if_name(rt_ifp));
 			} else {
-				os_log(OS_LOG_DEFAULT, "%s %s->%s ifscope %d->%d ifa_if %s",
-				    __func__,
+				os_log(OS_LOG_DEFAULT, "%s:%d %s->%s ifscope %d->%d ifa_if %s\n",
+				    __func__, __LINE__,
 				    s_src, s_dst, ifscope, scope,
 				    if_name(ifa->ifa_ifp));
 			}
@@ -1175,12 +1172,12 @@ getsrcif:
 		ifa = (struct ifaddr *)ifa_foraddr6(&srcsock->sin6_addr);
 
 		if (ip6_select_srcif_debug && ifa != NULL) {
-			os_log(OS_LOG_DEFAULT, "%s %s->%s ifscope %d ifa_if %s",
-			    __func__,
+			os_log(OS_LOG_DEFAULT, "%s:%d %s->%s ifscope %d ifa_if %s\n",
+			    __func__, __LINE__,
 			    s_src, s_dst, ifscope, if_name(ifa->ifa_ifp));
 		} else if (ip6_select_srcif_debug) {
-			os_log(OS_LOG_DEFAULT, "%s %s->%s ifscope %d ifa_if NULL",
-			    __func__,
+			os_log(OS_LOG_DEFAULT, "%s:%d %s->%s ifscope %d ifa_if NULL\n",
+			    __func__, __LINE__,
 			    s_src, s_dst, ifscope);
 		}
 	}
@@ -1357,7 +1354,7 @@ validateroute:
 						os_log(OS_LOG_DEFAULT,
 						    "%s->%s ifscope %d "
 						    "ro_if %s != ifa_if %s "
-						    "(cached route cleared)",
+						    "(cached route cleared)\n",
 						    s_src, s_dst,
 						    ifscope, if_name(ifp),
 						    if_name(ifa->ifa_ifp));
@@ -1365,7 +1362,7 @@ validateroute:
 						os_log(OS_LOG_DEFAULT,
 						    "%s->%s ifscope %d "
 						    "ro_if %s (no ifa_if "
-						    "found)", s_src, s_dst,
+						    "found)\n", s_src, s_dst,
 						    ifscope, if_name(ifp));
 					}
 				}
@@ -1498,8 +1495,8 @@ done:
 	}
 	if (ip6_select_srcif_debug) {
 		os_log(OS_LOG_DEFAULT,
-		    "%s %s->%s ifscope %d ifa_if %s ro_if %s (error=%d)",
-		    __func__,
+		    "%s:%d %s->%s ifscope %d ifa_if %s ro_if %s (error=%d)\n",
+		    __func__, __LINE__,
 		    s_src, s_dst, ifscope,
 		    (ifa != NULL) ? if_name(ifa->ifa_ifp) : "NONE",
 		    (ifp != NULL) ? if_name(ifp) : "NONE", error);

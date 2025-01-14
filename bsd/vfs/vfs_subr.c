@@ -6477,7 +6477,20 @@ vnode_usecount(vnode_t vp)
 int
 vnode_iocount(vnode_t vp)
 {
-	return vp->v_iocount;
+	if (!(vp->v_ext_flag & VE_LINKCHANGE)) {
+		return vp->v_iocount;
+	} else {
+		int iocount = 0;
+		vnode_lock_spin(vp);
+		if (!(vp->v_ext_flag & VE_LINKCHANGE)) {
+			iocount = vp->v_iocount;
+		} else {
+			/* the "link lock" takes its own iocount */
+			iocount = vp->v_iocount - 1;
+		}
+		vnode_unlock(vp);
+		return iocount;
+	}
 }
 
 int
@@ -6987,7 +7000,7 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 	cnp = param->vnfs_cnp;
 
 	vp->v_op = param->vnfs_vops;
-	vp->v_type = (uint16_t)param->vnfs_vtype;
+	vp->v_type = (uint8_t)param->vnfs_vtype;
 	vp->v_data = param->vnfs_fsnode;
 
 	if (param->vnfs_markroot) {
@@ -7085,7 +7098,7 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 			vp->v_lflag |= VL_OPSCHANGE;
 			vclean(vp, 0);
 			vp->v_op = param->vnfs_vops;
-			vp->v_type = (uint16_t)param->vnfs_vtype;
+			vp->v_type = (uint8_t)param->vnfs_vtype;
 			vp->v_data = param->vnfs_fsnode;
 			vp->v_lflag = VL_OPSCHANGE;
 			vp->v_mount = NULL;
@@ -7363,6 +7376,47 @@ vnode_removefsref(vnode_t vp)
 	return 0;
 }
 
+void
+vnode_link_lock(vnode_t vp)
+{
+	vnode_lock_spin(vp);
+	while (vp->v_ext_flag & VE_LINKCHANGE) {
+		vp->v_ext_flag |= VE_LINKCHANGEWAIT;
+		msleep(&vp->v_ext_flag, &vp->v_lock, PVFS | PSPIN,
+		    "vnode_link_lock_wait", 0);
+	}
+	if (vp->v_iocount == 0) {
+		panic("%s called without an iocount on the vnode", __FUNCTION__);
+	}
+	vnode_get_locked(vp);
+	vp->v_ext_flag |= VE_LINKCHANGE;
+	vnode_unlock(vp);
+}
+
+void
+vnode_link_unlock(vnode_t vp)
+{
+	bool do_wakeup = false;
+	bool do_vnode_put = false;
+
+	vnode_lock_spin(vp);
+	if (vp->v_ext_flag & VE_LINKCHANGEWAIT) {
+		do_wakeup = true;
+	}
+	vp->v_ext_flag &= ~(VE_LINKCHANGE | VE_LINKCHANGEWAIT);
+	if ((vp->v_usecount > 0) || (vp->v_iocount > 1)) {
+		vnode_put_locked(vp);
+	} else {
+		do_vnode_put = true;
+	}
+	vnode_unlock(vp);
+	if (do_wakeup) {
+		wakeup(&vp->v_ext_flag);
+	}
+	if (do_vnode_put) {
+		vnode_put(vp);
+	}
+}
 
 int
 vfs_iterate(int flags, int (*callout)(mount_t, void *), void *arg)
@@ -8131,6 +8185,49 @@ vn_attribute_cleanup(struct vnode_attr *vap, uint32_t defaulted_fields)
 	return;
 }
 
+#if CONFIG_APPLEDOUBLE
+
+#define NATIVE_XATTR(VP)  \
+	((VP)->v_mount ? (VP)->v_mount->mnt_kern_flag & MNTK_EXTENDED_ATTRS : 0)
+
+static int
+dot_underbar_check_paired_vnode(struct componentname *cnp, vnode_t vp,
+    vnode_t dvp, vfs_context_t ctx)
+{
+	int error = 0;
+	bool dvp_needs_put = false;
+
+	if (!dvp) {
+		if ((dvp = vnode_getparent(vp)) == NULLVP) {
+			return 0;
+		}
+		dvp_needs_put = true;
+	}
+
+	vnode_t dupairedvp = NULLVP;
+	char lastchar = cnp->cn_nameptr[cnp->cn_namelen];
+
+	cnp->cn_nameptr[cnp->cn_namelen] = '\0';
+	error = vnode_lookupat(cnp->cn_nameptr + (sizeof("._") - 1), 0,
+	    &dupairedvp, ctx, dvp);
+	cnp->cn_nameptr[cnp->cn_namelen] = lastchar;
+	if (dvp_needs_put) {
+		vnode_put(dvp);
+		dvp = NULLVP;
+	}
+	if (!error && dupairedvp) {
+		error = mac_vnode_check_deleteextattr(ctx, dupairedvp,
+		    "com.apple.quarantine");
+		vnode_put(dupairedvp);
+		dupairedvp = NULLVP;
+	} else {
+		error = 0;
+	}
+
+	return error;
+}
+#endif /* CONFIG_APPLEDOUBLE */
+
 int
 vn_authorize_unlink(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_context_t ctx, __unused void *reserved)
 {
@@ -8152,6 +8249,13 @@ vn_authorize_unlink(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_cont
 #if CONFIG_MACF
 	if (!error) {
 		error = mac_vnode_check_unlink(ctx, dvp, vp, cnp);
+#if CONFIG_APPLEDOUBLE
+		if (!error && !(NATIVE_XATTR(dvp)) &&
+		    (cnp->cn_namelen > (sizeof("._a") - 1)) &&
+		    cnp->cn_nameptr[0] == '.' && cnp->cn_nameptr[1] == '_') {
+			error = dot_underbar_check_paired_vnode(cnp, vp, dvp, ctx);
+		}
+#endif /* CONFIG_APPLEDOUBLE */
 	}
 #endif /* MAC */
 	if (!error) {
@@ -8223,6 +8327,16 @@ vn_authorize_open_existing(vnode_t vp, struct componentname *cnp, int fmode, vfs
 			return error;
 		}
 	}
+#if CONFIG_APPLEDOUBLE
+	if (fmode & (FWRITE | O_TRUNC) && !(NATIVE_XATTR(vp)) &&
+	    (cnp->cn_namelen > (sizeof("._a") - 1)) &&
+	    cnp->cn_nameptr[0] == '.' && cnp->cn_nameptr[1] == '_') {
+		error = dot_underbar_check_paired_vnode(cnp, vp, NULLVP, ctx);
+		if (error) {
+			return error;
+		}
+	}
+#endif /* CONFIG_APPLEDOUBLE */
 #endif
 
 	/* compute action to be authorized */
@@ -8359,6 +8473,19 @@ vn_authorize_renamex_with_paths(struct vnode *fdvp, struct vnode *fvp, struct co
 	} else {
 		error = mac_vnode_check_rename(ctx, fdvp, fvp, fcnp, tdvp, tvp, tcnp);
 	}
+#if CONFIG_APPLEDOUBLE
+	if (!error && !(NATIVE_XATTR(fdvp)) &&
+	    fcnp->cn_namelen > (sizeof("._a") - 1) &&
+	    fcnp->cn_nameptr[0] == '.' && fcnp->cn_nameptr[1] == '_') {
+		error = dot_underbar_check_paired_vnode(fcnp, fvp, fdvp, ctx);
+	}
+	/* Currently no Filesystem that does not support native xattrs supports rename swap */
+	if (!error && swap && !(NATIVE_XATTR(tdvp)) &&
+	    (tcnp->cn_namelen > (sizeof("._a") - 1)) &&
+	    (tcnp->cn_nameptr[0] == '.') && (tcnp->cn_nameptr[1] == '_')) {
+		error = dot_underbar_check_paired_vnode(tcnp, tvp, tdvp, ctx);
+	}
+#endif /* CONFIG_APPLEDOUBLE */
 	if (error) {
 		goto out;
 	}
@@ -11163,6 +11290,20 @@ vfs_setfskit(mount_t mp)
 	mount_lock_spin(mp);
 	mp->mnt_kern_flag |= MNTK_FSKIT;
 	mount_unlock(mp);
+}
+
+uint32_t
+vfs_getextflags(mount_t mp)
+{
+	uint32_t flags_ext = 0;
+
+	if (mp->mnt_kern_flag & MNTK_SYSTEMDATA) {
+		flags_ext |= MNT_EXT_ROOT_DATA_VOL;
+	}
+	if (mp->mnt_kern_flag & MNTK_FSKIT) {
+		flags_ext |= MNT_EXT_FSKIT;
+	}
+	return flags_ext;
 }
 
 char *

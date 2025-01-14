@@ -1299,6 +1299,9 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 				if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
 					hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
 				}
+				if (outgoing != 0) {
+					hdr->pth_comp_gencnt = m->m_pkthdr.comp_gencnt;
+				}
 
 				pktap_fill_proc_info(hdr, proto, m, pre, outgoing, ifp);
 
@@ -1446,6 +1449,7 @@ pktap_bpf_tap_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
 	if (kern_packet_get_wake_flag(pkt)) {
 		hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
 	}
+	kern_packet_get_compression_generation_count(pkt, &hdr->pth_comp_gencnt);
 	hdr->pth_trace_tag = kern_packet_get_trace_tag(pkt);
 	hdr->pth_protocol_family = proto;
 	hdr->pth_svc = so_svc2tc((mbuf_svc_class_t)

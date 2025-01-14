@@ -127,6 +127,10 @@ static int              lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *nd
 
 extern lck_rw_t rootvnode_rw_lock;
 
+#define RESOLVE_NOFOLLOW_ANY  0x00000001
+#define RESOLVE_CHECKED       0x80000000
+static int              lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len);
+
 /*
  * Convert a pathname into a pointer to a locked inode.
  *
@@ -182,10 +186,13 @@ namei(struct nameidata *ndp)
 	int volfs_restarts = 0;
 #endif
 	size_t bytes_copied = 0;
+	size_t resolve_prefix_len = 0;
 	vnode_t rootdir_with_usecount = NULLVP;
 	vnode_t startdir_with_usecount = NULLVP;
 	vnode_t usedvp_dp = NULLVP;
 	int32_t old_count = 0;
+	uint32_t resolve_flags = 0;
+	int resolve_error = 0;
 	bool dp_has_iocount = false;
 
 #if DIAGNOSTIC
@@ -249,6 +256,16 @@ retry_copy:
 		    cnp->cn_pnlen, &bytes_copied);
 	}
 	if (error == ENAMETOOLONG && !(cnp->cn_flags & HASBUF)) {
+		if (bytes_copied == PATHBUFLEN) {
+			resolve_error = lookup_check_for_resolve_prefix(cnp->cn_pnbuf, PATHBUFLEN,
+			    PATHBUFLEN, &resolve_flags, &resolve_prefix_len);
+			/* errors from copyinstr take precedence over resolve_error */
+			if (!resolve_error && resolve_prefix_len) {
+				ndp->ni_dirp += resolve_prefix_len;
+				resolve_prefix_len = 0;
+			}
+		}
+
 		cnp->cn_pnbuf = zalloc(ZV_NAMEI);
 		cnp->cn_flags |= HASBUF;
 		cnp->cn_pnlen = MAXPATHLEN;
@@ -258,10 +275,36 @@ retry_copy:
 	}
 	if (error) {
 		goto error_out;
+	} else if (resolve_error) {
+		error = resolve_error;
+		goto error_out;
 	}
 	assert(bytes_copied <= MAXPATHLEN);
 	ndp->ni_pathlen = (u_int)bytes_copied;
 	bytes_copied = 0;
+
+	if (!(resolve_flags & RESOLVE_CHECKED)) {
+		assert(!(cnp->cn_flags & HASBUF) && (cnp->cn_pnlen == PATHBUFLEN));
+		error = lookup_check_for_resolve_prefix(cnp->cn_pnbuf, cnp->cn_pnlen, ndp->ni_pathlen,
+		    &resolve_flags, &resolve_prefix_len);
+		if (error) {
+			goto error_out;
+		}
+		if (resolve_prefix_len) {
+			/*
+			 * Since this is pointing to the static path buffer instead of a zalloc'ed memorry,
+			 * we're not going to attempt to free this, so it is perfectly fine to change the
+			 * value of cnp->cn_pnbuf.
+			 */
+			cnp->cn_pnbuf += resolve_prefix_len;
+			cnp->cn_pnlen -= resolve_prefix_len;
+			ndp->ni_pathlen -= resolve_prefix_len;
+			resolve_prefix_len = 0;
+		}
+	}
+
+	/* At this point we should have stripped off the prefix from the path that has to be looked up */
+	assert((resolve_flags & RESOLVE_CHECKED) && (resolve_prefix_len == 0));
 
 	/*
 	 * Since the name cache may contain positive entries of
@@ -336,7 +379,7 @@ retry_copy:
 		error = ENOENT;
 		goto error_out;
 	}
-	if (ndp->ni_flag & NAMEI_NOFOLLOW_ANY) {
+	if (ndp->ni_flag & NAMEI_NOFOLLOW_ANY || (resolve_flags & RESOLVE_NOFOLLOW_ANY)) {
 		ndp->ni_loopcnt = MAXSYMLINKS;
 	} else {
 		ndp->ni_loopcnt = 0;
@@ -608,6 +651,49 @@ namei_compound_available(vnode_t dp, struct nameidata *ndp)
 	}
 
 	return 0;
+}
+
+static int
+lookup_check_for_resolve_prefix(char *path, size_t pathbuflen, size_t len, uint32_t *resolve_flags, size_t *prefix_len)
+{
+	int error = 0;
+	*resolve_flags = (uint32_t)RESOLVE_CHECKED;
+	*prefix_len = 0;
+
+	if (len < (sizeof("/.nofollow/") - 1) || path[0] != '/' || path[1] != '.') {
+		return 0;
+	}
+
+	if ((strncmp(&path[2], "nofollow/", (sizeof("nofollow/") - 1)) == 0)) {
+		*resolve_flags |= RESOLVE_NOFOLLOW_ANY;
+		*prefix_len = sizeof("/.nofollow") - 1;
+	} else if ((len >= sizeof("/.resolve/1/") - 1) &&
+	    strncmp(&path[2], "resolve/", (sizeof("resolve/") - 1)) == 0) {
+		char * flag = path + (sizeof("/.resolve/") - 1);
+		char *next = flag;
+		char last_char = path[pathbuflen - 1];
+
+		/* no leading zeroes or non digits */
+		if ((flag[0] == '0' && flag[1] != '/') ||
+		    flag[0] < '0' || flag[0] > '9') {
+			error = EINVAL;
+			goto out;
+		}
+
+		path[pathbuflen - 1] = '\0';
+		unsigned long flag_val = strtoul(flag, &next, 10);
+		path[pathbuflen - 1] = last_char;
+		if (next[0] != '/' || (flag_val & ~(RESOLVE_NOFOLLOW_ANY))) {
+			error = EINVAL;
+			goto out;
+		}
+		assert(next >= flag);
+		*resolve_flags |= (uint32_t)flag_val;
+		*prefix_len = (size_t)(next - path);
+	}
+out:
+	assert(*prefix_len <= sizeof("/.resolve/2147483647"));
+	return error;
 }
 
 static int

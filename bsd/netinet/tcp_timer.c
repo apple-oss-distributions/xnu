@@ -1718,8 +1718,7 @@ fc_output:
 			tp->t_srtt = TCPTV_SRTTBASE;
 			tp->t_rttvar =
 			    ((TCPTV_RTOBASE - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
-			tp->t_rttmin = tp->t_flags & TF_LOCAL ? tcp_TCPTV_MIN :
-			    TCPTV_REXMTMIN;
+			tp->t_rttmin = TCPTV_REXMTMIN;
 			TCPT_RANGESET(tp->t_rxtcur, TCP_REXMTVAL(tp),
 			    tp->t_rttmin, TCPTV_REXMTMAX, TCP_ADD_REXMTSLOP(tp));
 			TCP_LOG_RTT_INFO(tp);
@@ -1743,6 +1742,8 @@ fc_output:
 
 			/* If timing a segment in this window, stop the timer */
 			tp->t_rtttime = 0;
+
+			tp->t_flagsext |= TF_TLP_IS_RETRANS;
 		} else {
 			int32_t snd_len;
 
@@ -1756,10 +1757,12 @@ fc_output:
 			    - (tp->snd_max - tp->snd_una);
 			if (snd_len > 0) {
 				tp->snd_nxt = tp->snd_max;
+				tp->t_flagsext &= ~TF_TLP_IS_RETRANS;
 			} else {
 				snd_len = min((tp->snd_max - tp->snd_una),
 				    tp->t_maxseg);
 				tp->snd_nxt = tp->snd_max - snd_len;
+				tp->t_flagsext |= TF_TLP_IS_RETRANS;
 			}
 		}
 
@@ -1901,12 +1904,6 @@ tcp_remove_timer(struct tcpcb *tp)
 	}
 	lck_mtx_lock(&listp->mtx);
 
-	/* Check if pcb is on timer list again after acquiring the lock */
-	if (!(TIMER_IS_ON_LIST(tp))) {
-		lck_mtx_unlock(&listp->mtx);
-		return;
-	}
-
 	if (listp->next_te != NULL && listp->next_te == &tp->tentry) {
 		listp->next_te = LIST_NEXT(&tp->tentry, le);
 	}
@@ -1918,6 +1915,7 @@ tcp_remove_timer(struct tcpcb *tp)
 
 	tp->tentry.le.le_next = NULL;
 	tp->tentry.le.le_prev = NULL;
+
 	lck_mtx_unlock(&listp->mtx);
 }
 
@@ -2201,20 +2199,14 @@ tcp_run_timerlist(void * arg1, void * arg2)
 		if (in_pcb_checkstate(tp->t_inpcb, WNT_ACQUIRE, 0)
 		    == WNT_STOPUSING) {
 			/*
-			 * Some how this pcb went into dead state while
-			 * on the timer list, just take it off the list.
-			 * Since the timer list entry pointers are
-			 * protected by the timer list lock, we can
-			 * do it here without the socket lock.
+			 * Need to take socket lock because it protects
+			 * TIMER_IS_ON_LIST
 			 */
-			if (TIMER_IS_ON_LIST(tp)) {
-				tp->t_flags &= ~(TF_TIMER_ONLIST);
-				LIST_REMOVE(&tp->tentry, le);
-				listp->entries--;
-
-				tp->tentry.le.le_next = NULL;
-				tp->tentry.le.le_prev = NULL;
-			}
+			lck_mtx_unlock(&listp->mtx);
+			socket_lock(tp->t_inpcb->inp_socket, 1);
+			tcp_remove_timer(tp);
+			socket_unlock(tp->t_inpcb->inp_socket, 1);
+			lck_mtx_lock(&listp->mtx);
 			continue;
 		}
 		active_count++;
