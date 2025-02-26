@@ -365,7 +365,10 @@ mach_vm_range_intersects(
 {
 	struct mach_vm_range r2;
 
+#if CONFIG_KERNEL_TAGGING
 	addr = VM_KERNEL_STRIP_UPTR(addr);
+#endif /* CONFIG_KERNEL_TAGGING */
+
 	r2.min_address = addr;
 	if (os_add_overflow(addr, size, &r2.max_address)) {
 		__mach_vm_range_overflow(addr, size);

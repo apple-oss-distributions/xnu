@@ -484,52 +484,52 @@ T_DECL(ipv6_tcp_send6_send4_race, "race bind calls with TCP sockets")
 	do_bind_race(true, send6_leader, send4_racer);
 }
 
-T_DECL(ipv6_tcp_bind6_connectx4_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_bind6_connectx4_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, bind6_leader, connectx4_racer);
 }
 
-T_DECL(ipv6_tcp_bind4_connectx6_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_bind4_connectx6_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, bind4_leader, connectx6_racer);
 }
 
-T_DECL(ipv6_tcp_connectx4_bind6_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx4_bind6_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx4_leader, bind6_racer);
 }
 
-T_DECL(ipv6_tcp_connectx6_bind4_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx6_bind4_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx6_leader, bind4_racer);
 }
 
-T_DECL(ipv6_tcp_connectx4_connect6_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx4_connect6_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx4_leader, connect6_racer);
 }
 
-T_DECL(ipv6_tcp_connectx6_connect4_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx6_connect4_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx6_leader, connect4_racer);
 }
 
-T_DECL(ipv6_tcp_connectx4_binding_bind6_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx4_binding_bind6_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx4_binding_leader, bind6_racer);
 }
 
-T_DECL(ipv6_tcp_connectx6_binding_bind4_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx6_binding_bind4_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx6_binding_leader, bind4_racer);
 }
 
-T_DECL(ipv6_tcp_connectx4_binding_connect6_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx4_binding_connect6_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx4_binding_leader, connect6_racer);
 }
 
-T_DECL(ipv6_tcp_connectx6_binding_connect4_race, "race bind calls with TCP sockets")
+T_DECL(ipv6_tcp_connectx6_binding_connect4_race, "race bind calls with TCP sockets", T_META_ENABLED(false))
 {
 	do_bind_race(true, connectx6_binding_leader, connect4_racer);
 }

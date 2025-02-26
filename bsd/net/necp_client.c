@@ -2581,7 +2581,12 @@ necp_client_add_agent_interface_options(struct necp_client *client,
     const struct necp_client_parsed_parameters *parsed_parameters,
     ifnet_t ifp)
 {
-	if (ifp != NULL && ifp->if_agentids != NULL) {
+	if (ifp == NULL) {
+		return;
+	}
+
+	ifnet_lock_shared(ifp);
+	if (ifp->if_agentids != NULL) {
 		for (u_int32_t i = 0; i < ifp->if_agentcount; i++) {
 			if (uuid_is_null(ifp->if_agentids[i])) {
 				continue;
@@ -2591,6 +2596,7 @@ necp_client_add_agent_interface_options(struct necp_client *client,
 			    ifp->if_index, ifnet_get_generation(ifp));
 		}
 	}
+	ifnet_lock_done(ifp);
 }
 
 static void
@@ -2598,7 +2604,12 @@ necp_client_add_browse_interface_options(struct necp_client *client,
     const struct necp_client_parsed_parameters *parsed_parameters,
     ifnet_t ifp)
 {
-	if (ifp != NULL && ifp->if_agentids != NULL) {
+	if (ifp == NULL) {
+		return;
+	}
+
+	ifnet_lock_shared(ifp);
+	if (ifp->if_agentids != NULL) {
 		for (u_int32_t i = 0; i < ifp->if_agentcount; i++) {
 			if (uuid_is_null(ifp->if_agentids[i])) {
 				continue;
@@ -2617,6 +2628,7 @@ necp_client_add_browse_interface_options(struct necp_client *client,
 			}
 		}
 	}
+	ifnet_lock_done(ifp);
 }
 
 static inline bool

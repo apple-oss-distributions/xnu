@@ -93,6 +93,10 @@ parameter specifies the options that can be passed. only
 .Fn fs_snapshot_mount
 options are currently defined:
 .Bl -tag -width SNAPSHOT_MNT_IGNORE_OWNERSHIP
+.It Dv SNAPSHOT_MNT_NOSUID
+Setuid bits are not honored on this filesystem.
+.It Dv SNAPSHOT_MNT_NODEV
+Don't interpret special files.
 .It Dv SNAPSHOT_MNT_DONTBROWSE
 File system is not appropriate path to user data.
 .It Dv SNAPSHOT_MNT_IGNORE_OWNERSHIP

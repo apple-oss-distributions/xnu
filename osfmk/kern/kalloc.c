@@ -2200,16 +2200,16 @@ kalloc_next_good_size(vm_size_t size, uint32_t period)
 #pragma mark kalloc
 
 static inline kalloc_heap_t
-kalloc_type_get_heap(kalloc_type_var_view_t kt_view, bool kt_free __unused)
+kalloc_type_get_heap(kalloc_type_flags_t kt_flags)
 {
 	/*
 	 * Redirect data-only views
 	 */
-	if (kalloc_type_is_data(kt_view->kt_flags)) {
+	if (kalloc_type_is_data(kt_flags)) {
 		return KHEAP_DATA_BUFFERS;
 	}
 
-	if (kt_view->kt_flags & KT_PROCESSED) {
+	if (kt_flags & KT_PROCESSED) {
 		return KHEAP_KT_VAR;
 	}
 
@@ -2405,7 +2405,7 @@ kalloc_ext(
 
 	if (kt_is_var_view(kheap_or_kt_view)) {
 		kt_view = kt_demangle_var_view(kheap_or_kt_view);
-		kheap   = kalloc_type_get_heap(kt_view, false);
+		kheap   = kalloc_type_get_heap(kt_view->kt_flags);
 		/*
 		 * Use stats from view if present, else use stats from kheap.
 		 * KHEAP_KT_VAR accumulates stats for all allocations going to
@@ -2573,9 +2573,13 @@ kalloc_type_impl_external(kalloc_type_view_t kt_view, zalloc_flags_t flags)
 	 *
 	 */
 	if (__improbable(kt_view->kt_zv.zv_zone == ZONE_NULL)) {
-		vm_size_t size = kalloc_type_get_size(kt_view->kt_size);
+		kalloc_heap_t kheap;
+		vm_size_t size;
+
 		flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC);
-		return kalloc_ext(KHEAP_DEFAULT, size, flags, NULL).addr;
+		size  = kalloc_type_get_size(kt_view->kt_size);
+		kheap = kalloc_type_get_heap(kt_view->kt_flags);
+		return kalloc_ext(kheap, size, flags, NULL).addr;
 	}
 
 	flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC);
@@ -2704,7 +2708,7 @@ kfree_zone(
 
 	if (kt_is_var_view(kheap_or_kt_view)) {
 		kt_view = kt_demangle_var_view(kheap_or_kt_view);
-		kheap   = kalloc_type_get_heap(kt_view, true);
+		kheap   = kalloc_type_get_heap(kt_view->kt_flags);
 		/*
 		 * Note: If we have cross frees between KHEAP_KT_VAR and KHEAP_DEFAULT
 		 * we will end up having incorrect stats. Cross frees may happen on
@@ -2843,8 +2847,12 @@ kfree_type_impl_external(kalloc_type_view_t kt_view, void *ptr)
 	 * NULL as we need to use the vm for the allocation/free
 	 */
 	if (kt_view->kt_zv.zv_zone == ZONE_NULL) {
-		return kheap_free(KHEAP_DEFAULT, ptr,
-		           kalloc_type_get_size(kt_view->kt_size));
+		kalloc_heap_t kheap;
+		vm_size_t size;
+
+		size  = kalloc_type_get_size(kt_view->kt_size);
+		kheap = kalloc_type_get_heap(kt_view->kt_flags);
+		return kheap_free(kheap, ptr, size);
 	}
 	return kfree_type_impl(kt_view, ptr);
 }
@@ -3033,7 +3041,7 @@ krealloc_ext(
 
 	if (kt_is_var_view(kheap_or_kt_view)) {
 		kt_view = kt_demangle_var_view(kheap_or_kt_view);
-		kheap   = kalloc_type_get_heap(kt_view, false);
+		kheap   = kalloc_type_get_heap(kt_view->kt_flags);
 		/*
 		 * Similar to kalloc_ext: Use stats from view if present,
 		 * else use stats from kheap.

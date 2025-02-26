@@ -3077,6 +3077,8 @@ task_terminate_internal(
 	ipc_task_disable(task);
 
 #if CONFIG_EXCLAVES
+	//rdar://139307390, first suspension might not have done conclave suspend.
+	first_suspension = true;
 	if (first_suspension) {
 		task_unlock(task);
 		task_suspend_conclave(task);
@@ -3349,7 +3351,8 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 			}
 		}
 	}
-
+	//rdar://139307390, first suspension might not have done conclave suspend.
+	first_suspension = true;
 	if (first_suspension || should_mark_corpse) {
 		task_unlock(task);
 		if (first_suspension) {
@@ -3694,6 +3697,8 @@ task_hold_and_wait(
 	bool first_suspension __unused = task_hold_locked(task);
 
 #if CONFIG_EXCLAVES
+	//rdar://139307390, first suspension might not have done conclave suspend.
+	first_suspension = true;
 	if (suspend_conclave && first_suspension) {
 		task_unlock(task);
 		task_suspend_conclave(task);
@@ -3791,11 +3796,14 @@ task_release_locked(
 	_task_mark_suspend_end(task);
 #endif
 
+//rdar://139307390.
+#if 0
 #if CONFIG_EXCLAVES
 	task_unlock(task);
 	task_resume_conclave(task);
 	task_lock(task);
 #endif /* CONFIG_EXCLAVES */
+#endif
 }
 
 /*
@@ -4007,6 +4015,8 @@ place_task_hold(
 	 */
 	bool first_suspension __unused = task_hold_locked(task);
 
+//rdar://139307390, do not suspend conclave on task suspend.
+#if 0
 #if CONFIG_EXCLAVES
 	if (first_suspension) {
 		task_unlock(task);
@@ -4023,6 +4033,7 @@ place_task_hold(
 		}
 	}
 #endif /* CONFIG_EXCLAVES */
+#endif
 
 	task_wait_locked(task, FALSE);
 

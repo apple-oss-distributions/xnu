@@ -67,6 +67,8 @@
 #include <arm/misc_protos.h>
 #endif /* defined(HAS_APPLE_PAC) */
 
+extern int panic_on_dyld_issue;
+
 /*
  * DYLD page in linking pager.
  *
@@ -301,8 +303,13 @@ fixupPage64(
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
-			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
+
 			return KERN_FAILURE;
 		}
 		uint64_t value  = *chain;
@@ -314,6 +321,10 @@ fixupPage64(
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
 				printf("%s out of range bind ordinal %u (max %u)\n", __func__,
 				    bindOrdinal, hdr->mwli_binds_count);
+				if (panic_on_dyld_issue) {
+					panic("%s out of range bind ordinal %u (max %u)", __func__,
+					    bindOrdinal, hdr->mwli_binds_count);
+				}
 				return KERN_FAILURE;
 			}
 			uint32_t addend = (value >> 24) & 0xFF;
@@ -327,6 +338,9 @@ fixupPage64(
 		if (delta * 4 >= PAGE_SIZE) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_DELTA_TOO_LARGE), (uintptr_t)userVA);
 			printf("%s(): delta offset > page size %lld\n", __func__, delta * 4);
+			if (panic_on_dyld_issue) {
+				panic("%s(): delta offset > page size %lld", __func__, delta * 4);
+			}
 			return KERN_FAILURE;
 		}
 		chain = (uint64_t *)((uintptr_t)chain + (delta * 4)); // 4-byte stride
@@ -354,8 +368,12 @@ fixupChain32(
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
-			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
 			return KERN_FAILURE;
 		}
 		uint32_t value = *chain;
@@ -365,8 +383,12 @@ fixupChain32(
 			uint32_t bindOrdinal = value & 0x000FFFFF;
 			if (bindOrdinal >= hdr->mwli_binds_count) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
-				printf("%s(): out of range bind ordinal %u (max %u)",
+				printf("%s(): out of range bind ordinal %u (max %u)\n",
 				    __func__, bindOrdinal, hdr->mwli_binds_count);
+				if (panic_on_dyld_issue) {
+					panic("%s(): out of range bind ordinal %u (max %u)",
+					    __func__, bindOrdinal, hdr->mwli_binds_count);
+				}
 				return KERN_FAILURE;
 			}
 			uint32_t addend = (value >> 20) & 0x3F;
@@ -422,7 +444,10 @@ fixupPage32(
 			 */
 			if ((uintptr_t)&segInfo->page_start[overflowIndex + 1] > (uintptr_t)link_info + link_info_size) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
-				printf("%s(): out of range segInfo->page_start[overflowIndex]", __func__);
+				printf("%s(): out of range segInfo->page_start[overflowIndex]\n", __func__);
+				if (panic_on_dyld_issue) {
+					panic("%s(): out of range segInfo->page_start[overflowIndex]", __func__);
+				}
 				return KERN_FAILURE;
 			}
 			chainEnd    = (segInfo->page_start[overflowIndex] & DYLD_CHAINED_PTR_START_LAST);
@@ -476,6 +501,9 @@ signPointer(
 	default:
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_INVALID_AUTH_KEY), (uintptr_t)unsignedAddr);
 		printf("%s(): Invalid ptr auth key %d\n", __func__, key);
+		if (panic_on_dyld_issue) {
+			panic("%s(): Invalid ptr auth key %d", __func__, key);
+		}
 		return KERN_FAILURE;
 	}
 	return KERN_SUCCESS;
@@ -504,7 +532,10 @@ fixupPageAuth64(
 	 */
 	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
-		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		printf("%s(): out of range segInfo->page_start[pageIndex]\n", __func__);
+		if (panic_on_dyld_issue) {
+			panic("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		}
 		return KERN_FAILURE;
 	}
 	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
@@ -525,8 +556,12 @@ fixupPageAuth64(
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
-			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
 			return KERN_FAILURE;
 		}
 		uint64_t value = *chain;
@@ -542,8 +577,12 @@ fixupPageAuth64(
 				uint32_t bindOrdinal = value & 0x00FFFFFF;
 				if (bindOrdinal >= hdr->mwli_binds_count) {
 					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
-					printf("%s(): out of range bind ordinal %u (max %u)",
+					printf("%s(): out of range bind ordinal %u (max %u)\n",
 					    __func__, bindOrdinal, hdr->mwli_binds_count);
+					if (panic_on_dyld_issue) {
+						panic("%s(): out of range bind ordinal %u (max %u)",
+						    __func__, bindOrdinal, hdr->mwli_binds_count);
+					}
 					return KERN_FAILURE;
 				}
 				if (signPointer(bindsArray[bindOrdinal], (void *)uVA, addrDiv, diversity, key, pager, chain) != KERN_SUCCESS) {
@@ -561,8 +600,12 @@ fixupPageAuth64(
 				uint32_t bindOrdinal = value & 0x00FFFFFF;
 				if (bindOrdinal >= hdr->mwli_binds_count) {
 					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
-					printf("%s(): out of range bind ordinal %u (max %u)",
+					printf("%s(): out of range bind ordinal %u (max %u)\n",
 					    __func__, bindOrdinal, hdr->mwli_binds_count);
+					if (panic_on_dyld_issue) {
+						panic("%s(): out of range bind ordinal %u (max %u)",
+						    __func__, bindOrdinal, hdr->mwli_binds_count);
+					}
 					return KERN_FAILURE;
 				} else {
 					uint64_t addend19 = (value >> 32) & 0x0007FFFF;
@@ -603,7 +646,10 @@ fixupCachePageAuth64(
 	 */
 	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
-		printf("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		printf("%s(): out of range segInfo->page_start[pageIndex]\n", __func__);
+		if (panic_on_dyld_issue) {
+			panic("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		}
 		return KERN_FAILURE;
 	}
 	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
@@ -623,8 +669,12 @@ fixupCachePageAuth64(
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
-			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
 			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
 			return KERN_FAILURE;
 		}
 		uint64_t value = *chain;
@@ -695,6 +745,9 @@ fixup_page(
 		if ((uintptr_t)seg + sizeof(*seg) > (uintptr_t)link_info + link_info_size) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_INFO_OUT_OF_RANGE), (uintptr_t)userVA);
 			printf("%s(): seg_info out of bounds\n", __func__);
+			if (panic_on_dyld_issue) {
+				panic("%s(): seg_info out of bounds", __func__);
+			}
 			return KERN_FAILURE;
 		}
 
@@ -708,22 +761,34 @@ fixup_page(
 			if ((uintptr_t)seg + seg->size > (uintptr_t)link_info + link_info_size) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_SIZE_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->size out of bounds\n", __func__);
+				if (panic_on_dyld_issue) {
+					panic("%s(): seg->size out of bounds", __func__);
+				}
 				return KERN_FAILURE;
 			}
 			if (seg->size < sizeof(struct dyld_chained_starts_in_segment)) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_SIZE_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->size too small\n", __func__);
+				if (panic_on_dyld_issue) {
+					panic("%s(): seg->size too small", __func__);
+				}
 				return KERN_FAILURE;
 			}
 			/* ensure page_count and pageIndex are valid too */
 			if ((uintptr_t)&seg->page_start[seg->page_count] > (uintptr_t)link_info + link_info_size) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_PAGE_CNT_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->page_count out of bounds\n", __func__);
+				if (panic_on_dyld_issue) {
+					panic("%s(): seg->page_count out of bounds", __func__);
+				}
 				return KERN_FAILURE;
 			}
 			if (pageIndex >= seg->page_count) {
 				ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SEG_PAGE_CNT_OUT_OF_RANGE), (uintptr_t)userVA);
 				printf("%s(): seg->page_count too small\n", __func__);
+				if (panic_on_dyld_issue) {
+					panic("%s(): seg->page_count too small", __func__);
+				}
 				return KERN_FAILURE;
 			}
 
@@ -737,6 +802,9 @@ fixup_page(
 	if (segInfo == NULL) {
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_NO_SEG_FOR_VA), (uintptr_t)userVA);
 		printf("%s(): No segment for user VA 0x%llx\n", __func__, (long long)userVA);
+		if (panic_on_dyld_issue) {
+			panic("%s(): No segment for user VA 0x%llx", __func__, (long long)userVA);
+		}
 		return KERN_FAILURE;
 	}
 
@@ -768,6 +836,9 @@ fixup_page(
 	default:
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BAD_POINTER_FMT), (uintptr_t)userVA);
 		printf("%s(): unknown pointer_format %d\n", __func__, hdr->mwli_pointer_format);
+		if (panic_on_dyld_issue) {
+			panic("%s(): unknown pointer_format %d", __func__, hdr->mwli_pointer_format);
+		}
 		return KERN_FAILURE;
 	}
 	return KERN_SUCCESS;
@@ -839,7 +910,11 @@ dyld_pager_data_request(
 	    offset, upl_size,
 	    &upl, NULL, NULL, upl_flags, VM_KERN_MEMORY_SECURITY);
 	if (kr != KERN_SUCCESS) {
-		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_NO_UPL), 0 /* arg */);
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_NO_UPL), kr /* arg */);
+		if (panic_on_dyld_issue) {
+			panic("%s(): upl_request(%p, 0x%llx, 0x%llx) ret %d", __func__,
+			    mo_control, offset, (uint64_t)upl_size, kr);
+		}
 		retval = kr;
 		goto done;
 	}
@@ -994,6 +1069,9 @@ retry_src_fault:
 		if (r == pager->dyld_num_range) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_RANGE_NOT_FOUND), (uintptr_t)userVA);
 			printf("%s(): Range not found for offset 0x%llx\n", __func__, (long long)cur_offset);
+			if (panic_on_dyld_issue) {
+				panic("%s(): Range not found for offset 0x%llx", __func__, (long long)cur_offset);
+			}
 			retval = KERN_FAILURE;
 		} else if (fixup_page(dst_vaddr, dst_vaddr + PAGE_SIZE, userVA, pager) != KERN_SUCCESS) {
 			/* KDBG / printf was done under fixup_page() */
@@ -1001,6 +1079,9 @@ retry_src_fault:
 		}
 		if (retval != KERN_SUCCESS) {
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_SLIDE_ERROR), userVA);
+			if (panic_on_dyld_issue) {
+				panic("%s(): dyld pager slide error %d at 0x%llx", __func__, retval, (uint64_t)userVA);
+			}
 		}
 
 		assert(VM_PAGE_OBJECT(src_page) == src_page_object);

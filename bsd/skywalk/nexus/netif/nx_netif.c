@@ -2435,8 +2435,8 @@ nx_netif_attach(struct kern_nexus *nx, struct ifnet *ifp)
 		retval = kern_pbufpool_get_memory_info(nx->nx_tx_pp, &pp_info);
 		VERIFY(retval == 0);
 
-		/* set the drop limit as 80% of size of packet pool */
-		drop_lim = (pp_info.kpm_packets * 4) / 5;
+		/* set the drop limit as 75% of size of packet pool */
+		drop_lim = (pp_info.kpm_packets * 3) / 4;
 		VERIFY(drop_lim != 0);
 		IFCQ_PKT_DROP_LIMIT(ifp->if_snd) = drop_lim;
 	}

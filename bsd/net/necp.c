@@ -368,6 +368,7 @@ struct necp_socket_info {
 	u_int32_t client_flags;
 	char *domain __null_terminated;
 	char *url __null_terminated;
+	struct soflow_hash_entry *soflow_entry;
 	unsigned is_entitled : 1;
 	unsigned has_client : 1;
 	unsigned has_system_signed_result : 1;
@@ -9855,7 +9856,7 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 	    necp_restrict_multicast ||
 	    needs_address_for_signature ||
 	    (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_ADDRESS_TYPE_CONDITIONS) ||
-	    (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_CLIENT_FLAGS)) {
+	    (IS_INET(so) && IS_UDP(so))) {
 		if (override_local_addr != NULL) {
 			if (override_local_addr->sa_family == AF_INET6 && override_local_addr->sa_len <= sizeof(struct sockaddr_in6)) {
 				SOCKADDR_COPY(override_local_addr, &info->local_addr, override_local_addr->sa_len);
@@ -9938,6 +9939,12 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		}
 	}
 
+	if (IS_INET(so) && IS_UDP(so)) {
+		info->soflow_entry = soflow_get_flow(so, &(info->local_addr.sa), &(info->remote_addr.sa), NULL, 0, override_direction, input_ifindex);
+	} else {
+		info->soflow_entry = NULL;
+	}
+
 	if (necp_kernel_socket_policies_condition_mask & NECP_KERNEL_CONDITION_CLIENT_FLAGS) {
 		info->client_flags = 0;
 		if (INP_NO_CONSTRAINED(inp)) {
@@ -9955,19 +9962,15 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		if (inp->inp_socket->so_flags1 & SOF1_APPROVED_APP_DOMAIN) {
 			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN;
 		}
-		if (NEED_DGRAM_FLOW_TRACKING(so)) {
-			if (!necp_socket_is_connected(inp)) {
-				// If the socket has a flow entry for this 4-tuple then check if the flow is outgoing
-				// and set the inbound flag accordingly. Otherwise use the direction to set the inbound flag.
-				struct soflow_hash_entry *flow = soflow_get_flow(so, &info->local_addr.sa, &info->remote_addr.sa, NULL, 0, override_direction, input_ifindex);
-				if (flow != NULL) {
-					if (!flow->soflow_outgoing) {
-						info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
-					}
-					soflow_free_flow(flow);
-				} else if (override_direction == SOFLOW_DIRECTION_INBOUND) {
+		if (IS_INET(so) && IS_UDP(so)) {
+			// If the socket has a flow entry for this 4-tuple then check if the flow is outgoing
+			// and set the inbound flag accordingly. Otherwise use the direction to set the inbound flag.
+			if (info->soflow_entry != NULL) {
+				if (!info->soflow_entry->soflow_outgoing) {
 					info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
 				}
+			} else if (override_direction == SOFLOW_DIRECTION_INBOUND) {
+				info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_INBOUND;
 			}
 		} else {
 			// If the socket is explicitly marked as inbound then set the inbound flag.
@@ -10198,7 +10201,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 							}
 						}
 						if (necp_debug > 1 || NECP_DATA_TRACE_POLICY_ON(debug)) {
-							NECPLOG(LOG_DEBUG, "DATA-TRACE: Socket Policy <so %llx>: (Application %d Real Application %d BoundInterface %d Proto %d) Filter %d", (uint64_t)VM_KERNEL_ADDRPERM(so), info->application_id, info->real_application_id, info->bound_interface_index, info->protocol, policy_search_array[i]->result_parameter.filter_control_unit);
+							NECPLOG(LOG_DEBUG, "DATA-TRACE: Socket Policy <so %llx>: (Application %d Real Application %d BoundInterface %d Proto %d) Filter %d", (uint64_t)VM_KERNEL_ADDRPERM(so), info->application_id, info->real_application_id, info->bound_interface_index, info->protocol, *return_filter);
 						}
 					}
 					continue;
@@ -10585,6 +10588,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 	    inp->inp_policyresult.flowhash == flowhash) {
 		// If already matched this socket on this generation of table, skip
 
+		if (info.soflow_entry != NULL) {
+			soflow_free_flow(info.soflow_entry);
+		}
+
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
 
@@ -10650,6 +10657,11 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_PASS;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+			info.soflow_entry->soflow_policies_gencount = 0;
+			soflow_free_flow(info.soflow_entry);
+		}
 
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
@@ -10677,6 +10689,11 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			soflow_free_flow(info.soflow_entry);
+		}
 
 		// Unlock
 		lck_rw_done(&necp_kernel_policy_lock);
@@ -10718,6 +10735,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.route_rule_id = route_rule_id;
 		inp->inp_policyresult.results.result = matched_policy->result;
 		memcpy(&inp->inp_policyresult.results.result_parameter, &matched_policy->result_parameter, sizeof(matched_policy->result_parameter));
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 
 		if (info.used_responsible_pid && (matched_policy->condition_mask & NECP_KERNEL_CONDITION_REAL_APP_ID)) {
 			inp->inp_policyresult.app_id = info.real_application_id;
@@ -10767,6 +10788,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.route_rule_id = route_rule_id;
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT;
 			inp->inp_policyresult.results.result_parameter.flow_divert_control_unit = flow_divert_control_unit;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "FLOW DIVERT <ROUTE RULE>", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
 		} else if (drop_all && drop_all_bypass == NECP_DROP_ALL_BYPASS_CHECK_RESULT_FALSE) {
 			inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
@@ -10778,6 +10803,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.route_rule_id = 0;
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - DROP <NO MATCH>", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = 0;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 		} else {
 			// Mark non-matching socket so we don't re-check it
 			necp_unscope(inp);
@@ -10795,6 +10824,10 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
 			inp->inp_policyresult.results.route_rule_id = route_rule_id; // We may have matched a route rule, so mark it!
 			inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_NONE;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - NO MATCH", inp->inp_policyresult.policy_id, inp->inp_policyresult.skip_policy_id);
 		}
 	}
@@ -10810,9 +10843,17 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 		if (necp_debug > 1 || NECP_DATA_TRACE_POLICY_ON(debug)) {
 			NECP_DATA_TRACE_LOG_SOCKET(debug, so, "SOCKET - INP UPDATE", "RESULT - DROP <MISSING CLIENT>", 0, 0);
 		}
+	}
+
+	if (info.soflow_entry != NULL) {
+		soflow_free_flow(info.soflow_entry);
 	}
 
 	// Unlock
@@ -12886,10 +12927,20 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		// If policies haven't changed since last evaluation, do not update filter result in order to
 		// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 		// allow content filter to detect and drop pre-existing flows.
-		if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-		    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+		uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+		int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+		if (info.soflow_entry != NULL) {
+			current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+			current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+		}
+		if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+		    current_filter_control_unit != filter_control_unit) {
 			inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 			inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+			if (info.soflow_entry != NULL) {
+				info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+				info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+			}
 		}
 		if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 			inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -12920,6 +12971,10 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 		inp->inp_policyresult.results.flow_divert_aggregate_unit = 0;
 		inp->inp_policyresult.results.route_rule_id = 0;
 		inp->inp_policyresult.results.result = NECP_KERNEL_POLICY_RESULT_DROP;
+		if (info.soflow_entry != NULL) {
+			info.soflow_entry->soflow_filter_control_unit = 0;
+			info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+		}
 
 		// Unlock
 		allowed_to_receive = FALSE;
@@ -12969,10 +13024,20 @@ skip_agent_check:
 			// If policies haven't changed since last evaluation, do not update filter result in order to
 			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 			// allow content filter to detect and drop pre-existing flows.
-			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+			int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+			if (info.soflow_entry != NULL) {
+				current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+				current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+			}
+			if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+			    current_filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+				if (info.soflow_entry != NULL) {
+					info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+					info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+				}
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -13005,10 +13070,20 @@ skip_agent_check:
 			// If policies haven't changed since last evaluation, do not update filter result in order to
 			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
 			// allow content filter to detect and drop pre-existing flows.
-			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
-			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			uint32_t current_filter_control_unit = inp->inp_policyresult.results.filter_control_unit;
+			int32_t current_policies_gencount = inp->inp_policyresult.policy_gencount;
+			if (info.soflow_entry != NULL) {
+				current_filter_control_unit = info.soflow_entry->soflow_filter_control_unit;
+				current_policies_gencount = info.soflow_entry->soflow_policies_gencount;
+			}
+			if (current_policies_gencount != necp_kernel_socket_policies_gencount &&
+			    current_filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 				inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;
+				if (info.soflow_entry != NULL) {
+					info.soflow_entry->soflow_filter_control_unit = filter_control_unit;
+					info.soflow_entry->soflow_policies_gencount = necp_kernel_socket_policies_gencount;
+				}
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
 				inp->inp_policyresult.results.flow_divert_aggregate_unit = flow_divert_aggregate_unit;
@@ -13053,6 +13128,10 @@ done:
 
 	if (socket_proc) {
 		proc_rele(socket_proc);
+	}
+
+	if (info.soflow_entry != NULL) {
+		soflow_free_flow(info.soflow_entry);
 	}
 
 	return allowed_to_receive;

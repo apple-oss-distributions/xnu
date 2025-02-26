@@ -1233,6 +1233,9 @@ do_flow_divert:
 
 	so_update_tx_data_stats(so, 1, m->m_pkthdr.len);
 
+	in_pcb_check_management_entitled(inp);
+	in_pcb_check_ultra_constrained_entitled(inp);
+
 #if SKYWALK
 	sk_protect_t __single protect = sk_async_transmit_protect();
 #endif /* SKYWALK */

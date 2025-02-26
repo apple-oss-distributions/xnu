@@ -9711,6 +9711,34 @@ m_add_crumb(struct mbuf *m, uint16_t crumb)
 	m->m_pkthdr.pkt_crumbs |= crumb;
 }
 
+void
+m_add_hdr_crumb(struct mbuf *m, uint64_t crumb, uint64_t flag)
+{
+#if defined(__arm64__)
+	while (m != NULL) {
+		m->m_mhdrcommon_crumbs &= ~flag;
+		m->m_mhdrcommon_crumbs |= (crumb & flag);
+		m = m->m_next;
+	}
+#else
+#pragma unused(m, crumb, flag)
+#endif /*__arm64__*/
+}
+
+void
+m_add_hdr_crumb_chain(struct mbuf *head, uint64_t crumb, uint64_t flag)
+{
+#if defined(__arm64__)
+	while (head) {
+		/* This assumes that we might have a chain of mbuf chains */
+		m_add_hdr_crumb(head, crumb, flag);
+		head = head->m_nextpkt;
+	}
+#else
+#pragma unused(head, crumb, flag)
+#endif /*__arm64__*/
+}
+
 static void
 m_redzone_init(struct mbuf *m)
 {

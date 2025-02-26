@@ -110,6 +110,7 @@ struct droptap_header {
 #define _DROPTAP_PAD_5  5
 #define DROPTAP_IPSEC   6
 #define DROPTAP_IP6     7
+#define DROPTAP_MPTCP   8
 
 #define DROPTAP_UNSPEC  0
 
@@ -140,9 +141,11 @@ struct droptap_header {
 	X(DROP_REASON_AQM_COMPRESSED,               DROPTAP_SKYWALK, DROPTAP_AQM,  2,  "AQM compressed")                             \
 	X(DROP_REASON_AQM_BK_SYS_THROTTLED,         DROPTAP_SKYWALK, DROPTAP_AQM,  3,  "AQM BK_SYS throttled")                       \
 	X(DROP_REASON_AQM_PURGE_FLOW,               DROPTAP_SKYWALK, DROPTAP_AQM,  4,  "AQM purge flow")                             \
-	X(DROP_REASON_AQM_DROP,                     DROPTAP_SKYWALK, DROPTAP_AQM,  5,  "AQM drop")                             \
+	X(DROP_REASON_AQM_DROP,                     DROPTAP_SKYWALK, DROPTAP_AQM,  5,  "AQM drop")                                   \
 	/* Socket */                                                                                                                 \
 	X(DROP_REASON_FULL_SOCK_RCVBUF,             DROPTAP_BSD,     DROPTAP_SOCK, 1,  "Socket receive buffer full")                 \
+	/* MPTCP */                                                                                                                  \
+	X(DROP_REASON_MPTCP_INPUT_MALFORMED,        DROPTAP_BSD,     DROPTAP_MPTCP,1,  "MPTCP input packet malformed")               \
 	/* TCP */                                                                                                                    \
 	X(DROP_REASON_TCP_RST,                      DROPTAP_BSD,     DROPTAP_TCP,  1,  "TCP connection reset")                       \
 	/* IP */                                                                                                                     \

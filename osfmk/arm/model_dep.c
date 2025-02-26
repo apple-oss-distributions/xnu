@@ -225,9 +225,7 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 		if ((fp == 0) || ((fp & FP_ALIGNMENT_MASK) != 0)) {
 			break;
 		}
-		if (dump_kernel_stack && ((fp < VM_MIN_KERNEL_ADDRESS) || (fp > VM_MAX_KERNEL_ADDRESS))) {
-			break;
-		}
+
 		if ((!dump_kernel_stack) && (fp >= VM_MIN_KERNEL_ADDRESS)) {
 			break;
 		}

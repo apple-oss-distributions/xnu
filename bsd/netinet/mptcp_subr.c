@@ -2307,7 +2307,18 @@ fallback:
 			}
 		}
 
-		VERIFY(dlen == 0);
+		ASSERT(dlen == 0);
+		if (dlen != 0) {
+			/* "try" to gracefully recover on customer builds */
+			error_out = 1;
+			error = EIO;
+			dlen = 0;
+
+			*mp0 = NULL;
+
+			SB_EMPTY_FIXUP(&so->so_rcv);
+			soevent(so, SO_FILT_HINT_LOCKED | SO_FILT_HINT_MUSTRST);
+		}
 
 		if (m != NULL) {
 			so->so_rcv.sb_lastrecord = m;

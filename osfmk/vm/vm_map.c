@@ -2023,9 +2023,12 @@ vm_map_lookup_entry(
 	vm_map_entry_t  *entry)         /* OUT */
 {
 	bool result = false;
+
+#if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(address)) {
-		address = VM_KERNEL_STRIP_UPTR(address);
+		address = vm_memtag_canonicalize_address(address);
 	}
+#endif /* CONFIG_KERNEL_TAGGING */
 
 #if CONFIG_PROB_GZALLOC
 	if (map->pmap == kernel_pmap) {
@@ -2059,9 +2062,12 @@ vm_map_lookup_entry_allow_pgz(
 	vm_map_offset_t address,
 	vm_map_entry_t  *entry)         /* OUT */
 {
+#if CONFIG_KERNEL_TAGGING
 	if (VM_KERNEL_ADDRESS(address)) {
-		address = VM_KERNEL_STRIP_UPTR(address);
+		address = vm_memtag_canonicalize_address(address);
 	}
+#endif /* CONFIG_KERNEL_TAGGING */
+
 	return vm_map_store_lookup_entry( map, address, entry );
 }
 #endif /* CONFIG_PROB_GZALLOC */

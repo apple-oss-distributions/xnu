@@ -2254,7 +2254,7 @@ kctl_pcblist SYSCTL_HANDLER_ARGS
             2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
             ROUNDUP64(sizeof(struct xsockstat_n));
 
-        buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+        buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
 
         lck_mtx_lock(&ctl_mtx);
 

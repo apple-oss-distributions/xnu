@@ -5803,6 +5803,7 @@ retry:
 	if (error) {
 		if (error == ENOENT && num_retries < MAX_LINK_ENOENT_RETRIES) {
 			do_retry = true;
+			num_retries += 1;
 		}
 		goto out2;
 	}
@@ -14737,6 +14738,12 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 	}
 
 	/* Convert snapshot_mount flags to mount flags */
+	if (flags & SNAPSHOT_MNT_NOSUID) {
+		mount_flags |= MNT_NOSUID;
+	}
+	if (flags & SNAPSHOT_MNT_NODEV) {
+		mount_flags |= MNT_NODEV;
+	}
 	if (flags & SNAPSHOT_MNT_DONTBROWSE) {
 		mount_flags |= MNT_DONTBROWSE;
 	}

@@ -9107,10 +9107,7 @@ kevt_pcblist SYSCTL_HANDLER_ARGS
 	    ROUNDUP64(sizeof(struct xsockstat_n));
 	struct kern_event_pcb  *ev_pcb;
 
-	buf = kalloc_data(item_size, Z_WAITOK | Z_ZERO);
-	if (buf == NULL) {
-		return ENOMEM;
-	}
+	buf = kalloc_data(item_size, Z_WAITOK_ZERO_NOFAIL);
 
 	lck_rw_lock_shared(&kev_rwlock);
 

@@ -624,6 +624,9 @@ rip6_output(
 		ip6_output_setdstifscope(m, difscope, NULL);
 	}
 
+	in_pcb_check_management_entitled(in6p);
+	in_pcb_check_ultra_constrained_entitled(in6p);
+
 	/*
 	 * Source address selection.
 	 */

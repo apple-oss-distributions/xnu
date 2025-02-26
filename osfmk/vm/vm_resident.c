@@ -129,7 +129,7 @@
 
 #if MACH_ASSERT
 
-TUNABLE(bool, vm_check_refs_on_free, "vm_check_refs_on_free", true);
+TUNABLE(bool, vm_check_refs_on_alloc, "vm_check_refs_on_alloc", false);
 #define ASSERT_PMAP_FREE(mem) pmap_assert_free(VM_PAGE_GET_PHYS_PAGE(mem))
 
 #else /* MACH_ASSERT */
@@ -2397,9 +2397,11 @@ vm_page_lookup(
 	OSAddAtomic64(1, &vm_page_lookup_stats.vpl_total);
 #endif
 
-	if (VM_KERNEL_ADDRESS(offset)) {
-		offset = VM_KERNEL_STRIP_UPTR(offset);
+#if CONFIG_KERNEL_TAGGING
+	if (is_kernel_object(object)) {
+		offset = vm_memtag_canonicalize_address(offset);
 	}
+#endif /* CONFIG_KERNEL_TAGGING */
 
 	vm_object_lock_assert_held(object);
 	assertf(page_aligned(offset), "offset 0x%llx\n", offset);
@@ -3257,7 +3259,11 @@ restart:
 		assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
 		assert(!mem->vmp_realtime);
 
-		vm_page_validate_no_references(mem);
+#if MACH_ASSERT
+		if (vm_check_refs_on_alloc) {
+			vm_page_validate_no_references(mem);
+		}
+#endif /* MACH_ASSERT */
 		vm_page_finalize_grabed_page(mem);
 		return mem;
 	}
@@ -3447,8 +3453,11 @@ restart:
 			assert(!mem->vmp_wpmapped);
 			assert(!pmap_is_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem)));
 			assert(!mem->vmp_realtime);
-
-			vm_page_validate_no_references(mem);
+#if MACH_ASSERT
+			if (vm_check_refs_on_alloc) {
+				vm_page_validate_no_references(mem);
+			}
+#endif /* MACH_ASSERT */
 		}
 #if defined (__x86_64__) && (DEVELOPMENT || DEBUG)
 		vm_clump_update_stats(sub_count);
@@ -3641,7 +3650,11 @@ reactivate_secluded_page:
 	vm_object_unlock(object);
 	object = VM_OBJECT_NULL;
 
-	vm_page_validate_no_references(mem);
+#if MACH_ASSERT
+	if (vm_check_refs_on_alloc) {
+		vm_page_validate_no_references(mem);
+	}
+#endif /* MACH_ASSERT */
 
 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
 	vm_page_secluded.grab_success_other++;
@@ -3761,11 +3774,7 @@ vm_page_release(
 
 	assert(!mem->vmp_private && !mem->vmp_fictitious);
 
-#if MACH_ASSERT
-	if (vm_check_refs_on_free) {
-		vm_page_validate_no_references(mem);
-	}
-#endif /* MACH_ASSERT */
+	vm_page_validate_no_references(mem);
 
 //	dbgLog(VM_PAGE_GET_PHYS_PAGE(mem), vm_page_free_count, vm_page_wire_count, 5);	/* (TEST/DEBUG) */
 
@@ -4306,11 +4315,7 @@ vm_page_free_prepare_object(
 		assert(mem->vmp_specialq.prev == 0);
 		assert(mem->vmp_next_m == 0);
 
-#if MACH_ASSERT
-		if (vm_check_refs_on_free) {
-			vm_page_validate_no_references(mem);
-		}
-#endif /* MACH_ASSERT */
+		vm_page_validate_no_references(mem);
 
 		{
 			vm_page_init(mem, VM_PAGE_GET_PHYS_PAGE(mem), mem->vmp_lopage);
@@ -4405,13 +4410,9 @@ vm_page_free_list(
 			mem->vmp_snext = NULL;
 			assert(mem->vmp_pageq.prev == 0);
 
-#if MACH_ASSERT
-			if (vm_check_refs_on_free) {
-				if (!mem->vmp_fictitious && !mem->vmp_private) {
-					vm_page_validate_no_references(mem);
-				}
+			if (!mem->vmp_fictitious && !mem->vmp_private) {
+				vm_page_validate_no_references(mem);
 			}
-#endif /* MACH_ASSERT */
 
 			if (__improbable(mem->vmp_realtime)) {
 				vm_page_lock_queues();
@@ -5669,6 +5670,14 @@ vm_page_copy(
 	VM_PAGE_CHECK(dest_m);
 #endif
 	vm_object_lock_assert_held(src_m_object);
+
+#if CONFIG_SPTM
+	sptm_paddr_t src_paddr = ptoa(VM_PAGE_GET_PHYS_PAGE(src_m));
+	sptm_frame_type_t src_frame_type = sptm_get_frame_type(src_paddr);
+	if (src_frame_type == XNU_KERNEL_RESTRICTED) {
+		panic("%s: cannot copy from a restricted page", __func__);
+	}
+#endif /* CONFIG_SPTM */
 
 	if (src_m_object != VM_OBJECT_NULL &&
 	    src_m_object->code_signed) {

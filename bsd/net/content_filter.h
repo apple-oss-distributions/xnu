@@ -533,7 +533,7 @@ extern int cfil_log_level;
 #define CFIL_LOG(level, fmt, ...) \
 do { \
 	if (cfil_log_level >= level) \
-	        printf("%s:%d " fmt "\n",\
+	        os_log(OS_LOG_DEFAULT, "%s:%d " fmt "\n",\
 	                __FUNCTION__, __LINE__, ##__VA_ARGS__); \
 } while (0)
 

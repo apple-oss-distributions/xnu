@@ -238,11 +238,12 @@ soflow_entry_log(int level, struct socket *so, struct soflow_hash_entry *entry, 
 		return;
 	}
 
-	SOFLOW_LOG(level, so, entry->soflow_debug, "<%s>: %s <%s(%d) entry %p, featureID %llu> outifp %d lport %d fport %d laddr %s faddr %s hash %X "
+	SOFLOW_LOG(level, so, entry->soflow_debug, "<%s>: %s <%s(%d) entry %p, featureID %llu, filter_ctl 0x%x> outifp %d lport %d fport %d laddr %s faddr %s hash %X "
 	    "<rx p %llu b %llu, tx p %llu b %llu>",
 	    msg, entry->soflow_outgoing ? "OUT" : "IN ",
 	    SOFLOW_IS_UDP(so) ? "UDP" : "proto", SOFLOW_GET_SO_PROTO(so),
 	    entry, entry->soflow_feat_ctxt_id,
+	    entry->soflow_filter_control_unit,
 	    entry->soflow_outifindex,
 	    ntohs(entry->soflow_lport), ntohs(entry->soflow_fport), local, remote,
 	    entry->soflow_flowhash,
@@ -743,6 +744,7 @@ soflow_db_add_entry(struct soflow_db *db, struct sockaddr *local, struct sockadd
 	entry->soflow_lastused = net_uptime();
 	entry->soflow_db = db;
 	entry->soflow_debug = SOFLOW_ENABLE_DEBUG(db->soflow_db_so, entry);
+	microuptime(&entry->soflow_timestamp);
 
 	if (inp->inp_vflag & INP_IPV6) {
 		hashkey_faddr = entry->soflow_faddr.addr6.s6_addr32[3];

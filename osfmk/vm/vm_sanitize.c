@@ -536,12 +536,12 @@ vm_sanitize_addr_size(
 		goto unsanitary;
 	}
 
-
 	end_aligned = vm_map_round_page_mask(end_unaligned, pgmask);
 	if (__improbable(end_aligned <= addr_aligned)) {
 		kr = KERN_INVALID_ARGUMENT;
 		goto unsanitary;
 	}
+
 
 	if (flags & VM_SANITIZE_FLAGS_GET_UNALIGNED_VALUES) {
 		/* addr and size are already set */

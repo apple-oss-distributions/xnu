@@ -94,6 +94,7 @@
 
 #include <mach/sdt.h>
 
+#include <net/droptap.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -396,8 +397,10 @@ mptcp_input(struct mptses *mpte, struct mbuf *m)
 	struct mbuf *save = NULL, *prev = NULL;
 	struct mbuf *freelist = NULL, *tail = NULL;
 
+	ASSERT(m->m_flags & M_PKTHDR);
 	if (__improbable((m->m_flags & M_PKTHDR) == 0)) {
-		panic("mbuf invalid: %p", m);
+		m_drop_list(m, NULL, DROPTAP_FLAG_DIR_IN | DROPTAP_FLAG_L2_MISSING, DROP_REASON_MPTCP_INPUT_MALFORMED, NULL, 0);
+		return;
 	}
 
 	mp_so = mptetoso(mpte);

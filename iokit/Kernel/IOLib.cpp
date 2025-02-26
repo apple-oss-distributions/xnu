@@ -101,6 +101,7 @@ extern void bsd_log_unlock(void);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+lck_grp_t        io_lck_grp;
 lck_grp_t       *IOLockGroup;
 
 /*
@@ -184,7 +185,8 @@ IOLibInit(void)
 		return;
 	}
 
-	IOLockGroup = lck_grp_alloc_init("IOKit", LCK_GRP_ATTR_NULL);
+	lck_grp_init(&io_lck_grp, "IOKit", LCK_GRP_ATTR_NULL);
+	IOLockGroup = &io_lck_grp;
 
 #if IOTRACKING
 	IOTrackingInit();

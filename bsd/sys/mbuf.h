@@ -580,6 +580,10 @@ struct pkthdr {
 #define PKT_CRUMB_TCP_INPUT     0x1000
 #define PKT_CRUMB_UDP_INPUT     0x2000
 
+/* m_hdr_common crumbs flags */
+#define CRUMB_INPUT_FLAG 0x0000000000010000
+#define CRUMB_INTERFACE_FLAG 0x000000000001ffff
+
 /* flags related to flow control/advisory and identification */
 #define PKTF_FLOW_MASK  \
 	(PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC | PKTF_FLOW_RAWSOCK)
@@ -662,8 +666,16 @@ struct mbuf {
 struct m_hdr_common {
 	struct m_hdr M_hdr;
 	struct m_ext M_ext  __attribute__((aligned(16)));             /* M_EXT set */
+#if defined(__arm64__)
+	uint64_t m_hdr_crumbs;
+#endif
 	struct pkthdr M_pkthdr  __attribute__((aligned(16)));         /* M_PKTHDR set */
 };
+
+_Static_assert(sizeof(struct m_hdr_common) == 224, "Crumbs effecting size of struct");
+#if defined(__arm64__)
+_Static_assert(sizeof(struct m_hdr_common) == 224, "Crumbs effecting size of struct");
+#endif
 
 /*
  * The mbuf object
@@ -686,7 +698,9 @@ struct mbuf {
 #define m_ext           M_hdr_common.M_ext
 #define m_pkthdr        M_hdr_common.M_pkthdr
 #define m_pktdat        M_dat.MH_databuf
-
+#if defined(__arm64__)
+#define m_mhdrcommon_crumbs M_hdr_common.m_hdr_crumbs
+#endif /* __arm64__ */
 #endif /* CONFIG_MBUF_MCACHE */
 
 #define m_act           m_nextpkt
@@ -1657,7 +1671,28 @@ __private_extern__ int m_ext_paired_is_active(struct mbuf *);
 __private_extern__ void m_ext_paired_activate(struct mbuf *);
 
 __private_extern__ void m_add_crumb(struct mbuf *, uint16_t);
+__private_extern__ void m_add_hdr_crumb(struct mbuf *, uint64_t, uint64_t);
+__private_extern__ void m_add_hdr_crumb_chain(struct mbuf *, uint64_t, uint64_t);
 
+static inline void
+m_add_hdr_crumb_interface_output(mbuf_t m, int index, bool chain)
+{
+	if (chain) {
+		m_add_hdr_crumb_chain(m, index, CRUMB_INTERFACE_FLAG);
+	} else {
+		m_add_hdr_crumb(m, index, CRUMB_INTERFACE_FLAG);
+	}
+}
+
+static inline void
+m_add_hdr_crumb_interface_input(mbuf_t m, int index, bool chain)
+{
+	if (chain) {
+		m_add_hdr_crumb_chain(m, index | CRUMB_INPUT_FLAG, CRUMB_INTERFACE_FLAG);
+	} else {
+		m_add_hdr_crumb(m, index | CRUMB_INPUT_FLAG, CRUMB_INTERFACE_FLAG);
+	}
+}
 __private_extern__ void mbuf_drain(boolean_t);
 
 /*

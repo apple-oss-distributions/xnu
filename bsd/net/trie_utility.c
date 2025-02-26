@@ -520,19 +520,20 @@ net_trie_search(struct net_trie *trie,
 #endif
 
 			if (TRIE_NODE(trie, current).is_leaf == true) {
-				const uint8_t *data = &TRIE_BYTE(trie, TRIE_NODE(trie, current).metadata);
+				uint16_t metadata_idex = TRIE_NODE(trie, current).metadata;
+				const uint8_t *data = (metadata_idex > 0) ? &TRIE_BYTE(trie, metadata_idex) : NULL;
 				size_t length = TRIE_NODE(trie, current).metadata_length;
 
 				// Consider a match only if the metadata qualifies
 				if (check_metadata == NULL || check_metadata(data, length)) {
 					if (exact_matched) {
-#if 1
 						// Provide access of leaf metadata to caller
 						if (metadata && metadata_length) {
-							*metadata = data;
-							*metadata_length = length;
+							if (data != NULL && length > 0) {
+								*metadata = data;
+								*metadata_length = length;
+							}
 						}
-#endif
 						return current; /* Got an exact match */
 					} else if (partial_matched) {
 						// Remember the last partial match but continue to try exact match
@@ -540,7 +541,8 @@ net_trie_search(struct net_trie *trie,
 					}
 				}
 			}
-			if (TRIE_NODE(trie, current).child_map != NULL_TRIE_IDX) {
+			if (string_idx >= 0 && string_idx < (int16_t)string_length &&
+			    TRIE_NODE(trie, current).child_map != NULL_TRIE_IDX) {
 				next = TRIE_CHILD_GET(trie, current, string[string_idx]);
 			}
 		}
@@ -549,13 +551,16 @@ net_trie_search(struct net_trie *trie,
 
 	// Couldn't find an exact match, but there is a closest partial match
 	if (last_matched != NULL_TRIE_IDX) {
-#if 1
 		// Provide access of leaf metadata to caller
 		if (metadata && metadata_length) {
-			*metadata = &TRIE_BYTE(trie, TRIE_NODE(trie, last_matched).metadata);
-			*metadata_length = TRIE_NODE(trie, last_matched).metadata_length;
+			uint16_t metadata_idex = TRIE_NODE(trie, last_matched).metadata;
+			const uint8_t *data = (metadata_idex > 0) ? &TRIE_BYTE(trie, metadata_idex) : NULL;
+			size_t length = TRIE_NODE(trie, last_matched).metadata_length;
+			if (data != NULL && length > 0) {
+				*metadata = data;
+				*metadata_length = length;
+			}
 		}
-#endif
 		return last_matched;
 	}
 

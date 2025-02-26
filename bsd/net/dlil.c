@@ -3600,6 +3600,7 @@ ifnet_input_common(struct ifnet *ifp, struct mbuf *m_head, struct mbuf *m_tail,
 	if (m_tail == NULL) {
 		last = m_head;
 		while (m_head != NULL) {
+			m_add_hdr_crumb_interface_input(last, ifp->if_index, false);
 #if IFNET_INPUT_SANITY_CHK
 			if (__improbable(dlil_input_sanity_check != 0)) {
 				DLIL_INPUT_CHECK(last, ifp);
@@ -3618,6 +3619,7 @@ ifnet_input_common(struct ifnet *ifp, struct mbuf *m_head, struct mbuf *m_tail,
 		if (__improbable(dlil_input_sanity_check != 0)) {
 			last = m_head;
 			while (1) {
+				m_add_hdr_crumb_interface_input(last, ifp->if_index, false);
 				DLIL_INPUT_CHECK(last, ifp);
 				m_cnt++;
 				m_size += m_length(last);
@@ -3627,11 +3629,13 @@ ifnet_input_common(struct ifnet *ifp, struct mbuf *m_head, struct mbuf *m_tail,
 				last = mbuf_nextpkt(last);
 			}
 		} else {
+			m_add_hdr_crumb_interface_input(m_head, ifp->if_index, true);
 			m_cnt = s->packets_in;
 			m_size = s->bytes_in;
 			last = m_tail;
 		}
 #else
+		m_add_hdr_crumb_interface_input(m_head, ifp->if_index, true);
 		m_cnt = s->packets_in;
 		m_size = s->bytes_in;
 		last = m_tail;
@@ -3951,6 +3955,7 @@ dlil_input_async(struct dlil_threading_info *inp,
 		struct mbuf *m0;
 
 		for (m0 = m_head; m0; m0 = mbuf_nextpkt(m0)) {
+			m_add_hdr_crumb_interface_input(m0, ifp->if_index, false);
 			size += m_length(m0);
 			count++;
 		}
@@ -3969,6 +3974,8 @@ dlil_input_async(struct dlil_threading_info *inp,
 
 		inp->dlth_pkts_cnt += m_cnt;
 	}
+#else
+	m_add_hdr_crumb_interface_input(m_head, ifp->if_index, true);
 #endif /* IFNET_INPUT_SANITY_CHK */
 
 	/* NOTE: use the adjusted parameter, vs the original one */
@@ -4048,6 +4055,7 @@ dlil_input_sync(struct dlil_threading_info *inp,
 		struct mbuf *m0;
 
 		for (m0 = m_head; m0; m0 = mbuf_nextpkt(m0)) {
+			m_add_hdr_crumb_interface_input(m0, ifp->if_index, false);
 			size += m_length(m0);
 			count++;
 		}
@@ -4066,6 +4074,8 @@ dlil_input_sync(struct dlil_threading_info *inp,
 
 		inp->dlth_pkts_cnt += m_cnt;
 	}
+#else
+	m_add_hdr_crumb_interface_input(m_head, ifp->if_index, true);
 #endif /* IFNET_INPUT_SANITY_CHK */
 
 	/* NOTE: use the adjusted parameter, vs the original one */
@@ -5299,6 +5309,7 @@ ifnet_enqueue_mbuf(struct ifnet *ifp, struct mbuf *m, boolean_t flush,
 {
 	classq_pkt_t pkt;
 
+	m_add_hdr_crumb_interface_output(m, ifp->if_index, false);
 	if (ifp == NULL || m == NULL || !(m->m_flags & M_PKTHDR) ||
 	    m->m_nextpkt != NULL) {
 		if (m != NULL) {
@@ -5329,6 +5340,7 @@ ifnet_enqueue_mbuf_chain(struct ifnet *ifp, struct mbuf *m_head,
 {
 	classq_pkt_t head, tail;
 
+	m_add_hdr_crumb_interface_output(m_head, ifp->if_index, true);
 	ASSERT(m_head != NULL);
 	ASSERT((m_head->m_flags & M_PKTHDR) != 0);
 	ASSERT(m_tail != NULL);
@@ -5473,6 +5485,7 @@ ifnet_dequeue(struct ifnet *ifp, struct mbuf **mp)
 	VERIFY((pkt.cp_ptype == QP_MBUF) || (pkt.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*mp = pkt.cp_mbuf;
+	m_add_hdr_crumb_interface_output(*mp, ifp->if_index, false);
 	return rc;
 }
 
@@ -5501,6 +5514,7 @@ ifnet_dequeue_service_class(struct ifnet *ifp, mbuf_svc_class_t sc,
 	VERIFY((pkt.cp_ptype == QP_MBUF) || (pkt.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*mp = pkt.cp_mbuf;
+	m_add_hdr_crumb_interface_output(*mp, ifp->if_index, false);
 	return rc;
 }
 
@@ -5530,6 +5544,7 @@ ifnet_dequeue_multi(struct ifnet *ifp, u_int32_t pkt_limit,
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
+	m_add_hdr_crumb_interface_output(*head, ifp->if_index, false);
 	if (tail != NULL) {
 		*tail = pkt_tail.cp_mbuf;
 	}
@@ -5562,6 +5577,7 @@ ifnet_dequeue_multi_bytes(struct ifnet *ifp, u_int32_t byte_limit,
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
+	m_add_hdr_crumb_interface_output(*head, ifp->if_index, false);
 	if (tail != NULL) {
 		*tail = pkt_tail.cp_mbuf;
 	}
@@ -5597,6 +5613,7 @@ ifnet_dequeue_service_class_multi(struct ifnet *ifp, mbuf_svc_class_t sc,
 	VERIFY((pkt_head.cp_ptype == QP_MBUF) || (pkt_head.cp_mbuf == NULL));
 	ifnet_decr_iorefcnt(ifp);
 	*head = pkt_head.cp_mbuf;
+	m_add_hdr_crumb_interface_output(*head, ifp->if_index, false);
 	if (tail != NULL) {
 		*tail = pkt_tail.cp_mbuf;
 	}
@@ -5946,6 +5963,7 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 		uint32_t pktf_mask;     /* pkt flags to preserve */
 
 		m_add_crumb(m, PKT_CRUMB_DLIL_INPUT);
+		m_add_hdr_crumb_interface_input(m, ifp->if_index, false);
 
 		if (ifp_param == NULL) {
 			ifp = m->m_pkthdr.rcvif;
@@ -6703,6 +6721,7 @@ preout_again:
 	net_timernsec(&now, &now_nsec);
 
 	do {
+		m_add_hdr_crumb_interface_output(m, ifp->if_index, false);
 		/*
 		 * pkt_hdr is set here to point to m_data prior to
 		 * calling into the framer. This value of pkt_hdr is
@@ -9559,14 +9578,6 @@ ifnet_detach_final(struct ifnet *ifp)
 	ifp->if_refflags &= ~IFRF_READY;
 	lck_mtx_unlock(&ifp->if_ref_lock);
 
-	/* Clear agent IDs */
-	if (ifp->if_agentids != NULL) {
-		kfree_data(ifp->if_agentids,
-		    sizeof(uuid_t) * ifp->if_agentcount);
-		ifp->if_agentids = NULL;
-	}
-	ifp->if_agentcount = 0;
-
 #if SKYWALK
 	VERIFY(LIST_EMPTY(&ifp->if_netns_tokens));
 #endif /* SKYWALK */
@@ -9595,6 +9606,14 @@ ifnet_detach_final(struct ifnet *ifp)
 	if_purgeaddrs(ifp);
 
 	ifnet_lock_exclusive(ifp);
+
+	/* Clear agent IDs */
+	if (ifp->if_agentids != NULL) {
+		kfree_data(ifp->if_agentids,
+		    sizeof(uuid_t) * ifp->if_agentcount);
+		ifp->if_agentids = NULL;
+	}
+	ifp->if_agentcount = 0;
 
 	bzero(&ifp->if_nx_netif, sizeof(ifp->if_nx_netif));
 	bzero(&ifp->if_nx_flowswitch, sizeof(ifp->if_nx_flowswitch));
